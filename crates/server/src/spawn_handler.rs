@@ -5831,6 +5831,24 @@ impl Drop for PendingInjectionGuard {
     }
 }
 
+/// Whether an inject must defer because the agent is parked on a chooser /
+/// permission / Y-N prompt — a dialog a single keystroke answers, which a
+/// pasted prompt would corrupt. A free-text `InputNeeded` prompt is itself
+/// waiting for composed text, so the inject IS its answer and delivers
+/// immediately (issue #725). An `InputNeeded` reading with no recorded
+/// shape is not a chooser either, so it delivers too. The two maps are
+/// never co-held: the state lock is released before the shape lock.
+async fn inject_blocked_by_chooser(
+    states: &tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
+    shapes: &tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
+    id: TerminalId,
+) -> bool {
+    if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::InputNeeded) {
+        return false;
+    }
+    shapes.lock().await.get(&id).copied() == Some(lazybox_agents::PromptShape::Chooser)
+}
+
 /// Inject a prompt into an existing agent terminal. Same paste +
 /// submit split as the spawn-time initial_prompt path, just
 /// targeted at a live terminal instead of a fresh one. Quietly
@@ -5953,20 +5971,26 @@ async fn handle_inject_prompt_inner(
         return;
     };
 
-    // Readiness gate (issue #32). If the agent is parked on a
-    // permission gate / chooser / Y-N prompt, that dialog owns input —
-    // it expects `y`/`n`/`1`/`2`, not a pasted prompt. Writing the
-    // paste now feeds it into the dialog, which rejects it, and the
-    // injection is silently lost. Claude emits these prompts at ANY
-    // point in a session, not just at spawn, so the inject path needs
-    // its own gate keyed on `InputNeeded`: wait for the prompt to
-    // clear, then deliver the context.
+    // Readiness gate (issue #32, refined by #725). If the agent is parked
+    // on a permission gate / chooser / Y-N prompt, that dialog owns input —
+    // it expects `y`/`n`/`1`/`2`, not a pasted prompt. Writing the paste now
+    // feeds it into the dialog, which rejects it, and the injection is
+    // silently lost. Claude emits these prompts at ANY point in a session,
+    // not just at spawn, so the inject path needs its own gate: wait for the
+    // prompt to clear, then deliver the context.
+    //
+    // But a free-text `InputNeeded` prompt (the agent asking an open
+    // question) is itself waiting for composed text — the pasted snippet IS
+    // the answer, so deferring it deadlocks (the prompt never clears because
+    // it's waiting for this very input). Gate on the prompt SHAPE, not on
+    // `InputNeeded` alone: only Chooser-shaped prompts defer.
     //
     // Subscribe BEFORE reading the current state so a transition that
     // races between the read and the wait isn't missed.
     let events = config.bus.subscribe();
-    let blocked = config.terminal.agent_state_for(terminal_id).await
-        == Some(lazybox_ipc::AgentState::InputNeeded);
+    let shapes = config.terminal.input_needed_shapes.clone();
+    let blocked =
+        inject_blocked_by_chooser(&config.terminal.agent_states, &shapes, terminal_id).await;
     let states = config.terminal.agent_states.clone();
     let bus = config.bus.clone();
     let id = terminal_id;
@@ -6015,8 +6039,7 @@ async fn handle_inject_prompt_inner(
             // a transition racing the check isn't missed.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             events = bus.subscribe();
-            blocked =
-                states.lock().await.get(&id).copied() == Some(lazybox_ipc::AgentState::InputNeeded);
+            blocked = inject_blocked_by_chooser(&states, &shapes, id).await;
         }
         let Some(interaction) =
             terminal_io::acquire_live(&config_for_confirm, id, &backend_key).await
@@ -9511,6 +9534,15 @@ mod tests {
             .lock()
             .await
             .insert(id, lazybox_ipc::AgentState::InputNeeded);
+        // A chooser/permission gate: a pasted prompt would corrupt the
+        // choice, so the inject defers (issue #725 only lifts the gate for
+        // free-text prompts).
+        config
+            .terminal
+            .input_needed_shapes
+            .lock()
+            .await
+            .insert(id, lazybox_agents::PromptShape::Chooser);
 
         // The first call returns once its background waiter is registered;
         // it must not hold the per-terminal command lane for the keystroke
@@ -9550,6 +9582,72 @@ mod tests {
         })
         .await
         .expect("injection reservation released after terminal exit");
+    }
+
+    /// A free-text `InputNeeded` prompt (the agent asking an open question)
+    /// is itself waiting for composed text, so a pasted snippet IS the
+    /// answer and must deliver immediately instead of deferring behind the
+    /// readiness gate — deferring deadlocks because the prompt never clears
+    /// (issue #725).
+    #[tokio::test]
+    async fn free_text_prompt_injection_delivers_immediately() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "free-text-injection")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(725);
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
+        config.terminal.terminal_meta.lock().await.insert(
+            id,
+            (
+                SessionKey::new("free-text-injection"),
+                TerminalKind::Agent("claude".into()),
+            ),
+        );
+        config
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::InputNeeded);
+        config
+            .terminal
+            .input_needed_shapes
+            .lock()
+            .await
+            .insert(id, lazybox_agents::PromptShape::FreeText);
+
+        handle_inject_prompt(&config, id, "the answer", None, false).await;
+
+        // The prompt reaches the terminal instead of stalling behind the
+        // gate — the opposite of the chooser case, where nothing is written.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let joined: Vec<u8> = mock.writes_for(&backend_key).await.concat();
+                if String::from_utf8_lossy(&joined).contains("the answer") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("free-text inject must deliver the prompt to the terminal");
+
+        // The reservation is released after delivery, not held open by a
+        // 30-second readiness waiter.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !config.spawn.pending_prompt_injections.lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("injection reservation released after delivery");
     }
 
     /// The in-flight spawn guard claims a singleton identity exactly

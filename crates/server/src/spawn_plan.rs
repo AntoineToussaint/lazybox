@@ -1,6 +1,6 @@
 use lazybox_agents::{Agent, Registry, SpawnCtx};
 use lazybox_core::{SessionId, SessionKey};
-use lazybox_ipc::{AgentRunAccess, SpawnOrigin, TerminalId, TerminalKind};
+use lazybox_ipc::{AgentRunAccess, SpawnOrigin, TerminalId, TerminalKind, UserPrompt};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
@@ -11,6 +11,11 @@ pub struct SpawnOptions {
     pub on_main: bool,
     pub model_alias: Option<String>,
     pub resume: bool,
+    pub provider_session_id: Option<String>,
+    pub no_permission_override: Option<bool>,
+    pub replace_terminal_id: Option<TerminalId>,
+    pub prompt_history: Vec<UserPrompt>,
+    pub composing_buffer: Option<String>,
     pub access: AgentRunAccess,
     pub client_request_id: Option<String>,
     pub origin: SpawnOrigin,
@@ -33,6 +38,11 @@ pub(crate) struct SpawnPlanInput {
     pub landed_on_main: bool,
     pub model_alias: Option<String>,
     pub resume: bool,
+    pub provider_session_id: Option<String>,
+    pub no_permission_override: Option<bool>,
+    pub replace_terminal_id: Option<TerminalId>,
+    pub prompt_history: Vec<UserPrompt>,
+    pub composing_buffer: Option<String>,
     pub access: AgentRunAccess,
     pub shell_command: String,
 }
@@ -59,6 +69,11 @@ pub(crate) struct SpawnPlan {
     pub terminal_id: TerminalId,
     pub hook_settings: Option<PathBuf>,
     pub model_label: Option<String>,
+    pub model_alias: Option<String>,
+    pub provider_session_id: Option<String>,
+    pub replace_terminal_id: Option<TerminalId>,
+    pub prompt_history: Vec<UserPrompt>,
+    pub composing_buffer: Option<String>,
     pub access: AgentRunAccess,
     pub flags: SpawnFlags,
 }
@@ -90,10 +105,16 @@ pub(crate) fn build_spawn_plan(
         landed_on_main,
         model_alias,
         resume,
+        provider_session_id,
+        no_permission_override,
+        replace_terminal_id,
+        prompt_history,
+        composing_buffer,
         access,
         shell_command,
     } = input;
-    let no_permission = access != AgentRunAccess::ReadOnly && skip_permissions_for(autonomous, cfg);
+    let no_permission = access != AgentRunAccess::ReadOnly
+        && no_permission_override.unwrap_or_else(|| skip_permissions_for(autonomous, cfg));
     let agent = match &kind {
         TerminalKind::Agent(id) => Some(
             agents
@@ -102,10 +123,14 @@ pub(crate) fn build_spawn_plan(
         ),
         _ => None,
     };
+    let mut resolved_model_alias = model_alias.clone().or_else(|| priority_model_alias.clone());
     let (model_args, model_label) = match &kind {
         TerminalKind::Agent(agent_id) => {
             let models = cfg.agent_models(agent_id);
-            let alias = model_alias.as_deref().or(priority_model_alias.as_deref());
+            if resolved_model_alias.is_none() {
+                resolved_model_alias = models.default.clone();
+            }
+            let alias = resolved_model_alias.as_deref();
             let label = alias
                 .or(models.default.as_deref())
                 .and_then(|alias| models.tier(alias))
@@ -124,6 +149,7 @@ pub(crate) fn build_spawn_plan(
         hook_command.as_deref(),
         &model_args,
         resume,
+        provider_session_id.as_deref(),
         access,
     )?;
     let uses_argv_hooks = agent
@@ -166,6 +192,11 @@ pub(crate) fn build_spawn_plan(
         terminal_id,
         hook_settings,
         model_label,
+        model_alias: resolved_model_alias,
+        provider_session_id,
+        replace_terminal_id,
+        prompt_history,
+        composing_buffer,
         access,
         flags: SpawnFlags {
             autonomous,
@@ -187,6 +218,7 @@ pub(crate) fn argv_for(
     hook_command: Option<&str>,
     model_args: &[String],
     resume: bool,
+    provider_session_id: Option<&str>,
     access: AgentRunAccess,
 ) -> Result<Vec<String>, SpawnPlanError> {
     match kind {
@@ -205,7 +237,7 @@ pub(crate) fn argv_for(
                 hook_settings_path,
             };
             let mut argv = if resume {
-                agent.resume(&ctx)
+                agent.resume_session(&ctx, provider_session_id)
             } else {
                 agent.spawn(&ctx)
             };
@@ -311,6 +343,11 @@ mod tests {
             landed_on_main: false,
             model_alias: None,
             resume: false,
+            provider_session_id: None,
+            no_permission_override: None,
+            replace_terminal_id: None,
+            prompt_history: Vec::new(),
+            composing_buffer: None,
             access: AgentRunAccess::Default,
             shell_command: String::new(),
         }
@@ -388,6 +425,18 @@ mod tests {
                 .ends_with(&["--model".to_string(), "claude-haiku-4-5".to_string()])
         );
         assert_eq!(plan.model_label.as_deref(), Some("Haiku"));
+    }
+
+    #[test]
+    fn default_model_alias_is_part_of_the_resume_plan() {
+        let cfg = lazybox_config::Config::default();
+        let input = input(TerminalKind::Agent("claude".into()));
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert_eq!(plan.model_alias.as_deref(), Some("L"));
+        assert_eq!(plan.model_label.as_deref(), Some("Opus"));
     }
 
     #[test]

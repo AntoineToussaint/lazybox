@@ -423,6 +423,7 @@ impl TmuxBackend {
             }
             let _ = std::fs::write(&self.config_path, &self.conf);
         }
+        let operation = tmux_operation(args);
         let fut = tokio::process::Command::new("tmux")
             .arg("-L")
             .arg(&self.socket)
@@ -436,7 +437,7 @@ impl TmuxBackend {
             .map_err(|_| {
                 BackendError::Other(format!(
                     "tmux {} timed out after {}s",
-                    args.join(" "),
+                    operation,
                     TMUX_TIMEOUT.as_secs()
                 ))
             })?
@@ -449,10 +450,10 @@ impl TmuxBackend {
         let out = self.tmux_output(args).await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(BackendError::Other(format!(
-                "tmux {}: {}",
-                args.join(" "),
-                stderr.trim()
+            return Err(BackendError::Other(tmux_failure_message(
+                args,
+                &out.status.to_string(),
+                &stderr,
             )));
         }
         Ok(out)
@@ -665,6 +666,27 @@ fn new_session_args(
     cmd_args.push("--".into());
     cmd_args.extend(argv.iter().cloned());
     cmd_args
+}
+
+fn tmux_operation(args: &[&str]) -> String {
+    // `new-session` carries the agent argv, which can include an internal
+    // provider conversation id. Keep it out of errors and timeout logs.
+    if args.first() == Some(&"new-session") {
+        "new-session".into()
+    } else if args.is_empty() {
+        "command".into()
+    } else {
+        args.join(" ")
+    }
+}
+
+fn tmux_failure_message(args: &[&str], status: &str, stderr: &str) -> String {
+    let detail = if args.first() == Some(&"new-session") {
+        format!("exited with {status}")
+    } else {
+        stderr.trim().to_string()
+    };
+    format!("tmux {}: {detail}", tmux_operation(args))
 }
 
 impl SessionBackend for TmuxBackend {
@@ -1152,6 +1174,22 @@ impl SessionBackend for TmuxBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_session_errors_do_not_expose_agent_argv() {
+        let message = tmux_failure_message(
+            &[
+                "new-session",
+                "--",
+                "codex",
+                "resume",
+                "provider-session-id",
+            ],
+            "exit status: 1",
+            "failed to launch provider-session-id",
+        );
+        assert_eq!(message, "tmux new-session: exited with exit status: 1");
+    }
 
     /// The config keeps the attach client off the alternate screen
     /// (smcup@/rmcup@ for the `xterm*` TERM the daemon PTY advertises)

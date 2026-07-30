@@ -93,6 +93,8 @@ pub enum Id {
     /// remounting.
     HelpAsk,
     Error,
+    /// Provider-owned sign-in confirmation and retry prompt.
+    AgentAuth,
     /// Startup notice for a newer source commit or published release.
     Update,
     Polling,
@@ -540,6 +542,11 @@ pub(crate) struct RemovalPrompt {
 /// (`deferred_focus_project`, `deferred_focus_terminal`).
 #[derive(Debug, Clone)]
 pub(crate) enum ModalFlow {
+    /// Provider sign-in confirmation or a retry after login failed.
+    AgentAuth {
+        terminal_id: lazybox_ipc::TerminalId,
+        retry: bool,
+    },
     /// Reply textarea → `Command::PostReply`. Carries the target
     /// workspace; consumed by `Msg::TextareaSubmitted`.
     Reply { target: lazybox_core::SessionKey },
@@ -631,6 +638,15 @@ pub(crate) enum ModalFlow {
         return_step: usize,
         success_step: usize,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AgentAuthPrompt {
+    pub terminal_id: lazybox_ipc::TerminalId,
+    pub display_name: String,
+    pub other_session_count: usize,
+    pub retry: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1133,6 +1149,10 @@ pub struct Model<T: TerminalAdapter> {
     /// modal does when it resolves. Replaces the old fan of `pending_*`
     /// Options; see [`ModalFlow`]. `None` when no flow modal is armed.
     modal_flow: Option<ModalFlow>,
+    /// Provider authentication prompts are daemon-driven and may
+    /// arrive while another modal is open, so they wait here until the
+    /// current interaction completes.
+    auth_prompt_queue: std::collections::VecDeque<AgentAuthPrompt>,
     /// Async half of `x f` after the role picker resolves. Correlated to
     /// one structured run by `request_id`, then retained while the source
     /// PTY closes and the fresh target spawns.
@@ -1649,6 +1669,7 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             modal_flow: None,
+            auth_prompt_queue: std::collections::VecDeque::new(),
             conversion: None,
             last_reply_body: None,
             awaiting_repo_labels: None,

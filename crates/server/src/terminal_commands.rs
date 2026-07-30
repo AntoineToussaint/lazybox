@@ -63,7 +63,10 @@ pub(crate) async fn run_io_router(
             | Command::Resize { terminal_id, .. }
             | Command::Close { terminal_id, .. }
             | Command::InjectPrompt { terminal_id, .. }
-            | Command::DeliverSnippet { terminal_id, .. } => *terminal_id,
+            | Command::DeliverSnippet { terminal_id, .. }
+            | Command::ResumeAgent { terminal_id }
+            | Command::ReauthenticateAgent { terminal_id, .. }
+            | Command::CancelAgentReauthentication { terminal_id } => *terminal_id,
             other => {
                 tracing::error!(?other, "non-I/O command reached terminal I/O router");
                 continue;
@@ -75,7 +78,13 @@ pub(crate) async fn run_io_router(
                 fallback_spawn: Some(_),
                 ..
             }
-        ) || matches!(&command, Command::DeliverSnippet { .. });
+        ) || matches!(
+            &command,
+            Command::DeliverSnippet { .. }
+                | Command::ResumeAgent { .. }
+                | Command::ReauthenticateAgent { .. }
+                | Command::CancelAgentReauthentication { .. }
+        );
         if !handle_missing_terminal && config.terminal.backend_key_for(terminal_id).await.is_none()
         {
             // Never allocate a 60-second worker for arbitrary stale/hostile
@@ -89,8 +98,9 @@ pub(crate) async fn run_io_router(
             let sender = lanes.entry(terminal_id).or_insert_with(|| {
                 let (tx, lane_rx) = mpsc::channel(LANE_CAPACITY);
                 let lane_config = config.clone();
+                let lane_event_tx = event_tx.clone();
                 workers.spawn(async move {
-                    run_io_lane(lane_config, terminal_id, lane_rx).await;
+                    run_io_lane(lane_config, lane_event_tx, terminal_id, lane_rx).await;
                 });
                 tx
             });
@@ -112,8 +122,9 @@ pub(crate) async fn run_io_router(
             lanes.remove(&terminal_id);
             let (tx, lane_rx) = mpsc::channel(LANE_CAPACITY);
             let lane_config = config.clone();
+            let lane_event_tx = event_tx.clone();
             workers.spawn(async move {
-                run_io_lane(lane_config, terminal_id, lane_rx).await;
+                run_io_lane(lane_config, lane_event_tx, terminal_id, lane_rx).await;
             });
             if let Err(error) = tx.try_send(command) {
                 tracing::error!(?terminal_id, command = ?error.into_inner(), "replacement I/O lane closed");
@@ -133,6 +144,7 @@ pub(crate) async fn run_io_router(
 
 async fn run_io_lane(
     config: ServerConfig,
+    event_tx: EventSender,
     terminal_id: TerminalId,
     mut rx: mpsc::Receiver<Command>,
 ) {
@@ -246,6 +258,21 @@ async fn run_io_lane(
                     body,
                 )
                 .await;
+            }
+            Command::ResumeAgent { .. } => {
+                crate::agent_auth::resume_agent(&config, terminal_id).await;
+            }
+            Command::ReauthenticateAgent { switch_account, .. } => {
+                crate::agent_auth::start_reauthentication(
+                    &config,
+                    terminal_id,
+                    switch_account,
+                    Some(event_tx.clone()),
+                )
+                .await;
+            }
+            Command::CancelAgentReauthentication { .. } => {
+                crate::agent_auth::cancel_reauthentication(&config, terminal_id).await;
             }
             other => {
                 tracing::error!(?terminal_id, ?other, "invalid command in terminal I/O lane");
@@ -400,6 +427,9 @@ pub(crate) fn reject_command(event_tx: &EventSender, command: &Command, reason: 
         Command::Close { .. } => "Close",
         Command::InjectPrompt { .. } => "InjectPrompt",
         Command::DeliverSnippet { .. } => "DeliverSnippet",
+        Command::ResumeAgent { .. } => "ResumeAgent",
+        Command::ReauthenticateAgent { .. } => "ReauthenticateAgent",
+        Command::CancelAgentReauthentication { .. } => "CancelAgentReauthentication",
         Command::RecordUserMessage { .. } => "RecordUserMessage",
         Command::RecordComposingBuffer { .. } => "RecordComposingBuffer",
         _ => "TerminalCommand",
@@ -457,6 +487,98 @@ mod tests {
                     break;
                 }
             }
+            router.abort();
+            let _ = router.await;
+        })
+        .await
+        .expect("test deadline exceeded");
+    }
+
+    #[tokio::test]
+    async fn reauthenticate_then_cancel_is_fifo_for_one_terminal() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let terminal_id = TerminalId(882);
+            let key = mock
+                .spawn(
+                    &["codex".into()],
+                    Some(std::path::Path::new("/tmp")),
+                    &[],
+                    "blocked-agent",
+                )
+                .await
+                .expect("spawn");
+            let session_key = lazybox_core::SessionKey::new("github:owner/repo#882");
+            config
+                .terminal
+                .register_terminal(
+                    terminal_id,
+                    key.clone(),
+                    session_key.clone(),
+                    lazybox_ipc::TerminalKind::Agent("codex".into()),
+                )
+                .await;
+            config
+                .agent_recovery
+                .remember_spawn(crate::agent_auth::AgentResumeContext {
+                    terminal_id,
+                    session_key,
+                    session_id: None,
+                    agent_id: "codex".into(),
+                    cwd: "/tmp".into(),
+                    backend_key: Some(key.clone()),
+                    on_main: false,
+                    model_alias: None,
+                    access: lazybox_ipc::AgentRunAccess::Default,
+                    no_permission: false,
+                    provider_session_id: Some("conversation-882".into()),
+                    prompt_history: Vec::new(),
+                    composing_buffer: None,
+                })
+                .await;
+            crate::agent_auth::detect_required(&config, terminal_id, "sign-in expired").await;
+
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let event_tx = EventSender::from_unbounded(event_tx);
+            let (command_tx, command_rx) = mpsc::channel(ROUTER_CAPACITY);
+            let router = tokio::spawn(run_io_router(config.clone(), event_tx, command_rx));
+            let mut events = config.bus.subscribe();
+            command_tx
+                .send(Command::ReauthenticateAgent {
+                    terminal_id,
+                    switch_account: true,
+                })
+                .await
+                .expect("router open");
+            command_tx
+                .send(Command::CancelAgentReauthentication { terminal_id })
+                .await
+                .expect("router open");
+
+            loop {
+                if matches!(
+                    events.recv().await,
+                    Ok(Event::AgentAuthFinished {
+                        recovery_terminal_id,
+                        success: false,
+                        error: Some(error),
+                        ..
+                    }) if recovery_terminal_id == terminal_id && error.contains("cancelled")
+                ) {
+                    break;
+                }
+            }
+            assert!(
+                mock.all_argv()
+                    .await
+                    .iter()
+                    .all(|argv| argv.as_slice() != ["codex", "login"]),
+                "a cancellation queued after confirmation must stop before login"
+            );
+            assert!(
+                mock.list().await.expect("list").contains(&key),
+                "cancelling authentication must leave the blocked agent recoverable"
+            );
             router.abort();
             let _ = router.await;
         })

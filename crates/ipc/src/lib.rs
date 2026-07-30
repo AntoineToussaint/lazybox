@@ -1287,6 +1287,22 @@ pub enum Command {
     SetUpdateDismissal {
         target: String,
     },
+    /// Resume the exact agent conversation represented by a frozen exited
+    /// pane. The daemon retains the launch metadata for the terminal id and
+    /// uses the provider's exact-session resume builder.
+    ResumeAgent {
+        terminal_id: TerminalId,
+    },
+    /// Confirm provider-owned interactive authentication for one blocked
+    /// agent terminal.
+    ReauthenticateAgent {
+        terminal_id: TerminalId,
+        switch_account: bool,
+    },
+    /// Cancel only the authentication subprocess created for this terminal.
+    CancelAgentReauthentication {
+        terminal_id: TerminalId,
+    },
 }
 
 impl Command {
@@ -2063,6 +2079,75 @@ pub enum Event {
         client_request_id: String,
         message: String,
     },
+    /// A built-in agent adapter confidently classified its recent PTY
+    /// output as a provider-account authentication failure.
+    AgentAuthRequired {
+        terminal_id: TerminalId,
+        agent_id: String,
+        display_name: String,
+        reason: String,
+        other_session_count: usize,
+    },
+    /// Non-secret orchestration progress. Provider PTY bytes continue over
+    /// the terminal stream and are never copied into this message.
+    AgentAuthProgress {
+        recovery_terminal_id: TerminalId,
+        terminal_id: TerminalId,
+        phase: AgentAuthPhase,
+    },
+    /// Terminal outcome for the recovery attempt. `error` is a bounded,
+    /// scrubbed status assembled from process exit state, never provider
+    /// output.
+    AgentAuthFinished {
+        recovery_terminal_id: TerminalId,
+        terminal_id: TerminalId,
+        display_name: String,
+        success: bool,
+        error: Option<String>,
+    },
+    /// The provider has no exact session id for this resume and will use its
+    /// cwd-based fallback in a shared checkout.
+    AgentResumeFallback {
+        terminal_id: TerminalId,
+        display_name: String,
+    },
+    /// A daemon-owned terminal replaced a recoverable pane. Unlike matching
+    /// by workspace/agent, this relation remains unambiguous when isolated and
+    /// on-main terminals for the same agent coexist.
+    TerminalReplaced {
+        old_terminal_id: TerminalId,
+        terminal_id: TerminalId,
+        session_key: SessionKey,
+        kind: TerminalKind,
+        no_permission: bool,
+        on_main: bool,
+        model_label: Option<String>,
+        authenticating: bool,
+    },
+    /// Provider-owned authentication PTY bytes sent only to the connection
+    /// currently attached to the recovery flow. They never enter the daemon's
+    /// process-wide broadcast bus.
+    AgentAuthOutput {
+        terminal_id: TerminalId,
+        bytes: Vec<u8>,
+        first_seq: u64,
+        seq: u64,
+    },
+    /// Connection-private authoritative replay for an authentication PTY,
+    /// used when ownership moves to a reconnecting client.
+    AgentAuthReplay {
+        terminal_id: TerminalId,
+        replay: Vec<u8>,
+        seq: u64,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum AgentAuthPhase {
+    LoggingOut,
+    LoginInteractive,
+    Resuming,
 }
 
 /// Installed-vs-latest reading for one agent CLI, produced by the
@@ -2520,6 +2605,10 @@ pub struct TerminalSnapshot {
     /// has not committed its first state yet.
     #[serde(default)]
     pub agent_state: Option<AgentState>,
+    /// This terminal is the provider-owned interactive login process
+    /// for a recoverable agent conversation.
+    #[serde(default)]
+    pub authenticating: bool,
 }
 
 // ── Transport abstraction ──────────────────────────────────────────────
@@ -2632,6 +2721,13 @@ impl EventSender {
         match self {
             Self::Bounded { tx, .. } => tx.closed().await,
             Self::Unbounded(tx) => tx.closed().await,
+        }
+    }
+
+    pub fn is_closed(&self) -> bool {
+        match self {
+            Self::Bounded { tx, .. } => tx.is_closed(),
+            Self::Unbounded(tx) => tx.is_closed(),
         }
     }
 }

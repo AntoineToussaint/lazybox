@@ -868,6 +868,13 @@ struct TerminalSlot {
     /// offered — a crashing agent (#356) must not take the workspace
     /// down with it. `None` for a live terminal.
     exited: Option<TerminalExit>,
+    /// The provider login process temporarily occupying this pane.
+    /// Its successful replacement must inherit this slot's tile,
+    /// history, and draft rather than landing as a new terminal.
+    authenticating: bool,
+    /// Stable daemon recovery identity; distinct from this ephemeral auth
+    /// terminal id and used by retry/cancel commands.
+    auth_recovery_id: Option<TerminalId>,
     /// When this slot's terminal was spawned. Used to tell a clean
     /// exit that ran for a while from a dead-on-arrival one that
     /// exited `code 0` almost immediately without doing anything (#367).
@@ -2609,6 +2616,8 @@ impl TerminalStack {
             displayed: false,
             pending_feed: Vec::new(),
             exited: None,
+            authenticating: false,
+            auth_recovery_id: None,
             spawned_at: std::time::Instant::now(),
             did_work: false,
             deep_scrollback_requested: false,
@@ -2961,6 +2970,7 @@ impl TerminalStack {
                         slot.model_label = snap.model_label.clone();
                         slot.prompt_history = snap.prompt_history.clone();
                         slot.composing = snap.composing_buffer.clone().unwrap_or_default();
+                        slot.authenticating = snap.authenticating;
                         if let Some(state) = snap.agent_state {
                             slot.agent_state = state;
                         }
@@ -2982,6 +2992,7 @@ impl TerminalStack {
                         snap.composing_buffer.clone().unwrap_or_default(),
                     );
                     slot.agent_state = snap.agent_state.unwrap_or(lazybox_ipc::AgentState::Idle);
+                    slot.authenticating = snap.authenticating;
                     slot.desynced = !snap.replay_available;
                     slot.resync_request_pending = !snap.replay_available;
                     if !snap.replay_available {
@@ -3039,26 +3050,6 @@ impl TerminalStack {
                 on_main,
                 model_label,
             } => {
-                // A restart (#356) or a fresh `w x` after a crash lands
-                // here: supersede any exited pane for the same session +
-                // agent so the new terminal replaces the frozen one
-                // instead of leaving a dead tab beside it (and so the
-                // split/tab auto-layout below doesn't count the corpse).
-                if let TerminalKind::Agent(new_id) = kind {
-                    let superseded: Vec<TerminalId> = self
-                        .terminals
-                        .iter()
-                        .filter(|(_, s)| {
-                            s.exited.is_some()
-                                && &s.session_key == session_key
-                                && matches!(&s.kind, TerminalKind::Agent(a) if a == new_id)
-                        })
-                        .map(|(id, _)| *id)
-                        .collect();
-                    for old in superseded {
-                        self.drop_slot(old);
-                    }
-                }
                 let slot = Self::make_slot(
                     session_key.clone(),
                     kind.clone(),
@@ -3080,7 +3071,6 @@ impl TerminalStack {
                     self.collapsed = false;
                     self.collapse_user_set = true;
                 }
-
                 // Stage 2 of a `]]|` split: wrap the focused leaf
                 // in a fresh split with this new terminal as the
                 // sibling. Without this, the new shell shows up as a
@@ -3133,6 +3123,27 @@ impl TerminalStack {
                     }
                 }
             }
+            Event::TerminalReplaced {
+                old_terminal_id,
+                terminal_id,
+                session_key,
+                kind,
+                no_permission,
+                on_main,
+                model_label,
+                authenticating,
+            } => {
+                self.replace_terminal(
+                    *old_terminal_id,
+                    *terminal_id,
+                    session_key.clone(),
+                    kind.clone(),
+                    *no_permission,
+                    *on_main,
+                    model_label.clone(),
+                    *authenticating,
+                );
+            }
             Event::TerminalOutput {
                 terminal_id,
                 bytes,
@@ -3140,6 +3151,21 @@ impl TerminalStack {
                 seq,
             } => {
                 self.append_output(*terminal_id, bytes, *first_seq, *seq);
+            }
+            Event::AgentAuthOutput {
+                terminal_id,
+                bytes,
+                first_seq,
+                seq,
+            } => {
+                self.append_output(*terminal_id, bytes, *first_seq, *seq);
+            }
+            Event::AgentAuthReplay {
+                terminal_id,
+                replay,
+                seq,
+            } => {
+                self.resync_terminal(*terminal_id, replay, *seq);
             }
             Event::TerminalResync {
                 terminal_id,
@@ -3243,6 +3269,34 @@ impl TerminalStack {
                     }
                 } else {
                     self.drop_slot(*terminal_id);
+                }
+            }
+            Event::AgentAuthProgress {
+                recovery_terminal_id,
+                terminal_id,
+                phase: _,
+            } => {
+                if let Some(slot) = self.terminals.get_mut(terminal_id) {
+                    slot.authenticating = true;
+                    slot.auth_recovery_id = Some(*recovery_terminal_id);
+                    slot.exited = None;
+                }
+                self.focus_terminal(*terminal_id);
+            }
+            Event::AgentAuthFinished {
+                recovery_terminal_id,
+                terminal_id,
+                success: false,
+                ..
+            } => {
+                if let Some(slot) = self.terminals.get_mut(terminal_id) {
+                    slot.authenticating = true;
+                    slot.auth_recovery_id = Some(*recovery_terminal_id);
+                    slot.exited = Some(TerminalExit {
+                        code: Some(1),
+                        dead_on_arrival: false,
+                        last_output: None,
+                    });
                 }
             }
             Event::TerminalsRebadged { from, to } => {
@@ -3759,13 +3813,89 @@ impl TerminalStack {
         self.auto_collapse_on_emptiness();
     }
 
-    /// Re-spawn the agent behind an exited pane (#356). The daemon
-    /// already swept the dead terminal's state on exit, so its
-    /// singleton guard won't block this — it lands as a fresh
-    /// `TerminalSpawned`, and the arriving spawn supersedes this
-    /// exited slot. Leaving the frozen pane in place until then means a
-    /// spawn that fails daemon-side keeps the restart banner rather than
-    /// dropping to nothing.
+    #[allow(clippy::too_many_arguments)]
+    fn replace_terminal(
+        &mut self,
+        old_terminal_id: TerminalId,
+        terminal_id: TerminalId,
+        session_key: SessionKey,
+        kind: TerminalKind,
+        no_permission: bool,
+        on_main: bool,
+        model_label: Option<String>,
+        authenticating: bool,
+    ) {
+        if !self.terminals.contains_key(&old_terminal_id)
+            && let Some(slot) = self.terminals.get_mut(&terminal_id)
+        {
+            slot.session_key = session_key.clone();
+            slot.kind = kind;
+            slot.no_permission = no_permission;
+            slot.on_main = on_main;
+            if model_label.is_some() {
+                slot.model_label = model_label;
+            }
+            slot.authenticating = authenticating;
+            slot.auth_recovery_id = authenticating.then_some(old_terminal_id);
+            if self.active_session.as_ref() == Some(&session_key) {
+                self.focus_terminal(terminal_id);
+            }
+            self.collapsed = false;
+            return;
+        }
+        let old_focus = self.focused_terminal_id() == Some(old_terminal_id);
+        let old_recovery_id = self
+            .terminals
+            .get(&old_terminal_id)
+            .and_then(|slot| slot.auth_recovery_id)
+            .unwrap_or(old_terminal_id);
+        let old = self.terminals.remove(&old_terminal_id);
+        let (prompt_history, composing, inherited_model_label) = old.map_or_else(
+            || (Vec::new(), String::new(), None),
+            |slot| (slot.prompt_history, slot.composing, slot.model_label),
+        );
+        let mut slot = Self::make_slot(
+            session_key.clone(),
+            kind,
+            0,
+            no_permission,
+            on_main,
+            model_label.or(inherited_model_label),
+            prompt_history,
+            composing,
+        );
+        slot.authenticating = authenticating;
+        slot.auth_recovery_id = authenticating.then_some(old_recovery_id);
+        self.terminals.insert(terminal_id, slot);
+
+        if let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout
+            && let Some(path) = tree.path_to(old_terminal_id.0)
+        {
+            let _ = tree.replace_at(
+                &path,
+                lazybox_core::TileTree::Leaf {
+                    terminal_id: terminal_id.0,
+                },
+            );
+            if old_focus {
+                *focused = path;
+            }
+        }
+        for focused in self.last_focused.values_mut() {
+            if *focused == old_terminal_id {
+                *focused = terminal_id;
+            }
+        }
+        self.closing.remove(&old_terminal_id);
+        self.clamp_active_tab();
+        if old_focus || self.active_session.as_ref() == Some(&session_key) {
+            self.focus_terminal(terminal_id);
+        }
+        self.collapsed = false;
+    }
+
+    /// Resume the agent behind an exited pane while leaving the frozen pane
+    /// in place until the daemon publishes its exact replacement.
     fn restart_exited(&mut self, terminal_id: TerminalId, cmds: &mut Vec<Command>) {
         let Some(slot) = self.terminals.get(&terminal_id) else {
             return;
@@ -3773,17 +3903,14 @@ impl TerminalStack {
         if slot.exited.is_none() {
             return;
         }
-        cmds.push(Command::Spawn {
-            model_alias: None,
-            access: lazybox_ipc::AgentRunAccess::Default,
-            session_key: slot.session_key.clone(),
-            session_id: None,
-            client_request_id: None,
-            kind: slot.kind.clone(),
-            cwd: None,
-            initial_prompt: None,
-            on_main: slot.on_main,
-        });
+        if let Some(recovery_terminal_id) = slot.auth_recovery_id {
+            cmds.push(Command::ReauthenticateAgent {
+                terminal_id: recovery_terminal_id,
+                switch_account: true,
+            });
+        } else {
+            cmds.push(Command::ResumeAgent { terminal_id });
+        }
     }
 
     /// Close the focused terminal (`]]x`). In Splits, collapses the
@@ -3795,10 +3922,19 @@ impl TerminalStack {
         let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
             if let Some(id) = self.active_terminal_id() {
                 if self.terminals.get(&id).is_some_and(|s| s.exited.is_some()) {
-                    // Already dead server-side (#356) — no
-                    // `TerminalExited` will echo to prune it, so drop the
-                    // frozen pane locally.
-                    self.drop_slot(id);
+                    if self
+                        .terminals
+                        .get(&id)
+                        .is_some_and(|slot| slot.auth_recovery_id.is_some())
+                    {
+                        self.closing.insert(id);
+                        cmds.push(Command::Close {
+                            terminal_id: id,
+                            client_request_id: None,
+                        });
+                    } else {
+                        self.drop_slot(id);
+                    }
                 } else {
                     // Tag as a user close so the returning
                     // `TerminalExited` tears the pane down instead of
@@ -3839,10 +3975,19 @@ impl TerminalStack {
             if let Some(id) = target_id {
                 let tid = TerminalId(id);
                 if self.terminals.get(&tid).is_some_and(|s| s.exited.is_some()) {
-                    // Exited pane (#356): the tree collapse above already
-                    // dropped its tile; remove the map entry too since no
-                    // `TerminalExited` will echo to do it.
-                    self.terminals.remove(&tid);
+                    if self
+                        .terminals
+                        .get(&tid)
+                        .is_some_and(|slot| slot.auth_recovery_id.is_some())
+                    {
+                        self.closing.insert(tid);
+                        cmds.push(Command::Close {
+                            terminal_id: tid,
+                            client_request_id: None,
+                        });
+                    } else {
+                        self.terminals.remove(&tid);
+                    }
                 } else {
                     self.closing.insert(tid);
                     cmds.push(Command::Close {
@@ -6087,6 +6232,7 @@ mod resync_tests {
                 prompt_history: Vec::new(),
                 composing_buffer: None,
                 agent_state: None,
+                authenticating: false,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -6661,6 +6807,7 @@ mod hidden_feed_tests {
             prompt_history: Vec::new(),
             composing_buffer: None,
             agent_state: None,
+            authenticating: false,
         };
         stack.on_event(&Event::Snapshot {
             workspaces: vec![],
@@ -6729,6 +6876,7 @@ mod hidden_feed_tests {
                 prompt_history: Vec::new(),
                 composing_buffer: None,
                 agent_state: None,
+                authenticating: false,
             }
         };
         stack.on_event(&Event::Snapshot {
@@ -8166,6 +8314,7 @@ mod terminal_availability_tests {
                 prompt_history: typed_history(Some("last submitted")),
                 composing_buffer: Some(draft.into()),
                 agent_state: None,
+                authenticating: false,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -8435,17 +8584,85 @@ mod agent_crash_tests {
         );
 
         assert!(matches!(outcome, PaneOutcome::Consumed));
-        match cmds.as_slice() {
-            [
-                Command::Spawn {
-                    session_key, kind, ..
-                },
-            ] => {
-                assert_eq!(session_key, &sk);
-                assert!(matches!(kind, TerminalKind::Agent(a) if a == "codex"));
-            }
-            other => panic!("restart must spawn the same agent, got {other:?}"),
-        }
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::ResumeAgent {
+                terminal_id: TerminalId(1),
+            }]
+        ));
+    }
+
+    #[test]
+    fn failed_auth_restart_retries_the_stable_recovery_identity() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Codex".into(),
+            success: false,
+            error: Some("login failed".into()),
+        });
+
+        let mut cmds = Vec::new();
+        let outcome = stack.handle_key(
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
+            &mut cmds,
+        );
+
+        assert!(matches!(outcome, PaneOutcome::Consumed));
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::ReauthenticateAgent {
+                terminal_id: TerminalId(1),
+                switch_account: true,
+            }]
+        ));
+    }
+
+    #[test]
+    fn closing_a_failed_auth_pane_notifies_the_daemon() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            display_name: "Claude Code".into(),
+            success: false,
+            error: Some("login failed".into()),
+        });
+
+        let mut cmds = Vec::new();
+        stack.close_focused_tile(&mut cmds);
+
+        assert!(matches!(
+            cmds.as_slice(),
+            [Command::Close {
+                terminal_id: TerminalId(2),
+                ..
+            }]
+        ));
+        assert!(stack.terminals.contains_key(&TerminalId(2)));
     }
 
     #[test]
@@ -8470,30 +8687,160 @@ mod agent_crash_tests {
     }
 
     #[test]
-    fn restart_spawn_supersedes_exited_pane() {
+    fn exact_replacement_supersedes_only_the_named_exited_pane() {
         let sk = SessionKey::new("github:o/r#1");
         let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        {
+            let slot = stack.terminals.get_mut(&TerminalId(1)).unwrap();
+            slot.prompt_history.push(lazybox_ipc::UserPrompt {
+                text: "preserve this prompt".into(),
+                timestamp_ms: 1,
+                source: lazybox_ipc::PromptSource::Typed,
+            });
+            slot.composing = "preserve this draft".into();
+        }
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(3),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 3 }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        });
         stack.on_event(&Event::TerminalExited {
             terminal_id: TerminalId(1),
             exit_code: Some(1),
             last_output: None,
         });
 
-        // The restart's fresh terminal lands as a new id — the exited
-        // corpse for the same session+agent is dropped, not left as a
-        // dead tab beside the live one.
-        stack.on_event(&Event::TerminalSpawned {
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
             model_label: None,
             terminal_id: TerminalId(2),
             session_key: sk.clone(),
             kind: TerminalKind::Agent("codex".into()),
             no_permission: false,
             on_main: false,
+            authenticating: false,
         });
 
         assert!(stack.terminals.get(&TerminalId(1)).is_none());
-        assert!(stack.terminals.get(&TerminalId(2)).is_some());
-        assert_eq!(stack.visible_terminals(), vec![TerminalId(2)]);
+        let resumed = stack.terminals.get(&TerminalId(2)).unwrap();
+        assert_eq!(resumed.prompt_history[0].text, "preserve this prompt");
+        assert_eq!(resumed.composing, "preserve this draft");
+        let lazybox_core::SessionLayout::Splits { tree, focused } = &stack.layout else {
+            panic!("resumed terminal must keep the split layout");
+        };
+        assert_eq!(tree.leaves(), vec![2, 3]);
+        assert_eq!(focused, &[0]);
+        assert_eq!(
+            stack.visible_terminals(),
+            vec![TerminalId(2), TerminalId(3)]
+        );
+    }
+
+    #[test]
+    fn replacement_event_is_idempotent_after_reconnect_snapshot() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(2, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::AgentAuthOutput {
+            terminal_id: TerminalId(2),
+            bytes: b"provider login screen".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: true,
+            on_main: true,
+            model_label: Some("large".into()),
+            authenticating: true,
+        });
+
+        let auth = stack.terminals.get(&TerminalId(2)).expect("auth terminal");
+        assert_eq!(auth.recent, b"provider login screen");
+        assert_eq!(auth.last_seq, 1);
+        assert!(auth.no_permission);
+        assert!(auth.on_main);
+        assert_eq!(auth.model_label.as_deref(), Some("large"));
+        assert_eq!(auth.auth_recovery_id, Some(TerminalId(1)));
+    }
+
+    #[test]
+    fn resumed_agent_replaces_the_auth_terminal_in_place() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("claude".into()));
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().composing = "draft".into();
+        stack.on_event(&Event::AgentAuthProgress {
+            recovery_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(1),
+            phase: lazybox_ipc::AgentAuthPhase::LoginInteractive,
+        });
+
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            model_label: Some("Opus".into()),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: true,
+            on_main: true,
+            authenticating: false,
+        });
+
+        assert!(stack.terminals.get(&TerminalId(1)).is_none());
+        let resumed = stack.terminals.get(&TerminalId(2)).unwrap();
+        assert_eq!(resumed.composing, "draft");
+        assert!(!resumed.authenticating);
+        assert!(resumed.no_permission);
+        assert!(resumed.on_main);
+        assert_eq!(resumed.model_label.as_deref(), Some("Opus"));
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(2)));
+    }
+
+    #[test]
+    fn authentication_output_starts_a_fresh_sequence_on_the_replacement_terminal() {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: TerminalId(1),
+            bytes: b"blocked agent output".to_vec(),
+            first_seq: 10,
+            seq: 10,
+        });
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(1),
+            terminal_id: TerminalId(2),
+            session_key: sk,
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        });
+        stack.on_event(&Event::AgentAuthOutput {
+            terminal_id: TerminalId(2),
+            bytes: b"provider login".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+
+        let auth = stack.terminals.get(&TerminalId(2)).expect("auth terminal");
+        assert_eq!(auth.last_seq, 1);
+        assert_eq!(auth.recent, b"provider login");
+        assert!(!auth.desynced);
     }
 
     #[test]

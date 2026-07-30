@@ -242,6 +242,9 @@ impl ForwardState {
         match evt {
             Event::TerminalOutput {
                 terminal_id, seq, ..
+            }
+            | Event::AgentAuthOutput {
+                terminal_id, seq, ..
             } if self.is_superseded(terminal_id, seq) => {
                 // Already delivered inside a replay (resync/snapshot).
                 // Forwarding it again would double-feed the consumer's
@@ -250,9 +253,12 @@ impl ForwardState {
                 // (not a lossy drop: no resync owed).
                 ControlFlow::Continue(())
             }
-            Event::TerminalOutput {
+            evt @ (Event::TerminalOutput {
                 terminal_id, seq, ..
-            } => {
+            }
+            | Event::AgentAuthOutput {
+                terminal_id, seq, ..
+            }) => {
                 // Ordering rule: if anything is already buffered, or
                 // this terminal is mid-resync, we cannot forward live
                 // output without reordering it ahead of the queue — so
@@ -293,6 +299,9 @@ impl ForwardState {
                 // authoritative coverage. Record it here so any older raw
                 // output already in this connection's queue is suppressed.
                 if let Event::TerminalResync {
+                    terminal_id, seq, ..
+                }
+                | Event::AgentAuthReplay {
                     terminal_id, seq, ..
                 } = &other
                 {
@@ -803,6 +812,7 @@ mod tests {
                 prompt_history: Vec::new(),
                 composing_buffer: None,
                 agent_state: None,
+                authenticating: false,
             }],
             projects: Vec::new(),
             recent_snippets: Vec::new(),

@@ -830,8 +830,8 @@ pub(super) async fn commit_workspace_move(
         if let Some((_, terminal_meta)) = terminal_guards.as_mut() {
             for plan in rebadge_plans {
                 let mut changed = false;
-                for terminal_id in plan.terminal_ids {
-                    if let Some((session_key, _)) = terminal_meta.get_mut(&terminal_id)
+                for terminal_id in &plan.terminal_ids {
+                    if let Some((session_key, _)) = terminal_meta.get_mut(terminal_id)
                         && *session_key == plan.from
                     {
                         *session_key = plan.to.clone();
@@ -839,6 +839,9 @@ pub(super) async fn commit_workspace_move(
                     }
                 }
                 if changed {
+                    config_owned
+                        .agent_recovery
+                        .rebadge_blocking(&plan.terminal_ids, &plan.to);
                     let _ = config_owned.bus.send(Event::TerminalsRebadged {
                         from: plan.from,
                         to: plan.to,

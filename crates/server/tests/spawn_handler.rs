@@ -149,6 +149,60 @@ async fn spawn_and_wait(
     }
 }
 
+#[tokio::test]
+async fn live_provider_auth_failure_emits_recovery_without_stopping_the_agent() {
+    timeout(TEST_DEADLINE, async {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Agent("codex".into())).await;
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+
+        mock.emit(
+            &key,
+            include_bytes!("../../agents/tests/fixtures/codex_auth_chat_negative.bin"),
+        )
+        .await;
+        assert!(
+            wait_for(
+                &mut client,
+                |event| matches!(event, Event::AgentAuthRequired { .. }),
+                Duration::from_millis(100),
+            )
+            .await
+            .is_none(),
+            "ordinary conversation text must not trigger recovery",
+        );
+
+        mock.emit(
+            &key,
+            include_bytes!("../../agents/tests/fixtures/codex_refresh_rejected.bin"),
+        )
+        .await;
+        let required = wait_for(
+            &mut client,
+            |event| matches!(event, Event::AgentAuthRequired { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("auth failure must offer recovery");
+        assert!(matches!(
+            required,
+            Event::AgentAuthRequired {
+                terminal_id: id,
+                ref agent_id,
+                other_session_count: 0,
+                ..
+            } if id == terminal_id && agent_id == "codex"
+        ));
+        assert!(
+            mock.list().await.unwrap().contains(&key),
+            "detection alone must not stop the provider process"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Build a normalized hook event for a Claude lifecycle event name,
 /// mirroring what `lazybox hook-ingest` forwards after parsing Claude's
 /// stdin payload.
@@ -920,6 +974,125 @@ async fn restored_critic_session_keeps_read_only_access() {
                 .any(|arg| arg == "--dangerously-bypass-approvals-and-sandbox"),
             "a restored critic must not become autonomous: {argv:?}"
         );
+    })
+    .await
+    .expect("deadline");
+}
+
+#[tokio::test]
+async fn hook_session_identity_is_persisted_and_used_for_restore() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        let first_backend = MockBackend::new();
+        let first_config =
+            ServerConfig::with_store_and_backend(store.clone(), Arc::new(first_backend.clone()));
+        let workspace_key = lazybox_core::WorkspaceKey::new("test:exact-provider-resume");
+        let worktree = tempfile::TempDir::new().unwrap();
+        let mut workspace = lazybox_core::Workspace::empty(
+            workspace_key.clone(),
+            "exact resume",
+            chrono::Utc::now(),
+        );
+        let session = lazybox_core::WorkspaceSession::new(
+            workspace_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            worktree.path().to_path_buf(),
+            chrono::Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.add_session(session);
+        store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: workspace_key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+
+        let mut client = subscribed(first_config).await;
+        client
+            .send(Command::Spawn {
+                session_key: workspace_key.as_str().into(),
+                session_id: Some(session_id),
+                client_request_id: None,
+                kind: TerminalKind::Agent("codex".into()),
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            })
+            .unwrap();
+        let Event::TerminalSpawned { terminal_id, .. } = wait_for(
+            &mut client,
+            |event| matches!(event, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("spawned terminal") else {
+            unreachable!()
+        };
+        let backend_key = first_backend
+            .list()
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        client
+            .send(Command::IngestHook {
+                terminal_id,
+                backend_key: Some(backend_key),
+                hook: lazybox_ipc::HookEvent {
+                    kind: lazybox_ipc::HookEventKind::SessionStart,
+                    session_id: Some("provider-conversation-708".into()),
+                    cwd: None,
+                    tool_name: None,
+                    notification: None,
+                },
+            })
+            .unwrap();
+
+        let persisted = loop {
+            let record = store
+                .get_workspace(&workspace_key)
+                .unwrap()
+                .expect("workspace record");
+            let workspace: lazybox_core::Workspace =
+                serde_json::from_str(record.workspace_json.as_deref().unwrap()).unwrap();
+            if workspace.sessions[0]
+                .provider_session_ids
+                .get("codex")
+                .is_some_and(|id| id == "provider-conversation-708")
+            {
+                break workspace;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(
+            persisted.sessions[0].provider_session_ids["codex"],
+            "provider-conversation-708"
+        );
+
+        let restored_backend = MockBackend::new();
+        let restored_config =
+            ServerConfig::with_store_and_backend(store, Arc::new(restored_backend.clone()));
+        lazybox_server::spawn_handler::restore_persisted_sessions(&restored_config).await;
+        let argv = restored_backend
+            .all_argv()
+            .await
+            .into_iter()
+            .next()
+            .expect("restored agent");
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["resume", "provider-conversation-708"]),
+            "restore must target the captured provider conversation: {argv:?}"
+        );
+        assert!(!argv.iter().any(|arg| arg == "--last"));
     })
     .await
     .expect("deadline");

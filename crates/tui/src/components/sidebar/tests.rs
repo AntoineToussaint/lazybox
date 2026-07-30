@@ -52,6 +52,7 @@ mod multi_agent_state_tests {
             prompt_history: Vec::new(),
             composing_buffer: None,
             agent_state: Some(state),
+            authenticating: false,
         }
     }
 

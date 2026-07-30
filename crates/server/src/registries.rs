@@ -27,6 +27,13 @@ pub struct TerminalRegistry {
     pub(crate) on_main_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Model-tier label replayed in reconnect snapshots.
     pub(crate) terminal_models: Arc<Mutex<HashMap<TerminalId, String>>>,
+    /// Old side of an in-flight exact terminal replacement. The backend
+    /// remains registered until teardown, but reconnect snapshots hide it as
+    /// soon as the replacement becomes visible.
+    pub(crate) superseded_terminals: Arc<Mutex<HashSet<TerminalId>>>,
+    /// Provider-owned login terminals. Kept in the terminal registry for
+    /// interactive input routing, but their output is connection-private.
+    pub(crate) authenticating_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Recovered agents that require restart for the current PTY compatibility generation.
     pub(crate) outdated_agent_terminals: Arc<Mutex<HashSet<TerminalId>>>,
     /// Detection buffers to clear after an answer so stale prompt chrome cannot re-fire.
@@ -48,6 +55,8 @@ pub(crate) struct TerminalRegistrationGuard {
     terminals: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, String>>,
     terminal_meta: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, (SessionKey, TerminalKind)>>,
     agent_state_generations: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, u64>>,
+    superseded_terminals: tokio::sync::OwnedMutexGuard<HashSet<TerminalId>>,
+    authenticating_terminals: tokio::sync::OwnedMutexGuard<HashSet<TerminalId>>,
 }
 
 impl TerminalRegistrationGuard {
@@ -64,6 +73,25 @@ impl TerminalRegistrationGuard {
         if let Some(generation) = generation {
             self.agent_state_generations.insert(id, generation);
         }
+    }
+
+    pub(crate) fn register_replacement(
+        &mut self,
+        old_id: TerminalId,
+        id: TerminalId,
+        backend_key: String,
+        session_key: SessionKey,
+        kind: TerminalKind,
+        generation: Option<u64>,
+        authenticating: bool,
+    ) {
+        if self.terminals.contains_key(&old_id) {
+            self.superseded_terminals.insert(old_id);
+        }
+        if authenticating {
+            self.authenticating_terminals.insert(id);
+        }
+        self.register(id, backend_key, session_key, kind, generation);
     }
 }
 
@@ -122,6 +150,8 @@ impl TerminalRegistry {
         self.no_permission_terminals.lock().await.remove(&id);
         self.on_main_terminals.lock().await.remove(&id);
         self.terminal_models.lock().await.remove(&id);
+        self.superseded_terminals.lock().await.remove(&id);
+        self.authenticating_terminals.lock().await.remove(&id);
         self.outdated_agent_terminals.lock().await.remove(&id);
         self.agent_detect_resets.lock().await.remove(&id);
         self.hook_driven_terminals.lock().await.remove(&id);
@@ -333,6 +363,12 @@ impl TerminalRegistry {
         if !self.terminal_models.lock().await.is_empty() {
             return false;
         }
+        if !self.superseded_terminals.lock().await.is_empty() {
+            return false;
+        }
+        if !self.authenticating_terminals.lock().await.is_empty() {
+            return false;
+        }
         if !self.outdated_agent_terminals.lock().await.is_empty() {
             return false;
         }
@@ -385,10 +421,14 @@ impl TerminalRegistry {
         let terminals = self.terminals.clone().lock_owned().await;
         let terminal_meta = self.terminal_meta.clone().lock_owned().await;
         let agent_state_generations = self.agent_state_generations.clone().lock_owned().await;
+        let superseded_terminals = self.superseded_terminals.clone().lock_owned().await;
+        let authenticating_terminals = self.authenticating_terminals.clone().lock_owned().await;
         TerminalRegistrationGuard {
             terminals,
             terminal_meta,
             agent_state_generations,
+            superseded_terminals,
+            authenticating_terminals,
         }
     }
 

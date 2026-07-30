@@ -359,8 +359,37 @@ async fn run_case(case: Case) {
     for key in &backend_keys {
         mock.emit(key, "scrollback-marker").await;
     }
-    let session_paths_before: Vec<_> = load_workspace(&config, &issue_key)
-        .expect("issue row present pre-collapse")
+    let agent_backend_key = config
+        .terminal
+        .backend_key_for(terminal_ids[0])
+        .await
+        .expect("agent backend key");
+    client
+        .send(Command::IngestHook {
+            terminal_id: terminal_ids[0],
+            backend_key: Some(agent_backend_key),
+            hook: lazybox_ipc::HookEvent {
+                kind: lazybox_ipc::HookEventKind::SessionStart,
+                session_id: Some("provider-session-708".into()),
+                cwd: None,
+                tool_name: None,
+                notification: None,
+            },
+        })
+        .unwrap();
+    let issue_before = loop {
+        let workspace =
+            load_workspace(&config, &issue_key).expect("issue row present pre-collapse");
+        if workspace.sessions[0]
+            .provider_session_ids
+            .get(case.agent)
+            .is_some_and(|id| id == "provider-session-708")
+        {
+            break workspace;
+        }
+        tokio::task::yield_now().await;
+    };
+    let session_paths_before: Vec<_> = issue_before
         .sessions
         .iter()
         .map(|s| s.worktree_path.clone())
@@ -484,6 +513,14 @@ async fn run_case(case: Case) {
     );
     assert_eq!(pr_ws.sessions[0].workspace_key, pr_key);
     assert_eq!(
+        pr_ws.sessions[0]
+            .provider_session_ids
+            .get(case.agent)
+            .map(String::as_str),
+        Some("provider-session-708"),
+        "exact provider identity must follow the session onto the PR",
+    );
+    assert_eq!(
         pr_ws.sessions[0].worktree_path, session_paths_before[0],
         "a live worktree must be reused in place, never relocated (#78)",
     );
@@ -491,6 +528,78 @@ async fn run_case(case: Case) {
         assert!(
             pr_ws.sessions[0].worktree_path.join(".git").exists(),
             "the provisioned worktree must still exist on disk",
+        );
+    }
+
+    if case.agent == "codex"
+        && !case.provisioned
+        && !case.extra_shell
+        && matches!(case.trigger, Trigger::Manual)
+    {
+        let old_backend_key = config
+            .terminal
+            .backend_key_for(terminal_ids[0])
+            .await
+            .expect("moved agent remains live");
+        mock.finish(&old_backend_key, 1).await;
+        wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::TerminalExited {
+                        terminal_id,
+                        ..
+                    } if *terminal_id == terminal_ids[0]
+                )
+            },
+            EVENT_BUDGET,
+        )
+        .await
+        .expect("moved agent exit");
+        client
+            .send(Command::ResumeAgent {
+                terminal_id: terminal_ids[0],
+            })
+            .unwrap();
+        let resumed = wait_for(
+            &mut client,
+            |event| {
+                matches!(
+                    event,
+                    Event::TerminalReplaced {
+                        old_terminal_id,
+                        kind: TerminalKind::Agent(agent),
+                        ..
+                    } if *old_terminal_id == terminal_ids[0] && agent == "codex"
+                )
+            },
+            EVENT_BUDGET,
+        )
+        .await
+        .expect("moved agent exact resume");
+        let Event::TerminalReplaced {
+            terminal_id: resumed_id,
+            ..
+        } = resumed
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            config
+                .terminal
+                .terminal_meta_for(resumed_id)
+                .await
+                .expect("resumed terminal metadata")
+                .0,
+            pr_sk,
+            "recovery context must follow the terminal onto the PR",
+        );
+        assert!(
+            mock.all_argv().await.iter().any(|argv| argv
+                .windows(3)
+                .any(|args| args == ["codex", "resume", "provider-session-708"])),
+            "the moved session must resume by exact provider identity",
         );
     }
 

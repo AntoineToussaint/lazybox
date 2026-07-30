@@ -1022,6 +1022,69 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Messages, Messages::new(entries, chrono::Utc::now()));
     }
 
+    pub(super) fn queue_agent_auth_prompt(&mut self, prompt: super::AgentAuthPrompt) {
+        let already_active = matches!(
+            self.modal_flow,
+            Some(ModalFlow::AgentAuth { terminal_id, .. }) if terminal_id == prompt.terminal_id
+        );
+        if already_active
+            || self
+                .auth_prompt_queue
+                .iter()
+                .any(|queued| queued.terminal_id == prompt.terminal_id)
+        {
+            return;
+        }
+        self.auth_prompt_queue.push_back(prompt);
+        self.maybe_mount_next_auth_prompt();
+    }
+
+    pub(super) fn maybe_mount_next_auth_prompt(&mut self) {
+        use crate::realm::components::confirm::Confirm;
+
+        if !self.modal_stack.is_empty() {
+            return;
+        }
+        let Some(prompt) = self.auth_prompt_queue.pop_front() else {
+            return;
+        };
+        let copy = if prompt.retry {
+            format!(
+                "{} sign-in did not complete.\n\n{}\n\nThe conversation is still saved and can be resumed.\n\n[Enter] Retry    [Esc] Cancel",
+                prompt.display_name,
+                prompt.error.as_deref().unwrap_or("Provider login failed.")
+            )
+        } else {
+            let affected = if prompt.other_session_count == 0 {
+                format!(
+                    "This changes the machine-wide {} login.",
+                    prompt.display_name
+                )
+            } else {
+                format!(
+                    "This changes the machine-wide {} login and may affect {} other running {} session{}.",
+                    prompt.display_name,
+                    prompt.other_session_count,
+                    prompt.display_name,
+                    if prompt.other_session_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                )
+            };
+            format!(
+                "{} authentication is no longer valid.\n\nSign in with another account and continue this conversation?\n\n{affected}\n\n[Enter] Sign in and continue    [Esc] Not now",
+                prompt.display_name
+            )
+        };
+        self.set_modal_flow(ModalFlow::AgentAuth {
+            terminal_id: prompt.terminal_id,
+            retry: prompt.retry,
+        });
+        self.mount_modal(Id::AgentAuth, Confirm::new(copy).default_yes());
+    }
+
     /// If there's a queued workspace-removal prompt and no modal is
     /// currently up, mount it. Copy depends on the prompt's
     /// [`super::RemovalReason`]; the user's answer (Y → remove, N → keep +

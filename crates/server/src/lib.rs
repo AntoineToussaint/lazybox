@@ -26,6 +26,7 @@
     clippy::unwrap_or_default
 )]
 
+mod agent_auth;
 pub mod agent_runs;
 pub mod agent_stream;
 pub mod agent_updates;
@@ -278,8 +279,8 @@ const CONNECTION_ROUTER_TASKS: usize = 2;
 /// Any co-holding site (one that locks two of these maps at once)
 /// must follow this order; the constant exists as a discoverable name
 /// future callers can grep when they add one.
-pub const TERMINAL_MAP_LOCK_ORDER: &str =
-    "terminals → terminal_meta → terminal_sessions → agent_state_generations → agent_states";
+pub const TERMINAL_MAP_LOCK_ORDER: &str = "terminals → terminal_meta → terminal_sessions → agent_state_generations → \
+     superseded_terminals → authenticating_terminals → agent_states";
 
 /// `ServerConfig` is the per-process state shared across all client
 /// connections — the persistent store, the broadcast bus the poller
@@ -311,6 +312,7 @@ pub struct ServerConfig {
     pub terminal: TerminalRegistry,
     /// Spawn claims and prompt-injection synchronization.
     pub spawn: SpawnCoordinator,
+    pub(crate) agent_recovery: agent_auth::AgentRecoveryRegistry,
     /// Factory for a structured agent run's underlying process I/O.
     /// Defaults to spawning a real subprocess; tests swap in an
     /// in-memory fake so they never launch an agent CLI or a shell.
@@ -474,6 +476,7 @@ impl ServerConfig {
             worktree_root: Arc::new(worktree_root),
             terminal: TerminalRegistry::default(),
             spawn: SpawnCoordinator::default(),
+            agent_recovery: agent_auth::AgentRecoveryRegistry::default(),
             agent_stream_spawner: Arc::new(agent_stream::ProcessAgentStreamSpawner),
             agent_runs: Arc::new(Mutex::new(HashMap::new())),
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
@@ -882,6 +885,13 @@ impl Server {
                         lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
                         lazybox_ipc::Command::DeliverSnippet { .. } => "DeliverSnippet",
                         lazybox_ipc::Command::SetUpdateDismissal { .. } => "SetUpdateDismissal",
+                        lazybox_ipc::Command::ResumeAgent { .. } => "ResumeAgent",
+                        lazybox_ipc::Command::ReauthenticateAgent { .. } => {
+                            "ReauthenticateAgent"
+                        }
+                        lazybox_ipc::Command::CancelAgentReauthentication { .. } => {
+                            "CancelAgentReauthentication"
+                        }
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1139,7 +1149,10 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         | Command::Resize { .. }
         | Command::Close { .. }
         | Command::InjectPrompt { .. }
-        | Command::DeliverSnippet { .. } => CommandLane::TerminalIo,
+        | Command::DeliverSnippet { .. }
+        | Command::ResumeAgent { .. }
+        | Command::ReauthenticateAgent { .. }
+        | Command::CancelAgentReauthentication { .. } => CommandLane::TerminalIo,
         Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
             CommandLane::TerminalPersistence
         }
@@ -1284,6 +1297,12 @@ pub async fn dispatch_command(
             if !logins.is_empty() {
                 let _ = tx.send(Event::ViewerIdentities { logins });
             }
+            let (recovery_events, auth_replays) =
+                config.agent_recovery.replay_events(Some(tx)).await;
+            for event in recovery_events {
+                let _ = tx.send(event);
+            }
+            agent_auth::replay_auth_output(config, tx, auth_replays).await;
             // Resolve daemon-owned settings off the async runtime: automatic
             // shell discovery can consult the account database through NSS.
             let daemon_settings = tokio::task::spawn_blocking(|| {
@@ -1571,6 +1590,24 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;
+        }
+        lazybox_ipc::Command::ResumeAgent { terminal_id } => {
+            agent_auth::resume_agent(config, terminal_id).await;
+        }
+        lazybox_ipc::Command::ReauthenticateAgent {
+            terminal_id,
+            switch_account,
+        } => {
+            agent_auth::start_reauthentication(
+                config,
+                terminal_id,
+                switch_account,
+                Some(tx.clone()),
+            )
+            .await;
+        }
+        lazybox_ipc::Command::CancelAgentReauthentication { terminal_id } => {
+            agent_auth::cancel_reauthentication(config, terminal_id).await;
         }
         lazybox_ipc::Command::SetAutoMergeOnGreen {
             session_key,
@@ -2072,6 +2109,7 @@ mod snapshot_budget_tests {
             prompt_history: Vec::new(),
             composing_buffer: None,
             agent_state: None,
+            authenticating: false,
         }
     }
 

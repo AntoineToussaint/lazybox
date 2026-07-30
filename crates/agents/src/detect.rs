@@ -23,6 +23,7 @@
 //! `RUST_LOG=lazybox_agents=trace` to debug a misclassification against
 //! `/tmp/lazybox.log`.
 
+use crate::AuthFailure;
 use crate::pty::PromptShape;
 use lazybox_ipc::AgentState;
 
@@ -121,6 +122,49 @@ pub fn contains_any(text: &str, patterns: &[&str]) -> bool {
 /// output mentions the same phrase."
 pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool {
     contains_any(text, choices) && contains_any(text, questions)
+}
+
+pub fn codex_auth_failure(recent_output: &[u8]) -> Option<AuthFailure> {
+    let text = strip_ansi_lossy(recent_output).to_ascii_lowercase();
+    let tail = recent_tail(&text, 8 * 1024);
+    let refresh_rejected = tail.contains("access token could not be refreshed")
+        && (tail.contains("please sign in again")
+            || tail.contains("logged out or signed in to another account"));
+    let login_required = tail.contains("not logged in. run `codex login`")
+        || tail.contains("not logged in. run codex login")
+        || tail.contains("not authenticated. run `codex login`")
+        || tail.contains("not authenticated. run codex login");
+    let provider_rejected = (tail.contains("authentication failed")
+        || tail.contains("authentication error"))
+        && tail.contains("sign in again")
+        && (tail.contains("codex") || tail.contains("chatgpt"));
+    (refresh_rejected || login_required || provider_rejected).then_some(AuthFailure {
+        reason: "Codex authentication is no longer valid.",
+    })
+}
+
+pub fn claude_auth_failure(recent_output: &[u8]) -> Option<AuthFailure> {
+    let text = strip_ansi_lossy(recent_output).to_ascii_lowercase();
+    let tail = recent_tail(&text, 8 * 1024);
+    let login_required = tail.contains("not authenticated. run `claude auth login`")
+        || tail.contains("not authenticated. run claude auth login")
+        || tail.contains("not authenticated. run /login")
+        || tail.contains("not logged in. run `claude auth login`")
+        || tail.contains("not logged in. run claude auth login")
+        || tail.contains("not logged in. run /login");
+    let oauth_expired = (tail.contains("oauth") || tail.contains("authentication"))
+        && (tail.contains("expired") || tail.contains("invalid"))
+        && (tail.contains("please log in again")
+            || tail.contains("please login again")
+            || tail.contains("please run /login")
+            || tail.contains("please run `claude auth login`")
+            || tail.contains("please run claude auth login"));
+    let startup_failure = (tail.contains("authentication failed")
+        || tail.contains("authentication error"))
+        && (tail.contains("run /login") || tail.contains("claude auth login"));
+    (login_required || oauth_expired || startup_failure).then_some(AuthFailure {
+        reason: "Claude Code authentication is no longer valid.",
+    })
 }
 
 /// Claude Code's three observable states, in one detector. Ordered

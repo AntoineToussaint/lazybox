@@ -1,0 +1,1 @@
+I updated the authentication guide. If you are not authenticated, run `codex login`; it also explains access token rotation.

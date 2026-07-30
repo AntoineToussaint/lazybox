@@ -42,4 +42,9 @@ last_output_at: string | null,
  * Tile/tab arrangement for this session. Defaults to Tabs.
  * Persisted so the user's layout survives restart.
  */
-layout: SessionLayout, };
+layout: SessionLayout,
+/**
+ * Exact upstream conversation identity per agent running in this
+ * worktree.
+ */
+provider_session_ids: { [key in string]: string }, };

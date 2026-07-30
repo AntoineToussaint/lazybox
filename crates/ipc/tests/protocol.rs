@@ -418,6 +418,16 @@ fn all_commands() -> Vec<Command> {
         Command::SetUpdateDismissal {
             target: "release:v0.2.0".into(),
         },
+        Command::ResumeAgent {
+            terminal_id: TerminalId(12),
+        },
+        Command::ReauthenticateAgent {
+            terminal_id: TerminalId(12),
+            switch_account: true,
+        },
+        Command::CancelAgentReauthentication {
+            terminal_id: TerminalId(12),
+        },
         Command::Shutdown,
     ]
 }
@@ -453,6 +463,7 @@ fn all_events() -> Vec<Event> {
                 }],
                 composing_buffer: Some("half typed prompt".into()),
                 agent_state: Some(AgentState::InputNeeded),
+                authenticating: false,
             }],
             projects: vec![],
             recent_snippets: vec!["rev".into(), "pr".into()],
@@ -572,11 +583,32 @@ fn all_events() -> Vec<Event> {
             on_main: false,
             model_label: None,
         },
+        Event::TerminalReplaced {
+            old_terminal_id: TerminalId(2),
+            terminal_id: TerminalId(3),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: true,
+            model_label: Some("Large".into()),
+            authenticating: true,
+        },
         Event::TerminalOutput {
             terminal_id: TerminalId(2),
             bytes: b"ANSI: \x1b[31mred\x1b[0m".to_vec(),
             first_seq: 1,
             seq: 1,
+        },
+        Event::AgentAuthOutput {
+            terminal_id: TerminalId(3),
+            bytes: b"provider login".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        },
+        Event::AgentAuthReplay {
+            terminal_id: TerminalId(3),
+            replay: b"provider login replay".to_vec(),
+            seq: 2,
         },
         Event::TerminalResync {
             terminal_id: TerminalId(2),
@@ -894,6 +926,29 @@ fn all_events() -> Vec<Event> {
             client_request_id: "close-1".into(),
             message: "backend kill failed".into(),
         },
+        Event::AgentAuthRequired {
+            terminal_id: TerminalId(12),
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            reason: "provider sign-in expired".into(),
+            other_session_count: 2,
+        },
+        Event::AgentAuthProgress {
+            recovery_terminal_id: TerminalId(12),
+            terminal_id: TerminalId(12),
+            phase: lazybox_ipc::AgentAuthPhase::LoginInteractive,
+        },
+        Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(12),
+            terminal_id: TerminalId(12),
+            display_name: "Codex".into(),
+            success: false,
+            error: Some("provider login exited with status 1".into()),
+        },
+        Event::AgentResumeFallback {
+            terminal_id: TerminalId(12),
+            display_name: "Codex".into(),
+        },
     ]
 }
 
@@ -969,6 +1024,9 @@ fn command_tag(command: &Command) -> &'static str {
         Command::UpdateBranch { .. } => "UpdateBranch",
         Command::DeliverSnippet { .. } => "DeliverSnippet",
         Command::SetUpdateDismissal { .. } => "SetUpdateDismissal",
+        Command::ResumeAgent { .. } => "ResumeAgent",
+        Command::ReauthenticateAgent { .. } => "ReauthenticateAgent",
+        Command::CancelAgentReauthentication { .. } => "CancelAgentReauthentication",
     }
 }
 
@@ -1003,7 +1061,10 @@ fn event_tag(event: &Event) -> &'static str {
         Event::WorktreeProgress { .. } => "WorktreeProgress",
         Event::SessionEnded { .. } => "SessionEnded",
         Event::TerminalSpawned { .. } => "TerminalSpawned",
+        Event::TerminalReplaced { .. } => "TerminalReplaced",
         Event::TerminalOutput { .. } => "TerminalOutput",
+        Event::AgentAuthOutput { .. } => "AgentAuthOutput",
+        Event::AgentAuthReplay { .. } => "AgentAuthReplay",
         Event::TerminalResync { .. } => "TerminalResync",
         Event::TerminalResyncUnavailable { .. } => "TerminalResyncUnavailable",
         Event::TerminalExited { .. } => "TerminalExited",
@@ -1048,6 +1109,10 @@ fn event_tag(event: &Event) -> &'static str {
         Event::SnippetDelivered { .. } => "SnippetDelivered",
         Event::CommandCompleted { .. } => "CommandCompleted",
         Event::CommandFailed { .. } => "CommandFailed",
+        Event::AgentAuthRequired { .. } => "AgentAuthRequired",
+        Event::AgentAuthProgress { .. } => "AgentAuthProgress",
+        Event::AgentAuthFinished { .. } => "AgentAuthFinished",
+        Event::AgentResumeFallback { .. } => "AgentResumeFallback",
     }
 }
 
@@ -1059,12 +1124,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        67,
+        70,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        70,
+        77,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }
@@ -1111,8 +1176,8 @@ fn event_bincode_round_trip() {
     for ev in all_events() {
         let config = bincode::config::legacy();
         let bytes = bincode::serde::encode_to_vec(&ev, config).expect("serialize");
-        let (back, consumed): (Event, usize) =
-            bincode::serde::decode_from_slice(&bytes, config).expect("deserialize");
+        let (back, consumed): (Event, usize) = bincode::serde::decode_from_slice(&bytes, config)
+            .unwrap_or_else(|error| panic!("deserialize {ev:?}: {error}"));
         assert_eq!(consumed, bytes.len());
         assert_eq!(format!("{ev:?}"), format!("{back:?}"));
     }

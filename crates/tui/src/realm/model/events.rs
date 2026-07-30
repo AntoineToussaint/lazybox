@@ -813,7 +813,10 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
                 | IpcEvent::TerminalSpawned { .. }
+                | IpcEvent::TerminalReplaced { .. }
                 | IpcEvent::TerminalOutput { .. }
+                | IpcEvent::AgentAuthOutput { .. }
+                | IpcEvent::AgentAuthReplay { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
                 | IpcEvent::TerminalScrollback { .. }
@@ -855,6 +858,10 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCliUpdatesChecked { .. }
                 | IpcEvent::AgentCliUpdateFinished { .. }
                 | IpcEvent::SnippetDelivered { .. }
+                | IpcEvent::AgentAuthRequired { .. }
+                | IpcEvent::AgentAuthProgress { .. }
+                | IpcEvent::AgentAuthFinished { .. }
+                | IpcEvent::AgentResumeFallback { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }
@@ -1394,6 +1401,60 @@ impl<T: TerminalAdapter> Model<T> {
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
+        match &event {
+            IpcEvent::AgentAuthRequired {
+                terminal_id,
+                display_name,
+                other_session_count,
+                ..
+            } => {
+                self.queue_agent_auth_prompt(super::AgentAuthPrompt {
+                    terminal_id: *terminal_id,
+                    display_name: display_name.clone(),
+                    other_session_count: *other_session_count,
+                    retry: false,
+                    error: None,
+                });
+            }
+            IpcEvent::AgentAuthProgress { phase, .. } => {
+                let message = match phase {
+                    lazybox_ipc::AgentAuthPhase::LoggingOut => "signing out of the provider…",
+                    lazybox_ipc::AgentAuthPhase::LoginInteractive => {
+                        "complete sign-in in the terminal…"
+                    }
+                    lazybox_ipc::AgentAuthPhase::Resuming => {
+                        "sign-in complete — resuming conversation…"
+                    }
+                };
+                self.flash_info(message);
+            }
+            IpcEvent::AgentAuthFinished {
+                recovery_terminal_id,
+                terminal_id: _,
+                display_name,
+                success,
+                error,
+            } => {
+                if *success {
+                    self.flash_info(format!("{display_name} conversation resumed"));
+                    self.set_focus(PaneFocus::Terminals);
+                } else {
+                    self.queue_agent_auth_prompt(super::AgentAuthPrompt {
+                        terminal_id: *recovery_terminal_id,
+                        display_name: display_name.clone(),
+                        other_session_count: 0,
+                        retry: true,
+                        error: error.clone(),
+                    });
+                }
+            }
+            IpcEvent::AgentResumeFallback { display_name, .. } => {
+                self.flash_info(format!(
+                    "no exact {display_name} session id is available — resuming the latest conversation in this checkout"
+                ));
+            }
+            _ => {}
+        }
         let resync_requests = self.terminals.drain_pending_resync_requests();
         for (terminal_id, required_seq) in resync_requests {
             self.send_cmd(IpcCommand::RequestTerminalResync {
@@ -1493,7 +1554,10 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::WorktreeProgress { .. }
             | IpcEvent::SessionEnded { .. }
             | IpcEvent::TerminalSpawned { .. }
+            | IpcEvent::TerminalReplaced { .. }
             | IpcEvent::TerminalOutput { .. }
+            | IpcEvent::AgentAuthOutput { .. }
+            | IpcEvent::AgentAuthReplay { .. }
             | IpcEvent::TerminalResync { .. }
             | IpcEvent::TerminalResyncUnavailable { .. }
             | IpcEvent::TerminalScrollback { .. }
@@ -1532,6 +1596,10 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentCliUpdatesChecked { .. }
             | IpcEvent::AgentCliUpdateFinished { .. }
             | IpcEvent::SnippetDelivered { .. }
+            | IpcEvent::AgentAuthRequired { .. }
+            | IpcEvent::AgentAuthProgress { .. }
+            | IpcEvent::AgentAuthFinished { .. }
+            | IpcEvent::AgentResumeFallback { .. }
             | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -1712,7 +1780,10 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
                 | IpcEvent::TerminalSpawned { .. }
+                | IpcEvent::TerminalReplaced { .. }
                 | IpcEvent::TerminalOutput { .. }
+                | IpcEvent::AgentAuthOutput { .. }
+                | IpcEvent::AgentAuthReplay { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
                 | IpcEvent::TerminalScrollback { .. }
@@ -1751,6 +1822,10 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCliUpdatesChecked { .. }
                 | IpcEvent::AgentCliUpdateFinished { .. }
                 | IpcEvent::SnippetDelivered { .. }
+                | IpcEvent::AgentAuthRequired { .. }
+                | IpcEvent::AgentAuthProgress { .. }
+                | IpcEvent::AgentAuthFinished { .. }
+                | IpcEvent::AgentResumeFallback { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }

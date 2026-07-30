@@ -1,7 +1,8 @@
 use super::{
     AgentStateDurability, cancel_spawn_for_deleted_workspace, hook_backend_key_path, hook_command,
-    hook_exe, initialize_agent_state_generation, persist_agent_access, persist_no_permission,
-    persist_pty_launch_generation, persist_terminal_meta, wake_poll_for_terminal_kind,
+    hook_exe, initialize_agent_state_generation, persist_agent_access,
+    persist_agent_resume_context, persist_no_permission, persist_pty_launch_generation,
+    persist_terminal_meta, restore_backend_conversation_state, wake_poll_for_terminal_kind,
     write_hook_backend_key, write_hook_settings,
 };
 use crate::{ServerConfig, spawn_plan::SpawnPlan};
@@ -79,7 +80,7 @@ pub(super) async fn execute_spawn_plan(
         session_key,
         kind,
         argv: _,
-        cwd: _,
+        cwd: plan_cwd,
         env: _,
         hint: _,
         persist_key: _,
@@ -88,6 +89,11 @@ pub(super) async fn execute_spawn_plan(
         terminal_id,
         hook_settings,
         model_label,
+        model_alias,
+        provider_session_id,
+        replace_terminal_id,
+        prompt_history,
+        composing_buffer,
         access,
         flags,
     } = plan;
@@ -98,7 +104,6 @@ pub(super) async fn execute_spawn_plan(
         elapsed_ms = started_at.elapsed().as_millis(),
         "execute_spawn_plan: backend.spawn ok",
     );
-
     if cancel_spawn_for_deleted_workspace(config, &session_key, &backend_key).await {
         if let Some(path) = hook_settings {
             let _ = std::fs::remove_file(path);
@@ -172,6 +177,15 @@ pub(super) async fn execute_spawn_plan(
         .as_ref()
         .map(|durability| durability.generation);
 
+    if !prompt_history.is_empty() || composing_buffer.is_some() {
+        restore_backend_conversation_state(
+            config,
+            &backend_key,
+            &prompt_history,
+            composing_buffer.as_deref(),
+        )
+        .await;
+    }
     config
         .terminal
         .record_spawn_attributes(
@@ -183,20 +197,56 @@ pub(super) async fn execute_spawn_plan(
             model_label.as_deref(),
         )
         .await;
+    let resume_context = if let TerminalKind::Agent(agent_id) = &kind {
+        let context = crate::agent_auth::AgentResumeContext {
+            terminal_id,
+            session_key: session_key.clone(),
+            session_id: owning_session,
+            agent_id: agent_id.clone(),
+            cwd: plan_cwd,
+            backend_key: Some(backend_key.clone()),
+            on_main: landed_on_main,
+            model_alias,
+            access,
+            no_permission: skip_permissions,
+            provider_session_id,
+            prompt_history,
+            composing_buffer,
+        };
+        config.agent_recovery.remember_spawn(context.clone()).await;
+        Some(context)
+    } else {
+        None
+    };
     {
         let mut registration = config.terminal.lock_registration().await;
-        registration.register(
-            terminal_id,
-            backend_key.clone(),
-            session_key.clone(),
-            kind.clone(),
-            agent_state_generation,
-        );
+        if let Some(old_terminal_id) = replace_terminal_id {
+            registration.register_replacement(
+                old_terminal_id,
+                terminal_id,
+                backend_key.clone(),
+                session_key.clone(),
+                kind.clone(),
+                agent_state_generation,
+                false,
+            );
+        } else {
+            registration.register(
+                terminal_id,
+                backend_key.clone(),
+                session_key.clone(),
+                kind.clone(),
+                agent_state_generation,
+            );
+        }
         persist_terminal_meta(config, &backend_key, &session_key, &kind).await;
         if let Some(agent) = agent.as_deref() {
             persist_pty_launch_generation(config, &backend_key, agent.pty_launch_generation())
                 .await;
         }
+    }
+    if let Some(context) = &resume_context {
+        persist_agent_resume_context(config, &backend_key, context).await;
     }
     wake_poll_for_terminal_kind(config, &kind);
     drop(workspace_registration_guard);
@@ -210,15 +260,29 @@ pub(super) async fn execute_spawn_plan(
         subscriber_count,
         "execute_spawn_plan: broadcasting TerminalSpawned"
     );
-    if let Err(error) = config.bus.send(Event::TerminalSpawned {
-        terminal_id,
-        session_key: session_key.clone(),
-        kind: kind.clone(),
-        no_permission: skip_permissions,
-        on_main: landed_on_main,
-        model_label,
-    }) {
-        tracing::error!("execute_spawn_plan: bus.send(TerminalSpawned) failed: {error}");
+    let event = if let Some(old_terminal_id) = replace_terminal_id {
+        Event::TerminalReplaced {
+            old_terminal_id,
+            terminal_id,
+            session_key: session_key.clone(),
+            kind: kind.clone(),
+            no_permission: skip_permissions,
+            on_main: landed_on_main,
+            model_label,
+            authenticating: false,
+        }
+    } else {
+        Event::TerminalSpawned {
+            terminal_id,
+            session_key: session_key.clone(),
+            kind: kind.clone(),
+            no_permission: skip_permissions,
+            on_main: landed_on_main,
+            model_label,
+        }
+    };
+    if let Err(error) = config.bus.send(event) {
+        tracing::error!("execute_spawn_plan: bus.send(spawn lifecycle) failed: {error}");
     }
 
     Ok(SpawnExecutionOutcome::Spawned(ExecutedSpawn {

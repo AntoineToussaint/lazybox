@@ -46,6 +46,81 @@ fn claude_spawn_and_resume_argv() {
 }
 
 #[test]
+fn builtin_auth_and_exact_resume_commands_are_provider_owned() {
+    let ctx = SpawnCtx::default();
+    let claude = Claude;
+    let claude_auth = claude.auth_commands().expect("claude auth support");
+    assert_eq!(claude_auth.status, ["claude", "auth", "status"]);
+    assert_eq!(claude_auth.logout, ["claude", "auth", "logout"]);
+    assert_eq!(claude_auth.login, ["claude", "auth", "login"]);
+    assert_eq!(
+        claude.resume_session(&ctx, Some("claude-session-42")),
+        ["claude", "--resume", "claude-session-42"],
+    );
+    assert_eq!(claude.resume_session(&ctx, None), ["claude", "--continue"]);
+
+    let codex = Codex;
+    let codex_auth = codex.auth_commands().expect("codex auth support");
+    assert_eq!(codex_auth.status, ["codex", "login", "status"]);
+    assert_eq!(codex_auth.logout, ["codex", "logout"]);
+    assert_eq!(codex_auth.login, ["codex", "login"]);
+    assert_eq!(
+        codex.resume_session(&ctx, Some("codex-session-42")),
+        ["codex", "resume", "codex-session-42"],
+    );
+    assert_eq!(
+        codex.resume_session(&ctx, None),
+        ["codex", "resume", "--last"],
+    );
+}
+
+#[test]
+fn auth_failure_detection_accepts_provider_errors_and_rejects_chat_prose() {
+    let claude = Claude;
+    let codex = Codex;
+    assert!(
+        claude
+            .detect_auth_failure(include_bytes!("fixtures/claude_auth_required.bin"))
+            .is_some()
+    );
+    assert!(
+        claude
+            .detect_auth_failure(include_bytes!("fixtures/claude_oauth_expired.bin"))
+            .is_some()
+    );
+    assert!(
+        claude
+            .detect_auth_failure(include_bytes!("fixtures/claude_auth_startup_failure.bin"))
+            .is_some()
+    );
+    assert!(
+        codex
+            .detect_auth_failure(include_bytes!("fixtures/codex_refresh_rejected.bin"))
+            .is_some()
+    );
+    assert!(
+        codex
+            .detect_auth_failure(include_bytes!("fixtures/codex_login_required.bin"))
+            .is_some()
+    );
+    assert!(
+        codex
+            .detect_auth_failure(include_bytes!("fixtures/codex_auth_rejected.bin"))
+            .is_some()
+    );
+    assert!(
+        claude
+            .detect_auth_failure(include_bytes!("fixtures/claude_auth_chat_negative.bin"))
+            .is_none()
+    );
+    assert!(
+        codex
+            .detect_auth_failure(include_bytes!("fixtures/codex_auth_chat_negative.bin"))
+            .is_none()
+    );
+}
+
+#[test]
 fn claude_skip_permissions_appends_unattended_flags() {
     let agent = Claude;
     let ctx = SpawnCtx {

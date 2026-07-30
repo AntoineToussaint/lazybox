@@ -42,6 +42,112 @@ mod prompt_history_format_tests {
 }
 
 #[cfg(test)]
+mod agent_auth_recovery_tests {
+    use super::super::*;
+    use lazybox_ipc::{Command, Event, TerminalId, channel};
+    use tuirealm::ratatui::layout::{Rect, Size};
+    use tuirealm::ratatui::{Terminal, backend::TestBackend};
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(100, 30)).expect("model init")
+    }
+
+    fn rendered_auth_modal(model: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                model
+                    .app
+                    .view(&Id::AgentAuth, frame, Rect::new(0, 0, 100, 20))
+            })
+            .expect("render auth modal");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn auth_required_warns_about_other_provider_sessions_and_confirms() {
+        let mut model = build_model();
+        model.handle_daemon_event(Event::AgentAuthRequired {
+            terminal_id: TerminalId(7),
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            reason: "provider sign-in expired".into(),
+            other_session_count: 2,
+        });
+
+        assert_eq!(model.top_modal(), Some(&Id::AgentAuth));
+        let screen = rendered_auth_modal(&mut model)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(screen.contains("Codex authentication is no longer valid"));
+        assert!(
+            screen.contains("may affect 2 other running Codex") && screen.contains("sessions."),
+            "{screen}"
+        );
+        assert!(screen.contains("Sign in and continue"));
+        assert!(matches!(
+            model.handle_confirmed(true).as_slice(),
+            [Command::ReauthenticateAgent {
+                terminal_id: TerminalId(7),
+                switch_account: true,
+            }]
+        ));
+    }
+
+    #[test]
+    fn auth_prompt_escape_leaves_the_pane_untouched() {
+        let mut model = build_model();
+        model.handle_daemon_event(Event::AgentAuthRequired {
+            terminal_id: TerminalId(8),
+            agent_id: "claude".into(),
+            display_name: "Claude Code".into(),
+            reason: "provider sign-in expired".into(),
+            other_session_count: 0,
+        });
+
+        assert!(model.handle_modal_dismissed().is_empty());
+        assert!(model.top_modal().is_none());
+    }
+
+    #[test]
+    fn failed_login_offers_retry_without_losing_recovery_identity() {
+        let mut model = build_model();
+        model.handle_daemon_event(Event::AgentAuthFinished {
+            recovery_terminal_id: TerminalId(9),
+            terminal_id: TerminalId(9),
+            display_name: "Claude Code".into(),
+            success: false,
+            error: Some("provider login exited with status 1".into()),
+        });
+
+        let screen = rendered_auth_modal(&mut model)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(screen.contains("Claude Code sign-in did not complete"));
+        assert!(screen.contains("conversation is still saved"));
+        assert!(screen.contains("Retry"));
+        assert!(matches!(
+            model.handle_confirmed(true).as_slice(),
+            [Command::ReauthenticateAgent {
+                terminal_id: TerminalId(9),
+                switch_account: true,
+            }]
+        ));
+    }
+}
+
+#[cfg(test)]
 mod editor_notice_tests {
     use super::super::opened_file_notice;
     use crate::editors::OpenFileOutcome;
@@ -4217,6 +4323,7 @@ mod coalesce_tests {
                 prompt_history: Vec::new(),
                 composing_buffer: None,
                 agent_state: None,
+                authenticating: false,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -8135,6 +8242,7 @@ mod leader_tile_tests {
                 prompt_history: Vec::new(),
                 composing_buffer: Some("\n  recover me".into()),
                 agent_state: None,
+                authenticating: false,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -8215,6 +8323,7 @@ mod leader_tile_tests {
                 ],
                 composing_buffer: None,
                 agent_state: None,
+                authenticating: false,
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -11207,6 +11316,7 @@ mod worktree_progress_recovery_tests {
             prompt_history: Vec::new(),
             composing_buffer: None,
             agent_state: None,
+            authenticating: false,
         }
     }
 

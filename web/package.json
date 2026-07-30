@@ -7,9 +7,9 @@
   "scripts": {
     "dev": "astro dev",
     "build": "astro build",
+    "test": "npm run build && node --test scripts/homepage-install.test.mjs scripts/api-client.test.mjs",
     "preview": "astro preview",
     "check": "astro check",
-    "test": "node --test scripts/api-client.test.mjs",
     "lighthouse": "node scripts/lighthouse.mjs"
   },
   "dependencies": {

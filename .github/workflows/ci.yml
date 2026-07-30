@@ -173,9 +173,8 @@ jobs:
         if: needs.changes.outputs.web == 'true'
         working-directory: web
         run: |
-          npm test
           npm run check
-          npm run build
+          npm test
       - name: Enforce Lighthouse and transfer-size budgets
         if: needs.changes.outputs.web == 'true'
         working-directory: web

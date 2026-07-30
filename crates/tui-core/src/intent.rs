@@ -24,15 +24,19 @@
 //! ```
 //!
 //! Adding a new action becomes: add a resolver + tests, route it
-//! from `handle_pane_key`, extend `execute_intent`. The model
-//! itself stays a thin glue layer.
-//!
-//! Scope today: `Work` is the proof. Reply / Merge / Adopt / Kill /
-//! Snooze etc. migrate next.
+//! from dispatch, and execute the returned intent. The model itself
+//! stays a thin glue layer.
 
 use std::time::Duration;
 
-use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+use lazybox_core::{ActivityFingerprint, SessionKey, Workspace, WorkspaceKey};
+
+/// One activity row to persist as read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActivityReadTarget {
+    pub index: usize,
+    pub fingerprint: Option<ActivityFingerprint>,
+}
 
 /// What the model should do in response to an action. Carries the
 /// data the side-effect needs (workspace key, prompt text, …) but
@@ -101,6 +105,30 @@ pub enum Intent {
     Unsnooze { session_key: SessionKey },
     /// Bulk-mark every activity row on the workspace as read.
     MarkAllRead { session_key: SessionKey },
+    /// Mark specific activity rows read. `optimistic` is true for the
+    /// focused-cursor path, where the activity pane mirrors the write
+    /// immediately and records the undo target.
+    MarkActivitiesRead {
+        session_key: SessionKey,
+        targets: Vec<ActivityReadTarget>,
+        optimistic: bool,
+        notice: Option<String>,
+    },
+    /// Update every selected PR that is behind its base.
+    UpdateSelectedBranches {
+        workspace_keys: Vec<WorkspaceKey>,
+        selected_count: usize,
+    },
+    /// Fold an issue-only workspace into the PR that claims it.
+    CollapseIntoPr { issue_workspace_key: SessionKey },
+    /// Mount the handoff target picker with the source agent's captured
+    /// output.
+    MountHandoffPicker {
+        source_key: SessionKey,
+        source_name: String,
+        seed: String,
+        notice: Option<String>,
+    },
     /// Show a transient footer notice. Used when an action fires but
     /// can't do anything meaningful in the current state (e.g.,
     /// "no sessions to adopt").
@@ -656,6 +684,160 @@ pub fn resolve_mark_read(workspace: Option<&Workspace>) -> Intent {
             session_key: SessionKey::from(&w.key),
         })
         .unwrap_or(Intent::NoOp)
+}
+
+/// Resolve context-sensitive mark-read semantics from the workspace,
+/// activity multi-selection, and optional focused cursor row.
+pub fn resolve_mark_read_targets(
+    workspace: Option<&Workspace>,
+    selected: &[usize],
+    cursor: Option<usize>,
+) -> Intent {
+    let Some(workspace) = workspace else {
+        return Intent::NoOp;
+    };
+    let session_key = SessionKey::from(&workspace.key);
+    if !selected.is_empty() {
+        let targets = selected
+            .iter()
+            .map(|index| ActivityReadTarget {
+                index: *index,
+                fingerprint: workspace.activity.get(*index).map(ActivityFingerprint::of),
+            })
+            .collect();
+        let count = selected.len();
+        return Intent::MarkActivitiesRead {
+            session_key,
+            targets,
+            optimistic: false,
+            notice: Some(format!(
+                "marked {count} selected activit{} read",
+                if count == 1 { "y" } else { "ies" }
+            )),
+        };
+    }
+    if let Some(index) = cursor {
+        let targets = workspace
+            .is_activity_unread(index)
+            .then(|| ActivityReadTarget {
+                index,
+                fingerprint: workspace.activity.get(index).map(ActivityFingerprint::of),
+            })
+            .into_iter()
+            .collect();
+        return Intent::MarkActivitiesRead {
+            session_key,
+            targets,
+            optimistic: true,
+            notice: None,
+        };
+    }
+    Intent::MarkAllRead { session_key }
+}
+
+/// Resolve bulk branch updates over the current sidebar multi-selection.
+pub fn resolve_update_branch_selected(
+    selected_count: usize,
+    selected_workspaces: &[&Workspace],
+) -> Intent {
+    let workspace_keys = selected_workspaces
+        .iter()
+        .filter(|workspace| workspace.pr.as_ref().is_some_and(|pr| pr.is_behind_base))
+        .map(|workspace| workspace.key.clone())
+        .collect();
+    Intent::UpdateSelectedBranches {
+        workspace_keys,
+        selected_count,
+    }
+}
+
+/// Resolve issue-to-PR collapse by finding a locally-synced PR that claims
+/// the focused issue.
+pub fn resolve_collapse_into_pr(
+    issue_workspace: Option<&Workspace>,
+    workspaces: &[&Workspace],
+) -> Intent {
+    let Some(issue_workspace) = issue_workspace else {
+        return Intent::NoOp;
+    };
+    let Some(primary) = issue_workspace.primary_task() else {
+        return Intent::NoOp;
+    };
+    let claiming_pr = workspaces.iter().any(|workspace| {
+        workspace
+            .pr
+            .as_ref()
+            .is_some_and(|pr| pr.closes_issues.contains(&primary.id))
+    });
+    if claiming_pr {
+        Intent::CollapseIntoPr {
+            issue_workspace_key: SessionKey::from(&issue_workspace.key),
+        }
+    } else {
+        Intent::Notice("no PR closes this issue (or it isn't synced yet)".to_string())
+    }
+}
+
+/// Resolve an agent-to-agent handoff after the renderer has attempted to
+/// capture the focused agent terminal's visible text.
+pub fn resolve_send_to_session(
+    workspace: Option<&Workspace>,
+    captured_seed: Option<String>,
+) -> Intent {
+    let Some(workspace) = workspace else {
+        return Intent::NoOp;
+    };
+    let Some(seed) = captured_seed else {
+        return Intent::Notice("no agent session here to hand off from".to_string());
+    };
+    let notice = seed
+        .is_empty()
+        .then(|| "couldn't capture this agent's output — compose the brief yourself".to_string());
+    Intent::MountHandoffPicker {
+        source_key: SessionKey::from(&workspace.key),
+        source_name: workspace.name.clone(),
+        seed,
+        notice,
+    }
+}
+
+/// Pending footer copy for an intent whose daemon round-trip is not
+/// immediate.
+pub fn pending_notice(intent: &Intent, workspace: Option<&Workspace>) -> Option<String> {
+    let task_number_suffix = || {
+        workspace
+            .and_then(|workspace| workspace.pr.as_ref())
+            .and_then(|task| task.id.key.rsplit_once('#').map(|(_, number)| number))
+            .map(|number| format!(" #{number}"))
+            .unwrap_or_default()
+    };
+    match intent {
+        Intent::MergePr { .. } => Some(format!("merging PR{}…", task_number_suffix())),
+        Intent::UpdateBranch { .. } => Some(format!("updating branch PR{}…", task_number_suffix())),
+        Intent::UpdateSelectedBranches {
+            workspace_keys,
+            selected_count,
+        } => {
+            if workspace_keys.is_empty() {
+                Some(if *selected_count == 0 {
+                    "update branches: nothing selected".to_string()
+                } else {
+                    "update branches: no selected PR is behind base".to_string()
+                })
+            } else {
+                let count = workspace_keys.len();
+                let skipped = selected_count.saturating_sub(count);
+                let plural = if count == 1 { "" } else { "es" };
+                Some(if skipped == 0 {
+                    format!("updating {count} branch{plural}…")
+                } else {
+                    format!("updating {count} branch{plural} ({skipped} skipped)…")
+                })
+            }
+        }
+        Intent::CollapseIntoPr { .. } => Some("joining into PR…".to_string()),
+        _ => None,
+    }
 }
 
 /// Build the "address these comments" agent prompt. Lifted from
@@ -1596,5 +1778,118 @@ mod tests {
                 other => panic!("expected SpawnAgent({id}), got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn mark_read_targets_prefers_selection_then_cursor_then_workspace() {
+        let mut ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        ws.activity.push(lazybox_core::Activity {
+            author: "alice".into(),
+            body: "first".into(),
+            created_at: Utc::now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: Some("node-1".into()),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+
+        assert!(matches!(
+            resolve_mark_read_targets(Some(&ws), &[0], Some(0)),
+            Intent::MarkActivitiesRead {
+                targets,
+                optimistic: false,
+                notice: Some(_),
+                ..
+            } if targets.len() == 1
+                && targets[0].fingerprint
+                    == Some(ActivityFingerprint::NodeId("node-1".into()))
+        ));
+        assert!(matches!(
+            resolve_mark_read_targets(Some(&ws), &[], Some(0)),
+            Intent::MarkActivitiesRead {
+                targets,
+                optimistic: true,
+                notice: None,
+                ..
+            } if targets.len() == 1
+        ));
+        assert!(matches!(
+            resolve_mark_read_targets(Some(&ws), &[], None),
+            Intent::MarkAllRead { .. }
+        ));
+    }
+
+    #[test]
+    fn update_branch_selected_filters_and_formats_the_plan() {
+        let mut behind = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        behind.pr.as_mut().expect("pr").is_behind_base = true;
+        let current = pr("o/r#2", CiStatus::Success, ReviewStatus::Approved);
+        let selected = [&behind, &current];
+
+        let intent = resolve_update_branch_selected(3, &selected);
+
+        assert!(matches!(
+            &intent,
+            Intent::UpdateSelectedBranches {
+                workspace_keys,
+                selected_count: 3,
+            } if workspace_keys == &[behind.key.clone()]
+        ));
+        assert_eq!(
+            pending_notice(&intent, None).as_deref(),
+            Some("updating 1 branch (2 skipped)…")
+        );
+    }
+
+    #[test]
+    fn collapse_into_pr_requires_a_claiming_pr() {
+        let issue = issue("o/r#42");
+        let mut claiming = pr("o/r#7", CiStatus::Success, ReviewStatus::Approved);
+        claiming
+            .pr
+            .as_mut()
+            .expect("pr")
+            .closes_issues
+            .push(issue.primary_task().expect("issue").id.clone());
+
+        assert!(matches!(
+            resolve_collapse_into_pr(Some(&issue), &[&issue, &claiming]),
+            Intent::CollapseIntoPr { .. }
+        ));
+        assert!(matches!(
+            resolve_collapse_into_pr(Some(&issue), &[&issue]),
+            Intent::Notice(message) if message.contains("no PR closes")
+        ));
+    }
+
+    #[test]
+    fn send_to_session_distinguishes_missing_and_blank_captures() {
+        let ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+
+        assert!(matches!(
+            resolve_send_to_session(Some(&ws), None),
+            Intent::Notice(message) if message.contains("no agent session")
+        ));
+        assert!(matches!(
+            resolve_send_to_session(Some(&ws), Some(String::new())),
+            Intent::MountHandoffPicker {
+                seed,
+                notice: Some(_),
+                ..
+            } if seed.is_empty()
+        ));
+    }
+
+    #[test]
+    fn pending_notice_names_the_pr_number() {
+        let ws = pr("o/r#42", CiStatus::Success, ReviewStatus::Approved);
+        let intent = resolve_merge(Some(&ws));
+
+        assert_eq!(
+            pending_notice(&intent, Some(&ws)).as_deref(),
+            Some("merging PR #42…")
+        );
     }
 }

@@ -312,9 +312,9 @@ terminal for native whole-screen selection.
 - Drag a splitter to resize; mouse wheel scrolls the focused list/terminal.
 - `F8` (or `Alt-s` / `Ctrl-Alt-s`) toggles lazybox's mouse capture; off = host-native selection, on = lazybox pane-scoped selection + splitter drag.
 - `mouse ?` in the terminal footer means lazybox has requested capture but has
-  not received a host mouse event yet. Move the pointer to verify reporting; if
-  the indicator remains, enable mouse reporting in the host terminal (Ghostty:
-  Command Palette → Toggle Mouse Reporting).
+  not received a recent host mouse event. Move the pointer to verify reporting;
+  if the indicator remains, enable mouse reporting in the host terminal
+  (Ghostty: Command Palette → Toggle Mouse Reporting).
 
 ### How it works (brief)
 Mouse events route through `crates/tui/src/realm/model/keys.rs`: hit-testing for
@@ -328,6 +328,8 @@ restart. The context menu is a `SidebarContext` modal.
 - [ ] Dragging a splitter resizes; the layout persists for the session.
 - [ ] Mouse wheel scrolls the focused list/terminal.
 - [ ] `F8` flips capture; host-native selection works when off, lazybox selection when on.
+- [ ] Disabling host mouse reporting after a verified event restores the
+  `mouse ?` guidance without requiring a focus change.
 - [ ] `scripts/check-ghostty-mouse-reporting.sh` passes against Ghostty's default
   configuration and records an SGR right-button report.
 - [ ] Right-click on a sidebar row opens the context menu.

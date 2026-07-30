@@ -22,6 +22,7 @@ const ACTION_DROPPED_NOTE: &str =
     "\n\n_(Proposed an action, but Ask was closed before you could confirm — ask again to apply.)_";
 
 const MOUSE_CAPTURE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const MOUSE_INPUT_VERIFICATION_TTL: Duration = Duration::from_secs(10);
 
 /// Compose a readable action-failure banner (merge/close/update/delete
 /// rejected). Leads with the reason — the part that matters — and trims
@@ -55,9 +56,14 @@ fn strip_graphql_path(reason: &str) -> String {
 
 impl<T: TerminalAdapter> Model<T> {
     fn request_host_mouse_capture(&mut self, enabled: bool) -> std::io::Result<()> {
-        let result = super::host_terminal::request_mouse_capture(enabled);
+        let result = (self.mouse_capture_requester)(enabled);
         self.mouse_capture_requested_at = std::time::Instant::now();
         result
+    }
+
+    pub(super) fn mouse_input_verified(&self) -> bool {
+        self.mouse_input_observed_at
+            .is_some_and(|at| at.elapsed() < MOUSE_INPUT_VERIFICATION_TTL)
     }
 
     /// Flip lazybox's mouse capture on/off. Issues
@@ -67,7 +73,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// confirms which mode is now active.
     pub(super) fn toggle_mouse_capture(&mut self) {
         self.mouse_capture_on = !self.mouse_capture_on;
-        self.mouse_input_verified = false;
+        self.mouse_input_observed_at = None;
         self.mouse_unverified_logged = false;
         let msg = if self.mouse_capture_on {
             "mouse: lazybox capture requested — move the pointer to verify; F8 or Alt-s for host selection"
@@ -93,8 +99,12 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     pub(super) fn note_host_mouse_input(&mut self) {
-        if self.mouse_capture_on && !self.mouse_input_verified {
-            self.mouse_input_verified = true;
+        if self.mouse_capture_on {
+            let was_verified = self.mouse_input_verified();
+            self.mouse_input_observed_at = Some(std::time::Instant::now());
+            if was_verified {
+                return;
+            }
             self.mouse_unverified_logged = false;
             tracing::info!("host mouse reporting verified");
             if self.focus == PaneFocus::Terminals {
@@ -107,8 +117,8 @@ impl<T: TerminalAdapter> Model<T> {
         if !self.mouse_capture_on {
             return;
         }
-        let was_verified = self.mouse_input_verified;
-        self.mouse_input_verified = false;
+        let was_verified = self.mouse_input_verified();
+        self.mouse_input_observed_at = None;
         self.mouse_unverified_logged = false;
         match self.request_host_mouse_capture(true) {
             Ok(()) => {
@@ -130,14 +140,26 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     pub(super) fn tick_mouse_capture(&mut self) {
-        if !self.mouse_capture_on
-            || self.mouse_capture_requested_at.elapsed() < MOUSE_CAPTURE_REFRESH_INTERVAL
-        {
+        if !self.mouse_capture_on {
+            return;
+        }
+        if self.mouse_input_observed_at.is_some() && !self.mouse_input_verified() {
+            self.mouse_input_observed_at = None;
+            self.mouse_unverified_logged = false;
+            tracing::info!(
+                reason = "no_recent_mouse_event",
+                "host mouse reporting verification expired"
+            );
+            if self.focus == PaneFocus::Terminals {
+                self.redraw = true;
+            }
+        }
+        if self.mouse_capture_requested_at.elapsed() < MOUSE_CAPTURE_REFRESH_INTERVAL {
             return;
         }
         match self.request_host_mouse_capture(true) {
             Ok(()) => {
-                if !self.mouse_input_verified && !self.mouse_unverified_logged {
+                if !self.mouse_input_verified() && !self.mouse_unverified_logged {
                     tracing::info!(
                         reason = "no_mouse_event_since_capture_request",
                         "host mouse reporting remains unverified"
@@ -145,7 +167,7 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mouse_unverified_logged = true;
                 }
                 tracing::debug!(
-                    verified = self.mouse_input_verified,
+                    verified = self.mouse_input_verified(),
                     "mouse capture refreshed"
                 );
             }

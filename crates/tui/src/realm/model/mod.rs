@@ -77,6 +77,7 @@ const RIGHT_PID: PaneId = PaneId::new(2);
 const TERMINALS_PID: PaneId = PaneId::new(3);
 
 type UrlOpener = dyn Fn(&str, Option<&str>) -> std::io::Result<()> + Send + Sync;
+type MouseCaptureRequester = dyn Fn(bool) -> std::io::Result<()> + Send + Sync;
 
 /// Component IDs for modal-side mounts only. Pane access is via
 /// typed fields, so panes don't appear here.
@@ -1030,12 +1031,16 @@ pub struct Model<T: TerminalAdapter> {
     /// inside the terminal pane do lazybox-side text selection.
     #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
-    /// Set only after crossterm receives a real mouse event while
-    /// capture is requested. Until then the footer keeps host mouse
-    /// reporting visibly unverified.
-    mouse_input_verified: bool,
+    /// Most recent crossterm mouse event received while capture was
+    /// requested. Old evidence expires so a host that stops forwarding
+    /// events cannot remain verified indefinitely.
+    mouse_input_observed_at: Option<Instant>,
     mouse_unverified_logged: bool,
     mouse_capture_requested_at: Instant,
+    /// Host-terminal I/O boundary. The real model writes crossterm's
+    /// capture sequences to stdout; headless models inject a no-op so
+    /// tests never mutate the terminal running the test process.
+    mouse_capture_requester: Box<MouseCaptureRequester>,
     url_opener: Box<UrlOpener>,
     /// Active lazybox-side drag-selection in the terminal pane. Set on
     /// mouse Down inside the terminal rect and extended on Drag; while a
@@ -1501,7 +1506,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// common Application setup + field initializers only live in
     /// one place. Callers are responsible for prepping the terminal
     /// (raw mode, alt screen, mouse capture) before passing it in.
-    fn build(terminal: T, client: Client) -> Self {
+    fn build(
+        terminal: T,
+        client: Client,
+        mouse_capture_requester: Box<MouseCaptureRequester>,
+    ) -> Self {
         // Build the modal-event channel + register a custom Port for
         // it. Crossterm input is read directly in the run loop —
         // there's no `crossterm_input_listener` here, so the listener
@@ -1548,9 +1557,10 @@ impl<T: TerminalAdapter> Model<T> {
             cmd_send_overloaded: std::cell::Cell::new(false),
             daemon_disconnect_notified: false,
             mouse_capture_on: true,
-            mouse_input_verified: false,
+            mouse_input_observed_at: None,
             mouse_unverified_logged: false,
             mouse_capture_requested_at: Instant::now(),
+            mouse_capture_requester,
             url_opener: Box::new(crate::editors::open_url),
             terminal_drag: None,
             preselect: None,
@@ -1671,7 +1681,11 @@ impl Model<CrosstermTerminalAdapter> {
         let term_guard = HostTerminalGuard::new();
         // Splash is mounted lazily by `start_setup_wizard`. Returning
         // users (with a persisted setup) boot straight to the panes.
-        let mut model = Self::build(terminal, client);
+        let mut model = Self::build(
+            terminal,
+            client,
+            Box::new(host_terminal::request_mouse_capture),
+        );
         model.apply_snippets(snippets);
         model.term_guard = Some(term_guard);
         // Subscribe up-front for both first-run and returning users.
@@ -1695,7 +1709,7 @@ impl Model<tuirealm::terminal::TestTerminalAdapter> {
     ) -> anyhow::Result<Self> {
         let terminal = tuirealm::terminal::TestTerminalAdapter::new(size)
             .map_err(|e| anyhow::anyhow!("test adapter init: {e:?}"))?;
-        Ok(Self::build(terminal, client))
+        Ok(Self::build(terminal, client, Box::new(|_| Ok(()))))
     }
 
     #[cfg(test)]
@@ -3819,7 +3833,7 @@ impl<T: TerminalAdapter> Model<T> {
         // tour/help hints.
         let mut globals = globals;
         if self.focus == PaneFocus::Terminals
-            && (!self.mouse_capture_on || !self.mouse_input_verified)
+            && (!self.mouse_capture_on || !self.mouse_input_verified())
         {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
             let toggle = ActionDef::for_kind(ActionKind::ToggleMouseCapture);

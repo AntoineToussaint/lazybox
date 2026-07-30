@@ -1,10 +1,10 @@
-//! Single owner of the host-terminal modes lazybox toggles on at
-//! startup. [`enable_host_terminal`] (called from `Model::new`) and
+//! Single owner of the host-terminal control sequences lazybox emits.
+//! [`enable_host_terminal`] (called from `Model::new`) and
 //! [`restore_host_terminal`] (called from the [`HostTerminalGuard`]'s
-//! `Drop`, the panic hook, and the signal handler) are the only two
-//! places that touch these modes, and both walk the same
-//! [`HostMode::ALL`] list — so the enable set and the restore set
-//! can't drift. The leak this prevents (#211): the old teardown was
+//! `Drop`, the panic hook, and the signal handler) both walk the same
+//! [`HostMode::ALL`] list, while live mouse-capture requests reuse the
+//! same encoder. The enable set and restore set therefore can't drift.
+//! The leak this prevents (#211): the old teardown was
 //! hand-rolled in three places that didn't all run, and the panic
 //! path omitted `DisableFocusChange`, so an error/signal/panic exit
 //! stranded the shell in Kitty keyboard protocol (CSI-u) where every

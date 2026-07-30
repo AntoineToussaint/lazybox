@@ -164,6 +164,8 @@ describe("workspace model", () => {
   it("searches metadata and filters unread and attention work", () => {
     const failing = workspace("failing", task("Broken release", 0));
     failing.pr!.ci = "Failure";
+    const mixed = workspace("mixed", task("Mixed checks", 0));
+    mixed.pr!.ci = "Mixed";
     const unread = workspace("unread", task("Provider labels", 2));
     unread.activity = [activity("a", "new")];
     const quiet = workspace("quiet", task("Documentation", 0));
@@ -181,11 +183,11 @@ describe("workspace model", () => {
       }).map((item) => item.key),
     ).toEqual(["unread"]);
     expect(
-      filteredWorkspaces([quiet, failing, unread], {
+      filteredWorkspaces([quiet, failing, mixed, unread], {
         query: "",
         filter: "attention",
       }).map((item) => item.key),
-    ).toEqual(["failing"]);
+    ).toEqual(["failing", "mixed"]);
   });
 
   it("replaces the baseline and then applies live upserts and removals", () => {

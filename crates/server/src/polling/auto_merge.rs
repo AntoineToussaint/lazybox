@@ -862,7 +862,7 @@ mod tests {
         // route through `upsert`, so this can't dispatch yet).
         super::super::upsert(&config, task.clone()).await;
         let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
-        super::super::set_auto_merge_on_green(&config, &key, true).await;
+        crate::workspace::set_auto_merge_on_green(&config, &key, true).await;
         assert_eq!(config.poll.auto_merge.lock().attempts_started, 0);
 
         // A re-poll of the armed green workspace dispatches once …

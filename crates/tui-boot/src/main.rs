@@ -647,7 +647,7 @@ async fn run_embedded_realm(
             lazybox_server::spawn_handler::restore_persisted_sessions(&config).await;
         });
     }
-    lazybox_server::polling::migrate_legacy_sandbox(&config);
+    lazybox_server::workspace::migrate_legacy_sandbox(&config);
 
     let serve_config = config.clone();
     // Graceful-teardown plumbing for the in-process daemon (#FIX-shutdown):
@@ -1319,7 +1319,7 @@ async fn server_start() -> anyhow::Result<()> {
     {
         tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
     }
-    polling::migrate_legacy_sandbox(&config);
+    lazybox_server::workspace::migrate_legacy_sandbox(&config);
     polling::spawn(config.clone(), resolve_poll_interval());
     let _ = lazybox_server::keep_awake::spawn(&config);
     lazybox_server::agent_updates::spawn_scheduled(config.clone());

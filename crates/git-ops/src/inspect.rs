@@ -12,9 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use tokio::process::Command;
-
-use crate::{GitError, WorktreeManager, apply_git_env};
+use crate::{GitError, GitRunner, WorktreeManager, default_git_runner};
 
 // `base_dir` is reachable via a crate-private accessor on
 // `WorktreeManager`; see `crates/git-ops/src/lib.rs`. Inspector code
@@ -179,7 +177,7 @@ impl WorktreeManager {
         let _guard = lock.lock().await;
         let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
         let mut paths = Vec::new();
-        for entry in list_porcelain(&bare).await? {
+        for entry in list_porcelain(self.git_runner(), &bare).await? {
             if entry.prunable || entry.branch.as_deref() != Some(branch) {
                 continue;
             }
@@ -219,7 +217,7 @@ impl WorktreeManager {
         let bare_paths = discover_bare_clones(&self.base_dir().join("repos")).await;
         let mut porcelain: HashMap<PathBuf, (PathBuf, PorcelainEntry)> = HashMap::new();
         for bare in &bare_paths {
-            if let Ok(entries) = list_porcelain(bare).await {
+            if let Ok(entries) = list_porcelain(self.git_runner(), bare).await {
                 for entry in entries {
                     let key = canonical_or_self(&entry.path);
                     porcelain.insert(key, (bare.clone(), entry));
@@ -249,7 +247,8 @@ impl WorktreeManager {
                 let key = canonical_or_self(&path);
                 seen_paths.insert(key.clone());
 
-                let inspection = inspect_one(&path, &key, &porcelain, &tracked_by_path).await;
+                let inspection =
+                    inspect_one(self.git_runner(), &path, &key, &porcelain, &tracked_by_path).await;
                 inspections.push(inspection);
             }
         }
@@ -350,7 +349,7 @@ impl WorktreeManager {
         // gone, reap the local branch too, so merged / abandoned
         // feature branches don't pile up in the bare clone (issue #160).
         if let Some(branch) = inspection.branch.as_deref() {
-            delete_local_branch(bare, branch).await;
+            delete_local_branch(self.git_runner(), bare, branch).await;
         }
         Ok(())
     }
@@ -406,7 +405,7 @@ pub async fn scan_external_checkouts(
 
     let mut out: Vec<DiscoveredCheckout> = Vec::with_capacity(paths.len());
     for path in paths {
-        out.push(describe_checkout(path).await);
+        out.push(describe_checkout(default_git_runner(), path).await);
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out
@@ -490,11 +489,8 @@ const SCAN_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// or timeout — every caller already treats "no answer" as a
 /// defaulted value, so a wedged probe degrades one field instead of
 /// hanging the scan. `kill_on_drop` reaps the timed-out child.
-async fn scan_git(path: &Path, args: &[&str]) -> Option<std::process::Output> {
-    let mut cmd = Command::new("git");
-    cmd.current_dir(path).args(args).kill_on_drop(true);
-    apply_git_env(&mut cmd);
-    match tokio::time::timeout(SCAN_PROBE_TIMEOUT, cmd.output()).await {
+async fn scan_git(git: &dyn GitRunner, path: &Path, args: &[&str]) -> Option<std::process::Output> {
+    match tokio::time::timeout(SCAN_PROBE_TIMEOUT, git.run(Some(path), args, &[])).await {
         Ok(Ok(out)) if out.status.success() => Some(out),
         _ => None,
     }
@@ -510,20 +506,20 @@ pub async fn describe_checkout_at(path: PathBuf) -> Option<DiscoveredCheckout> {
     if !is_git_checkout(&path).await {
         return None;
     }
-    Some(describe_checkout(path).await)
+    Some(describe_checkout(default_git_runner(), path).await)
 }
 
 /// Gather the read-only facts one discovered checkout carries.
-async fn describe_checkout(path: PathBuf) -> DiscoveredCheckout {
+async fn describe_checkout(git: &dyn GitRunner, path: PathBuf) -> DiscoveredCheckout {
     let is_linked_worktree = tokio::fs::metadata(path.join(".git"))
         .await
         .map(|m| m.is_file())
         .unwrap_or(false);
     let (branch, remote_url, last_commit_unix, has_uncommitted_changes) = tokio::join!(
-        checkout_branch(&path),
-        checkout_remote_url(&path),
-        checkout_last_commit_unix(&path),
-        checkout_dirty(&path),
+        checkout_branch(git, &path),
+        checkout_remote_url(git, &path),
+        checkout_last_commit_unix(git, &path),
+        checkout_dirty(git, &path),
     );
     DiscoveredCheckout {
         path,
@@ -536,23 +532,23 @@ async fn describe_checkout(path: PathBuf) -> DiscoveredCheckout {
 }
 
 /// The checkout's current branch. `None` on a detached HEAD.
-async fn checkout_branch(path: &Path) -> Option<String> {
-    let out = scan_git(path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
+async fn checkout_branch(git: &dyn GitRunner, path: &Path) -> Option<String> {
+    let out = scan_git(git, path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).await?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!name.is_empty()).then_some(name)
 }
 
 /// The `origin` remote URL, when the checkout has one configured.
-async fn checkout_remote_url(path: &Path) -> Option<String> {
-    let out = scan_git(path, &["remote", "get-url", "origin"]).await?;
+async fn checkout_remote_url(git: &dyn GitRunner, path: &Path) -> Option<String> {
+    let out = scan_git(git, path, &["remote", "get-url", "origin"]).await?;
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!url.is_empty()).then_some(url)
 }
 
 /// Committer time of `HEAD`, in seconds since the Unix epoch. `None`
 /// on an empty repo (no commits) or any git failure.
-async fn checkout_last_commit_unix(path: &Path) -> Option<u64> {
-    let out = scan_git(path, &["log", "-1", "--format=%ct"]).await?;
+async fn checkout_last_commit_unix(git: &dyn GitRunner, path: &Path) -> Option<u64> {
+    let out = scan_git(git, path, &["log", "-1", "--format=%ct"]).await?;
     String::from_utf8_lossy(&out.stdout)
         .trim()
         .parse::<u64>()
@@ -563,8 +559,8 @@ async fn checkout_last_commit_unix(path: &Path) -> Option<u64> {
 /// twin of [`uncommitted`] that carries the probe timeout; the
 /// inspector's own `uncommitted` runs under `WorktreeManager`'s
 /// timeouts and is left untouched.
-async fn checkout_dirty(path: &Path) -> bool {
-    match scan_git(path, &["status", "--porcelain"]).await {
+async fn checkout_dirty(git: &dyn GitRunner, path: &Path) -> bool {
+    match scan_git(git, path, &["status", "--porcelain"]).await {
         Some(out) => !out.stdout.is_empty(),
         None => false,
     }
@@ -580,17 +576,11 @@ async fn checkout_dirty(path: &Path) -> bool {
 ///
 /// Failures are logged and swallowed: a leftover branch is cosmetic and
 /// must never fail the worktree removal it follows.
-async fn delete_local_branch(bare: &Path, branch: &str) {
-    if bare_head_branch(bare).await.as_deref() == Some(branch) {
+async fn delete_local_branch(git: &dyn GitRunner, bare: &Path, branch: &str) {
+    if bare_head_branch(git, bare).await.as_deref() == Some(branch) {
         return;
     }
-    let result = apply_git_env(
-        Command::new("git")
-            .current_dir(bare)
-            .args(["branch", "-D", branch]),
-    )
-    .output()
-    .await;
+    let result = git.run(Some(bare), &["branch", "-D", branch], &[]).await;
     match result {
         Ok(o) if !o.status.success() => tracing::debug!(
             branch,
@@ -608,15 +598,11 @@ async fn delete_local_branch(bare: &Path, branch: &str) {
 
 /// The branch the bare clone's HEAD points at — the default branch
 /// (`main`/`master`/…). `None` on detached HEAD or any git failure.
-async fn bare_head_branch(bare: &Path) -> Option<String> {
-    let output = apply_git_env(Command::new("git").current_dir(bare).args([
-        "symbolic-ref",
-        "--short",
-        "HEAD",
-    ]))
-    .output()
-    .await
-    .ok()?;
+async fn bare_head_branch(git: &dyn GitRunner, bare: &Path) -> Option<String> {
+    let output = git
+        .run(Some(bare), &["symbolic-ref", "--short", "HEAD"], &[])
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -625,6 +611,7 @@ async fn bare_head_branch(bare: &Path) -> Option<String> {
 }
 
 async fn inspect_one(
+    git: &dyn GitRunner,
     path: &Path,
     canon: &Path,
     porcelain: &HashMap<PathBuf, (PathBuf, PorcelainEntry)>,
@@ -668,19 +655,19 @@ async fn inspect_one(
     let (local_exists, remote_exists, size_pair, has_uncommitted_changes, has_unpushed_commits) = tokio::join!(
         async {
             match (bare_path.as_ref(), branch_refs.as_ref()) {
-                (Some(bare), Some((local_ref, _))) => ref_exists(bare, local_ref).await,
+                (Some(bare), Some((local_ref, _))) => ref_exists(git, bare, local_ref).await,
                 _ => false,
             }
         },
         async {
             match (bare_path.as_ref(), branch_refs.as_ref()) {
-                (Some(bare), Some((_, remote_ref))) => ref_exists(bare, remote_ref).await,
+                (Some(bare), Some((_, remote_ref))) => ref_exists(git, bare, remote_ref).await,
                 _ => false,
             }
         },
         size_and_mtime(path),
-        uncommitted(path),
-        unpushed(path, bare_path.as_deref()),
+        uncommitted(git, path),
+        unpushed(git, path, bare_path.as_deref()),
     );
     let (size_bytes, last_modified) = size_pair;
 
@@ -697,8 +684,8 @@ async fn inspect_one(
             // it BranchDeletedUpstream made `is_safe_to_delete` true
             // and the rescope reaper deleted committed local work.
             // (Both probes are sequential + lazy: this arm is rare.)
-            if branch_has_upstream_config(bare, branch_name).await
-                || branch_tip_on_remote(bare, branch_name).await
+            if branch_has_upstream_config(git, bare, branch_name).await
+                || branch_tip_on_remote(git, bare, branch_name).await
             {
                 reasons.push(OrphanReason::BranchDeletedUpstream);
             }
@@ -768,14 +755,10 @@ async fn discover_bare_clones(repos_root: &Path) -> Vec<PathBuf> {
 /// blank-line-separated stanzas of `key value` lines; we only consume
 /// the keys we care about and ignore the rest so future git versions
 /// adding new keys don't break parsing.
-async fn list_porcelain(bare: &Path) -> Result<Vec<PorcelainEntry>, GitError> {
-    let output = apply_git_env(Command::new("git").current_dir(bare).args([
-        "worktree",
-        "list",
-        "--porcelain",
-    ]))
-    .output()
-    .await?;
+async fn list_porcelain(git: &dyn GitRunner, bare: &Path) -> Result<Vec<PorcelainEntry>, GitError> {
+    let output = git
+        .run(Some(bare), &["worktree", "list", "--porcelain"], &[])
+        .await?;
     if !output.status.success() {
         return Err(GitError::Command(
             String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -820,13 +803,12 @@ async fn list_porcelain(bare: &Path) -> Result<Vec<PorcelainEntry>, GitError> {
     Ok(out)
 }
 
-async fn ref_exists(bare: &Path, ref_name: &str) -> bool {
-    apply_git_env(
-        Command::new("git")
-            .current_dir(bare)
-            .args(["show-ref", "--verify", "--quiet", ref_name]),
+async fn ref_exists(git: &dyn GitRunner, bare: &Path, ref_name: &str) -> bool {
+    git.run(
+        Some(bare),
+        &["show-ref", "--verify", "--quiet", ref_name],
+        &[],
     )
-    .output()
     .await
     .map(|o| o.status.success())
     .unwrap_or(false)
@@ -838,7 +820,15 @@ async fn ref_exists(bare: &Path, ref_name: &str) -> bool {
 /// resolved an upstream-less checkout is conservatively reported
 /// non-pristine.
 pub async fn worktree_is_pristine(worktree: &Path, bare: Option<&Path>) -> bool {
-    let (dirty, ahead) = tokio::join!(uncommitted(worktree), unpushed(worktree, bare));
+    worktree_is_pristine_with(default_git_runner(), worktree, bare).await
+}
+
+async fn worktree_is_pristine_with(
+    git: &dyn GitRunner,
+    worktree: &Path,
+    bare: Option<&Path>,
+) -> bool {
+    let (dirty, ahead) = tokio::join!(uncommitted(git, worktree), unpushed(git, worktree, bare));
     !dirty && !ahead
 }
 
@@ -867,14 +857,10 @@ async fn directory_has_real_content(path: &Path) -> bool {
     }
 }
 
-async fn uncommitted(worktree: &Path) -> bool {
-    let Ok(output) = apply_git_env(
-        Command::new("git")
-            .current_dir(worktree)
-            .args(["status", "--porcelain"]),
-    )
-    .output()
-    .await
+async fn uncommitted(git: &dyn GitRunner, worktree: &Path) -> bool {
+    let Ok(output) = git
+        .run(Some(worktree), &["status", "--porcelain"], &[])
+        .await
     else {
         return false;
     };
@@ -883,15 +869,11 @@ async fn uncommitted(worktree: &Path) -> bool {
 
 /// `git rev-list --count <range>` in `worktree`. `None` when the
 /// range doesn't resolve (missing ref, no upstream, not a repo).
-async fn rev_list_count(worktree: &Path, range: &str) -> Option<u64> {
-    let output = apply_git_env(
-        Command::new("git")
-            .current_dir(worktree)
-            .args(["rev-list", "--count", range]),
-    )
-    .output()
-    .await
-    .ok()?;
+async fn rev_list_count(git: &dyn GitRunner, worktree: &Path, range: &str) -> Option<u64> {
+    let output = git
+        .run(Some(worktree), &["rev-list", "--count", range], &[])
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -917,22 +899,22 @@ async fn rev_list_count(worktree: &Path, range: &str) -> Option<u64> {
 /// worktree ("ghost on disk"); there's no branch state to lose, so
 /// the legacy `false` stands and the Untracked cleanup path keeps
 /// working.
-async fn unpushed(worktree: &Path, bare: Option<&Path>) -> bool {
-    if let Some(n) = rev_list_count(worktree, "@{u}..HEAD").await {
+async fn unpushed(git: &dyn GitRunner, worktree: &Path, bare: Option<&Path>) -> bool {
+    if let Some(n) = rev_list_count(git, worktree, "@{u}..HEAD").await {
         return n > 0;
     }
     let Some(bare) = bare else {
         return false;
     };
-    if let Some(n) = rev_list_count(worktree, "refs/remotes/origin/HEAD..HEAD").await {
+    if let Some(n) = rev_list_count(git, worktree, "refs/remotes/origin/HEAD..HEAD").await {
         return n > 0;
     }
-    if let Some(default_branch) = bare_head_branch(bare).await {
+    if let Some(default_branch) = bare_head_branch(git, bare).await {
         for base in [
             format!("refs/remotes/origin/{default_branch}..HEAD"),
             format!("refs/heads/{default_branch}..HEAD"),
         ] {
-            if let Some(n) = rev_list_count(worktree, &base).await {
+            if let Some(n) = rev_list_count(git, worktree, &base).await {
                 return n > 0;
             }
         }
@@ -944,13 +926,12 @@ async fn unpushed(worktree: &Path, bare: Option<&Path>) -> bool {
 /// clone (`branch.<name>.remote`). Lazybox's `checkout_at` records it
 /// when the worktree was created off a remote-tracking ref, so its
 /// presence is evidence the branch genuinely existed upstream.
-async fn branch_has_upstream_config(bare: &Path, branch: &str) -> bool {
-    apply_git_env(Command::new("git").current_dir(bare).args([
-        "config",
-        "--get",
-        &format!("branch.{branch}.remote"),
-    ]))
-    .output()
+async fn branch_has_upstream_config(git: &dyn GitRunner, bare: &Path, branch: &str) -> bool {
+    git.run(
+        Some(bare),
+        &["config", "--get", &format!("branch.{branch}.remote")],
+        &[],
+    )
     .await
     .map(|o| o.status.success())
     .unwrap_or(false)
@@ -960,15 +941,19 @@ async fn branch_has_upstream_config(bare: &Path, branch: &str) -> bool {
 /// i.e. its commits made it to the remote at some point (covers
 /// worktrees created before upstream config was recorded, as long as
 /// the merge wasn't a squash).
-async fn branch_tip_on_remote(bare: &Path, branch: &str) -> bool {
-    let Ok(output) = apply_git_env(Command::new("git").current_dir(bare).args([
-        "branch",
-        "-r",
-        "--contains",
-        &format!("refs/heads/{branch}"),
-    ]))
-    .output()
-    .await
+async fn branch_tip_on_remote(git: &dyn GitRunner, bare: &Path, branch: &str) -> bool {
+    let Ok(output) = git
+        .run(
+            Some(bare),
+            &[
+                "branch",
+                "-r",
+                "--contains",
+                &format!("refs/heads/{branch}"),
+            ],
+            &[],
+        )
+        .await
     else {
         return false;
     };
@@ -1011,4 +996,138 @@ fn walk_sync(root: &Path) -> (u64, Option<SystemTime>) {
 
 fn canonical_or_self(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::future::Future;
+    use std::os::unix::process::ExitStatusExt;
+    use std::pin::Pin;
+    use std::process::{ExitStatus, Output};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug)]
+    struct Call {
+        cwd: Option<PathBuf>,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    }
+
+    struct ScriptedGit {
+        bare: PathBuf,
+        worktree: PathBuf,
+        calls: Mutex<Vec<Call>>,
+    }
+
+    impl ScriptedGit {
+        fn output(success: bool, stdout: impl Into<Vec<u8>>) -> Output {
+            Output {
+                status: ExitStatus::from_raw(if success { 0 } else { 1 << 8 }),
+                stdout: stdout.into(),
+                stderr: Vec::new(),
+            }
+        }
+    }
+
+    impl GitRunner for ScriptedGit {
+        fn run<'a>(
+            &'a self,
+            cwd: Option<&'a Path>,
+            args: &'a [&'a str],
+            env: &'a [(String, String)],
+        ) -> Pin<Box<dyn Future<Output = Result<Output, GitError>> + Send + 'a>> {
+            self.calls
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(Call {
+                    cwd: cwd.map(Path::to_path_buf),
+                    args: args.iter().map(|arg| (*arg).to_string()).collect(),
+                    env: env.to_vec(),
+                });
+            let response = match args {
+                ["worktree", "list", "--porcelain"] => Ok(Self::output(
+                    true,
+                    format!(
+                        "worktree {}\nbare\n\nworktree {}\nHEAD 1234\n\
+                         branch refs/heads/feature\n\n",
+                        self.bare.display(),
+                        self.worktree.display(),
+                    ),
+                )),
+                ["show-ref", "--verify", "--quiet", "refs/heads/feature"] => {
+                    Ok(Self::output(true, Vec::new()))
+                }
+                [
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/feature",
+                ] => Ok(Self::output(false, Vec::new())),
+                ["status", "--porcelain"] => Ok(Self::output(true, Vec::new())),
+                ["rev-list", "--count", "@{u}..HEAD"] => Ok(Self::output(true, b"0\n".to_vec())),
+                ["config", "--get", "branch.feature.remote"] => {
+                    Ok(Self::output(true, b"origin\n".to_vec()))
+                }
+                _ => Err(GitError::Command(format!(
+                    "unexpected scripted git command: {}",
+                    args.join(" ")
+                ))),
+            };
+            Box::pin(async move { response })
+        }
+    }
+
+    #[tokio::test]
+    async fn inspection_decisions_run_through_the_injected_runner() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("repos/acme/widget.git");
+        let worktree = tmp.path().join("worktrees/session");
+        std::fs::create_dir_all(&bare).expect("bare dir");
+        std::fs::create_dir_all(&worktree).expect("worktree dir");
+        let git = Arc::new(ScriptedGit {
+            bare: bare.clone(),
+            worktree: worktree.clone(),
+            calls: Mutex::new(Vec::new()),
+        });
+        let manager = WorktreeManager::new(tmp.path())
+            .with_git_runner(Arc::clone(&git) as Arc<dyn GitRunner>);
+        let tracked = [TrackedSession {
+            session_id: "session".into(),
+            worktree_path: worktree.clone(),
+            is_stopped: false,
+        }];
+
+        let inspections = manager
+            .inspect_worktrees(&tracked)
+            .await
+            .expect("scripted inspection");
+
+        assert_eq!(inspections.len(), 1);
+        assert_eq!(
+            inspections[0].reasons,
+            vec![OrphanReason::BranchDeletedUpstream]
+        );
+        assert!(inspections[0].is_safe_to_delete);
+
+        let calls = git.calls.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(calls.iter().all(|call| call.env.is_empty()));
+        assert!(calls.iter().all(|call| {
+            call.cwd.as_deref() == Some(bare.as_path())
+                || call.cwd.as_deref() == Some(worktree.as_path())
+        }));
+        let mut commands: Vec<_> = calls.iter().map(|call| call.args.join(" ")).collect();
+        commands.sort();
+        assert_eq!(
+            commands,
+            [
+                "config --get branch.feature.remote",
+                "rev-list --count @{u}..HEAD",
+                "show-ref --verify --quiet refs/heads/feature",
+                "show-ref --verify --quiet refs/remotes/origin/feature",
+                "status --porcelain",
+                "worktree list --porcelain",
+            ]
+        );
+    }
 }

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Output;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::process::Command;
 
@@ -43,6 +44,42 @@ pub enum GitError {
     Command(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Executes one bounded git command. A non-zero exit is returned in
+/// [`Output`]; runner failures are reserved for spawn, wait, and timeout
+/// errors so callers can interpret git's exit status for probes.
+pub trait GitRunner: Send + Sync {
+    /// Run `git` with an optional working directory and extra environment.
+    fn run<'a>(
+        &'a self,
+        cwd: Option<&'a Path>,
+        args: &'a [&'a str],
+        env: &'a [(String, String)],
+    ) -> Pin<Box<dyn Future<Output = Result<Output, GitError>> + Send + 'a>>;
+}
+
+struct BoundedGitRunner;
+
+impl GitRunner for BoundedGitRunner {
+    fn run<'a>(
+        &'a self,
+        cwd: Option<&'a Path>,
+        args: &'a [&'a str],
+        env: &'a [(String, String)],
+    ) -> Pin<Box<dyn Future<Output = Result<Output, GitError>> + Send + 'a>> {
+        let timeout = if cwd.is_some() {
+            GIT_TIMEOUT
+        } else {
+            GIT_NO_CWD_TIMEOUT
+        };
+        Box::pin(exec_git_bounded(cwd, args, env, timeout))
+    }
+}
+
+fn default_git_runner() -> &'static dyn GitRunner {
+    static RUNNER: BoundedGitRunner = BoundedGitRunner;
+    &RUNNER
 }
 
 /// A handle to a created worktree.
@@ -173,6 +210,35 @@ pub enum CheckoutPhase {
     AddingWorktree,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartPoint {
+    Origin,
+    PullRequest(u64),
+    Local,
+    Missing,
+}
+
+fn resolve_start_point(
+    has_origin: bool,
+    pr: Option<u64>,
+    pr_fetched: bool,
+    local_exists: bool,
+    local_is_ancestor: bool,
+) -> StartPoint {
+    if has_origin {
+        StartPoint::Origin
+    } else if let Some(pr) = pr
+        && pr_fetched
+        && (!local_exists || local_is_ancestor)
+    {
+        StartPoint::PullRequest(pr)
+    } else if local_exists {
+        StartPoint::Local
+    } else {
+        StartPoint::Missing
+    }
+}
+
 /// Sink the [`WorktreeManager`] calls at each [`CheckoutPhase`] boundary.
 pub type ProgressSink = dyn Fn(CheckoutPhase) + Send + Sync;
 
@@ -198,6 +264,7 @@ pub struct WorktreeManager {
     base_dir: PathBuf,
     progress: Option<Arc<ProgressSink>>,
     github_token: Option<GithubTokenSource>,
+    git: Arc<dyn GitRunner>,
 }
 
 impl WorktreeManager {
@@ -206,6 +273,7 @@ impl WorktreeManager {
             base_dir: base_dir.into(),
             progress: None,
             github_token: None,
+            git: Arc::new(BoundedGitRunner),
         }
     }
 
@@ -225,6 +293,12 @@ impl WorktreeManager {
     /// while the GitHub API (same token) works fine (issue #394).
     pub fn with_github_token(mut self, source: GithubTokenSource) -> Self {
         self.github_token = Some(source);
+        self
+    }
+
+    /// Replace the git command executor.
+    pub fn with_git_runner(mut self, runner: Arc<dyn GitRunner>) -> Self {
+        self.git = runner;
         self
     }
 
@@ -254,6 +328,10 @@ impl WorktreeManager {
     /// every downstream caller.
     pub(crate) fn base_dir(&self) -> &Path {
         &self.base_dir
+    }
+
+    pub(crate) fn git_runner(&self) -> &dyn GitRunner {
+        self.git.as_ref()
     }
 
     /// Default base dir: `<LAZYBOX_HOME>/v2/` (default `~/.lazybox/v2/`).
@@ -537,31 +615,63 @@ impl WorktreeManager {
         // a force-recreated head), keep the local ref rather than dropping
         // commits.
         let local_ref = format!("refs/heads/{branch}");
-        let local_exists = ref_exists(&bare_path, &local_ref).await;
-        let start_point = if ref_exists(&bare_path, &format!("refs/remotes/origin/{branch}")).await
-        {
-            format!("refs/remotes/origin/{branch}")
-        } else if let Some(pr) = pr_number
+        let local_exists = ref_exists_with(self.git_runner(), &bare_path, &local_ref).await;
+        let has_origin = ref_exists_with(
+            self.git_runner(),
+            &bare_path,
+            &format!("refs/remotes/origin/{branch}"),
+        )
+        .await;
+        let pr_fetched = if !has_origin
+            && let Some(pr) = pr_number
             && fetch_pull_head(&bare_path, owner, repo, pr, &auth)
                 .await
                 .is_ok()
-            && ref_exists(&bare_path, &format!("refs/lazybox/pr/{pr}")).await
-            && (!local_exists
-                || is_ancestor(&bare_path, &local_ref, &format!("refs/lazybox/pr/{pr}")).await)
         {
-            format!("refs/lazybox/pr/{pr}")
-        } else if local_exists {
-            local_ref.clone()
+            ref_exists_with(
+                self.git_runner(),
+                &bare_path,
+                &format!("refs/lazybox/pr/{pr}"),
+            )
+            .await
         } else {
-            return Err(GitError::Command(pr_number.map_or_else(
-                || format!("branch '{branch}' not found locally or on origin"),
-                |pr| {
-                    format!(
-                        "branch '{branch}' not found locally or on origin, and its \
-                     pull-request head (refs/pull/{pr}/head) could not be fetched"
-                    )
-                },
-            )));
+            false
+        };
+        let local_is_ancestor = if let Some(pr) = pr_number
+            && pr_fetched
+            && local_exists
+        {
+            is_ancestor(
+                self.git_runner(),
+                &bare_path,
+                &local_ref,
+                &format!("refs/lazybox/pr/{pr}"),
+            )
+            .await
+        } else {
+            false
+        };
+        let start_point = match resolve_start_point(
+            has_origin,
+            pr_number,
+            pr_fetched,
+            local_exists,
+            local_is_ancestor,
+        ) {
+            StartPoint::Origin => format!("refs/remotes/origin/{branch}"),
+            StartPoint::PullRequest(pr) => format!("refs/lazybox/pr/{pr}"),
+            StartPoint::Local => local_ref,
+            StartPoint::Missing => {
+                return Err(GitError::Command(pr_number.map_or_else(
+                    || format!("branch '{branch}' not found locally or on origin"),
+                    |pr| {
+                        format!(
+                            "branch '{branch}' not found locally or on origin, and its \
+                         pull-request head (refs/pull/{pr}/head) could not be fetched"
+                        )
+                    },
+                )));
+            }
         };
 
         // Surface a stale-base warning only when the origin refresh failed
@@ -571,7 +681,15 @@ impl WorktreeManager {
         // alarm naming a commit we didn't check out (issue #550 / #320).
         if let Err(e) = &origin_fetch
             && !start_point.starts_with("refs/lazybox/pr/")
-            && let Some(phase) = stale_base_phase(&bare_path, branch, e, !auth.is_empty()).await
+            && let Some(phase) = stale_base_phase(
+                self.git_runner(),
+                &bare_path,
+                branch,
+                e,
+                !auth.is_empty(),
+                std::time::SystemTime::now(),
+            )
+            .await
         {
             self.report(phase);
         }
@@ -725,8 +843,15 @@ impl WorktreeManager {
                 }
             }
             Err(e) => {
-                if let Some(phase) =
-                    stale_base_phase(&bare_path, base_branch, &e, !auth.is_empty()).await
+                if let Some(phase) = stale_base_phase(
+                    self.git_runner(),
+                    &bare_path,
+                    base_branch,
+                    &e,
+                    !auth.is_empty(),
+                    std::time::SystemTime::now(),
+                )
+                .await
                 {
                     self.report(phase);
                 }
@@ -738,16 +863,27 @@ impl WorktreeManager {
         }
 
         self.report(CheckoutPhase::AddingWorktree);
-        let start_point =
-            if ref_exists(&bare_path, &format!("refs/remotes/origin/{base_branch}")).await {
-                format!("refs/remotes/origin/{base_branch}")
-            } else if ref_exists(&bare_path, &format!("refs/heads/{base_branch}")).await {
-                format!("refs/heads/{base_branch}")
-            } else {
-                return Err(GitError::Command(format!(
-                    "base branch '{base_branch}' not found locally or on origin"
-                )));
-            };
+        let start_point = if ref_exists_with(
+            self.git_runner(),
+            &bare_path,
+            &format!("refs/remotes/origin/{base_branch}"),
+        )
+        .await
+        {
+            format!("refs/remotes/origin/{base_branch}")
+        } else if ref_exists_with(
+            self.git_runner(),
+            &bare_path,
+            &format!("refs/heads/{base_branch}"),
+        )
+        .await
+        {
+            format!("refs/heads/{base_branch}")
+        } else {
+            return Err(GitError::Command(format!(
+                "base branch '{base_branch}' not found locally or on origin"
+            )));
+        };
 
         // `-B` (not `-b`) so a stale local branch with the same name —
         // left behind from a previous spawn that failed mid-mounts —
@@ -871,8 +1007,18 @@ impl WorktreeManager {
         // a ref for locally resolves even when `origin/HEAD` never got
         // set (issue #557 B10).
         for guess in ["main", "master", "develop", "trunk"] {
-            if ref_exists(&bare_path, &format!("refs/remotes/origin/{guess}")).await
-                || ref_exists(&bare_path, &format!("refs/heads/{guess}")).await
+            if ref_exists_with(
+                self.git_runner(),
+                &bare_path,
+                &format!("refs/remotes/origin/{guess}"),
+            )
+            .await
+                || ref_exists_with(
+                    self.git_runner(),
+                    &bare_path,
+                    &format!("refs/heads/{guess}"),
+                )
+                .await
             {
                 return Ok(guess.to_string());
             }
@@ -924,7 +1070,7 @@ impl WorktreeManager {
         let _ = fetch_origin_ref(&bare_path, owner, repo, base_branch, &auth).await;
 
         let base_ref = format!("refs/remotes/origin/{base_branch}");
-        if !ref_exists(&bare_path, &base_ref).await {
+        if !ref_exists_with(self.git_runner(), &bare_path, &base_ref).await {
             return Err(GitError::Command(format!(
                 "base ref '{base_ref}' not found for {owner}/{repo}"
             )));
@@ -1865,38 +2011,53 @@ const PERSISTENT_STALE_AFTER: std::time::Duration = std::time::Duration::from_se
 /// `None` when no usable ref exists (the checkout is about to error
 /// anyway) or the describe probe fails. Best-effort, read-only diagnostics.
 async fn stale_base_phase(
+    git: &dyn GitRunner,
     bare_path: &Path,
     branch: &str,
     err: &GitError,
     authed: bool,
+    now: std::time::SystemTime,
 ) -> Option<CheckoutPhase> {
-    let start = if ref_exists(bare_path, &format!("refs/remotes/origin/{branch}")).await {
+    let start = if ref_exists_with(git, bare_path, &format!("refs/remotes/origin/{branch}")).await {
         format!("refs/remotes/origin/{branch}")
-    } else if ref_exists(bare_path, &format!("refs/heads/{branch}")).await {
+    } else if ref_exists_with(git, bare_path, &format!("refs/heads/{branch}")).await {
         format!("refs/heads/{branch}")
     } else {
         return None;
     };
     // `%h <short sha>` + `%cr <committer date, relative>` → e.g.
     // "a1b2c3d, 3 days ago". One `git show` for both fields.
-    let desc = run_git_in(bare_path, &["show", "-s", "--format=%h, %cr", &start])
+    let output = git
+        .run(
+            Some(bare_path),
+            &["show", "-s", "--format=%h, %cr", &start],
+            &[],
+        )
         .await
         .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let desc = String::from_utf8_lossy(&output.stdout);
     let desc = desc.trim();
     if desc.is_empty() {
         return None;
     }
     let mut note = format!("could not refresh {branch} — branched from local ref ({desc}); ");
     note.push_str(&fetch_failure_reason(err, authed));
-    match last_refresh_age(bare_path) {
+    Some(classify_stale(last_refresh_age(bare_path, now), note))
+}
+
+fn classify_stale(age: Option<std::time::Duration>, mut note: String) -> CheckoutPhase {
+    match age {
         Some(age) if age >= PERSISTENT_STALE_AFTER => {
             note.push_str(&format!(
                 "; origin has not refreshed in {}",
                 format_age(age)
             ));
-            Some(CheckoutPhase::BaseRefStalePersistent(note))
+            CheckoutPhase::BaseRefStalePersistent(note)
         }
-        _ => Some(CheckoutPhase::BaseRefStale(note)),
+        _ => CheckoutPhase::BaseRefStale(note),
     }
 }
 
@@ -1932,10 +2093,10 @@ fn fetch_failure_reason(err: &GitError, authed: bool) -> String {
 /// clone time, then never again in a bare clone) when no fetch has
 /// succeeded since the stamp was introduced. `None` when neither is
 /// readable.
-fn last_refresh_age(bare: &Path) -> Option<std::time::Duration> {
+fn last_refresh_age(bare: &Path, now: std::time::SystemTime) -> Option<std::time::Duration> {
     let mtime = |p: PathBuf| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let t = mtime(bare.join(REFRESH_STAMP)).or_else(|| mtime(bare.join("HEAD")))?;
-    std::time::SystemTime::now().duration_since(t).ok()
+    now.duration_since(t).ok()
 }
 
 fn format_age(age: std::time::Duration) -> String {
@@ -1956,14 +2117,19 @@ async fn is_git_repo(path: &Path) -> bool {
 
 /// Cheap existence check for a git ref. Uses `show-ref --verify --quiet`;
 /// exit 0 = ref exists, non-zero = missing or ambiguous.
+async fn ref_exists_with(git: &dyn GitRunner, bare_path: &Path, ref_name: &str) -> bool {
+    git.run(
+        Some(bare_path),
+        &["show-ref", "--verify", "--quiet", ref_name],
+        &[],
+    )
+    .await
+    .map(|o| o.status.success())
+    .unwrap_or(false)
+}
+
 async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
-    Command::new("git")
-        .current_dir(bare_path)
-        .args(["show-ref", "--verify", "--quiet", ref_name])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    ref_exists_with(default_git_runner(), bare_path, ref_name).await
 }
 
 /// Whether every commit reachable from `maybe_ancestor` is also reachable
@@ -1972,14 +2138,20 @@ async fn ref_exists(bare_path: &Path, ref_name: &str) -> bool {
 /// for no; any other failure (bad ref, probe error) is treated as "not an
 /// ancestor" so callers stay on the conservative side (keep the local ref)
 /// rather than discarding commits on an inconclusive answer.
-async fn is_ancestor(bare_path: &Path, maybe_ancestor: &str, descendant: &str) -> bool {
-    Command::new("git")
-        .current_dir(bare_path)
-        .args(["merge-base", "--is-ancestor", maybe_ancestor, descendant])
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+async fn is_ancestor(
+    git: &dyn GitRunner,
+    bare_path: &Path,
+    maybe_ancestor: &str,
+    descendant: &str,
+) -> bool {
+    git.run(
+        Some(bare_path),
+        &["merge-base", "--is-ancestor", maybe_ancestor, descendant],
+        &[],
+    )
+    .await
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// Apply lazybox's standard env overrides to a `git` Command.
@@ -2018,9 +2190,7 @@ async fn is_ancestor(bare_path: &Path, maybe_ancestor: &str, descendant: &str) -
 /// `cargo test` from one), the subprocess would operate on the
 /// inherited repo instead of the bare clone we're targeting.
 ///
-/// `pub(crate)` so the inspector module can apply the same hygienic
-/// env to its read-only probes.
-pub(crate) fn apply_git_env(cmd: &mut Command) -> &mut Command {
+fn apply_git_env(cmd: &mut Command) -> &mut Command {
     if std::env::var_os("GIT_HTTP_LOW_SPEED_LIMIT").is_none()
         && std::env::var_os("GIT_HTTP_LOW_SPEED_TIME").is_none()
     {
@@ -2447,14 +2617,27 @@ async fn run_git_transfer(
     }
 }
 
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const GIT_NO_CWD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 async fn run_git(args: &[&str], envs: &[(String, String)]) -> Result<String, GitError> {
-    // Wall-clock cap. `run_git` is the no-cwd variant (today only
-    // `git init --bare` staging a clone); network transfers stream
-    // through `run_git_transfer` instead. Still FINITE: a git process
-    // wedged on a silent credential prompt would otherwise hang its
-    // caller forever.
-    const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-    exec_git_bounded(None, args, envs, GIT_TIMEOUT).await
+    run_git_with(default_git_runner(), None, args, envs).await
+}
+
+async fn run_git_with(
+    git: &dyn GitRunner,
+    cwd: Option<&Path>,
+    args: &[&str],
+    envs: &[(String, String)],
+) -> Result<String, GitError> {
+    let output = git.run(cwd, args, envs).await?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into())
+    } else {
+        Err(GitError::Command(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
 }
 
 /// Kills the child's whole process group with SIGKILL on drop unless
@@ -2481,7 +2664,7 @@ async fn exec_git_bounded(
     args: &[&str],
     envs: &[(String, String)],
     timeout: std::time::Duration,
-) -> Result<String, GitError> {
+) -> Result<Output, GitError> {
     let label = match cwd {
         Some(cwd) => format!("git (in {}) {}", cwd.display(), args.join(" ")),
         None => format!("git {}", args.join(" ")),
@@ -2528,12 +2711,11 @@ async fn exec_git_bounded(
     let elapsed = started.elapsed();
     if output.status.success() {
         tracing::info!("{label} ok ({elapsed:?})");
-        Ok(String::from_utf8_lossy(&output.stdout).into())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("{label} failed ({elapsed:?}): {}", stderr.trim());
-        Err(GitError::Command(stderr))
     }
+    Ok(output)
 }
 
 /// Reject script names that would escape `_lazybox/scripts/`, name a
@@ -2700,8 +2882,133 @@ async fn run_git_in_env(
     // enough that a real `git fetch` over a slow network can still
     // complete; short enough that a hung process surfaces as an
     // error rather than silent paralysis.
-    const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    exec_git_bounded(Some(cwd), args, envs, GIT_TIMEOUT).await
+    run_git_with(default_git_runner(), Some(cwd), args, envs).await
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+
+    #[test]
+    fn start_point_precedence_is_exhaustive() {
+        struct Case {
+            has_origin: bool,
+            pr: Option<u64>,
+            pr_fetched: bool,
+            local_exists: bool,
+            local_is_ancestor: bool,
+            expected: StartPoint,
+        }
+
+        for case in [
+            Case {
+                has_origin: true,
+                pr: Some(42),
+                pr_fetched: true,
+                local_exists: true,
+                local_is_ancestor: true,
+                expected: StartPoint::Origin,
+            },
+            Case {
+                has_origin: false,
+                pr: Some(42),
+                pr_fetched: true,
+                local_exists: false,
+                local_is_ancestor: false,
+                expected: StartPoint::PullRequest(42),
+            },
+            Case {
+                has_origin: false,
+                pr: Some(42),
+                pr_fetched: true,
+                local_exists: true,
+                local_is_ancestor: true,
+                expected: StartPoint::PullRequest(42),
+            },
+            Case {
+                has_origin: false,
+                pr: Some(42),
+                pr_fetched: true,
+                local_exists: true,
+                local_is_ancestor: false,
+                expected: StartPoint::Local,
+            },
+            Case {
+                has_origin: false,
+                pr: Some(42),
+                pr_fetched: false,
+                local_exists: true,
+                local_is_ancestor: true,
+                expected: StartPoint::Local,
+            },
+            Case {
+                has_origin: false,
+                pr: None,
+                pr_fetched: false,
+                local_exists: true,
+                local_is_ancestor: false,
+                expected: StartPoint::Local,
+            },
+            Case {
+                has_origin: false,
+                pr: Some(42),
+                pr_fetched: false,
+                local_exists: false,
+                local_is_ancestor: false,
+                expected: StartPoint::Missing,
+            },
+            Case {
+                has_origin: false,
+                pr: None,
+                pr_fetched: false,
+                local_exists: false,
+                local_is_ancestor: false,
+                expected: StartPoint::Missing,
+            },
+        ] {
+            assert_eq!(
+                resolve_start_point(
+                    case.has_origin,
+                    case.pr,
+                    case.pr_fetched,
+                    case.local_exists,
+                    case.local_is_ancestor,
+                ),
+                case.expected,
+            );
+        }
+    }
+
+    #[test]
+    fn stale_classification_changes_at_twenty_four_hours() {
+        let recent = PERSISTENT_STALE_AFTER - std::time::Duration::from_secs(1);
+        assert!(matches!(
+            classify_stale(Some(recent), "note".into()),
+            CheckoutPhase::BaseRefStale(note) if note == "note"
+        ));
+        assert!(matches!(
+            classify_stale(None, "note".into()),
+            CheckoutPhase::BaseRefStale(note) if note == "note"
+        ));
+        assert!(matches!(
+            classify_stale(Some(PERSISTENT_STALE_AFTER), "note".into()),
+            CheckoutPhase::BaseRefStalePersistent(note)
+                if note == "note; origin has not refreshed in 24 hours"
+        ));
+    }
+
+    #[test]
+    fn refresh_age_uses_the_supplied_time() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let head = tmp.path().join("HEAD");
+        std::fs::write(&head, "ref: refs/heads/main\n").expect("write HEAD");
+        let modified = std::fs::metadata(&head)
+            .and_then(|metadata| metadata.modified())
+            .expect("HEAD mtime");
+        let age = std::time::Duration::from_secs(37 * 60);
+
+        assert_eq!(last_refresh_age(tmp.path(), modified + age), Some(age));
+    }
 }
 
 #[cfg(test)]

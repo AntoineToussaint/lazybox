@@ -1725,6 +1725,33 @@ kbd {
 .band h2 { font-size: clamp(1.9rem, 4.2vw, 2.8rem); margin: 0 0 0.8rem; letter-spacing: -0.03em; }
 .band p { color: var(--fg-dim); margin: 0 auto 1.9rem; max-width: 34rem; }
 
+/* ── support ─────────────────────────────────────────────── */
+.support-section { padding-top: 0; }
+.support-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  padding: clamp(1.6rem, 4vw, 2.4rem);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(32rem 18rem at 100% 0%, rgba(110, 231, 168, 0.08), transparent 65%),
+    var(--panel);
+  box-shadow: var(--shadow);
+}
+.support-card h2 {
+  margin: 0 0 0.55rem;
+  font-size: clamp(1.65rem, 3vw, 2.2rem);
+  letter-spacing: -0.03em;
+}
+.support-card p:last-child {
+  max-width: 42rem;
+  margin: 0;
+  color: var(--fg-dim);
+}
+.support-card .btn { flex: 0 0 auto; }
+
 /* ── footer ──────────────────────────────────────────────── */
 footer {
   padding: 2.75rem 0;
@@ -1768,6 +1795,7 @@ footer .links a:hover { color: var(--fg); }
 @media (max-width: 760px) {
   .handoff-flow { grid-template-columns: 1fr; gap: 1.6rem; }
   .handoff-stage { min-height: 9.5rem; }
+  .support-card { align-items: flex-start; flex-direction: column; }
   .handoff-stage + .handoff-stage::before {
     content: "↓";
     left: 50%;

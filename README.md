@@ -203,6 +203,13 @@ Run a side-by-side dev instance against its own state with `make dev`
 (`LAZYBOX_HOME=~/.lazybox-dev`) if you want to try lazybox without disturbing your
 main inbox.
 
+## Support lazybox
+
+Lazybox is MIT-licensed and developed in public. If it saves you time, you can
+[sponsor its development on GitHub](https://github.com/sponsors/AntoineToussaint).
+Sponsorships fund maintenance, releases, and the infrastructure behind the
+project; the open-source TUI and daemon remain available to everyone.
+
 ## Contributing & support
 
 Issues and PRs welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for the build

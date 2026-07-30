@@ -29,6 +29,8 @@ use tokio::sync::{Semaphore, mpsc};
 
 pub type Body = UnsyncBoxBody<Bytes, Infallible>;
 
+const API_CLIENT_HTML: &str = include_str!("api_client.html");
+
 #[derive(Debug, Clone)]
 pub struct GatewayOptions {
     pub bind_addr: SocketAddr,
@@ -283,6 +285,10 @@ where
     B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
     B::Error: Display + Send + Sync + 'static,
 {
+    if request.method() == Method::GET && request.uri().path() == "/" {
+        return api_client_response();
+    }
+
     if !check_bearer_token(
         request.headers().get(AUTHORIZATION),
         options.bearer_token.as_deref(),
@@ -585,6 +591,31 @@ fn json_response<T: Serialize + ?Sized>(status: StatusCode, payload: &T) -> Resp
             .boxed_unsync(),
         ),
     }
+}
+
+fn api_client_response() -> Response<Body> {
+    let mut response = response_with_body(
+        StatusCode::OK,
+        "text/html; charset=utf-8",
+        Full::new(Bytes::from_static(API_CLIENT_HTML.as_bytes())).boxed_unsync(),
+    );
+    let headers = response.headers_mut();
+    headers.insert(
+        "cache-control",
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    headers.insert(
+        "content-security-policy",
+        HeaderValue::from_static(
+            "default-src 'none'; connect-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        ),
+    );
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 fn response_with_body(

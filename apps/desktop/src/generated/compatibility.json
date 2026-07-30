@@ -12,6 +12,13 @@
       }
     },
     {
+      "CreateWorkspace": {
+        "agent": "codex",
+        "name": "first workspace",
+        "project_key": "github-o-r"
+      }
+    },
+    {
       "FocusWorkspace": {
         "session_key": "github:o/r#42"
       }
@@ -242,6 +249,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 1946760404,
+  "protocol_fingerprint": 2885052090,
   "protocol_version": 1
 }

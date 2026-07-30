@@ -1,5 +1,6 @@
 import type {
   DesktopInfo,
+  DesktopRepository,
   DesktopStreamMessage,
   LazyboxCommand,
   LazyboxEvent,
@@ -12,6 +13,7 @@ import type {
 
 export type {
   DesktopInfo,
+  DesktopRepository,
   DesktopStreamMessage,
   LazyboxCommand,
   LazyboxEvent,
@@ -29,6 +31,20 @@ export function spawnAgentCommand(
   return {
     SpawnAgent: {
       session_key: sessionKey,
+      agent,
+    },
+  };
+}
+
+export function createWorkspaceCommand(
+  name: string,
+  projectKey: string,
+  agent: string | null,
+): LazyboxCommand {
+  return {
+    CreateWorkspace: {
+      name,
+      project_key: projectKey,
       agent,
     },
   };

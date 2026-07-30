@@ -148,6 +148,7 @@ pub struct AgentRunId(pub u64);
 /// Opaque client-generated id that correlates a structured-run start
 /// request with its success or failure event.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct AgentRunRequestId(pub String);
 
 /// Runtime surface requested for an agent.
@@ -2048,6 +2049,7 @@ pub enum WorktreeStep {
 /// controls unattended (no-permission) launch mode — a user `w` "work
 /// on this" runs unattended yet is `Interactive` here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum SpawnOrigin {
     /// The local user issued the spawn. Provisioning mounts the
     /// progress modal (today's behavior).
@@ -2061,6 +2063,7 @@ pub enum SpawnOrigin {
 /// Which autonomous source started a spawn — names the parenthetical
 /// tag on the "starting agent…" footer notice (issue #645).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum AutonomousTrigger {
     /// An `@lazybox` mention in an issue/PR body or comment.
     Mention,

@@ -388,6 +388,7 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             session_key,
             step,
             status,
+            ..
         } => Some(DesktopEvent::WorktreeProgress {
             session_key,
             step,

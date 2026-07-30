@@ -552,6 +552,7 @@ fn resolve_inspect_pick<P: PickPayload>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editors::UserEditorEntry;
     use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
     use std::path::PathBuf;
 
@@ -992,12 +993,12 @@ mod tests {
                 if target.path.as_path() == std::path::Path::new("/checkout")
         ));
 
-        let editor = EditorTemplate {
+        let editor = EditorTemplate::from(UserEditorEntry {
             id: "code".into(),
-            display: "VS Code".into(),
+            display: Some("VS Code".into()),
             command: "code".into(),
-            args: vec!["{path}".into()],
-        };
+            args: Some(vec!["{path}".into()]),
+        });
         assert!(matches!(
             resolve_pick(
                 &[Payload::Index(0)],

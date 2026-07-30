@@ -232,6 +232,7 @@ jobs:
           npm audit --audit-level=moderate
           npm test
           npm run build
+          npm run tauri build -- --no-bundle
       - name: Lint and test desktop shell
         run: |
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check

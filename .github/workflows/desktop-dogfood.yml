@@ -1,0 +1,46 @@
+name: Desktop dogfood build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-app:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: ./.github/actions/rust-build-env
+        with:
+          rust-components: clippy,rustfmt
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Verify desktop
+        working-directory: apps/desktop
+        run: |
+          npm test
+          npm run build
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Build internal app
+        working-directory: apps/desktop
+        run: npm run tauri build -- --bundles app
+      - name: Package app artifact
+        working-directory: target/release/bundle/macos
+        run: ditto -c -k --keepParent lazybox.app lazybox-desktop-dogfood.zip
+      - uses: actions/upload-artifact@v6
+        with:
+          name: lazybox-desktop-dogfood-${{ github.sha }}
+          path: target/release/bundle/macos/lazybox-desktop-dogfood.zip
+          if-no-files-found: error
+          retention-days: 14

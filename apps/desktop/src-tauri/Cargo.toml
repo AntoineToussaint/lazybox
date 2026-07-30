@@ -13,6 +13,8 @@ tauri-build = { version = "2.6.3", features = [] }
 bytes = "1"
 futures-util = "0.3"
 lazybox-config = { path = "../../../crates/config" }
+lazybox-core = { path = "../../../crates/core" }
+lazybox-gh = { path = "../../../crates/gh-provider" }
 lazybox-ipc = { path = "../../../crates/ipc" }
 lazybox-server = { path = "../../../crates/server" }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
@@ -20,4 +22,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.11.5", features = [] }
 tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }

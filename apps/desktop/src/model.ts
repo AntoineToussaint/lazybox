@@ -1,5 +1,7 @@
 import type { LazyboxEvent, Task, Workspace } from "./protocol";
 
+export type InboxFilter = "all" | "unread" | "ci" | "review";
+
 export function primaryTask(workspace: Workspace): Task | null {
   return (
     workspace.pr ??
@@ -28,6 +30,40 @@ export function sortedWorkspaces(
     const leftUpdated = primaryTask(left)?.updated_at ?? "";
     const rightUpdated = primaryTask(right)?.updated_at ?? "";
     return rightUpdated.localeCompare(leftUpdated);
+  });
+}
+
+export function filteredWorkspaces(
+  values: Iterable<Workspace>,
+  query: string,
+  filter: InboxFilter,
+): Workspace[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  return sortedWorkspaces(values).filter((workspace) => {
+    const task = primaryTask(workspace);
+    const matchesQuery =
+      normalized.length === 0 ||
+      [
+        workspace.name,
+        workspace.branch,
+        task?.title,
+        task?.repo,
+        task?.body,
+        taskReference(task),
+      ].some((value) => value?.toLocaleLowerCase().includes(normalized));
+    if (!matchesQuery) {
+      return false;
+    }
+    switch (filter) {
+      case "unread":
+        return unreadCount(workspace) > 0;
+      case "ci":
+        return task?.ci === "Failure";
+      case "review":
+        return task?.role === "Reviewer" && task.review === "Pending";
+      case "all":
+        return true;
+    }
   });
 }
 

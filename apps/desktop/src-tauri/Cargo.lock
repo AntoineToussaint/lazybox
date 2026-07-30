@@ -2037,6 +2037,8 @@ dependencies = [
  "bytes",
  "futures-util",
  "lazybox-config",
+ "lazybox-core",
+ "lazybox-gh",
  "lazybox-ipc",
  "lazybox-server",
  "reqwest",
@@ -2045,6 +2047,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

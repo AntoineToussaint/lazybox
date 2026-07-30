@@ -289,6 +289,7 @@ Top-level keys (`crates/config/src/lib.rs`):
 | Key | Purpose |
 |---|---|
 | `setup` | Wizard output: enabled `providers`, `agents`, `filters`, `scopes`, `default_agent` |
+| `desktop` | Opt-in macOS desktop analytics and content-free crash diagnostics |
 | `editors` | Custom/override editor entries (`e`) — see [editor integration](workspaces-and-worktrees.md#editor-integration) |
 | `repos.<owner/name>` | Per-repo `env` / `mounts` / `scripts` — see [per-repo overrides](workspaces-and-worktrees.md#per-repo-overrides) |
 | `worktree` | Global `mounts`, `scripts`, `auto_cleanup_merged` |

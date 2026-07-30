@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Task, Workspace } from "./protocol";
 import {
   applyWorkspaceEvent,
+  filteredWorkspaces,
   primaryTask,
   sortedWorkspaces,
   unreadCount,
@@ -112,6 +113,25 @@ describe("workspace model", () => {
     ];
     item.seen_count = 1;
     expect(unreadCount(item)).toBe(2);
+  });
+
+  it("filters the inbox by text and actionable state", () => {
+    const failing = workspace("failure", task("Broken build", 0));
+    if (failing.pr !== null) {
+      failing.pr.ci = "Failure";
+    }
+    const review = workspace("review", task("Needs review", 0));
+    if (review.pr !== null) {
+      review.pr.role = "Reviewer";
+      review.pr.review = "Pending";
+    }
+    const unread = workspace("unread", task("Fresh comment", 2));
+    const values = [review, unread, failing];
+
+    expect(filteredWorkspaces(values, "broken", "all")).toEqual([failing]);
+    expect(filteredWorkspaces(values, "", "ci")).toEqual([failing]);
+    expect(filteredWorkspaces(values, "", "review")).toEqual([review]);
+    expect(filteredWorkspaces(values, "", "unread")).toEqual([unread]);
   });
 
   it("replaces the baseline and then applies live upserts and removals", () => {

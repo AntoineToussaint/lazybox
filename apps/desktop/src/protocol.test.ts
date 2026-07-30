@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { spawnAgentCommand } from "./protocol";
+import {
+  createWorkspaceCommand,
+  markReadCommand,
+  postReplyCommand,
+  spawnAgentCommand,
+  spawnShellCommand,
+} from "./protocol";
 
 describe("IPC command JSON", () => {
   it("matches the generated serde shape for control commands", () => {
@@ -9,5 +15,25 @@ describe("IPC command JSON", () => {
         agent: "codex",
       },
     });
+    expect(spawnShellCommand("github:owner/repo#1")).toEqual({
+      SpawnShell: { session_key: "github:owner/repo#1" },
+    });
+    expect(markReadCommand("github:owner/repo#1")).toEqual({
+      MarkRead: { session_key: "github:owner/repo#1" },
+    });
+    expect(postReplyCommand("github:owner/repo#1", "Looks good.")).toEqual({
+      PostReply: {
+        session_key: "github:owner/repo#1",
+        body: "Looks good.",
+      },
+    });
+    expect(createWorkspaceCommand("investigate", "github-owner-repo", "codex"))
+      .toEqual({
+        CreateWorkspace: {
+          name: "investigate",
+          project_key: "github-owner-repo",
+          agent: "codex",
+        },
+      });
   });
 });

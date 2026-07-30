@@ -7,6 +7,29 @@
       }
     },
     {
+      "SpawnShell": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "CreateWorkspace": {
+        "agent": "codex",
+        "name": "investigate",
+        "project_key": "github-o-r"
+      }
+    },
+    {
+      "MarkRead": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "PostReply": {
+        "body": "Shipped in the latest update.",
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
       "FocusWorkspace": {
         "session_key": "github:o/r#42"
       }
@@ -226,6 +249,12 @@
       }
     }
   ],
+<<<<<<< HEAD
   "protocol_fingerprint": 1361266201,
+||||||| parent of 3ca07617 (Complete private macOS desktop workflow (#647))
+  "protocol_fingerprint": 212278580,
+=======
+  "protocol_fingerprint": 2392251102,
+>>>>>>> 3ca07617 (Complete private macOS desktop workflow (#647))
   "protocol_version": 1
 }

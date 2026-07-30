@@ -1714,11 +1714,6 @@ fn render_inserts_blank_spacer_between_recap_and_agent_grid() {
 
 #[test]
 fn footer_drops_all_keys_to_pty_noise() {
-    // Regression for issue #25: `all keys → PTY` was a footer entry
-    // that described an implementation mode rather than an actionable
-    // shortcut. The hint bar should now only carry escape hatches —
-    // leave the pane, interrupt the process. (The Shift-PgUp/Dn scroll
-    // hint was dropped in #202 — mouse-wheel is the primary scroll path.)
     let bindings = TerminalStack::contextual_bindings(']');
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
     assert!(
@@ -1730,86 +1725,28 @@ fn footer_drops_all_keys_to_pty_noise() {
         !keys.iter().any(|k| k == "all keys"),
         "footer must not advertise the `all keys` pseudo-binding, got {keys:?}",
     );
-    // Sanity: exit + interrupt remain.
-    assert!(labels.iter().any(|l| l == "exit to sidebar"));
-    assert!(labels.iter().any(|l| l == "interrupt"));
+    assert_eq!(labels, ["menu"]);
+    assert_eq!(keys, ["]]"]);
 }
 
 #[test]
-fn footer_surfaces_leader_focus_and_tile_escape_hatches() {
-    // Issue #170 / #202: from inside a focused terminal the hint bar
-    // must carry the way back to the sidebar (`]]`), the focus-mode
-    // toggle (`]]f`), the split chord (`]]|`, #286) and the snippet
-    // leader. The `Shift-PgUp/PgDn` scroll hint is deliberately absent
-    // (#202) — scrolling is intuitive and crowded out more useful hints.
+fn footer_collapses_terminal_commands_into_the_leader_menu() {
     let bindings = TerminalStack::contextual_bindings(']');
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
     let keys: Vec<String> = bindings.iter().map(|b| b.keys.to_string()).collect();
-    assert!(
-        labels.iter().any(|l| l == "exit to sidebar"),
-        "the way back to focus must be advertised, got {labels:?}",
-    );
-    assert!(keys.iter().any(|k| k == "]]q"), "leave chord, got {keys:?}");
-    assert!(
-        labels.iter().any(|l| l == "focus mode"),
-        "focus-mode hint, got {labels:?}"
-    );
-    assert!(
-        keys.iter().any(|k| k == "]]f"),
-        "focus-mode chord, got {keys:?}"
-    );
-    assert!(
-        labels.iter().any(|l| l == "split panes"),
-        "split-panes hint, got {labels:?}"
-    );
-    assert!(
-        keys.iter().any(|k| k == "]]|"),
-        "split chord must ride the `]]` leader, got {keys:?}"
-    );
-    assert!(
-        !keys.iter().any(|k| k == "Ctrl-w"),
-        "Ctrl-w is the inner program's key now (#286), got {keys:?}"
-    );
-    assert!(
-        keys.iter().any(|k| k == "]]s"),
-        "snippet leader, got {keys:?}"
-    );
-    assert!(
-        !labels.iter().any(|l| l == "scroll"),
-        "scroll hint must not surface in the footer, got {labels:?}"
-    );
+    assert_eq!(labels, ["menu"]);
+    assert_eq!(keys, ["]]"]);
 }
 
 #[test]
 fn footer_leader_hints_honor_the_configured_escape_char() {
-    // Issue #170: a user who remapped `terminal.escape_char` must
-    // see the chord they actually type — `}}q` / `}}s`, not the
-    // hardcoded `]]` default.
     let bindings = TerminalStack::contextual_bindings('}');
     let keys: Vec<String> = bindings.iter().map(|b| b.keys.to_string()).collect();
-    assert!(keys.iter().any(|k| k == "}}q"), "leave chord, got {keys:?}");
-    assert!(
-        keys.iter().any(|k| k == "}}f"),
-        "focus-mode chord, got {keys:?}"
-    );
-    assert!(
-        keys.iter().any(|k| k == "}}s"),
-        "snippet leader, got {keys:?}"
-    );
-    assert!(keys.iter().any(|k| k == "}}|"), "split chord, got {keys:?}");
-    assert!(
-        keys.iter().all(|k| !k.contains("]]")),
-        "no hardcoded `]]` should leak through, got {keys:?}",
-    );
+    assert_eq!(keys, ["}}"]);
 }
 
 #[test]
 fn every_footer_hint_is_catalog_backed_or_allowlisted() {
-    // #188: the footer mixes catalog-derived hints with hand-curated
-    // ones (`Ctrl-c`, the split chord, the snippet leader). Nothing else may
-    // creep in untracked — a tile/interrupt handler renamed out from
-    // under its hint, or a label drifting from the catalog, must fail
-    // the build rather than ship a footer that lies.
     use lazybox_tui_core::action::ActionDef;
     let overrides = std::collections::BTreeMap::new();
     let bindings = TerminalStack::contextual_bindings(']');
@@ -1818,30 +1755,11 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
         .iter()
         .map(|e| (e.keys_display.to_string(), e.label.to_string()))
         .collect();
-    // LeaveTerminal's display is the escape char doubled + `q` (owned by
-    // `terminal_escape_char`, not the catalog default string; the `]]`
-    // leader is non-timed and `]]q` is the exit command, #252), so vouch
-    // for the rendered form rather than the catalog placeholder.
-    catalog_pairs.push(("]]q".to_string(), "exit to sidebar".to_string()));
-    // ToggleFocusMode rides the `]]` leader from a terminal (`]]f`)
-    // rather than its catalog default key (`.`), so vouch for the
-    // leader-rendered form while the label still tracks the catalog.
-    catalog_pairs.push(("]]f".to_string(), "focus mode".to_string()));
-    // The explicit record of what's intentionally NOT catalog-backed:
-    // `Ctrl-c` (forwarded straight to the PTY as an interrupt), the
-    // `]]|` split chord (a leader command, not a catalog action) and
-    // the snippet leader (its bindings are the user's snippet library,
-    // not catalog actions).
-    let allow: &[(&str, &str)] = &[
-        ("Ctrl-c", "interrupt"),
-        ("]]|", "split panes"),
-        ("]]s", "snippets"),
-    ];
+    catalog_pairs.push(("]]".to_string(), "menu".to_string()));
     for b in &bindings {
         let keys = b.keys.to_string();
         let label = b.label.to_string();
-        let backed = catalog_pairs.iter().any(|(k, l)| *k == keys && *l == label)
-            || allow.iter().any(|(k, l)| *k == keys && *l == label);
+        let backed = catalog_pairs.iter().any(|(k, l)| *k == keys && *l == label);
         assert!(
             backed,
             "footer hint `{keys}` / `{label}` is neither catalog-backed nor allowlisted",
@@ -1850,25 +1768,12 @@ fn every_footer_hint_is_catalog_backed_or_allowlisted() {
 }
 
 #[test]
-fn footer_leave_hint_tracks_the_escape_char_not_an_action_override() {
-    // #188: the leave chord is owned by `terminal.escape_char`, not
-    // the `leave_terminal` action_keys slot. Terminal-pane dispatch
-    // matches only the escape char and never the catalog chord, so the
-    // footer must always render the escape char doubled + the `q` exit
-    // command (`]]q`), since the `]]` leader is non-timed (#252). The
-    // function takes no `overrides` map precisely because no terminal
-    // hint is action_keys-sensitive — the leave/focus/split/snippet
-    // chords all derive from the escape char, and `Ctrl-c` is literal.
+fn footer_menu_hint_tracks_the_escape_char() {
     let bindings = TerminalStack::contextual_bindings(']');
-    let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
-    assert!(leave.is_some(), "leave-terminal binding must surface");
-    assert_eq!(
-        leave.unwrap().keys,
-        "]]q",
-        "footer must show the escape char doubled + q",
-    );
-    // A remapped escape char DOES drive dispatch, so the hint follows it.
+    let menu = bindings.iter().find(|b| b.label == "menu");
+    assert_eq!(menu.expect("menu binding").keys, "]]");
+
     let bindings = TerminalStack::contextual_bindings('}');
-    let leave = bindings.iter().find(|b| b.label == "exit to sidebar");
-    assert_eq!(leave.unwrap().keys, "}}q");
+    let menu = bindings.iter().find(|b| b.label == "menu");
+    assert_eq!(menu.expect("menu binding").keys, "}}");
 }

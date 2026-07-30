@@ -1929,7 +1929,12 @@ impl<T: TerminalAdapter> Model<T> {
             failing_ci: self.sidebar.has_failing_ci(),
             in_terminal: self.focus == PaneFocus::Terminals,
         };
-        lazybox_tui_core::tips::next_tip(&ctx, &self.tips_seen, &self.action_key_overrides)
+        lazybox_tui_core::tips::next_tip(
+            &ctx,
+            &self.tips_seen,
+            &self.action_key_overrides,
+            self.ui_defaults.terminal_escape_char,
+        )
     }
 
     /// Append `id` to `ui.tips_seen` so the tip never resurfaces.
@@ -3777,51 +3782,20 @@ impl<T: TerminalAdapter> Model<T> {
                 .terminals
                 .contextual_bindings(self.ui_defaults.terminal_escape_char),
         };
-        // Universal hints appended to every pane's footer (issue #100):
-        // the orientation + escape shortcuts a lost first-time user
-        // always needs in view. `quit` last so it's the rightmost,
-        // most-findable hint.
-        //
-        // But in a focused terminal the PTY eats every key, so those
-        // globals don't fire — advertising `q q` / `?` there is a lie
-        // (issue #114). The catalog's `available_in_terminal` is the
-        // single source of truth for this; when nothing universal
-        // survives terminal focus we advertise the `]]` gateway that
-        // unlocks them instead, so the footer never claims a shortcut
-        // the focused pane won't dispatch.
+        // Universal hints appended to panes where their shortcuts are
+        // available. A live terminal owns its keys, so its command
+        // leader above is the only steady-state gateway hint.
         let globals: Vec<crate::pane::Binding> = {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
-            // Footer's curated short tail of `universal_shortcuts()` —
-            // kept to three so a narrow line never truncates `quit`
-            // off the right edge.
             let tail = [ActionKind::OpenHelp, ActionKind::OpenTour, ActionKind::Quit]
                 .map(ActionDef::for_kind);
-            if self.focus == PaneFocus::Terminals
-                && tail.iter().all(|def| !def.available_in_terminal())
-            {
-                let help = ActionDef::for_kind(ActionKind::OpenHelp);
-                let quit = ActionDef::for_kind(ActionKind::Quit);
-                // The way back out is `terminal.escape_char` doubled,
-                // owned by the escape-char latch — not a remappable
-                // catalog chord (#188). Render it from the configured
-                // char so the hint matches what the dispatcher matches.
-                let esc = self.ui_defaults.terminal_escape_char;
-                vec![crate::pane::Binding {
-                    keys: std::borrow::Cow::Owned(format!("{esc}{esc}")),
-                    label: std::borrow::Cow::Owned(format!(
-                        "exit for {} · {}",
-                        help.effective_keys_display(&self.action_key_overrides),
-                        quit.effective_keys_display(&self.action_key_overrides),
-                    )),
-                }]
-            } else {
-                tail.iter()
-                    .map(|def| crate::pane::Binding {
-                        keys: def.effective_keys_display(&self.action_key_overrides),
-                        label: std::borrow::Cow::Borrowed(def.label),
-                    })
-                    .collect()
-            }
+            tail.iter()
+                .filter(|def| self.focus != PaneFocus::Terminals || def.available_in_terminal())
+                .map(|def| crate::pane::Binding {
+                    keys: def.effective_keys_display(&self.action_key_overrides),
+                    label: std::borrow::Cow::Borrowed(def.label),
+                })
+                .collect()
         };
         // While a sticky error is pinned, advertise how to inspect its
         // full text and dismiss it right in the hint bar (#453). Inserted
@@ -3829,20 +3803,14 @@ impl<T: TerminalAdapter> Model<T> {
         // widths while the error's own actions still out-rank the
         // tour/help hints.
         let mut globals = globals;
-        if self.focus == PaneFocus::Terminals {
+        if self.focus == PaneFocus::Terminals && !self.mouse_capture_on {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
             let toggle = ActionDef::for_kind(ActionKind::ToggleMouseCapture);
-            let label = if self.mouse_capture_on {
-                let esc = self.ui_defaults.terminal_escape_char;
-                std::borrow::Cow::Owned(format!("mouse on · {esc}{esc}u if links fail"))
-            } else {
-                std::borrow::Cow::Borrowed("links off · enable")
-            };
             globals.insert(
                 0,
                 crate::pane::Binding {
                     keys: toggle.effective_keys_display(&self.action_key_overrides),
-                    label,
+                    label: std::borrow::Cow::Borrowed("links off · enable"),
                 },
             );
         }

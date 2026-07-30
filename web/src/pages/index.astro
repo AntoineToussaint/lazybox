@@ -2,10 +2,14 @@
 import Layout from '../layouts/Layout.astro';
 
 const repo = 'https://github.com/AntoineToussaint/lazybox';
+const sponsors = 'https://github.com/sponsors/AntoineToussaint';
 const docs = '/docs/';
 const workflows = '/docs/tutorials/core-workflows/';
 const orchestrationGuide = '/docs/how-to/orchestrate-multiple-agents/';
-const installCmd =
+const brewInstallCmd = 'brew install AntoineToussaint/lazybox/lazybox';
+const installerCmd =
+  "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh";
+const sourceInstallCmd =
   'cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot';
 
 const fleet = [
@@ -163,17 +167,53 @@ const steps = [
           <a class="btn btn-ghost" href={repo}>★ Star on GitHub</a>
         </div>
 
-        <div class="install" data-install>
-          <code><span class="prompt">$</span>{installCmd}</code>
-          <button class="copy" type="button" aria-label="Copy install command" data-copy={installCmd}>
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" data-icon="copy"><rect x="5" y="5" width="9" height="9" rx="1.5"></rect><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"></path></svg>
-            <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" data-icon="check" style="display:none"><path d="M3.5 8.5l3 3 6-6"></path></svg>
-          </button>
+        <div class="install-options">
+          <div class="install-option install-option-primary">
+            <p class="install-label">Homebrew <span>Prebuilt · recommended</span></p>
+            <div class="install" data-install>
+              <code><span class="prompt">$</span>{brewInstallCmd}</code>
+              <button class="copy" type="button" aria-label="Copy Homebrew install command" data-copy={brewInstallCmd}>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" data-icon="copy"><rect x="5" y="5" width="9" height="9" rx="1.5"></rect><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"></path></svg>
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" data-icon="check" style="display:none"><path d="M3.5 8.5l3 3 6-6"></path></svg>
+              </button>
+            </div>
+          </div>
+
+          <details class="install-more">
+            <summary>Other options: installer script or advanced source build</summary>
+            <div class="install-alternatives">
+              <div class="install-option">
+                <p class="install-label">Installer script <span>Prebuilt</span></p>
+                <div class="install" data-install>
+                  <code><span class="prompt">$</span>{installerCmd}</code>
+                  <button class="copy" type="button" aria-label="Copy installer script command" data-copy={installerCmd}>
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" data-icon="copy"><rect x="5" y="5" width="9" height="9" rx="1.5"></rect><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"></path></svg>
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" data-icon="check" style="display:none"><path d="M3.5 8.5l3 3 6-6"></path></svg>
+                  </button>
+                </div>
+              </div>
+
+              <div class="install-option install-option-source">
+                <p class="install-label">Advanced / from source</p>
+                <div class="install" data-install>
+                  <code><span class="prompt">$</span>{sourceInstallCmd}</code>
+                  <button class="copy" type="button" aria-label="Copy source install command" data-copy={sourceInstallCmd}>
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" data-icon="copy"><rect x="5" y="5" width="9" height="9" rx="1.5"></rect><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"></path></svg>
+                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" data-icon="check" style="display:none"><path d="M3.5 8.5l3 3 6-6"></path></svg>
+                  </button>
+                </div>
+                <p class="install-caption">
+                  Compiles the current main branch (HEAD) locally. Requires Rust 1.88+,
+                  Zig 0.15.2, and a native C/C++ toolchain.
+                </p>
+              </div>
+            </div>
+          </details>
+
+          <p class="install-guide">
+            <a href="/docs/tutorials/quickstart/#1-install">See every install method and platform.</a>
+          </p>
         </div>
-        <p class="install-caption">
-          Installs the current source build shown here. Prefer a published release?
-          <a href="/docs/tutorials/quickstart/#1-install">Use the stable install guide.</a>
-        </p>
 
         <div class="term" data-reveal aria-label="lazybox managing several agents in a terminal">
           <div class="bar">
@@ -207,6 +247,21 @@ const steps = [
         </div>
       </div>
     </div>
+
+    <aside class="founder-note" aria-labelledby="founder-note-title">
+      <div class="container">
+        <div class="founder-note-inner" data-reveal>
+          <p class="founder-note-title" id="founder-note-title">A note on where this is.</p>
+          <p>
+            We’re in the stone age of agent coding. lazybox is <strong>not the solution</strong> —
+            it’s the scaffolding I built to survive the mess while I work on the real thing.
+            But it’s <strong>by far the most productive I can be right now</strong>; nothing else
+            I’ve tried is close. Use it, break it, tell me what’s missing. It’s a stopgap, and
+            I’m building past it.
+          </p>
+        </div>
+      </div>
+    </aside>
 
     <section id="snippets" class="snippets-section">
       <div class="container">
@@ -977,6 +1032,23 @@ const steps = [
         </div>
       </div>
     </section>
+
+    <section id="support" class="support-section">
+      <div class="container">
+        <div class="support-card" data-reveal>
+          <div>
+            <p class="kicker">Open source, built in public</p>
+            <h2>Support lazybox.</h2>
+            <p>
+              If lazybox saves you time, a sponsorship helps fund maintenance,
+              releases, and the infrastructure behind the project. The
+              open-source TUI and daemon remain available to everyone.
+            </p>
+          </div>
+          <a class="btn btn-ghost" href={sponsors}>♡ Sponsor on GitHub</a>
+        </div>
+      </div>
+    </section>
   </main>
 
   <footer>
@@ -985,6 +1057,7 @@ const steps = [
       <div class="links">
         <a href={docs}>Docs</a>
         <a href={repo}>GitHub</a>
+        <a href={sponsors}>Sponsor</a>
         <a href={`${repo}/blob/main/LICENSE`}>License</a>
       </div>
     </div>

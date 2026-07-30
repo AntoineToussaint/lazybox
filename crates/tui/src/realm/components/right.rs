@@ -208,6 +208,14 @@ impl Right {
         self.inner.mark_cursor_row_read(cmds)
     }
 
+    pub fn activity_cursor_target(&self) -> Option<usize> {
+        self.inner.activity_cursor_target()
+    }
+
+    pub fn mark_activity_read_locally(&mut self, index: usize) {
+        self.inner.mark_activity_read_locally(index);
+    }
+
     /// Current activity-cursor position. Read-only; used by tests to
     /// assert navigation keys land where they should.
     pub fn comment_cursor(&self) -> usize {

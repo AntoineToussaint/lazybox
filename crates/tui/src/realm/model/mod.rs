@@ -23,6 +23,7 @@
 //! `app.tick(...)` and `Model::update` decides what to do.
 
 mod activity_pane;
+mod choice_dispatch;
 mod dispatch;
 mod events;
 mod helpers;
@@ -756,76 +757,81 @@ pub enum ChoicePayload {
     Session(lazybox_core::SessionKey),
 }
 
-impl ChoicePayload {
-    /// The positional index for an [`Self::Index`] row.
-    pub(crate) fn as_index(&self) -> Option<usize> {
+impl lazybox_tui_core::choice::PickPayload for ChoicePayload {
+    type Filter = crate::components::sidebar::Filter;
+
+    fn as_index(&self) -> Option<usize> {
         match self {
-            Self::Index(i) => Some(*i),
+            Self::Index(index) => Some(*index),
             _ => None,
         }
     }
 
-    /// The string value for a [`Self::Text`] row.
-    pub(crate) fn as_text(&self) -> Option<&str> {
+    fn as_text(&self) -> Option<&str> {
         match self {
-            Self::Text(s) => Some(s.as_str()),
+            Self::Text(text) => Some(text),
             _ => None,
         }
     }
 
-    /// The optional-string value for a [`Self::OptText`] row (the outer
-    /// `Option` reports whether the payload was an `OptText` at all).
-    pub(crate) fn into_opt_text(self) -> Option<Option<String>> {
+    fn opt_text(&self) -> Option<Option<String>> {
         match self {
-            Self::OptText(v) => Some(v),
+            Self::OptText(value) => Some(value.clone()),
             _ => None,
         }
     }
 
-    /// The duration for a [`Self::Duration`] row.
-    pub(crate) fn as_duration(&self) -> Option<std::time::Duration> {
+    fn as_duration(&self) -> Option<std::time::Duration> {
         match self {
-            Self::Duration(d) => Some(*d),
+            Self::Duration(duration) => Some(*duration),
             _ => None,
         }
     }
 
-    /// The filter for a [`Self::Filter`] row.
-    pub(crate) fn as_filter(&self) -> Option<crate::components::sidebar::Filter> {
+    fn filter(&self) -> Option<<Self as lazybox_tui_core::choice::PickPayload>::Filter> {
         match self {
-            Self::Filter(f) => Some(*f),
+            Self::Filter(filter) => Some(*filter),
             _ => None,
         }
     }
 
-    /// The policy toggle for a [`Self::Policy`] row.
-    pub(crate) fn into_policy(self) -> Option<crate::realm::model::modals::PolicyToggle> {
+    fn policy(&self) -> Option<lazybox_tui_core::choice::PolicyPick> {
+        use crate::realm::model::modals::PolicyToggle;
         match self {
-            Self::Policy(p) => Some(p),
+            Self::Policy(PolicyToggle::MergeOnGreen) => {
+                Some(lazybox_tui_core::choice::PolicyPick::MergeOnGreen)
+            }
+            Self::Policy(PolicyToggle::AutoFix(kind)) => {
+                Some(lazybox_tui_core::choice::PolicyPick::AutoFix(*kind))
+            }
+            Self::Policy(PolicyToggle::Info(message)) => {
+                Some(lazybox_tui_core::choice::PolicyPick::Info(message.clone()))
+            }
             _ => None,
         }
     }
 
-    /// The workspace key for a [`Self::Workspace`] row.
-    pub(crate) fn into_workspace(self) -> Option<lazybox_core::WorkspaceKey> {
+    fn workspace(&self) -> Option<lazybox_core::WorkspaceKey> {
         match self {
-            Self::Workspace(k) => Some(k),
+            Self::Workspace(key) => Some(key.clone()),
             _ => None,
         }
     }
 
-    /// The project key for a [`Self::Project`] row.
-    pub(crate) fn into_project(self) -> Option<lazybox_core::ProjectKey> {
+    fn project(&self) -> Option<lazybox_core::ProjectKey> {
         match self {
-            Self::Project(k) => Some(k),
+            Self::Project(key) => Some(key.clone()),
             _ => None,
         }
     }
 
-    /// The session key for a [`Self::Session`] row.
-    pub(crate) fn into_session(self) -> Option<lazybox_core::SessionKey> {
+    fn is_new_local_project(&self) -> bool {
+        matches!(self, Self::NewLocalProject)
+    }
+
+    fn session(&self) -> Option<lazybox_core::SessionKey> {
         match self {
-            Self::Session(k) => Some(k),
+            Self::Session(key) => Some(key.clone()),
             _ => None,
         }
     }

@@ -20,7 +20,9 @@ pub mod agent_attention;
 pub mod agents {
     pub use lazybox_agents::{Registry, registry, trim_leading_blank_lines};
 }
+pub mod choice;
 pub mod confirm_latch;
+pub mod dispatch;
 pub mod editors;
 pub mod help;
 pub mod intent;

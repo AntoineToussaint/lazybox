@@ -2637,6 +2637,15 @@ mod tests {
     }
 
     #[test]
+    fn session_id_wraps_a_known_uuid() {
+        let uuid = Uuid::from_u128(0x12345678_1234_5678_1234_567812345678);
+        let session_id = SessionId(uuid);
+
+        assert_eq!(session_id.0, uuid);
+        assert_eq!(session_id.to_string(), uuid.to_string());
+    }
+
+    #[test]
     fn session_default_name_matches_kind() {
         assert_eq!(
             default_name_for(&SessionKind::Agent {

@@ -55,6 +55,43 @@ fn trim_recent_output(buf: &mut Vec<u8>, cap: usize) {
     buf.truncate(buf.len() - cut);
 }
 
+struct TermState {
+    pty_rx: mpsc::Receiver<Vec<u8>>,
+    terminal: libghostty_vt::Terminal<'static, 'static>,
+    recent_output: Vec<u8>,
+    last_output_at: Instant,
+}
+
+impl TermState {
+    fn new(
+        pty_rx: mpsc::Receiver<Vec<u8>>,
+        terminal: libghostty_vt::Terminal<'static, 'static>,
+    ) -> Self {
+        Self {
+            pty_rx,
+            terminal,
+            recent_output: Vec::with_capacity(RECENT_OUTPUT_CAP),
+            last_output_at: Instant::now(),
+        }
+    }
+
+    fn process_pending(&mut self) -> bool {
+        let mut had_output = false;
+        while let Ok(chunk) = self.pty_rx.try_recv() {
+            self.ingest(&chunk);
+            had_output = true;
+        }
+        had_output
+    }
+
+    fn ingest(&mut self, chunk: &[u8]) {
+        self.terminal.vt_write(chunk);
+        self.recent_output.extend_from_slice(chunk);
+        trim_recent_output(&mut self.recent_output, RECENT_OUTPUT_CAP);
+        self.last_output_at = Instant::now();
+    }
+}
+
 /// Manages a PTY child process + libghostty-vt terminal state.
 ///
 /// PTY reader runs on a background thread, sends bytes via channel.
@@ -71,18 +108,13 @@ pub struct TermSession {
     _reader_thread: std::thread::JoinHandle<()>,
     size: PtySize,
     finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pty_rx: mpsc::Receiver<Vec<u8>>,
-    terminal: libghostty_vt::Terminal<'static, 'static>,
+    state: TermState,
     render_state: libghostty_vt::RenderState<'static>,
     row_iter: libghostty_vt::render::RowIterator<'static>,
     cell_iter: libghostty_vt::render::CellIterator<'static>,
     /// Per-session render cache — see `GhosttyTerminal` for the
     /// dirty-tracking flow that uses it.
     shadow: Option<ratatui::buffer::Buffer>,
-    /// When the PTY last produced output.
-    last_output_at: Instant,
-    /// Rolling buffer of recent PTY output (last ~4KB) for callers to inspect.
-    recent_output: Vec<u8>,
     /// Explicit `!Send + !Sync` marker — see struct doc.
     _not_send: std::marker::PhantomData<*mut ()>,
 }
@@ -186,14 +218,11 @@ impl TermSession {
             _reader_thread: reader_thread,
             size,
             finished,
-            pty_rx,
-            terminal,
+            state: TermState::new(pty_rx, terminal),
             render_state,
             row_iter,
             cell_iter,
             shadow: None,
-            last_output_at: Instant::now(),
-            recent_output: Vec::with_capacity(RECENT_OUTPUT_CAP),
             _not_send: std::marker::PhantomData,
         })
     }
@@ -201,28 +230,17 @@ impl TermSession {
     /// Process pending PTY output — call from main thread every tick.
     /// Returns true if new output was received.
     pub fn process_pending(&mut self) -> bool {
-        let mut had_output = false;
-        while let Ok(chunk) = self.pty_rx.try_recv() {
-            self.terminal.vt_write(&chunk);
-            // Buffer recent output for callers to inspect.
-            self.recent_output.extend_from_slice(&chunk);
-            trim_recent_output(&mut self.recent_output, RECENT_OUTPUT_CAP);
-            had_output = true;
-        }
-        if had_output {
-            self.last_output_at = Instant::now();
-        }
-        had_output
+        self.state.process_pending()
     }
 
     /// When the PTY last produced output.
     pub fn last_output_at(&self) -> Instant {
-        self.last_output_at
+        self.state.last_output_at
     }
 
     /// Recent PTY output bytes (last ~4KB) for pattern detection by callers.
     pub fn recent_output(&self) -> &[u8] {
-        &self.recent_output
+        &self.state.recent_output
     }
 
     /// Send raw bytes to the PTY.
@@ -238,7 +256,7 @@ impl TermSession {
             self.master
                 .resize(size)
                 .map_err(|e| TermError::PtyOpen(e.into()))?;
-            let _ = self.terminal.resize(size.cols, size.rows, 0, 0);
+            let _ = self.state.terminal.resize(size.cols, size.rows, 0, 0);
             self.size = size;
         }
         Ok(())
@@ -265,7 +283,7 @@ impl TermSession {
         &mut Option<ratatui::buffer::Buffer>,
     ) {
         (
-            &mut self.terminal,
+            &mut self.state.terminal,
             &mut self.render_state,
             &mut self.row_iter,
             &mut self.cell_iter,
@@ -277,7 +295,7 @@ impl TermSession {
     /// Callers use this to forward clicks in the app's requested mouse
     /// protocol. Wheel events remain in the outer terminal's scrollback.
     pub fn is_mouse_tracking(&self) -> bool {
-        self.terminal.is_mouse_tracking().unwrap_or(false)
+        self.state.terminal.is_mouse_tracking().unwrap_or(false)
     }
 
     /// True when the PTY child is using the alternate screen buffer
@@ -285,14 +303,17 @@ impl TermSession {
     /// mode; the caller needs a different strategy — either forward
     /// mouse as SGR events (if mouse tracking is on) or do nothing.
     pub fn in_alternate_screen(&self) -> bool {
-        self.terminal
+        self.state
+            .terminal
             .mode(libghostty_vt::terminal::Mode::ALT_SCREEN)
             .unwrap_or(false)
             || self
+                .state
                 .terminal
                 .mode(libghostty_vt::terminal::Mode::ALT_SCREEN_SAVE)
                 .unwrap_or(false)
             || self
+                .state
                 .terminal
                 .mode(libghostty_vt::terminal::Mode::ALT_SCREEN_LEGACY)
                 .unwrap_or(false)
@@ -301,7 +322,49 @@ impl TermSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{RECENT_OUTPUT_CAP, trim_recent_output};
+    use super::{RECENT_OUTPUT_CAP, TermState, trim_recent_output};
+    use libghostty_vt::{Terminal, TerminalOptions};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    fn term_state() -> (mpsc::Sender<Vec<u8>>, TermState) {
+        let (tx, rx) = mpsc::channel();
+        let terminal = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback: 100,
+        })
+        .expect("create terminal");
+        (tx, TermState::new(rx, terminal))
+    }
+
+    #[test]
+    fn process_pending_ingests_queued_chunks_and_advances_timestamp() {
+        let (tx, mut state) = term_state();
+        let previous_output_at = Instant::now() - Duration::from_secs(1);
+        state.last_output_at = previous_output_at;
+        tx.send(b"hello ".to_vec()).expect("send first chunk");
+        tx.send(b"world".to_vec()).expect("send second chunk");
+
+        assert!(state.process_pending());
+        assert_eq!(state.recent_output, b"hello world");
+        assert_eq!(state.terminal.cursor_x().expect("read cursor"), 11);
+        assert!(state.last_output_at > previous_output_at);
+
+        let last_output_at = state.last_output_at;
+        assert!(!state.process_pending());
+        assert_eq!(state.last_output_at, last_output_at);
+    }
+
+    #[test]
+    fn process_pending_trims_recent_output() {
+        let (tx, mut state) = term_state();
+        let output = vec![b'a'; RECENT_OUTPUT_CAP + 500];
+        tx.send(output).expect("send output");
+
+        assert!(state.process_pending());
+        assert_eq!(state.recent_output, vec![b'a'; RECENT_OUTPUT_CAP]);
+    }
 
     #[test]
     fn trim_keeps_buffer_bounded() {

@@ -8561,6 +8561,18 @@ mod tips_tests {
     }
 
     #[test]
+    fn leave_terminal_tip_uses_the_configured_escape_char() {
+        let mut m = armed_model();
+        m.ui_defaults.terminal_escape_char = '}';
+        m.focus = PaneFocus::Terminals;
+
+        let tip = m.pick_tip().expect("the in-terminal tip is eligible");
+
+        assert!(tip.message.contains("}}q"), "{}", tip.message);
+        assert!(!tip.message.contains("]]q"), "{}", tip.message);
+    }
+
+    #[test]
     fn already_seen_tip_does_not_resurface() {
         let mut m = armed_model();
         m.set_tips(true, vec!["leave_terminal".to_string()]);

@@ -11,10 +11,9 @@
 //! stealing. The model caps it to one tip per session and persists
 //! which tips have shown so they don't repeat.
 //!
-//! Tips reference the action catalog ([`ActionKind`]) for their key
-//! hint rather than hardcoding a key string, so a user's `action_keys`
-//! remap flows through automatically (same single-source-of-truth
-//! discipline as the footer / help panel).
+//! Tips resolve their key hint from the source that owns the binding:
+//! the action catalog for remappable actions, or the configured
+//! terminal leader for terminal commands.
 
 use crate::action::{ActionDef, ActionKind};
 use std::collections::BTreeMap;
@@ -40,15 +39,20 @@ enum Trigger {
     InTerminal,
 }
 
-/// One catalog tip. `template` is filled at resolve time with the
-/// effective key for `action` (so a remap is reflected), substituted
-/// for the literal `{key}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyHint {
+    Action(ActionKind),
+    TerminalExit,
+}
+
+/// One progressive tip. `template` is filled at resolve time with the
+/// key from its binding owner, substituted for the literal `{key}`.
 struct Tip {
     /// Stable id persisted to `ui.tips_seen`. Never reuse across
     /// different tip content — it's how "already shown" is tracked.
     id: &'static str,
     trigger: Trigger,
-    action: ActionKind,
+    key_hint: KeyHint,
     template: &'static str,
 }
 
@@ -72,19 +76,19 @@ const TIPS: &[Tip] = &[
     Tip {
         id: "jump_to_asking",
         trigger: Trigger::AgentWaiting,
-        action: ActionKind::JumpToAsking,
+        key_hint: KeyHint::Action(ActionKind::JumpToAsking),
         template: "{key} jumps to the next agent waiting on input",
     },
     Tip {
         id: "jump_to_failing_ci",
         trigger: Trigger::FailingCi,
-        action: ActionKind::JumpToFailingCi,
+        key_hint: KeyHint::Action(ActionKind::JumpToFailingCi),
         template: "{key} jumps to the next failing PR",
     },
     Tip {
         id: "leave_terminal",
         trigger: Trigger::InTerminal,
-        action: ActionKind::LeaveTerminal,
+        key_hint: KeyHint::TerminalExit,
         template: "{key} returns from the terminal to the sidebar",
     },
 ];
@@ -98,20 +102,29 @@ pub struct ResolvedTip {
 }
 
 /// Pick the highest-priority tip eligible for the current state that
-/// hasn't already been shown, resolving its key hint through the
-/// effective binding (user `action_keys` override or catalog
-/// default). Returns `None` when nothing applies — no matching state,
-/// or every matching tip is already in `seen`.
+/// hasn't already been shown. Catalog actions use their effective
+/// binding (user `action_keys` override or catalog default); terminal
+/// exit uses the configured terminal leader. Returns `None` when
+/// nothing applies — no matching state, or every matching tip is
+/// already in `seen`.
 pub fn next_tip(
     ctx: &TipContext,
     seen: &[String],
     overrides: &BTreeMap<String, String>,
+    terminal_escape_char: char,
 ) -> Option<ResolvedTip> {
     let tip = TIPS
         .iter()
         .filter(|t| t.matches(ctx))
         .find(|t| !seen.iter().any(|s| s == t.id))?;
-    let key = ActionDef::for_kind(tip.action).effective_keys_display(overrides);
+    let key = match tip.key_hint {
+        KeyHint::Action(action) => ActionDef::for_kind(action)
+            .effective_keys_display(overrides)
+            .into_owned(),
+        KeyHint::TerminalExit => {
+            format!("{terminal_escape_char}{terminal_escape_char}q")
+        }
+    };
     Some(ResolvedTip {
         id: tip.id.to_string(),
         message: format!("tip: {}", tip.template.replace("{key}", &key)),
@@ -129,7 +142,7 @@ mod tests {
     #[test]
     fn no_tip_when_no_state_matches() {
         let ctx = TipContext::default();
-        assert!(next_tip(&ctx, &[], &no_overrides()).is_none());
+        assert!(next_tip(&ctx, &[], &no_overrides(), ']').is_none());
     }
 
     #[test]
@@ -138,7 +151,7 @@ mod tests {
             agent_waiting: true,
             ..Default::default()
         };
-        let tip = next_tip(&ctx, &[], &no_overrides()).expect("a tip");
+        let tip = next_tip(&ctx, &[], &no_overrides(), ']').expect("a tip");
         assert_eq!(tip.id, "jump_to_asking");
         // Key hint derives from the catalog (`!`), not a literal.
         assert!(tip.message.contains('!'), "{}", tip.message);
@@ -151,7 +164,7 @@ mod tests {
             failing_ci: true,
             ..Default::default()
         };
-        let tip = next_tip(&ctx, &[], &no_overrides()).expect("a tip");
+        let tip = next_tip(&ctx, &[], &no_overrides(), ']').expect("a tip");
         assert_eq!(tip.id, "jump_to_failing_ci");
         assert!(tip.message.contains("Shift-F"), "{}", tip.message);
     }
@@ -162,9 +175,25 @@ mod tests {
             in_terminal: true,
             ..Default::default()
         };
-        let tip = next_tip(&ctx, &[], &no_overrides()).expect("a tip");
+        let tip = next_tip(&ctx, &[], &no_overrides(), ']').expect("a tip");
         assert_eq!(tip.id, "leave_terminal");
         assert!(tip.message.contains("]]q"), "{}", tip.message);
+    }
+
+    #[test]
+    fn terminal_tip_uses_the_configured_escape_char_instead_of_action_overrides() {
+        let ctx = TipContext {
+            in_terminal: true,
+            ..Default::default()
+        };
+        let mut overrides = BTreeMap::new();
+        overrides.insert("leave_terminal".to_string(), "Esc".to_string());
+
+        let tip = next_tip(&ctx, &[], &overrides, '}').expect("a tip");
+
+        assert!(tip.message.contains("}}q"), "{}", tip.message);
+        assert!(!tip.message.contains("]]q"), "{}", tip.message);
+        assert!(!tip.message.contains("Esc"), "{}", tip.message);
     }
 
     #[test]
@@ -175,7 +204,7 @@ mod tests {
         };
         let seen = vec!["jump_to_asking".to_string()];
         assert!(
-            next_tip(&ctx, &seen, &no_overrides()).is_none(),
+            next_tip(&ctx, &seen, &no_overrides(), ']').is_none(),
             "the only matching tip was already shown",
         );
     }
@@ -188,10 +217,10 @@ mod tests {
             failing_ci: true,
             in_terminal: true,
         };
-        let tip = next_tip(&ctx, &[], &no_overrides()).expect("a tip");
+        let tip = next_tip(&ctx, &[], &no_overrides(), ']').expect("a tip");
         assert_eq!(tip.id, "jump_to_asking");
         // With it marked seen, the next-priority tip surfaces.
-        let tip = next_tip(&ctx, &[tip.id], &no_overrides()).expect("a tip");
+        let tip = next_tip(&ctx, &[tip.id], &no_overrides(), ']').expect("a tip");
         assert_eq!(tip.id, "jump_to_failing_ci");
     }
 
@@ -203,20 +232,22 @@ mod tests {
         };
         let mut overrides = BTreeMap::new();
         overrides.insert("jump_to_asking".to_string(), "Ctrl-a".to_string());
-        let tip = next_tip(&ctx, &[], &overrides).expect("a tip");
+        let tip = next_tip(&ctx, &[], &overrides, ']').expect("a tip");
         assert!(tip.message.contains("Ctrl-a"), "{}", tip.message);
     }
 
     #[test]
-    fn every_tip_references_a_real_catalog_action() {
+    fn catalog_tip_actions_have_keys_and_every_tip_has_a_placeholder() {
         // A tip pointing at an ActionKind whose default_keys is a
         // presentation-only form would still render, but guard that
         // each referenced action has a non-empty effective key so the
         // `{key}` substitution never produces an empty hint.
         let overrides = no_overrides();
         for tip in TIPS {
-            let key = ActionDef::for_kind(tip.action).effective_keys_display(&overrides);
-            assert!(!key.is_empty(), "{} has no key hint", tip.id);
+            if let KeyHint::Action(action) = tip.key_hint {
+                let key = ActionDef::for_kind(action).effective_keys_display(&overrides);
+                assert!(!key.is_empty(), "{} has no key hint", tip.id);
+            }
             assert!(
                 tip.template.contains("{key}"),
                 "{} template missing {{key}} placeholder",

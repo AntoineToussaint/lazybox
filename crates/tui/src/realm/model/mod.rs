@@ -1904,7 +1904,12 @@ impl<T: TerminalAdapter> Model<T> {
             failing_ci: self.sidebar.has_failing_ci(),
             in_terminal: self.focus == PaneFocus::Terminals,
         };
-        lazybox_tui_core::tips::next_tip(&ctx, &self.tips_seen, &self.action_key_overrides)
+        lazybox_tui_core::tips::next_tip(
+            &ctx,
+            &self.tips_seen,
+            &self.action_key_overrides,
+            self.ui_defaults.terminal_escape_char,
+        )
     }
 
     /// Append `id` to `ui.tips_seen` so the tip never resurfaces.

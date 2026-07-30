@@ -44,11 +44,11 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Build site (Astro + Starlight)
+      - name: Build and verify site (Astro + Starlight)
         working-directory: web
         run: |
           npm ci
-          npm run build   # → web/dist (homepage at /, docs at /docs/, includes public/CNAME)
+          npm test   # → web/dist (homepage at /, docs at /docs/, includes public/CNAME)
 
       - uses: actions/upload-pages-artifact@v5
         with:

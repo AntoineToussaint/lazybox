@@ -44,6 +44,7 @@ mod resource_limits;
 pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;
+mod spawn_plan;
 mod terminal_commands;
 mod terminal_io;
 pub mod workspace;
@@ -1645,15 +1646,14 @@ pub async fn dispatch_command(
                 session_key,
                 session_id,
                 kind,
-                cwd,
-                initial_prompt,
-                autonomous,
-                on_main,
-                model_alias,
-                false,
-                // A client `Spawn` is always a local-user action (`w` /
-                // `a` / `x …`), so provisioning mounts the progress modal.
-                lazybox_ipc::SpawnOrigin::Interactive,
+                spawn_handler::SpawnOptions {
+                    cwd,
+                    initial_prompt,
+                    autonomous,
+                    on_main,
+                    model_alias,
+                    ..Default::default()
+                },
             )
             .await;
         }
@@ -1841,14 +1841,7 @@ pub async fn dispatch_command(
                     session_key,
                     None,
                     lazybox_ipc::TerminalKind::Agent(agent_id),
-                    None,
-                    None,
-                    false,
-                    false,
-                    None,
-                    false,
-                    // `x n` / `Shift-W` — a local-user spawn.
-                    lazybox_ipc::SpawnOrigin::Interactive,
+                    spawn_handler::SpawnOptions::default(),
                 )
                 .await;
             }
@@ -2026,14 +2019,7 @@ pub async fn dispatch_command(
                     session_key,
                     None,
                     lazybox_ipc::TerminalKind::Agent(agent_id),
-                    None,
-                    None,
-                    false,
-                    false,
-                    None,
-                    false,
-                    // `x a` adopt / import checkout — a local-user spawn.
-                    lazybox_ipc::SpawnOrigin::Interactive,
+                    spawn_handler::SpawnOptions::default(),
                 )
                 .await;
             }

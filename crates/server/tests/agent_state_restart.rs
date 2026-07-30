@@ -3,7 +3,7 @@ use lazybox_ipc::{AgentState, Event, HookEvent, HookEventKind, TerminalId, Termi
 use lazybox_server::ServerConfig;
 use lazybox_server::backend::{MockBackend, SessionBackend};
 use lazybox_server::spawn_handler::{
-    handle_ingest_hook, handle_spawn, recover_sessions, snapshot_terminals,
+    SpawnOptions, handle_ingest_hook, handle_spawn, recover_sessions, snapshot_terminals,
 };
 use lazybox_store::{SqliteStore, Store};
 use std::path::Path;
@@ -371,13 +371,10 @@ async fn recovered_dead_process_exits_and_fresh_spawn_has_no_old_state() {
         SessionKey::from("test:fresh"),
         None,
         TerminalKind::Agent("codex".into()),
-        Some(temp.path().to_string_lossy().into_owned()),
-        None,
-        false,
-        false,
-        None,
-        false,
-        lazybox_ipc::SpawnOrigin::Interactive,
+        SpawnOptions {
+            cwd: Some(temp.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        },
     )
     .await;
     let fresh = snapshot_terminals(&restarted)

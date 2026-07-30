@@ -6,7 +6,7 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
-## [0.1.9] - 2026-07-29
+## [0.1.9] - 2026-07-30
 
 This release makes lazybox a steadier control surface for long-running agent
 fleets: prompts, terminals, and agent run state survive restarts more
@@ -41,6 +41,9 @@ Then run `gh auth login` if needed and launch `lazybox`.
   command, and stays quiet for a previously dismissed target.
 - Agent-to-agent handoff (`x s`): capture a running agent's output, edit the
   brief, and inject it into another workspace's session (#431).
+- Agent-authored session conversion: fork a running session into a new one
+  seeded with a role prompt — continue the work or critique it — drawn from
+  the source agent's own output (#649).
 - Update branch: `g u` merges the base into a behind PR's head, and `Shift-U`
   fans it out over the sidebar multi-select (#484).
 - A multi-select filter menu on `f` combining state, role, and kind predicates
@@ -88,6 +91,14 @@ Then run `gh auth login` if needed and launch `lazybox`.
   (#599, #590, #610).
 - Tour hints are derived from the action catalog so they track the live keymap
   (#602).
+- GitHub rate-limit waits are surfaced: the poller reports the wait and backs
+  off until the limit resets instead of erroring against a throttled API
+  (#678).
+- Ask Lazybox gains a thinking spinner, a follow-up-versus-new-question
+  distinction, and a stickier conversation loop (#643).
+- The editor launcher (`e`) detects more macOS GUI editors (#676), and the
+  terminal footer hint bar is decluttered to the keys that matter in context
+  (#665).
 - The docs, install paths, support forms, provider setup, and mobile homepage
   have been audited against the current CLI, config schema, and action catalog.
 
@@ -120,6 +131,12 @@ Then run `gh auth login` if needed and launch `lazybox`.
 - All agent badges render in the sidebar (#621); tour cards stay within the
   modal height and Ask Lazybox help lists actions in the correct order (#600,
   #601).
+- Clicking a desktop notification focuses the workspace that triggered it
+  (#674).
+- Stale branch holders are reclaimed, so a branch pinned by a defunct session
+  can be freed and reused (#652).
+- Terminal recovery is hardened against file-descriptor exhaustion, so a burst
+  of spawns can't wedge the daemon (#653).
 - Release binaries no longer inherit a false `-dirty` version suffix from
   cargo-dist's generated manifest output, and the pre-split shell-installer URL
   remains valid.

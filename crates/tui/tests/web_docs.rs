@@ -729,3 +729,45 @@ printf '%s\n' 'exit 0' > "$output"
         )
     );
 }
+
+#[test]
+fn changelog_top_release_matches_package_version_and_carries_a_date() {
+    // cargo-dist extracts the newest `## [x.y.z] - DATE` section verbatim as the
+    // GitHub release notes, so that heading must name the version actually
+    // shipping and carry a real date. A version bump that leaves the changelog
+    // topping out at the previous release would slip through every other check.
+    let changelog = read("CHANGELOG.md");
+    let heading = changelog
+        .lines()
+        .find(|line| line.starts_with("## [") && !line.contains("[Unreleased]"))
+        .expect("CHANGELOG.md has a versioned release heading");
+
+    let version = heading
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(version, _)| version)
+        .expect("release heading names a version in brackets");
+    assert_eq!(
+        version,
+        env!("CARGO_PKG_VERSION"),
+        "newest CHANGELOG heading {heading:?} must match the package version {}; \
+         bump the version and add its changelog section together",
+        env!("CARGO_PKG_VERSION"),
+    );
+
+    let date = heading
+        .split_once(" - ")
+        .map(|(_, date)| date.trim())
+        .expect("release heading carries an ` - <date>` suffix");
+    let parts: Vec<&str> = date.split('-').collect();
+    assert!(
+        parts.len() == 3
+            && parts[0].len() == 4
+            && parts[1].len() == 2
+            && parts[2].len() == 2
+            && parts
+                .iter()
+                .all(|part| part.chars().all(|c| c.is_ascii_digit())),
+        "release heading must carry an ISO YYYY-MM-DD date, got {date:?}",
+    );
+}

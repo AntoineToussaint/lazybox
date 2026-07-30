@@ -521,7 +521,15 @@ pub async fn handle_inbound(
         terminals.get(&terminal_id).cloned()
     };
     if let Some(key) = backend_key {
-        match crate::terminal_io::write_live(server, terminal_id, &key, &bytes).await {
+        match crate::terminal_io::write_live(
+            server,
+            terminal_id,
+            &key,
+            &bytes,
+            lazybox_ipc::TerminalInputIntent::Submit,
+        )
+        .await
+        {
             Ok(true) => tracing::info!(
                 provider = provider.id(),
                 ?terminal_id,
@@ -1631,6 +1639,65 @@ mod tests {
             provider.posts.lock().len(),
             1,
             "the duplicate delivery must not produce a second reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn inbound_agent_message_releases_prior_view_redraw_before_response() {
+        use crate::backend::SessionBackend;
+
+        let provider = MockProvider::new(TerminalTarget::NoSurface, vec![]);
+        let (server, mock) = crate::ServerConfig::in_memory_with_mock();
+        let terminal_id = TerminalId(77);
+        let backend_key = mock
+            .spawn(&[], None, &[], "chat-view-redraw")
+            .await
+            .expect("spawn");
+        server
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(terminal_id, backend_key.clone());
+        server.terminal.terminal_meta.lock().await.insert(
+            terminal_id,
+            (
+                SessionKey::new("chat-view-redraw"),
+                TerminalKind::Agent("claude".into()),
+            ),
+        );
+        server
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(terminal_id, AgentState::Idle);
+        crate::spawn_handler::handle_resize(&server, terminal_id, 100, 30).await;
+
+        let state = Arc::new(Mutex::new(RouterState::new()));
+        state.lock().await.record_dedicated(terminal_id, "C1");
+        handle_inbound(
+            &provider,
+            &server,
+            &state,
+            ChatInbound::Message {
+                channel: "C1".into(),
+                user: "U1".into(),
+                text: "continue".into(),
+                ts: "1700.2".into(),
+                thread_ts: None,
+            },
+        )
+        .await;
+
+        assert_eq!(
+            mock.writes_for(&backend_key).await,
+            vec![encode_for_pty("continue")],
+        );
+        assert!(
+            !crate::terminal_io::suppresses_agent_reading(&server.terminal, terminal_id, Some(1),)
+                .await,
+            "the first agent response after a chat submission must drive lifecycle state",
         );
     }
 

@@ -1,7 +1,7 @@
 //! Property tests for framing. Generate arbitrary payloads and assert
 //! write → read returns them unchanged, regardless of payload shape.
 
-use lazybox_ipc::{Command, TerminalId, socket};
+use lazybox_ipc::{Command, TerminalId, TerminalInputIntent, socket};
 use proptest::prelude::*;
 use tokio::io::duplex;
 
@@ -13,6 +13,7 @@ fn write_cmd() -> impl Strategy<Value = Command> {
         any::<Vec<u8>>().prop_map(|bytes| Command::Write {
             terminal_id: TerminalId(1),
             bytes,
+            intent: TerminalInputIntent::Compose,
         }),
         (0u16.., 0u16..).prop_map(|(cols, rows)| Command::Resize {
             terminal_id: TerminalId(1),

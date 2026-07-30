@@ -1,5 +1,6 @@
 import {
   DESKTOP_TERMINAL_STREAM_ITEMS,
+  TERMINAL_INPUT_INTENTS,
   TERMINAL_CLIENT_COMMAND_KINDS,
   TERMINAL_SERVER_FRAME_HEADER_BYTES,
   TERMINAL_CLIENT_FRAME_HEADER_BYTES,
@@ -8,6 +9,7 @@ import {
   TERMINAL_RESYNC_PAYLOAD_LAYOUT,
   TERMINAL_SERVER_FRAME_LAYOUT,
   TERMINAL_SERVER_FRAME_KINDS,
+  TERMINAL_WRITE_PAYLOAD_LAYOUT,
 } from "./generated/terminal-wire";
 
 export { TERMINAL_SERVER_FRAME_HEADER_BYTES };
@@ -33,6 +35,8 @@ export interface TerminalReplayState {
   replayAvailable: boolean;
   dirty: boolean;
 }
+
+export type TerminalInputIntent = "compose" | "submit" | "view";
 
 export type TerminalStreamItem =
   | { kind: "reset" }
@@ -170,24 +174,34 @@ export async function sendTerminalFramesSequentially(
 export function writeTerminalFrame(
   terminalId: number,
   payload: Uint8Array,
+  intent: TerminalInputIntent = "compose",
 ): Uint8Array {
-  return encodeClientFrame(TERMINAL_CLIENT_COMMAND_KINDS.write, terminalId, payload);
+  const body = new Uint8Array(
+    TERMINAL_WRITE_PAYLOAD_LAYOUT.bytesOffset + payload.length,
+  );
+  body[TERMINAL_WRITE_PAYLOAD_LAYOUT.intentOffset] =
+    TERMINAL_INPUT_INTENTS[intent];
+  body.set(payload, TERMINAL_WRITE_PAYLOAD_LAYOUT.bytesOffset);
+  return encodeClientFrame(TERMINAL_CLIENT_COMMAND_KINDS.write, terminalId, body);
 }
 
 export function writeTerminalFrames(
   terminalId: number,
   payload: Uint8Array,
   maxWriteBytes: number,
+  intent: TerminalInputIntent = "compose",
 ): Uint8Array[] {
   if (!Number.isInteger(maxWriteBytes) || maxWriteBytes < 1) {
     throw new Error("terminal write limit must be a positive integer");
   }
   const frames: Uint8Array[] = [];
   for (let offset = 0; offset < payload.length; offset += maxWriteBytes) {
+    const nextOffset = offset + maxWriteBytes;
     frames.push(
       writeTerminalFrame(
         terminalId,
-        payload.slice(offset, offset + maxWriteBytes),
+        payload.slice(offset, nextOffset),
+        nextOffset >= payload.length ? intent : "compose",
       ),
     );
   }

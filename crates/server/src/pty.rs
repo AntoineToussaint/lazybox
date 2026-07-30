@@ -1073,6 +1073,10 @@ impl DaemonPty {
         }
     }
 
+    pub(crate) fn output_seq(&self) -> u64 {
+        self.last_seq.load(Ordering::SeqCst)
+    }
+
     pub async fn resize(&self, size: PtySize) -> Result<(), PtyError> {
         let m = self.master.lock().await;
         m.resize(size).map_err(|e| PtyError::Open(e.to_string()))

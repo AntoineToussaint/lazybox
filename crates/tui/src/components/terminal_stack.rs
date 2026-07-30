@@ -29,7 +29,7 @@
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::SessionKey;
-use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
+use lazybox_ipc::{Command, Event, TerminalId, TerminalInputIntent, TerminalKind};
 use lazybox_tui_term::GhosttyTerminal;
 use libghostty_vt as vt;
 use ratatui::Frame;
@@ -2874,7 +2874,12 @@ impl TerminalStack {
         } else {
             (None, None)
         };
-        Self::push_write(cmds, id, bytes);
+        let intent = if key.code == KeyCode::Enter && !key.modifiers.contains(KeyModifiers::SHIFT) {
+            TerminalInputIntent::Submit
+        } else {
+            TerminalInputIntent::Compose
+        };
+        Self::push_write(cmds, id, bytes, intent);
         // Persist the submitted prompt daemon-side so the history survives
         // a restart — the replay ring only carries PTY output, not the
         // input we composed here.
@@ -2906,8 +2911,13 @@ impl TerminalStack {
     /// `cmds` vec (and later the same ordered command channel), so the
     /// PTY receives the identical byte stream; splitting mid-UTF-8 or
     /// mid-escape is fine for a byte-oriented PTY.
-    fn push_write(cmds: &mut Vec<Command>, terminal_id: TerminalId, bytes: Vec<u8>) {
-        cmds.extend(Command::write_chunked(terminal_id, bytes));
+    fn push_write(
+        cmds: &mut Vec<Command>,
+        terminal_id: TerminalId,
+        bytes: Vec<u8>,
+        intent: TerminalInputIntent,
+    ) {
+        cmds.extend(Command::write_chunked(terminal_id, bytes, intent));
     }
 
     pub fn on_event(&mut self, event: &Event) {
@@ -5128,7 +5138,12 @@ mod write_chunking_tests {
             .collect();
 
         let mut cmds = Vec::new();
-        TerminalStack::push_write(&mut cmds, TerminalId(4), original.clone());
+        TerminalStack::push_write(
+            &mut cmds,
+            TerminalId(4),
+            original.clone(),
+            TerminalInputIntent::Compose,
+        );
 
         assert!(
             cmds.len() > 1,
@@ -5137,7 +5152,9 @@ mod write_chunking_tests {
         let mut reassembled = Vec::new();
         for cmd in &cmds {
             match cmd {
-                Command::Write { terminal_id, bytes } => {
+                Command::Write {
+                    terminal_id, bytes, ..
+                } => {
                     assert_eq!(*terminal_id, TerminalId(4));
                     assert!(
                         bytes.len() <= MAX_WRITE_CHUNK_BYTES,

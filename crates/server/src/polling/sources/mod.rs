@@ -35,6 +35,15 @@ fn full_sweep_commit(
     }
 }
 
+fn full_sweep_admitted(
+    will_full_sweep: bool,
+    manual_refresh: bool,
+    governor_plan: &lazybox_gh::BackgroundPlan,
+    required_points: u32,
+) -> bool {
+    will_full_sweep && governor_plan.admits_complete_graphql_unit(manual_refresh, required_points)
+}
+
 #[cfg(test)]
 mod full_sweep_commit_tests {
     use super::*;
@@ -51,6 +60,15 @@ mod full_sweep_commit_tests {
     }
 
     #[test]
+    fn focused_work_precedes_the_cursor_committing_broad_sweep() {
+        assert_eq!(
+            full_sweep_stages(true),
+            vec![FullSweepStage::Focused, FullSweepStage::Broad]
+        );
+        assert_eq!(full_sweep_stages(false), vec![FullSweepStage::Broad]);
+    }
+
+    #[test]
     fn complete_global_fetch_commits_both_progress_markers() {
         assert_eq!(
             full_sweep_commit(true, true, true),
@@ -59,6 +77,20 @@ mod full_sweep_commit_tests {
                 sweep_timer: true,
             }
         );
+    }
+
+    #[test]
+    fn an_unknown_graphql_budget_only_admits_the_bootstrap_request() {
+        let plan = lazybox_gh::BackgroundPlan {
+            graphql_points: 4,
+            rest_core_points: 1,
+            graphql_budget_current: false,
+            pressure: false,
+            next_eligible_at: None,
+            tick_interval: Duration::from_secs(60),
+        };
+        assert!(!full_sweep_admitted(true, false, &plan, 3));
+        assert!(full_sweep_admitted(true, true, &plan, 3));
     }
 }
 
@@ -244,6 +276,20 @@ pub(super) enum GhFetchPlan {
     Hot,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FullSweepStage {
+    Focused,
+    Broad,
+}
+
+fn full_sweep_stages(has_focused_targets: bool) -> Vec<FullSweepStage> {
+    if has_focused_targets {
+        vec![FullSweepStage::Focused, FullSweepStage::Broad]
+    } else {
+        vec![FullSweepStage::Broad]
+    }
+}
+
 pub(super) fn gh_fetch_plan(full_sweep_due: bool, poll_notifications: bool) -> GhFetchPlan {
     if full_sweep_due {
         GhFetchPlan::Full
@@ -354,15 +400,7 @@ impl GhSource {
             self.filter.pr_enabled(),
             self.filter.issue_enabled() || !self.mention_allowed_logins.is_empty(),
         );
-        if self.scheduling.run_global {
-            forecast.global_points
-        } else if self.filter.pr_enabled() {
-            forecast
-                .repo_base_points
-                .saturating_add(forecast.per_repo_points)
-        } else {
-            forecast.repo_base_points
-        }
+        forecast.required_points(self.scheduling.run_global, self.filter.pr_enabled())
     }
 
     fn governor_status(&self) -> String {
@@ -1378,6 +1416,12 @@ impl TaskSource for GhSource {
         let mut guard = self.pending_actions.lock();
         std::mem::take(&mut *guard)
     }
+    fn record_items_changed(&self, count: usize) {
+        self.client.note_items_changed(count);
+        let governor = self.governor_status();
+        log_rate_budget(&governor);
+        self.emit_progress(format!("Governor: {governor}"));
+    }
     /// Tiered fetch:
     ///
     /// 1. **Hot targets** — bounded focus/live/recent-own workspaces,
@@ -1402,48 +1446,79 @@ impl TaskSource for GhSource {
         Box::pin(async move {
             let result = async {
                 self.set_retry_after_secs(None);
+                let manual_refresh = self.client.manual_refresh_pending();
+                if self.client.should_full_sweep()
+                    && !manual_refresh
+                    && !self.governor_plan.graphql_budget_current
+                {
+                    self.emit_progress("Learning the current GitHub GraphQL budget…");
+                    self.client
+                        .bootstrap_graphql_budget()
+                        .await
+                        .map_err(lazybox_core::ProviderError::from)?;
+                    self.set_last_kind(FetchMode::Incremental);
+                    return Ok::<_, lazybox_core::ProviderError>(Vec::new());
+                }
                 let required_sweep_points = self.required_sweep_points();
-                let full_sweep_admitted = self.client.should_full_sweep()
-                    && (self.client.manual_refresh_pending()
-                        || self.governor_plan.graphql_points >= required_sweep_points);
-                let (mut tasks, kind) =
-                    match gh_fetch_plan(full_sweep_admitted, self.poll_notifications) {
-                        GhFetchPlan::Full => (self.fetch_full().await?, FetchMode::Full),
-                        GhFetchPlan::Hot => (self.fetch_hot_only().await?, FetchMode::Hot),
-                        GhFetchPlan::Warm => match self.fetch_incremental().await? {
-                            Some(tasks) => (tasks, FetchMode::Incremental),
-                            None => {
-                                if self.governor_plan.graphql_points >= required_sweep_points {
-                                    tracing::info!(
-                                        "incremental returned None; promoting to full sweep"
+                let full_sweep_admitted = full_sweep_admitted(
+                    self.client.should_full_sweep(),
+                    manual_refresh,
+                    &self.governor_plan,
+                    required_sweep_points,
+                );
+                let plan = gh_fetch_plan(full_sweep_admitted, self.poll_notifications);
+                let (tasks, kind) = match plan {
+                    GhFetchPlan::Full => {
+                        let mut focused = Vec::new();
+                        let mut broad = None;
+                        for stage in full_sweep_stages(!self.hot_targets.is_empty()) {
+                            match stage {
+                                FullSweepStage::Focused => {
+                                    let hot_targets = self.hot_notification_targets();
+                                    let requests = rank_targeted_requests(
+                                        &hot_targets,
+                                        &[],
+                                        &self.cold_targets,
                                     );
-                                    (self.fetch_full().await?, FetchMode::Full)
-                                } else {
-                                    tracing::info!(
-                                        allowance = self.governor_plan.graphql_points,
-                                        "incremental failed; full sweep deferred by governor"
+                                    let targeted = self.fetch_targeted(requests).await?;
+                                    focused = apply_needs_reply_toggle(
+                                        filter_github_tasks_with_watches(
+                                            targeted.tasks,
+                                            &self.filter,
+                                            &self.scopes,
+                                            &self.watch_repos,
+                                        ),
+                                        self.detect_needs_reply,
                                     );
-                                    (Vec::new(), FetchMode::Incremental)
+                                }
+                                FullSweepStage::Broad => {
+                                    broad = Some(self.fetch_full().await?);
                                 }
                             }
-                        },
-                    };
-
-                if kind == FetchMode::Full && !self.hot_targets.is_empty() {
-                    let hot_targets = self.hot_notification_targets();
-                    let requests = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
-                    let targeted = self.fetch_targeted(requests).await?;
-                    let hot_tasks = apply_needs_reply_toggle(
-                        filter_github_tasks_with_watches(
-                            targeted.tasks,
-                            &self.filter,
-                            &self.scopes,
-                            &self.watch_repos,
-                        ),
-                        self.detect_needs_reply,
-                    );
-                    merge_targeted_tasks(&mut tasks, hot_tasks);
-                }
+                        }
+                        let mut tasks = broad.expect("full sweep stages always include broad");
+                        merge_targeted_tasks(&mut tasks, focused);
+                        (tasks, FetchMode::Full)
+                    }
+                    GhFetchPlan::Hot => (self.fetch_hot_only().await?, FetchMode::Hot),
+                    GhFetchPlan::Warm => match self.fetch_incremental().await? {
+                        Some(tasks) => (tasks, FetchMode::Incremental),
+                        None => {
+                            if self.governor_plan.graphql_points >= required_sweep_points {
+                                tracing::info!(
+                                    "incremental returned None; promoting to full sweep"
+                                );
+                                (self.fetch_full().await?, FetchMode::Full)
+                            } else {
+                                tracing::info!(
+                                    allowance = self.governor_plan.graphql_points,
+                                    "incremental failed; full sweep deferred by governor"
+                                );
+                                (Vec::new(), FetchMode::Incremental)
+                            }
+                        }
+                    },
+                };
 
                 self.queue_auto_fix_actions(&tasks);
                 self.set_last_kind(kind);
@@ -1908,7 +1983,7 @@ pub async fn sources_for(
     bus: tokio::sync::broadcast::Sender<Event>,
     state: &mut TickState,
     viewer_identities: std::sync::Arc<parking_lot::Mutex<Vec<(String, String)>>>,
-    gh_client_cache: std::sync::Arc<parking_lot::Mutex<Option<GhClient>>>,
+    gh_client_cache: crate::registries::GithubClientCache,
 ) -> Vec<Box<dyn TaskSource>> {
     sources_for_with_engagement(
         setup,
@@ -2000,7 +2075,7 @@ pub(super) async fn sources_for_with_engagement(
     bus: tokio::sync::broadcast::Sender<Event>,
     state: &mut TickState,
     viewer_identities: std::sync::Arc<parking_lot::Mutex<Vec<(String, String)>>>,
-    gh_client_cache: std::sync::Arc<parking_lot::Mutex<Option<GhClient>>>,
+    gh_client_cache: crate::registries::GithubClientCache,
     engagement: &EngagementSnapshot,
     poll_notifications: bool,
     cursor_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
@@ -2013,6 +2088,7 @@ pub(super) async fn sources_for_with_engagement(
             .await
         {
             Ok(cred) => {
+                let _initialization = gh_client_cache.lock_initialization().await;
                 // Reuse the cached client when the credential source
                 // AND the token material are unchanged. The source
                 // label alone is rotation-stable ("cmd:gh auth token"
@@ -2031,7 +2107,7 @@ pub(super) async fn sources_for_with_engagement(
                 // Clone the cached client out under a brief std-lock and
                 // release before any `.await` — the cache lock must never
                 // span the `from_credential` network call (issue #92).
-                let cached = gh_client_cache.lock().clone().filter(|c| {
+                let cached = gh_client_cache.cached().filter(|c| {
                     gh_client_reusable(
                         c.credential_source(),
                         c.credential_fingerprint(),
@@ -2162,7 +2238,7 @@ pub(super) async fn sources_for_with_engagement(
                                 let _ = bus.send(Event::ViewerIdentities { logins: snapshot });
                             }
                         }
-                        *gh_client_cache.lock() = Some(client.clone());
+                        gh_client_cache.store(client.clone());
                         // Resolve the `@lazybox` allowlist. Empty YAML
                         // list → fall back to "just the authenticated
                         // viewer", which mirrors the design doc's MVP
@@ -2200,7 +2276,9 @@ pub(super) async fn sources_for_with_engagement(
                         let will_full_sweep = client.should_full_sweep();
                         let now = std::time::Instant::now();
                         let sessioned_repos = engagement.sessioned_repos();
-                        let governor_plan = client.begin_background_tick(poll_interval);
+                        let governor_interval =
+                            super::background_tick_interval(poll_interval, engagement.hot_count());
+                        let governor_plan = client.begin_background_tick(governor_interval);
                         let want_prs = filter.pr_enabled();
                         let scan_issues = filter.issue_enabled() || !mention_allowed.is_empty();
                         let forecast = client.background_sweep_forecast(want_prs, scan_issues);
@@ -2210,29 +2288,22 @@ pub(super) async fn sources_for_with_engagement(
                             state.round_robin.tick,
                             DEFAULT_ROUND_ROBIN_N,
                         );
-                        let required_sweep_points = if global_due {
-                            forecast.global_points
-                        } else if want_prs {
-                            forecast
-                                .repo_base_points
-                                .saturating_add(forecast.per_repo_points)
-                        } else {
-                            forecast.repo_base_points
-                        };
+                        let required_sweep_points = forecast.required_points(global_due, want_prs);
                         let max_repos = if client.manual_refresh_pending() {
                             usize::MAX
-                        } else if global_due || forecast.per_repo_points == 0 {
-                            0
                         } else {
-                            ((governor_plan
-                                .graphql_points
-                                .saturating_sub(forecast.repo_base_points)
-                                / forecast.per_repo_points) as usize)
-                                .min(DEFAULT_ROUND_ROBIN_N)
+                            forecast.repo_capacity(
+                                governor_plan.graphql_points,
+                                global_due,
+                                DEFAULT_ROUND_ROBIN_N,
+                            )
                         };
-                        let full_sweep_admitted = will_full_sweep
-                            && (client.manual_refresh_pending()
-                                || governor_plan.graphql_points >= required_sweep_points);
+                        let full_sweep_admitted = full_sweep_admitted(
+                            will_full_sweep,
+                            client.manual_refresh_pending(),
+                            &governor_plan,
+                            required_sweep_points,
+                        );
                         let scheduling = plan_round_robin_tick_budgeted(
                             &mut state.round_robin,
                             sessioned_repos,
@@ -2363,7 +2434,7 @@ pub async fn default_sources(
     // need the cached value visible to other connections.
     let mut throwaway_state = TickState::default();
     let throwaway_viewers = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
-    let throwaway_client_cache = std::sync::Arc::new(parking_lot::Mutex::new(None));
+    let throwaway_client_cache = crate::registries::GithubClientCache::default();
     sources_for(
         &setup,
         bus,

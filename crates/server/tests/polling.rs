@@ -4641,6 +4641,19 @@ fn hot_targets_shorten_the_regular_cadence() {
 }
 
 #[test]
+fn governor_uses_the_same_cadence_as_hot_scheduling() {
+    let interval = Duration::from_secs(60);
+    assert_eq!(
+        polling::background_tick_interval(interval, 1),
+        polling::next_tick_delay_with_hot(interval, None, false, Duration::from_secs(5), 1,)
+    );
+    assert_eq!(
+        polling::background_tick_interval(interval, 0),
+        Duration::from_secs(60)
+    );
+}
+
+#[test]
 fn rate_limit_backoff_beats_the_hot_cadence() {
     let d = polling::next_tick_delay_with_hot(
         Duration::from_secs(60),

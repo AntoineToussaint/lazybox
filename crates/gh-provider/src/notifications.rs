@@ -195,7 +195,7 @@ pub(crate) struct NotificationsState {
     /// When the last full sweep completed. `None` means "never" — the
     /// first tick after daemon start always runs a full sweep to
     /// bootstrap the inbox.
-    pub(crate) last_full_sweep_at: Option<std::time::Instant>,
+    pub(crate) last_full_sweep_at: Option<DateTime<Utc>>,
     /// "Skip the cheap heartbeat round-trip and go straight to full
     /// sweep" deadline. Armed by `note_heartbeat_failed` when the
     /// notifications endpoint errors (auth scope missing, REST
@@ -234,7 +234,7 @@ pub(crate) struct NotificationsState {
     /// windowed search can't see PRs that left the window without an
     /// update (silently closed, un-involved, transferred), so one
     /// sweep per `FULL_RECONCILE_INTERVAL` drops the window.
-    pub(crate) last_full_reconcile_at: Option<std::time::Instant>,
+    pub(crate) last_full_reconcile_at: Option<DateTime<Utc>>,
 }
 
 impl NotificationsState {
@@ -252,6 +252,10 @@ impl NotificationsState {
     /// timer arithmetic can be unit-tested without spinning up a real
     /// client.
     pub fn is_full_sweep_due(&self, threshold: std::time::Duration) -> bool {
+        self.is_full_sweep_due_at(threshold, Utc::now())
+    }
+
+    fn is_full_sweep_due_at(&self, threshold: std::time::Duration, now: DateTime<Utc>) -> bool {
         if self.force_full_sweep {
             return true;
         }
@@ -260,7 +264,11 @@ impl NotificationsState {
         }
         match self.last_full_sweep_at {
             None => true,
-            Some(t) => t.elapsed() >= threshold,
+            Some(t) if t > now => true,
+            Some(t) => now
+                .signed_duration_since(t)
+                .to_std()
+                .is_ok_and(|elapsed| elapsed >= threshold),
         }
     }
 
@@ -287,12 +295,20 @@ impl NotificationsState {
     /// broken heartbeat shouldn't force the heavy full download every
     /// cycle.
     pub fn is_full_reconcile_due(&self, threshold: std::time::Duration) -> bool {
+        self.is_full_reconcile_due_at(threshold, Utc::now())
+    }
+
+    fn is_full_reconcile_due_at(&self, threshold: std::time::Duration, now: DateTime<Utc>) -> bool {
         if self.force_full_sweep {
             return true;
         }
         match self.last_full_reconcile_at {
             None => true,
-            Some(t) => t.elapsed() >= threshold,
+            Some(t) if t > now => true,
+            Some(t) => now
+                .signed_duration_since(t)
+                .to_std()
+                .is_ok_and(|elapsed| elapsed >= threshold),
         }
     }
 
@@ -330,31 +346,23 @@ pub struct SyncCursors {
 }
 
 impl NotificationsState {
-    pub(crate) fn cursors(&self, now: DateTime<Utc>) -> SyncCursors {
-        let to_wall = |instant: std::time::Instant| {
-            now - chrono::Duration::from_std(instant.elapsed()).unwrap_or_default()
-        };
+    pub(crate) fn cursors(&self) -> SyncCursors {
         SyncCursors {
             last_modified: self.last_modified.clone(),
-            last_full_sweep_at: self.last_full_sweep_at.map(to_wall),
+            last_full_sweep_at: self.last_full_sweep_at,
             last_pr_sweep_at: self.last_pr_sweep_at_utc,
             last_merged_sweep_at: self.last_merged_sweep_at_utc,
-            last_full_reconcile_at: self.last_full_reconcile_at.map(to_wall),
+            last_full_reconcile_at: self.last_full_reconcile_at,
         }
     }
 
     pub(crate) fn restore_cursors(&mut self, cursors: SyncCursors, now: DateTime<Utc>) {
-        let to_mono = |wall: DateTime<Utc>| {
-            let age = now.signed_duration_since(wall).to_std().unwrap_or_default();
-            std::time::Instant::now()
-                .checked_sub(age)
-                .unwrap_or_else(std::time::Instant::now)
-        };
+        let valid = |wall: Option<DateTime<Utc>>| wall.filter(|value| *value <= now);
         self.last_modified = cursors.last_modified;
-        self.last_full_sweep_at = cursors.last_full_sweep_at.map(to_mono);
-        self.last_pr_sweep_at_utc = cursors.last_pr_sweep_at;
-        self.last_merged_sweep_at_utc = cursors.last_merged_sweep_at;
-        self.last_full_reconcile_at = cursors.last_full_reconcile_at.map(to_mono);
+        self.last_full_sweep_at = valid(cursors.last_full_sweep_at);
+        self.last_pr_sweep_at_utc = valid(cursors.last_pr_sweep_at);
+        self.last_merged_sweep_at_utc = valid(cursors.last_merged_sweep_at);
+        self.last_full_reconcile_at = valid(cursors.last_full_reconcile_at);
     }
 }
 
@@ -444,17 +452,13 @@ mod tests {
         let now = Utc::now();
         let state = NotificationsState {
             last_modified: Some("Wed, 30 Jul 2026 10:00:00 GMT".to_string()),
-            last_full_sweep_at: Some(
-                std::time::Instant::now() - std::time::Duration::from_secs(120),
-            ),
+            last_full_sweep_at: Some(now - chrono::Duration::seconds(120)),
             last_pr_sweep_at_utc: Some(now - chrono::Duration::minutes(2)),
             last_merged_sweep_at_utc: Some(now - chrono::Duration::minutes(3)),
-            last_full_reconcile_at: Some(
-                std::time::Instant::now() - std::time::Duration::from_secs(1800),
-            ),
+            last_full_reconcile_at: Some(now - chrono::Duration::seconds(1800)),
             ..NotificationsState::default()
         };
-        let encoded = serde_json::to_string(&state.cursors(now)).expect("serialize cursors");
+        let encoded = serde_json::to_string(&state.cursors()).expect("serialize cursors");
         let cursors: SyncCursors = serde_json::from_str(&encoded).expect("deserialize cursors");
         let mut restored = NotificationsState::default();
         restored.restore_cursors(cursors, now);
@@ -467,6 +471,38 @@ mod tests {
         );
         assert!(restored.last_full_sweep_at.is_some());
         assert!(restored.last_full_reconcile_at.is_some());
+    }
+
+    #[test]
+    fn restart_preserves_elapsed_age_and_rejects_future_cursors() {
+        let now = Utc.with_ymd_and_hms(2026, 7, 30, 12, 0, 0).unwrap();
+        let mut old = NotificationsState::default();
+        old.restore_cursors(
+            SyncCursors {
+                last_full_sweep_at: Some(now - chrono::Duration::hours(2)),
+                last_full_reconcile_at: Some(now - chrono::Duration::hours(2)),
+                ..SyncCursors::default()
+            },
+            now,
+        );
+        assert!(old.is_full_sweep_due_at(std::time::Duration::from_secs(600), now));
+        assert!(old.is_full_reconcile_due_at(std::time::Duration::from_secs(3600), now));
+
+        let mut future = NotificationsState::default();
+        future.restore_cursors(
+            SyncCursors {
+                last_full_sweep_at: Some(now + chrono::Duration::hours(1)),
+                last_pr_sweep_at: Some(now + chrono::Duration::hours(1)),
+                last_merged_sweep_at: Some(now + chrono::Duration::hours(1)),
+                last_full_reconcile_at: Some(now + chrono::Duration::hours(1)),
+                ..SyncCursors::default()
+            },
+            now,
+        );
+        assert!(future.is_full_sweep_due_at(std::time::Duration::from_secs(600), now));
+        assert!(future.is_full_reconcile_due_at(std::time::Duration::from_secs(3600), now));
+        assert!(future.last_pr_sweep_at_utc.is_none());
+        assert!(future.last_merged_sweep_at_utc.is_none());
     }
 
     #[test]
@@ -538,7 +574,7 @@ mod tests {
         // heartbeat and goes straight to the sweep.
         let s = NotificationsState {
             // Sweep happened RIGHT now — timer alone wouldn't promote.
-            last_full_sweep_at: Some(std::time::Instant::now()),
+            last_full_sweep_at: Some(Utc::now()),
             // Back-off armed 100ms into the future.
             heartbeat_back_off_until: Some(
                 std::time::Instant::now() + std::time::Duration::from_millis(100),
@@ -556,7 +592,7 @@ mod tests {
         // heartbeat resumes on the next tick.
         let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
         let s = NotificationsState {
-            last_full_sweep_at: Some(std::time::Instant::now()),
+            last_full_sweep_at: Some(Utc::now()),
             heartbeat_back_off_until: Some(past),
             ..Default::default()
         };
@@ -570,7 +606,7 @@ mod tests {
         // sync cheap: between sweeps, every tick takes the cheap
         // notifications-heartbeat path. Verify the timer does its job.
         let s = NotificationsState {
-            last_full_sweep_at: Some(std::time::Instant::now()),
+            last_full_sweep_at: Some(Utc::now()),
             ..Default::default()
         };
         assert!(!s.is_full_sweep_due(std::time::Duration::from_secs(600)));
@@ -587,7 +623,7 @@ mod tests {
         // issue (no self-notification) wouldn't surface until the next
         // scheduled sweep, up to 10 min away.
         let s = NotificationsState {
-            last_full_sweep_at: Some(std::time::Instant::now()),
+            last_full_sweep_at: Some(Utc::now()),
             force_full_sweep: true,
             ..Default::default()
         };
@@ -607,7 +643,7 @@ mod tests {
         // A reconcile just ran → the next global sweep can narrow to
         // `updated:>=` instead of re-downloading every PR.
         let s = NotificationsState {
-            last_full_reconcile_at: Some(std::time::Instant::now()),
+            last_full_reconcile_at: Some(Utc::now()),
             ..Default::default()
         };
         assert!(!s.is_full_reconcile_due(std::time::Duration::from_secs(3600)));
@@ -622,7 +658,7 @@ mod tests {
         // un-involved — is reconciled immediately, not at the next
         // scheduled reconcile up to an hour away.
         let s = NotificationsState {
-            last_full_reconcile_at: Some(std::time::Instant::now()),
+            last_full_reconcile_at: Some(Utc::now()),
             force_full_sweep: true,
             ..Default::default()
         };
@@ -635,7 +671,7 @@ mod tests {
         // the heavy unwindowed download every cycle — a windowed sweep
         // still catches every changed open PR.
         let s = NotificationsState {
-            last_full_reconcile_at: Some(std::time::Instant::now()),
+            last_full_reconcile_at: Some(Utc::now()),
             heartbeat_back_off_until: Some(
                 std::time::Instant::now() + std::time::Duration::from_secs(60),
             ),

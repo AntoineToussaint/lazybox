@@ -9,96 +9,186 @@ struct HourReplay {
     reconcile_max_age_secs: u64,
 }
 
-fn replay(full_sweep_secs: u32, repos_per_sweep: u32, changed_targets: u32) -> HourReplay {
-    let sweeps = 3600 / full_sweep_secs;
-    let fixed_graphql = 4;
-    let graphql_requests = sweeps * (fixed_graphql + repos_per_sweep) + changed_targets;
+fn captured_current_main(changed_targets: u32) -> HourReplay {
     HourReplay {
         rest_requests: 60,
-        graphql_requests,
-        graphql_points: graphql_requests,
-        response_bytes: u64::from(sweeps) * 150_000
-            + u64::from(sweeps * repos_per_sweep) * 1_000
-            + u64::from(changed_targets) * 12_000,
-        request_p95_ms: if repos_per_sweep > 3 { 13_800 } else { 1_800 },
+        graphql_requests: 84 + changed_targets,
+        graphql_points: 84 + changed_targets,
+        response_bytes: 960_000 + u64::from(changed_targets) * 12_000,
+        request_p95_ms: 13_800,
         notification_freshness_p95_secs: 60,
         reconcile_max_age_secs: 3600,
     }
 }
 
-fn current_main(changed_targets: u32) -> HourReplay {
-    replay(600, 10, changed_targets)
+fn execute_graphql(
+    budget: &mut lazybox_gh::RateBudget,
+    class: &str,
+    remaining: &mut u32,
+    used: &mut u32,
+    reset_at: chrono::DateTime<chrono::Utc>,
+    observed_at: std::time::Instant,
+) -> Option<(u64, u64)> {
+    budget
+        .admit(
+            lazybox_gh::ApiResource::Graphql,
+            class,
+            lazybox_gh::RequestPriority::Recent,
+            1,
+        )
+        .ok()?;
+    *remaining = remaining.saturating_sub(1);
+    *used = used.saturating_add(1);
+    let (bytes, duration) = match class {
+        "PR search" => (150_000, std::time::Duration::from_millis(1_800)),
+        "single-PR notification deep-fetch" => (12_000, std::time::Duration::from_millis(700)),
+        _ => (1_000, std::time::Duration::from_millis(350)),
+    };
+    budget.observe_graphql_response(
+        class,
+        lazybox_gh::RemoteRateLimit {
+            remaining: *remaining,
+            limit: 5000,
+            reset_at,
+            observed_at,
+        },
+        *used,
+        1,
+        200,
+        bytes as usize,
+        duration,
+    );
+    Some((bytes, duration.as_millis() as u64))
 }
 
 fn governed(changed_targets: u32, external_pressure: bool) -> HourReplay {
-    if external_pressure {
-        use chrono::Utc;
-        use lazybox_gh::{RateBudget, RemoteRateLimit};
-        use std::time::{Duration, Instant};
+    use chrono::Utc;
+    use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
-        let wall_now = Utc::now();
-        let mono_now = Instant::now();
-        let reset_at = wall_now + chrono::Duration::hours(1);
-        let mut budget = RateBudget::default_for_lazybox();
-        budget.observe_graphql_response(
-            "baseline",
-            RemoteRateLimit {
-                remaining: 5000,
+    let wall_start = Utc::now();
+    let mono_start = Instant::now();
+    let reset_at = wall_start + chrono::Duration::hours(1);
+    let mut budget = lazybox_gh::RateBudget::default_for_lazybox();
+    budget.observe(lazybox_gh::RemoteRateLimit {
+        remaining: 5000,
+        limit: 5000,
+        reset_at,
+        observed_at: mono_start,
+    });
+    let client = lazybox_gh::GhClient::stub_with_rate_limit_for_tests(
+        "report", "report", 5000, 5000, reset_at,
+    )
+    .expect("stub client");
+    let forecast = client.background_sweep_forecast(true, true);
+    let mut rotation = lazybox_server::polling::RoundRobinState::default();
+    for index in 0..30 {
+        rotation.record_sync(
+            &format!("owner/repo-{index:02}"),
+            mono_start - Duration::from_secs((30 - index) * 60),
+        );
+    }
+    let sessioned: HashSet<String> = (0..10)
+        .map(|index| format!("owner/repo-{index:02}"))
+        .collect();
+    let tick_interval =
+        lazybox_server::polling::background_tick_interval(Duration::from_secs(60), 0);
+    let sweep_minutes = lazybox_gh::GhClient::FULL_SWEEP_INTERVAL.as_secs() / 60;
+    let mut remaining = 5000u32;
+    let mut used = 0u32;
+    let mut response_bytes = 0u64;
+    let mut changes_left = changed_targets;
+
+    for minute in 0..60u64 {
+        let wall_now = wall_start + chrono::Duration::minutes(minute as i64);
+        let mono_now = mono_start + Duration::from_secs(minute * 60);
+        if external_pressure && minute == 1 {
+            remaining = 2200;
+            used = 2800;
+            budget.observe(lazybox_gh::RemoteRateLimit {
+                remaining,
                 limit: 5000,
                 reset_at,
                 observed_at: mono_now,
-            },
-            0,
-            0,
-            200,
-            0,
-            Duration::ZERO,
-            0,
+            });
+        }
+        let plan = budget.begin_background_tick(tick_interval, wall_now, mono_now);
+        let sweep_due = minute.is_multiple_of(sweep_minutes);
+        let global_due = lazybox_server::polling::will_run_global(
+            rotation.cursor.len(),
+            rotation.tick,
+            lazybox_server::polling::DEFAULT_ROUND_ROBIN_N,
         );
-        budget.observe_graphql_response(
-            "external-drain",
-            RemoteRateLimit {
-                remaining: 2200,
-                limit: 5000,
+        let required = forecast.required_points(global_due, true);
+        let admitted = sweep_due && plan.admits_complete_graphql_unit(false, required);
+        let max_repos = forecast.repo_capacity(
+            plan.graphql_points,
+            global_due,
+            lazybox_server::polling::DEFAULT_ROUND_ROBIN_N,
+        );
+        let pick = lazybox_server::polling::plan_round_robin_tick_budgeted(
+            &mut rotation,
+            &sessioned,
+            admitted,
+            lazybox_server::polling::DEFAULT_ROUND_ROBIN_N,
+            max_repos,
+            mono_now,
+        );
+
+        let mut operations = Vec::new();
+        if admitted {
+            if pick.run_global {
+                operations.push("PR search");
+            } else {
+                operations.extend(std::iter::repeat_n("round-robin-repo", pick.repos.len()));
+            }
+            operations.extend(["review-requested", "merged-sweep", "issues search"]);
+        }
+        if changes_left > 0 {
+            operations.push("single-PR notification deep-fetch");
+            changes_left -= 1;
+        }
+        for class in operations {
+            if let Some((bytes, _)) = execute_graphql(
+                &mut budget,
+                class,
+                &mut remaining,
+                &mut used,
                 reset_at,
-                observed_at: mono_now + Duration::from_secs(60),
-            },
-            2800,
-            0,
-            200,
-            0,
-            Duration::ZERO,
-            0,
-        );
-        let plan = budget.begin_background_tick(
-            Duration::from_secs(60),
-            wall_now + chrono::Duration::minutes(1),
-            mono_now + Duration::from_secs(60),
-        );
-        assert_eq!(
-            plan.graphql_points, 0,
-            "projected external burn must consume the scheduled allowance"
-        );
-        return HourReplay {
-            rest_requests: 60,
-            graphql_requests: 0,
-            graphql_points: 0,
-            response_bytes: 0,
-            request_p95_ms: 0,
-            notification_freshness_p95_secs: 60,
-            reconcile_max_age_secs: 3660,
-        };
+                mono_now,
+            ) {
+                response_bytes += bytes;
+            }
+        }
     }
 
-    replay(
-        lazybox_gh::GhClient::FULL_SWEEP_INTERVAL.as_secs() as u32,
-        lazybox_server::polling::DEFAULT_ROUND_ROBIN_N as u32,
-        changed_targets,
-    )
+    let snapshot = budget.snapshot();
+    if external_pressure {
+        assert_eq!(
+            snapshot
+                .resources
+                .iter()
+                .find(|resource| resource.resource == "graphql")
+                .map(|resource| resource.allowance),
+            Some(0),
+            "the production governor must stop scheduled work after the external drain"
+        );
+    }
+
+    HourReplay {
+        rest_requests: 60,
+        graphql_requests: snapshot.total.requests as u32,
+        graphql_points: snapshot.total.graphql_points as u32,
+        response_bytes,
+        request_p95_ms: snapshot.request_p95_ms.unwrap_or(0),
+        notification_freshness_p95_secs: tick_interval.as_secs(),
+        reconcile_max_age_secs: lazybox_gh::GhClient::FULL_RECONCILE_INTERVAL.as_secs()
+            + u64::from(external_pressure) * tick_interval.as_secs(),
+    }
 }
 
-#[test]
-fn reproducible_four_scenario_baseline_and_after_report() {
+#[tokio::test]
+async fn reproducible_four_scenario_baseline_and_after_report() {
     let scenarios = [
         ("quiet", 0, false),
         ("sparse notifications", 6, false),
@@ -106,7 +196,7 @@ fn reproducible_four_scenario_baseline_and_after_report() {
         ("external consumer", 0, true),
     ];
     for (name, changes, external_pressure) in scenarios {
-        let baseline = current_main(changes);
+        let baseline = captured_current_main(changes);
         let after = governed(changes, external_pressure);
         eprintln!("{name}: baseline={baseline:?} after={after:?}");
 
@@ -126,7 +216,7 @@ fn reproducible_four_scenario_baseline_and_after_report() {
         }
     }
 
-    let baseline = current_main(0);
+    let baseline = captured_current_main(0);
     let after = governed(0, false);
     let reduction = 1.0 - f64::from(after.graphql_points) / f64::from(baseline.graphql_points);
     assert!(

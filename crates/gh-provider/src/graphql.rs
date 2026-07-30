@@ -61,6 +61,7 @@ use serde::Deserialize;
 const SEARCH_QUERY: &str = r#"
 query($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
@@ -158,6 +159,35 @@ pub struct GqlResponse {
 #[derive(Deserialize, Debug)]
 pub struct GqlMutationResponse {
     pub errors: Option<Vec<GqlError>>,
+}
+
+const RATE_BUDGET_QUERY: &str = r#"
+query {
+  viewer { login }
+  rateLimit { cost limit remaining resetAt used }
+}
+"#;
+
+pub fn rate_budget_body() -> serde_json::Value {
+    serde_json::json!({ "query": RATE_BUDGET_QUERY })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlRateBudgetResponse {
+    pub data: Option<GqlRateBudgetData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlRateBudgetData {
+    pub viewer: GqlRateBudgetViewer,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: GqlRateLimit,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlRateBudgetViewer {
+    pub login: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -263,6 +293,8 @@ fn default_limit() -> u32 {
 #[derive(Deserialize, Debug)]
 pub struct GqlSearch {
     pub nodes: Vec<GqlPr>,
+    #[serde(rename = "issueCount", default)]
+    pub issue_count: u32,
     #[serde(rename = "pageInfo", default)]
     pub page_info: Option<GqlPageInfo>,
 }
@@ -665,6 +697,10 @@ pub fn merged_sweep_query(
 /// budget is closer to the per-request side than the per-result
 /// side, so smaller pages win.
 const PR_PAGE_SIZE: u32 = 25;
+
+pub fn pr_page_count(issue_count: u32) -> u32 {
+    issue_count.div_ceil(PR_PAGE_SIZE).max(1)
+}
 
 pub fn query_body_after(search_query: &str, after: Option<&str>) -> serde_json::Value {
     // Omit `after` entirely when None — sending `"after": null` in the
@@ -2701,6 +2737,7 @@ fn extract_repo_from_url(url: &str) -> String {
 const ISSUES_QUERY: &str = r#"
 query($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
+    issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on Issue {
@@ -2786,6 +2823,8 @@ pub struct GqlIssueRepo {
 #[derive(Deserialize, Debug)]
 pub struct GqlIssueSearch {
     pub nodes: Vec<GqlIssue>,
+    #[serde(rename = "issueCount", default)]
+    pub issue_count: u32,
     #[serde(rename = "pageInfo", default)]
     pub page_info: Option<GqlPageInfo>,
 }
@@ -2821,16 +2860,22 @@ pub fn default_issues_qualifiers() -> Vec<String> {
     ]
 }
 
+const ISSUE_PAGE_SIZE: u32 = 100;
+
+pub fn issue_page_count(issue_count: u32) -> u32 {
+    issue_count.div_ceil(ISSUE_PAGE_SIZE).max(1)
+}
+
 pub fn issues_query_body(search_query: &str, after: Option<&str>) -> serde_json::Value {
     let variables = match after {
         Some(cursor) => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": ISSUE_PAGE_SIZE,
             "after": cursor,
         }),
         None => serde_json::json!({
             "query": search_query,
-            "first": 100,
+            "first": ISSUE_PAGE_SIZE,
         }),
     };
     serde_json::json!({
@@ -3745,6 +3790,10 @@ mod tests {
             SEARCH_QUERY.contains("totalCount"),
             "comments.totalCount disappeared — `unread_count` would collapse to 0 on inbox-scan",
         );
+        assert!(
+            SEARCH_QUERY.contains("issueCount"),
+            "the governor needs the total result count to price every page",
+        );
         // Hard guards: previous bloated numbers (both pre-trim AND
         // the intermediate #17 band-aid trim) must NOT come back.
         // The band-aid (`comments(first: 5)` etc.) was superseded
@@ -3772,6 +3821,10 @@ mod tests {
 
     #[test]
     fn issues_query_connection_sizes_are_pinned_low() {
+        assert!(ISSUES_QUERY.contains("issueCount"));
+        assert_eq!(pr_page_count(0), 1);
+        assert_eq!(pr_page_count(26), 2);
+        assert_eq!(issue_page_count(101), 2);
         assert!(
             ISSUES_QUERY.contains("comments(first: 15)"),
             "issue comments cap drifted",

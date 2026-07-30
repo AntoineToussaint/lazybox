@@ -87,7 +87,7 @@ pub(super) async fn upsert_with_context(
     config: &ServerConfig,
     ctx: &mut UpsertContext,
     task: Task,
-) {
+) -> CommitOutcome {
     // Skip re-creating workspaces the user explicitly archived
     // (`x x`). Without this, every 60s tick re-creates the row
     // from the upstream task and the dismiss feels broken. Cached
@@ -98,7 +98,7 @@ pub(super) async fn upsert_with_context(
             workspace_key = %candidate_key,
             "upsert: skipping archived workspace"
         );
-        return;
+        return CommitOutcome::Unchanged;
     }
 
     if is_pr_task(&task) {
@@ -131,13 +131,12 @@ pub(super) async fn upsert_with_context(
                 pr_workspace = %pr_key,
                 "routing issue upsert into PR workspace (closingIssuesReferences)"
             );
-            upsert_into_workspace_key(config, &pr_key, task).await;
-            return;
+            return upsert_into_workspace_key(config, &pr_key, task).await;
         }
     }
 
     let key = WorkspaceKey::new(candidate_key);
-    upsert_into_workspace_key(config, &key, task).await;
+    upsert_into_workspace_key(config, &key, task).await
 }
 
 /// Inner upsert: load workspace at `key`, attach the task, migrate
@@ -149,7 +148,7 @@ pub(super) async fn upsert_into_workspace_key(
     config: &ServerConfig,
     key: &WorkspaceKey,
     task: Task,
-) {
+) -> CommitOutcome {
     // LOST-UPDATE GUARD: this function is a load→modify→commit that
     // spans awaits (`prepare_upsert` → `commit_merge`). Detached
     // mutation handlers (mark-read, snooze, layout) run concurrently
@@ -186,7 +185,7 @@ pub(super) async fn upsert_into_workspace_key(
                 workspace_key = %key.as_str(),
                 "upsert: skipping merged PR with no existing workspace (recently-merged sweep back-fill only)"
             );
-            return;
+            return CommitOutcome::Unchanged;
         }
         merged_transition_pr_number(prev.as_ref(), &task).map(TerminalCleanup::MergedPr)
     } else if !task.is_pr() && task.state == lazybox_core::TaskState::Closed {
@@ -233,7 +232,7 @@ pub(super) async fn upsert_into_workspace_key(
     //    committing would overwrite the preserved row with
     //    freshly-derived state, so this poll's update is dropped.
     let Some((workspace, pending_merges)) = prepare_upsert(config, key, task).await else {
-        return;
+        return CommitOutcome::Unchanged;
     };
 
     // Auto-merge signal, captured off the final in-memory state before
@@ -271,6 +270,7 @@ pub(super) async fn upsert_into_workspace_key(
     } else if reopened_issue {
         handlers::cancel_pending_removal(config, key).await;
     }
+    commit_outcome
 }
 
 /// A workspace's primary task just reached a terminal state that makes

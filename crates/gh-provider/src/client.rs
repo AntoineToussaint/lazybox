@@ -287,6 +287,28 @@ pub struct BackgroundSweepForecast {
     pub per_repo_points: u32,
 }
 
+impl BackgroundSweepForecast {
+    pub fn required_points(self, run_global: bool, want_prs: bool) -> u32 {
+        if run_global {
+            self.global_points
+        } else if want_prs {
+            self.repo_base_points.saturating_add(self.per_repo_points)
+        } else {
+            self.repo_base_points
+        }
+    }
+
+    pub fn repo_capacity(self, allowance: u32, run_global: bool, limit: usize) -> usize {
+        if run_global || self.per_repo_points == 0 {
+            return 0;
+        }
+        (allowance.saturating_sub(self.repo_base_points) / self.per_repo_points)
+            .try_into()
+            .unwrap_or(usize::MAX)
+            .min(limit)
+    }
+}
+
 #[derive(Debug)]
 struct PrFetchOutcome {
     tasks: Vec<Task>,
@@ -605,9 +627,11 @@ fn request_profile(
     use crate::rate_budget::{ApiResource, RequestPriority};
     match operation {
         "notifications heartbeat" => (ApiResource::rest("core"), RequestPriority::Recent),
+        "budget-bootstrap" => (ApiResource::Graphql, RequestPriority::Recent),
         "hot-target batch query" => (ApiResource::Graphql, RequestPriority::Focused),
         "single-PR notification deep-fetch"
         | "single-issue notification deep-fetch"
+        | "PR details background prefetch"
         | "PR search"
         | "issues search"
         | "review-requested"
@@ -832,6 +856,37 @@ impl GhClient {
         self.rate_snapshot().compact()
     }
 
+    pub async fn bootstrap_graphql_budget(&self) -> Result<(), GhError> {
+        self.acquire_or_block("budget-bootstrap")?;
+        let response: graphql::GqlRateBudgetResponse = self
+            .post_graphql_with_retry("budget-bootstrap", &graphql::rate_budget_body())
+            .await?;
+        if let Some(errors) = response.errors {
+            let joined = errors
+                .iter()
+                .map(graphql::GqlError::full)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(format!(
+                "GraphQL budget bootstrap: {joined}"
+            )));
+        }
+        let data = response
+            .data
+            .ok_or_else(|| GhError::Graphql("GraphQL budget bootstrap returned no data".into()))?;
+        if data.viewer.login != self.user {
+            return Err(GhError::Graphql(
+                "GraphQL budget bootstrap returned a different viewer".into(),
+            ));
+        }
+        tracing::debug!(
+            remaining = data.rate_limit.remaining,
+            limit = data.rate_limit.limit,
+            "GraphQL budget bootstrapped"
+        );
+        Ok(())
+    }
+
     pub fn background_sweep_forecast(
         &self,
         want_prs: bool,
@@ -839,7 +894,7 @@ impl GhClient {
     ) -> BackgroundSweepForecast {
         let budget = self.budget.lock();
         let issue_points = if scan_issues {
-            budget.forecast("issues search", 1)
+            budget.unit_forecast("issues search", 1)
         } else {
             0
         };
@@ -851,14 +906,14 @@ impl GhClient {
             };
         }
 
-        let reviewer_points = budget.forecast("review-requested", 1);
-        let merged_points = budget.forecast("merged-sweep", 1);
+        let reviewer_points = budget.unit_forecast("review-requested", 1);
+        let merged_points = budget.unit_forecast("merged-sweep", 1);
         let watched_points = budget
-            .forecast("watched-repo", 1)
+            .unit_forecast("watched-repo", 1)
             .saturating_mul(self.watch_repos.len() as u32);
         BackgroundSweepForecast {
             global_points: budget
-                .forecast("PR search", 1)
+                .unit_forecast("PR search", 1)
                 .saturating_add(reviewer_points)
                 .saturating_add(merged_points)
                 .saturating_add(watched_points)
@@ -866,7 +921,7 @@ impl GhClient {
             repo_base_points: reviewer_points
                 .saturating_add(merged_points)
                 .saturating_add(issue_points),
-            per_repo_points: budget.forecast("round-robin-repo", 1),
+            per_repo_points: budget.unit_forecast("round-robin-repo", 1),
         }
     }
 
@@ -1219,7 +1274,6 @@ impl GhClient {
                         status,
                         byte_len,
                         elapsed,
-                        0,
                     );
                 } else {
                     self.budget.lock().observe_failed_response(
@@ -1288,15 +1342,17 @@ impl GhClient {
         resource: crate::rate_budget::ApiResource,
         started: std::time::Instant,
         succeeded: bool,
-        items: usize,
     ) {
         self.budget.lock().observe_unreported_response(
             operation,
             resource,
             if succeeded { 200 } else { 0 },
             started.elapsed(),
-            items,
         );
+    }
+
+    pub fn note_items_changed(&self, items: usize) {
+        self.budget.lock().note_items_changed(items);
     }
 
     fn observe_limit_response(
@@ -1391,7 +1447,6 @@ impl GhClient {
             crate::rate_budget::ApiResource::rest("core"),
             started,
             result.is_ok(),
-            result.as_ref().map_or(0, |page| page.items.len()),
         );
         let orgs: Vec<octocrab::models::orgs::Organization> = result
             .map_err(GhError::Api)?
@@ -1450,7 +1505,6 @@ impl GhClient {
                     crate::rate_budget::ApiResource::rest("core"),
                     started,
                     result.is_ok(),
-                    result.as_ref().map_or(0, |page| page.items.len()),
                 );
                 result.map_err(GhError::Api)?
             };
@@ -1483,11 +1537,6 @@ impl GhClient {
                         crate::rate_budget::ApiResource::rest("core"),
                         started,
                         result.is_ok(),
-                        result
-                            .as_ref()
-                            .ok()
-                            .and_then(Option::as_ref)
-                            .map_or(0, |page| page.items.len()),
                     );
                     result.map_err(GhError::Api)?
                 };
@@ -1513,7 +1562,6 @@ impl GhClient {
                     crate::rate_budget::ApiResource::rest("core"),
                     started,
                     result.is_ok(),
-                    result.as_ref().map_or(0, |page| page.items.len()),
                 );
                 result.map_err(GhError::Api)?
             };
@@ -1546,11 +1594,6 @@ impl GhClient {
                         crate::rate_budget::ApiResource::rest("core"),
                         started,
                         result.is_ok(),
-                        result
-                            .as_ref()
-                            .ok()
-                            .and_then(Option::as_ref)
-                            .map_or(0, |page| page.items.len()),
                     );
                     result.map_err(GhError::Api)?
                 };
@@ -1644,7 +1687,7 @@ impl GhClient {
     /// heartbeat already covered).
     pub fn mark_full_sweep_done(&self) {
         let mut state = self.notifications_state.lock();
-        state.last_full_sweep_at = Some(std::time::Instant::now());
+        state.last_full_sweep_at = Some(chrono::Utc::now());
         state.force_full_sweep = false;
         if state.last_modified.is_none() {
             state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
@@ -1687,7 +1730,7 @@ impl GhClient {
         let mut state = self.notifications_state.lock();
         state.last_pr_sweep_at_utc = Some(sweep_started);
         if was_reconcile {
-            state.last_full_reconcile_at = Some(std::time::Instant::now());
+            state.last_full_reconcile_at = Some(chrono::Utc::now());
         }
     }
 
@@ -1731,13 +1774,15 @@ impl GhClient {
         let s = self.notifications_state.lock();
         NotificationsSnapshot {
             has_last_modified: s.last_modified.is_some(),
-            last_full_sweep_elapsed: s.last_full_sweep_at.map(|i| i.elapsed()),
+            last_full_sweep_elapsed: s
+                .last_full_sweep_at
+                .and_then(|at| chrono::Utc::now().signed_duration_since(at).to_std().ok()),
             heartbeat_backed_off: s.heartbeat_backed_off(),
         }
     }
 
     pub fn sync_cursors(&self) -> crate::SyncCursors {
-        self.notifications_state.lock().cursors(chrono::Utc::now())
+        self.notifications_state.lock().cursors()
     }
 
     pub fn restore_sync_cursors(&self, cursors: crate::SyncCursors) {
@@ -2708,6 +2753,10 @@ impl GhClient {
                         );
                         metrics.lock().graphql_cost += rl.cost.unwrap_or(0);
                     }
+                    self.budget.lock().note_expected_pages(
+                        "PR search",
+                        graphql::pr_page_count(data.search.issue_count),
+                    );
                     Ok(FetchPage {
                         items: data
                             .search
@@ -2806,6 +2855,9 @@ impl GhClient {
                     if let Some(rl) = &data.rate_limit {
                         metrics.lock().graphql_cost += rl.cost.unwrap_or(0);
                     }
+                    self.budget
+                        .lock()
+                        .note_expected_pages(op, graphql::pr_page_count(data.search.issue_count));
                     Ok(FetchPage {
                         items: data
                             .search
@@ -2919,6 +2971,10 @@ impl GhClient {
                             rl.limit
                         );
                     }
+                    self.budget.lock().note_expected_pages(
+                        "issues search",
+                        graphql::issue_page_count(data.search.issue_count),
+                    );
 
                     Ok(FetchPage {
                         items: data
@@ -3233,7 +3289,6 @@ impl GhClient {
             crate::rate_budget::ApiResource::rest("core"),
             started,
             result.is_ok(),
-            usize::from(result.is_ok()),
         );
         result.map_err(GhError::Api)?;
         Ok(())
@@ -3310,12 +3365,29 @@ impl GhClient {
         &self,
         pull_request_node_id: &str,
     ) -> Result<Option<graphql::PrDetails>, GhError> {
+        self.fetch_pr_details_for_operation("PR details lazy-fetch", pull_request_node_id)
+            .await
+    }
+
+    pub async fn prefetch_pr_details(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<Option<graphql::PrDetails>, GhError> {
+        self.fetch_pr_details_for_operation("PR details background prefetch", pull_request_node_id)
+            .await
+    }
+
+    async fn fetch_pr_details_for_operation(
+        &self,
+        operation: &'static str,
+        pull_request_node_id: &str,
+    ) -> Result<Option<graphql::PrDetails>, GhError> {
         let started = std::time::Instant::now();
         let mut metrics = BranchMetrics::new("pr-details");
-        self.acquire_or_block("PR details lazy-fetch")?;
+        self.acquire_or_block(operation)?;
         let body = graphql::pr_details_body(pull_request_node_id);
         let (response, bytes): (graphql::GqlPrDetailsResponse, usize) = self
-            .post_graphql_with_retry_measured("PR details lazy-fetch", &body)
+            .post_graphql_with_retry_measured(operation, &body)
             .await?;
         metrics.requests = 1;
         metrics.resp_bytes = bytes;
@@ -4460,6 +4532,20 @@ mod tests {
     }
 
     #[test]
+    fn pr_detail_prefetch_is_scheduled_while_user_fetch_stays_interactive() {
+        let (_, user_priority) = request_profile("PR details lazy-fetch");
+        let (_, prefetch_priority) = request_profile("PR details background prefetch");
+        assert_eq!(
+            user_priority,
+            crate::rate_budget::RequestPriority::Interactive
+        );
+        assert_eq!(
+            prefetch_priority,
+            crate::rate_budget::RequestPriority::Recent
+        );
+    }
+
+    #[test]
     fn issue_query_runs_when_issues_displayed() {
         assert!(should_query_issues(true, &logins(&[])));
         assert!(should_query_issues(true, &logins(&["alice"])));
@@ -5291,6 +5377,17 @@ mod tests {
     async fn partial_repo_fanout_reports_non_authoritative_pr_coverage() {
         let base_uri = spawn_repo_routing_server().await;
         let client = make_client(&base_uri);
+        let wall_now = chrono::Utc::now();
+        client
+            .budget
+            .lock()
+            .observe(crate::rate_budget::RemoteRateLimit {
+                remaining: 5000,
+                limit: 5000,
+                reset_at: wall_now + chrono::Duration::hours(1),
+                observed_at: std::time::Instant::now(),
+            });
+        client.begin_background_tick(std::time::Duration::from_secs(60));
 
         let outcome = client
             .fetch_round_robin_with_status_and_mentions(
@@ -5528,6 +5625,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn budget_bootstrap_turns_an_unknown_graphql_budget_into_a_current_observation() {
+        const BODY: &str = r#"{
+          "data": {
+            "viewer": { "login": "test-user" },
+            "rateLimit": {
+              "cost": 1,
+              "limit": 5000,
+              "remaining": 4321,
+              "resetAt": "2026-08-01T12:00:00Z",
+              "used": 679
+            }
+          }
+        }"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        assert!(client.rate_snapshot().remote.is_none());
+
+        client
+            .bootstrap_graphql_budget()
+            .await
+            .expect("budget bootstrap");
+
+        let remote = client
+            .rate_snapshot()
+            .remote
+            .expect("GraphQL budget observation");
+        assert_eq!(remote.remaining, 4321);
+        assert_eq!(remote.limit, 5000);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn captured_graphql_fixture_reconciles_forecast_and_actual_cost() {
         let response_body = include_str!("../tests/fixtures/graphql_rate_limit.json");
         let base_uri =
@@ -5571,7 +5699,6 @@ mod tests {
             200,
             0,
             std::time::Duration::ZERO,
-            0,
         );
 
         assert_eq!(
@@ -5590,6 +5717,21 @@ mod tests {
                 per_repo_points: 0,
             }
         );
+
+        client.budget.lock().note_expected_pages("watched-repo", 3);
+        let forecast = client.background_sweep_forecast(true, false);
+        assert_eq!(
+            forecast,
+            BackgroundSweepForecast {
+                global_points: 15,
+                repo_base_points: 2,
+                per_repo_points: 1,
+            }
+        );
+        assert_eq!(forecast.required_points(true, true), 15);
+        assert_eq!(forecast.required_points(false, true), 3);
+        assert_eq!(forecast.repo_capacity(5, false, 3), 3);
+        assert_eq!(forecast.repo_capacity(5, true, 3), 0);
     }
 
     /// Issue #305: the real `mergePullRequest` success reply has no
@@ -5799,14 +5941,16 @@ mod tests {
                                     && val.trim() == last_modified
                             });
                     let response = if ims_matches {
-                        "HTTP/1.1 304 Not Modified\r\n\
+                        format!(
+                            "HTTP/1.1 304 Not Modified\r\n\
                          X-RateLimit-Resource: core\r\n\
                          X-RateLimit-Limit: 5000\r\n\
                          X-RateLimit-Remaining: 4999\r\n\
                          X-RateLimit-Used: 1\r\n\
-                         X-RateLimit-Reset: 4102444800\r\n\
-                         Connection: close\r\n\r\n"
-                            .to_string()
+                         X-RateLimit-Reset: {}\r\n\
+                         Connection: close\r\n\r\n",
+                            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp()
+                        )
                     } else {
                         format!(
                             "HTTP/1.1 200 OK\r\n\
@@ -5816,9 +5960,10 @@ mod tests {
                              X-RateLimit-Limit: 5000\r\n\
                              X-RateLimit-Remaining: 4999\r\n\
                              X-RateLimit-Used: 1\r\n\
-                             X-RateLimit-Reset: 4102444800\r\n\
+                             X-RateLimit-Reset: {}\r\n\
                              Content-Length: {}\r\n\
                              Connection: close\r\n\r\n{body}",
+                            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
                             body.len(),
                         )
                     };

@@ -239,7 +239,11 @@ impl Component for SyncStatus {
         };
         self.body_height = body_area.height.max(1);
 
-        let lines = self.body_lines(theme);
+        let lines = self
+            .body_lines(theme)
+            .into_iter()
+            .flat_map(|line| crate::components::comment_render::wrap_one(line, body_area.width))
+            .collect::<Vec<_>>();
         // Clamp scroll so a short log can't leave blank rows scrolled
         // off the top.
         let max = max_scroll(lines.len(), self.body_height);
@@ -390,6 +394,19 @@ mod tests {
             out.find("GitHub budget governor") < out.find("Last sync per source"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn narrow_modal_wraps_the_complete_governor_snapshot() {
+        let n = now();
+        let mut comp = SyncStatus::new(Vec::new(), Vec::new(), n).with_governor(Some(
+            "share=55% · graphql 4300/5000 reset=2026-04-01T13:00:00Z reserve=2250 \
+             allowance=4/9 · next=global reconcile"
+                .into(),
+        ));
+        let out = render(&mut comp, 50, 16);
+        assert!(out.contains("share=55%"), "{out}");
+        assert!(out.contains("next=global reconcile"), "{out}");
     }
 
     #[test]

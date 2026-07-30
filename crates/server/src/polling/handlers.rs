@@ -52,7 +52,7 @@ pub async fn post_reply(
             return;
         }
     };
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_reply_error(config, &e);
@@ -217,6 +217,7 @@ impl ProviderHandle {
 /// Errors come back as `String` ready for the handler's
 /// `emit_err` callback.
 async fn build_provider_for_workspace(
+    config: &ServerConfig,
     workspace_key: &WorkspaceKey,
 ) -> Result<ProviderHandle, String> {
     let source = workspace_key
@@ -225,16 +226,9 @@ async fn build_provider_for_workspace(
         .map(|(p, _)| p)
         .unwrap_or("");
     match source {
-        s if s == lazybox_gh::SOURCE => {
-            let cred = lazybox_gh::credential_chain()
-                .resolve(lazybox_gh::SOURCE)
-                .await
-                .map_err(|e| format!("github credentials: {e}"))?;
-            let client = GhClient::from_credential(cred)
-                .await
-                .map_err(|e| format!("github client init: {e}"))?;
-            Ok(ProviderHandle::Github(client))
-        }
+        s if s == lazybox_gh::SOURCE => resolve_gh_client_result(config)
+            .await
+            .map(ProviderHandle::Github),
         s if s == lazybox_linear::SOURCE => {
             let cred = lazybox_linear::credential_chain()
                 .resolve(lazybox_linear::SOURCE)
@@ -245,6 +239,43 @@ async fn build_provider_for_workspace(
         other => Err(format!(
             "no provider registered for workspace prefix `{other}`",
         )),
+    }
+}
+
+#[cfg(test)]
+mod provider_resolution_tests {
+    use super::*;
+    use lazybox_store::MemoryStore;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn github_workspace_operations_reuse_the_process_governor() {
+        let config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(30);
+        config.poll.cache_gh_client(
+            GhClient::stub_with_rate_limit_for_tests(
+                "test-source",
+                "test-fingerprint",
+                3210,
+                5000,
+                reset_at,
+            )
+            .expect("stub client"),
+        );
+
+        let provider =
+            build_provider_for_workspace(&config, &WorkspaceKey::new("github-owner-repo-1"))
+                .await
+                .expect("cached GitHub provider");
+        let ProviderHandle::Github(client) = provider else {
+            panic!("github workspace must resolve the GitHub provider");
+        };
+        let remote = client
+            .rate_snapshot()
+            .remote
+            .expect("cached governor observation");
+        assert_eq!(remote.remaining, 3210);
+        assert_eq!(remote.reset_at, reset_at);
     }
 }
 
@@ -282,7 +313,7 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     // dispatches `merge` to github / linear / future-provider based
     // on the workspace key's prefix — the server stays provider-
     // agnostic.
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -363,7 +394,7 @@ pub async fn handle_update_branch(config: &ServerConfig, workspace_key: Workspac
         .map(|p| p.id.key.clone())
         .unwrap_or_else(|| workspace_key.as_str().to_string());
 
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -421,7 +452,7 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
         .map(|i| i.id.key.clone())
         .unwrap_or_else(|| workspace_key.as_str().to_string());
 
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -533,7 +564,7 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
         .filter(|k| !k.is_empty())
         .unwrap_or_else(|| workspace_key.as_str().to_string());
 
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -617,7 +648,7 @@ pub async fn handle_request_reviewers(
         ));
         return;
     };
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -659,7 +690,7 @@ pub async fn handle_add_assignees(
         ));
         return;
     };
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -697,7 +728,7 @@ pub async fn handle_set_assignees(
         ));
         return;
     };
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -736,7 +767,7 @@ pub async fn handle_set_labels(
         emit_err(&format!("set_labels: workspace {workspace_key} not found"));
         return;
     };
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             emit_err(&e);
@@ -774,7 +805,7 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
         ));
         return;
     };
-    let provider = match build_provider_for_workspace(&workspace_key).await {
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("fetch_repo_labels: {e}");
@@ -797,33 +828,33 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
     }
 }
 
-/// Clone the persistent `GhClient` out of the cache, building one on
-/// a cold cache. The std-lock is released before any `.await` so a
-/// cold build never holds it across the `from_credential` network
-/// call (issue #92); the cache lives outside `poll_state` so this
-/// never contends with a running poll tick. `None` means credentials
-/// or client init failed — the caller skips the user-triggered fetch.
-pub(super) async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
+async fn resolve_gh_client_result(config: &ServerConfig) -> Result<GhClient, String> {
     if let Some(client) = config.poll.cached_gh_client() {
-        return Some(client);
+        return Ok(client);
     }
-    let cred = match lazybox_gh::credential_chain()
+    let _initialization = config.poll.gh_client_cache.lock_initialization().await;
+    if let Some(client) = config.poll.cached_gh_client() {
+        return Ok(client);
+    }
+    let cred = lazybox_gh::credential_chain()
         .resolve(lazybox_gh::SOURCE)
         .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!("gh client credentials: {e}");
-            return None;
-        }
-    };
-    match GhClient::from_credential(cred).await {
-        Ok(client) => {
-            config.poll.cache_gh_client(client.clone());
-            Some(client)
-        }
-        Err(e) => {
-            tracing::warn!("gh client init: {e}");
+        .map_err(|error| format!("github credentials: {error}"))?;
+    let client = GhClient::from_credential(cred)
+        .await
+        .map_err(|error| format!("github client init: {error}"))?;
+    config.poll.cache_gh_client(client.clone());
+    Ok(client)
+}
+
+/// Clone the process-wide `GhClient` out of the cache, building it once
+/// on a cold cache. Polling, reads, and mutations all use this path so
+/// they share one governor and one secondary-limit/concurrency domain.
+pub(super) async fn resolve_gh_client(config: &ServerConfig) -> Option<GhClient> {
+    match resolve_gh_client_result(config).await {
+        Ok(client) => Some(client),
+        Err(error) => {
+            tracing::warn!("{error}");
             None
         }
     }
@@ -2119,7 +2150,7 @@ pub async fn prefetch_top_pr_details(
                 // `handle_fetch_pr_details` applies here too (re-load
                 // before the activity merge), along with the
                 // closes-issues collapse re-run.
-                let details = match client.fetch_pr_details(&node_id).await {
+                let details = match client.prefetch_pr_details(&node_id).await {
                     Ok(Some(details)) => details,
                     Ok(None) => return 0usize,
                     Err(e) => {

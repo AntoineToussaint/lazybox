@@ -4,11 +4,17 @@ import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import {
+  InboxConnection,
+  ReplyDrafts,
   applyWorkspaceEvent,
+  canReplyToTask,
+  filteredWorkspaces,
+  preferredTerminal,
   primaryTask,
-  sortedWorkspaces,
+  shouldHandleWorkspaceEnter,
   taskReference,
   unreadCount,
+  type WorkspaceFilter,
 } from "./model";
 import {
   type DesktopInfo,
@@ -19,6 +25,7 @@ import {
   type TerminalSnapshot,
   type Workspace,
   type WorkspacesResponse,
+  commandsForWorkspaceIntent,
   spawnAgentCommand,
   terminalKindLabel,
 } from "./protocol";
@@ -52,20 +59,62 @@ interface ActiveTerminal {
   resyncing: boolean;
 }
 
+interface DesktopAgentOption {
+  id: string;
+  label: string;
+  available: boolean;
+}
+
+interface DesktopSetupState {
+  first_run: boolean;
+  selected_repositories: string[];
+  agents: DesktopAgentOption[];
+  default_agent: string;
+  analytics_enabled: boolean;
+  diagnostics_path: string;
+}
+
+interface GithubAuthStatus {
+  authenticated: boolean;
+  account: string | null;
+  message: string;
+}
+
+interface GithubRepositoryOption {
+  id: string;
+  label: string;
+  owner: string;
+}
+
+type AnalyticsEvent =
+  | "app_opened"
+  | "workspace_opened"
+  | "agent_started"
+  | "shell_started"
+  | "reply_posted";
+
 const workspaceList = element<HTMLDivElement>("workspace-list");
 const workspaceCount = element<HTMLSpanElement>("workspace-count");
 const unreadTotal = element<HTMLSpanElement>("unread-count");
+const workspaceSearch = element<HTMLInputElement>("workspace-search");
+const workspaceFilter = element<HTMLSelectElement>("workspace-filter");
 const workspaceEmpty = element<HTMLDivElement>("workspace-empty");
 const workspaceDetail = element<HTMLDivElement>("workspace-detail");
 const taskKicker = element<HTMLParagraphElement>("task-kicker");
 const taskTitle = element<HTMLHeadingElement>("task-title");
 const taskMeta = element<HTMLParagraphElement>("task-meta");
 const taskDescription = element<HTMLDivElement>("task-description");
+const taskSignals = element<HTMLDivElement>("task-signals");
 const activityCount = element<HTMLSpanElement>("activity-count");
 const activityList = element<HTMLDivElement>("activity-list");
 const agentLabel = element<HTMLElement>("agent-label");
 const spawnButton = element<HTMLButtonElement>("spawn-button");
+const shellButton = element<HTMLButtonElement>("shell-button");
+const markReadButton = element<HTMLButtonElement>("mark-read-button");
+const replyForm = element<HTMLFormElement>("reply-form");
+const replyBody = element<HTMLTextAreaElement>("reply-body");
 const refreshButton = element<HTMLButtonElement>("refresh-button");
+const settingsButton = element<HTMLButtonElement>("settings-button");
 const terminalHost = element<HTMLDivElement>("terminal");
 const terminalEmpty = element<HTMLDivElement>("terminal-empty");
 const terminalTitle = element<HTMLHeadingElement>("terminal-title");
@@ -73,12 +122,48 @@ const terminalState = element<HTMLSpanElement>("terminal-state");
 const connectionDot = element<HTMLSpanElement>("connection-dot");
 const connectionLabel = element<HTMLSpanElement>("connection-label");
 const statusMessage = element<HTMLSpanElement>("status-message");
+const setupDialog = element<HTMLDialogElement>("setup-dialog");
+const setupForm = element<HTMLFormElement>("setup-form");
+const setupTitle = element<HTMLHeadingElement>("setup-title");
+const setupClose = element<HTMLButtonElement>("setup-close");
+const githubAuthMessage = element<HTMLParagraphElement>("github-auth-message");
+const githubAuthBadge = element<HTMLSpanElement>("github-auth-badge");
+const githubLoginButton = element<HTMLButtonElement>("github-login-button");
+const githubCheckButton = element<HTMLButtonElement>("github-check-button");
+const discoverReposButton = element<HTMLButtonElement>("discover-repos-button");
+const repositorySearch = element<HTMLInputElement>("repository-search");
+const repositoryList = element<HTMLDivElement>("repository-list");
+const repositorySelectionCount = element<HTMLParagraphElement>(
+  "repository-selection-count",
+);
+const defaultAgentSelect =
+  element<HTMLSelectElement>("default-agent-select");
+const analyticsEnabled = element<HTMLInputElement>("analytics-enabled");
+const setupError = element<HTMLParagraphElement>("setup-error");
+const diagnosticsPath = element<HTMLSpanElement>("diagnostics-path");
+const saveSettingsButton =
+  element<HTMLButtonElement>("save-settings-button");
+const confirmDialog = element<HTMLDialogElement>("confirm-dialog");
+const confirmTitle = element<HTMLHeadingElement>("confirm-title");
+const confirmMessage = element<HTMLParagraphElement>("confirm-message");
+const confirmPreview = element<HTMLPreElement>("confirm-preview");
+const confirmAccept = element<HTMLButtonElement>("confirm-accept");
 
 let workspaces = new Map<string, Workspace>();
 let terminals = new Map<number, TerminalRecord>();
 let selectedKey: string | null = null;
+let visibleWorkspaces: Workspace[] = [];
 let defaultAgent = "claude";
 let previewMode = false;
+let inboxLoading = true;
+let inboxError: string | null = null;
+let setupState: DesktopSetupState | null = null;
+let discoveredRepositories: GithubRepositoryOption[] = [];
+let selectedRepositories = new Set<string>();
+let setupRequired = false;
+const replyDrafts = new ReplyDrafts();
+const pendingLaunches = new Set<string>();
+let focusRequestedSession: string | null = null;
 let activeTerminal: ActiveTerminal | null = null;
 let resizeTimer: number | undefined;
 interface PendingTerminalInput {
@@ -93,21 +178,63 @@ const encoder = new TextEncoder();
 let terminalDecoder = new TerminalFrameDecoder(2 * 1024 * 1024 + 25);
 let maxTerminalWriteBytes = 128 * 1024;
 const pendingTerminalFrames = new Map<number, TerminalBinaryFrame[]>();
+let desktopMetadataLoaded = false;
+let terminalReaderStarted = false;
+let eventChannel: Channel<DesktopStreamMessage> | null = null;
+const inboxConnection = new InboxConnection(
+  () => invoke<WorkspacesResponse>("list_workspaces"),
+  async () => {
+    eventChannel = new Channel<DesktopStreamMessage>();
+    eventChannel.onmessage = handleStreamMessage;
+    await invoke("subscribe_events", { onEvent: eventChannel });
+    if (!terminalReaderStarted) {
+      terminalReaderStarted = true;
+      void readTerminalData();
+    }
+  },
+);
 
 refreshButton.addEventListener("click", () => {
-  void sendCommand("Refresh", "Refreshing providers…");
+  void refreshInbox(true);
 });
 
 spawnButton.addEventListener("click", () => {
-  if (selectedKey !== null) {
-    void sendCommand(
-      spawnAgentCommand(selectedKey, defaultAgent),
-      `Starting ${defaultAgent}…`,
-    );
+  void startAgent();
+});
+
+shellButton.addEventListener("click", () => {
+  void startShell();
+});
+
+markReadButton.addEventListener("click", () => {
+  void markSelectedRead();
+});
+
+replyForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void reviewReply();
+});
+
+workspaceSearch.addEventListener("input", renderInbox);
+workspaceFilter.addEventListener("change", renderInbox);
+settingsButton.addEventListener("click", () => void openSettings());
+setupClose.addEventListener("click", closeSettings);
+githubCheckButton.addEventListener("click", () => void refreshGithubAuth());
+githubLoginButton.addEventListener("click", () => void startGithubLogin());
+discoverReposButton.addEventListener("click", () => void discoverRepositories());
+repositorySearch.addEventListener("input", renderRepositories);
+setupForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void saveSettings();
+});
+setupDialog.addEventListener("cancel", (event) => {
+  if (setupRequired) {
+    event.preventDefault();
   }
 });
 
 window.addEventListener("resize", () => scheduleResize());
+window.addEventListener("keydown", handleKeyboard);
 
 void boot();
 
@@ -119,6 +246,7 @@ async function boot(): Promise<void> {
     defaultAgent = preview.defaultAgent;
     workspaces = preview.workspaces;
     terminals = preview.terminals;
+    inboxLoading = false;
     setConnection(true, "Preview data");
     selectWorkspace(preview.selectedKey);
     render();
@@ -126,29 +254,75 @@ async function boot(): Promise<void> {
   }
 
   try {
+    await initializeDesktopMetadata();
+    if (await refreshInbox(false)) {
+      recordAnalytics("app_opened");
+    }
+  } catch (error) {
+    showInboxFailure(error);
+  }
+}
+
+async function initializeDesktopMetadata(): Promise<void> {
+  if (desktopMetadataLoaded) {
+    return;
+  }
+  try {
+    setupState = await invoke<DesktopSetupState>("desktop_setup_state");
+    applySetupState(setupState);
+    if (setupState.first_run) {
+      openSetupDialog(true);
+      void refreshGithubAuth();
+    }
     const info = await invoke<DesktopInfo>("desktop_info");
     terminalDecoder = new TerminalFrameDecoder(info.max_terminal_frame_bytes);
     maxTerminalWriteBytes = info.max_terminal_write_bytes;
     defaultAgent = info.default_agent;
     agentLabel.textContent = defaultAgent;
-    const initial = await invoke<WorkspacesResponse>("list_workspaces");
+    desktopMetadataLoaded = true;
+  } catch (error) {
+    desktopMetadataLoaded = false;
+    throw error;
+  }
+}
+
+async function refreshInbox(requestProviderRefresh: boolean): Promise<boolean> {
+  inboxLoading = true;
+  inboxError = null;
+  renderInbox();
+  try {
+    await initializeDesktopMetadata();
+    const initial = await inboxConnection.connect();
     workspaces = new Map(
       initial.workspaces.map((workspace) => [workspace.key, workspace]),
     );
+    inboxLoading = false;
     if (initial.warnings.length > 0) {
       setStatus(initial.warnings[0] ?? "Some workspaces could not be decoded.");
     }
     chooseInitialWorkspace();
     render();
-
-    const events = new Channel<DesktopStreamMessage>();
-    events.onmessage = handleStreamMessage;
-    await invoke("subscribe_events", { onEvent: events });
-    void readTerminalData();
+    setConnection(true, "Live");
+    if (requestProviderRefresh) {
+      return runCommands(
+        ["Refresh"],
+        "Refreshing providers…",
+        "Refresh requested.",
+      );
+    }
+    return true;
   } catch (error) {
-    setConnection(false, "Daemon unavailable");
-    setStatus(String(error));
+    showInboxFailure(error);
+    return false;
   }
+}
+
+function showInboxFailure(error: unknown): void {
+  inboxLoading = false;
+  inboxError = String(error);
+  renderInbox();
+  setConnection(false, "Daemon unavailable");
+  setStatus(`${String(error)} Select Refresh to retry.`);
 }
 
 function handleStreamMessage(message: DesktopStreamMessage): void {
@@ -169,10 +343,15 @@ function handleEvent(event: LazyboxEvent): void {
     "Snapshot" in event ||
     "WorkspaceUpserted" in event ||
     "WorkspaceRemoved" in event;
+  const terminalChanged =
+    "Snapshot" in event ||
+    "TerminalSpawned" in event ||
+    "TerminalExited" in event ||
+    "AgentState" in event;
   if (workspaceChanged) {
     workspaces = applyWorkspaceEvent(workspaces, event);
     if (selectedKey !== null && !workspaces.has(selectedKey)) {
-      selectedKey = null;
+      changeSelectedWorkspace(null);
     }
   }
 
@@ -204,6 +383,10 @@ function handleEvent(event: LazyboxEvent): void {
     });
     if (payload.session_key === selectedKey) {
       attachTerminal(payload.terminal_id);
+      if (focusRequestedSession === payload.session_key) {
+        activeTerminal?.terminal.focus();
+        focusRequestedSession = null;
+      }
     }
     applyPendingTerminalFrames(payload.terminal_id);
   } else if ("TerminalExited" in event) {
@@ -238,12 +421,21 @@ function handleEvent(event: LazyboxEvent): void {
       `${event.PollCompleted.source}: ${event.PollCompleted.count} tasks synchronized.`,
     );
   } else if ("WorktreeProgress" in event) {
-    setStatus(
-      `Preparing workspace: ${event.WorktreeProgress.step.toLowerCase()}`,
-    );
+    const status = event.WorktreeProgress.status;
+    if (typeof status === "object" && "Failed" in status) {
+      setStatus(`Workspace error: ${status.Failed}`);
+    } else if (typeof status === "object" && "Warned" in status) {
+      setStatus(`Workspace warning: ${status.Warned}`);
+    } else if (typeof status === "object" && "Progress" in status) {
+      setStatus(status.Progress);
+    } else {
+      setStatus(
+        `Preparing workspace: ${event.WorktreeProgress.step.toLowerCase()}`,
+      );
+    }
   }
 
-  if (workspaceChanged) {
+  if (workspaceChanged || terminalChanged) {
     render();
   }
 }
@@ -309,17 +501,38 @@ function render(): void {
 }
 
 function renderInbox(): void {
-  const items = sortedWorkspaces(workspaces.values());
+  const items = filteredWorkspaces(workspaces.values(), {
+    query: workspaceSearch.value,
+    filter: workspaceFilter.value as WorkspaceFilter,
+  });
+  visibleWorkspaces = items;
   workspaceList.replaceChildren();
-  const unread = items.reduce((sum, workspace) => sum + unreadCount(workspace), 0);
-  workspaceCount.textContent = `${items.length} workspace${items.length === 1 ? "" : "s"}`;
+  workspaceList.setAttribute("aria-busy", String(inboxLoading));
+  const allItems = [...workspaces.values()];
+  const unread = allItems.reduce(
+    (sum, workspace) => sum + unreadCount(workspace),
+    0,
+  );
+  workspaceCount.textContent =
+    items.length === allItems.length
+      ? `${items.length} workspace${items.length === 1 ? "" : "s"}`
+      : `${items.length} of ${allItems.length}`;
   unreadTotal.textContent = `${unread} unread`;
 
+  if (inboxLoading) {
+    renderInboxMessage("Loading persisted workspaces…");
+    return;
+  }
+  if (inboxError !== null) {
+    renderInboxMessage(inboxError, true);
+    return;
+  }
   if (items.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "inbox-empty";
-    empty.textContent = "No persisted workspaces yet.";
-    workspaceList.append(empty);
+    renderInboxMessage(
+      allItems.length === 0
+        ? "Your inbox is empty. Refresh after setup to fetch GitHub work."
+        : "No workspaces match this search and filter.",
+    );
     return;
   }
 
@@ -328,6 +541,17 @@ function renderInbox(): void {
     const button = document.createElement("button");
     button.className = "workspace-row";
     button.classList.toggle("selected", workspace.key === selectedKey);
+    button.type = "button";
+    button.role = "option";
+    button.ariaSelected = String(workspace.key === selectedKey);
+    button.tabIndex = workspace.key === selectedKey ? 0 : -1;
+    const count = unreadCount(workspace);
+    button.setAttribute(
+      "aria-label",
+      `${task?.title ?? workspace.name}, ${task?.repo ?? workspace.branch}, ${
+        count === 0 ? "read" : `${count} unread`
+      }`,
+    );
     button.addEventListener("click", () => selectWorkspace(workspace.key));
 
     const top = document.createElement("span");
@@ -345,8 +569,13 @@ function renderInbox(): void {
     const bottom = document.createElement("span");
     bottom.className = "workspace-row-bottom";
     const repo = document.createElement("span");
-    repo.textContent = task?.repo ?? workspace.branch;
-    const count = unreadCount(workspace);
+    repo.textContent = [
+      task?.repo ?? workspace.branch,
+      task?.needs_reply ? "reply needed" : null,
+      task?.ci === "Failure" || task?.ci === "Mixed" ? "CI failing" : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
     const unreadBadge = document.createElement("span");
     unreadBadge.className = "unread-badge";
     unreadBadge.textContent = count > 0 ? String(count) : "·";
@@ -369,14 +598,81 @@ function renderWorkspace(): void {
   taskTitle.textContent = task?.title ?? workspace.name;
   taskMeta.textContent = [
     task?.repo,
-    task?.role?.toLowerCase(),
-    task?.ci === undefined ? null : `CI ${task.ci.toLowerCase()}`,
+    task?.role === undefined ? null : `you are ${task.role.toLowerCase()}`,
     workspace.branch,
   ]
     .filter((value): value is string => Boolean(value))
     .join(" · ");
+  taskSignals.replaceChildren();
+  if (task !== null) {
+    addTaskSignal(task.state);
+    if (task.ci !== "None") {
+      addTaskSignal(
+        `CI ${task.ci.toLowerCase()}`,
+        task.ci === "Success"
+          ? "success"
+          : task.ci === "Failure" || task.ci === "Mixed"
+            ? "attention"
+            : undefined,
+      );
+    }
+    if (task.review !== "None") {
+      addTaskSignal(
+        `Review ${task.review.replace(/([A-Z])/g, " $1").trim().toLowerCase()}`,
+        task.review === "Approved"
+          ? "success"
+          : task.review === "ChangesRequested"
+            ? "attention"
+            : undefined,
+      );
+    }
+    if (task.needs_reply) {
+      addTaskSignal(
+        task.last_commenter === null
+          ? "Reply needed"
+          : `Reply to @${task.last_commenter}`,
+        "attention",
+      );
+    }
+    if (task.additions > 0 || task.deletions > 0) {
+      addTaskSignal(`+${task.additions} −${task.deletions}`);
+    }
+    for (const label of task.labels.slice(0, 4)) {
+      addTaskSignal(label.name);
+    }
+  }
   taskDescription.textContent =
     task?.body?.trim() || "No description was provided for this workspace.";
+  markReadButton.disabled = unreadCount(workspace) === 0;
+  replyBody.disabled = !canReplyToTask(task);
+  replyForm.classList.toggle("hidden", !canReplyToTask(task));
+
+  const agentTerminal = terminalForWorkspace(
+    workspace.key,
+    "agent",
+    defaultAgent,
+  );
+  const existingAgentSession = workspace.sessions.some(
+    (session) =>
+      typeof session.kind === "object" &&
+      "Agent" in session.kind &&
+      session.kind.Agent.agent_id === defaultAgent,
+  );
+  const spawnVerb =
+    agentTerminal !== undefined && !agentTerminal.state.startsWith("exited")
+      ? "Open"
+      : existingAgentSession
+        ? "Resume"
+        : "Start";
+  spawnButton.querySelector("span")!.textContent = spawnVerb;
+  spawnButton.disabled = pendingLaunches.has(
+    launchKey(workspace.key, "agent", defaultAgent),
+  );
+  shellButton.textContent =
+    terminalForWorkspace(workspace.key, "shell") === undefined
+      ? "Shell"
+      : "Open shell";
+  shellButton.disabled = pendingLaunches.has(launchKey(workspace.key, "shell"));
 
   activityList.replaceChildren();
   activityCount.textContent = String(workspace.activity.length);
@@ -391,6 +687,10 @@ function renderWorkspace(): void {
   for (const activity of workspace.activity.slice(0, 30)) {
     const card = document.createElement("article");
     card.className = "activity-card";
+    card.setAttribute(
+      "aria-label",
+      `${activity.kind} by ${activity.author}, ${relativeTime(activity.created_at)}`,
+    );
     const heading = document.createElement("div");
     const author = document.createElement("strong");
     author.textContent = activity.author;
@@ -405,18 +705,58 @@ function renderWorkspace(): void {
   }
 }
 
+function renderInboxMessage(message: string, error = false): void {
+  const empty = document.createElement("p");
+  empty.className = `inbox-empty${error ? " error" : ""}`;
+  empty.textContent = message;
+  if (error) {
+    empty.role = "alert";
+  }
+  workspaceList.append(empty);
+}
+
+function addTaskSignal(
+  label: string,
+  tone?: "attention" | "success",
+): void {
+  const signal = document.createElement("span");
+  signal.className = `signal-pill${tone === undefined ? "" : ` ${tone}`}`;
+  signal.textContent = label;
+  taskSignals.append(signal);
+}
+
 function selectWorkspace(key: string): void {
-  selectedKey = key;
+  const changed = changeSelectedWorkspace(key);
   render();
   attachSelectedTerminal();
   void sendCommand({ FocusWorkspace: { session_key: key } });
+  if (changed) {
+    const workspace = workspaces.get(key);
+    setStatus(`Opened workspace: ${primaryTask(workspace!)?.title ?? workspace?.name ?? key}`);
+    recordAnalytics("workspace_opened");
+  }
+}
+
+function changeSelectedWorkspace(key: string | null): boolean {
+  if (selectedKey === key) {
+    return false;
+  }
+  if (selectedKey !== null) {
+    replyDrafts.save(selectedKey, replyBody.value);
+  }
+  selectedKey = key;
+  replyBody.value = key === null ? "" : replyDrafts.get(key);
+  return true;
 }
 
 function chooseInitialWorkspace(): void {
   if (selectedKey !== null && workspaces.has(selectedKey)) {
     return;
   }
-  selectedKey = sortedWorkspaces(workspaces.values())[0]?.key ?? null;
+  changeSelectedWorkspace(
+    filteredWorkspaces(workspaces.values(), { query: "", filter: "all" })[0]
+      ?.key ?? null,
+  );
 }
 
 function attachSelectedTerminal(): void {
@@ -424,9 +764,9 @@ function attachSelectedTerminal(): void {
     detachTerminal();
     return;
   }
-  const record = [...terminals.values()].find(
-    (terminal) => terminal.sessionKey === selectedKey,
-  );
+  const record =
+    terminalForWorkspace(selectedKey, "agent") ??
+    terminalForWorkspace(selectedKey, "shell");
   if (record === undefined) {
     detachTerminal();
     return;
@@ -496,11 +836,17 @@ function attachTerminal(id: number): void {
   terminalTitle.textContent = `${terminalKindLabel(record.kind)} · ${record.sessionKey}`;
   setTerminalState(record.state);
   scheduleResize();
-  terminal.focus();
-
   if (record.dirty || !record.replayAvailable) {
     requestTerminalResync(record);
   }
+}
+
+function terminalForWorkspace(
+  sessionKey: string,
+  kind: "agent" | "shell",
+  agentId?: string,
+): TerminalRecord | undefined {
+  return preferredTerminal(terminals.values(), sessionKey, kind, agentId);
 }
 
 function detachTerminal(): void {
@@ -667,20 +1013,542 @@ function scheduleResize(): void {
   }, 80);
 }
 
+async function startAgent(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const existing = terminalForWorkspace(selectedKey, "agent", defaultAgent);
+  if (existing !== undefined && !existing.state.startsWith("exited")) {
+    attachTerminal(existing.id);
+    activeTerminal?.terminal.focus();
+    setStatus(`Opened ${defaultAgent}.`);
+    return;
+  }
+  const pendingKey = launchKey(selectedKey, "agent", defaultAgent);
+  if (pendingLaunches.has(pendingKey)) {
+    return;
+  }
+  pendingLaunches.add(pendingKey);
+  renderWorkspace();
+  focusRequestedSession = selectedKey;
+  try {
+    const succeeded = await runCommands(
+      [spawnAgentCommand(selectedKey, defaultAgent)],
+      `${
+        existing === undefined
+          ? workspaces.get(selectedKey)?.sessions.length === 0
+            ? "Creating workspace and starting"
+            : "Starting"
+          : "Resuming"
+      } ${defaultAgent}…`,
+      `${defaultAgent} launch requested.`,
+    );
+    if (succeeded) {
+      recordAnalytics("agent_started");
+    } else {
+      focusRequestedSession = null;
+    }
+  } finally {
+    pendingLaunches.delete(pendingKey);
+    renderWorkspace();
+  }
+}
+
+async function startShell(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const existing = terminalForWorkspace(selectedKey, "shell");
+  if (existing !== undefined && !existing.state.startsWith("exited")) {
+    attachTerminal(existing.id);
+    activeTerminal?.terminal.focus();
+    setStatus("Opened shell.");
+    return;
+  }
+  const pendingKey = launchKey(selectedKey, "shell");
+  if (pendingLaunches.has(pendingKey)) {
+    return;
+  }
+  pendingLaunches.add(pendingKey);
+  renderWorkspace();
+  focusRequestedSession = selectedKey;
+  try {
+    const succeeded = await runCommands(
+      commandsForWorkspaceIntent(selectedKey, { type: "spawn-shell" }),
+      "Starting workspace shell…",
+      "Shell launch requested.",
+    );
+    if (succeeded) {
+      recordAnalytics("shell_started");
+    } else {
+      focusRequestedSession = null;
+    }
+  } finally {
+    pendingLaunches.delete(pendingKey);
+    renderWorkspace();
+  }
+}
+
+function launchKey(
+  workspaceKey: string,
+  kind: "agent" | "shell",
+  agent = "",
+): string {
+  return `${workspaceKey}\0${kind}\0${agent}`;
+}
+
+async function markSelectedRead(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  await runCommands(
+    commandsForWorkspaceIntent(selectedKey, { type: "mark-read" }),
+    "Marking workspace read…",
+    "Workspace marked read.",
+  );
+}
+
+async function reviewReply(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const workspaceKey = selectedKey;
+  const workspace = workspaces.get(workspaceKey);
+  const task = workspace === undefined ? null : primaryTask(workspace);
+  if (!canReplyToTask(task)) {
+    setStatus("Replies are available for GitHub tasks only.");
+    return;
+  }
+  const body = replyBody.value.trim();
+  if (body.length === 0) {
+    setStatus("Write a reply before submitting.");
+    replyBody.focus();
+    return;
+  }
+  const accepted = await confirmUserAction(
+    "Post this reply?",
+    "This comment will be visible to everyone with access to the GitHub task.",
+    "Post reply",
+    body,
+  );
+  if (!accepted) {
+    return;
+  }
+  replyDrafts.save(workspaceKey, body);
+  const succeeded = await runCommands(
+    commandsForWorkspaceIntent(workspaceKey, { type: "reply", body }),
+    "Posting reply to GitHub…",
+    "Reply posted. Refreshing activity…",
+  );
+  if (succeeded) {
+    replyDrafts.clear(workspaceKey);
+    if (selectedKey === workspaceKey) {
+      replyBody.value = "";
+    }
+    recordAnalytics("reply_posted");
+  } else if (selectedKey === workspaceKey) {
+    replyBody.value = body;
+    replyBody.focus();
+  }
+}
+
+async function runCommands(
+  commands: LazyboxCommand[],
+  pendingMessage: string,
+  successMessage: string,
+): Promise<boolean> {
+  setStatus(pendingMessage);
+  for (const command of commands) {
+    if (!(await sendCommand(command))) {
+      return false;
+    }
+  }
+  setStatus(successMessage);
+  return true;
+}
+
 async function sendCommand(
   command: LazyboxCommand,
-  pendingMessage?: string,
-): Promise<void> {
-  if (pendingMessage !== undefined) {
-    setStatus(pendingMessage);
-  }
+): Promise<boolean> {
   if (previewMode) {
-    return;
+    return true;
   }
   try {
     await invoke("send_command", { command });
+    return true;
   } catch (error) {
     setStatus(String(error));
+    return false;
+  }
+}
+
+async function openSettings(): Promise<void> {
+  if (previewMode) {
+    setupState = {
+      first_run: false,
+      selected_repositories: ["github:acme/relay"],
+      agents: [
+        { id: "codex", label: "Codex", available: true },
+        { id: "claude", label: "Claude Code", available: true },
+      ],
+      default_agent: defaultAgent,
+      analytics_enabled: false,
+      diagnostics_path: "~/.lazybox/v2/desktop-crashes",
+    };
+  } else {
+    try {
+      setupState = await invoke<DesktopSetupState>("desktop_setup_state");
+    } catch (error) {
+      setStatus(String(error));
+      return;
+    }
+  }
+  applySetupState(setupState);
+  openSetupDialog(false);
+  void refreshGithubAuth();
+}
+
+function applySetupState(state: DesktopSetupState): void {
+  selectedRepositories = new Set(state.selected_repositories);
+  defaultAgentSelect.replaceChildren();
+  for (const agent of state.agents) {
+    const option = document.createElement("option");
+    option.value = agent.id;
+    option.textContent = `${agent.label}${agent.available ? "" : " — not installed"}`;
+    option.disabled = !agent.available;
+    option.selected = agent.id === state.default_agent;
+    defaultAgentSelect.append(option);
+  }
+  if (
+    !state.agents.some(
+      (agent) => agent.id === defaultAgentSelect.value && agent.available,
+    )
+  ) {
+    defaultAgentSelect.value =
+      state.agents.find((agent) => agent.available)?.id ?? "";
+  }
+  analyticsEnabled.checked = state.analytics_enabled;
+  diagnosticsPath.textContent = `Crash reports: ${state.diagnostics_path}`;
+  renderRepositories();
+}
+
+function openSetupDialog(required: boolean): void {
+  setupRequired = required;
+  setupTitle.textContent = required ? "Set up lazybox" : "Desktop settings";
+  setupClose.classList.toggle("hidden", required);
+  setupError.classList.add("hidden");
+  if (!setupDialog.open) {
+    setupDialog.showModal();
+  }
+  githubCheckButton.focus();
+}
+
+function closeSettings(): void {
+  if (!setupRequired) {
+    setupDialog.close();
+  }
+}
+
+async function refreshGithubAuth(): Promise<void> {
+  githubCheckButton.disabled = true;
+  githubAuthBadge.textContent = "Checking";
+  githubAuthBadge.classList.remove("ready");
+  githubAuthMessage.textContent = "Checking the existing credential chain…";
+  let status: GithubAuthStatus;
+  try {
+    status = previewMode
+      ? {
+          authenticated: true,
+          account: "preview-user",
+          message: "GitHub credential verified",
+        }
+      : await invoke<GithubAuthStatus>("github_auth_status");
+  } catch (error) {
+    githubCheckButton.disabled = false;
+    githubAuthBadge.textContent = "Unavailable";
+    githubAuthMessage.textContent = String(error);
+    discoverReposButton.disabled = true;
+    return;
+  }
+  githubCheckButton.disabled = false;
+  githubAuthBadge.textContent = status.authenticated ? "Connected" : "Action needed";
+  githubAuthBadge.classList.toggle("ready", status.authenticated);
+  githubAuthMessage.textContent = status.authenticated
+    ? `${status.message} for @${status.account ?? "unknown"}`
+    : status.message;
+  discoverReposButton.disabled = !status.authenticated;
+  if (
+    status.authenticated &&
+    setupRequired &&
+    discoveredRepositories.length === 0
+  ) {
+    void discoverRepositories();
+  }
+}
+
+async function startGithubLogin(): Promise<void> {
+  const accepted = await confirmUserAction(
+    "Start GitHub sign-in?",
+    "lazybox will open GitHub CLI's browser-based login. The resulting credential stays in GitHub CLI or your OS credential store.",
+    "Start sign-in",
+  );
+  if (!accepted) {
+    return;
+  }
+  try {
+    if (!previewMode) {
+      await invoke("begin_github_login");
+    }
+    githubAuthMessage.textContent =
+      "Complete sign-in in the browser, then choose Check again.";
+    githubAuthBadge.textContent = "Waiting";
+    githubAuthBadge.classList.remove("ready");
+  } catch (error) {
+    showSetupError(String(error));
+  }
+}
+
+async function discoverRepositories(): Promise<void> {
+  repositoryList.setAttribute("aria-busy", "true");
+  discoverReposButton.disabled = true;
+  repositoryList.replaceChildren();
+  const loading = document.createElement("p");
+  loading.textContent = "Discovering repositories…";
+  repositoryList.append(loading);
+  try {
+    discoveredRepositories = previewMode
+      ? [
+          { id: "github:acme/relay", label: "acme/relay", owner: "acme" },
+          { id: "github:acme/api", label: "acme/api", owner: "acme" },
+        ]
+      : await invoke<GithubRepositoryOption[]>("list_github_repositories");
+    renderRepositories();
+  } catch (error) {
+    repositoryList.replaceChildren();
+    const message = document.createElement("p");
+    message.textContent = String(error);
+    message.role = "alert";
+    repositoryList.append(message);
+  } finally {
+    repositoryList.setAttribute("aria-busy", "false");
+    discoverReposButton.disabled = false;
+  }
+}
+
+function renderRepositories(): void {
+  const query = repositorySearch.value.trim().toLocaleLowerCase();
+  const byId = new Map(
+    discoveredRepositories.map((repository) => [repository.id, repository]),
+  );
+  for (const id of selectedRepositories) {
+    if (!byId.has(id)) {
+      const label = id.replace(/^github:/, "");
+      byId.set(id, {
+        id,
+        label,
+        owner: label.split("/")[0] ?? "",
+      });
+    }
+  }
+  const repositories = [...byId.values()]
+    .filter((repository) => repository.label.toLocaleLowerCase().includes(query))
+    .sort((left, right) => left.label.localeCompare(right.label));
+  repositoryList.replaceChildren();
+  if (repositories.length === 0) {
+    const message = document.createElement("p");
+    message.textContent =
+      byId.size === 0
+        ? "Verify GitHub access, then discover repositories."
+        : "No repositories match this filter.";
+    repositoryList.append(message);
+  }
+  for (const repository of repositories) {
+    const label = document.createElement("label");
+    label.className = "repository-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = repository.id;
+    checkbox.checked = selectedRepositories.has(repository.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        selectedRepositories.add(repository.id);
+      } else {
+        selectedRepositories.delete(repository.id);
+      }
+      updateRepositorySelectionCount();
+    });
+    const name = document.createElement("span");
+    name.textContent = repository.label;
+    label.append(checkbox, name);
+    repositoryList.append(label);
+  }
+  updateRepositorySelectionCount();
+}
+
+function updateRepositorySelectionCount(): void {
+  repositorySelectionCount.textContent = `${selectedRepositories.size} selected`;
+}
+
+async function saveSettings(): Promise<void> {
+  setupError.classList.add("hidden");
+  if (selectedRepositories.size === 0) {
+    showSetupError("Select at least one GitHub repository.");
+    return;
+  }
+  if (defaultAgentSelect.value.length === 0) {
+    showSetupError("Install and select a default agent.");
+    return;
+  }
+  const accepted = await confirmUserAction(
+    "Save desktop settings?",
+    "lazybox will update the shared configuration and restart so provider scope and agent changes take effect.",
+    "Save and restart",
+  );
+  if (!accepted) {
+    return;
+  }
+  saveSettingsButton.disabled = true;
+  saveSettingsButton.textContent = "Saving…";
+  try {
+    if (!previewMode) {
+      await invoke("save_desktop_settings", {
+        settings: {
+          repositories: [...selectedRepositories],
+          default_agent: defaultAgentSelect.value,
+          analytics_enabled: analyticsEnabled.checked,
+        },
+      });
+    }
+    setStatus("Settings saved. Restarting lazybox…");
+    if (previewMode) {
+      setupDialog.close();
+    }
+  } catch (error) {
+    showSetupError(String(error));
+    saveSettingsButton.disabled = false;
+    saveSettingsButton.textContent = "Save and restart";
+  }
+}
+
+function showSetupError(message: string): void {
+  setupError.textContent = message;
+  setupError.classList.remove("hidden");
+}
+
+function confirmUserAction(
+  title: string,
+  message: string,
+  acceptLabel: string,
+  preview?: string,
+): Promise<boolean> {
+  confirmTitle.textContent = title;
+  confirmMessage.textContent = message;
+  confirmAccept.textContent = acceptLabel;
+  confirmPreview.textContent = preview ?? "";
+  confirmPreview.classList.toggle("hidden", preview === undefined);
+  confirmDialog.returnValue = "";
+  confirmDialog.showModal();
+  confirmAccept.focus();
+  return new Promise((resolve) => {
+    confirmDialog.addEventListener(
+      "close",
+      () => resolve(confirmDialog.returnValue === "confirm"),
+      { once: true },
+    );
+  });
+}
+
+function recordAnalytics(event: AnalyticsEvent): void {
+  if (previewMode) {
+    return;
+  }
+  void invoke("record_analytics", { event }).catch((error) => {
+    console.warn("lazybox desktop analytics write failed", error);
+  });
+}
+
+function handleKeyboard(event: KeyboardEvent): void {
+  if ((event.metaKey || event.ctrlKey) && event.key === ",") {
+    event.preventDefault();
+    void openSettings();
+    return;
+  }
+  const target = event.target;
+  const editable =
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    target instanceof HTMLSelectElement ||
+    (target instanceof HTMLElement && target.isContentEditable);
+  if (
+    target === replyBody &&
+    (event.metaKey || event.ctrlKey) &&
+    event.key === "Enter"
+  ) {
+    event.preventDefault();
+    replyForm.requestSubmit();
+    return;
+  }
+  if (editable || setupDialog.open || confirmDialog.open) {
+    return;
+  }
+  if (event.key === "/") {
+    event.preventDefault();
+    workspaceSearch.focus();
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    navigateWorkspaces(event.key === "ArrowDown" ? 1 : -1);
+    return;
+  }
+  if (
+    event.key === "Enter" &&
+    selectedKey !== null &&
+    shouldHandleWorkspaceEnter(
+      true,
+      editable,
+      target instanceof Element && target.closest("button, a") !== null,
+    )
+  ) {
+    event.preventDefault();
+    selectWorkspace(selectedKey);
+    return;
+  }
+  if (event.key === "r") {
+    event.preventDefault();
+    replyBody.focus();
+  } else if (event.key === "a") {
+    event.preventDefault();
+    void startAgent();
+  } else if (event.key === "s") {
+    event.preventDefault();
+    void startShell();
+  } else if (event.key === "m") {
+    event.preventDefault();
+    void markSelectedRead();
+  } else if (event.key === "R") {
+    event.preventDefault();
+    void refreshInbox(true);
+  }
+}
+
+function navigateWorkspaces(delta: number): void {
+  if (visibleWorkspaces.length === 0) {
+    return;
+  }
+  const current = visibleWorkspaces.findIndex(
+    (workspace) => workspace.key === selectedKey,
+  );
+  const next =
+    current < 0
+      ? 0
+      : Math.max(0, Math.min(visibleWorkspaces.length - 1, current + delta));
+  const key = visibleWorkspaces[next]?.key;
+  if (key !== undefined) {
+    selectWorkspace(key);
+    workspaceList
+      .querySelector<HTMLButtonElement>('[aria-selected="true"]')
+      ?.focus();
   }
 }
 

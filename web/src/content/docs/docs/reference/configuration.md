@@ -20,6 +20,7 @@ which is the canonical source of truth for defaults and field names.
 | Key | Purpose |
 | --- | --- |
 | [`setup`](#setup) | Wizard output: enabled providers / agents, filters, scopes, default agent |
+| [`desktop`](#desktop) | Private desktop analytics opt-in |
 | [`editors`](#editors) | Override / extend the detected editors |
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
 | [`agent`](#agent) | Permission prompts, LLM gateway, agent state-detection timers |
@@ -86,6 +87,10 @@ setup:
   providers: [github, linear]
   agents: [claude, codex, aider]
   default_agent: claude      # what `w w` spawns; unset → claude
+
+# ── desktop privacy ──────────────────────────────────────────────────
+desktop:
+  analytics_enabled: false   # explicit opt-in; fixed event names only
 
 # ── agent ────────────────────────────────────────────────────────────
 agent:
@@ -250,6 +255,12 @@ hand.
 | `scopes` | map | `{}` | Per-provider scope ids (orgs / repos); empty = all |
 | `default_agent` | string | unset | Agent the `w w` work shortcut spawns; unset falls back to `claude` |
 | `wizard_completed` | bool | `false` | Set once the wizard finishes, so an all-empty block doesn't re-trigger it |
+
+## `desktop`
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `analytics_enabled` | bool | `false` | Record the desktop client's fixed, content-free event names and timestamps locally. Provider and terminal contents cannot enter this boundary. |
 
 ## `agent`
 

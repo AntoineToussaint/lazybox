@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="A desktop proof of lazybox's client-agnostic daemon."
+      content="A focused lazybox client for GitHub triage and agent work."
     />
     <title>lazybox desktop</title>
   </head>
@@ -19,33 +19,78 @@
             <span>desktop client</span>
           </div>
         </div>
-        <div class="connection">
-          <span id="connection-dot" class="connection-dot"></span>
-          <span id="connection-label">Starting daemon…</span>
+        <div class="topbar-actions">
+          <div class="connection">
+            <span id="connection-dot" class="connection-dot"></span>
+            <span id="connection-label">Starting daemon…</span>
+          </div>
+          <button
+            id="settings-button"
+            class="icon-button"
+            type="button"
+            aria-label="Open settings"
+            title="Settings (⌘,)"
+          >
+            ⚙
+          </button>
         </div>
       </header>
 
       <main class="workspace-grid">
-        <aside class="inbox-panel">
+        <aside class="inbox-panel" aria-label="GitHub inbox">
           <div class="panel-heading">
             <div>
               <p class="eyebrow">Reactive inbox</p>
               <h1>Workspaces</h1>
             </div>
-            <button id="refresh-button" class="icon-button" title="Refresh inbox">↻</button>
+            <button
+              id="refresh-button"
+              class="icon-button"
+              type="button"
+              aria-label="Refresh inbox"
+              title="Refresh inbox (⇧R)"
+            >
+              ↻
+            </button>
+          </div>
+          <div class="inbox-controls">
+            <label class="search-control">
+              <span aria-hidden="true">⌕</span>
+              <input
+                id="workspace-search"
+                type="search"
+                autocomplete="off"
+                placeholder="Search workspaces  /"
+                aria-label="Search workspaces"
+              />
+            </label>
+            <label>
+              <span class="sr-only">Filter workspaces</span>
+              <select id="workspace-filter">
+                <option value="all">All</option>
+                <option value="unread">Unread</option>
+                <option value="attention">Needs attention</option>
+              </select>
+            </label>
           </div>
           <div class="inbox-summary">
-            <span id="workspace-count">0 workspaces</span>
+            <span id="workspace-count">Loading…</span>
             <span id="unread-count">0 unread</span>
           </div>
-          <div id="workspace-list" class="workspace-list" aria-live="polite"></div>
+          <div
+            id="workspace-list"
+            class="workspace-list"
+            role="listbox"
+            aria-label="Workspaces"
+            aria-busy="true"
+          ></div>
         </aside>
 
-        <section class="activity-panel">
+        <section class="activity-panel" aria-label="Task activity">
           <div id="workspace-empty" class="empty-state">
-            <span class="empty-glyph">↳</span>
+            <span class="empty-glyph" aria-hidden="true">↳</span>
             <h2>Choose a workspace</h2>
-            <p>Open a task to see its context and start an agent.</p>
+            <p>Open a task to inspect activity, reply, and start work.</p>
           </div>
           <div id="workspace-detail" class="workspace-detail hidden">
             <div class="detail-heading">
@@ -54,43 +99,183 @@
                 <h2 id="task-title"></h2>
                 <p id="task-meta" class="task-meta"></p>
               </div>
-              <button id="spawn-button" class="primary-button">
-                <span>Start</span>
-                <strong id="agent-label">agent</strong>
-              </button>
+              <div class="workspace-actions">
+                <button id="mark-read-button" class="quiet-button" type="button">
+                  Mark read
+                </button>
+                <button id="shell-button" class="quiet-button" type="button">
+                  Shell
+                </button>
+                <button id="spawn-button" class="primary-button" type="button">
+                  <span>Start</span>
+                  <strong id="agent-label">agent</strong>
+                </button>
+              </div>
             </div>
+            <div id="task-signals" class="task-signals" aria-label="Task metadata"></div>
             <div id="task-description" class="task-description"></div>
             <div class="activity-heading">
               <h3>Activity</h3>
               <span id="activity-count"></span>
             </div>
-            <div id="activity-list" class="activity-list"></div>
+            <div id="activity-list" class="activity-list" role="feed"></div>
+            <form id="reply-form" class="reply-form">
+              <label for="reply-body">Reply on GitHub</label>
+              <textarea
+                id="reply-body"
+                rows="3"
+                maxlength="10000"
+                placeholder="Write a reply…"
+              ></textarea>
+              <div>
+                <span>⌘↵ to review</span>
+                <button id="reply-button" class="primary-button" type="submit">
+                  Review reply
+                </button>
+              </div>
+            </form>
           </div>
         </section>
 
-        <section class="terminal-panel">
+        <section class="terminal-panel" aria-label="Live terminal">
           <div class="terminal-heading">
             <div>
               <p class="eyebrow">Live daemon PTY</p>
               <h2 id="terminal-title">No terminal attached</h2>
             </div>
-            <span id="terminal-state" class="terminal-state">idle</span>
+            <span id="terminal-state" class="terminal-state" role="status">idle</span>
           </div>
           <div id="terminal-shell" class="terminal-shell">
             <div id="terminal-empty" class="terminal-empty">
-              <span>›_</span>
-              <p>Start an agent to prove the terminal bridge end to end.</p>
+              <span aria-hidden="true">›_</span>
+              <p>Start the configured agent or a shell in this workspace.</p>
             </div>
-            <div id="terminal" class="terminal-host hidden"></div>
+            <div
+              id="terminal"
+              class="terminal-host hidden"
+              aria-label="Interactive workspace terminal"
+            ></div>
           </div>
         </section>
       </main>
 
       <footer class="statusbar">
-        <span id="status-message">Loading persisted workspaces…</span>
-        <span>daemon → HTTP/NDJSON → Tauri channel → xterm.js</span>
+        <span id="status-message" role="status" aria-live="polite">
+          Loading persisted workspaces…
+        </span>
+        <span>↑↓ navigate · ↵ open · r reply · a agent · s shell</span>
       </footer>
     </div>
+
+    <dialog id="setup-dialog" class="setup-dialog" aria-labelledby="setup-title">
+      <form id="setup-form">
+        <div class="dialog-heading">
+          <div>
+            <p class="eyebrow">Private desktop MVP</p>
+            <h2 id="setup-title">Set up lazybox</h2>
+          </div>
+          <button
+            id="setup-close"
+            class="icon-button"
+            type="button"
+            aria-label="Close settings"
+          >
+            ×
+          </button>
+        </div>
+
+        <section class="setup-section" aria-labelledby="github-setup-title">
+          <div class="setup-section-heading">
+            <div>
+              <h3 id="github-setup-title">1. GitHub access</h3>
+              <p id="github-auth-message">Checking the existing credential chain…</p>
+            </div>
+            <span id="github-auth-badge" class="setup-badge">Checking</span>
+          </div>
+          <div class="button-row">
+            <button id="github-login-button" class="quiet-button" type="button">
+              Sign in with GitHub CLI
+            </button>
+            <button id="github-check-button" class="quiet-button" type="button">
+              Check again
+            </button>
+          </div>
+          <p class="privacy-note">
+            Credentials remain in your environment, GitHub CLI credential store,
+            or OS-backed storage. They are never sent to this webview.
+          </p>
+        </section>
+
+        <section class="setup-section" aria-labelledby="repo-setup-title">
+          <div class="setup-section-heading">
+            <div>
+              <h3 id="repo-setup-title">2. Repositories</h3>
+              <p>Select the repositories lazybox should poll.</p>
+            </div>
+            <button id="discover-repos-button" class="quiet-button" type="button">
+              Discover
+            </button>
+          </div>
+          <input
+            id="repository-search"
+            type="search"
+            autocomplete="off"
+            placeholder="Filter repositories"
+            aria-label="Filter discovered repositories"
+          />
+          <div
+            id="repository-list"
+            class="repository-list"
+            aria-live="polite"
+            aria-busy="false"
+          >
+            <p>Verify GitHub access, then discover repositories.</p>
+          </div>
+          <p id="repository-selection-count" class="selection-count">0 selected</p>
+        </section>
+
+        <section class="setup-section setup-grid" aria-labelledby="agent-setup-title">
+          <label>
+            <span id="agent-setup-title">3. Default agent</span>
+            <select id="default-agent-select"></select>
+          </label>
+          <label class="analytics-choice">
+            <input id="analytics-enabled" type="checkbox" />
+            <span>
+              Share content-free usage events
+              <small>
+                Opt in to fixed event names only. Provider and terminal content
+                cannot enter analytics.
+              </small>
+            </span>
+          </label>
+        </section>
+
+        <p id="setup-error" class="dialog-error hidden" role="alert"></p>
+        <div class="dialog-footer">
+          <span id="diagnostics-path"></span>
+          <button id="save-settings-button" class="primary-button" type="submit">
+            Save and restart
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+      <form method="dialog">
+        <p class="eyebrow">Confirm action</p>
+        <h2 id="confirm-title">Continue?</h2>
+        <p id="confirm-message"></p>
+        <pre id="confirm-preview" class="confirm-preview hidden"></pre>
+        <div class="dialog-footer">
+          <button id="confirm-cancel" class="quiet-button" value="cancel">Cancel</button>
+          <button id="confirm-accept" class="primary-button" value="confirm">
+            Confirm
+          </button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

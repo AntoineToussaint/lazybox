@@ -1638,7 +1638,7 @@ pub async fn dispatch_command(
             config.poll.wake(true);
         }
         lazybox_ipc::Command::PostReply { session_key, body } => {
-            polling::post_reply(config, session_key, body).await;
+            let _ = polling::post_reply(config, session_key, body).await;
         }
         lazybox_ipc::Command::SetSessionLayout {
             session_key,

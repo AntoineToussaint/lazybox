@@ -7,7 +7,23 @@
       }
     },
     {
+      "SpawnShell": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
       "FocusWorkspace": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "MarkRead": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "PostReply": {
+        "body": "Ready for another look.",
         "session_key": "github:o/r#42"
       }
     },
@@ -226,6 +242,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 1361266201,
+  "protocol_fingerprint": 2835908415,
   "protocol_version": 1
 }

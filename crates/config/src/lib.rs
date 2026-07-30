@@ -30,6 +30,10 @@ pub struct Config {
     /// Settings palette (`,`); editable by hand.
     #[serde(default)]
     pub setup: SetupSection,
+    /// Desktop-only privacy preferences. Provider and agent choices continue
+    /// to live under `setup:` so every client reads the same configuration.
+    #[serde(default)]
+    pub desktop: DesktopConfig,
     /// Custom + override editor entries. Merged with builtins
     /// (Zed/VS Code/Cursor/…) at startup. `id` matches builtins
     /// to override; new ids extend.
@@ -101,6 +105,14 @@ pub struct SetupSection {
     /// re-trigger the first-run wizard forever.
     #[serde(default)]
     pub wizard_completed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct DesktopConfig {
+    /// Allow the desktop client to record its fixed, content-free usage
+    /// events. Disabled unless the user explicitly opts in.
+    pub analytics_enabled: bool,
 }
 
 /// One entry under `editors:`. Args support `{path}` for the
@@ -1863,6 +1875,20 @@ repos:
         let reentry = reparsed.repos.get("acme/widget").unwrap();
         assert_eq!(reentry.env, entry.env);
         assert_eq!(reentry.mounts.len(), entry.mounts.len());
+    }
+
+    #[test]
+    fn desktop_analytics_defaults_off_and_round_trips() {
+        let default_config = Config::parse("").expect("parse defaults");
+        assert!(!default_config.desktop.analytics_enabled);
+
+        let configured =
+            Config::parse("desktop:\n  analytics_enabled: true\n").expect("parse desktop");
+        assert!(configured.desktop.analytics_enabled);
+
+        let serialized = serde_yaml::to_string(&configured).expect("serialize desktop");
+        let round_tripped = Config::parse(&serialized).expect("parse serialized desktop");
+        assert!(round_tripped.desktop.analytics_enabled);
     }
 
     /// `ui.terminal_new_layout` defaults to `split` (unchanged

@@ -1,0 +1,23 @@
+WEBVTT
+
+NOTE
+Cues narrate the silent inbox demo. A "⌨ <chord> — <text>" line renders as
+a keycap chip plus description in the on-video overlay; plain lines are
+context. Same file drives the native <track> captions and the overlay, so
+they can't drift.
+
+1
+00:00.500 --> 00:03.600
+One inbox for every repo — PRs, issues, CI and reviews together
+
+2
+00:04.000 --> 00:07.200
+CI status and agent terminals update live, no manual refresh
+
+3
+00:07.600 --> 00:10.800
+⌨ f — filter the inbox down to what needs you
+
+4
+00:11.200 --> 00:14.200
+Left: GitHub workspaces. Right: the agents working them.

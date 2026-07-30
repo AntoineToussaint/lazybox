@@ -111,6 +111,43 @@ test('demo captions render key hints in the terminal mono font', () => {
   assert.match(rule, /font-family:\s*var\(--mono\)/, 'expected the g key hint to use the mono font');
 });
 
+const demoClips = ['01-inbox', '02-snippets', '03-policies', '04-spawn', '05-autowork'];
+
+test('every demo video carries a timestamped WebVTT captions track', () => {
+  for (const clip of demoClips) {
+    assert.ok(
+      html.includes(`<track kind="captions" src="/demo/${clip}.vtt"`),
+      `missing captions track for demo: ${clip}`,
+    );
+  }
+});
+
+test('each captions file ships with parseable cues inside its clip', async () => {
+  const timestamp = /^(?:\d{2}:)?[0-5]\d:[0-5]\d\.\d{3}$/;
+  for (const clip of demoClips) {
+    const vtt = await readFile(new URL(`../public/demo/${clip}.vtt`, import.meta.url), 'utf8');
+    assert.ok(vtt.startsWith('WEBVTT'), `missing WEBVTT header: ${clip}`);
+    const cues = [...vtt.matchAll(/^(\S+)\s+-->\s+(\S+)/gm)];
+    assert.ok(cues.length >= 3, `expected at least three cues in ${clip}, got ${cues.length}`);
+    for (const [, start, end] of cues) {
+      assert.match(start, timestamp, `bad cue start in ${clip}: ${start}`);
+      assert.match(end, timestamp, `bad cue end in ${clip}: ${end}`);
+    }
+  }
+});
+
+test('the styled caption overlay reads its cues from the same track', () => {
+  for (const clip of demoClips) {
+    assert.ok(html.includes(`src="/demo/${clip}.mp4"`), `missing demo video: ${clip}`);
+  }
+  // One overlay host per clip, plus the keycap-chip look sourced from the cue text.
+  const overlays = html.match(/class="demo-overlay"/g) ?? [];
+  assert.equal(overlays.length, demoClips.length, 'expected one overlay per demo clip');
+  assert.ok(html.includes('cuechange'), 'overlay must be driven by the VTT track cuechange event');
+  const keyRule = css.match(/\.demo-overlay-key\{([^}]*)\}/)?.[1] ?? '';
+  assert.match(keyRule, /font-family:\s*var\(--mono\)/, 'expected the keycap chip in the mono font');
+});
+
 test('the homepage publishes the established public-safe social preview', () => {
   assert.ok(html.includes('<meta property="og:image" content="https://lazybox.ai/og.png">'));
   assert.ok(html.includes('<meta name="twitter:image" content="https://lazybox.ai/og.png">'));

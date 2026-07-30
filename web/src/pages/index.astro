@@ -177,17 +177,20 @@ const steps = [
             <span>tty://lazybox</span>
             <span>real TUI capture · inbox at scale</span>
           </div>
-          <video
-            src="/demo/01-inbox.mp4"
-            poster="/demo/01-inbox.jpg"
-            aria-label="lazybox inbox with workspaces, CI status, activity, and embedded agent terminals"
-            data-demo
-            loop
-            muted
-            playsinline
-            preload="none"
-            controls
-          ></video>
+          <div class="demo-video" data-demo-video>
+            <video
+              src="/demo/01-inbox.mp4"
+              poster="/demo/01-inbox.jpg"
+              aria-label="lazybox inbox with workspaces, CI status, activity, and embedded agent terminals"
+              data-demo
+              loop
+              muted
+              playsinline
+              preload="none"
+              controls
+            ><track kind="captions" src="/demo/01-inbox.vtt" srclang="en" label="English" default /></video>
+            <div class="demo-overlay" data-demo-overlay aria-hidden="true"></div>
+          </div>
           <figcaption id="demo-caption">
             <span aria-hidden="true">└─</span> GitHub workspaces on the left; live agent terminals on the right.
           </figcaption>
@@ -253,28 +256,40 @@ const steps = [
           <figure class="demo-item" data-reveal>
             <div class="term">
               <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">snippets</span></div>
-              <video src="/demo/02-snippets.mp4" poster="/demo/02-snippets.jpg" aria-label="Firing reusable snippets into an agent" loop muted playsinline preload="none" controls></video>
+              <div class="demo-video" data-demo-video>
+                <video src="/demo/02-snippets.mp4" poster="/demo/02-snippets.jpg" aria-label="Firing reusable snippets into an agent" loop muted playsinline preload="none" controls><track kind="captions" src="/demo/02-snippets.vtt" srclang="en" label="English" default /></video>
+                <div class="demo-overlay" data-demo-overlay aria-hidden="true"></div>
+              </div>
             </div>
             <figcaption><b>Snippets</b> — reusable prompts fired into any agent, most-recently-used first.</figcaption>
           </figure>
           <figure class="demo-item" data-reveal>
             <div class="term">
               <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">github controls</span></div>
-              <video src="/demo/03-policies.mp4" poster="/demo/03-policies.jpg" aria-label="The github leader menu: merge, auto-merge on green, policies, reviewers and labels" loop muted playsinline preload="none" controls></video>
+              <div class="demo-video" data-demo-video>
+                <video src="/demo/03-policies.mp4" poster="/demo/03-policies.jpg" aria-label="The github leader menu: merge, auto-merge on green, policies, reviewers and labels" loop muted playsinline preload="none" controls><track kind="captions" src="/demo/03-policies.vtt" srclang="en" label="English" default /></video>
+                <div class="demo-overlay" data-demo-overlay aria-hidden="true"></div>
+              </div>
             </div>
             <figcaption><b>GitHub controls</b> — merge, auto-merge on green, automation policies, reviewers and labels, all from one <code>g</code> menu.</figcaption>
           </figure>
           <figure class="demo-item" data-reveal>
             <div class="term">
               <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">worktree + agent</span></div>
-              <video src="/demo/04-spawn.mp4" poster="/demo/04-spawn.jpg" aria-label="Spawning a git worktree and a live agent for one task" loop muted playsinline preload="none" controls></video>
+              <div class="demo-video" data-demo-video>
+                <video src="/demo/04-spawn.mp4" poster="/demo/04-spawn.jpg" aria-label="Spawning a git worktree and a live agent for one task" loop muted playsinline preload="none" controls><track kind="captions" src="/demo/04-spawn.vtt" srclang="en" label="English" default /></video>
+                <div class="demo-overlay" data-demo-overlay aria-hidden="true"></div>
+              </div>
             </div>
             <figcaption><b>Transparent worktrees</b> — every task gets its own git worktree and a live agent, managed for you.</figcaption>
           </figure>
           <figure class="demo-item" data-reveal>
             <div class="term">
               <div class="bar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="title">github auto-work</span></div>
-              <video src="/demo/05-autowork.mp4" poster="/demo/05-autowork.jpg" aria-label="Tagging a GitHub issue and an agent picking it up" loop muted playsinline preload="none" controls></video>
+              <div class="demo-video" data-demo-video>
+                <video src="/demo/05-autowork.mp4" poster="/demo/05-autowork.jpg" aria-label="Tagging a GitHub issue and an agent picking it up" loop muted playsinline preload="none" controls><track kind="captions" src="/demo/05-autowork.vtt" srclang="en" label="English" default /></video>
+                <div class="demo-overlay" data-demo-overlay aria-hidden="true"></div>
+              </div>
             </div>
             <figcaption><b>GitHub-driven work</b> — CI failures, reviews and issues surface in the inbox; tag one and an agent picks it up.</figcaption>
           </figure>
@@ -1142,6 +1157,62 @@ const steps = [
       demo.pause();
       demo.removeAttribute('autoplay');
     }
+    // Styled caption overlay driven by each demo's WebVTT <track>. The .vtt is
+    // the single source of truth: the native (toggleable) track and this chip
+    // overlay read the same cues, so they can never drift. A cue like
+    // "⌨ ]]s — open the picker" becomes a keycap chip + description; any other
+    // cue is shown as plain description text.
+    document.querySelectorAll<HTMLElement>('[data-demo-video]').forEach((wrap) => {
+      const video = wrap.querySelector<HTMLVideoElement>('video');
+      const overlay = wrap.querySelector<HTMLElement>('[data-demo-overlay]');
+      const track = video?.textTracks?.[0];
+      if (!video || !overlay || !track) return;
+
+      // Hidden mode still populates cues and fires cuechange, but suppresses the
+      // browser's own caption rendering so only the styled overlay shows. If the
+      // viewer turns captions on via the controls (mode 'showing'), defer to it.
+      track.mode = 'hidden';
+
+      const render = () => {
+        if (track.mode === 'showing') {
+          overlay.classList.remove('on');
+          overlay.textContent = '';
+          return;
+        }
+        const cue = track.activeCues?.[0] as VTTCue | undefined;
+        if (!cue) {
+          overlay.classList.remove('on');
+          return;
+        }
+        const text = cue.text;
+        overlay.textContent = '';
+        const line = document.createElement('div');
+        line.className = 'demo-overlay-line';
+        const m = text.match(/^⌨\s+(.+?)\s+—\s+([\s\S]+)$/);
+        if (m) {
+          const chip = document.createElement('kbd');
+          chip.className = 'demo-overlay-key';
+          chip.textContent = m[1];
+          const desc = document.createElement('span');
+          desc.textContent = m[2];
+          line.append(chip, desc);
+        } else {
+          const desc = document.createElement('span');
+          desc.textContent = text;
+          line.append(desc);
+        }
+        overlay.append(line);
+        overlay.classList.add('on');
+      };
+
+      track.addEventListener('cuechange', render);
+      video.addEventListener('play', render);
+      video.addEventListener('seeked', render);
+      video.addEventListener('pause', () => overlay.classList.remove('on'));
+      video.addEventListener('ended', () => overlay.classList.remove('on'));
+      render();
+    });
+
     const items = document.querySelectorAll('[data-reveal]');
     if (reduce || !('IntersectionObserver' in window)) {
       items.forEach((el) => el.classList.add('in'));

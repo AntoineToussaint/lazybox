@@ -1,0 +1,18 @@
+WEBVTT
+
+NOTE
+"⌨ <chord> — <text>" lines render as a keycap chip + description in the
+overlay; plain lines are context. Drives both the native <track> and the
+styled overlay from one source.
+
+1
+00:00.400 --> 00:02.300
+⌨ g — the GitHub menu: merge, reviewers, labels, policies
+
+2
+00:02.500 --> 00:04.800
+⌨ g m — merge the focused pull request
+
+3
+00:05.000 --> 00:08.100
+Guarded first — lazybox won't merge over branch conflicts

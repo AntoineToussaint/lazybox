@@ -235,7 +235,7 @@ pub(crate) fn project_label(
         .unwrap_or_else(|| project.display_name())
 }
 
-fn group_label(
+pub(crate) fn group_label(
     w: &Workspace,
     projects: &BTreeMap<ProjectKey, Project>,
     workspaces: &HashMap<SessionKey, Workspace>,

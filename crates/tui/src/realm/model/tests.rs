@@ -9782,6 +9782,28 @@ mod jump_to_workspace_tests {
         assert_eq!(m.sidebar.selected_workspace_key(), Some(&bk));
     }
 
+    #[test]
+    fn notification_focus_request_jumps_to_its_workspace() {
+        let mut m = build_model();
+        let (ak, bk) = seed_two(&mut m);
+        let mut hidden = Workspace::from_task(task("owner/repo#2", Duration::hours(1)), Utc::now());
+        hidden.snoozed_until = Some(Utc::now() + Duration::hours(1));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(hidden)));
+        assert!(
+            !m.sidebar.focus_workspace_key(&bk),
+            "target starts outside the Inbox"
+        );
+        assert!(m.sidebar.focus_workspace_key(&ak));
+        m.sync_panes();
+
+        m.handle_daemon_event(IpcEvent::WorkspaceFocusRequested {
+            session_key: bk.clone(),
+        });
+
+        assert_eq!(m.sidebar.selected_workspace_key(), Some(&bk));
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+
     /// With nothing tracked the picker refuses to mount (a footer hint
     /// fires instead) — no empty modal.
     #[test]

@@ -749,6 +749,13 @@ pub enum Command {
     FocusWorkspace {
         session_key: SessionKey,
     },
+    /// A desktop-notification click asks every attached TUI to jump to
+    /// the workspace that raised the banner. Kept separate from
+    /// [`Command::FocusWorkspace`], which every ordinary cursor move
+    /// emits as a polling hint and must not move other clients.
+    ActivateWorkspace {
+        session_key: SessionKey,
+    },
     /// Mark exactly one activity row as read. The auto-mark-on-hover
     /// flow uses this so a brief glance at one comment doesn't flip
     /// the whole workspace's unread badge to zero. `index` is the
@@ -1586,6 +1593,12 @@ pub enum Event {
     /// tab + focuses the terminal stack.
     TerminalFocusRequested {
         terminal_id: TerminalId,
+    },
+    /// A one-shot request from a clicked desktop notification. Each
+    /// attached TUI resolves the key against its current sidebar and
+    /// follows the same workspace-jump path as the fuzzy picker.
+    WorkspaceFocusRequested {
+        session_key: SessionKey,
     },
     /// Every terminal keyed to `from` now belongs to `to`. Broadcast
     /// when the daemon rebadges terminals during an issue→PR collapse

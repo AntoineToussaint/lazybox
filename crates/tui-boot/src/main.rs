@@ -67,6 +67,22 @@ fn resolve_poll_interval() -> Duration {
         .unwrap_or(POLL_INTERVAL_FALLBACK)
 }
 
+fn owned_embedded_notification_socket(
+    service_started: bool,
+    socket_path: &std::path::Path,
+    pid_path: &std::path::Path,
+    process_id: u32,
+) -> Option<PathBuf> {
+    if service_started
+        && socket_path.exists()
+        && lifecycle::read_pid(pid_path).ok().flatten() == Some(process_id)
+    {
+        Some(socket_path.to_path_buf())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,6 +107,47 @@ mod tests {
             "fallback must NOT match the schema default, otherwise we \
              can't tell whether the config is being honored",
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn embedded_notifications_only_target_a_socket_owned_by_this_process() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let socket_path = temp.path().join("daemon.sock");
+        let pid_path = temp.path().join("daemon.pid");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&socket_path).expect("socket listener");
+        lazybox_server::lifecycle::write_pid_file(std::process::id(), &pid_path).expect("pid file");
+
+        assert_eq!(
+            owned_embedded_notification_socket(true, &socket_path, &pid_path, std::process::id()),
+            Some(socket_path.clone())
+        );
+        assert_eq!(
+            owned_embedded_notification_socket(false, &socket_path, &pid_path, std::process::id()),
+            None
+        );
+
+        lazybox_server::lifecycle::write_pid_file(1, &pid_path).expect("foreign pid file");
+        assert_eq!(
+            owned_embedded_notification_socket(true, &socket_path, &pid_path, std::process::id()),
+            None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn terminal_selection_targets_the_lazybox_tty() {
+        let terminal =
+            terminal_selection_script("com.apple.Terminal", "/dev/ttys674").expect("script");
+        assert!(terminal.contains(r#"if tty of target_tab is "/dev/ttys674""#));
+        assert!(terminal.contains("set selected tab of target_window to target_tab"));
+
+        let iterm =
+            terminal_selection_script("com.googlecode.iterm2", "/dev/ttys674").expect("script");
+        assert!(iterm.contains(r#"if tty of target_session is "/dev/ttys674""#));
+        assert!(iterm.contains("select target_session"));
+        assert!(iterm.contains("select target_window"));
     }
 }
 
@@ -276,6 +333,10 @@ async fn main() -> anyhow::Result<()> {
 
     init_tracing()?;
 
+    if matches!(args.first().map(String::as_str), Some("notification-click")) {
+        return notification_click_subcommand(&args[1..]).await;
+    }
+
     let fresh = take_flag(&mut args, "--fresh");
     let test_mode = take_flag(&mut args, "--test");
     let preselect_workspace = take_value(&mut args, "--workspace");
@@ -304,6 +365,113 @@ async fn main() -> anyhow::Result<()> {
             run_remote(&socket_path, preselect).await
         }
         _ => run_embedded_realm(preselect).await,
+    }
+}
+
+async fn notification_click_subcommand(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let Some(workspace_key) = take_value(&mut args, "--workspace") else {
+        return Ok(());
+    };
+    let socket_path = take_value(&mut args, "--socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(lifecycle::socket_path);
+
+    #[cfg(target_os = "macos")]
+    if let Some(bundle_id) = take_value(&mut args, "--terminal-bundle-id") {
+        let terminal_tty = take_value(&mut args, "--terminal-tty");
+        let wezterm_pane_id = take_value(&mut args, "--wezterm-pane-id");
+        activate_terminal(
+            &bundle_id,
+            terminal_tty.as_deref(),
+            wezterm_pane_id.as_deref(),
+        );
+    }
+
+    let command = lazybox_ipc::Command::ActivateWorkspace {
+        session_key: lazybox_core::SessionKey::new(workspace_key),
+    };
+    if let Err(error) = socket::send_command(&socket_path, &command).await {
+        tracing::warn!(
+            %error,
+            socket = %socket_path.display(),
+            "notification click could not send workspace focus"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn activate_terminal(bundle_id: &str, terminal_tty: Option<&str>, wezterm_pane_id: Option<&str>) {
+    let selected = terminal_tty
+        .and_then(|tty| terminal_selection_script(bundle_id, tty))
+        .is_some_and(|script| run_quiet_command("osascript", &["-e", &script]));
+
+    if selected {
+        return;
+    }
+
+    if bundle_id == "com.github.wez.wezterm"
+        && let Some(pane_id) = wezterm_pane_id
+        && !run_quiet_command("wezterm", &["cli", "activate-pane", "--pane-id", pane_id])
+    {
+        tracing::warn!(%pane_id, "notification click could not select WezTerm pane");
+    }
+
+    if !run_quiet_command("open", &["-b", bundle_id]) {
+        tracing::warn!(%bundle_id, "notification click could not activate terminal");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_quiet_command(program: &str, args: &[&str]) -> bool {
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_selection_script(bundle_id: &str, terminal_tty: &str) -> Option<String> {
+    let tty = terminal_tty.replace('\\', "\\\\").replace('"', "\\\"");
+    match bundle_id {
+        "com.apple.Terminal" => Some(format!(
+            "tell application id \"com.apple.Terminal\"\n\
+             repeat with target_window in windows\n\
+             repeat with target_tab in tabs of target_window\n\
+             if tty of target_tab is \"{tty}\" then\n\
+             set selected tab of target_window to target_tab\n\
+             set index of target_window to 1\n\
+             activate\n\
+             return\n\
+             end if\n\
+             end repeat\n\
+             end repeat\n\
+             activate\n\
+             end tell"
+        )),
+        "com.googlecode.iterm2" => Some(format!(
+            "tell application id \"com.googlecode.iterm2\"\n\
+             repeat with target_window in windows\n\
+             repeat with target_tab in tabs of target_window\n\
+             repeat with target_session in sessions of target_tab\n\
+             if tty of target_session is \"{tty}\" then\n\
+             select target_session\n\
+             select target_tab\n\
+             select target_window\n\
+             activate\n\
+             return\n\
+             end if\n\
+             end repeat\n\
+             end repeat\n\
+             end repeat\n\
+             activate\n\
+             end tell"
+        )),
+        _ => None,
     }
 }
 
@@ -361,13 +529,8 @@ async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
     // handshake error means a version-skewed daemon — logged (never
     // surfaced to Claude, whose turn would stall on a non-zero exit)
     // so the operator can see why agent state stopped updating.
-    if let Ok((mut rd, mut wr)) = lazybox_ipc::transport::connect(&lifecycle::socket_path()).await {
-        match socket::client_handshake(&mut rd, &mut wr).await {
-            Ok(_) => {
-                let _ = socket::write_frame(&mut wr, &command).await;
-            }
-            Err(e) => tracing::warn!("hook-ingest handshake failed: {e}"),
-        }
+    if let Err(error) = socket::send_command(&lifecycle::socket_path(), &command).await {
+        tracing::warn!("hook-ingest IPC send failed: {error}");
     }
     Ok(())
 }
@@ -585,10 +748,14 @@ async fn run_remote(
     // The remote path skips the full config application (the daemon
     // owns most of it), but notifications fire client-side — arm them
     // here too or `--connect` sessions would stay silent.
-    let notifier = lazybox_config::Config::load()
-        .map(|c| c.attention.notifier)
+    let attention = lazybox_config::Config::load()
+        .map(|c| c.attention)
         .unwrap_or_default();
-    lazybox_tui::platform::set_notifier_backend(map_notifier_backend(notifier));
+    lazybox_tui::platform::set_notification_click_context(
+        Some(socket_path.to_path_buf()),
+        attention.terminal_bundle_id,
+    );
+    lazybox_tui::platform::set_notifier_backend(map_notifier_backend(attention.notifier));
     let available_update = update_check.await.unwrap_or_else(|error| {
         tracing::debug!("startup update check task failed: {error}");
         None
@@ -778,6 +945,12 @@ async fn run_embedded_realm(
         tracing::debug!("startup update check task failed: {error}");
         None
     });
+    let notification_socket = owned_embedded_notification_socket(
+        embedded_socket.is_some(),
+        &lifecycle::socket_path(),
+        &lifecycle::pid_path(),
+        std::process::id(),
+    );
 
     spawn_terminal_restore_on_signal(Some(DaemonDrain {
         trigger: graceful_stop_tx.clone(),
@@ -851,6 +1024,10 @@ async fn run_embedded_realm(
         // Arm desktop notifications with the configured backend. Until
         // this call `notify_user` is a logged no-op — arming is the
         // binary's opt-in so library tests never spawn real banners.
+        lazybox_tui::platform::set_notification_click_context(
+            notification_socket,
+            user_config.attention.terminal_bundle_id.clone(),
+        );
         lazybox_tui::platform::set_notifier_backend(map_notifier_backend(
             user_config.attention.notifier,
         ));

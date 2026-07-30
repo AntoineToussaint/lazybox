@@ -1140,6 +1140,7 @@ impl Server {
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
+                        lazybox_ipc::Command::ActivateWorkspace { .. } => "ActivateWorkspace",
                         lazybox_ipc::Command::MarkActivityRead { .. } => "MarkActivityRead",
                         lazybox_ipc::Command::UnmarkActivityRead { .. } => "UnmarkActivityRead",
                         lazybox_ipc::Command::FetchPrDetails { .. } => "FetchPrDetails",
@@ -1802,6 +1803,13 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::FocusWorkspace { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             polling::set_focused_workspace(config, &key).await;
+        }
+        lazybox_ipc::Command::ActivateWorkspace { session_key } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            polling::set_focused_workspace(config, &key).await;
+            let _ = config
+                .bus
+                .send(lazybox_ipc::Event::WorkspaceFocusRequested { session_key });
         }
         lazybox_ipc::Command::MarkActivityRead {
             session_key,

@@ -78,7 +78,7 @@ impl Sidebar {
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
         self.inner.on_event(evt);
         for notif in self.inner.drain_pending_notifications() {
-            crate::platform::notify_user(&notif.title, &notif.body);
+            crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
         }
     }
 
@@ -350,6 +350,12 @@ impl Sidebar {
         self.inner.focus_workspace_key(key)
     }
 
+    /// Reveal and select a workspace even when the current sidebar view
+    /// hides it.
+    pub fn reveal_workspace_key(&mut self, key: &lazybox_core::SessionKey) -> bool {
+        self.inner.reveal_workspace_key(key)
+    }
+
     /// Move the cursor onto the RepoHeader row for the given project.
     /// See `Sidebar::focus_project_header`.
     pub fn focus_project_header(&mut self, key: &lazybox_core::ProjectKey) -> bool {
@@ -535,7 +541,7 @@ impl AppComponent<Msg, UserEvent> for Sidebar {
             Event::User(UserEvent::Daemon(evt)) => {
                 self.inner.on_event(evt);
                 for notif in self.inner.drain_pending_notifications() {
-                    crate::platform::notify_user(&notif.title, &notif.body);
+                    crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
                 }
                 None
             }

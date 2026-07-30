@@ -136,6 +136,11 @@ pub struct AttentionConfig {
     /// environment (subprocess helpers locally, the terminal's OSC
     /// escape sequence over SSH); `osc` / `subprocess` force one path.
     pub notifier: NotifierBackend,
+    /// macOS bundle identifier to activate when a clickable
+    /// `terminal-notifier` banner is opened. Normally inferred from the
+    /// launching terminal; set this for an unrecognized terminal or
+    /// integrated terminal host.
+    pub terminal_bundle_id: Option<String>,
 }
 
 /// `attention.notifier` values — how a desktop banner is delivered.
@@ -164,6 +169,7 @@ impl Default for AttentionConfig {
             mentioned: true,
             desktop_notify: true,
             notifier: NotifierBackend::Auto,
+            terminal_bundle_id: None,
         }
     }
 }
@@ -2345,6 +2351,25 @@ auto_fix:
             let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
             assert_eq!(reparsed.attention.notifier, want, "round-trip: {yaml}");
         }
+    }
+
+    #[test]
+    fn terminal_bundle_id_is_optional_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.attention.terminal_bundle_id.is_none());
+
+        let yaml = "attention:\n  terminal_bundle_id: com.example.Terminal\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(
+            cfg.attention.terminal_bundle_id.as_deref(),
+            Some("com.example.Terminal")
+        );
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(
+            reparsed.attention.terminal_bundle_id,
+            cfg.attention.terminal_bundle_id
+        );
     }
 
     #[test]

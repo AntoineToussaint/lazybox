@@ -112,6 +112,127 @@ pub fn set_notifier_backend(backend: NotifierBackend) {
     BACKEND.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[cfg(target_os = "macos")]
+struct NotificationClickContext {
+    executable: std::path::PathBuf,
+    socket_path: std::path::PathBuf,
+    terminal_bundle_id: String,
+    terminal_session: Option<TerminalSession>,
+}
+
+#[cfg(target_os = "macos")]
+enum TerminalSession {
+    Tty(String),
+    WezTermPane(String),
+}
+
+#[cfg(target_os = "macos")]
+static NOTIFICATION_CLICK_CONTEXT: std::sync::OnceLock<Option<NotificationClickContext>> =
+    std::sync::OnceLock::new();
+
+/// Configure the local target a clickable macOS notification should
+/// reach. The socket differs for `--connect <path>` clients, so the
+/// boot crate supplies the path used by this TUI instead of assuming
+/// the default daemon location.
+#[cfg(target_os = "macos")]
+pub fn set_notification_click_context(
+    socket_path: Option<std::path::PathBuf>,
+    configured_bundle_id: Option<String>,
+) {
+    let terminal_bundle_id = detect_terminal_bundle_id(
+        configured_bundle_id.as_deref(),
+        std::env::var("__CFBundleIdentifier").ok().as_deref(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+    );
+    let terminal_session = terminal_bundle_id
+        .as_deref()
+        .and_then(detect_terminal_session);
+    let context = socket_path
+        .zip(std::env::current_exe().ok())
+        .zip(terminal_bundle_id)
+        .map(
+            |((socket_path, executable), terminal_bundle_id)| NotificationClickContext {
+                executable,
+                socket_path,
+                terminal_bundle_id,
+                terminal_session,
+            },
+        );
+    let _ = NOTIFICATION_CLICK_CONTEXT.set(context);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_notification_click_context(
+    socket_path: Option<std::path::PathBuf>,
+    configured_bundle_id: Option<String>,
+) {
+    let _ = (socket_path, configured_bundle_id);
+}
+
+/// Resolve the app to bring forward for a notification click. A
+/// configured value wins; macOS's inherited bundle identifier is more
+/// precise than terminal-name inference and also covers integrated
+/// terminals such as VS Code.
+pub fn detect_terminal_bundle_id(
+    configured: Option<&str>,
+    inherited: Option<&str>,
+    term_program: Option<&str>,
+) -> Option<String> {
+    configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| inherited.map(str::trim).filter(|value| !value.is_empty()))
+        .map(str::to_string)
+        .or_else(|| {
+            let bundle_id = match term_program? {
+                "Apple_Terminal" => "com.apple.Terminal",
+                "iTerm.app" => "com.googlecode.iterm2",
+                "ghostty" => "com.mitchellh.ghostty",
+                "WezTerm" => "com.github.wez.wezterm",
+                _ => return None,
+            };
+            Some(bundle_id.to_string())
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn detect_terminal_session(bundle_id: &str) -> Option<TerminalSession> {
+    if bundle_id == "com.github.wez.wezterm" {
+        return std::env::var("WEZTERM_PANE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(TerminalSession::WezTermPane);
+    }
+    if !matches!(bundle_id, "com.apple.Terminal" | "com.googlecode.iterm2") {
+        return None;
+    }
+
+    let tty = if std::env::var_os("TMUX").is_some() {
+        command_stdout("tmux", &["display-message", "-p", "#{client_tty}"])
+    } else {
+        None
+    }
+    .or_else(|| command_stdout("tty", &[]))?;
+    Some(TerminalSession::Tty(tty))
+}
+
+#[cfg(target_os = "macos")]
+fn command_stdout(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 fn notifier_backend() -> Option<NotifierBackend> {
     match BACKEND.load(std::sync::atomic::Ordering::Relaxed) {
         BACKEND_AUTO => Some(NotifierBackend::Auto),
@@ -255,7 +376,7 @@ fn notify_send_path() -> Option<&'static std::path::Path> {
 /// queued for the render thread to emit between frames
 /// ([`crate::notify::queue_osc_notification`]), so the escape bytes
 /// can't interleave with a ratatui frame flush (issue #296).
-pub fn notify_user(title: &str, body: &str) {
+pub fn notify_user(title: &str, body: &str, workspace_key: &lazybox_core::SessionKey) {
     let Some(backend) = notifier_backend() else {
         tracing::debug!(title, "notify_user: skipped — no backend armed");
         return;
@@ -281,7 +402,7 @@ pub fn notify_user(title: &str, body: &str) {
         }
         Route::Subprocess => {
             tracing::debug!(title, remote, "notify_user: subprocess backend");
-            notify_subprocess(title, body);
+            notify_subprocess(title, body, workspace_key);
         }
     }
 }
@@ -332,7 +453,7 @@ fn log_notifier_exit(helper: &'static str, spawned: std::io::Result<std::process
 /// missing — install `libnotify` (e.g. `apt install libnotify-bin`).
 ///
 /// **Windows**: stub (TODO: PowerShell `New-BurntToastNotification`).
-fn notify_subprocess(title: &str, body: &str) {
+fn notify_subprocess(title: &str, body: &str, workspace_key: &lazybox_core::SessionKey) {
     #[cfg(target_os = "macos")]
     {
         use std::sync::OnceLock;
@@ -350,17 +471,18 @@ fn notify_subprocess(title: &str, body: &str) {
             // lazybox.app bundle id, spoofing one would surface the
             // wrong app's icon.
             let (i, o, e) = stdio();
-            let spawned = std::process::Command::new(tn_path)
+            let mut command = std::process::Command::new(tn_path);
+            command
                 .arg("-title")
                 .arg(title)
                 .arg("-message")
                 .arg(body)
                 .arg("-group")
-                .arg("com.lazybox.agent")
-                .stdin(i)
-                .stdout(o)
-                .stderr(e)
-                .spawn();
+                .arg("com.lazybox.agent");
+            if let Some(click_command) = notification_click_command(workspace_key) {
+                command.arg("-execute").arg(click_command);
+            }
+            let spawned = command.stdin(i).stdout(o).stderr(e).spawn();
             log_notifier_exit("terminal-notifier", spawned);
         } else {
             // Zero-dependency fallback, but newer macOS attributes its
@@ -386,6 +508,7 @@ fn notify_subprocess(title: &str, body: &str) {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
+        let _ = workspace_key;
         let Some(ns_path) = notify_send_path() else {
             // No notify-send on PATH → no notification. A one-time
             // tracing line so users can grep /tmp/lazybox.log and find
@@ -414,8 +537,56 @@ fn notify_subprocess(title: &str, body: &str) {
     }
     #[cfg(windows)]
     {
-        let _ = (title, body);
+        let _ = (title, body, workspace_key);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn notification_click_command(workspace_key: &lazybox_core::SessionKey) -> Option<String> {
+    let context = NOTIFICATION_CLICK_CONTEXT.get()?.as_ref()?;
+    let executable = context.executable.to_str()?;
+    let socket_path = context.socket_path.to_str()?;
+    Some(build_notification_click_command(
+        executable,
+        socket_path,
+        &context.terminal_bundle_id,
+        context.terminal_session.as_ref(),
+        workspace_key,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn build_notification_click_command(
+    executable: &str,
+    socket_path: &str,
+    terminal_bundle_id: &str,
+    terminal_session: Option<&TerminalSession>,
+    workspace_key: &lazybox_core::SessionKey,
+) -> String {
+    let mut command = format!(
+        "{} notification-click --workspace {} --socket {} --terminal-bundle-id {}",
+        shell_quote(executable),
+        shell_quote(workspace_key.as_str()),
+        shell_quote(socket_path),
+        shell_quote(terminal_bundle_id),
+    );
+    match terminal_session {
+        Some(TerminalSession::Tty(tty)) => {
+            command.push_str(" --terminal-tty ");
+            command.push_str(&shell_quote(tty));
+        }
+        Some(TerminalSession::WezTermPane(pane_id)) => {
+            command.push_str(" --wezterm-pane-id ");
+            command.push_str(&shell_quote(pane_id));
+        }
+        None => {}
+    }
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 /// One-time hint logged when the osascript fallback fires because
@@ -579,6 +750,41 @@ mod route_tests {
             Route::Osc(OscNotifier::Osc777)
         );
     }
+
+    #[test]
+    fn terminal_bundle_detection_prefers_exact_sources_then_known_terminals() {
+        assert_eq!(
+            detect_terminal_bundle_id(
+                Some("  com.example.Override  "),
+                Some("com.example.Inherited"),
+                Some("ghostty")
+            )
+            .as_deref(),
+            Some("com.example.Override")
+        );
+        assert_eq!(
+            detect_terminal_bundle_id(None, Some("com.microsoft.VSCode"), Some("unknown"))
+                .as_deref(),
+            Some("com.microsoft.VSCode")
+        );
+        assert_eq!(
+            detect_terminal_bundle_id(None, None, Some("Apple_Terminal")).as_deref(),
+            Some("com.apple.Terminal")
+        );
+        assert_eq!(
+            detect_terminal_bundle_id(None, None, Some("iTerm.app")).as_deref(),
+            Some("com.googlecode.iterm2")
+        );
+        assert_eq!(
+            detect_terminal_bundle_id(None, None, Some("ghostty")).as_deref(),
+            Some("com.mitchellh.ghostty")
+        );
+        assert_eq!(
+            detect_terminal_bundle_id(None, None, Some("WezTerm")).as_deref(),
+            Some("com.github.wez.wezterm")
+        );
+        assert_eq!(detect_terminal_bundle_id(None, None, Some("unknown")), None);
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -614,5 +820,37 @@ mod tests {
         assert!(TERMINAL_NOTIFIER_HINT.contains("terminal-notifier"));
         assert!(TERMINAL_NOTIFIER_HINT.contains("brew install terminal-notifier"));
         assert!(TERMINAL_NOTIFIER_HINT.contains("Script Editor"));
+    }
+
+    #[test]
+    fn notification_click_command_quotes_every_dynamic_argument() {
+        let command = build_notification_click_command(
+            "/Applications/Lazy Box/lazybox",
+            "/tmp/lazy'box/daemon.sock",
+            "com.example.Terminal",
+            Some(&TerminalSession::Tty("/dev/ttys674".into())),
+            &lazybox_core::SessionKey::new("github:o/repo#674; touch /tmp/no"),
+        );
+        assert_eq!(
+            command,
+            "'/Applications/Lazy Box/lazybox' notification-click --workspace \
+             'github:o/repo#674; touch /tmp/no' --socket \
+             '/tmp/lazy'\"'\"'box/daemon.sock' --terminal-bundle-id \
+             'com.example.Terminal' --terminal-tty '/dev/ttys674'"
+        );
+    }
+
+    #[test]
+    fn notification_click_context_uses_the_client_socket_and_bundle_override() {
+        set_notification_click_context(
+            Some(std::path::PathBuf::from("/tmp/lazybox-remote.sock")),
+            Some("com.example.Terminal".into()),
+        );
+        let command = notification_click_command(&lazybox_core::SessionKey::new("github:o/r#674"))
+            .expect("click command");
+        assert!(command.contains(
+            " notification-click --workspace 'github:o/r#674' --socket \
+             '/tmp/lazybox-remote.sock' --terminal-bundle-id 'com.example.Terminal'"
+        ));
     }
 }

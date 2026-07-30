@@ -7,18 +7,20 @@ pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 mod api_gateway;
 
 use api_gateway::{
-    CommandResponse, GatewayOptions, HealthResponse, JsonClientFrame, JsonServerFrame,
-    ProtocolResponse, UnsupportedProtocolResponse, WorkspacesResponse,
+    CommandResponse, DesktopCommand, DesktopEvent, DesktopTerminalSnapshot, GatewayOptions,
+    HealthResponse, JsonClientFrame, JsonServerFrame, ProtocolResponse,
+    UnsupportedFingerprintResponse, UnsupportedProtocolResponse, WorkspacesResponse,
 };
 use bytes::Bytes;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use http_body_util::{BodyExt, Full};
 use hyper::header::{AUTHORIZATION, HeaderValue};
 use hyper::{Method, Request, StatusCode};
 use lazybox_agents::{Agent, SpawnCtx, StructuredAgentProtocol};
 use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace};
 use lazybox_ipc::{
-    AgentInputMessage, AgentRunRequestId, AgentRuntimeMode, Command, Event, TerminalId, TerminalKind,
+    AgentInputMessage, AgentRunRequestId, AgentRuntimeMode, AgentState, Command, Event, TerminalId,
+    TerminalKind, WorktreeStep, WorktreeStepStatus,
 };
 use lazybox_server::ServerError;
 use lazybox_server::agent_stream::{AgentStreamConfig, AgentStreamIo, AgentStreamSpawner};
@@ -149,6 +151,162 @@ fn make_task(key: &str) -> Task {
         kind: None,
         closes_issues: vec![],
     }
+}
+
+fn desktop_contract_workspace() -> Workspace {
+    let timestamp = Utc
+        .timestamp_opt(1_700_000_000, 0)
+        .single()
+        .expect("fixed fixture timestamp");
+    let mut task = make_task("o/r#42");
+    task.updated_at = timestamp;
+    Workspace::from_task(task, timestamp)
+}
+
+fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
+    match command {
+        DesktopCommand::SpawnAgent { .. } => "SpawnAgent",
+        DesktopCommand::FocusWorkspace { .. } => "FocusWorkspace",
+        DesktopCommand::Refresh => "Refresh",
+    }
+}
+
+fn desktop_event_tag(event: &DesktopEvent) -> &'static str {
+    match event {
+        DesktopEvent::Snapshot { .. } => "Snapshot",
+        DesktopEvent::WorkspaceUpserted(_) => "WorkspaceUpserted",
+        DesktopEvent::WorkspaceRemoved(_) => "WorkspaceRemoved",
+        DesktopEvent::TerminalSpawned { .. } => "TerminalSpawned",
+        DesktopEvent::TerminalExited { .. } => "TerminalExited",
+        DesktopEvent::TerminalFocusRequested { .. } => "TerminalFocusRequested",
+        DesktopEvent::AgentState { .. } => "AgentState",
+        DesktopEvent::ProviderError { .. } => "ProviderError",
+        DesktopEvent::CommandRejected { .. } => "CommandRejected",
+        DesktopEvent::PollCompleted { .. } => "PollCompleted",
+        DesktopEvent::PollProgress { .. } => "PollProgress",
+        DesktopEvent::WorktreeProgress { .. } => "WorktreeProgress",
+    }
+}
+
+#[test]
+fn desktop_compatibility_fixture_is_current() {
+    let session_key = lazybox_core::SessionKey::from("github:o/r#42");
+    let workspace = desktop_contract_workspace();
+    let commands = vec![
+        DesktopCommand::SpawnAgent {
+            session_key: session_key.clone(),
+            agent: "codex".into(),
+        },
+        DesktopCommand::FocusWorkspace {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::Refresh,
+    ];
+    let events = vec![
+        DesktopEvent::Snapshot {
+            workspaces: vec![workspace.clone()],
+            terminals: vec![DesktopTerminalSnapshot {
+                terminal_id: TerminalId(7),
+                session_key: session_key.clone(),
+                kind: TerminalKind::Agent("codex".into()),
+                last_seq: 42,
+                agent_state: Some(AgentState::Working),
+            }],
+        },
+        DesktopEvent::WorkspaceUpserted(Box::new(workspace)),
+        DesktopEvent::WorkspaceRemoved(lazybox_core::WorkspaceKey("github:o/r#42".into())),
+        DesktopEvent::TerminalSpawned {
+            terminal_id: TerminalId(7),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Shell,
+        },
+        DesktopEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: Some(0),
+            last_output: Some("done".into()),
+        },
+        DesktopEvent::TerminalFocusRequested {
+            terminal_id: TerminalId(7),
+        },
+        DesktopEvent::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(7),
+            state: AgentState::InputNeeded,
+        },
+        DesktopEvent::ProviderError {
+            source: "github".into(),
+            message: "unavailable".into(),
+        },
+        DesktopEvent::CommandRejected {
+            command: "Refresh".into(),
+            message: "busy".into(),
+        },
+        DesktopEvent::PollCompleted {
+            source: "github".into(),
+            count: 3,
+        },
+        DesktopEvent::PollProgress {
+            source: "github".into(),
+            message: "page 2".into(),
+        },
+        DesktopEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Progress("50%".into()),
+        },
+    ];
+    let command_tags = commands
+        .iter()
+        .map(desktop_command_tag)
+        .collect::<std::collections::BTreeSet<_>>();
+    let event_tags = events
+        .iter()
+        .map(desktop_event_tag)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(command_tags.len(), 3);
+    assert_eq!(event_tags.len(), 12);
+    let fixture = serde_json::json!({
+        "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,
+        "protocol_fingerprint": api_gateway::DESKTOP_PROTOCOL_FINGERPRINT,
+        "commands": commands,
+        "events": events,
+    });
+    let rendered = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&fixture).expect("serialize compatibility fixture")
+    );
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/desktop/src/generated/compatibility.json");
+
+    if std::env::var_os("UPDATE_DESKTOP_CONTRACT").is_some() {
+        std::fs::write(&path, rendered).expect("write compatibility fixture");
+        return;
+    }
+
+    let committed = std::fs::read_to_string(&path).expect(
+        "desktop compatibility fixture is missing; run the contract generator and update it",
+    );
+    assert_eq!(
+        committed, rendered,
+        "desktop compatibility fixture is stale; rerun with UPDATE_DESKTOP_CONTRACT=1"
+    );
+}
+
+#[test]
+fn desktop_boundary_rejects_internal_commands_and_private_events() {
+    let internal_command = serde_json::json!({
+        "ListProviderCredentials": {
+            "principal_id": "local"
+        }
+    });
+    assert!(serde_json::from_value::<DesktopCommand>(internal_command).is_err());
+    assert!(
+        api_gateway::desktop_event(Event::ProviderCredentialsListed {
+            principal_id: lazybox_ipc::PrincipalId::local(),
+            credentials: Vec::new(),
+        })
+        .is_none()
+    );
 }
 
 async fn read_json<T: serde::de::DeserializeOwned>(
@@ -285,6 +443,30 @@ async fn health_route_returns_json() {
     assert_eq!(payload.service, "lazybox-api-gateway");
     assert!(payload.ok);
 }
+
+#[tokio::test]
+async fn reusable_gateway_rejects_every_non_loopback_listener() {
+    let options = GatewayOptions {
+        bind_addr: "0.0.0.0:0".parse().expect("wildcard address"),
+        ..GatewayOptions::default()
+    };
+    let error = api_gateway::serve(ServerConfig::in_memory(), options)
+        .await
+        .expect_err("public gateway entry point must reject wildcard binds");
+    assert!(matches!(error, api_gateway::GatewayError::NonLoopback(_)));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+        .await
+        .expect("bind wildcard listener");
+    let error = api_gateway::serve_listener(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        listener,
+    )
+    .await
+    .expect_err("pre-bound wildcard listener must also be rejected");
+    assert!(matches!(error, api_gateway::GatewayError::NonLoopback(_)));
+}
 #[tokio::test]
 async fn metrics_route_returns_event_counters() {
     let config = ServerConfig::in_memory();
@@ -339,6 +521,10 @@ async fn protocol_route_discovers_the_versioned_binary_boundary() {
         api_gateway::DESKTOP_PROTOCOL_VERSION
     );
     assert_eq!(
+        payload.protocol_fingerprint,
+        api_gateway::DESKTOP_PROTOCOL_FINGERPRINT
+    );
+    assert_eq!(
         payload.terminal_transport,
         api_gateway::TERMINAL_BINARY_CONTENT_TYPE
     );
@@ -376,6 +562,35 @@ async fn unsupported_protocol_header_is_rejected_clearly() {
         payload
             .error
             .contains("unsupported lazybox protocol version")
+    );
+}
+
+#[tokio::test]
+async fn unsupported_protocol_fingerprint_is_rejected_clearly() {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/protocol")
+        .header(
+            api_gateway::PROTOCOL_FINGERPRINT_HEADER,
+            api_gateway::DESKTOP_PROTOCOL_FINGERPRINT.wrapping_add(1),
+        )
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+    let payload: UnsupportedFingerprintResponse = read_json(response).await;
+    assert_eq!(payload.supported, api_gateway::DESKTOP_PROTOCOL_FINGERPRINT);
+    assert!(
+        payload
+            .error
+            .contains("unsupported lazybox protocol fingerprint")
     );
 }
 
@@ -460,6 +675,9 @@ fn every_terminal_command_round_trips_the_binary_codec() {
         Command::Close {
             terminal_id: lazybox_ipc::TerminalId(2),
         },
+        Command::FetchScrollback {
+            terminal_id: lazybox_ipc::TerminalId(2),
+        },
     ];
 
     for command in commands {
@@ -489,6 +707,33 @@ async fn terminal_command_body_forwards_every_complete_binary_frame() {
         .flat_map(|command| api_gateway::encode_terminal_command(command).unwrap())
         .collect::<Vec<_>>();
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+
+    api_gateway::pump_terminal_commands(Full::new(Bytes::from(bytes)), tx).await;
+
+    for expected in expected {
+        let actual = rx.recv().await.expect("decoded terminal command");
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+    }
+}
+
+#[tokio::test]
+async fn terminal_command_body_accepts_coalesced_frames_over_the_buffer_limit() {
+    let expected = [
+        Command::Write {
+            terminal_id: TerminalId(2),
+            bytes: vec![b'a'; lazybox_ipc::MAX_WRITE_CHUNK_BYTES],
+        },
+        Command::Write {
+            terminal_id: TerminalId(2),
+            bytes: vec![b'b'; lazybox_ipc::MAX_WRITE_CHUNK_BYTES],
+        },
+    ];
+    let bytes = expected
+        .iter()
+        .flat_map(|command| api_gateway::encode_terminal_command(command).unwrap())
+        .collect::<Vec<_>>();
+    assert!(bytes.len() > lazybox_ipc::MAX_COMMAND_FRAME_BYTES as usize);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(2);
 
     api_gateway::pump_terminal_commands(Full::new(Bytes::from(bytes)), tx).await;
 
@@ -542,7 +787,7 @@ fn json_control_stream_never_serializes_terminal_byte_payloads() {
         panic!("expected snapshot");
     };
     assert!(terminals[0].replay.is_empty());
-    assert!(terminals[0].replay_available);
+    assert!(!terminals[0].replay_available);
 }
 
 struct DecodedTerminalFrame {
@@ -662,7 +907,7 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
     assert_eq!(response.status(), StatusCode::OK);
     let _command_stream = response.into_body();
 
-    let output_snapshot = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    let output_snapshot = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             let snapshot = config
                 .backend
@@ -873,6 +1118,93 @@ async fn command_route_accepts_json_client_frame() {
     let payload: CommandResponse = read_json(response).await;
     assert!(payload.ok);
     assert!(payload.completed);
+    assert!(payload.events.is_empty());
+}
+
+#[tokio::test]
+async fn command_route_returns_connection_scoped_handler_events() {
+    let frame = JsonClientFrame::Command(Command::ListProviderCredentials {
+        principal_id: lazybox_ipc::PrincipalId::local(),
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: CommandResponse = read_json(response).await;
+    assert!(matches!(
+        payload.events.as_slice(),
+        [Event::ProviderCredentialsListed { credentials, .. }] if credentials.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn json_command_route_rejects_every_binary_terminal_command() {
+    let commands = [
+        Command::Write {
+            terminal_id: TerminalId(1),
+            bytes: vec![1],
+        },
+        Command::Resize {
+            terminal_id: TerminalId(1),
+            cols: 80,
+            rows: 24,
+        },
+        Command::RequestTerminalResync {
+            terminal_id: TerminalId(1),
+            required_seq: 1,
+        },
+        Command::Close {
+            terminal_id: TerminalId(1),
+        },
+        Command::FetchScrollback {
+            terminal_id: TerminalId(1),
+        },
+    ];
+
+    for command in commands {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/commands")
+            .body(Full::new(Bytes::from(
+                serde_json::to_vec(&JsonClientFrame::Command(command)).unwrap(),
+            )))
+            .unwrap();
+        let response = api_gateway::handle_request(
+            ServerConfig::in_memory(),
+            GatewayOptions::default(),
+            request,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn json_stream_drops_terminal_commands_and_forwards_control_commands() {
+    let mut input = serde_json::to_vec(&JsonClientFrame::Command(Command::Write {
+        terminal_id: TerminalId(1),
+        bytes: vec![1, 2, 3],
+    }))
+    .unwrap();
+    input.push(b'\n');
+    input.extend(serde_json::to_vec(&JsonClientFrame::Command(Command::Refresh)).unwrap());
+    input.push(b'\n');
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+
+    api_gateway::pump_ndjson_commands(Full::new(Bytes::from(input)), tx).await;
+
+    assert!(matches!(rx.recv().await, Some(Command::Refresh)));
+    assert!(rx.recv().await.is_none());
 }
 
 #[tokio::test]

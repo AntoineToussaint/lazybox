@@ -26,26 +26,27 @@ the foreground API request restore.
 
 ## Versioned contract
 
-`GET /v1/protocol` reports the desktop protocol version, Rust IPC fingerprint,
+`GET /v1/protocol` reports the desktop protocol version, Rust wire fingerprint,
 daemon build, binary terminal media type, and frame/write limits. Desktop
-requests send `x-lazybox-protocol-version`; an unsupported value receives HTTP
-426 with the requested and supported versions.
+requests send `x-lazybox-protocol-version` and
+`x-lazybox-protocol-fingerprint`; an unsupported value receives HTTP 426 with
+the requested and supported values.
 
 TypeScript definitions under `apps/desktop/src/generated/` are generated from
-the Rust `Command`, `Event`, core model, and gateway DTOs:
+the Rust desktop command/event DTOs, core model, and gateway DTOs:
 
 ```sh
 cargo run -p lazybox-server --features desktop-contract \
   --bin generate-desktop-contract
-UPDATE_DESKTOP_CONTRACT=1 cargo test -p lazybox-ipc --test protocol \
+UPDATE_DESKTOP_CONTRACT=1 cargo test -p lazybox-server --test api_gateway \
   desktop_compatibility_fixture_is_current -- --exact
 ```
 
-The committed compatibility fixture is serialized from the exhaustive Rust
-wire corpus. Rust tests require every command and event discriminant to have a
-sample; frontend tests pin the protocol version and variant coverage. The
-desktop CI job regenerates the types and fails on any diff, so a Rust wire
-change cannot silently leave the frontend contract stale.
+The committed compatibility fixture is serialized from every desktop command
+and event shape. Frontend tests pin the protocol version, fingerprint, and
+variant coverage. The desktop CI job regenerates the types and fails on any
+diff, so a Rust desktop wire change cannot silently leave the frontend
+contract stale.
 
 ## Terminal transport
 
@@ -65,8 +66,10 @@ raw terminal bytes
 ```
 
 Client frames use a length, kind, terminal id, and command payload. Kinds are
-write, resize, resync, and close. Frames and writes are capped by the existing
-IPC limits. Each gateway bridge retains the daemon's bounded
+write, resize, resync, close, and fetch scrollback. JSON command routes reject
+those terminal commands so all terminal traffic shares the ordered binary
+queue. Frames and writes are capped by the existing IPC limits. Each gateway
+bridge retains the daemon's bounded
 drop-and-authoritative-replay behavior; the Tauri shell adds a bounded native
 queue and the webview pulls raw chunks, so neither side accumulates an
 unbounded terminal backlog. xterm.js receives `Uint8Array` payloads directly,

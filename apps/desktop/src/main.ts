@@ -25,19 +25,20 @@ import {
 import {
   TerminalFrameDecoder,
   type TerminalBinaryFrame,
+  type TerminalReplayState,
+  decodeTerminalStreamItem,
+  discardTerminalView,
   resizeTerminalFrame,
+  requiredTerminalResyncSequence,
   resyncTerminalFrame,
+  sendTerminalFramesSequentially,
   writeTerminalFrames,
 } from "./terminal";
 
-export interface TerminalRecord {
+export interface TerminalRecord extends TerminalReplayState {
   id: number;
   sessionKey: string;
   kind: TerminalKind;
-  replay: Uint8Array;
-  lastSeq: number;
-  replayAvailable: boolean;
-  dirty: boolean;
   state: string;
 }
 
@@ -81,6 +82,7 @@ let activeTerminal: ActiveTerminal | null = null;
 let resizeTimer: number | undefined;
 const pendingInput = new Map<number, number[]>();
 const inputTimers = new Map<number, number>();
+const inputSending = new Set<number>();
 const encoder = new TextEncoder();
 let terminalDecoder = new TerminalFrameDecoder(2 * 1024 * 1024 + 25);
 let maxTerminalWriteBytes = 128 * 1024;
@@ -153,7 +155,7 @@ function handleStreamMessage(message: DesktopStreamMessage): void {
     setStatus(message.payload.message);
     return;
   }
-  handleEvent(message.payload.payload);
+  handleEvent(message.payload);
 }
 
 function handleEvent(event: LazyboxEvent): void {
@@ -198,11 +200,6 @@ function handleEvent(event: LazyboxEvent): void {
       attachTerminal(payload.terminal_id);
     }
     applyPendingTerminalFrames(payload.terminal_id);
-  } else if ("TerminalResyncUnavailable" in event) {
-    if (activeTerminal?.id === event.TerminalResyncUnavailable.terminal_id) {
-      activeTerminal.resyncing = false;
-      setTerminalState("waiting for replay");
-    }
   } else if ("TerminalExited" in event) {
     const record = terminals.get(event.TerminalExited.terminal_id);
     if (record !== undefined) {
@@ -249,7 +246,12 @@ async function readTerminalData(): Promise<void> {
   while (!previewMode) {
     try {
       const chunk = await invoke<ArrayBuffer>("read_terminal_data");
-      for (const frame of terminalDecoder.push(chunk)) {
+      const item = decodeTerminalStreamItem(chunk);
+      if (item.kind === "reset") {
+        terminalDecoder.reset();
+        continue;
+      }
+      for (const frame of terminalDecoder.push(item.payload)) {
         if (frame.kind === "output") {
           handleTerminalOutput(frame);
         } else if (frame.kind === "resync-unavailable") {
@@ -497,6 +499,10 @@ function attachTerminal(id: number): void {
 
 function detachTerminal(): void {
   if (activeTerminal !== null) {
+    const record = terminals.get(activeTerminal.id);
+    if (record !== undefined) {
+      discardTerminalView(record);
+    }
     activeTerminal.disposeInput();
     activeTerminal.disposeResize();
     activeTerminal.terminal.dispose();
@@ -526,7 +532,10 @@ function handleTerminalOutput(frame: TerminalBinaryFrame): void {
     frame.firstSeq !== record.lastSeq + 1 &&
     !(record.lastSeq === 0 && frame.firstSeq === 0)
   ) {
-    requestTerminalResync(record);
+    requestTerminalResync(
+      record,
+      requiredTerminalResyncSequence(record.lastSeq, true),
+    );
     return;
   }
   activeTerminal.terminal.write(frame.payload);
@@ -559,11 +568,17 @@ function handleTerminalResyncUnavailable(terminalId: number): void {
   }
 }
 
-function requestTerminalResync(record: TerminalRecord): void {
+function requestTerminalResync(
+  record: TerminalRecord,
+  requiredSeq = requiredTerminalResyncSequence(
+    record.lastSeq,
+    record.replayAvailable,
+  ),
+): void {
   if (activeTerminal?.id === record.id && !activeTerminal.resyncing) {
     activeTerminal.resyncing = true;
     setTerminalState("resyncing");
-    void sendTerminalFrame(resyncTerminalFrame(record.id, record.lastSeq + 1));
+    void sendTerminalFrame(resyncTerminalFrame(record.id, requiredSeq));
   }
 }
 
@@ -576,19 +591,35 @@ function queueTerminalInput(id: number, bytes: number[]): void {
   }
   const timer = window.setTimeout(() => {
     inputTimers.delete(id);
-    const buffered = pendingInput.get(id) ?? [];
-    pendingInput.delete(id);
-    if (buffered.length > 0) {
-      for (const frame of writeTerminalFrames(
-        id,
-        Uint8Array.from(buffered),
-        maxTerminalWriteBytes,
-      )) {
-        void sendTerminalFrame(frame);
-      }
-    }
+    void flushTerminalInput(id);
   }, 12);
   inputTimers.set(id, timer);
+}
+
+async function flushTerminalInput(id: number): Promise<void> {
+  if (inputSending.has(id)) {
+    return;
+  }
+  inputSending.add(id);
+  try {
+    while (true) {
+      const buffered = pendingInput.get(id) ?? [];
+      pendingInput.delete(id);
+      if (buffered.length === 0) {
+        return;
+      }
+      await sendTerminalFramesSequentially(
+        writeTerminalFrames(
+          id,
+          Uint8Array.from(buffered),
+          maxTerminalWriteBytes,
+        ),
+        sendTerminalFrame,
+      );
+    }
+  } finally {
+    inputSending.delete(id);
+  }
 }
 
 function scheduleResize(): void {

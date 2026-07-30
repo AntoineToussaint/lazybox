@@ -123,9 +123,6 @@ describe("workspace model", () => {
         Snapshot: {
           workspaces: [first],
           terminals: [],
-          projects: [],
-          recent_snippets: [],
-          dismissed_updates: [],
         },
       },
     );

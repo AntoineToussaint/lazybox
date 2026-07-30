@@ -1029,34 +1029,6 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
 }
 
-#[test]
-fn desktop_compatibility_fixture_is_current() {
-    let fixture = serde_json::json!({
-        "protocol_version": 1,
-        "commands": all_commands(),
-        "events": all_events(),
-    });
-    let rendered = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&fixture).expect("serialize compatibility fixture")
-    );
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../apps/desktop/src/generated/compatibility.json");
-
-    if std::env::var_os("UPDATE_DESKTOP_CONTRACT").is_some() {
-        std::fs::write(&path, rendered).expect("write compatibility fixture");
-        return;
-    }
-
-    let committed = std::fs::read_to_string(&path).expect(
-        "desktop compatibility fixture is missing; run the contract generator and update it",
-    );
-    assert_eq!(
-        committed, rendered,
-        "desktop compatibility fixture is stale; rerun with UPDATE_DESKTOP_CONTRACT=1"
-    );
-}
-
 /// Round-trip every Command through bincode. Any new variant added to
 /// the enum must show up in `all_commands` or this test fails — that's
 /// the point.

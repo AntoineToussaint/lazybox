@@ -1,10 +1,10 @@
-export type { Command as LazyboxCommand } from "./Command";
-export type { Event as LazyboxEvent } from "./Event";
+export type { DesktopCommand as LazyboxCommand } from "./DesktopCommand";
+export type { DesktopEvent as LazyboxEvent } from "./DesktopEvent";
 export type { DesktopInfo } from "./DesktopInfo";
 export type { DesktopStreamMessage } from "./DesktopStreamMessage";
 export type { TerminalKind } from "./TerminalKind";
-export type { TerminalSnapshot } from "./TerminalSnapshot";
+export type { DesktopTerminalSnapshot as TerminalSnapshot } from "./DesktopTerminalSnapshot";
 export type { Task } from "./Task";
 export type { Workspace } from "./Workspace";
 export type { WorkspacesResponse } from "./WorkspacesResponse";
-export const DESKTOP_PROTOCOL_VERSION = 1 as const;
+export { DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION } from "./terminal-wire";

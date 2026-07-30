@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   TerminalFrameDecoder,
+  decodeTerminalStreamItem,
+  discardTerminalView,
+  requiredTerminalResyncSequence,
   resizeTerminalFrame,
   resyncTerminalFrame,
+  sendTerminalFramesSequentially,
   writeTerminalFrame,
   writeTerminalFrames,
 } from "./terminal";
@@ -91,6 +95,82 @@ describe("binary terminal protocol", () => {
     const decoder = new TerminalFrameDecoder(2048);
 
     expect(() => decoder.push(bytes)).toThrow("invalid terminal frame length");
+  });
+
+  it("invalidates a discarded view and requests an attainable replay baseline", () => {
+    const state = {
+      replay: new Uint8Array(),
+      lastSeq: 42,
+      replayAvailable: true,
+      dirty: false,
+    };
+
+    discardTerminalView(state);
+
+    expect(state).toEqual({
+      replay: new Uint8Array(),
+      lastSeq: 42,
+      replayAvailable: false,
+      dirty: true,
+    });
+    expect(
+      requiredTerminalResyncSequence(
+        state.lastSeq,
+        state.replayAvailable,
+      ),
+    ).toBe(42);
+    expect(requiredTerminalResyncSequence(42, true)).toBe(43);
+  });
+
+  it("resets an incomplete frame before decoding a reconnected stream", () => {
+    const stale = serverFrame(2, 7, 1, 1, new Uint8Array([1, 2, 3]));
+    const fresh = serverFrame(1, 7, 0, 9, new Uint8Array([9, 8]));
+    const decoder = new TerminalFrameDecoder(2048);
+
+    expect(decoder.push(stale.slice(0, stale.length - 1))).toEqual([]);
+    decoder.reset();
+
+    expect(decoder.push(fresh)).toEqual([
+      {
+        kind: "snapshot",
+        terminalId: 7,
+        firstSeq: 0,
+        seq: 9,
+        payload: new Uint8Array([9, 8]),
+      },
+    ]);
+  });
+
+  it("decodes native reset and data items without JSON byte arrays", () => {
+    expect(decodeTerminalStreamItem(new Uint8Array([0]))).toEqual({
+      kind: "reset",
+    });
+    expect(decodeTerminalStreamItem(new Uint8Array([1, 4, 5]))).toEqual({
+      kind: "data",
+      payload: new Uint8Array([4, 5]),
+    });
+  });
+
+  it("waits for each terminal frame before sending the next one", async () => {
+    const frames = [
+      new Uint8Array([1]),
+      new Uint8Array([2]),
+      new Uint8Array([3]),
+    ];
+    const sent: number[] = [];
+    let concurrent = 0;
+    let maxConcurrent = 0;
+
+    await sendTerminalFramesSequentially(frames, async (frame) => {
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await Promise.resolve();
+      sent.push(frame[0]!);
+      concurrent -= 1;
+    });
+
+    expect(sent).toEqual([1, 2, 3]);
+    expect(maxConcurrent).toBe(1);
   });
 });
 

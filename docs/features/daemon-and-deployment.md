@@ -155,10 +155,12 @@ serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
  / `JsonServerFrame::Event`) except terminal bytes, which use the versioned
 binary terminal stream. When a token is set, requests need
 `Authorization: Bearer <token>`. One-shot commands execute their handler to
-completion before HTTP 200; control commands that require a stream are
-rejected. Connections, request bodies, command lines, and commands per stream
-all have hard bounds. `GET /v1/workspaces` includes a `warnings` array for
-persisted rows that were preserved but could not be decoded.
+completion before HTTP 200 and return connection-scoped handler outcomes in
+the response's `events` array; control commands that require a stream are
+rejected. Terminal commands are accepted only by the ordered binary endpoint.
+Connections, request bodies, command lines, and commands per stream all have
+hard bounds. `GET /v1/workspaces` includes a `warnings` array for persisted
+rows that were preserved but could not be decoded.
 
 Provider credentials mutated through the experimental API remain in memory for
 the daemon process lifetime. Restarting the daemon discards them; persistent

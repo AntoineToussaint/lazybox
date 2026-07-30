@@ -1,26 +1,31 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use bytes::Bytes;
-use futures_util::StreamExt;
-use lazybox_ipc::Command;
 use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
-    CommandResponse, DESKTOP_PROTOCOL_VERSION, DesktopInfo, DesktopStreamMessage, GatewayOptions,
-    JsonClientFrame, JsonServerFrame, PROTOCOL_VERSION_HEADER, ProtocolResponse,
-    TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse,
+    CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
+    DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand,
+    DesktopInfo, DesktopStreamMessage, GatewayOptions, JsonClientFrame, JsonServerFrame,
+    PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER, ProtocolResponse,
+    TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
 use reqwest::{Client, Response};
 use serde::de::DeserializeOwned;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::ipc::{Channel, InvokeBody, Request};
 use tauri::{Manager, State};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, broadcast, mpsc};
-use tokio_stream::wrappers::BroadcastStream;
+use tokio::sync::{Mutex, mpsc};
+
+enum TerminalStreamItem {
+    Reset,
+    Data(Bytes),
+}
 
 #[derive(Clone)]
 struct GatewayClient {
@@ -33,9 +38,10 @@ struct DesktopState {
     gateway: GatewayClient,
     agents: Vec<String>,
     default_agent: String,
-    terminal_commands: broadcast::Sender<Bytes>,
-    terminal_rx: Mutex<mpsc::Receiver<Bytes>>,
-    terminal_tx: mpsc::Sender<Bytes>,
+    terminal_commands: mpsc::Sender<Bytes>,
+    terminal_command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
+    terminal_rx: Mutex<mpsc::Receiver<TerminalStreamItem>>,
+    terminal_tx: mpsc::Sender<TerminalStreamItem>,
     streams_started: AtomicBool,
     client_runtime: Mutex<Option<ClientRuntime>>,
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -71,11 +77,8 @@ async fn list_workspaces(state: State<'_, DesktopState>) -> Result<WorkspacesRes
 #[tauri::command]
 async fn send_command(
     state: State<'_, DesktopState>,
-    command: Command,
-) -> Result<CommandResponse, String> {
-    if is_terminal_command(&command) {
-        return Err("terminal commands must use the binary terminal channel".to_string());
-    }
+    command: DesktopCommand,
+) -> Result<(), String> {
     let response = state
         .gateway
         .authorized(
@@ -83,42 +86,46 @@ async fn send_command(
                 .gateway
                 .client
                 .post(state.gateway.url("/v1/commands"))
-                .json(&JsonClientFrame::Command(command))
+                .json(&JsonClientFrame::Command(command.into()))
                 .timeout(Duration::from_secs(5 * 60 + 5)),
         )
         .send()
         .await
         .map_err(|error| format!("send command: {error}"))?;
-    decode_response(response).await
+    let response: CommandResponse = decode_response(response).await?;
+    if response.ok && response.completed {
+        Ok(())
+    } else {
+        Err("daemon did not complete the desktop command".to_string())
+    }
 }
 
 #[tauri::command]
-fn send_terminal_frame(state: State<'_, DesktopState>, request: Request<'_>) -> Result<(), String> {
+async fn send_terminal_frame(
+    state: State<'_, DesktopState>,
+    request: Request<'_>,
+) -> Result<(), String> {
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err("terminal frame must be a binary request body".to_string());
     };
     if bytes.len() > lazybox_ipc::MAX_COMMAND_FRAME_BYTES as usize + 4 {
         return Err("terminal frame exceeds the command limit".to_string());
     }
-    state
-        .terminal_commands
-        .send(Bytes::copy_from_slice(bytes))
-        .map_err(|_| "terminal stream is not connected".to_string())?;
-    Ok(())
+    enqueue_terminal_frame(&state.terminal_commands, Bytes::copy_from_slice(bytes)).await
 }
 
 #[tauri::command]
 async fn read_terminal_data(
     state: State<'_, DesktopState>,
 ) -> Result<tauri::ipc::Response, String> {
-    let bytes = state
+    let item = state
         .terminal_rx
         .lock()
         .await
         .recv()
         .await
         .ok_or_else(|| "terminal stream stopped".to_string())?;
-    Ok(tauri::ipc::Response::new(bytes.to_vec()))
+    Ok(tauri::ipc::Response::new(encode_terminal_stream_item(item)))
 }
 
 #[tauri::command]
@@ -136,10 +143,10 @@ fn subscribe_events(
     });
 
     let terminal_gateway = state.gateway.clone();
-    let terminal_commands = state.terminal_commands.clone();
+    let terminal_command_rx = state.terminal_command_rx.clone();
     let terminal_tx = state.terminal_tx.clone();
     tauri::async_runtime::spawn(async move {
-        stream_terminal_events(terminal_gateway, terminal_commands, terminal_tx).await;
+        stream_terminal_events(terminal_gateway, terminal_command_rx, terminal_tx).await;
     });
     Ok(())
 }
@@ -165,6 +172,7 @@ impl GatewayClient {
         request
             .bearer_auth(&self.bearer_token)
             .header(PROTOCOL_VERSION_HEADER, DESKTOP_PROTOCOL_VERSION)
+            .header(PROTOCOL_FINGERPRINT_HEADER, DESKTOP_PROTOCOL_FINGERPRINT)
     }
 }
 
@@ -181,16 +189,6 @@ async fn decode_response<T: DeserializeOwned>(response: Response) -> Result<T, S
         .json()
         .await
         .map_err(|error| format!("decode gateway response: {error}"))
-}
-
-fn is_terminal_command(command: &Command) -> bool {
-    matches!(
-        command,
-        Command::Write { .. }
-            | Command::Resize { .. }
-            | Command::RequestTerminalResync { .. }
-            | Command::Close { .. }
-    )
 }
 
 async fn stream_control_events(gateway: GatewayClient, on_event: Channel<DesktopStreamMessage>) {
@@ -233,7 +231,12 @@ async fn stream_control_events_once(
         .map_err(|error| format!("read control stream: {error}"))?
     {
         for frame in decoder.push(&chunk)? {
-            if on_event.send(DesktopStreamMessage::Frame(frame)).is_err() {
+            let JsonServerFrame::Event(event) = frame;
+            if let Some(event) = desktop_event(event)
+                && on_event
+                    .send(DesktopStreamMessage::Frame(Box::new(event)))
+                    .is_err()
+            {
                 return Ok(());
             }
         }
@@ -243,12 +246,12 @@ async fn stream_control_events_once(
 
 async fn stream_terminal_events(
     gateway: GatewayClient,
-    commands: broadcast::Sender<Bytes>,
-    terminal_tx: mpsc::Sender<Bytes>,
+    command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
+    terminal_tx: mpsc::Sender<TerminalStreamItem>,
 ) {
     loop {
         if let Err(error) =
-            stream_terminal_events_once(&gateway, commands.subscribe(), &terminal_tx).await
+            stream_terminal_events_once(&gateway, command_rx.clone(), &terminal_tx).await
         {
             eprintln!("desktop terminal stream disconnected: {error}");
         }
@@ -258,11 +261,12 @@ async fn stream_terminal_events(
 
 async fn stream_terminal_events_once(
     gateway: &GatewayClient,
-    command_rx: broadcast::Receiver<Bytes>,
-    terminal_tx: &mpsc::Sender<Bytes>,
+    command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
+    terminal_tx: &mpsc::Sender<TerminalStreamItem>,
 ) -> Result<(), String> {
-    let commands = BroadcastStream::new(command_rx).map(|result| {
-        result.map_err(|error| io::Error::other(format!("terminal command stream lagged: {error}")))
+    let commands = futures_util::stream::unfold(command_rx, |command_rx| async move {
+        let command = command_rx.lock().await.recv().await;
+        command.map(|command| (Ok::<_, io::Error>(command), command_rx))
     });
     let body = reqwest::Body::wrap_stream(commands);
     let mut response = gateway
@@ -282,6 +286,10 @@ async fn stream_terminal_events_once(
             response.status()
         ));
     }
+    terminal_tx
+        .send(TerminalStreamItem::Reset)
+        .await
+        .map_err(|_| "webview terminal reader stopped".to_string())?;
 
     while let Some(chunk) = response
         .chunk()
@@ -289,11 +297,33 @@ async fn stream_terminal_events_once(
         .map_err(|error| format!("read terminal stream: {error}"))?
     {
         terminal_tx
-            .send(chunk)
+            .send(TerminalStreamItem::Data(chunk))
             .await
             .map_err(|_| "webview terminal reader stopped".to_string())?;
     }
     Ok(())
+}
+
+async fn enqueue_terminal_frame(
+    terminal_commands: &mpsc::Sender<Bytes>,
+    frame: Bytes,
+) -> Result<(), String> {
+    terminal_commands
+        .send(frame)
+        .await
+        .map_err(|_| "terminal stream stopped".to_string())
+}
+
+fn encode_terminal_stream_item(item: TerminalStreamItem) -> Vec<u8> {
+    match item {
+        TerminalStreamItem::Reset => vec![DESKTOP_TERMINAL_STREAM_ITEM_RESET],
+        TerminalStreamItem::Data(bytes) => {
+            let mut encoded = Vec::with_capacity(1 + bytes.len());
+            encoded.push(DESKTOP_TERMINAL_STREAM_ITEM_DATA);
+            encoded.extend_from_slice(&bytes);
+            encoded
+        }
+    }
 }
 
 #[derive(Default)]
@@ -385,18 +415,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
             .map_err(|error| format!("discover daemon protocol: {error}"))?,
     )
     .await?;
-    if protocol.protocol_version != DESKTOP_PROTOCOL_VERSION {
-        return Err(format!(
-            "unsupported lazybox protocol version {}; desktop supports version {}",
-            protocol.protocol_version, DESKTOP_PROTOCOL_VERSION
-        ));
-    }
-    if protocol.terminal_transport != TERMINAL_BINARY_CONTENT_TYPE {
-        return Err(format!(
-            "unsupported terminal transport {}; desktop requires {}",
-            protocol.terminal_transport, TERMINAL_BINARY_CONTENT_TYPE
-        ));
-    }
+    validate_protocol(&protocol)?;
 
     let mut agents = user_config.setup.agents.iter().cloned().collect::<Vec<_>>();
     if agents.is_empty() {
@@ -420,7 +439,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         })
         .or_else(|| agents.first().cloned())
         .ok_or_else(|| "no agent is configured".to_string())?;
-    let (terminal_commands, _) = broadcast::channel(256);
+    let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
 
     Ok(DesktopState {
@@ -428,12 +447,35 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         agents,
         default_agent,
         terminal_commands,
+        terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
         terminal_rx: Mutex::new(terminal_rx),
         terminal_tx,
         streams_started: AtomicBool::new(false),
         client_runtime: Mutex::new(Some(client_runtime)),
         gateway_task: Mutex::new(Some(gateway_task)),
     })
+}
+
+fn validate_protocol(protocol: &ProtocolResponse) -> Result<(), String> {
+    if protocol.protocol_version != DESKTOP_PROTOCOL_VERSION {
+        return Err(format!(
+            "unsupported lazybox protocol version {}; desktop supports version {}",
+            protocol.protocol_version, DESKTOP_PROTOCOL_VERSION
+        ));
+    }
+    if protocol.protocol_fingerprint != DESKTOP_PROTOCOL_FINGERPRINT {
+        return Err(format!(
+            "unsupported lazybox protocol fingerprint {}; desktop supports {}",
+            protocol.protocol_fingerprint, DESKTOP_PROTOCOL_FINGERPRINT
+        ));
+    }
+    if protocol.terminal_transport != TERMINAL_BINARY_CONTENT_TYPE {
+        return Err(format!(
+            "unsupported terminal transport {}; desktop requires {}",
+            protocol.terminal_transport, TERMINAL_BINARY_CONTENT_TYPE
+        ));
+    }
+    Ok(())
 }
 
 fn main() {
@@ -472,7 +514,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazybox_ipc::TerminalId;
+    use lazybox_ipc::{Command, TerminalId};
 
     #[test]
     fn ndjson_decoder_handles_split_and_batched_frames() {
@@ -517,15 +559,69 @@ mod tests {
     }
 
     #[test]
-    fn terminal_commands_are_rejected_from_the_json_command_path() {
-        assert!(is_terminal_command(&Command::Write {
-            terminal_id: TerminalId(4),
-            bytes: vec![b'x'],
-        }));
-        assert!(is_terminal_command(&Command::RequestTerminalResync {
-            terminal_id: TerminalId(4),
-            required_seq: 8,
-        }));
-        assert!(!is_terminal_command(&Command::Refresh));
+    fn desktop_rejects_a_daemon_with_a_different_contract_fingerprint() {
+        let mut protocol = lazybox_server::api_gateway::protocol_response();
+        protocol.protocol_fingerprint = DESKTOP_PROTOCOL_FINGERPRINT.wrapping_add(1);
+
+        let error = validate_protocol(&protocol).expect_err("fingerprint mismatch must fail");
+
+        assert!(error.contains("unsupported lazybox protocol fingerprint"));
+    }
+
+    #[test]
+    fn desktop_command_translation_exposes_only_the_supported_control_shape() {
+        let command = Command::from(DesktopCommand::SpawnAgent {
+            session_key: "github:o/r#1".into(),
+            agent: "codex".to_string(),
+        });
+
+        assert!(matches!(
+            command,
+            Command::Spawn {
+                kind: lazybox_ipc::TerminalKind::Agent(agent),
+                cwd: None,
+                initial_prompt: None,
+                on_main: false,
+                model_alias: None,
+                ..
+            } if agent == "codex"
+        ));
+    }
+
+    #[tokio::test]
+    async fn terminal_command_queue_applies_backpressure_without_dropping_input() {
+        let (tx, mut rx) = mpsc::channel(1);
+        enqueue_terminal_frame(&tx, Bytes::from_static(b"first"))
+            .await
+            .expect("enqueue first frame");
+        let second = enqueue_terminal_frame(&tx, Bytes::from_static(b"second"));
+        tokio::pin!(second);
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut second)
+                .await
+                .is_err(),
+            "a full terminal queue must hold the producer"
+        );
+        assert_eq!(rx.recv().await.as_deref(), Some(b"first".as_slice()));
+        tokio::time::timeout(Duration::from_secs(1), &mut second)
+            .await
+            .expect("second enqueue resumes")
+            .expect("enqueue second frame");
+        assert_eq!(rx.recv().await.as_deref(), Some(b"second".as_slice()));
+    }
+
+    #[test]
+    fn terminal_stream_reset_precedes_unmodified_binary_data() {
+        assert_eq!(
+            encode_terminal_stream_item(TerminalStreamItem::Reset),
+            vec![DESKTOP_TERMINAL_STREAM_ITEM_RESET]
+        );
+        assert_eq!(
+            encode_terminal_stream_item(TerminalStreamItem::Data(Bytes::from_static(&[
+                0, 27, 255
+            ]))),
+            vec![DESKTOP_TERMINAL_STREAM_ITEM_DATA, 0, 27, 255]
+        );
     }
 }

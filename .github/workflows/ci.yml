@@ -221,7 +221,7 @@ jobs:
       - name: Verify generated desktop contract
         run: |
           cargo run -p lazybox-server --features desktop-contract --bin generate-desktop-contract
-          cargo test -p lazybox-ipc --test protocol desktop_compatibility_fixture_is_current -- --exact
+          cargo test -p lazybox-server --test api_gateway desktop_compatibility_fixture_is_current -- --exact
           git diff --exit-code -- apps/desktop/src/generated
       - name: Install frontend dependencies
         working-directory: apps/desktop

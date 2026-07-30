@@ -27,14 +27,9 @@ export function spawnAgentCommand(
   agent: string,
 ): LazyboxCommand {
   return {
-    Spawn: {
+    SpawnAgent: {
       session_key: sessionKey,
-      session_id: null,
-      kind: { Agent: agent },
-      cwd: null,
-      initial_prompt: null,
-      on_main: false,
-      model_alias: null,
+      agent,
     },
   };
 }

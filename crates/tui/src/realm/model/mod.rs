@@ -592,6 +592,29 @@ pub(crate) enum ModalFlow {
     },
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HelpQuestionKind {
+    FollowUp,
+    #[default]
+    NewQuestion,
+}
+
+impl HelpQuestionKind {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::FollowUp => Self::NewQuestion,
+            Self::NewQuestion => Self::FollowUp,
+        }
+    }
+
+    pub(crate) fn input_label(self) -> &'static str {
+        match self {
+            Self::FollowUp => "Follow-up",
+            Self::NewQuestion => "New question",
+        }
+    }
+}
+
 /// App-level message vocabulary for modals + globals.
 #[derive(Debug, PartialEq, Clone)]
 pub enum Msg {
@@ -621,7 +644,7 @@ pub enum Msg {
     HelpIndexOpen,
     /// Question submitted from the `HelpAsk` modal. The modal stays
     /// mounted; the answer streams back into `Model::help_convo`.
-    HelpAsked(String, crate::realm::components::help_ask::HelpQuestionKind),
+    HelpAsked(String, HelpQuestionKind),
     /// Spinner heartbeat from the `HelpAsk` modal.
     HelpSpinnerTick,
     /// `e` pressed in the snippets browser — close it and open the
@@ -1283,16 +1306,15 @@ pub struct Model<T: TerminalAdapter> {
     /// switching between Ask and the shortcut index keeps the thread.
     pub(crate) help_convo: crate::realm::components::help_ask::SharedHelpConvo,
     /// Run id of the live help-agent run, captured from the
-    /// `AgentRunStarted` carrying the help sentinel session key.
+    /// `AgentRunStarted` carrying the current help start request id.
     /// `None` before the first question (the run starts lazily) and
     /// again after `AgentRunFinished` — the next question then starts
     /// a fresh run (with fresh context).
     help_run: Option<lazybox_ipc::AgentRunId>,
-    /// True between dispatching `StartAgentRun` and its
-    /// `AgentRunStarted` landing. Questions submitted in that window
-    /// queue in `help_pending_questions` rather than double-starting
-    /// the run.
-    help_run_starting: bool,
+    /// Request id between dispatching `StartAgentRun` and its correlated
+    /// success or failure event. Questions submitted in that window queue
+    /// in `help_pending_questions` rather than double-starting the run.
+    help_start_request: Option<lazybox_ipc::AgentRunRequestId>,
     help_pending_questions: Vec<String>,
     /// An explicit exit can race `AgentRunStarted`. Interrupt that run
     /// as soon as its id arrives instead of adopting a conversation the
@@ -1566,7 +1588,7 @@ impl<T: TerminalAdapter> Model<T> {
             theme_picker_prev: None,
             help_convo: Default::default(),
             help_run: None,
-            help_run_starting: false,
+            help_start_request: None,
             help_pending_questions: Vec::new(),
             help_interrupt_on_start: false,
             help_restart_question: None,

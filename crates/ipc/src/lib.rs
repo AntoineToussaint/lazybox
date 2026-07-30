@@ -143,6 +143,11 @@ pub struct TerminalId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AgentRunId(pub u64);
 
+/// Opaque client-generated id that correlates a structured-run start
+/// request with its success or failure event.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AgentRunRequestId(pub String);
+
 /// Runtime surface requested for an agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentRuntimeMode {
@@ -1034,6 +1039,7 @@ pub enum Command {
     /// does not replace `Spawn`; terminal clients can keep using PTY
     /// bytes while structured clients subscribe to run events.
     StartAgentRun {
+        request_id: AgentRunRequestId,
         session_key: SessionKey,
         #[serde(default)]
         session_id: Option<lazybox_core::SessionId>,
@@ -1679,12 +1685,17 @@ pub enum Event {
         error: Option<String>,
     },
     AgentRunStarted {
+        request_id: AgentRunRequestId,
         run_id: AgentRunId,
         session_key: SessionKey,
         #[serde(default)]
         session_id: Option<lazybox_core::SessionId>,
         agent: String,
         mode: AgentRuntimeMode,
+    },
+    AgentRunStartFailed {
+        request_id: AgentRunRequestId,
+        message: String,
     },
     /// Lossless raw provider JSONL object text from the runtime.
     AgentRawJson {

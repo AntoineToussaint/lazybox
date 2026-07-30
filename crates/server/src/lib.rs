@@ -1705,6 +1705,7 @@ pub async fn dispatch_command(
             spawn_handler::handle_ingest_hook(config, terminal_id, backend_key, hook).await;
         }
         lazybox_ipc::Command::StartAgentRun {
+            request_id,
             session_key,
             session_id,
             agent,
@@ -1715,6 +1716,7 @@ pub async fn dispatch_command(
         } => {
             agent_runs::handle_start_agent_run(
                 config,
+                request_id,
                 session_key,
                 session_id,
                 agent,

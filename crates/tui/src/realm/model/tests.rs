@@ -11420,7 +11420,7 @@ mod help_ask_tests {
     //! conversation, and the modal hand-off from the `?` help panel.
 
     use super::super::*;
-    use crate::realm::components::help_ask::HelpQuestionKind;
+    use crate::realm::HelpQuestionKind;
     use lazybox_core::SessionKey;
     use lazybox_ipc::Event as IpcEvent;
     use lazybox_ipc::{
@@ -11434,8 +11434,29 @@ mod help_ask_tests {
         Model::new_for_test(client, Size::new(120, 40)).expect("model init")
     }
 
-    fn run_started(run_id: u64) -> IpcEvent {
+    fn ask_new(
+        model: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        question: &str,
+    ) -> Vec<IpcCommand> {
+        model.handle_help_question(question.into(), HelpQuestionKind::NewQuestion)
+    }
+
+    fn ask_follow_up(
+        model: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        question: &str,
+    ) -> Vec<IpcCommand> {
+        model.handle_help_question(question.into(), HelpQuestionKind::FollowUp)
+    }
+
+    fn run_started(
+        model: &Model<tuirealm::terminal::TestTerminalAdapter>,
+        run_id: u64,
+    ) -> IpcEvent {
         IpcEvent::AgentRunStarted {
+            request_id: model
+                .help_start_request
+                .clone()
+                .expect("help start request"),
             run_id: AgentRunId(run_id),
             session_key: SessionKey::new(HELP_SESSION_KEY),
             session_id: None,
@@ -11450,7 +11471,7 @@ mod help_ask_tests {
     #[test]
     fn first_question_starts_the_run_with_generated_context() {
         let mut m = build_model();
-        let cmds = m.handle_help_asked("how do I multi-select?".into());
+        let cmds = ask_new(&mut m, "how do I multi-select?");
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::StartAgentRun {
@@ -11480,7 +11501,7 @@ mod help_ask_tests {
             }
             other => panic!("expected StartAgentRun, got {other:?}"),
         }
-        assert!(m.help_run_starting);
+        assert!(m.help_start_request.is_some());
         let convo = m.help_convo_mut();
         assert_eq!(convo.turns.len(), 1);
         assert!(!convo.turns[0].done);
@@ -11492,7 +11513,7 @@ mod help_ask_tests {
     fn follow_up_rides_the_same_run() {
         let mut m = build_model();
         m.help_run = Some(AgentRunId(7));
-        let cmds = m.handle_help_asked("and in the sidebar?".into());
+        let cmds = ask_follow_up(&mut m, "and in the sidebar?");
         assert_eq!(cmds.len(), 1);
         match &cmds[0] {
             IpcCommand::SendAgentInput { run_id, message } => {
@@ -11538,14 +11559,15 @@ mod help_ask_tests {
     #[test]
     fn question_while_starting_queues_until_run_started() {
         let mut m = build_model();
-        assert!(!m.handle_help_asked("first?".into()).is_empty());
-        let cmds = m.handle_help_asked("second?".into());
+        assert!(!ask_new(&mut m, "first?").is_empty());
+        let cmds = ask_follow_up(&mut m, "second?");
         assert!(cmds.is_empty(), "second question must not start a run");
         assert_eq!(m.help_pending_questions, vec!["second?".to_string()]);
 
-        m.handle_daemon_event(run_started(3));
+        let started = run_started(&m, 3);
+        m.handle_daemon_event(started);
         assert_eq!(m.help_run, Some(AgentRunId(3)));
-        assert!(!m.help_run_starting);
+        assert!(m.help_start_request.is_none());
         assert!(m.help_pending_questions.is_empty());
     }
 
@@ -11553,7 +11575,7 @@ mod help_ask_tests {
     fn new_question_while_starting_replaces_the_pending_thread() {
         let (client, mut server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
-        assert!(!m.handle_help_asked("old question".into()).is_empty());
+        assert!(!ask_new(&mut m, "old question").is_empty());
 
         let cmds = m.handle_help_question("fresh question".into(), HelpQuestionKind::NewQuestion);
         assert!(cmds.is_empty(), "the old run has no id to interrupt yet");
@@ -11564,7 +11586,8 @@ mod help_ask_tests {
             "the old transcript is cleared immediately"
         );
 
-        m.handle_daemon_event(run_started(3));
+        let started = run_started(&m, 3);
+        m.handle_daemon_event(started);
         assert!(matches!(
             server.rx.try_recv(),
             Ok(IpcCommand::InterruptAgentRun {
@@ -11575,7 +11598,7 @@ mod help_ask_tests {
             server.rx.try_recv(),
             Ok(IpcCommand::StartAgentRun { .. })
         ));
-        assert!(m.help_run_starting);
+        assert!(m.help_start_request.is_some());
         assert_eq!(m.help_run, None);
     }
 
@@ -11584,9 +11607,9 @@ mod help_ask_tests {
     #[test]
     fn blank_question_is_a_noop() {
         let mut m = build_model();
-        assert!(m.handle_help_asked("   ".into()).is_empty());
+        assert!(ask_new(&mut m, "   ").is_empty());
         assert!(m.help_convo_mut().turns.is_empty());
-        assert!(!m.help_run_starting);
+        assert!(m.help_start_request.is_none());
     }
 
     /// Streamed deltas append to the open turn; `AgentTurnFinished`
@@ -11595,8 +11618,9 @@ mod help_ask_tests {
     #[test]
     fn deltas_and_turn_finished_stream_into_the_convo() {
         let mut m = build_model();
-        let _ = m.handle_help_asked("how do I snooze?".into());
-        m.handle_daemon_event(run_started(1));
+        let _ = ask_new(&mut m, "how do I snooze?");
+        let started = run_started(&m, 1);
+        m.handle_daemon_event(started);
         for delta in ["Press ", "`z`"] {
             m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
                 run_id: AgentRunId(1),
@@ -11627,14 +11651,15 @@ mod help_ask_tests {
     #[test]
     fn follow_up_mid_stream_keeps_turns_correlated() {
         let mut m = build_model();
-        let _ = m.handle_help_asked("q1".into());
-        m.handle_daemon_event(run_started(1));
+        let _ = ask_new(&mut m, "q1");
+        let started = run_started(&m, 1);
+        m.handle_daemon_event(started);
         m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
             run_id: AgentRunId(1),
             delta: "A1 start".into(),
         });
         // Follow-up while A1 is still streaming.
-        let cmds = m.handle_help_asked("q2".into());
+        let cmds = ask_follow_up(&mut m, "q2");
         assert!(matches!(
             cmds.first(),
             Some(IpcCommand::SendAgentInput { .. })
@@ -11678,46 +11703,89 @@ mod help_ask_tests {
     #[test]
     fn run_finished_resets_for_a_fresh_start() {
         let mut m = build_model();
-        let _ = m.handle_help_asked("q".into());
-        m.handle_daemon_event(run_started(1));
-        let _ = m.handle_help_asked("follow-up".into());
+        let _ = ask_new(&mut m, "q");
+        let started = run_started(&m, 1);
+        m.handle_daemon_event(started);
+        let _ = ask_follow_up(&mut m, "follow-up");
         m.handle_daemon_event(IpcEvent::AgentRunFinished {
             run_id: AgentRunId(1),
             exit_code: Some(1),
             error: Some("boom".into()),
         });
         assert_eq!(m.help_run, None);
-        assert!(!m.help_run_starting);
+        assert!(m.help_start_request.is_none());
         {
             let convo = m.help_convo_mut();
             assert!(convo.turns[0].done, "open turn closed on exit");
             assert!(convo.turns[1].done, "queued follow-up turn closed too");
             assert!(convo.notice.as_deref().unwrap_or("").contains("boom"));
         }
-        let cmds = m.handle_help_asked("again?".into());
+        let cmds = ask_new(&mut m, "again?");
         assert!(
             matches!(cmds.first(), Some(IpcCommand::StartAgentRun { .. })),
             "next question restarts the run: {cmds:?}",
         );
     }
 
-    /// A spawn failure surfaces inside the help conversation — not as
-    /// a footer sync-error banner (its `agent_run:*` source would
-    /// otherwise be misread as a provider sync failure) — and closes
-    /// every queued turn, not just the last.
+    #[test]
+    fn run_finished_changes_the_mounted_input_to_a_new_question() {
+        use crate::realm::components::help_ask::HelpAsk;
+        use tuirealm::component::AppComponent;
+        use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let _ = ask_new(&mut m, "q");
+        let started = run_started(&m, 1);
+        m.handle_daemon_event(started);
+        let mut help = HelpAsk::new(
+            m.catalog.clone(),
+            m.help_convo.clone(),
+            m.ui_defaults.terminal_escape_char,
+        );
+
+        m.handle_daemon_event(IpcEvent::AgentRunFinished {
+            run_id: AgentRunId(1),
+            exit_code: Some(1),
+            error: Some("boom".into()),
+        });
+        for ch in "again?".chars() {
+            let _ = help.on(&Event::Keyboard(KeyEvent::new(
+                Key::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        let submitted = help.on(&Event::Keyboard(KeyEvent::new(
+            Key::Enter,
+            KeyModifiers::NONE,
+        )));
+        let Some(Msg::HelpAsked(question, HelpQuestionKind::NewQuestion)) = submitted else {
+            panic!("dead run must expose the next input as a new question: {submitted:?}");
+        };
+
+        let cmds = m.handle_help_question(question, HelpQuestionKind::NewQuestion);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::StartAgentRun { .. }]
+        ));
+        let convo = m.help_convo_mut();
+        assert_eq!(convo.turns.len(), 1);
+        assert_eq!(convo.turns[0].question, "again?");
+    }
+
+    /// A correlated spawn failure surfaces inside the help conversation,
+    /// not as a footer sync-error banner, and closes every queued turn.
     #[test]
     fn spawn_failure_lands_in_the_convo_not_the_footer() {
         let mut m = build_model();
         m.status.polling = None;
-        let _ = m.handle_help_asked("q".into());
-        let _ = m.handle_help_asked("queued while starting".into());
-        m.handle_daemon_event(IpcEvent::ProviderError {
-            source: format!("agent_run:{}", HELP_AGENT_PREFERENCE[0]),
+        let _ = ask_new(&mut m, "q");
+        let _ = ask_follow_up(&mut m, "queued while starting");
+        let request_id = m.help_start_request.clone().expect("start request");
+        m.handle_daemon_event(IpcEvent::AgentRunStartFailed {
+            request_id,
             message: "No such file or directory".into(),
-            detail: String::new(),
-            kind: "permanent".into(),
         });
-        assert!(!m.help_run_starting);
+        assert!(m.help_start_request.is_none());
         let convo = m.help_convo_mut();
         assert!(convo.turns[0].done);
         assert!(convo.turns[1].done, "queued turn must not spin forever");
@@ -11742,8 +11810,9 @@ mod help_ask_tests {
     #[test]
     fn live_run_does_not_claim_other_runs_agent_run_errors() {
         let mut m = build_model();
-        let _ = m.handle_help_asked("q".into());
-        m.handle_daemon_event(run_started(1));
+        let _ = ask_new(&mut m, "q");
+        let started = run_started(&m, 1);
+        m.handle_daemon_event(started);
         m.handle_daemon_event(IpcEvent::ProviderError {
             source: "agent_run:stdin".into(),
             message: "broken pipe on someone else's run".into(),
@@ -11764,7 +11833,7 @@ mod help_ask_tests {
     fn codex_only_configuration_starts_help_with_codex() {
         let mut m = build_model();
         m.set_agents(vec!["codex".into()]);
-        let cmds = m.handle_help_asked("q".into());
+        let cmds = ask_new(&mut m, "q");
         assert!(matches!(
             cmds.first(),
             Some(IpcCommand::StartAgentRun { agent, .. }) if agent == "codex"
@@ -11779,7 +11848,7 @@ mod help_ask_tests {
         let mut m = build_model();
         m.set_agents(vec!["claude".into(), "codex".into()]);
         m.set_default_agent("codex");
-        let cmds = m.handle_help_asked("q".into());
+        let cmds = ask_new(&mut m, "q");
         assert!(matches!(
             cmds.first(),
             Some(IpcCommand::StartAgentRun { agent, .. }) if agent == "codex"
@@ -11792,7 +11861,7 @@ mod help_ask_tests {
     fn no_structured_help_agent_sets_notice_instead_of_dispatching() {
         let mut m = build_model();
         m.set_agents(vec!["cursor-agent".into()]);
-        let cmds = m.handle_help_asked("q".into());
+        let cmds = ask_new(&mut m, "q");
         assert!(cmds.is_empty());
         let convo = m.help_convo_mut();
         assert!(convo.turns[0].done);
@@ -11873,15 +11942,63 @@ mod help_ask_tests {
         let (client, mut server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         m.mount_help_ask();
-        assert!(!m.handle_help_asked("q".into()).is_empty());
+        assert!(!ask_new(&mut m, "q").is_empty());
         assert!(m.handle_modal_dismissed().is_empty());
         assert!(m.help_interrupt_on_start);
         assert!(m.help_convo_mut().turns.is_empty());
 
-        m.handle_daemon_event(run_started(7));
+        let started = run_started(&m, 7);
+        m.handle_daemon_event(started);
         assert_eq!(m.help_run, None);
-        assert!(!m.help_run_starting);
+        assert!(m.help_start_request.is_none());
         assert!(!m.help_interrupt_on_start);
+        assert!(matches!(
+            server.rx.try_recv(),
+            Ok(IpcCommand::InterruptAgentRun {
+                run_id: AgentRunId(7)
+            })
+        ));
+    }
+
+    #[test]
+    fn exit_during_start_ignores_other_clients_run_outcomes() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.mount_help_ask();
+        assert!(!ask_new(&mut m, "q").is_empty());
+        assert!(m.handle_modal_dismissed().is_empty());
+        let own_request = m
+            .help_start_request
+            .clone()
+            .expect("own pending start request");
+        let foreign_request = lazybox_ipc::AgentRunRequestId("other-client".into());
+
+        m.handle_daemon_event(IpcEvent::AgentRunStartFailed {
+            request_id: foreign_request.clone(),
+            message: "other client failed".into(),
+        });
+        m.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id: foreign_request,
+            run_id: AgentRunId(8),
+            session_key: SessionKey::new(HELP_SESSION_KEY),
+            session_id: None,
+            agent: HELP_AGENT_PREFERENCE[0].into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        assert_eq!(m.help_start_request.as_ref(), Some(&own_request));
+        assert!(
+            server.rx.try_recv().is_err(),
+            "another client's run must not be interrupted"
+        );
+
+        m.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id: own_request,
+            run_id: AgentRunId(7),
+            session_key: SessionKey::new(HELP_SESSION_KEY),
+            session_id: None,
+            agent: HELP_AGENT_PREFERENCE[0].into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
         assert!(matches!(
             server.rx.try_recv(),
             Ok(IpcCommand::InterruptAgentRun {
@@ -11905,7 +12022,8 @@ mod help_ask_tests {
     }
 
     fn finish_help_turn(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, answer: String) {
-        m.handle_daemon_event(run_started(1));
+        let started = run_started(m, 1);
+        m.handle_daemon_event(started);
         m.handle_daemon_event(IpcEvent::AgentTurnFinished {
             run_id: AgentRunId(1),
             result: Some(answer),
@@ -11921,7 +12039,7 @@ mod help_ask_tests {
     fn add_snippet_action_proposes_a_confirm_and_strips_the_block() {
         let mut m = build_model();
         m.update(Msg::HelpAskOpen);
-        let _ = m.handle_help_asked("add a snippet".into());
+        let _ = ask_new(&mut m, "add a snippet");
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
 
         assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
@@ -11957,7 +12075,7 @@ mod help_ask_tests {
     fn declining_the_snippet_confirm_changes_nothing() {
         let mut m = build_model();
         m.update(Msg::HelpAskOpen);
-        let _ = m.handle_help_asked("add a snippet".into());
+        let _ = ask_new(&mut m, "add a snippet");
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
         assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
 
@@ -11992,7 +12110,7 @@ mod help_ask_tests {
 
         let mut m = build_model();
         m.update(Msg::HelpAskOpen);
-        let _ = m.handle_help_asked("add a snippet".into());
+        let _ = ask_new(&mut m, "add a snippet");
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
         assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
 
@@ -12021,7 +12139,7 @@ mod help_ask_tests {
     #[test]
     fn dropped_action_strips_block_and_notes_it_was_not_applied() {
         let mut m = build_model();
-        let _ = m.handle_help_asked("add a snippet".into());
+        let _ = ask_new(&mut m, "add a snippet");
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
 
         assert!(m.modal_flow.is_none());
@@ -12043,7 +12161,7 @@ mod help_ask_tests {
     fn invalid_snippet_key_sets_a_notice_and_no_confirm() {
         let mut m = build_model();
         m.update(Msg::HelpAskOpen);
-        let _ = m.handle_help_asked("add a snippet".into());
+        let _ = ask_new(&mut m, "add a snippet");
         finish_help_turn(
             &mut m,
             "```lazybox-action\n{\"action\":\"add_snippet\",\"key\":\"has space\",\"body\":\"x\"}\n```"
@@ -12125,7 +12243,7 @@ mod help_ask_tests {
         let mut m = build_model();
         m.set_agents(vec!["claude".into(), "codex".into()]);
         m.update(Msg::HelpAskOpen);
-        let _ = m.handle_help_asked("use codex by default".into());
+        let _ = ask_new(&mut m, "use codex by default");
         finish_help_turn(&mut m, edit_config_answer("setup.default_agent", "codex"));
 
         assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
@@ -12145,7 +12263,7 @@ mod help_ask_tests {
     fn edit_config_off_allowlist_key_is_rejected() {
         let mut m = build_model();
         m.update(Msg::HelpAskOpen);
-        let _ = m.handle_help_asked("disable permissions".into());
+        let _ = ask_new(&mut m, "disable permissions");
         finish_help_turn(&mut m, edit_config_answer("agent.skip_permissions", "true"));
 
         assert!(m.modal_flow.is_none());

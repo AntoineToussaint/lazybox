@@ -20,8 +20,7 @@
 //! between Ask and the shortcut index without losing the thread.
 
 use crate::components::comment_render;
-use crate::realm::Msg;
-use crate::realm::UserEvent;
+use crate::realm::{HelpQuestionKind, Msg, UserEvent};
 use lazybox_tui_core::action::{ActionKind, CatalogEntry, Section};
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -54,9 +53,35 @@ pub struct HelpConvo {
     /// unavailable, run exited, spawn failure. Cleared on the next
     /// question.
     pub notice: Option<String>,
+    next_question: HelpQuestionKind,
+    follow_up_available: bool,
 }
 
 impl HelpConvo {
+    pub(crate) fn next_question(&self) -> HelpQuestionKind {
+        self.next_question
+    }
+
+    pub(crate) fn follow_up_available(&self) -> bool {
+        self.follow_up_available
+    }
+
+    pub(crate) fn select_next_question(&mut self, kind: HelpQuestionKind) {
+        if kind == HelpQuestionKind::NewQuestion || self.follow_up_available {
+            self.next_question = kind;
+        }
+    }
+
+    pub(crate) fn activate_thread(&mut self) {
+        self.follow_up_available = true;
+        self.next_question = HelpQuestionKind::FollowUp;
+    }
+
+    pub(crate) fn deactivate_thread(&mut self) {
+        self.follow_up_available = false;
+        self.next_question = HelpQuestionKind::NewQuestion;
+    }
+
     /// The turn awaiting its answer: the *earliest* un-done turn. The
     /// run answers questions in submission order, so deltas and results
     /// always belong to the oldest open turn — keyed on the last turn
@@ -81,28 +106,6 @@ impl HelpConvo {
 
 pub type SharedHelpConvo = Arc<Mutex<HelpConvo>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HelpQuestionKind {
-    FollowUp,
-    NewQuestion,
-}
-
-impl HelpQuestionKind {
-    fn toggled(self) -> Self {
-        match self {
-            Self::FollowUp => Self::NewQuestion,
-            Self::NewQuestion => Self::FollowUp,
-        }
-    }
-
-    fn input_label(self) -> &'static str {
-        match self {
-            Self::FollowUp => "Follow-up",
-            Self::NewQuestion => "New question",
-        }
-    }
-}
-
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub struct HelpAsk {
@@ -115,7 +118,6 @@ pub struct HelpAsk {
     /// Transcript scroll, in lines up from the bottom. 0 = pinned to
     /// the bottom so a streaming answer auto-follows.
     scroll_up: usize,
-    next_question: HelpQuestionKind,
     spinner_idx: usize,
 }
 
@@ -135,24 +137,12 @@ impl HelpAsk {
             exit.keys_display = Cow::Owned(format!("{leader}q"));
         }
         catalog.extend(terminal_search_entries(&leader));
-        let next_question = {
-            let convo = match convo.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if convo.turns.is_empty() {
-                HelpQuestionKind::NewQuestion
-            } else {
-                HelpQuestionKind::FollowUp
-            }
-        };
         Self {
             catalog,
             convo,
             query: String::new(),
             matches: Vec::new(),
             scroll_up: 0,
-            next_question,
             spinner_idx: 0,
         }
     }
@@ -180,8 +170,10 @@ impl HelpAsk {
             return Some(Msg::HelpIndexOpen);
         }
         match key.code {
-            Key::Tab if !self.convo().turns.is_empty() => {
-                self.next_question = self.next_question.toggled();
+            Key::Tab => {
+                let mut convo = self.convo();
+                let next = convo.next_question().toggled();
+                convo.select_next_question(next);
                 None
             }
             Key::Enter => {
@@ -192,8 +184,7 @@ impl HelpAsk {
                 self.query.clear();
                 self.refilter();
                 self.scroll_up = 0;
-                let kind = self.next_question;
-                self.next_question = HelpQuestionKind::FollowUp;
+                let kind = self.convo().next_question();
                 Some(Msg::HelpAsked(question, kind))
             }
             Key::Backspace => {
@@ -447,9 +438,15 @@ impl Component for HelpAsk {
             return;
         }
 
+        let (next_question, follow_up_available) = {
+            let convo = self.convo();
+            (convo.next_question(), convo.follow_up_available())
+        };
         let mode_style = |kind| {
-            if self.next_question == kind {
+            if next_question == kind {
                 Style::default().fg(Color::Black).bg(theme.accent).bold()
+            } else if kind == HelpQuestionKind::FollowUp && !follow_up_available {
+                Style::default().fg(theme.text_dim).dim()
             } else {
                 Style::default().fg(theme.text_dim)
             }
@@ -472,7 +469,7 @@ impl Component for HelpAsk {
 
         let input_line = Line::from(vec![
             Span::styled(
-                format!("{} › ", self.next_question.input_label()),
+                format!("{} › ", next_question.input_label()),
                 Style::default().fg(theme.accent).bold(),
             ),
             Span::styled(self.query.clone(), Style::default().fg(theme.text_strong)),
@@ -649,7 +646,11 @@ mod tests {
             other => panic!("expected HelpAsked, got {other:?}"),
         }
         assert!(c.query.is_empty());
-        assert_eq!(c.next_question, HelpQuestionKind::FollowUp);
+        assert_eq!(
+            c.convo().next_question(),
+            HelpQuestionKind::NewQuestion,
+            "the model marks the thread active only after accepting the question"
+        );
     }
 
     /// Enter with an empty (or whitespace) query is a no-op — nothing
@@ -759,23 +760,53 @@ mod tests {
     #[test]
     fn tab_selects_follow_up_or_new_question() {
         let mut c = component();
-        assert_eq!(c.next_question, HelpQuestionKind::NewQuestion);
+        assert_eq!(c.convo().next_question(), HelpQuestionKind::NewQuestion);
         assert!(c.on_key(&key(Key::Tab)).is_none());
         assert_eq!(
-            c.next_question,
+            c.convo().next_question(),
             HelpQuestionKind::NewQuestion,
             "there is no thread to follow up yet"
         );
 
-        c.convo().turns.push(HelpTurn {
-            question: "q".into(),
-            answer: "a".into(),
-            done: true,
-        });
+        {
+            let mut convo = c.convo();
+            convo.turns.push(HelpTurn {
+                question: "q".into(),
+                answer: "a".into(),
+                done: true,
+            });
+            convo.activate_thread();
+        }
         let _ = c.on_key(&key(Key::Tab));
-        assert_eq!(c.next_question, HelpQuestionKind::FollowUp);
+        assert_eq!(c.convo().next_question(), HelpQuestionKind::NewQuestion);
         let _ = c.on_key(&key(Key::Tab));
-        assert_eq!(c.next_question, HelpQuestionKind::NewQuestion);
+        assert_eq!(c.convo().next_question(), HelpQuestionKind::FollowUp);
+    }
+
+    #[test]
+    fn selected_question_kind_survives_component_remount() {
+        let shared = SharedHelpConvo::default();
+        {
+            let mut convo = shared.lock().unwrap_or_else(|e| e.into_inner());
+            convo.turns.push(HelpTurn {
+                question: "q".into(),
+                answer: "a".into(),
+                done: true,
+            });
+            convo.activate_thread();
+        }
+        let catalog =
+            ActionDef::catalog(&["claude".to_string()], &std::collections::BTreeMap::new());
+        let mut first = HelpAsk::new(catalog.clone(), shared.clone(), ']');
+        let _ = first.on_key(&key(Key::Tab));
+        assert!(matches!(first.on_key(&ke('?')), Some(Msg::HelpIndexOpen)));
+
+        let mut remounted = HelpAsk::new(catalog, shared, ']');
+        let _ = remounted.on_key(&ke('q'));
+        assert!(matches!(
+            remounted.on_key(&key(Key::Enter)),
+            Some(Msg::HelpAsked(_, HelpQuestionKind::NewQuestion))
+        ));
     }
 
     #[test]

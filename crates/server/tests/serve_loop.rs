@@ -3,9 +3,9 @@
 //! are fast and deterministic.
 
 use lazybox_ipc::{
-    AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRuntimeMode,
-    Command, Event, HookEvent, HookEventKind, PrincipalId, ProviderCredentialInput, TerminalId,
-    TerminalKind, channel,
+    AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
+    AgentRuntimeMode, Command, Event, HookEvent, HookEventKind, PrincipalId,
+    ProviderCredentialInput, TerminalId, TerminalKind, channel,
 };
 use lazybox_server::backend::SessionBackend;
 use lazybox_server::{Server, ServerConfig};
@@ -405,6 +405,7 @@ async fn start_agent_run_unknown_agent_reports_error() {
 
     client
         .send(Command::StartAgentRun {
+            request_id: AgentRunRequestId("unknown-agent".into()),
             session_key: "test:ws".into(),
             session_id: None,
             agent: "does-not-exist".into(),
@@ -420,10 +421,14 @@ async fn start_agent_run_unknown_agent_reports_error() {
         .expect("daemon responds")
         .expect("got event");
     match evt {
-        Event::ProviderError { message, .. } => {
+        Event::AgentRunStartFailed {
+            request_id,
+            message,
+        } => {
+            assert_eq!(request_id, AgentRunRequestId("unknown-agent".into()));
             assert!(message.contains("no agent registered"));
         }
-        other => panic!("expected ProviderError, got {other:?}"),
+        other => panic!("expected AgentRunStartFailed, got {other:?}"),
     }
 }
 #[tokio::test]
@@ -753,6 +758,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             workspace_key: wkey(),
         },
         Command::StartAgentRun {
+            request_id: AgentRunRequestId("bulk-unknown-agent".into()),
             session_key: "test:ws".into(),
             session_id: None,
             agent: "no-such-agent".into(),

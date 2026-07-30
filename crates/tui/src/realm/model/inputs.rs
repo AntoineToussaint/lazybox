@@ -14,7 +14,7 @@
 //! `mount_setup_modal`, `unmount_setup_modal`) co-locates here
 //! since it's the same modal-state-mutation shape.
 
-use super::{ChoicePayload, Id, ModalFlow, Model, Msg};
+use super::{ChoicePayload, HelpQuestionKind, Id, ModalFlow, Model, Msg};
 use crate::realm::UserEvent;
 use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use tuirealm::terminal::TerminalAdapter;
@@ -425,23 +425,13 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
-    /// A follow-up submitted to the current help thread.
-    ///
-    /// **Effects**: returns commands as a `Vec` for testability.
-    pub fn handle_help_asked(&mut self, question: String) -> Vec<IpcCommand> {
-        self.handle_help_question(
-            question,
-            crate::realm::components::help_ask::HelpQuestionKind::FollowUp,
-        )
-    }
-
     /// A question submitted from the `HelpAsk` modal. Follow-ups ride
     /// the current run; new questions interrupt it and start with fresh
     /// context.
     pub fn handle_help_question(
         &mut self,
         question: String,
-        kind: crate::realm::components::help_ask::HelpQuestionKind,
+        kind: HelpQuestionKind,
     ) -> Vec<IpcCommand> {
         use lazybox_ipc::AgentInputMessage;
 
@@ -449,8 +439,7 @@ impl<T: TerminalAdapter> Model<T> {
         if question.is_empty() {
             return Vec::new();
         }
-        let mut cmds = if kind == crate::realm::components::help_ask::HelpQuestionKind::NewQuestion
-        {
+        let mut cmds = if kind == HelpQuestionKind::NewQuestion {
             self.reset_help_session()
         } else {
             Vec::new()
@@ -464,6 +453,7 @@ impl<T: TerminalAdapter> Model<T> {
                     question: question.clone(),
                     ..Default::default()
                 });
+            convo.activate_thread();
         }
         self.redraw = true;
         if self.help_interrupt_on_start {
@@ -484,7 +474,7 @@ impl<T: TerminalAdapter> Model<T> {
             });
             return cmds;
         }
-        if self.help_run_starting {
+        if self.help_start_request.is_some() {
             self.help_pending_questions.push(question);
             return cmds;
         }
@@ -503,6 +493,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.help_pending_questions.clear();
             let mut convo = self.help_convo_mut();
             convo.close_open_turns();
+            convo.deactivate_thread();
             convo.notice = Some(format!(
                 "the help assistant needs a structured agent ({}) enabled — \
 showing keybinding search only",
@@ -510,12 +501,15 @@ showing keybinding search only",
             ));
             return None;
         };
-        self.help_run_starting = true;
+        let request_id =
+            lazybox_ipc::AgentRunRequestId(uuid::Uuid::new_v4().hyphenated().to_string());
+        self.help_start_request = Some(request_id.clone());
         let context = lazybox_tui_core::help::agent_context(
             &self.catalog,
             self.ui_defaults.terminal_escape_char,
         );
         Some(IpcCommand::StartAgentRun {
+            request_id,
             session_key: lazybox_core::SessionKey::new(HELP_SESSION_KEY),
             session_id: None,
             agent: help_agent.to_string(),
@@ -541,10 +535,10 @@ showing keybinding search only",
         self.help_pending_questions.clear();
         self.help_restart_question = None;
         if interrupt.is_some() {
-            self.help_run_starting = false;
+            self.help_start_request = None;
             self.help_interrupt_on_start = false;
         } else {
-            self.help_interrupt_on_start = self.help_run_starting;
+            self.help_interrupt_on_start = self.help_start_request.is_some();
         }
         *self.help_convo_mut() = Default::default();
         interrupt.into_iter().collect()

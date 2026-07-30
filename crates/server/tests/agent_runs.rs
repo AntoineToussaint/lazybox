@@ -1,5 +1,7 @@
 use lazybox_agents::{Agent, SpawnCtx, StructuredAgentProtocol};
-use lazybox_ipc::{AgentInputMessage, AgentRunId, AgentRuntimeMode, Command, Event, channel};
+use lazybox_ipc::{
+    AgentInputMessage, AgentRunId, AgentRunRequestId, AgentRuntimeMode, Command, Event, channel,
+};
 use lazybox_server::ServerError;
 use lazybox_server::agent_runs::{
     AGENT_INPUT_CHANNEL_CAPACITY, AgentRunHandle, handle_interrupt_agent_run,
@@ -151,6 +153,7 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
 
     client
         .send(Command::StartAgentRun {
+            request_id: AgentRunRequestId("stream-request".into()),
             session_key: "test:stream".into(),
             session_id: None,
             agent: "fake-stream".into(),
@@ -161,7 +164,12 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
         })
         .unwrap();
 
-    let run_id = wait_for_started(&mut client, "fake-stream").await;
+    let run_id = wait_for_started(
+        &mut client,
+        "fake-stream",
+        &AgentRunRequestId("stream-request".into()),
+    )
+    .await;
     client
         .send(Command::SendAgentInput {
             run_id,
@@ -240,15 +248,21 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
     assert!(saw_usage);
     assert!(saw_turn_finished);
 }
-async fn wait_for_started(client: &mut lazybox_ipc::Client, expected_agent: &str) -> AgentRunId {
+async fn wait_for_started(
+    client: &mut lazybox_ipc::Client,
+    expected_agent: &str,
+    expected_request: &AgentRunRequestId,
+) -> AgentRunId {
     loop {
         match recv_agent_event(client).await {
             Event::AgentRunStarted {
+                request_id,
                 run_id,
                 agent,
                 mode,
                 ..
             } => {
+                assert_eq!(&request_id, expected_request);
                 assert_eq!(agent, expected_agent);
                 assert_eq!(mode, AgentRuntimeMode::StreamJson);
                 return run_id;
@@ -367,6 +381,7 @@ async fn codex_turn_processes_resume_as_one_logical_run() {
 
     client
         .send(Command::StartAgentRun {
+            request_id: AgentRunRequestId("codex-request".into()),
             session_key: "lazybox:help".into(),
             session_id: None,
             agent: "fake-codex".into(),
@@ -379,7 +394,12 @@ async fn codex_turn_processes_resume_as_one_logical_run() {
             access: lazybox_ipc::AgentRunAccess::Default,
         })
         .unwrap();
-    let run_id = wait_for_started(&mut client, "fake-codex").await;
+    let run_id = wait_for_started(
+        &mut client,
+        "fake-codex",
+        &AgentRunRequestId("codex-request".into()),
+    )
+    .await;
     assert_turn_answer(&mut client, run_id, "first answer").await;
 
     // The first child has exited, but lazybox keeps the logical run id
@@ -492,6 +512,7 @@ async fn workspace_less_run_resolves_to_neutral_cwd() {
 
     client
         .send(Command::StartAgentRun {
+            request_id: AgentRunRequestId("workspace-less-request".into()),
             session_key: "lazybox:help".into(),
             session_id: None,
             agent: "fake-stream".into(),
@@ -501,7 +522,12 @@ async fn workspace_less_run_resolves_to_neutral_cwd() {
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
         })
         .unwrap();
-    wait_for_started(&mut client, "fake-stream").await;
+    wait_for_started(
+        &mut client,
+        "fake-stream",
+        &AgentRunRequestId("workspace-less-request".into()),
+    )
+    .await;
 
     let config = captured.lock().unwrap().take().expect("spawner invoked");
     assert_eq!(config.cwd.as_deref(), Some(std::env::temp_dir().as_path()));
@@ -557,6 +583,7 @@ async fn stdout_error_emits_run_finished_with_error() {
 
     client
         .send(Command::StartAgentRun {
+            request_id: AgentRunRequestId("stdout-error-request".into()),
             session_key: "test:stream-err".into(),
             session_id: None,
             agent: "fake-stream".into(),
@@ -566,7 +593,12 @@ async fn stdout_error_emits_run_finished_with_error() {
             access: lazybox_ipc::AgentRunAccess::Default,
         })
         .unwrap();
-    let run_id = wait_for_started(&mut client, "fake-stream").await;
+    let run_id = wait_for_started(
+        &mut client,
+        "fake-stream",
+        &AgentRunRequestId("stdout-error-request".into()),
+    )
+    .await;
 
     match recv_agent_event(&mut client).await {
         Event::AgentRunFinished {
@@ -596,6 +628,7 @@ async fn terminal_mode_agent_run_reports_that_spawn_should_be_used() {
 
     client
         .send(Command::StartAgentRun {
+            request_id: AgentRunRequestId("terminal-request".into()),
             session_key: "test:terminal".into(),
             session_id: None,
             agent: "claude".into(),
@@ -611,9 +644,13 @@ async fn terminal_mode_agent_run_reports_that_spawn_should_be_used() {
         .expect("daemon responds")
         .expect("event");
     match event {
-        Event::ProviderError { message, .. } => {
+        Event::AgentRunStartFailed {
+            request_id,
+            message,
+        } => {
+            assert_eq!(request_id, AgentRunRequestId("terminal-request".into()));
             assert!(message.contains("use Spawn for terminal mode"));
         }
-        other => panic!("expected ProviderError, got {other:?}"),
+        other => panic!("expected AgentRunStartFailed, got {other:?}"),
     }
 }

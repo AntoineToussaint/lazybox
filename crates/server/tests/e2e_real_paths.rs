@@ -1234,6 +1234,42 @@ async fn e2e_live_branch_holder_provisions_a_detached_checkout() {
             "the live holder keeps sole ownership of the branch"
         );
         assert_eq!(std::fs::read(unrelated.join("WIP.txt")).unwrap(), marker);
+
+        // A second spawn resolving the PR's persisted session must reuse
+        // the detached worktree in place. A detached HEAD is not a stale
+        // "wrong branch" — so provisioning is NOT re-run, and the Setup
+        // step (mounts / setup scripts, and its "Setting up workspace"
+        // progress) does not fire again on every spawn (#721 regression).
+        send_spawn(
+            &mut client,
+            &pr_key,
+            TerminalKind::Agent("claude".into()),
+            None,
+        );
+        let mut re_ran_setup = false;
+        let spawned = wait_for(
+            &mut client,
+            |event| match event {
+                Event::WorktreeProgress {
+                    session_key,
+                    step: lazybox_ipc::WorktreeStep::Setup,
+                    status: lazybox_ipc::WorktreeStepStatus::Started,
+                    ..
+                } if session_key.as_str() == pr_key.as_str() => {
+                    re_ran_setup = true;
+                    false
+                }
+                Event::TerminalSpawned { .. } => true,
+                _ => false,
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(spawned.is_some(), "the reused-worktree spawn completes");
+        assert!(
+            !re_ran_setup,
+            "reusing a detached worktree must not re-provision or re-run setup (#721)"
+        );
     })
     .await
     .expect("deadline");

@@ -2758,16 +2758,29 @@ pub async fn worktree_dir_ready(wt_path: &Path) -> bool {
     tokio::fs::metadata(gitdir.join("index")).await.is_ok()
 }
 
-/// Whether `wt_path` is a completed checkout on `expected_branch`.
+/// Whether `wt_path` is a completed checkout ready to reuse for
+/// `expected_branch`.
 ///
 /// This is the branch-aware spawn fast path: structural readiness alone
 /// is insufficient because a valid worktree can have been switched to a
-/// different branch since its session was persisted.
+/// *different named branch* since its session was persisted — that must
+/// re-provision. A *detached* HEAD is not a mismatch, though: it is a
+/// deliberate state (a branch held by another live worktree provisions
+/// detached, #721; an agent may detach to inspect a commit), reused in
+/// place rather than re-provisioned. This mirrors `ensure_worktree_branch`,
+/// the reuse guard on the provision path, and sync, which likewise never
+/// fights a detached HEAD (`worktree_unsafe_to_advance`). Without the tolerance the readiness
+/// probe reports every detached worktree as stale, and each spawn re-runs
+/// the full provision (mounts, setup scripts, progress modal) for a tree
+/// that only ever gets reused.
 pub async fn worktree_dir_ready_on_branch(wt_path: &Path, expected_branch: &str) -> bool {
     worktree_dir_ready(wt_path).await
         && current_worktree_branch(wt_path)
             .await
-            .is_ok_and(|branch| branch.as_deref() == Some(expected_branch))
+            .is_ok_and(|branch| match branch.as_deref() {
+                None => true,
+                Some(actual) => actual == expected_branch,
+            })
 }
 
 /// Guard the idempotent re-entry: a worktree already at the session path
@@ -4122,6 +4135,15 @@ mod health_probe_tests {
         assert!(
             !worktree_dir_ready_on_branch(&wt, "main").await,
             "structural readiness must not hide a branch mismatch"
+        );
+
+        // A detached HEAD is a deliberate reuse-in-place state (#721), not
+        // a stale worktree — the probe accepts it so the spawn fast path
+        // doesn't re-provision (and re-run setup) a tree it only reuses.
+        git(&wt, &["checkout", "-q", "--detach"]);
+        assert!(
+            worktree_dir_ready_on_branch(&wt, "wt-branch").await,
+            "a detached HEAD is reused in place, never reported stale"
         );
 
         // A standalone repo (`.git` is a directory) is ready too.

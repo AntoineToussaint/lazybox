@@ -216,21 +216,35 @@ fn homepage_never_advertises_the_removed_single_w_action() {
 }
 
 #[test]
-fn homepage_install_delivers_the_showcased_source_build() {
+fn homepage_install_prioritizes_prebuilt_releases() {
     let page = read("web/src/pages/index.astro");
+    let brew = page
+        .find("brew install AntoineToussaint/lazybox/lazybox")
+        .expect("homepage is missing the Homebrew install");
+    let alternatives = page
+        .find("<details class=\"install-more\">")
+        .expect("homepage is missing alternate install methods");
+    let installer = page
+        .find("Installer script <span>Prebuilt</span>")
+        .expect("homepage is missing the prebuilt installer");
+    let source = page
+        .find("Advanced / from source")
+        .expect("homepage is missing the advanced source install");
+
+    assert!(
+        brew < alternatives,
+        "Homebrew must be the primary install method"
+    );
+    assert!(
+        alternatives < installer && installer < source,
+        "the prebuilt installer must come before the advanced source build"
+    );
     assert!(
         page.contains(
             "cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot"
-        ),
-        "homepage install must build the source version whose workflows it showcases"
-    );
-    assert!(
-        page.contains("Prefer a published release?"),
-        "stable and current-source install paths are not distinguished"
-    );
-    assert!(
-        !page.contains("const installCmd =\n  'brew "),
-        "homepage still sends the flagship CTA to an older tap release"
+        ) && page.contains("Compiles the current main branch (HEAD) locally.")
+            && page.contains("Zig 0.15.2"),
+        "the advanced source build must identify HEAD and its toolchain requirements"
     );
 }
 

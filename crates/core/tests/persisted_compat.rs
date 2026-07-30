@@ -191,6 +191,7 @@ fn maximal_workspace() -> Workspace {
                 },
                 focused: vec![1, 0],
             },
+            provider_session_ids: Default::default(),
         },
         WorkspaceSession {
             id: session_id("94c1de83-97e2-4b73-9d5c-1f0a26c9c9aa"),
@@ -203,6 +204,7 @@ fn maximal_workspace() -> Workspace {
             created_at: at(9, 0),
             last_output_at: None,
             layout: SessionLayout::Tabs { active: 0 },
+            provider_session_ids: Default::default(),
         },
     ];
     ws

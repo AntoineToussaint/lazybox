@@ -77,6 +77,18 @@ impl StructuredAgentProtocol {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAuthCommands {
+    pub status: Vec<String>,
+    pub logout: Vec<String>,
+    pub login: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthFailure {
+    pub reason: &'static str,
+}
+
 pub use crate::pty::PromptShape;
 
 /// One semantic observation produced by an agent's PTY detector.
@@ -195,6 +207,27 @@ pub trait Agent: Send + Sync {
     /// a `--continue`-style flag.
     fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
         self.spawn(ctx)
+    }
+
+    /// Command + args to resume a particular upstream conversation.
+    /// Adapters that do not expose stable session ids inherit their
+    /// existing cwd-based resume behavior.
+    fn resume_session(&self, ctx: &SpawnCtx, provider_session_id: Option<&str>) -> Vec<String> {
+        let _ = provider_session_id;
+        self.resume(ctx)
+    }
+
+    /// Provider-owned authentication commands, when this CLI supports
+    /// interactive account recovery.
+    fn auth_commands(&self) -> Option<AgentAuthCommands> {
+        None
+    }
+
+    /// Conservatively classify a provider-account authentication failure
+    /// from recent PTY output.
+    fn detect_auth_failure(&self, recent_output: &[u8]) -> Option<AuthFailure> {
+        let _ = recent_output;
+        None
     }
 
     /// Extra environment variables to seed into this agent's launch, on
@@ -558,7 +591,15 @@ pub mod builtins {
             argv
         }
         fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
+            self.resume_session(ctx, None)
+        }
+
+        fn resume_session(&self, ctx: &SpawnCtx, provider_session_id: Option<&str>) -> Vec<String> {
             let mut argv = vec!["claude".into(), "--continue".into()];
+            if let Some(session_id) = provider_session_id {
+                argv[1] = "--resume".into();
+                argv.push(session_id.into());
+            }
             if ctx.access == AgentRunAccess::ReadOnly {
                 push_read_only_flags(&mut argv, ctx);
             } else {
@@ -566,6 +607,18 @@ pub mod builtins {
             }
             push_settings_flag(&mut argv, ctx);
             argv
+        }
+
+        fn auth_commands(&self) -> Option<AgentAuthCommands> {
+            Some(AgentAuthCommands {
+                status: vec!["claude".into(), "auth".into(), "status".into()],
+                logout: vec!["claude".into(), "auth".into(), "logout".into()],
+                login: vec!["claude".into(), "auth".into(), "login".into()],
+            })
+        }
+
+        fn detect_auth_failure(&self, recent_output: &[u8]) -> Option<AuthFailure> {
+            crate::detect::claude_auth_failure(recent_output)
         }
 
         fn pty_spawn_env(&self) -> Vec<(String, String)> {
@@ -745,13 +798,33 @@ pub mod builtins {
         /// that), so a restored session reattaches its own conversation
         /// instead of starting blank.
         fn resume(&self, ctx: &SpawnCtx) -> Vec<String> {
-            let mut argv = vec!["codex".into(), "resume".into(), "--last".into()];
+            self.resume_session(ctx, None)
+        }
+
+        fn resume_session(&self, ctx: &SpawnCtx, provider_session_id: Option<&str>) -> Vec<String> {
+            let mut argv = vec![
+                "codex".into(),
+                "resume".into(),
+                provider_session_id.unwrap_or("--last").into(),
+            ];
             if ctx.access == AgentRunAccess::ReadOnly {
                 argv.extend(codex_read_only_flags(ctx));
             } else {
                 argv.extend(codex_unattended_flags(ctx));
             }
             argv
+        }
+
+        fn auth_commands(&self) -> Option<AgentAuthCommands> {
+            Some(AgentAuthCommands {
+                status: vec!["codex".into(), "login".into(), "status".into()],
+                logout: vec!["codex".into(), "logout".into()],
+                login: vec!["codex".into(), "login".into()],
+            })
+        }
+
+        fn detect_auth_failure(&self, recent_output: &[u8]) -> Option<AuthFailure> {
+            crate::detect::codex_auth_failure(recent_output)
         }
 
         /// Suppress Homebrew's implicit self-update inside a spawned Codex

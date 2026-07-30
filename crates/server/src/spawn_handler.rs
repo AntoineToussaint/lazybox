@@ -718,6 +718,8 @@ async fn handle_spawn_inner(
         on_main,
         model_alias,
         resume,
+        provider_session_id,
+        no_permission_override,
         access,
         client_request_id,
         origin,
@@ -855,7 +857,7 @@ async fn handle_spawn_inner(
         Option<lazybox_core::SessionId>,
         bool,
     ) = if let Some(c) = cwd.as_deref() {
-        (PathBuf::from(c), None, false)
+        (PathBuf::from(c), session_id, on_main)
     } else {
         // Race provisioning against a `CancelSpawn` on this claim: Esc
         // on the setup checklist must abort a wedged cold clone —
@@ -1009,6 +1011,8 @@ async fn handle_spawn_inner(
             landed_on_main,
             model_alias,
             resume,
+            provider_session_id,
+            no_permission_override,
             access,
             shell_command,
         },
@@ -1137,6 +1141,7 @@ async fn handle_spawn_inner(
             // (`Notify` permits stack). The inject task only needs to
             // know "we reached ready at least once."
             let mut signaled_ready = false;
+            let mut auth_required_emitted = false;
             let check_ready = |state_buf: &Vec<u8>,
                                last_chunk_len: usize,
                                signaled: &mut bool,
@@ -1215,6 +1220,14 @@ async fn handle_spawn_inner(
                     id_for_pump,
                     &session_key_for_pump,
                     &mut state_machine,
+                )
+                .await;
+                maybe_emit_auth_required(
+                    &config_for_pump,
+                    agent_for_pump.as_ref(),
+                    &state_buf,
+                    id_for_pump,
+                    &mut auth_required_emitted,
                 )
                 .await;
                 last_chunk_len = sub.replay.len();
@@ -1335,6 +1348,14 @@ async fn handle_spawn_inner(
                         &mut state_machine,
                     )
                     .await;
+                    maybe_emit_auth_required(
+                        &config_for_pump,
+                        agent_for_pump.as_ref(),
+                        &state_buf,
+                        id_for_pump,
+                        &mut auth_required_emitted,
+                    )
+                    .await;
                     last_chunk_len = snapshot.replay.len();
                     if agent_for_pump.is_some() {
                         last_output_at = tokio::time::Instant::now();
@@ -1403,6 +1424,14 @@ async fn handle_spawn_inner(
                     id_for_pump,
                     &session_key_for_pump,
                     &mut state_machine,
+                )
+                .await;
+                maybe_emit_auth_required(
+                    &config_for_pump,
+                    agent_for_pump.as_ref(),
+                    &state_buf,
+                    id_for_pump,
+                    &mut auth_required_emitted,
                 )
                 .await;
                 last_chunk_len = chunk.bytes.len();
@@ -4055,6 +4084,24 @@ fn detect_window(buf: &[u8]) -> &[u8] {
     &buf[buf.len().saturating_sub(DETECT_WINDOW)..]
 }
 
+async fn maybe_emit_auth_required(
+    config: &ServerConfig,
+    agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
+    state_buf: &[u8],
+    terminal_id: TerminalId,
+    emitted: &mut bool,
+) {
+    if *emitted {
+        return;
+    }
+    let Some(failure) = agent.and_then(|agent| agent.detect_auth_failure(detect_window(state_buf)))
+    else {
+        return;
+    };
+    *emitted = true;
+    crate::agent_auth::detect_required(config, terminal_id, failure.reason).await;
+}
+
 /// Fetch the replay ring + covered seq for a pump that detected a seq
 /// gap (a chunk dropped on the backend's bounded bridge or a lagged
 /// broadcast). The reader thread pushes to the ring BEFORE
@@ -4325,6 +4372,26 @@ async fn finish_terminal(
     } else {
         None
     };
+    if let Some(TerminalKind::Agent(agent_id)) = kind
+        && let Some(output) = last_output.as_deref()
+        && let Some(failure) = config
+            .agents
+            .get(agent_id)
+            .and_then(|agent| agent.detect_auth_failure(output.as_bytes()))
+    {
+        crate::agent_auth::detect_required(config, terminal_id, failure.reason).await;
+    }
+    if matches!(kind, Some(TerminalKind::Agent(_))) {
+        let (prompt_history, composing_buffer) = tokio::join!(
+            load_prompt_history(config, backend_key),
+            load_composing_buffer(config, backend_key),
+        );
+        config
+            .agent_recovery
+            .mark_exited(terminal_id, backend_key, prompt_history, composing_buffer)
+            .await;
+    }
+    let authenticating = config.agent_recovery.active(terminal_id).await;
     match exit_code {
         Some(0) => tracing::info!(
             ?terminal_id,
@@ -4358,7 +4425,8 @@ async fn finish_terminal(
     // broadcasts, so a racing late hook/PTY reading sees the absorbing state
     // and cannot resurrect the process. Only agent terminals carry a state
     // pill; shells don't.
-    if let Some((session_key, TerminalKind::Agent(_))) = meta
+    if !authenticating
+        && let Some((session_key, TerminalKind::Agent(_))) = meta
         && let Some(durability) = agent_state_durability(config, terminal_id, backend_key).await
     {
         transition_and_broadcast_agent_state(
@@ -4372,11 +4440,13 @@ async fn finish_terminal(
         )
         .await;
     }
-    let _ = config.bus.send(Event::TerminalExited {
-        terminal_id,
-        exit_code,
-        last_output,
-    });
+    if !authenticating {
+        let _ = config.bus.send(Event::TerminalExited {
+            terminal_id,
+            exit_code,
+            last_output,
+        });
+    }
     // `terminals` was removed by the atomic claim above, so snapshots stop
     // seeing this id before any auxiliary map disappears. Keep terminal_meta
     // until the state event is sent, then close that ingress gate before
@@ -6076,6 +6146,7 @@ pub async fn handle_close(
     terminal_id: TerminalId,
     client_request_id: Option<&str>,
 ) -> bool {
+    config.agent_recovery.forget(terminal_id).await;
     let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         return true;
     };
@@ -6160,16 +6231,34 @@ pub async fn handle_ingest_hook(
     // Resolve the workspace; a terminal mid-teardown (terminals entry
     // resolved but meta already swept) is dropped without marking
     // anything hook-driven.
-    let session_key = {
+    let (session_key, terminal_kind) = {
         let meta = config.terminal.terminal_meta.lock().await;
         match meta.get(&terminal_id) {
-            Some((sk, _)) => sk.clone(),
+            Some((sk, kind)) => (sk.clone(), kind.clone()),
             None => {
                 tracing::debug!(?terminal_id, kind = ?hook.kind, "hook for unknown terminal, dropping");
                 return;
             }
         }
     };
+    if let (TerminalKind::Agent(agent_id), Some(provider_session_id)) =
+        (&terminal_kind, hook.session_id.as_deref())
+    {
+        config
+            .agent_recovery
+            .update_provider_session(terminal_id, provider_session_id.to_string())
+            .await;
+        if let Some(session_id) = config.terminal.terminal_session_for(terminal_id).await {
+            persist_provider_session_id(
+                config,
+                &session_key,
+                session_id,
+                agent_id,
+                provider_session_id,
+            )
+            .await;
+        }
+    }
     // From now on this terminal is hook-driven: the PTY detector defers
     // to hooks for Working/InputNeeded (until the timestamp recorded here
     // goes stale — see `lazybox_agents::HOOK_STALENESS`, consulted by the
@@ -6248,6 +6337,44 @@ pub async fn handle_ingest_hook(
         hook = ?hook.kind,
         "hook → AgentState transition",
     );
+}
+
+async fn persist_provider_session_id(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    session_id: SessionId,
+    agent_id: &str,
+    provider_session_id: &str,
+) {
+    let workspace_key = WorkspaceKey::new(session_key.as_str());
+    let _guard = config.lock_workspace(workspace_key.as_str()).await;
+    let mut workspace = match load_workspace(config, &workspace_key) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            tracing::warn!(%workspace_key, %error, "could not persist provider session identity");
+            return;
+        }
+    };
+    let Some(session) = workspace
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == session_id)
+    else {
+        return;
+    };
+    if session
+        .provider_session_ids
+        .get(agent_id)
+        .is_some_and(|stored| stored == provider_session_id)
+    {
+        return;
+    }
+    session
+        .provider_session_ids
+        .insert(agent_id.to_string(), provider_session_id.to_string());
+    if let Err(error) = persist_and_broadcast(config, &workspace).await {
+        tracing::warn!(%workspace_key, %error, "could not persist provider session identity");
+    }
 }
 
 async fn pump_recovered_session(
@@ -7249,6 +7376,42 @@ async fn load_composing_buffer(config: &ServerConfig, backend_key: &str) -> Opti
         .flatten()
 }
 
+pub(crate) async fn restore_terminal_conversation_state(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    prompt_history: &[UserPrompt],
+    composing_buffer: Option<&str>,
+) {
+    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+        return;
+    };
+    let store = config.store.clone();
+    let history_key = TerminalPersistedField::UserMessageHistory.key(&backend_key);
+    let draft_key = TerminalPersistedField::Draft.key(&backend_key);
+    let prompt_history = prompt_history.to_vec();
+    let composing_buffer = composing_buffer.map(str::to_string);
+    let _ = tokio::task::spawn_blocking(move || {
+        let mut mutations = Vec::with_capacity(2);
+        if !prompt_history.is_empty()
+            && let Ok(value) = serde_json::to_string(&prompt_history)
+        {
+            mutations.push(StoreMutation::SetKv {
+                key: history_key,
+                value,
+            });
+        }
+        match composing_buffer {
+            Some(value) if !value.is_empty() => mutations.push(StoreMutation::SetKv {
+                key: draft_key,
+                value,
+            }),
+            _ => mutations.push(StoreMutation::DeleteKv { key: draft_key }),
+        }
+        store.apply_batch(&mutations)
+    })
+    .await;
+}
+
 /// Used by `Subscribe` to seed a new client with what's already
 /// running. Reads the parallel `terminal_meta` map populated by
 /// `handle_spawn` so each snapshot carries the right session_key
@@ -7296,6 +7459,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     let no_permission = config.terminal.no_permission_terminals.lock().await.clone();
     let on_main = config.terminal.on_main_terminals.lock().await.clone();
     let terminal_models = config.terminal.terminal_models.lock().await.clone();
+    let authenticating = config.agent_recovery.recovery_terminal_ids().await;
 
     // Assemble independent terminals concurrently. `buffered` preserves the
     // stable map-entry order while capping fan-out; one wedged session now
@@ -7305,6 +7469,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
     let no_permission = &no_permission;
     let on_main = &on_main;
     let terminal_models = &terminal_models;
+    let authenticating = &authenticating;
     stream::iter(entries)
         .map(|(id, key, session_key, kind, agent_state)| async move {
             let snapshot_fut =
@@ -7377,6 +7542,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 last_seq,
                 replay_available,
                 agent_state,
+                authenticating: authenticating.contains(&id),
             }
         })
         .buffered(SNAPSHOT_CONCURRENCY)
@@ -7535,6 +7701,12 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 continue;
             }
             let access = load_session_access(config, session.id).await;
+            let provider_session_id = match &kind {
+                TerminalKind::Agent(agent_id) => {
+                    session.provider_session_ids.get(agent_id).cloned()
+                }
+                _ => None,
+            };
             tracing::info!(
                 "restoring session {:?} in workspace {}",
                 kind,
@@ -7547,6 +7719,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 kind,
                 SpawnOptions {
                     resume: true,
+                    provider_session_id,
                     access,
                     origin: lazybox_ipc::SpawnOrigin::Autonomous(
                         lazybox_ipc::AutonomousTrigger::Restore,
@@ -7681,6 +7854,7 @@ mod tests {
             hook_command,
             model_args,
             resume,
+            None,
             AgentRunAccess::Default,
         )
         .ok()
@@ -7828,6 +8002,8 @@ mod tests {
                 landed_on_main: false,
                 model_alias: None,
                 resume: false,
+                provider_session_id: None,
+                no_permission_override: None,
                 access: AgentRunAccess::Default,
                 shell_command: String::new(),
             },

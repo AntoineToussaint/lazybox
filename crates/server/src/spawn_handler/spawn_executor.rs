@@ -79,7 +79,7 @@ pub(super) async fn execute_spawn_plan(
         session_key,
         kind,
         argv: _,
-        cwd: _,
+        cwd: plan_cwd,
         env: _,
         hint: _,
         persist_key: _,
@@ -88,6 +88,8 @@ pub(super) async fn execute_spawn_plan(
         terminal_id,
         hook_settings,
         model_label,
+        model_alias,
+        provider_session_id,
         access,
         flags,
     } = plan;
@@ -183,6 +185,26 @@ pub(super) async fn execute_spawn_plan(
             model_label.as_deref(),
         )
         .await;
+    if let TerminalKind::Agent(agent_id) = &kind {
+        config
+            .agent_recovery
+            .remember_spawn(crate::agent_auth::AgentResumeContext {
+                terminal_id,
+                session_key: session_key.clone(),
+                session_id: owning_session,
+                agent_id: agent_id.clone(),
+                cwd: plan_cwd,
+                backend_key: Some(backend_key.clone()),
+                on_main: landed_on_main,
+                model_alias,
+                access,
+                no_permission: skip_permissions,
+                provider_session_id,
+                prompt_history: Vec::new(),
+                composing_buffer: None,
+            })
+            .await;
+    }
     {
         let mut registration = config.terminal.lock_registration().await;
         registration.register(

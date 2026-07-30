@@ -90,8 +90,11 @@ impl Component for Confirm {
         // is a safe upper bound. Without this dynamic sizing, the
         // hardcoded 6-row modal hid the Y/N buttons whenever the
         // question wrapped past one line, leaving the user stuck.
-        let question_width = crate::util::visual_width(&self.question);
-        let q_lines = question_width.div_ceil(inner_w).max(1) as u16;
+        let q_lines = self
+            .question
+            .split('\n')
+            .map(|line| crate::util::visual_width(line).div_ceil(inner_w).max(1))
+            .sum::<usize>() as u16;
         let modal_h = (5 + q_lines).max(6).min(area.height.saturating_sub(2));
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;

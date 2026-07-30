@@ -136,6 +136,7 @@ fn snapshot_hydrates_agent_state() {
             prompt_history: Vec::new(),
             composing_buffer: None,
             agent_state: Some(AgentState::Working),
+            authenticating: false,
         }],
         projects: vec![],
         recent_snippets: Vec::new(),
@@ -1673,6 +1674,7 @@ fn agent_workspace(repo: &str, key: &str, now: DateTime<Utc>) -> Workspace {
         created_at: now,
         last_output_at: None,
         layout: Default::default(),
+        provider_session_ids: Default::default(),
     });
     w
 }

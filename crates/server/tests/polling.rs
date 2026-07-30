@@ -2949,6 +2949,7 @@ async fn seed_issue_with_session(
         created_at: Utc::now(),
         last_output_at: None,
         layout: lazybox_core::SessionLayout::default(),
+        provider_session_ids: Default::default(),
     });
     let json = serde_json::to_string(&issue_ws).unwrap();
     config
@@ -3755,6 +3756,27 @@ async fn adopt_sessions_moves_sessions_between_workspaces() {
 
     let config = ServerConfig::in_memory();
     let (source_key, session_id) = seed_issue_with_session(&config, "o/r#71").await;
+    let mut source_ws: lazybox_core::Workspace = serde_json::from_str(
+        &config
+            .store
+            .get_workspace(&source_key)
+            .unwrap()
+            .unwrap()
+            .workspace_json
+            .unwrap(),
+    )
+    .unwrap();
+    source_ws.sessions[0]
+        .provider_session_ids
+        .insert("codex".into(), "provider-session-708".into());
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: source_key.as_str().to_string(),
+            created_at: source_ws.created_at,
+            workspace_json: Some(serde_json::to_string(&source_ws).unwrap()),
+        })
+        .unwrap();
     polling::upsert(&config, make_task("o/r#999")).await;
     let target_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&make_task("o/r#999")));
 
@@ -3794,6 +3816,10 @@ async fn adopt_sessions_moves_sessions_between_workspaces() {
         .find(|s| s.id == session_id)
         .expect("session must have moved to target");
     assert_eq!(moved.workspace_key, target_key);
+    assert_eq!(
+        moved.provider_session_ids.get("codex").map(String::as_str),
+        Some("provider-session-708"),
+    );
 }
 
 #[tokio::test]
@@ -5210,6 +5236,7 @@ async fn seed_issue_with_n_sessions(
             created_at: Utc::now() + chrono::Duration::seconds(i as i64),
             last_output_at: None,
             layout: lazybox_core::SessionLayout::default(),
+            provider_session_ids: Default::default(),
         });
     }
     config

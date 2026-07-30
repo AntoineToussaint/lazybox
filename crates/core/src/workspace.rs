@@ -32,7 +32,7 @@
 use crate::task::{Activity, Task, TaskId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -1585,6 +1585,10 @@ pub struct Session {
     /// Persisted so the user's layout survives restart.
     #[serde(default)]
     pub layout: SessionLayout,
+    /// Exact upstream conversation identity per agent running in this
+    /// worktree.
+    #[serde(default)]
+    pub provider_session_ids: BTreeMap<String, String>,
 }
 
 impl Session {
@@ -1606,6 +1610,7 @@ impl Session {
             created_at: now,
             last_output_at: None,
             layout: SessionLayout::default(),
+            provider_session_ids: BTreeMap::new(),
         }
     }
 }
@@ -2711,10 +2716,41 @@ mod tests {
             created_at: chrono::Utc::now(),
             last_output_at: None,
             layout: SessionLayout::default(),
+            provider_session_ids: BTreeMap::new(),
         };
         w.add_session(make());
         w.add_session(make());
         assert_eq!(w.sessions.len(), 1, "second add with same id is a no-op");
+    }
+
+    #[test]
+    fn provider_session_ids_round_trip_and_default_for_legacy_records() {
+        let mut session = Session::new(
+            WorkspaceKey::new("github:owner/repo#7"),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            "/tmp/wt".into(),
+            now(),
+        );
+        session
+            .provider_session_ids
+            .insert("codex".into(), "codex-conversation".into());
+        session
+            .provider_session_ids
+            .insert("claude".into(), "claude-conversation".into());
+
+        let value = serde_json::to_value(&session).expect("serialize session");
+        let decoded: Session = serde_json::from_value(value.clone()).expect("deserialize session");
+        assert_eq!(decoded.provider_session_ids, session.provider_session_ids);
+
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .expect("session object")
+            .remove("provider_session_ids");
+        let decoded: Session = serde_json::from_value(legacy).expect("deserialize legacy session");
+        assert!(decoded.provider_session_ids.is_empty());
     }
 
     // ── Worktree slug stability ───────────────────────────────────

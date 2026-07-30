@@ -803,6 +803,7 @@ mod tests {
                 prompt_history: Vec::new(),
                 composing_buffer: None,
                 agent_state: None,
+                authenticating: false,
             }],
             projects: Vec::new(),
             recent_snippets: Vec::new(),

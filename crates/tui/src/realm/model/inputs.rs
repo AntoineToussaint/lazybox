@@ -324,6 +324,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// arrives while another modal is up and never gets re-surfaced
     /// here is invisible forever.
     fn drain_queued_daemon_prompts(&mut self) {
+        self.maybe_mount_next_auth_prompt();
         self.maybe_mount_next_removal_prompt();
         self.maybe_mount_next_merge_prompt();
     }
@@ -753,6 +754,18 @@ showing keybinding search only",
         self.pop_modal();
         let mut cmds = Vec::new();
         match top {
+            Some(Id::AgentAuth) => {
+                if let Some(ModalFlow::AgentAuth { terminal_id, retry }) = self.modal_flow.take() {
+                    if yes {
+                        cmds.push(IpcCommand::ReauthenticateAgent {
+                            terminal_id,
+                            switch_account: true,
+                        });
+                    } else if retry {
+                        cmds.push(IpcCommand::CancelAgentReauthentication { terminal_id });
+                    }
+                }
+            }
             Some(Id::RemoveOutOfScope) => {
                 if let Some(ModalFlow::RemovalPrompt { workspace, reason }) = self.modal_flow.take()
                 {

@@ -4053,13 +4053,7 @@ async fn spawn_losing_to_merge_cannot_recreate_the_deleted_source() {
             source_session_key,
             Some(session_id),
             TerminalKind::Shell,
-            None,
-            None,
-            false,
-            false,
-            None,
-            false,
-            lazybox_ipc::SpawnOrigin::Interactive,
+            lazybox_server::spawn_handler::SpawnOptions::default(),
         )
         .await;
     });

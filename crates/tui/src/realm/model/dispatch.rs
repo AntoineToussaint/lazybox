@@ -798,6 +798,42 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MountHandoffPicker { .. } => {}
                 }
             }
+            Action::ToggleAutoFix => {
+                let Some(workspace) = self.sidebar.selected_workspace().cloned() else {
+                    return cmds;
+                };
+                if workspace.pr.is_none() {
+                    return cmds;
+                }
+                let arm = if workspace.policies.any_auto_fix_armed() {
+                    lazybox_core::PolicyArm::Disarm
+                } else {
+                    lazybox_core::PolicyArm::Arm
+                };
+                let name = crate::util::notice_slug(&workspace.name);
+                match arm {
+                    lazybox_core::PolicyArm::Arm if self.auto_fix_enabled => self.flash_info(
+                        format!("auto-fix: armed for {name} (CI failures + conflicts)"),
+                    ),
+                    lazybox_core::PolicyArm::Arm => self
+                        .flash_info(format!("auto-fix: armed for {name}, but disabled globally")),
+                    lazybox_core::PolicyArm::Disarm => {
+                        self.flash_info(format!("auto-fix: off for {name}"))
+                    }
+                    lazybox_core::PolicyArm::Default => unreachable!(),
+                }
+                let session_key = lazybox_core::SessionKey::from(&workspace.key);
+                for kind in [
+                    lazybox_core::AutoFixKind::CiFailure,
+                    lazybox_core::AutoFixKind::MergeConflict,
+                ] {
+                    cmds.push(IpcCommand::SetAutoFixPolicy {
+                        session_key: session_key.clone(),
+                        kind,
+                        arm,
+                    });
+                }
+            }
             Action::ToggleTrackMain => {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 // Explicit variant list (no `_`): a new Intent variant is

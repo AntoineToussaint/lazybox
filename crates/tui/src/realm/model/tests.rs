@@ -5403,6 +5403,93 @@ mod merge_focus_follow_tests {
         }
     }
 
+    #[test]
+    fn direct_auto_fix_toggle_arms_both_failure_kinds() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        m.auto_fix_enabled = true;
+        let ws = workspace("owner/repo#7", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        let cmds = m.dispatch_action(&Action::ToggleAutoFix);
+        assert_eq!(cmds.len(), 2);
+        for (command, expected_kind) in cmds.iter().zip([
+            lazybox_core::AutoFixKind::CiFailure,
+            lazybox_core::AutoFixKind::MergeConflict,
+        ]) {
+            assert!(matches!(
+                command,
+                IpcCommand::SetAutoFixPolicy {
+                    session_key,
+                    kind,
+                    arm: lazybox_core::PolicyArm::Arm,
+                } if session_key.as_str() == ws_key.as_str() && *kind == expected_kind
+            ));
+        }
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.as_str())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("CI failures + conflicts"),
+            "toggle notice must explain both repair signals: {notice:?}"
+        );
+    }
+
+    #[test]
+    fn direct_auto_fix_toggle_disarms_both_when_either_is_armed() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let mut ws = workspace("owner/repo#8", true, Duration::hours(1));
+        ws.policies.set(
+            lazybox_core::AutoFixKind::CiFailure,
+            lazybox_core::PolicyArm::Arm,
+        );
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        let cmds = m.dispatch_action(&Action::ToggleAutoFix);
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds.iter().all(|command| matches!(
+            command,
+            IpcCommand::SetAutoFixPolicy {
+                arm: lazybox_core::PolicyArm::Disarm,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn shift_a_dispatches_the_direct_auto_fix_toggle() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        m.auto_fix_enabled = true;
+        let ws = workspace("owner/repo#9", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('A'), KeyModifiers::SHIFT));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.as_str())
+            .unwrap_or_default();
+        assert!(
+            notice.starts_with("auto-fix: armed"),
+            "Shift-A must fire the direct catalog action: {notice:?}"
+        );
+    }
+
     /// The native-auto-merge row is read-only: picking it emits no
     /// command (it's a status row, not a toggle).
     #[test]

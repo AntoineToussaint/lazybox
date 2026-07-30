@@ -83,10 +83,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// pill ahead of the status pills so the user can see, at a glance,
     /// which rows will merge themselves once CI goes green.
     pub auto_merge_armed: bool,
-    /// This workspace has an auto-fix behavior explicitly armed
-    /// (`Workspace::policies` — issue #363). Renders a ` FIX ` pill so an
-    /// explicit per-session auto-fix arm is visible, never invisible.
-    pub auto_fix_armed: bool,
+    /// This workspace has CI-failure auto-fix explicitly armed.
+    pub auto_fix_ci_armed: bool,
+    /// This workspace has merge-conflict auto-fix explicitly armed.
+    pub auto_fix_conflict_armed: bool,
     /// This workspace has "track main" armed (`Workspace::track_main` —
     /// issue #535). Renders a ` ⤓main ` pill so the user can see which
     /// rows the daemon keeps fast-forwarded to the default branch.
@@ -746,13 +746,20 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(" ARM ", style))
 }
 
-/// The ` FIX ` auto-fix badge (issue #363) — a filled block so an
-/// explicit per-session auto-fix arm is never invisible. Its own
-/// center-aligned, Max-collapsing column (#524).
+/// The compact ` FIX ` badge expands on the cursor row to name the
+/// armed repair signals. Its own center-aligned, Max-collapsing column.
 fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    if !ctx.auto_fix_armed {
-        return Cell::empty();
-    }
+    let label = match (
+        ctx.auto_fix_ci_armed,
+        ctx.auto_fix_conflict_armed,
+        ctx.is_cursor,
+    ) {
+        (false, false, _) => return Cell::empty(),
+        (true, true, true) => " AUTO-FIX ARMED: CI+CONFLICT ",
+        (true, false, true) => " AUTO-FIX ARMED: CI ",
+        (false, true, true) => " AUTO-FIX ARMED: CONFLICT ",
+        _ => " FIX ",
+    };
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
@@ -761,7 +768,7 @@ fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(ratatui::style::Color::Black)
             .add_modifier(Modifier::BOLD)
     };
-    Cell::from_span(Span::styled(" FIX ", style))
+    Cell::from_span(Span::styled(label, style))
 }
 
 /// The track-main badge (issue #535). A synced tracked workspace shows a
@@ -933,7 +940,8 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
-            auto_fix_armed: false,
+            auto_fix_ci_armed: false,
+            auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
             has_notes: false,
@@ -1281,7 +1289,8 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
-            auto_fix_armed: false,
+            auto_fix_ci_armed: false,
+            auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
             has_notes: false,
@@ -1506,7 +1515,8 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
-            auto_fix_armed: false,
+            auto_fix_ci_armed: false,
+            auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
             has_notes: false,
@@ -1567,11 +1577,10 @@ mod tests {
         assert_eq!(cell_status(&ctx).width(), 0);
     }
 
-    /// A workspace with an auto-fix policy explicitly armed surfaces a
-    /// ` FIX ` pill (issue #363) in its own slot so the per-session arm
-    /// is never invisible — even before any CI pill applies (#524).
+    /// The cursor row names exactly which auto-fix signals are armed,
+    /// while other armed rows keep the compact fleet-scanning badge.
     #[test]
-    fn cell_fix_shows_pill_when_auto_fix_armed() {
+    fn cell_fix_names_armed_signals_on_the_cursor_row() {
         let mut task = make_task("owner/repo#1", "x");
         task.review = ReviewStatus::None;
         task.ci = CiStatus::None;
@@ -1580,9 +1589,24 @@ mod tests {
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
         assert_eq!(cell_fix(&ctx).width(), 0, "unarmed row has no FIX slot");
-        ctx.auto_fix_armed = true;
-        let cell = cell_fix(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " FIX ");
+        ctx.is_cursor = true;
+        ctx.auto_fix_ci_armed = true;
+        assert_eq!(
+            cell_fix(&ctx).spans[0].content.as_ref(),
+            " AUTO-FIX ARMED: CI "
+        );
+        ctx.auto_fix_conflict_armed = true;
+        assert_eq!(
+            cell_fix(&ctx).spans[0].content.as_ref(),
+            " AUTO-FIX ARMED: CI+CONFLICT "
+        );
+        ctx.auto_fix_ci_armed = false;
+        assert_eq!(
+            cell_fix(&ctx).spans[0].content.as_ref(),
+            " AUTO-FIX ARMED: CONFLICT "
+        );
+        ctx.is_cursor = false;
+        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
     }
 
     /// The track-main badge (issue #535): empty when untracked, a calm
@@ -2409,7 +2433,8 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
-            auto_fix_armed: false,
+            auto_fix_ci_armed: false,
+            auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
             has_notes: false,
@@ -2467,7 +2492,8 @@ mod tests {
         ctx0.has_notes = true;
         ctx0.sent_snippet_count = 2;
         ctx0.auto_merge_armed = true;
-        ctx0.auto_fix_armed = true;
+        ctx0.auto_fix_ci_armed = true;
+        ctx0.auto_fix_conflict_armed = true;
         let mut ctx1 = ctx_for(&ws1, &task1, &theme);
         ctx1.has_notes = true;
         let ctx2 = ctx_for(&ws2, &task2, &theme);

@@ -711,7 +711,14 @@ impl Sidebar {
                 agent_number: agent_numbers.get(key).copied(),
                 ascii_glyphs: self.ascii_glyphs,
                 auto_merge_armed: workspace.is_some_and(|w| w.auto_merge_on_green),
-                auto_fix_armed: workspace.is_some_and(|w| w.policies.any_auto_fix_armed()),
+                auto_fix_ci_armed: workspace.is_some_and(|w| {
+                    w.policies.arm(lazybox_core::AutoFixKind::CiFailure)
+                        == lazybox_core::PolicyArm::Arm
+                }),
+                auto_fix_conflict_armed: workspace.is_some_and(|w| {
+                    w.policies.arm(lazybox_core::AutoFixKind::MergeConflict)
+                        == lazybox_core::PolicyArm::Arm
+                }),
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),

@@ -1912,6 +1912,7 @@ pub(super) fn action_from_kind(
         ActionKind::MergePr => Action::MergePr,
         ActionKind::UpdateBranch => Action::UpdateBranch,
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
+        ActionKind::ToggleAutoFix => Action::ToggleAutoFix,
         ActionKind::ToggleTrackMain => Action::ToggleTrackMain,
         ActionKind::ManagePolicies => Action::ManagePolicies,
         ActionKind::Archive => Action::Archive,

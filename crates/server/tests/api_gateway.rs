@@ -28,8 +28,7 @@ use lazybox_store::{MemoryStore, WorkspaceRecord};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 struct FakeStreamAgent;
 
@@ -316,20 +315,6 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).unwrap()
 }
 
-async fn raw_http_request(port: u16, path: &str, token: Option<&str>) -> String {
-    let authorization = token
-        .map(|token| format!("Authorization: Bearer {token}\r\n"))
-        .unwrap_or_default();
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n{authorization}\r\n"
-    );
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-    stream.write_all(request.as_bytes()).await.unwrap();
-    let mut response = String::new();
-    stream.read_to_string(&mut response).await.unwrap();
-    response
-}
-
 #[test]
 fn bearer_token_helper_accepts_matching_token() {
     let header = HeaderValue::from_static("Bearer secret");
@@ -359,7 +344,7 @@ fn bearer_token_helper_allows_requests_when_token_is_not_configured() {
 }
 
 #[tokio::test]
-async fn thin_client_shell_is_public_while_api_routes_stay_authenticated() {
+async fn local_browser_shell_is_public_while_api_routes_stay_authenticated() {
     let request = Request::builder()
         .method(Method::GET)
         .uri("/")
@@ -370,7 +355,8 @@ async fn thin_client_shell_is_public_while_api_routes_stay_authenticated() {
         ..GatewayOptions::default()
     };
 
-    let response = api_gateway::handle_request(ServerConfig::in_memory(), options, request).await;
+    let response =
+        api_gateway::handle_request(ServerConfig::in_memory(), options.clone(), request).await;
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
@@ -386,41 +372,17 @@ async fn thin_client_shell_is_public_while_api_routes_stay_authenticated() {
     );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    assert!(html.contains("lazybox remote"));
+    assert!(html.contains("lazybox browser"));
     assert!(html.contains("/v1/workspaces"));
     assert!(html.contains("Authorization: `Bearer ${token}`"));
-}
 
-#[tokio::test]
-async fn wildcard_listener_serves_the_token_authenticated_thin_client_path() {
-    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
-    let bind_addr = listener.local_addr().unwrap();
-    assert!(!bind_addr.ip().is_loopback());
-    let port = bind_addr.port();
-    let options = GatewayOptions {
-        bind_addr,
-        bearer_token: Some("remote-secret".into()),
-        ..GatewayOptions::default()
-    };
-    let server = tokio::spawn(api_gateway::serve_listener(
-        ServerConfig::in_memory(),
-        options,
-        listener,
-    ));
-
-    let page = raw_http_request(port, "/", None).await;
-    assert!(page.starts_with("HTTP/1.1 200 OK"));
-    assert!(page.contains("lazybox remote"));
-
-    let unauthorized = raw_http_request(port, "/v1/health", None).await;
-    assert!(unauthorized.starts_with("HTTP/1.1 401 Unauthorized"));
-
-    let authenticated = raw_http_request(port, "/v1/health", Some("remote-secret")).await;
-    assert!(authenticated.starts_with("HTTP/1.1 200 OK"));
-    assert!(authenticated.contains("\"service\":\"lazybox-api-gateway\""));
-
-    server.abort();
-    assert!(server.await.unwrap_err().is_cancelled());
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/health")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = api_gateway::handle_request(ServerConfig::in_memory(), options, request).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

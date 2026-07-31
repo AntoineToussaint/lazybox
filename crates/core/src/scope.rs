@@ -40,6 +40,12 @@ pub struct Scope {
     #[serde(default)]
     pub parent: Option<String>,
     pub kind: ScopeKind,
+    /// Whether the underlying repo is private. Only meaningful for
+    /// `ScopeKind::Repo`; orgs and other scopes leave it `false`. The
+    /// picker renders a marker for private repos so scopes from a
+    /// mixed org are easy to tell apart.
+    #[serde(default)]
+    pub private: bool,
 }
 
 /// Coarse classification used by the picker for icons / sort order.
@@ -125,6 +131,7 @@ impl MockScopeSource {
             label: org.to_string(),
             parent: None,
             kind: ScopeKind::Org,
+            private: false,
         });
         self
     }
@@ -141,6 +148,7 @@ impl MockScopeSource {
             label: format!("{org}/{repo}"),
             parent: Some(parent_id),
             kind: ScopeKind::Repo,
+            private: false,
         });
         self
     }

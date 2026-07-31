@@ -269,12 +269,15 @@ fn record_analytics_best_effort(path: &Path, enabled: bool, event: AnalyticsEven
 async fn list_workspaces(state: State<'_, DesktopState>) -> Result<WorkspacesResponse, String> {
     let response = list_gateway_workspaces(&state.gateway).await?;
     // Seed the inbox model so the first computed view isn't empty while
-    // waiting for the control stream's opening snapshot.
-    state
-        .inbox
-        .lock()
-        .await
-        .seed_workspaces(&response.workspaces);
+    // waiting for the control stream's opening snapshot, and re-emit the
+    // recomputed view so a manual refresh reflects the refetch (the
+    // channel is unset on the pre-subscribe first call, so `emit` no-ops).
+    let view = {
+        let mut model = state.inbox.lock().await;
+        model.seed_workspaces(&response.workspaces);
+        model.view(now_utc())
+    };
+    emit_inbox_view(&state, view).await;
     Ok(response)
 }
 

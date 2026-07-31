@@ -216,4 +216,8 @@ pub struct RepoSummary {
     /// the future; defaults are the indicators lazybox already
     /// surfaces as badges on workspace rows.
     pub attention: usize,
+    /// Total unread across this repo's workspaces. Counted over every
+    /// workspace in the group regardless of collapse, so a repo's — and
+    /// the inbox's — unread total stays stable when a group is folded.
+    pub unread: usize,
 }

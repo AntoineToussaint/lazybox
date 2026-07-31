@@ -72,8 +72,15 @@ impl InboxModel {
             DesktopEvent::AgentState {
                 session_key, state, ..
             } => {
-                self.agents.insert(session_key.clone(), *state);
-                true
+                let previous = self.agents.insert(session_key.clone(), *state);
+                // The view only reflects one agent-derived signal: whether
+                // the workspace is asking for input (attention). Re-emit
+                // only when that membership flips, so a `Working`/`Done`
+                // transition or a repeated reading doesn't rebuild the
+                // whole inbox. Mirrors the TUI's `asking_changed` gate.
+                let was_asking = previous == Some(AgentState::InputNeeded);
+                let now_asking = *state == AgentState::InputNeeded;
+                was_asking != now_asking
             }
             _ => false,
         }
@@ -199,6 +206,19 @@ mod tests {
     }
 
     #[test]
+    fn seed_workspaces_replaces_the_map_so_a_refetch_view_is_current() {
+        let mut m = model();
+        m.seed_workspaces(&[pr("k1", "owner/r", 1)]);
+        assert_eq!(m.view(now()).total, 1);
+        // A later refetch is authoritative: it replaces the set wholesale.
+        m.seed_workspaces(&[pr("k2", "owner/r", 2), pr("k3", "owner/r", 3)]);
+        let view = m.view(now());
+        assert_eq!(view.total, 2);
+        assert!(view.workspaces.contains_key("k2"));
+        assert!(!view.workspaces.contains_key("k1"));
+    }
+
+    #[test]
     fn cycle_sort_mode_matches_the_shared_taxonomy() {
         let mut m = model();
         assert_eq!(m.view(now()).sort_mode, SortMode::ByRoleSplit);
@@ -218,6 +238,10 @@ mod tests {
         m.toggle_collapsed("owner/r");
         let view = m.view(now());
         assert_eq!(view.collapsed, vec!["owner/r".to_string()]);
+        assert_eq!(
+            view.total, 1,
+            "collapsing must not shrink the workspace count"
+        );
         assert!(
             !view
                 .rows
@@ -236,5 +260,29 @@ mod tests {
             source: "github".into(),
             message: "page 2".into(),
         }));
+    }
+
+    #[test]
+    fn agent_state_re_emits_only_on_the_asking_flip() {
+        let mut m = model();
+        let key = SessionKey::from("owner/r#1");
+        let agent = |state| DesktopEvent::AgentState {
+            session_key: key.clone(),
+            terminal_id: lazybox_ipc::TerminalId(1),
+            state,
+        };
+
+        // Non-asking transitions never rebuild the view.
+        assert!(!m.apply(&agent(AgentState::Working)));
+        assert!(!m.apply(&agent(AgentState::Working)), "repeat is a no-op");
+        // Rising edge into InputNeeded flips attention -> re-emit.
+        assert!(m.apply(&agent(AgentState::InputNeeded)));
+        assert!(
+            !m.apply(&agent(AgentState::InputNeeded)),
+            "still asking -> no re-emit"
+        );
+        // Falling edge out of InputNeeded flips back -> re-emit.
+        assert!(m.apply(&agent(AgentState::Done)));
+        assert!(!m.apply(&agent(AgentState::Idle)));
     }
 }

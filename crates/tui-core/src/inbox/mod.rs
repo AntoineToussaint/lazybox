@@ -192,6 +192,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 if workspace_needs_attention(w, input.attention, input.agents) {
                     summary.attention += 1;
                 }
+                summary.unread += w.unread_count();
             }
             if !input.collapsed_repos.contains(repo) {
                 // ByRoleSplit drops a `KindHeader` between the PR

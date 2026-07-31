@@ -72,7 +72,7 @@ function groupedView(): InboxView {
         status_label: "",
       }),
     },
-    summaries: { "owner/repo": { active: 3, attention: 1 } },
+    summaries: { "owner/repo": { active: 3, attention: 1, unread: 2 } },
     sort_mode: "ByRoleSplit",
     sort_label: "split",
     collapsed: [],
@@ -134,6 +134,28 @@ describe("inbox view rendering", () => {
     expect(rows[0]?.querySelector(".unread-badge")?.textContent).toBe("2");
     // A statusless issue shows no status pill.
     expect(rows[2]?.querySelector(".signal-pill")).toBeNull();
+  });
+
+  it("wraps each repo in a group so the listbox holds only groups", () => {
+    const list = document.createElement("div");
+    list.setAttribute("role", "listbox");
+    renderInboxList(list, groupedView(), {
+      selectedKey: null,
+      onSelectWorkspace: () => {},
+      onToggleRepo: () => {},
+    });
+
+    // Every direct child of the listbox is an ARIA group (no bare
+    // headers/options leaking as listbox children).
+    const children = [...list.children];
+    expect(children).toHaveLength(1);
+    expect(
+      children.every((child) => child.getAttribute("role") === "group"),
+    ).toBe(true);
+    expect(children[0]?.getAttribute("aria-label")).toBe("owner/repo");
+    // The group carries the repo header, section headers, and the rows.
+    expect(children[0]?.querySelector(".repo-header")).not.toBeNull();
+    expect(children[0]?.querySelectorAll(".workspace-row")).toHaveLength(3);
   });
 
   it("selects a workspace by key when its row is clicked", () => {

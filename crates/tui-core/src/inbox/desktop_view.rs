@@ -141,16 +141,20 @@ pub fn compute_inbox_view(input: ComputeInputs<'_>) -> InboxView {
 
     let ComputeOutcome { visible, summaries } = compute_visible(input);
 
+    // Header totals come from the per-repo summaries, which count every
+    // workspace in each group regardless of collapse — so folding a repo
+    // never shrinks the inbox's workspace/unread counts. The badge lookup
+    // below only carries the rows actually rendered (collapsed rows are
+    // hidden), so it stays keyed to the emitted `visible` tree.
+    let total: u32 = summaries.values().map(|s| s.active as u32).sum();
+    let unread_total: u32 = summaries.values().map(|s| s.unread as u32).sum();
+
     let mut workspace_rows: BTreeMap<String, WorkspaceRow> = BTreeMap::new();
-    let mut total = 0u32;
-    let mut unread_total = 0u32;
     for row in &visible {
         if let VisibleRow::Workspace(key) = row {
             let key_str = key.as_str().to_string();
             if let Some(w) = workspaces.get(key) {
                 let entry = WorkspaceRow::from_workspace(&key_str, w, attention, agents);
-                total += 1;
-                unread_total += entry.unread_count;
                 workspace_rows.insert(key_str, entry);
             }
         }
@@ -228,6 +232,20 @@ mod tests {
         ws
     }
 
+    fn activity() -> lazybox_core::Activity {
+        lazybox_core::Activity {
+            author: "someone".into(),
+            body: "a comment".into(),
+            created_at: now(),
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        }
+    }
+
     fn inputs<'a>(
         workspaces: &'a HashMap<SessionKey, Workspace>,
         collapsed: &'a BTreeSet<String>,
@@ -301,21 +319,59 @@ mod tests {
         }
     }
 
+    /// Collapsing a repo hides its rows from the tree but must NOT shrink
+    /// the header's workspace / unread totals — they count the whole
+    /// group regardless of collapse.
     #[test]
-    fn collapsed_repo_is_reported_and_hides_rows() {
+    fn collapse_hides_rows_without_shrinking_totals() {
         let mut ws = HashMap::new();
-        let w = pr_workspace("k1", "owner/r", 7, CiStatus::Success);
+        let mut w = pr_workspace("k1", "owner/r", 7, CiStatus::Success);
+        w.activity = vec![activity(), activity()]; // two unseen -> unread 2
         ws.insert(SessionKey::from(&w.key), w);
-        let mut collapsed = BTreeSet::new();
-        collapsed.insert("owner/r".to_string());
         let att = lazybox_config::AttentionConfig::default();
         let agents = HashMap::new();
         let projects = BTreeMap::new();
         let filters = FilterSet::new();
-        let view = compute_inbox_view(inputs(&ws, &collapsed, &att, &agents, &projects, &filters));
 
-        assert_eq!(view.collapsed, vec!["owner/r".to_string()]);
-        assert_eq!(view.total, 0, "collapsed repo emits no workspace rows");
-        assert_eq!(view.summaries.get("owner/r").map(|s| s.active), Some(1));
+        let expanded = compute_inbox_view(inputs(
+            &ws,
+            &BTreeSet::new(),
+            &att,
+            &agents,
+            &projects,
+            &filters,
+        ));
+        assert_eq!(expanded.total, 1);
+        assert_eq!(expanded.unread_total, 2);
+        assert_eq!(
+            expanded
+                .rows
+                .iter()
+                .filter(|r| matches!(r, VisibleRow::Workspace(_)))
+                .count(),
+            1
+        );
+
+        let mut collapsed = BTreeSet::new();
+        collapsed.insert("owner/r".to_string());
+        let folded =
+            compute_inbox_view(inputs(&ws, &collapsed, &att, &agents, &projects, &filters));
+        assert_eq!(folded.collapsed, vec!["owner/r".to_string()]);
+        assert_eq!(
+            folded.total, 1,
+            "collapsing must not shrink the workspace count"
+        );
+        assert_eq!(
+            folded.unread_total, 2,
+            "collapsing must not shrink the unread count"
+        );
+        assert!(
+            !folded
+                .rows
+                .iter()
+                .any(|r| matches!(r, VisibleRow::Workspace(_))),
+            "collapsed repo hides its workspace rows"
+        );
+        assert_eq!(folded.summaries.get("owner/r").map(|s| s.active), Some(1));
     }
 }

@@ -588,15 +588,18 @@ function renderInbox(): void {
   workspaceCount.textContent = `${total} workspace${total === 1 ? "" : "s"}`;
   unreadTotal.textContent = `${unread} unread`;
 
-  if (inboxLoading) {
-    renderInboxMessage("Loading persisted workspaces…");
-    return;
-  }
   if (inboxError !== null) {
     renderInboxMessage(inboxError, true);
     return;
   }
-  if (inboxView === null || inboxView.rows.length === 0) {
+  // `null` means "connected but the first view hasn't arrived yet" — keep
+  // showing loading rather than flashing "empty" before the daemon's
+  // opening snapshot lands. An empty inbox is a non-null view with no rows.
+  if (inboxLoading || inboxView === null) {
+    renderInboxMessage("Loading persisted workspaces…");
+    return;
+  }
+  if (inboxView.rows.length === 0) {
     renderInboxMessage(
       "Your inbox is empty. Refresh after setup to fetch GitHub work.",
     );

@@ -159,7 +159,7 @@ export function loadPreview(): PreviewState {
       }),
       [second.key]: previewRow(second, {}),
     },
-    summaries: { "acme/relay": { active: 2, attention: 1 } },
+    summaries: { "acme/relay": { active: 2, attention: 1, unread: 2 } },
     sort_mode: "ByRoleSplit",
     sort_label: "split",
     collapsed: [],

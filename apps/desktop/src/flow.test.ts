@@ -327,6 +327,13 @@ describe("credential-free desktop workflow", () => {
 
     vi.resetModules();
     await import("./main");
+    // Wait until the initial connect settles (it overwrites the map from
+    // the empty list_workspaces) before injecting the empty view + events,
+    // so a late refreshInbox can't clobber them.
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+    pushInbox([]);
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -504,6 +511,13 @@ describe("credential-free desktop workflow", () => {
 
     vi.resetModules();
     await import("./main");
+    // Wait until the initial connect settles (it overwrites the map from
+    // the empty list_workspaces) before injecting the empty view + events,
+    // so a late refreshInbox can't clobber them.
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+    pushInbox([]);
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -646,21 +660,31 @@ function pushInbox(rows: Array<{ number: number; unread?: number }>): void {
 }
 
 function inboxViewFor(rows: Array<{ number: number; unread?: number }>): unknown {
+  // An empty inbox is a non-null view with no rows — mirrors the daemon's
+  // opening snapshot for a repo with nothing in flight.
+  const tree =
+    rows.length === 0
+      ? []
+      : [
+          { RepoHeader: "o/r" },
+          { KindHeader: "Pr" },
+          ...rows.map((row) => ({ Workspace: `github-o-r-${row.number}` })),
+        ];
+  const unread = rows.reduce((sum, row) => sum + (row.unread ?? 0), 0);
   return {
-    rows: [
-      { RepoHeader: "o/r" },
-      { KindHeader: "Pr" },
-      ...rows.map((row) => ({ Workspace: `github-o-r-${row.number}` })),
-    ],
+    rows: tree,
     workspaces: Object.fromEntries(
       rows.map((row) => [`github-o-r-${row.number}`, workspaceRowFor(row)]),
     ),
-    summaries: { "o/r": { active: rows.length, attention: 0 } },
+    summaries:
+      rows.length === 0
+        ? {}
+        : { "o/r": { active: rows.length, attention: 0, unread } },
     sort_mode: "ByRoleSplit",
     sort_label: "split",
     collapsed: [],
     total: rows.length,
-    unread_total: rows.reduce((sum, row) => sum + (row.unread ?? 0), 0),
+    unread_total: unread,
   };
 }
 

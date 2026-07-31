@@ -105,7 +105,9 @@ export interface InboxListHandlers {
 /**
  * Render the grouped inbox tree into `list`: repo group headers →
  * PR/Issue/Other section headers → workspace rows with real badges.
- * Headers are presentational; workspace rows are the focusable options.
+ * Each repo becomes an ARIA `group` so the `listbox` container only ever
+ * holds groups (its rows are the focusable `option`s); the repo/section
+ * headers are presentational chrome inside the group.
  */
 export function renderInboxList(
   list: HTMLElement,
@@ -114,17 +116,23 @@ export function renderInboxList(
 ): void {
   list.replaceChildren();
   const collapsed = new Set(view.collapsed);
+  let group: HTMLElement | null = null;
   for (const row of view.rows) {
     if ("RepoHeader" in row) {
-      list.append(
+      group = document.createElement("div");
+      group.className = "repo-group";
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-label", row.RepoHeader);
+      group.append(
         repoHeader(row.RepoHeader, view, collapsed.has(row.RepoHeader), handlers),
       );
+      list.append(group);
     } else if ("KindHeader" in row) {
-      list.append(sectionHeader(kindHeaderLabel(row.KindHeader)));
+      (group ?? list).append(sectionHeader(kindHeaderLabel(row.KindHeader)));
     } else if ("Workspace" in row) {
       const data = view.workspaces[row.Workspace];
       if (data !== undefined) {
-        list.append(workspaceRow(data, handlers));
+        (group ?? list).append(workspaceRow(data, handlers));
       }
     }
     // Session sub-rows are not surfaced in the desktop v1 (the workspace

@@ -2013,14 +2013,36 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-// The filter model + the pure attention producers moved to the
-// client-free `lazybox_tui_core::inbox` module (#731). Re-exported at
-// the legacy `sidebar::*` paths so the rest of the crate keeps its
-// `crate::components::sidebar::*` imports.
-pub use lazybox_tui_core::inbox::{
-    AttentionSignal, Filter, FilterAxis, FilterCtx, FilterSet, attention_gate, mailbox_membership,
-    workspace_attention_signals, workspace_needs_attention,
+pub(crate) use lazybox_tui_core::inbox::{
+    AttentionSignal, attention_gate, mailbox_membership, workspace_attention_signals,
 };
+/// The filter model + the pure attention producers moved to the
+/// client-free `lazybox_tui_core::inbox` module (#731), re-exported at
+/// the legacy `sidebar::*` paths so the rest of the crate keeps its
+/// `crate::components::sidebar::*` imports.
+///
+/// Visibility mirrors the pre-move split: the filter model was `pub`,
+/// so it stays reachable from outside the crate:
+///
+/// ```
+/// use lazybox_tui::components::sidebar::Filter;
+/// let _ = Filter::Author;
+/// ```
+///
+/// The pills-side attention producers were `pub(crate)`, so reaching
+/// one from outside `lazybox_tui` must NOT compile (guards against the
+/// move accidentally widening `pub(crate)` to `pub`):
+///
+/// ```compile_fail
+/// use lazybox_tui::components::sidebar::attention_gate;
+/// ```
+pub use lazybox_tui_core::inbox::{Filter, FilterAxis, FilterCtx, FilterSet};
+// `workspace_needs_attention`'s production caller moved into
+// `inbox::compute_visible` with the grouping logic (#731); inside `tui`
+// only the attention-signal unit tests still exercise it, so the
+// re-export is test-only.
+#[cfg(test)]
+pub(crate) use lazybox_tui_core::inbox::workspace_needs_attention;
 
 // Re-export the ratatui-styled pills.rs items so callers in the rest of
 // the crate keep their `crate::components::sidebar::*` import paths.

@@ -1009,6 +1009,65 @@ pub struct TickState {
     unknown_mergeable_probes: std::collections::HashMap<String, u32>,
 }
 
+impl TickState {
+    /// Broadcast a `ProviderError` for `source_key` unless it merely
+    /// repeats the failure already surfaced for that source this session.
+    ///
+    /// Retryable transients — a throttle, an HTTP 502, a "retrying in Ns"
+    /// hiccup the daemon is already auto-retrying — churn their message
+    /// every cycle (the countdown ticks down, a throttle alternates with a
+    /// 502). Keying the debounce on the exact text re-fired the footer
+    /// toast on every retry: a flicker that never cleared while the
+    /// condition persisted (#727). So the whole retryable streak collapses
+    /// onto one stable [`RETRYABLE_DEDUPE_KEY`] sentinel and broadcasts
+    /// once; auth/permanent errors debounce on their real message so a
+    /// changed error still surfaces. A genuine recovery calls
+    /// [`Self::clear_error`], re-arming the next broadcast.
+    ///
+    /// Every path that surfaces a poll failure (fetch error, client-init
+    /// failure) MUST go through here so the two never drift onto different
+    /// key schemes for the shared `last_error` slot.
+    fn broadcast_error_debounced(
+        &mut self,
+        bus: &tokio::sync::broadcast::Sender<Event>,
+        source_key: &str,
+        error: &lazybox_core::ProviderError,
+    ) {
+        let message = error.user_message();
+        let dedupe_key = if error.is_retryable() {
+            RETRYABLE_DEDUPE_KEY
+        } else {
+            message.as_str()
+        };
+        if self.last_error.get(source_key).map(String::as_str) == Some(dedupe_key) {
+            return;
+        }
+        self.last_error
+            .insert(source_key.to_string(), dedupe_key.to_string());
+        let kind = if error.is_retryable() {
+            "retryable"
+        } else if error.is_auth() {
+            "auth"
+        } else {
+            "permanent"
+        };
+        let _ = bus.send(Event::ProviderError {
+            source: error.source().to_string(),
+            message,
+            detail: error.diagnostic(),
+            kind: kind.to_string(),
+        });
+    }
+
+    /// Forget the last surfaced failure for `source_key` so its next
+    /// failure broadcasts even if it repeats an earlier message. Called
+    /// when the source recovers — a successful fetch or a rate-limit wait
+    /// replacing the error state.
+    fn clear_error(&mut self, source_key: &str) {
+        self.last_error.remove(source_key);
+    }
+}
+
 /// How many consecutive `Mergeable::Unknown` sightings of one task may
 /// arm the 5s fast re-poll before that task falls back to the normal
 /// poll cadence. GitHub computes mergeability within a few seconds in
@@ -1203,8 +1262,8 @@ mod rate_limit_wait_tests {
 /// streak — a throttle, an HTTP 502, a "retrying in Ns" hiccup the
 /// daemon is already auto-retrying — onto a single `ProviderError`
 /// broadcast. The NUL prefix guarantees it can never equal a real
-/// `ProviderError::user_message`. See the retryable arm in
-/// [`tick_with_state`] (#727).
+/// `ProviderError::user_message`. See
+/// [`TickState::broadcast_error_debounced`] (#727).
 const RETRYABLE_DEDUPE_KEY: &str = "\u{0}retryable";
 
 pub async fn tick_with_state(
@@ -1421,7 +1480,7 @@ pub async fn tick_with_state(
                 // Clear the debounce slot — the next failure should
                 // broadcast even if it carries the same message as a
                 // previous run.
-                state.last_error.remove(source.name());
+                state.clear_error(source.name());
                 // Always emit `PollCompleted`, even on 0 tasks, so
                 // the TUI can distinguish "polling hasn't run yet"
                 // from "polling found nothing matching your filter".
@@ -1491,13 +1550,6 @@ pub async fn tick_with_state(
                          next tick rebuilds from the credential chain"
                     );
                 }
-                let kind = if e.is_retryable() {
-                    "retryable"
-                } else if e.is_auth() {
-                    "auth"
-                } else {
-                    "permanent"
-                };
                 // Capture the longest retry-after hint across all
                 // failing sources this tick. Provider gave us a
                 // precise number (GitHub's rateLimit.resetAt) —
@@ -1506,7 +1558,6 @@ pub async fn tick_with_state(
                     max_retry_after_secs =
                         Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
                 }
-                let msg = e.user_message();
                 let now = Utc::now();
                 let rate_limit_wait = if source.name() == lazybox_gh::SOURCE {
                     config
@@ -1520,40 +1571,10 @@ pub async fn tick_with_state(
                     let secs = wait.retry_after_secs(now);
                     max_retry_after_secs =
                         Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
-                    state.last_error.remove(source.name());
+                    state.clear_error(source.name());
                     let _ = config.bus.send(wait.event());
                 } else {
-                    // Debounce: only emit a ProviderError when the
-                    // condition changed since the last failure for this
-                    // source. A *retryable* transient churns its message
-                    // every cycle while the daemon auto-retries — the
-                    // "retrying in Ns" countdown ticks down, and a
-                    // throttle alternates with a 502 — so keying the
-                    // debounce on the exact text re-fired the footer toast
-                    // on every retry: a flicker that never cleared while
-                    // the condition persisted (#727). Collapse the whole
-                    // retryable streak onto one stable sentinel so it
-                    // broadcasts once. A genuine recovery clears the slot
-                    // (the success arm above), and an escalation to
-                    // auth/permanent carries its real message and so still
-                    // surfaces.
-                    let dedupe_key = if e.is_retryable() {
-                        RETRYABLE_DEDUPE_KEY
-                    } else {
-                        msg.as_str()
-                    };
-                    let prev = state.last_error.get(source.name());
-                    if prev.map(String::as_str) != Some(dedupe_key) {
-                        state
-                            .last_error
-                            .insert(source.name().to_string(), dedupe_key.to_string());
-                        let _ = config.bus.send(Event::ProviderError {
-                            source: e.source().to_string(),
-                            message: msg,
-                            detail: e.diagnostic(),
-                            kind: kind.to_string(),
-                        });
-                    }
+                    state.broadcast_error_debounced(&config.bus, source.name(), &e);
                 }
             }
         }
@@ -5617,8 +5638,8 @@ mod tick_noop_skip_tests {
     }
 
     /// #727: a self-healing retryable transient whose specific message
-    /// churns every retry cycle (a throttle, then a 502, then a ticking
-    /// "retrying in Ns") must collapse to a SINGLE `ProviderError`
+    /// churns every retry cycle (a throttle with a ticking "retrying in
+    /// Ns", then a 502) must collapse to a SINGLE `ProviderError`
     /// broadcast — not re-fire the footer toast on every attempt.
     /// Pre-fix the debounce keyed on the exact message, so each varying
     /// message looked new and re-broadcast, flickering a red banner that
@@ -5641,18 +5662,25 @@ mod tick_noop_skip_tests {
                         + 'a,
                 >,
             > {
-                // A different retryable message every cycle — the
-                // "retrying in Ns" countdown ticking down between ticks.
-                let secs = 15
-                    - self
-                        .attempt
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // Alternate a ticking throttle with a 502 so the
+                // user-facing message is genuinely different every cycle
+                // — exactly the churn the exact-message debounce missed.
+                let n = self
+                    .attempt
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Box::pin(async move {
-                    Err(lazybox_core::ProviderError::retryable_after(
-                        lazybox_gh::SOURCE,
-                        "transient upstream hiccup",
-                        secs,
-                    ))
+                    Err(if n.is_multiple_of(2) {
+                        lazybox_core::ProviderError::retryable_after(
+                            lazybox_gh::SOURCE,
+                            "secondary rate limit",
+                            15 + n,
+                        )
+                    } else {
+                        lazybox_core::ProviderError::retryable(
+                            lazybox_gh::SOURCE,
+                            "HTTP 502 (Bad Gateway)",
+                        )
+                    })
                 })
             }
         }
@@ -5676,6 +5704,63 @@ mod tick_noop_skip_tests {
             errors, 1,
             "a churning retryable streak must broadcast one ProviderError, not one per retry"
         );
+    }
+
+    /// Finding #1: the fetch-failure path and the client-init-failure
+    /// path both surface through [`TickState::broadcast_error_debounced`],
+    /// so they can never drift onto different key schemes for the shared
+    /// `last_error` slot. Two differently-worded retryables — as when an
+    /// init failure alternates with a churning fetch throttle — coalesce
+    /// to one toast; an escalation to auth still surfaces; and a cleared
+    /// slot re-arms the next retryable. Pre-unification the init path kept
+    /// its own exact-message debounce and could re-toast on that
+    /// alternation.
+    #[tokio::test]
+    async fn debounced_error_coalesces_retryables_across_call_sites() {
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let mut state = TickState::default();
+        let mut rx = config.bus.subscribe();
+        let kinds = |events: Vec<Event>, want: &str| {
+            events
+                .into_iter()
+                .filter(|event| matches!(event, Event::ProviderError { kind, .. } if kind == want))
+                .count()
+        };
+
+        // A fetch throttle then an init-style hiccup: different messages,
+        // one broadcast.
+        state.broadcast_error_debounced(
+            &config.bus,
+            lazybox_gh::SOURCE,
+            &lazybox_core::ProviderError::retryable_after(lazybox_gh::SOURCE, "throttled", 15),
+        );
+        state.broadcast_error_debounced(
+            &config.bus,
+            lazybox_gh::SOURCE,
+            &lazybox_core::ProviderError::retryable(lazybox_gh::SOURCE, "client init timed out"),
+        );
+        assert_eq!(
+            kinds(drain(&mut rx), "retryable"),
+            1,
+            "differently-worded retryables (fetch vs init) coalesce to one toast"
+        );
+
+        // Escalation to auth is a genuine change of condition — surfaces.
+        state.broadcast_error_debounced(
+            &config.bus,
+            lazybox_gh::SOURCE,
+            &lazybox_core::ProviderError::auth(lazybox_gh::SOURCE, "token revoked"),
+        );
+        assert_eq!(kinds(drain(&mut rx), "auth"), 1);
+
+        // Recovery clears the slot, re-arming the next retryable.
+        state.clear_error(lazybox_gh::SOURCE);
+        state.broadcast_error_debounced(
+            &config.bus,
+            lazybox_gh::SOURCE,
+            &lazybox_core::ProviderError::retryable(lazybox_gh::SOURCE, "another hiccup"),
+        );
+        assert_eq!(kinds(drain(&mut rx), "retryable"), 1);
     }
 
     /// The dedupe sentinel must not swallow a genuine change of

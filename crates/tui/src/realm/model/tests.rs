@@ -528,11 +528,14 @@ mod effects_tests {
         m.status.polling = None;
 
         m.pending_refresh_ack = true;
+        // `exhausted` (retries run out) is the actionable failure that
+        // arms the sticky banner; a live `retryable` transient stays quiet
+        // (#730).
         m.handle_daemon_event(IpcEvent::ProviderError {
             source: source.into(),
             message: "boom".into(),
             detail: String::new(),
-            kind: "retryable".into(),
+            kind: "exhausted".into(),
         });
 
         assert_eq!(
@@ -13742,7 +13745,11 @@ mod mutation_failure_notice_tests {
             source: source.into(),
             message: message.into(),
             detail: String::new(),
-            kind: "retryable".into(),
+            // `exhausted`: an actionable sync failure. A live `retryable`
+            // transient no longer raises the banner (#730); mutation
+            // rejections and exhausted syncs are the actionable surface
+            // these tests cover.
+            kind: "exhausted".into(),
         }
     }
 
@@ -13815,6 +13822,90 @@ mod mutation_failure_notice_tests {
             Some(crate::realm::status_ctx::SyncOutcome::Err { message, .. })
                 if message == "request failed"
         ));
+    }
+
+    /// #730: a live `retryable` transient the daemon is auto-retrying
+    /// must NOT raise the red "✗ sync failed" banner — that noise buries
+    /// the failures the user must act on. The spinner still clears (the
+    /// poll did end) and the attempt still lands in the Shift-D sync log,
+    /// but the footer stays quiet on a background cycle.
+    #[test]
+    fn live_retryable_transient_clears_spinner_without_a_banner() {
+        let mut m = build_model();
+        m.status.polling = None;
+        m.handle_daemon_event(IpcEvent::PollProgress {
+            source: "github".into(),
+            message: "Fetching issues".into(),
+        });
+        assert!(m.status.bg_poll.is_some());
+
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "github".into(),
+            message: "github hiccup, retrying next cycle".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        assert!(
+            m.status.bg_poll.is_none(),
+            "the poll ended, so its spinner must clear even for a quiet transient"
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "a self-healing transient must not raise a footer banner, got {:?}",
+            m.status.notice.as_ref().map(|n| &n.message),
+        );
+        assert!(
+            m.sync_error_source.is_none(),
+            "a quiet transient must not arm the sticky sync-error tag"
+        );
+        assert!(
+            matches!(
+                m.status
+                    .sync
+                    .latest_per_source()
+                    .first()
+                    .map(|entry| &entry.outcome),
+                Some(crate::realm::status_ctx::SyncOutcome::Err { kind, .. }) if kind == "retryable"
+            ),
+            "the transient still records in the sync log for Shift-D"
+        );
+    }
+
+    /// #730: a manual refresh (Shift-R) that hits a live transient gets
+    /// calm, auto-fading feedback so it doesn't look ignored — but still
+    /// not the red banner reserved for actionable failures.
+    #[test]
+    fn manual_refresh_transient_gets_calm_feedback_not_a_banner() {
+        let mut m = build_model();
+        m.status.polling = None;
+        m.pending_refresh_ack = true;
+
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "github".into(),
+            message: "github hiccup, retrying next cycle".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        let n = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a manual refresh deserves feedback");
+        assert_eq!(
+            n.severity,
+            NoticeSeverity::Retryable,
+            "calm auto-fading feedback, not a sticky error"
+        );
+        assert!(
+            !n.message.contains("sync failed"),
+            "must not read as a hard failure, got {:?}",
+            n.message,
+        );
+        assert!(
+            m.sync_error_source.is_none(),
+            "the calm feedback must not arm the sticky sync-error tag"
+        );
+        assert!(!m.pending_refresh_ack, "the refresh ack is consumed");
     }
 
     /// A failed reply names the action AND parks the (otherwise lost)
@@ -14065,7 +14156,10 @@ mod notice_severity_slot_tests {
             source: "github".into(),
             message: "boom".into(),
             detail: String::new(),
-            kind: "retryable".into(),
+            // `exhausted` (retries run out) is the actionable failure that
+            // arms the banner; a live `retryable` transient stays quiet
+            // (#730).
+            kind: "exhausted".into(),
         });
         assert!(
             m.status

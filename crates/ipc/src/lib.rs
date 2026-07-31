@@ -2183,9 +2183,15 @@ pub struct AgentCliUpdateStatus {
 /// by `as_str` so existing TUI matches keep working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderErrorKind {
-    /// Network blip, rate limit, transient API failure. The TUI
-    /// shows a footer notice and we keep polling.
+    /// Network blip, rate limit, transient API failure that the daemon
+    /// is auto-retrying. Self-healing, so the TUI keeps it quiet — a
+    /// non-alarming sync status, never a red banner (#730).
     Retryable,
+    /// A retryable transient whose retries are exhausted: the daemon
+    /// kept failing across successive cycles, so sync is genuinely
+    /// stuck and now actionable ("check your connection or token").
+    /// The TUI surfaces this as a real error (#730).
+    Exhausted,
     /// Credentials failed to resolve / unauthorized. The TUI walks
     /// the user through re-auth.
     Auth,
@@ -2198,6 +2204,7 @@ impl ProviderErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Retryable => "retryable",
+            Self::Exhausted => "exhausted",
             Self::Auth => "auth",
             Self::Permanent => "permanent",
         }

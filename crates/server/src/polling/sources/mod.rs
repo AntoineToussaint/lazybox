@@ -2610,32 +2610,13 @@ pub(super) async fn sources_for_with_engagement(
                         // A dead token at startup used to be log-only:
                         // the daemon looked idle in the UI while every
                         // tick silently failed to even build a client.
-                        // Broadcast a ProviderError the same way fetch
-                        // failures do — with the per-source debounce so
-                        // the identical failure doesn't re-toast every
-                        // tick.
+                        // Broadcast through the SAME debounced path fetch
+                        // failures use, so a retryable init failure
+                        // coalesces onto the shared sentinel instead of
+                        // re-toasting when it alternates with a churning
+                        // fetch retryable (#727).
                         tracing::warn!("github client init failed: {}", e.diagnostic());
-                        let msg = e.user_message();
-                        if state.last_error.get(lazybox_gh::SOURCE).map(String::as_str)
-                            != Some(msg.as_str())
-                        {
-                            state
-                                .last_error
-                                .insert(lazybox_gh::SOURCE.to_string(), msg.clone());
-                            let kind = if e.is_retryable() {
-                                "retryable"
-                            } else if e.is_auth() {
-                                "auth"
-                            } else {
-                                "permanent"
-                            };
-                            let _ = bus.send(Event::ProviderError {
-                                source: lazybox_gh::SOURCE.to_string(),
-                                message: msg,
-                                detail: e.diagnostic(),
-                                kind: kind.to_string(),
-                            });
-                        }
+                        state.broadcast_error_debounced(&bus, lazybox_gh::SOURCE, &e);
                     }
                 }
             }

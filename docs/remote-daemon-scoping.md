@@ -42,9 +42,11 @@ Two ways to reach a remote daemon exist:
    ```
 
    The daemon survives client disconnects (same model as a tmux server), and
-   terminal replay reconstructs the screen on reconnect from the per-terminal
-   ring buffer. SSH is the trust boundary — there is no TCP/TLS in the socket
-   transport.
+   the `--connect` client re-dials on its own after a dropped socket (laptop
+   sleep, wifi change, tunnel reset) — it re-`Subscribe`s and the daemon
+   replays a resync snapshot from the per-terminal ring buffer, so the screen
+   reconstructs without a manual restart. SSH is the trust boundary — there is
+   no TCP/TLS in the socket transport.
 
 2. **JSON HTTP API gateway** for non-terminal clients (desktop, iOS, browser):
 

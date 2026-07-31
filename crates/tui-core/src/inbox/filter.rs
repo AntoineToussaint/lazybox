@@ -1,4 +1,4 @@
-//! Generic sidebar filter model.
+//! Generic inbox filter model.
 //!
 //! Filtering used to be a single fixed 5-value role cycle advanced by
 //! `f`. This replaces it with a set of toggleable predicates over
@@ -19,11 +19,14 @@ use lazybox_core::{CiStatus, ReviewStatus, SessionKey, TaskRole, Workspace};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use crate::components::sidebar::WorkspaceKind;
+use super::WorkspaceKind;
 
 /// The axis a [`Filter`] lives on. Drives the OR-within / AND-across
 /// combination in [`FilterSet::accepts`] and groups the filter menu.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum FilterAxis {
     State,
     Role,
@@ -43,7 +46,10 @@ impl FilterAxis {
 
 /// One toggleable predicate over a workspace. Variants are grouped by
 /// their [`FilterAxis`]; [`Filter::ALL`] lists them in menu order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum Filter {
     // ── State ──────────────────────────────────────────────────────
     /// Workspace has a coding-agent session. Matches on the recorded
@@ -176,7 +182,7 @@ pub struct FilterCtx<'a> {
 
 /// The active set of filters. Empty (the default) is a no-op that
 /// accepts every workspace.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FilterSet {
     active: BTreeSet<Filter>,
 }

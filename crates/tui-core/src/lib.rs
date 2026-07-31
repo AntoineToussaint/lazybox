@@ -25,6 +25,7 @@ pub mod confirm_latch;
 pub mod dispatch;
 pub mod editors;
 pub mod help;
+pub mod inbox;
 pub mod intent;
 pub mod notify;
 pub mod platform;

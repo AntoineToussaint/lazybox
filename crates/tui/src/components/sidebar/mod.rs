@@ -42,211 +42,14 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-/// Which logical mailbox the sidebar is currently showing.
-///
-/// Three mutually-exclusive buckets, cycled via `Shift-S`:
-///
-/// - **Inbox** — actionable workspaces: not snoozed, primary task
-///   is Open / Draft / In-Progress / In-Review. The default.
-/// - **Inactive** — historical workspaces: primary task is Merged
-///   or Closed. Useful for "where did I work on that PR last
-///   week" — the data is already persisted, this just surfaces it.
-/// - **Snoozed** — explicitly snoozed (`z` / `x z`).
-///
-/// Future expansion: a fourth "All repo activity" view that surfaces
-/// PRs the user isn't involved in. That requires a separate GH fetch
-/// (today the poller filters by `role.*`) and lives with the
-/// org/repo picker work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mailbox {
-    #[default]
-    Inbox,
-    Inactive,
-    Snoozed,
-}
-
-/// How the sidebar orders workspaces within each repo group.
-/// `Recent` is the legacy `updated_at desc` order; `ByRole` puts
-/// authored PRs first then reviews-requested etc.; `ByRoleSplit`
-/// (chip label `split`) splits each repo into a `PRs` and an
-/// `Issues` section, preserving role ordering within each section.
-/// Cycled via `o` in the sidebar.
-///
-/// Default is `ByRoleSplit` — most repos surface a mix of PRs and
-/// issues, and the visual split is the natural way to scan ("what's
-/// review-blocked vs what's still scoped as an issue?"). Recency
-/// is one `o` press away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SortMode {
-    Recent,
-    ByRole,
-    #[default]
-    ByRoleSplit,
-}
-
-impl SortMode {
-    pub fn next(self) -> Self {
-        match self {
-            SortMode::Recent => SortMode::ByRole,
-            SortMode::ByRole => SortMode::ByRoleSplit,
-            SortMode::ByRoleSplit => SortMode::Recent,
-        }
-    }
-
-    pub fn chip_label(self) -> &'static str {
-        match self {
-            SortMode::Recent => "recent",
-            SortMode::ByRole => "by-role",
-            SortMode::ByRoleSplit => "split",
-        }
-    }
-}
-
-/// Which kind of work a workspace primarily represents. Used by the
-/// `[split]` sort mode to bucket each repo into a `PRs` section, an
-/// `Issues` section, and an `Other` section. A workspace with an
-/// attached PR is a `Pr` regardless of whether it also links issues —
-/// the PR is what the user typically interacts with first; GitHub
-/// issues and Linear tickets are `Issue`; an empty scratch workspace
-/// (no PR, no issues) is `Other` so it isn't mislabeled as an issue.
-///
-/// Variant order matters: `Pr` is declared first so the derived
-/// `Ord` puts PRs ahead of issues ahead of untyped — same intent the
-/// `[split]` mode needs when partitioning the list.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum WorkspaceKind {
-    Pr,
-    Issue,
-    Other,
-}
-
-impl WorkspaceKind {
-    /// Classify a workspace. A filled PR slot wins; otherwise any
-    /// attached issue (GitHub or Linear) makes it an issue bucket; a
-    /// workspace with no task at all is `Other`.
-    pub fn classify(w: &lazybox_core::Workspace) -> Self {
-        if w.pr.is_some() {
-            WorkspaceKind::Pr
-        } else if !w.gh_issues.is_empty() || !w.linear_issues.is_empty() {
-            WorkspaceKind::Issue
-        } else {
-            WorkspaceKind::Other
-        }
-    }
-
-    /// Header label rendered in the sidebar list.
-    pub fn header_label(self) -> &'static str {
-        match self {
-            WorkspaceKind::Pr => "PRs",
-            WorkspaceKind::Issue => "Issues",
-            WorkspaceKind::Other => "Other",
-        }
-    }
-
-    /// Single-letter marker rendered before the header label —
-    /// mirrors the per-row `[PR]` / `[I]` pill colouring so the
-    /// section header lines up visually with the rows under it.
-    /// Untyped workspaces have no per-row glyph, so the section gets
-    /// a neutral dot rather than a type letter.
-    pub fn header_marker(self) -> char {
-        match self {
-            WorkspaceKind::Pr => 'P',
-            WorkspaceKind::Issue => 'I',
-            WorkspaceKind::Other => '·',
-        }
-    }
-}
-
-/// Sort key for the `ByRole*` modes. Author first (your own PRs are
-/// usually the most actionable), then Reviewer (someone's waiting on
-/// you), then Assignee, then Mentioned. Lower number sorts first.
-pub fn role_rank(role: Option<lazybox_core::TaskRole>) -> u8 {
-    match role {
-        Some(lazybox_core::TaskRole::Author) => 0,
-        Some(lazybox_core::TaskRole::Reviewer) => 1,
-        Some(lazybox_core::TaskRole::Assignee) => 2,
-        Some(lazybox_core::TaskRole::Mentioned) => 3,
-        None => 4,
-    }
-}
-
-/// One row in the rendered sidebar list. The visual model is a
-/// three-level tree:
-///
-/// ```text
-/// owner/name              <- RepoHeader
-///   ▸ Workspace title     <- Workspace (always present)
-///       claude            <- Session (only when workspace has 2+)
-///       shell             <- Session
-///   ▸ Other workspace
-/// ```
-///
-/// **Sessions are only surfaced when the workspace has more than
-/// one.** A workspace with zero or one session collapses to its
-/// single Workspace row — the sub-list would just be redundant. As
-/// soon as a second session appears (`Event::SessionCreated`), the
-/// workspace expands to show all of them.
-///
-/// Headers are render-only — j/k navigation and key dispatch skip
-/// them, so the cursor always rests on a Workspace or Session row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VisibleRow {
-    /// Repo group header. The string is the repo display name
-    /// (`"owner/name"` for GitHub, the project key for Linear, or
-    /// `"(no repo)"` for unattached workspaces).
-    RepoHeader(String),
-    /// Item-kind group header — only emitted in
-    /// `SortMode::ByRoleSplit`, nested under each repo header.
-    /// Splits the workspaces of one repo into `PRs` and `Issues`
-    /// sections so the visual hierarchy is `repo > kind > workspace`.
-    /// Non-selectable like `RepoHeader`; j/k navigation walks
-    /// straight past it (cursor still parks on it for click /
-    /// collapse interactions, same as a repo header).
-    KindHeader(WorkspaceKind),
-    /// A workspace under whichever repo header most recently appeared.
-    Workspace(SessionKey),
-    /// A session sub-row (workspace key + session id). Only emitted
-    /// when its parent workspace has 2+ sessions; otherwise the
-    /// session is implicit in the workspace row.
-    Session {
-        workspace: SessionKey,
-        session_id: SessionId,
-    },
-}
-
-/// Free-text search scoped to a single project (repo group). Invoked
-/// with `/` and filters that project's PRs + Issues live as the user
-/// types — fuzzy match on title, substring match on number. Other
-/// projects are left untouched (the search is deliberately scoped to
-/// one group, not global).
-///
-/// `editing` is true while the bottom input bar is capturing
-/// keystrokes (between `/` and `Enter`/`Esc`). `Enter` keeps the
-/// query applied but stops capturing so j/k navigates the results;
-/// `Esc` clears the query and closes the bar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchState {
-    /// Repo-header label the search is scoped to — matched against
-    /// `visible_rows::group_label` so only that project's rows are
-    /// filtered. Captured from the row under the cursor when `/` opens.
-    pub scope: String,
-    pub query: String,
-    pub editing: bool,
-}
-
-/// Per-repo summary line shown in the collapsible header.
-#[derive(Debug, Clone, Default)]
-pub struct RepoSummary {
-    /// Workspaces under this repo that are visible in the current
-    /// mailbox. Roughly "active work for this repo".
-    pub active: usize,
-    /// Workspaces with at least one indicator demanding the user's
-    /// attention: unread activity, CI failing, review pending /
-    /// changes-requested, agent in `Asking` state. Configurable in
-    /// the future; defaults are the indicators lazybox already
-    /// surfaces as badges on workspace rows.
-    pub attention: usize,
-}
+// The inbox view-model types + grouping/sort/filter/search logic moved
+// to the client-free `lazybox_tui_core::inbox` module (#731) so the
+// desktop client builds the same sidebar from the same code. Re-exported
+// at the legacy `sidebar::*` paths so render/dispatch call sites keep
+// their imports.
+pub use lazybox_tui_core::inbox::{
+    Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind, role_rank,
+};
 
 /// At-a-glance attention tallies across the visible mailbox, surfaced
 /// by the focus-mode event header so a heads-down user stays aware of
@@ -2203,7 +2006,6 @@ impl Sidebar {
     }
 }
 
-mod filter;
 mod handlers;
 pub(crate) mod pills;
 mod render;
@@ -2211,14 +2013,19 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-pub use filter::{Filter, FilterAxis, FilterCtx, FilterSet};
+// The filter model + the pure attention producers moved to the
+// client-free `lazybox_tui_core::inbox` module (#731). Re-exported at
+// the legacy `sidebar::*` paths so the rest of the crate keeps its
+// `crate::components::sidebar::*` imports.
+pub use lazybox_tui_core::inbox::{
+    AttentionSignal, Filter, FilterAxis, FilterCtx, FilterSet, attention_gate, mailbox_membership,
+    workspace_attention_signals, workspace_needs_attention,
+};
 
-// Re-export pills.rs items so callers in the rest of the crate
-// keep their `crate::components::sidebar::*` import paths.
+// Re-export the ratatui-styled pills.rs items so callers in the rest of
+// the crate keep their `crate::components::sidebar::*` import paths.
 pub(crate) use pills::{
-    AttentionSignal, attention_gate, badge_pill_style, mailbox_membership, relative_time,
-    role_badge, status_pills, workspace_attention_signals, workspace_needs_attention,
-    workspace_type_label,
+    badge_pill_style, relative_time, role_badge, status_pills, workspace_type_label,
 };
 #[cfg(test)]
 pub(crate) use pills::{pill_for_tag, status_pill};

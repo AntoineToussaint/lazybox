@@ -1,19 +1,19 @@
-//! Rendering primitives + visibility/attention helpers for the
-//! sidebar. Everything that turns workspace state into visual
-//! signal — status pills, role badges, mailbox membership,
-//! attention scoring, column widths — lives here so `mod.rs` can
-//! stay focused on the `Sidebar` struct + its impl blocks.
+//! Ratatui-styled rendering primitives for the sidebar: status pills,
+//! role badges, the workspace-type glyph, relative-time trailer, and
+//! badge styling. The client-free visibility/attention producers
+//! (`mailbox_membership`, `workspace_attention_signals`, …) live in
+//! `lazybox_tui_core::inbox`; this file only turns their output into
+//! ratatui `Style`s so `mod.rs` can stay focused on the `Sidebar`
+//! struct + its impl blocks.
 //!
 //! Why one file: these helpers share the same conceptual layer
 //! ("how does a workspace surface in the inbox?") and they form a
 //! tightly-knit graph — `status_pills` calls into `lifecycle_pill`;
-//! `mailbox_membership` is consulted by render; `relative_time`
-//! and `role_badge` are render primitives too. Splitting them
-//! across separate files would mean a lot of `pub(super) use`
-//! gymnastics for no real readability win.
+//! `relative_time` and `role_badge` are render primitives too.
+//! Splitting them across separate files would mean a lot of
+//! `pub(super) use` gymnastics for no real readability win.
 
-use super::Mailbox;
-use lazybox_core::{SessionKey, Workspace};
+use lazybox_core::Workspace;
 use ratatui::style::{Color, Modifier, Style};
 
 /// Right-side status pill showing the most actionable problem on the
@@ -28,10 +28,6 @@ pub(crate) struct StatusPill {
     pub(crate) style: Style,
 }
 
-/// Does this workspace want the user's attention right now? Drives
-/// the "needs attention" counter on the collapsed repo header.
-/// Each signal (unread / CI / review / agent-asking / mentioned)
-/// is independently toggleable via `~/.lazybox/config.yaml::attention`.
 /// Single-cell type marker rendered immediately before the number
 /// on each workspace row. The glyph sits flush against the number
 /// (`⇄312`, not `[PR]   #312`) so the title column gets the cells
@@ -59,195 +55,6 @@ pub(crate) fn workspace_type_label(workspace: &Workspace, ascii: bool) -> Option
         return Some(if ascii { "l" } else { "◆" });
     }
     None
-}
-
-/// Pure predicate: does `workspace` belong in `mailbox` right now?
-///
-/// Single source of truth for the inbox / inactive / snoozed
-/// classification. The body used to live inline in
-/// `recompute_visible_inner`, where each branch was hand-rolled
-/// and the snoozed-wins-over-merged subtlety wasn't covered by
-/// any test. Pulling it out lets the test file exercise every
-/// (workspace state, mailbox) cell directly.
-///
-/// Rules (snooze always wins — a snoozed workspace appears ONLY
-/// in the Snoozed mailbox, never leaks into Inbox / Inactive):
-///
-/// - **Inbox**: not snoozed AND
-///   (`show_inactive_in_inbox` OR the primary task is alive —
-///   open / draft / in-progress / in-review). Empty workspaces
-///   (no primary task at all) show in Inbox so the user can act
-///   on them.
-/// - **Inactive**: not snoozed AND primary task is `Merged` /
-///   `Closed`.
-/// - **Snoozed**: workspace is snoozed.
-/// How long a freshly-merged/closed PR stays visible in the Inbox
-/// before falling into the Inactive mailbox. The point: when a PR
-/// merges between polls, the gh-provider's recently-merged sweep
-/// catches it and updates `state=Merged`. Without this grace
-/// window the row would IMMEDIATELY disappear from the Inbox view
-/// the user was looking at — they'd never see the MERGED pill.
-///
-/// 30 minutes is enough to give lazybox a poll cycle (or two) to
-/// surface the state transition while the user is still around,
-/// without permanently cluttering Inbox with completed work.
-pub const INACTIVE_GRACE: chrono::Duration = chrono::Duration::minutes(30);
-
-pub fn mailbox_membership(
-    workspace: &Workspace,
-    mailbox: Mailbox,
-    now: chrono::DateTime<chrono::Utc>,
-    show_inactive_in_inbox: bool,
-) -> bool {
-    let snoozed = workspace.is_snoozed(now);
-    // "Recently inactivated" = task is Merged/Closed AND it reached
-    // that state within the grace window. Such workspaces appear in
-    // BOTH Inbox (so the user sees the MERGED/CLOSED transition) and
-    // Inactive (so they're already in their permanent home).
-    //
-    // The clock is `closed_at` (the merge/close moment), NOT
-    // `updated_at`: GitHub bumps `updated_at` on ANY later activity —
-    // post-merge comments, branch deletion, linked-issue closure,
-    // deploy statuses. Keying off `updated_at` let a merged PR in an
-    // active repo keep resetting its own grace window, so it never
-    // fell out of the Inbox (issue #96). `closed_at` only moves once.
-    // Falls back to `updated_at` for records that predate the field.
-    let recently_inactivated = workspace
-        .primary_task()
-        .map(|t| {
-            matches!(
-                t.state,
-                lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
-            ) && (now - t.closed_at.unwrap_or(t.updated_at)) < INACTIVE_GRACE
-        })
-        .unwrap_or(false);
-    match mailbox {
-        Mailbox::Snoozed => snoozed,
-        Mailbox::Inbox => {
-            if snoozed {
-                return false;
-            }
-            if show_inactive_in_inbox {
-                return true;
-            }
-            match workspace.primary_task() {
-                Some(t) => {
-                    let is_terminal = matches!(
-                        t.state,
-                        lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
-                    );
-                    !is_terminal || recently_inactivated
-                }
-                None => true,
-            }
-        }
-        Mailbox::Inactive => {
-            if snoozed {
-                return false;
-            }
-            matches!(
-                workspace.primary_task().map(|t| t.state),
-                Some(lazybox_core::TaskState::Merged) | Some(lazybox_core::TaskState::Closed)
-            )
-        }
-    }
-}
-
-/// One reason a workspace might want the user's attention. Single
-/// vocabulary used by `workspace_attention_signals` (pure producer),
-/// `workspace_needs_attention` (gated by config), and the per-
-/// signal header counters (`Unread`/`AgentAsking`/`CiFailing`/…).
-///
-/// Adding a new signal means: add a variant here, add a producer
-/// branch in `workspace_attention_signals`, add a config flag, and
-/// — because the gate match below is exhaustive — the compiler
-/// catches the missing wiring.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AttentionSignal {
-    Unread,
-    AgentAsking,
-    CiFailing,
-    ReviewPending,
-    Mentioned,
-}
-
-/// Pure: every attention signal currently active for `w`. Order is
-/// stable (matches the producer below) so callers that want
-/// priority-aware behavior can read the first hit.
-///
-/// **Single source of truth.** The per-repo `needs attention`
-/// counter, the header signal totals (`? N input`, `N CI`,
-/// `N review`), and the row pill all derive from this one
-/// producer. Before unification, each consumer had its own ad-hoc
-/// check: `review_pending_count` counted "reviewers requested"
-/// (even without ChangesRequested), `workspace_needs_attention`
-/// didn't — so a repo with reviewers-only PRs lit the header
-/// counter but not the repo badge.
-pub fn workspace_attention_signals(
-    w: &Workspace,
-    agents: &std::collections::HashMap<SessionKey, lazybox_ipc::AgentState>,
-) -> Vec<AttentionSignal> {
-    let mut out = Vec::new();
-    if w.unread_count() > 0 {
-        out.push(AttentionSignal::Unread);
-    }
-    // AgentAsking signal: source of truth is the sidebar-local
-    // `agents` state map (driven by `Event::AgentState` deltas).
-    // NOT `w.sessions[i].state` — that gets blown away every poll
-    // when `WorkspaceUpserted` re-loads from the persisted store.
-    if crate::agent_attention::workspace_is_asking(w, agents) {
-        out.push(AttentionSignal::AgentAsking);
-    }
-    if let Some(t) = w.primary_task() {
-        if matches!(
-            t.ci,
-            lazybox_core::CiStatus::Failure | lazybox_core::CiStatus::Mixed
-        ) {
-            out.push(AttentionSignal::CiFailing);
-        }
-        // ReviewPending unifies: explicit ReviewStatus + reviewers
-        // requested. The previous split (header counter had the
-        // `reviewers.is_empty()` extra, attention badge didn't) led
-        // to "1 review" in the header next to a repo header with no
-        // attention dot — confusing.
-        if matches!(
-            t.review,
-            lazybox_core::ReviewStatus::Pending | lazybox_core::ReviewStatus::ChangesRequested,
-        ) || !t.reviewers.is_empty()
-        {
-            out.push(AttentionSignal::ReviewPending);
-        }
-        if matches!(t.role, lazybox_core::TaskRole::Mentioned) {
-            out.push(AttentionSignal::Mentioned);
-        }
-    }
-    out
-}
-
-/// Is `signal` enabled in the user's attention config? Exhaustive
-/// match so a new `AttentionSignal` variant fails to compile until
-/// it's wired up here AND in `AttentionConfig`.
-pub(crate) fn attention_gate(
-    signal: AttentionSignal,
-    cfg: &lazybox_config::AttentionConfig,
-) -> bool {
-    match signal {
-        AttentionSignal::Unread => cfg.unread,
-        AttentionSignal::AgentAsking => cfg.agent_asking,
-        AttentionSignal::CiFailing => cfg.ci_failing,
-        AttentionSignal::ReviewPending => cfg.review_pending,
-        AttentionSignal::Mentioned => cfg.mentioned,
-    }
-}
-
-pub(crate) fn workspace_needs_attention(
-    w: &Workspace,
-    cfg: &lazybox_config::AttentionConfig,
-    agents: &std::collections::HashMap<SessionKey, lazybox_ipc::AgentState>,
-) -> bool {
-    workspace_attention_signals(w, agents)
-        .iter()
-        .any(|s| attention_gate(*s, cfg))
 }
 
 /// Render the right-trailer pill for a task. **Pure mapping** from

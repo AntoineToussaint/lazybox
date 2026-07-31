@@ -1199,6 +1199,14 @@ mod rate_limit_wait_tests {
     }
 }
 
+/// Debounce sentinel that collapses an entire retryable-transient
+/// streak — a throttle, an HTTP 502, a "retrying in Ns" hiccup the
+/// daemon is already auto-retrying — onto a single `ProviderError`
+/// broadcast. The NUL prefix guarantees it can never equal a real
+/// `ProviderError::user_message`. See the retryable arm in
+/// [`tick_with_state`] (#727).
+const RETRYABLE_DEDUPE_KEY: &str = "\u{0}retryable";
+
 pub async fn tick_with_state(
     config: &ServerConfig,
     sources: &[Box<dyn TaskSource>],
@@ -1515,13 +1523,30 @@ pub async fn tick_with_state(
                     state.last_error.remove(source.name());
                     let _ = config.bus.send(wait.event());
                 } else {
-                    // Debounce: only emit a ProviderError if the message
-                    // changed since the last failure for this source.
+                    // Debounce: only emit a ProviderError when the
+                    // condition changed since the last failure for this
+                    // source. A *retryable* transient churns its message
+                    // every cycle while the daemon auto-retries — the
+                    // "retrying in Ns" countdown ticks down, and a
+                    // throttle alternates with a 502 — so keying the
+                    // debounce on the exact text re-fired the footer toast
+                    // on every retry: a flicker that never cleared while
+                    // the condition persisted (#727). Collapse the whole
+                    // retryable streak onto one stable sentinel so it
+                    // broadcasts once. A genuine recovery clears the slot
+                    // (the success arm above), and an escalation to
+                    // auth/permanent carries its real message and so still
+                    // surfaces.
+                    let dedupe_key = if e.is_retryable() {
+                        RETRYABLE_DEDUPE_KEY
+                    } else {
+                        msg.as_str()
+                    };
                     let prev = state.last_error.get(source.name());
-                    if prev.map(String::as_str) != Some(msg.as_str()) {
+                    if prev.map(String::as_str) != Some(dedupe_key) {
                         state
                             .last_error
-                            .insert(source.name().to_string(), msg.clone());
+                            .insert(source.name().to_string(), dedupe_key.to_string());
                         let _ = config.bus.send(Event::ProviderError {
                             source: e.source().to_string(),
                             message: msg,
@@ -5589,6 +5614,147 @@ mod tick_noop_skip_tests {
                 .any(|event| matches!(event, Event::ProviderError { .. })),
             "a known rate-limit wait must not be reported as a generic failure"
         );
+    }
+
+    /// #727: a self-healing retryable transient whose specific message
+    /// churns every retry cycle (a throttle, then a 502, then a ticking
+    /// "retrying in Ns") must collapse to a SINGLE `ProviderError`
+    /// broadcast — not re-fire the footer toast on every attempt.
+    /// Pre-fix the debounce keyed on the exact message, so each varying
+    /// message looked new and re-broadcast, flickering a red banner that
+    /// never cleared while the condition persisted.
+    #[tokio::test]
+    async fn churning_retryable_streak_broadcasts_one_provider_error() {
+        struct ChurningRetryable {
+            attempt: std::sync::atomic::AtomicU64,
+        }
+        impl TaskSource for ChurningRetryable {
+            fn name(&self) -> &str {
+                lazybox_gh::SOURCE
+            }
+            fn fetch<'a>(
+                &'a self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                // A different retryable message every cycle — the
+                // "retrying in Ns" countdown ticking down between ticks.
+                let secs = 15
+                    - self
+                        .attempt
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move {
+                    Err(lazybox_core::ProviderError::retryable_after(
+                        lazybox_gh::SOURCE,
+                        "transient upstream hiccup",
+                        secs,
+                    ))
+                })
+            }
+        }
+
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(ChurningRetryable {
+            attempt: std::sync::atomic::AtomicU64::new(0),
+        })];
+        let mut state = TickState::default();
+        let mut rx = config.bus.subscribe();
+
+        for _ in 0..4 {
+            tick_with_state(&config, &sources, &mut state).await;
+        }
+
+        let errors = drain(&mut rx)
+            .into_iter()
+            .filter(|event| matches!(event, Event::ProviderError { .. }))
+            .count();
+        assert_eq!(
+            errors, 1,
+            "a churning retryable streak must broadcast one ProviderError, not one per retry"
+        );
+    }
+
+    /// The dedupe sentinel must not swallow a genuine change of
+    /// condition: a retryable streak that escalates to an auth failure
+    /// still surfaces the auth error, and a recovery between failures
+    /// re-arms the next retryable broadcast.
+    #[tokio::test]
+    async fn retryable_dedupe_still_surfaces_escalation_and_recovery() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Mode {
+            Retryable,
+            Ok,
+            Auth,
+        }
+        struct ModedSource {
+            mode: Arc<Mutex<Mode>>,
+        }
+        impl TaskSource for ModedSource {
+            fn name(&self) -> &str {
+                lazybox_gh::SOURCE
+            }
+            fn fetch<'a>(
+                &'a self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                let mode = *self.mode.lock();
+                Box::pin(async move {
+                    match mode {
+                        Mode::Retryable => Err(lazybox_core::ProviderError::retryable(
+                            lazybox_gh::SOURCE,
+                            "transient hiccup",
+                        )),
+                        Mode::Ok => Ok(Vec::new()),
+                        Mode::Auth => Err(lazybox_core::ProviderError::auth(
+                            lazybox_gh::SOURCE,
+                            "token revoked",
+                        )),
+                    }
+                })
+            }
+        }
+
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let mode = Arc::new(Mutex::new(Mode::Retryable));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(ModedSource { mode: mode.clone() })];
+        let mut state = TickState::default();
+        let mut rx = config.bus.subscribe();
+
+        let count = |events: Vec<Event>, want_kind: &str| {
+            events
+                .into_iter()
+                .filter(
+                    |event| matches!(event, Event::ProviderError { kind, .. } if kind == want_kind),
+                )
+                .count()
+        };
+
+        // Two retryable ticks collapse to one broadcast.
+        tick_with_state(&config, &sources, &mut state).await;
+        tick_with_state(&config, &sources, &mut state).await;
+        assert_eq!(count(drain(&mut rx), "retryable"), 1);
+
+        // Escalation to auth is a real change of condition — it surfaces.
+        *mode.lock() = Mode::Auth;
+        tick_with_state(&config, &sources, &mut state).await;
+        assert_eq!(count(drain(&mut rx), "auth"), 1);
+
+        // A genuine recovery clears the debounce slot…
+        *mode.lock() = Mode::Ok;
+        tick_with_state(&config, &sources, &mut state).await;
+        // …so the next retryable after recovery broadcasts again.
+        *mode.lock() = Mode::Retryable;
+        tick_with_state(&config, &sources, &mut state).await;
+        assert_eq!(count(drain(&mut rx), "retryable"), 1);
     }
 
     #[tokio::test]

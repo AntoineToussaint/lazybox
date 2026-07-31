@@ -276,7 +276,9 @@ pub async fn set_notes(config: &ServerConfig, key: &WorkspaceKey, notes: String)
 /// and broadcasts `WorkspaceUpserted` so every TUI updates the sidebar
 /// label). Only the display `name` changes — the workspace key and any
 /// session worktrees stay put, so nothing is orphaned. A blank name is
-/// ignored so the row never renders empty.
+/// ignored so the row never renders empty; re-submitting the current
+/// name emits nothing because `commit_upsert`'s no-change compare skips
+/// the write + broadcast when the serialized row is identical.
 pub async fn rename_workspace(config: &ServerConfig, key: &WorkspaceKey, name: String) {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -500,6 +502,25 @@ mod rename_workspace_tests {
         assert!(
             events.try_recv().is_err(),
             "a blank name must not commit or broadcast"
+        );
+        assert_eq!(stored_name(&config, &key), "Work");
+    }
+
+    #[tokio::test]
+    async fn unchanged_rename_does_not_rebroadcast() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("local:scratch#3");
+        seed(&config, &key, "Work");
+        let mut events = config.bus.subscribe();
+
+        // Submitting the current name (here with surrounding whitespace,
+        // as an Enter-through on the prefilled input would) resolves to
+        // the same stored name and must not force a write + broadcast.
+        rename_workspace(&config, &key, "  Work  ".to_string()).await;
+
+        assert!(
+            events.try_recv().is_err(),
+            "renaming to the current name must be a no-op"
         );
         assert_eq!(stored_name(&config, &key), "Work");
     }

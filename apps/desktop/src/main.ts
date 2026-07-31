@@ -8,19 +8,18 @@ import {
   ReplyDrafts,
   applyWorkspaceEvent,
   canReplyToTask,
-  filteredWorkspaces,
   preferredTerminal,
   primaryTask,
   projectKeyLabel,
   shouldHandleWorkspaceEnter,
   taskReference,
   unreadCount,
-  type WorkspaceFilter,
 } from "./model";
 import {
   type DesktopInfo,
   type DesktopRepository,
   type DesktopStreamMessage,
+  type InboxView,
   type LazyboxCommand,
   type LazyboxEvent,
   type TerminalKind,
@@ -32,6 +31,11 @@ import {
   spawnAgentCommand,
   terminalKindLabel,
 } from "./protocol";
+import {
+  relativeTime,
+  renderInboxList,
+  workspaceKeysInOrder,
+} from "./inbox_view";
 import {
   TerminalFrameDecoder,
   type TerminalBinaryFrame,
@@ -99,8 +103,8 @@ type AnalyticsEvent =
 const workspaceList = element<HTMLDivElement>("workspace-list");
 const workspaceCount = element<HTMLSpanElement>("workspace-count");
 const unreadTotal = element<HTMLSpanElement>("unread-count");
-const workspaceSearch = element<HTMLInputElement>("workspace-search");
-const workspaceFilter = element<HTMLSelectElement>("workspace-filter");
+const sortButton = element<HTMLButtonElement>("sort-button");
+const sortLabel = element<HTMLElement>("sort-label");
 const newWorkspaceButton =
   element<HTMLButtonElement>("new-workspace-button");
 const workspaceEmpty = element<HTMLDivElement>("workspace-empty");
@@ -170,7 +174,7 @@ const confirmAccept = element<HTMLButtonElement>("confirm-accept");
 let workspaces = new Map<string, Workspace>();
 let terminals = new Map<number, TerminalRecord>();
 let selectedKey: string | null = null;
-let visibleWorkspaces: Workspace[] = [];
+let inboxView: InboxView | null = null;
 let defaultAgent = "claude";
 let previewMode = false;
 let inboxLoading = true;
@@ -202,12 +206,18 @@ const pendingTerminalFrames = new Map<number, TerminalBinaryFrame[]>();
 let desktopMetadataLoaded = false;
 let terminalReaderStarted = false;
 let eventChannel: Channel<DesktopStreamMessage> | null = null;
+let inboxChannel: Channel<InboxView> | null = null;
 const inboxConnection = new InboxConnection(
   () => invoke<WorkspacesResponse>("list_workspaces"),
   async () => {
     eventChannel = new Channel<DesktopStreamMessage>();
     eventChannel.onmessage = handleStreamMessage;
-    await invoke("subscribe_events", { onEvent: eventChannel });
+    inboxChannel = new Channel<InboxView>();
+    inboxChannel.onmessage = applyInboxView;
+    await invoke("subscribe_events", {
+      onEvent: eventChannel,
+      onInbox: inboxChannel,
+    });
     if (!terminalReaderStarted) {
       terminalReaderStarted = true;
       void readTerminalData();
@@ -243,8 +253,7 @@ replyForm.addEventListener("submit", (event) => {
   void reviewReply();
 });
 
-workspaceSearch.addEventListener("input", renderInbox);
-workspaceFilter.addEventListener("change", renderInbox);
+sortButton.addEventListener("click", () => void cycleSortMode());
 settingsButton.addEventListener("click", () => void openSettings());
 setupClose.addEventListener("click", closeSettings);
 githubCheckButton.addEventListener("click", () => void refreshGithubAuth());
@@ -274,6 +283,7 @@ async function boot(): Promise<void> {
     defaultAgent = preview.defaultAgent;
     workspaces = preview.workspaces;
     terminals = preview.terminals;
+    inboxView = preview.inboxView;
     inboxLoading = false;
     setConnection(true, "Preview data");
     selectWorkspace(preview.selectedKey);
@@ -534,89 +544,73 @@ function updateNewWorkspaceButton(): void {
   newWorkspaceButton.disabled = availableRepositories().length === 0;
 }
 
-function renderInbox(): void {
-  const items = filteredWorkspaces(workspaces.values(), {
-    query: workspaceSearch.value,
-    filter: workspaceFilter.value as WorkspaceFilter,
-  });
-  visibleWorkspaces = items;
-  workspaceList.replaceChildren();
-  workspaceList.setAttribute("aria-busy", String(inboxLoading));
-  const allItems = [...workspaces.values()];
-  const unread = allItems.reduce(
-    (sum, workspace) => sum + unreadCount(workspace),
-    0,
-  );
-  workspaceCount.textContent =
-    items.length === allItems.length
-      ? `${items.length} workspace${items.length === 1 ? "" : "s"}`
-      : `${items.length} of ${allItems.length}`;
-  unreadTotal.textContent = `${unread} unread`;
+function applyInboxView(view: InboxView): void {
+  inboxView = view;
+  inboxLoading = false;
+  const hadSelection = selectedKey !== null && workspaces.has(selectedKey);
+  chooseInitialWorkspace();
+  if (!hadSelection && selectedKey !== null) {
+    render();
+    attachSelectedTerminal();
+  } else {
+    renderInbox();
+  }
+}
 
-  if (inboxLoading) {
-    renderInboxMessage("Loading persisted workspaces…");
+async function cycleSortMode(): Promise<void> {
+  if (previewMode) {
     return;
   }
+  try {
+    await invoke("cycle_sort_mode");
+  } catch (error) {
+    setStatus(String(error));
+  }
+}
+
+async function toggleRepoCollapsed(label: string): Promise<void> {
+  if (previewMode) {
+    return;
+  }
+  try {
+    await invoke("toggle_repo_collapsed", { label });
+  } catch (error) {
+    setStatus(String(error));
+  }
+}
+
+function renderInbox(): void {
+  workspaceList.replaceChildren();
+  workspaceList.setAttribute("aria-busy", String(inboxLoading));
+  sortLabel.textContent = inboxView?.sort_label ?? "split";
+  const total = inboxView?.total ?? 0;
+  const unread = inboxView?.unread_total ?? 0;
+  workspaceCount.textContent = `${total} workspace${total === 1 ? "" : "s"}`;
+  unreadTotal.textContent = `${unread} unread`;
+
   if (inboxError !== null) {
     renderInboxMessage(inboxError, true);
     return;
   }
-  if (items.length === 0) {
+  // `null` means "connected but the first view hasn't arrived yet" — keep
+  // showing loading rather than flashing "empty" before the daemon's
+  // opening snapshot lands. An empty inbox is a non-null view with no rows.
+  if (inboxLoading || inboxView === null) {
+    renderInboxMessage("Loading persisted workspaces…");
+    return;
+  }
+  if (inboxView.rows.length === 0) {
     renderInboxMessage(
-      allItems.length === 0
-        ? "Your inbox is empty. Refresh after setup to fetch GitHub work."
-        : "No workspaces match this search and filter.",
+      "Your inbox is empty. Refresh after setup to fetch GitHub work.",
     );
     return;
   }
 
-  for (const workspace of items) {
-    const task = primaryTask(workspace);
-    const button = document.createElement("button");
-    button.className = "workspace-row";
-    button.classList.toggle("selected", workspace.key === selectedKey);
-    button.type = "button";
-    button.role = "option";
-    button.ariaSelected = String(workspace.key === selectedKey);
-    button.tabIndex = workspace.key === selectedKey ? 0 : -1;
-    const count = unreadCount(workspace);
-    button.setAttribute(
-      "aria-label",
-      `${task?.title ?? workspace.name}, ${task?.repo ?? workspace.branch}, ${
-        count === 0 ? "read" : `${count} unread`
-      }`,
-    );
-    button.addEventListener("click", () => selectWorkspace(workspace.key));
-
-    const top = document.createElement("span");
-    top.className = "workspace-row-top";
-    const reference = document.createElement("span");
-    reference.className = "workspace-reference";
-    reference.textContent = taskReference(task);
-    const state = document.createElement("span");
-    state.className = `task-state task-state-${(task?.state ?? "local").toLowerCase()}`;
-    state.textContent = task?.state ?? "local";
-    top.append(reference, state);
-
-    const title = document.createElement("strong");
-    title.textContent = task?.title ?? workspace.name;
-    const bottom = document.createElement("span");
-    bottom.className = "workspace-row-bottom";
-    const repo = document.createElement("span");
-    repo.textContent = [
-      task?.repo ?? workspace.branch,
-      task?.needs_reply ? "reply needed" : null,
-      task?.ci === "Failure" || task?.ci === "Mixed" ? "CI failing" : null,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    const unreadBadge = document.createElement("span");
-    unreadBadge.className = "unread-badge";
-    unreadBadge.textContent = count > 0 ? String(count) : "·";
-    bottom.append(repo, unreadBadge);
-    button.append(top, title, bottom);
-    workspaceList.append(button);
-  }
+  renderInboxList(workspaceList, inboxView, {
+    selectedKey,
+    onSelectWorkspace: selectWorkspace,
+    onToggleRepo: (label) => void toggleRepoCollapsed(label),
+  });
 }
 
 function renderWorkspace(): void {
@@ -789,10 +783,8 @@ function chooseInitialWorkspace(): void {
   if (selectedKey !== null && workspaces.has(selectedKey)) {
     return;
   }
-  changeSelectedWorkspace(
-    filteredWorkspaces(workspaces.values(), { query: "", filter: "all" })[0]
-      ?.key ?? null,
-  );
+  const keys = inboxView === null ? [] : workspaceKeysInOrder(inboxView);
+  changeSelectedWorkspace(keys.find((key) => workspaces.has(key)) ?? null);
 }
 
 function attachSelectedTerminal(): void {
@@ -1663,11 +1655,6 @@ function handleKeyboard(event: KeyboardEvent): void {
   ) {
     return;
   }
-  if (event.key === "/") {
-    event.preventDefault();
-    workspaceSearch.focus();
-    return;
-  }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
     event.preventDefault();
     navigateWorkspaces(event.key === "ArrowDown" ? 1 : -1);
@@ -1698,6 +1685,9 @@ function handleKeyboard(event: KeyboardEvent): void {
   } else if (event.key === "m") {
     event.preventDefault();
     void markSelectedRead();
+  } else if (event.key === "o") {
+    event.preventDefault();
+    void cycleSortMode();
   } else if (event.key === "R") {
     event.preventDefault();
     void refreshInbox(true);
@@ -1705,17 +1695,16 @@ function handleKeyboard(event: KeyboardEvent): void {
 }
 
 function navigateWorkspaces(delta: number): void {
-  if (visibleWorkspaces.length === 0) {
+  const keys = inboxView === null ? [] : workspaceKeysInOrder(inboxView);
+  if (keys.length === 0) {
     return;
   }
-  const current = visibleWorkspaces.findIndex(
-    (workspace) => workspace.key === selectedKey,
-  );
+  const current = keys.findIndex((key) => key === selectedKey);
   const next =
     current < 0
       ? 0
-      : Math.max(0, Math.min(visibleWorkspaces.length - 1, current + delta));
-  const key = visibleWorkspaces[next]?.key;
+      : Math.max(0, Math.min(keys.length - 1, current + delta));
+  const key = keys[next];
   if (key !== undefined) {
     selectWorkspace(key);
     workspaceList
@@ -1772,27 +1761,6 @@ function setStatus(message: string): void {
 function setTerminalState(state: string): void {
   terminalState.textContent = state;
   terminalState.dataset.state = state;
-}
-
-function relativeTime(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return "";
-  }
-  const seconds = Math.round((timestamp - Date.now()) / 1000);
-  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
-  if (Math.abs(seconds) < 60) {
-    return formatter.format(seconds, "second");
-  }
-  const minutes = Math.round(seconds / 60);
-  if (Math.abs(minutes) < 60) {
-    return formatter.format(minutes, "minute");
-  }
-  const hours = Math.round(minutes / 60);
-  if (Math.abs(hours) < 24) {
-    return formatter.format(hours, "hour");
-  }
-  return formatter.format(Math.round(hours / 24), "day");
 }
 
 function element<T extends HTMLElement>(id: string): T {

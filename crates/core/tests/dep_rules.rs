@@ -63,6 +63,11 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-linear",
                 "lazybox-slack",
                 "lazybox-store",
+                // Optional, desktop-contract only: the contract generator
+                // exports the shared inbox view-model as TS and the
+                // `DesktopStreamMessage::Inbox` variant carries it (#732).
+                // Off in every daemon build — the daemon never renders.
+                "lazybox-tui-core",
             ]),
         ),
         ("lazybox-slack", set(&["lazybox-auth"])),

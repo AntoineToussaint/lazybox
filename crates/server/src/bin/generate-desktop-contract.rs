@@ -21,6 +21,9 @@ use lazybox_server::api_gateway::{
     TERMINAL_WRITE_INTENT_SUBMIT, TERMINAL_WRITE_INTENT_VIEW, UnsupportedFingerprintResponse,
     UnsupportedProtocolResponse, WorkspacesResponse,
 };
+use lazybox_tui_core::inbox::{
+    InboxView, RepoSummary, SortMode, VisibleRow, WorkspaceKind, WorkspaceRow,
+};
 use std::path::PathBuf;
 use ts_rs::{Config, TS};
 
@@ -49,6 +52,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     DesktopRepository::export_all(&config)?;
     DesktopStreamMessage::export_all(&config)?;
 
+    // Shared inbox view-model (#732): the grouped rows, per-row badge
+    // data, per-repo summaries, and sort taxonomy the desktop renders.
+    // `export_all` pulls transitive deps (StatusTag, CiStatus, …).
+    InboxView::export_all(&config)?;
+    WorkspaceRow::export_all(&config)?;
+    VisibleRow::export_all(&config)?;
+    RepoSummary::export_all(&config)?;
+    SortMode::export_all(&config)?;
+    WorkspaceKind::export_all(&config)?;
+
     for entry in std::fs::read_dir(&output)? {
         let path = entry?.path();
         if path.extension().is_some_and(|extension| extension == "ts") {
@@ -63,19 +76,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let index = format!(
-        "export type {{ DesktopCommand as LazyboxCommand }} from \"./DesktopCommand\";\n\
-         export type {{ DesktopEvent as LazyboxEvent }} from \"./DesktopEvent\";\n\
-         export type {{ DesktopInfo }} from \"./DesktopInfo\";\n\
-         export type {{ DesktopRepository }} from \"./DesktopRepository\";\n\
-         export type {{ DesktopStreamMessage }} from \"./DesktopStreamMessage\";\n\
-         export type {{ TerminalKind }} from \"./TerminalKind\";\n\
-         export type {{ DesktopTerminalSnapshot as TerminalSnapshot }} from \"./DesktopTerminalSnapshot\";\n\
-         export type {{ Task }} from \"./Task\";\n\
-         export type {{ Workspace }} from \"./Workspace\";\n\
-         export type {{ WorkspacesResponse }} from \"./WorkspacesResponse\";\n\
-         export {{ DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION }} from \"./terminal-wire\";\n"
-    );
+    let index = "export type { DesktopCommand as LazyboxCommand } from \"./DesktopCommand\";\n\
+         export type { DesktopEvent as LazyboxEvent } from \"./DesktopEvent\";\n\
+         export type { DesktopInfo } from \"./DesktopInfo\";\n\
+         export type { DesktopRepository } from \"./DesktopRepository\";\n\
+         export type { DesktopStreamMessage } from \"./DesktopStreamMessage\";\n\
+         export type { InboxView } from \"./InboxView\";\n\
+         export type { WorkspaceRow } from \"./WorkspaceRow\";\n\
+         export type { VisibleRow } from \"./VisibleRow\";\n\
+         export type { RepoSummary } from \"./RepoSummary\";\n\
+         export type { SortMode } from \"./SortMode\";\n\
+         export type { WorkspaceKind } from \"./WorkspaceKind\";\n\
+         export type { StatusTag } from \"./StatusTag\";\n\
+         export type { TerminalKind } from \"./TerminalKind\";\n\
+         export type { DesktopTerminalSnapshot as TerminalSnapshot } from \"./DesktopTerminalSnapshot\";\n\
+         export type { Task } from \"./Task\";\n\
+         export type { Workspace } from \"./Workspace\";\n\
+         export type { WorkspacesResponse } from \"./WorkspacesResponse\";\n\
+         export { DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION } from \"./terminal-wire\";\n";
     std::fs::write(output.join("index.ts"), index)?;
     let terminal_wire = format!(
         "export const DESKTOP_PROTOCOL_VERSION = {DESKTOP_PROTOCOL_VERSION} as const;\n\

@@ -17,6 +17,7 @@
 //! this function is purely the rebuild half.
 
 mod attention;
+mod desktop_view;
 mod filter;
 mod model;
 
@@ -24,6 +25,7 @@ pub use attention::{
     AttentionSignal, INACTIVE_GRACE, attention_gate, mailbox_membership,
     workspace_attention_signals, workspace_needs_attention,
 };
+pub use desktop_view::{InboxView, WorkspaceRow, compute_inbox_view};
 pub use filter::{Filter, FilterAxis, FilterCtx, FilterSet};
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind, role_rank,
@@ -190,6 +192,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 if workspace_needs_attention(w, input.attention, input.agents) {
                     summary.attention += 1;
                 }
+                summary.unread += w.unread_count();
             }
             if !input.collapsed_repos.contains(repo) {
                 // ByRoleSplit drops a `KindHeader` between the PR
@@ -906,5 +909,7 @@ mod contract_tests {
         assert!(Filter::decl(&cfg).contains("Filter"));
         assert!(FilterAxis::decl(&cfg).contains("FilterAxis"));
         assert!(RepoSummary::decl(&cfg).contains("RepoSummary"));
+        assert!(InboxView::decl(&cfg).contains("InboxView"));
+        assert!(WorkspaceRow::decl(&cfg).contains("WorkspaceRow"));
     }
 }

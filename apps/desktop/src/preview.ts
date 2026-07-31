@@ -1,11 +1,43 @@
 import type { TerminalRecord } from "./main";
-import type { Workspace } from "./protocol";
+import type { InboxView, Workspace, WorkspaceRow } from "./protocol";
 
 export interface PreviewState {
   defaultAgent: string;
   workspaces: Map<string, Workspace>;
   terminals: Map<number, TerminalRecord>;
+  inboxView: InboxView;
   selectedKey: string;
+}
+
+function previewRow(
+  workspace: Workspace,
+  overrides: Partial<WorkspaceRow>,
+): WorkspaceRow {
+  const task = workspace.pr!;
+  return {
+    key: workspace.key,
+    title: task.title,
+    reference: task.id.key,
+    number: Number(task.id.key.split("#")[1] ?? "0"),
+    repo: task.repo,
+    kind: "Pr",
+    role: task.role,
+    state: task.state,
+    status: "CiOk",
+    status_label: "CI OK",
+    ci: task.ci,
+    review: task.review,
+    unread_count: task.unread_count,
+    updated_at: task.updated_at,
+    additions: task.additions,
+    deletions: task.deletions,
+    labels: task.labels,
+    needs_reply: task.needs_reply,
+    last_commenter: task.last_commenter,
+    session_count: workspace.sessions.length,
+    attention: task.needs_reply,
+    ...overrides,
+  };
 }
 
 export function loadPreview(): PreviewState {
@@ -113,8 +145,30 @@ export function loadPreview(): PreviewState {
     activity: [],
     seen_count: 0,
   };
+  const inboxView: InboxView = {
+    rows: [
+      { RepoHeader: "acme/relay" },
+      { KindHeader: "Pr" },
+      { Workspace: selected.key },
+      { Workspace: second.key },
+    ],
+    workspaces: {
+      [selected.key]: previewRow(selected, {
+        status: "ReviewPending",
+        status_label: "REVIEW",
+      }),
+      [second.key]: previewRow(second, {}),
+    },
+    summaries: { "acme/relay": { active: 2, attention: 1, unread: 2 } },
+    sort_mode: "ByRoleSplit",
+    sort_label: "split",
+    collapsed: [],
+    total: 2,
+    unread_total: 2,
+  };
   return {
     defaultAgent: "codex",
+    inboxView,
     workspaces: new Map([
       [selected.key, selected],
       [second.key, second],

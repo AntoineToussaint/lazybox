@@ -10,8 +10,10 @@ rust-version.workspace = true
 [features]
 desktop-contract = [
     "dep:ts-rs",
+    "dep:lazybox-tui-core",
     "lazybox-core/desktop-contract",
     "lazybox-ipc/desktop-contract",
+    "lazybox-tui-core/desktop-contract",
 ]
 
 [dependencies]
@@ -25,6 +27,10 @@ lazybox-ipc       = { workspace = true }
 lazybox-agents    = { workspace = true }
 lazybox-linear       = { workspace = true }
 lazybox-slack        = { workspace = true }
+# Only the desktop-contract generator + the `Inbox` stream variant reach
+# the shared inbox view-model (#732); gated so daemon builds never pull
+# the client-side logic crate.
+lazybox-tui-core    = { workspace = true, optional = true }
 
 tokio            = { workspace = true }
 futures          = { workspace = true }

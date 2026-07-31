@@ -103,10 +103,18 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ),
         // tui-core is the UI library's gateway to agent metadata (badges,
         // display names) and the prompt-trim helper (#548), so it depends
-        // on agents — keeping that edge off the UI library itself.
+        // on agents — keeping that edge off the UI library itself. It also
+        // hosts the client-free inbox view logic (#731), which scores
+        // attention against `lazybox_config::AttentionConfig` — hence the
+        // config edge (config → core only, so no cycle).
         (
             "lazybox-tui-core",
-            set(&["lazybox-agents", "lazybox-core", "lazybox-ipc"]),
+            set(&[
+                "lazybox-agents",
+                "lazybox-config",
+                "lazybox-core",
+                "lazybox-ipc",
+            ]),
         ),
         ("lazybox-tui-term", set(&[])),
         // Vendored libghostty crates: no lazybox-* references allowed.

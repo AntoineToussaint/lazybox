@@ -13,6 +13,19 @@ readme = "../../README.md"
 name = "lazybox_tui_core"
 path = "src/lib.rs"
 
+[features]
+# Emit ts-rs bindings for the inbox view-model types (VisibleRow,
+# WorkspaceKind, SortMode, Filter, FilterAxis, RepoSummary,
+# ComputeOutcome) so the desktop client can consume the exact same
+# grouping/filter output the TUI renders. Off by default — the CLI
+# never needs the TS derives. Mirrors the `desktop-contract` feature
+# on core/ipc/server.
+desktop-contract = [
+    "dep:ts-rs",
+    "lazybox-core/desktop-contract",
+    "lazybox-ipc/desktop-contract",
+]
+
 # This crate is intentionally ratatui-free. It holds the pure-logic
 # modules that the TUI client builds on but that don't need a render
 # context: latches, intent state machines, agent-attention tracking,
@@ -25,6 +38,11 @@ path = "src/lib.rs"
 [dependencies]
 lazybox-core   = { workspace = true }
 lazybox-ipc    = { workspace = true }
+# The inbox view logic scores per-workspace attention against the
+# user's `attention` config (which signals count), so tui-core reaches
+# `lazybox_config::AttentionConfig` directly. config depends on core
+# only, so no cycle.
+lazybox-config = { workspace = true }
 # The UI library reaches agent metadata (display name + badge glyph) and
 # the prompt-trim helper through this crate rather than depending on
 # lazybox-agents directly, so the UI lib's dep set stays boot-free (#548).
@@ -39,6 +57,7 @@ libc      = "0.2"
 which     = "8"
 unicode-width = "0.2"
 unicode-segmentation = { workspace = true }
+ts-rs      = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

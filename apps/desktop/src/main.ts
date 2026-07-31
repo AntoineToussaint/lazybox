@@ -22,15 +22,25 @@ import {
   type InboxView,
   type LazyboxCommand,
   type LazyboxEvent,
+  type PickerRow,
+  type SnippetPickerView,
   type TerminalKind,
   type TerminalSnapshot,
   type Workspace,
   type WorkspacesResponse,
   commandsForWorkspaceIntent,
   createWorkspaceCommand,
+  deliverSnippetCommand,
   spawnAgentCommand,
   terminalKindLabel,
 } from "./protocol";
+import {
+  autoSubmitRow,
+  clampCursor,
+  flattenRows,
+  renderSnippetList,
+  renderSnippetPreview,
+} from "./snippet_picker";
 import {
   relativeTime,
   renderInboxList,
@@ -245,6 +255,12 @@ const confirmTitle = element<HTMLHeadingElement>("confirm-title");
 const confirmMessage = element<HTMLParagraphElement>("confirm-message");
 const confirmPreview = element<HTMLPreElement>("confirm-preview");
 const confirmAccept = element<HTMLButtonElement>("confirm-accept");
+const snippetButton = element<HTMLButtonElement>("snippet-button");
+const snippetDialog = element<HTMLDialogElement>("snippet-dialog");
+const snippetFilter = element<HTMLInputElement>("snippet-filter");
+const snippetList = element<HTMLDivElement>("snippet-list");
+const snippetPreview = element<HTMLDivElement>("snippet-preview");
+const snippetCount = element<HTMLSpanElement>("snippet-count");
 
 let workspaces = new Map<string, Workspace>();
 let terminals = new Map<number, TerminalRecord>();
@@ -269,6 +285,10 @@ const pendingLaunches = new Set<string>();
 let focusRequestedSession: string | null = null;
 let activeTerminal: ActiveTerminal | null = null;
 let resizeTimer: number | undefined;
+let snippetViewState: SnippetPickerView | null = null;
+let snippetCursor = 0;
+let snippetQuery = "";
+let snippetTargetTerminal: number | null = null;
 interface PendingTerminalInput {
   bytes: number[];
   intent: TerminalInputIntent;
@@ -333,6 +353,10 @@ replyForm.addEventListener("submit", (event) => {
 
 sortButton.addEventListener("click", () => void cycleSortMode());
 settingsButton.addEventListener("click", () => void openSettings());
+snippetButton.addEventListener("click", () => void openSnippetPicker());
+snippetFilter.addEventListener("input", () => void onSnippetFilterInput());
+snippetDialog.addEventListener("keydown", handleSnippetKey);
+snippetDialog.addEventListener("close", onSnippetDialogClose);
 setupClose.addEventListener("click", closeSettings);
 githubCheckButton.addEventListener("click", () => void refreshGithubAuth());
 githubLoginButton.addEventListener("click", () => void startGithubLogin());
@@ -920,6 +944,15 @@ function attachTerminal(id: number): void {
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
+  // Intercept the snippet shortcut before xterm forwards it to the PTY,
+  // so ⌘/Ctrl-J opens the picker instead of reaching the agent.
+  terminal.attachCustomKeyEventHandler((event) => {
+    if (event.type === "keydown" && isSnippetShortcut(event)) {
+      void openSnippetPicker();
+      return false;
+    }
+    return true;
+  });
   terminalHost.classList.remove("hidden");
   terminalEmpty.classList.add("hidden");
   terminal.open(terminalHost);
@@ -946,6 +979,7 @@ function attachTerminal(id: number): void {
   };
   terminalTitle.textContent = `${terminalKindLabel(record.kind)} · ${record.sessionKey}`;
   setTerminalState(record.state);
+  snippetButton.disabled = false;
   scheduleResize();
   if (record.dirty || !record.replayAvailable) {
     requestTerminalResync(record);
@@ -976,6 +1010,10 @@ function detachTerminal(): void {
   terminalEmpty.classList.remove("hidden");
   terminalTitle.textContent = "No terminal attached";
   setTerminalState("idle");
+  snippetButton.disabled = true;
+  if (snippetDialog.open) {
+    closeSnippetPicker();
+  }
 }
 
 function handleTerminalOutput(frame: TerminalBinaryFrame): void {
@@ -1122,6 +1160,174 @@ function scheduleResize(): void {
       ),
     );
   }, 80);
+}
+
+function isSnippetShortcut(event: KeyboardEvent): boolean {
+  return (
+    (event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    !event.shiftKey &&
+    (event.key === "j" || event.key === "J")
+  );
+}
+
+async function openSnippetPicker(): Promise<void> {
+  if (snippetDialog.open) {
+    return;
+  }
+  if (activeTerminal === null) {
+    setStatus("Open an agent or shell to send a snippet.");
+    return;
+  }
+  snippetTargetTerminal = activeTerminal.id;
+  snippetQuery = "";
+  snippetFilter.value = "";
+  const view = await fetchSnippetView("");
+  if (view === null) {
+    return;
+  }
+  snippetViewState = view;
+  snippetCursor = 0;
+  renderSnippet();
+  if (!snippetDialog.open) {
+    snippetDialog.showModal();
+  }
+  snippetFilter.focus();
+}
+
+function onSnippetDialogClose(): void {
+  snippetViewState = null;
+  snippetTargetTerminal = null;
+  activeTerminal?.terminal.focus();
+}
+
+function closeSnippetPicker(): void {
+  if (snippetDialog.open) {
+    snippetDialog.close();
+  }
+}
+
+async function fetchSnippetView(
+  filter: string,
+): Promise<SnippetPickerView | null> {
+  if (previewMode) {
+    return previewSnippetView();
+  }
+  try {
+    return await invoke<SnippetPickerView>("snippet_view", { filter });
+  } catch (error) {
+    setStatus(String(error));
+    return null;
+  }
+}
+
+async function onSnippetFilterInput(): Promise<void> {
+  const query = snippetFilter.value;
+  const grew = query.length > snippetQuery.length;
+  snippetQuery = query;
+  const view = await fetchSnippetView(query);
+  if (view === null || !snippetDialog.open) {
+    return;
+  }
+  snippetViewState = view;
+  snippetCursor = 0;
+  renderSnippet();
+  // Auto-submit only when a character was added — parity with the TUI,
+  // where Backspace never fires the `]]srev` fast path.
+  if (grew) {
+    const row = autoSubmitRow(view);
+    if (row !== null) {
+      await deliverSnippet(row);
+    }
+  }
+}
+
+function renderSnippet(): void {
+  const view = snippetViewState;
+  if (view === null) {
+    return;
+  }
+  snippetCursor = clampCursor(flattenRows(view).length, snippetCursor);
+  snippetCount.textContent = `${view.visible_count}/${view.total}`;
+  renderSnippetList(snippetList, view, snippetCursor, {
+    onPick: (index) => {
+      const picked = flattenRows(view)[index];
+      if (picked !== undefined) {
+        void deliverSnippet(picked);
+      }
+    },
+    onHover: (index) => {
+      snippetCursor = index;
+      renderSnippet();
+    },
+  });
+  renderSnippetPreview(snippetPreview, view, snippetCursor);
+  snippetList
+    .querySelector<HTMLElement>('[aria-selected="true"]')
+    ?.scrollIntoView({ block: "nearest" });
+}
+
+function handleSnippetKey(event: KeyboardEvent): void {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveSnippetCursor(1);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveSnippetCursor(-1);
+  } else if (event.key === "Enter") {
+    event.preventDefault();
+    if (snippetViewState !== null) {
+      const row = flattenRows(snippetViewState)[snippetCursor];
+      if (row !== undefined) {
+        void deliverSnippet(row);
+      }
+    }
+  }
+  // Esc falls through to the dialog's native cancel/close.
+}
+
+function moveSnippetCursor(delta: number): void {
+  if (snippetViewState === null) {
+    return;
+  }
+  const length = flattenRows(snippetViewState).length;
+  snippetCursor = clampCursor(length, snippetCursor + delta);
+  renderSnippet();
+}
+
+async function deliverSnippet(row: PickerRow): Promise<void> {
+  const terminalId = snippetTargetTerminal;
+  closeSnippetPicker();
+  if (terminalId === null) {
+    setStatus("The target terminal is no longer attached.");
+    return;
+  }
+  if (await sendCommand(deliverSnippetCommand(terminalId, row))) {
+    setStatus(`Sent ]${row.key} to the terminal.`);
+  }
+}
+
+// A small fixed view for the dev preview harness (no daemon to query).
+function previewSnippetView(): SnippetPickerView {
+  const row = (
+    key: string,
+    description: string,
+    category: string,
+    body: string,
+  ): PickerRow => ({ key, description, category, body, origin: "built-in" });
+  const groups = [
+    {
+      category: "Review",
+      label: "Review",
+      rows: [row("rev", "Review the current diff", "Review", "Review the current diff…")],
+    },
+    {
+      category: "Git & PR",
+      label: "Git & PR",
+      rows: [row("pr", "Open a PR", "Git & PR", "Open a PR with gh…")],
+    },
+  ];
+  return { filter: "", groups, auto_submit: null, visible_count: 2, total: 2 };
 }
 
 async function startAgent(): Promise<void> {
@@ -1853,6 +2059,11 @@ function handleKeyboard(event: KeyboardEvent): void {
     }
     return;
   }
+  if (isSnippetShortcut(event)) {
+    event.preventDefault();
+    void openSnippetPicker();
+    return;
+  }
   const target = event.target;
   const editable =
     target instanceof HTMLInputElement ||
@@ -1872,7 +2083,8 @@ function handleKeyboard(event: KeyboardEvent): void {
     editable ||
     setupDialog.open ||
     confirmDialog.open ||
-    newWorkspaceDialog.open
+    newWorkspaceDialog.open ||
+    snippetDialog.open
   ) {
     return;
   }

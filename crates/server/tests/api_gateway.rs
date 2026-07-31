@@ -173,6 +173,7 @@ fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
         DesktopCommand::FocusWorkspace { .. } => "FocusWorkspace",
         DesktopCommand::MarkRead { .. } => "MarkRead",
         DesktopCommand::PostReply { .. } => "PostReply",
+        DesktopCommand::DeliverSnippet { .. } => "DeliverSnippet",
         DesktopCommand::Refresh => "Refresh",
     }
 }
@@ -186,6 +187,7 @@ fn desktop_event_tag(event: &DesktopEvent) -> &'static str {
         DesktopEvent::TerminalExited { .. } => "TerminalExited",
         DesktopEvent::TerminalFocusRequested { .. } => "TerminalFocusRequested",
         DesktopEvent::AgentState { .. } => "AgentState",
+        DesktopEvent::SnippetDelivered { .. } => "SnippetDelivered",
         DesktopEvent::ProviderError { .. } => "ProviderError",
         DesktopEvent::CommandRejected { .. } => "CommandRejected",
         DesktopEvent::PollCompleted { .. } => "PollCompleted",
@@ -221,6 +223,12 @@ fn desktop_compatibility_fixture_is_current() {
             session_key: session_key.clone(),
             body: "Ready for another look.".into(),
         },
+        DesktopCommand::DeliverSnippet {
+            terminal_id: TerminalId(7),
+            snippet_key: "rev".into(),
+            category: "Review".into(),
+            body: "Review the current diff.".into(),
+        },
         DesktopCommand::Refresh,
     ];
     let events = vec![
@@ -233,6 +241,7 @@ fn desktop_compatibility_fixture_is_current() {
                 last_seq: 42,
                 agent_state: Some(AgentState::Working),
             }],
+            recent_snippets: vec!["rev".into()],
         },
         DesktopEvent::WorkspaceUpserted(Box::new(workspace)),
         DesktopEvent::WorkspaceRemoved(lazybox_core::WorkspaceKey("github:o/r#42".into())),
@@ -253,6 +262,11 @@ fn desktop_compatibility_fixture_is_current() {
             session_key: session_key.clone(),
             terminal_id: TerminalId(7),
             state: AgentState::InputNeeded,
+        },
+        DesktopEvent::SnippetDelivered {
+            terminal_id: TerminalId(7),
+            session_key: session_key.clone(),
+            snippet_key: "rev".into(),
         },
         DesktopEvent::ProviderError {
             source: "github".into(),
@@ -284,8 +298,8 @@ fn desktop_compatibility_fixture_is_current() {
         .iter()
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(command_tags.len(), 7);
-    assert_eq!(event_tags.len(), 12);
+    assert_eq!(command_tags.len(), 8);
+    assert_eq!(event_tags.len(), 13);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,
         "protocol_fingerprint": api_gateway::DESKTOP_PROTOCOL_FINGERPRINT,

@@ -1173,6 +1173,13 @@ impl<T: TerminalAdapter> Model<T> {
             Action::ToggleRepoGroup => {
                 self.sidebar.toggle_repo_at_cursor();
             }
+            Action::ToggleRepoPin => {
+                if let Some((repo, pinned)) = self.sidebar.toggle_pin_at_cursor() {
+                    let verb = if pinned { "pinned" } else { "unpinned" };
+                    self.flash_info(format!("{verb} {repo}"));
+                    self.redraw = true;
+                }
+            }
             Action::SelectWorkspace => {
                 // Toggle the cursor row's broadcast mark. The notice
                 // names the running count + the broadcast key so the

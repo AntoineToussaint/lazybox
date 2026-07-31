@@ -209,6 +209,11 @@ pub enum Action {
     /// "group the sessions" shortcut. Acts on the list, not a single
     /// workspace, so it lives in the Sidebar section.
     ToggleRepoGroup,
+    /// Pin or unpin the cursor's repo group to the top of the sidebar.
+    /// Pinned groups render first, in pin order; the rest keep the
+    /// algorithmic order. Acts on the list, not a single workspace, so
+    /// it lives in the Sidebar section. The pin set persists.
+    ToggleRepoPin,
     /// Toggle the focused workspace row in/out of the sidebar's
     /// multi-select set — the targets a broadcast
     /// ([`Action::BroadcastToSelected`]) fans out to. Selection
@@ -428,6 +433,7 @@ pub enum ActionKind {
     CycleMailbox,
     OpenSearch,
     ToggleRepoGroup,
+    ToggleRepoPin,
     SelectWorkspace,
     BroadcastToSelected,
     UpdateBranchSelected,
@@ -551,6 +557,7 @@ impl ActionKind {
         Self::CycleMailbox,
         Self::OpenSearch,
         Self::ToggleRepoGroup,
+        Self::ToggleRepoPin,
         Self::FocusPaneRight,
         Self::SelectWorkspace,
         Self::BroadcastToSelected,
@@ -657,6 +664,7 @@ impl Action {
             Action::CycleMailbox => ActionKind::CycleMailbox,
             Action::OpenSearch => ActionKind::OpenSearch,
             Action::ToggleRepoGroup => ActionKind::ToggleRepoGroup,
+            Action::ToggleRepoPin => ActionKind::ToggleRepoPin,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
             Action::UpdateBranchSelected => ActionKind::UpdateBranchSelected,
@@ -1165,6 +1173,13 @@ impl ActionDef {
                 default_keys: "Space",
                 label: "collapse group",
                 describe: "Collapse or expand the repo group the cursor is in — fold a project's workspaces into a single header row, and unfold it again. The collapsed set persists across restarts.",
+                section: Section::Sidebar,
+            },
+            ActionKind::ToggleRepoPin => &Self {
+                kind: ActionKind::ToggleRepoPin,
+                default_keys: "p",
+                label: "pin group",
+                describe: "Pin or unpin the cursor's repo group to the top of the sidebar. Pinned repos render first, in the order you pinned them; everything else keeps its usual order. The pin set persists across restarts.",
                 section: Section::Sidebar,
             },
             ActionKind::SelectWorkspace => &Self {
@@ -1773,6 +1788,7 @@ impl ActionKind {
             ActionKind::CycleMailbox => "cycle_mailbox",
             ActionKind::OpenSearch => "open_search",
             ActionKind::ToggleRepoGroup => "toggle_repo_group",
+            ActionKind::ToggleRepoPin => "toggle_repo_pin",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
             ActionKind::UpdateBranchSelected => "update_branch_selected",
@@ -2499,7 +2515,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::CycleSort
         | ActionKind::CycleMailbox
         | ActionKind::OpenSearch
-        | ActionKind::ToggleRepoGroup => true,
+        | ActionKind::ToggleRepoGroup
+        | ActionKind::ToggleRepoPin => true,
         // Toggling a selection mark needs a row under the cursor; the
         // broadcast itself acts on the selection set (which the catalog
         // can't see), so the dispatcher gates on it and surfaces a

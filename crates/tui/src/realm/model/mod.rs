@@ -1909,6 +1909,7 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
+        pinned_repos: Vec<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
@@ -1918,8 +1919,13 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(agent) = default_agent.clone().filter(|s| !s.is_empty()) {
             self.right.set_default_agent(agent);
         }
-        self.sidebar
-            .apply_inner_config(attention, collapsed_repos, default_agent, display);
+        self.sidebar.apply_inner_config(
+            attention,
+            collapsed_repos,
+            pinned_repos,
+            default_agent,
+            display,
+        );
         self.sidebar.set_keep_awake(ui.keep_awake);
         // Stash resolved defaults for model-level knobs (`q-q`
         // window, terminal-escape char, split step) that used to be

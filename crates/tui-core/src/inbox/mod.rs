@@ -70,6 +70,11 @@ pub struct ComputeInputs<'a> {
     /// workspaces still shows up.
     pub projects: &'a BTreeMap<ProjectKey, Project>,
     pub collapsed_repos: &'a BTreeSet<String>,
+    /// Repo group names the user pinned to the top, in pin order.
+    /// Pinned groups render first (in this order); every other group
+    /// keeps the algorithmic (alphabetical) order. A name here that
+    /// has no matching group this pass is simply ignored.
+    pub pinned_repos: &'a [String],
     pub attention: &'a lazybox_config::AttentionConfig,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     pub now: chrono::DateTime<chrono::Utc>,
@@ -180,10 +185,23 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         );
     }
 
+    // Step 4b: order the groups. Pinned groups lead, in the user's pin
+    // order (skipping pins with no group this pass); the rest follow in
+    // the algorithmic `BTreeSet` (alphabetical) order. Pinning overrides
+    // the default order only for the pinned repos and leaves everything
+    // else untouched — the "pinned > algorithmic" compose rule (#760).
+    let mut ordered_repos: Vec<String> = Vec::with_capacity(all_repos.len());
+    for pinned in input.pinned_repos {
+        if all_repos.remove(pinned) {
+            ordered_repos.push(pinned.clone());
+        }
+    }
+    ordered_repos.extend(all_repos);
+
     // Step 5: emit headers + workspace rows + session sub-rows.
-    let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + all_repos.len() + 4);
+    let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + ordered_repos.len() + 4);
     let mut summaries: BTreeMap<String, RepoSummary> = BTreeMap::new();
-    for repo in &all_repos {
+    for repo in &ordered_repos {
         visible.push(VisibleRow::RepoHeader(repo.clone()));
         let mut summary = RepoSummary::default();
         if let Some(rows) = by_repo.get(repo) {
@@ -415,6 +433,7 @@ mod tests {
             show_inactive_in_inbox: false,
             projects,
             collapsed_repos: collapsed,
+            pinned_repos: &[],
             attention,
             agents: asking,
             now: fixed_time(),
@@ -480,6 +499,71 @@ mod tests {
         } else {
             panic!("expected RepoHeader, got {:?}", out.visible[2]);
         }
+    }
+
+    /// A pinned repo floats to the top ahead of the alphabetical
+    /// order; unpinned repos keep their relative (alphabetical) order
+    /// below it (#760).
+    #[test]
+    fn pinned_repo_floats_above_alphabetical_order() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "owner/a"), ("kb", "owner/b"), ("kc", "owner/c")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let pins = vec!["owner/c".to_string()];
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.pinned_repos = &pins;
+        let out = compute_visible(inp);
+        let headers: Vec<&str> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::RepoHeader(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, ["owner/c", "owner/a", "owner/b"]);
+    }
+
+    /// Multiple pins render first in pin order (not alphabetical), and
+    /// a pin naming a repo with no rows this pass is skipped without
+    /// disturbing the rest.
+    #[test]
+    fn multiple_pins_keep_pin_order_and_skip_absent() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "owner/a"), ("kb", "owner/b"), ("kc", "owner/c")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        // Pin c then a; "owner/z" has no group and must be ignored.
+        let pins = vec![
+            "owner/c".to_string(),
+            "owner/z".to_string(),
+            "owner/a".to_string(),
+        ];
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.pinned_repos = &pins;
+        let out = compute_visible(inp);
+        let headers: Vec<&str> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::RepoHeader(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, ["owner/c", "owner/a", "owner/b"]);
     }
 
     /// Collapsed repo: header only, workspace rows under it are

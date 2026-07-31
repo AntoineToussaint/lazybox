@@ -13,6 +13,10 @@
 /// Repo / source tree row in the sidebar.
 pub const REPO: &str = "";
 
+/// Pinned repo group (`nf-fa-thumb_tack`, U+F08D) — marks a group the
+/// user floated to the top of the sidebar.
+pub const PIN: &str = "\u{f08d}";
+
 // ── Activity kinds ────────────────────────────────────────────────────
 
 pub const COMMENT: &str = "";

@@ -307,11 +307,17 @@ impl Sidebar {
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
+        pinned_repos: Vec<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
-        self.inner
-            .apply_config(attention, collapsed_repos, default_agent, display);
+        self.inner.apply_config(
+            attention,
+            collapsed_repos,
+            pinned_repos,
+            default_agent,
+            display,
+        );
     }
 
     /// Replace the set of subscribed-repo names that should show up
@@ -472,6 +478,12 @@ impl Sidebar {
     /// `Space` key on a header.
     pub fn toggle_repo_at_cursor(&mut self) -> bool {
         self.inner.toggle_repo_at_cursor()
+    }
+
+    /// Pin / unpin the cursor's repo group. Same effect as the `p`
+    /// key. Returns `(repo, now_pinned)` for the footer notice.
+    pub fn toggle_pin_at_cursor(&mut self) -> Option<(String, bool)> {
+        self.inner.toggle_pin_at_cursor()
     }
 
     /// Replace the active filter set from the filter menu's picks.

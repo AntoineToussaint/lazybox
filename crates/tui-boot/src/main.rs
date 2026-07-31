@@ -985,6 +985,7 @@ async fn run_embedded_realm(
         model.apply_sidebar_config(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),
+            user_config.ui.pinned_repos.clone(),
             user_config.setup.default_agent.clone(),
             &user_config.display,
             &ui_defaults,

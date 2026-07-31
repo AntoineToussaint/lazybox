@@ -1975,6 +1975,7 @@ pub(super) fn action_from_kind(
         ActionKind::CycleMailbox => Action::CycleMailbox,
         ActionKind::OpenSearch => Action::OpenSearch,
         ActionKind::ToggleRepoGroup => Action::ToggleRepoGroup,
+        ActionKind::ToggleRepoPin => Action::ToggleRepoPin,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
         ActionKind::UpdateBranchSelected => Action::UpdateBranchSelected,

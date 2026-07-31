@@ -262,6 +262,7 @@ mod tests {
             show_inactive_in_inbox: false,
             projects,
             collapsed_repos: collapsed,
+            pinned_repos: &[],
             attention,
             agents,
             now: now(),

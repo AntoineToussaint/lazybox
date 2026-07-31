@@ -428,6 +428,14 @@ impl Sidebar {
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ];
+                    // A pin marker on a pinned group — the visual
+                    // affordance for the "float to top" order (#760).
+                    if self.pinned_repos.iter().any(|r| r == name) {
+                        spans.push(Span::styled(
+                            format!(" {}", icons::PIN),
+                            row_bg.unwrap_or_default().fg(theme.accent),
+                        ));
+                    }
                     if let Some(s) = self.repo_summaries.get(name) {
                         // Active count is redundant — the workspace
                         // rows are visible directly under the header,

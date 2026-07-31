@@ -65,10 +65,42 @@ struct DesktopState {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct DesktopModelTier {
+    alias: String,
+    label: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct DesktopAgentOption {
     id: String,
     label: String,
     available: bool,
+    /// The agent's model-tier menu (`alias → label`), resolved through
+    /// the shared [`lazybox_config::Config::agent_models`] so it matches
+    /// what a TUI spawn chord would offer. Empty for agents with no menu.
+    models: Vec<DesktopModelTier>,
+    /// Alias of the tier a bare spawn currently defaults to, if any.
+    default_tier: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DesktopThemeColors {
+    accent: String,
+    hover: String,
+    success: String,
+    warn: String,
+    error: String,
+    text_strong: String,
+    text_dim: String,
+    chrome: String,
+    fill: String,
+    surface: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct DesktopThemeOption {
+    name: String,
+    colors: DesktopThemeColors,
 }
 
 #[derive(Serialize)]
@@ -79,6 +111,19 @@ struct DesktopSetupState {
     default_agent: String,
     analytics_enabled: bool,
     diagnostics_path: String,
+    /// Active `ui.theme` name, or `None` for the default theme.
+    theme: Option<String>,
+    /// The built-in theme catalog (name + palette) the client renders
+    /// swatches from — sourced from `lazybox_tui_core::theme`, never
+    /// hardcoded in the frontend.
+    themes: Vec<DesktopThemeOption>,
+    /// Active `ui.keymap_preset`, surfaced read-only (a full remap UI is
+    /// out of scope).
+    keymap_preset: Option<String>,
+    /// `ui.terminal_new_layout` as `"split"` / `"tabs"`.
+    terminal_new_layout: String,
+    /// `ui.activity_pane_default` as `"full"` / `"summary"` / `"hidden"`.
+    activity_pane_default: String,
 }
 
 #[derive(Serialize)]
@@ -100,6 +145,22 @@ struct SaveDesktopSettings {
     github_scopes: Vec<String>,
     default_agent: String,
     analytics_enabled: bool,
+    #[serde(default)]
+    theme: Option<String>,
+    #[serde(default = "default_terminal_layout")]
+    terminal_new_layout: String,
+    #[serde(default = "default_activity_pane")]
+    activity_pane_default: String,
+    #[serde(default)]
+    default_model_tier: Option<String>,
+}
+
+fn default_terminal_layout() -> String {
+    "split".to_string()
+}
+
+fn default_activity_pane() -> String {
+    "full".to_string()
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -150,6 +211,89 @@ fn desktop_setup_state_from_config(config: &lazybox_config::Config) -> DesktopSe
         default_agent: effective_default_agent(config),
         analytics_enabled: config.desktop.analytics_enabled,
         diagnostics_path: diagnostics_dir().display().to_string(),
+        theme: config.ui.theme.clone(),
+        themes: theme_options(),
+        keymap_preset: config.ui.keymap_preset.clone(),
+        terminal_new_layout: terminal_layout_key(config.ui.terminal_new_layout).to_string(),
+        activity_pane_default: activity_pane_key(config.ui.activity_pane_default).to_string(),
+    }
+}
+
+/// The built-in theme catalog exposed to the client — names plus the
+/// per-slot hex colors, sourced from the shared `lazybox_tui_core`
+/// palette so the desktop renders swatches without redeclaring colors.
+fn theme_options() -> Vec<DesktopThemeOption> {
+    use lazybox_tui_core::theme::{BUILT_IN_PALETTES, ThemePalette};
+    BUILT_IN_PALETTES
+        .iter()
+        .map(|palette| DesktopThemeOption {
+            name: palette.name.to_string(),
+            colors: DesktopThemeColors {
+                accent: ThemePalette::hex(palette.accent),
+                hover: ThemePalette::hex(palette.hover),
+                success: ThemePalette::hex(palette.success),
+                warn: ThemePalette::hex(palette.warn),
+                error: ThemePalette::hex(palette.error),
+                text_strong: ThemePalette::hex(palette.text_strong),
+                text_dim: ThemePalette::hex(palette.text_dim),
+                chrome: ThemePalette::hex(palette.chrome),
+                fill: ThemePalette::hex(palette.fill),
+                surface: ThemePalette::hex(palette.surface),
+            },
+        })
+        .collect()
+}
+
+fn terminal_layout_key(layout: lazybox_config::NewTerminalLayout) -> &'static str {
+    match layout {
+        lazybox_config::NewTerminalLayout::Split => "split",
+        lazybox_config::NewTerminalLayout::Tabs => "tabs",
+    }
+}
+
+fn activity_pane_key(mode: lazybox_config::ActivityPaneMode) -> &'static str {
+    match mode {
+        lazybox_config::ActivityPaneMode::Full => "full",
+        lazybox_config::ActivityPaneMode::Summary => "summary",
+        lazybox_config::ActivityPaneMode::Hidden => "hidden",
+    }
+}
+
+fn parse_terminal_layout(raw: &str) -> Result<lazybox_config::NewTerminalLayout, String> {
+    match raw {
+        "split" => Ok(lazybox_config::NewTerminalLayout::Split),
+        "tabs" => Ok(lazybox_config::NewTerminalLayout::Tabs),
+        other => Err(format!("unknown terminal layout {other:?}")),
+    }
+}
+
+fn parse_activity_pane(raw: &str) -> Result<lazybox_config::ActivityPaneMode, String> {
+    match raw {
+        "full" => Ok(lazybox_config::ActivityPaneMode::Full),
+        "summary" => Ok(lazybox_config::ActivityPaneMode::Summary),
+        "hidden" => Ok(lazybox_config::ActivityPaneMode::Hidden),
+        other => Err(format!("unknown activity-pane mode {other:?}")),
+    }
+}
+
+fn theme_exists(name: &str) -> bool {
+    lazybox_tui_core::theme::BUILT_IN_PALETTES
+        .iter()
+        .any(|palette| palette.name == name)
+}
+
+/// Reject a *newly chosen* theme the desktop can't render, but never
+/// reject one that only carries the already-persisted value forward. A
+/// theme registered outside the built-in catalog (e.g. a TUI plugin
+/// palette) stays selected here, matching the TUI's lenient "unknown →
+/// leave as-is" instead of blocking every save until a built-in is
+/// picked.
+fn validate_theme_change(new: Option<&str>, current: Option<&str>) -> Result<(), String> {
+    match new {
+        Some(theme) if new != current && !theme_exists(theme) => {
+            Err(format!("unknown theme {theme:?}"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -219,23 +363,57 @@ async fn list_github_repositories() -> Result<Vec<GithubRepositoryOption>, Strin
 }
 
 #[tauri::command]
-fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Result<(), String> {
+fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Result<bool, String> {
     let config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
-    let scopes = validate_github_scopes(
-        settings.github_scopes,
-        !config.setup.wizard_completed || !config.setup.providers.contains("github"),
-    )?;
+    let first_run = !config.setup.wizard_completed || !config.setup.providers.contains("github");
+    let scopes = validate_github_scopes(settings.github_scopes, first_run)?;
     if !detect_agent_options(&config)
         .iter()
         .any(|agent| agent.id == settings.default_agent && agent.available)
     {
         return Err("select an installed agent".to_string());
     }
-    let default_agent = settings.default_agent;
+    validate_theme_change(settings.theme.as_deref(), config.ui.theme.as_deref())?;
+    let terminal_new_layout = parse_terminal_layout(&settings.terminal_new_layout)?;
+    let activity_pane_default = parse_activity_pane(&settings.activity_pane_default)?;
+    if let Some(alias) = settings.default_model_tier.as_deref()
+        && config
+            .agent_models(&settings.default_agent)
+            .tier(alias)
+            .is_none()
+    {
+        return Err(format!(
+            "unknown model tier {alias:?} for agent {:?}",
+            settings.default_agent
+        ));
+    }
+    // Only settings the daemon consumed at startup — the watched scopes
+    // and the default agent baked into `DesktopState` — need a restart to
+    // take effect. Theme / layout / activity-pane / model-tier changes are
+    // read live (the client re-themes in place; the daemon re-reads the
+    // model menu on the next spawn), so they apply without one.
+    let previous_scopes = config
+        .setup
+        .scopes
+        .get("github")
+        .cloned()
+        .unwrap_or_default();
+    let restart_required = first_run
+        || scopes != previous_scopes
+        || settings.default_agent != effective_default_agent(&config);
     let analytics_enabled = settings.analytics_enabled;
+    let applied = DesktopSettings {
+        scopes,
+        default_agent: settings.default_agent,
+        analytics_enabled,
+        theme: settings.theme,
+        terminal_new_layout,
+        activity_pane_default,
+        default_model_tier: settings.default_model_tier,
+    };
     lazybox_config::Config::save_with(move |config| {
-        apply_desktop_settings(config, scopes, default_agent, analytics_enabled);
+        apply_desktop_settings(config, applied);
     })
     .map_err(|error| format!("save lazybox configuration: {error}"))?;
     if analytics_enabled
@@ -244,11 +422,13 @@ fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Resul
     {
         eprintln!("lazybox desktop could not record onboarding analytics: {error}");
     }
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(150)).await;
-        app.request_restart();
-    });
-    Ok(())
+    if restart_required {
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            app.request_restart();
+        });
+    }
+    Ok(restart_required)
 }
 
 #[tauri::command]
@@ -710,23 +890,52 @@ fn validate_github_scopes(
     Ok(scopes)
 }
 
-fn apply_desktop_settings(
-    config: &mut lazybox_config::Config,
+/// Pure mutation over the shared [`Config`] — the desktop's only writer,
+/// applied under `Config::save_with`'s read-modify-write lock. Stays
+/// side-effect-free so it's trivially testable and can never bypass the
+/// atomic save path.
+struct DesktopSettings {
     scopes: BTreeSet<String>,
     default_agent: String,
     analytics_enabled: bool,
-) {
+    theme: Option<String>,
+    terminal_new_layout: lazybox_config::NewTerminalLayout,
+    activity_pane_default: lazybox_config::ActivityPaneMode,
+    default_model_tier: Option<String>,
+}
+
+fn apply_desktop_settings(config: &mut lazybox_config::Config, settings: DesktopSettings) {
     config.setup.providers.insert("github".to_string());
-    config.setup.agents.insert(default_agent.clone());
+    config.setup.agents.insert(settings.default_agent.clone());
     config
         .setup
         .filters
         .entry("github".to_string())
         .or_insert_with(|| ProviderConfig::default_for("github").enabled_keys);
-    config.setup.scopes.insert("github".to_string(), scopes);
-    config.setup.default_agent = Some(default_agent);
+    config
+        .setup
+        .scopes
+        .insert("github".to_string(), settings.scopes);
     config.setup.wizard_completed = true;
-    config.desktop.analytics_enabled = analytics_enabled;
+    config.desktop.analytics_enabled = settings.analytics_enabled;
+    config.ui.theme = settings.theme;
+    config.ui.terminal_new_layout = settings.terminal_new_layout;
+    config.ui.activity_pane_default = settings.activity_pane_default;
+    // Persist the picked default tier against the chosen agent's `models`
+    // block — the same "default-model pick" overlay `Config::agent_models`
+    // reads. Only touch the agents map when there's a tier to store or the
+    // agent already has an entry, so a bare save never litters config with
+    // empty agent stanzas.
+    if settings.default_model_tier.is_some() || config.agents.contains_key(&settings.default_agent)
+    {
+        config
+            .agents
+            .entry(settings.default_agent.clone())
+            .or_default()
+            .models
+            .default = settings.default_model_tier;
+    }
+    config.setup.default_agent = Some(settings.default_agent);
 }
 
 fn detect_agent_options(config: &lazybox_config::Config) -> Vec<DesktopAgentOption> {
@@ -749,10 +958,22 @@ fn detect_agent_options(config: &lazybox_config::Config) -> Vec<DesktopAgentOpti
                     "cursor-agent" => "Cursor Agent".to_string(),
                     _ => id.clone(),
                 });
+            let models = config.agent_models(&id);
+            let default_tier = models.default.clone();
+            let model_menu = models
+                .tiers
+                .iter()
+                .map(|tier| DesktopModelTier {
+                    alias: tier.alias.clone(),
+                    label: tier.label.clone(),
+                })
+                .collect();
             DesktopAgentOption {
+                available: which::which(&command).is_ok(),
                 id,
                 label,
-                available: which::which(&command).is_ok(),
+                models: model_menu,
+                default_tier,
             }
         })
         .collect()
@@ -1213,7 +1434,18 @@ mod tests {
         )
         .expect("valid repository scopes");
         let mut config = lazybox_config::Config::load_from(&path).expect("load seeded config");
-        apply_desktop_settings(&mut config, scopes, "codex".to_string(), true);
+        apply_desktop_settings(
+            &mut config,
+            DesktopSettings {
+                scopes,
+                default_agent: "codex".to_string(),
+                analytics_enabled: true,
+                theme: Some("Tokyo Night".to_string()),
+                terminal_new_layout: lazybox_config::NewTerminalLayout::Tabs,
+                activity_pane_default: lazybox_config::ActivityPaneMode::Summary,
+                default_model_tier: Some("M".to_string()),
+            },
+        );
         config.save_to(&path).expect("persist desktop setup");
 
         let saved = lazybox_config::Config::load_from(&path).expect("reload desktop setup");
@@ -1223,6 +1455,22 @@ mod tests {
         assert!(saved.setup.agents.contains("codex"));
         assert!(saved.setup.wizard_completed);
         assert!(saved.desktop.analytics_enabled);
+        assert_eq!(saved.ui.theme.as_deref(), Some("Tokyo Night"));
+        assert_eq!(
+            saved.ui.terminal_new_layout,
+            lazybox_config::NewTerminalLayout::Tabs
+        );
+        assert_eq!(
+            saved.ui.activity_pane_default,
+            lazybox_config::ActivityPaneMode::Summary
+        );
+        assert_eq!(
+            saved
+                .agents
+                .get("codex")
+                .and_then(|a| a.models.default.as_deref()),
+            Some("M")
+        );
         assert_eq!(
             saved.setup.scopes.get("github"),
             Some(&BTreeSet::from([
@@ -1265,6 +1513,26 @@ mod tests {
         let initial = desktop_setup_state_from_config(&config);
         assert_eq!(initial.default_agent, "claude");
         assert!(configured_agent_ids(&config).contains(&"claude".to_string()));
+        // Appearance / workspace defaults surface for the settings UI, and
+        // the theme catalog comes from the shared palette (not hardcoded TS).
+        assert!(initial.theme.is_none());
+        assert!(!initial.themes.is_empty());
+        assert_eq!(initial.terminal_new_layout, "split");
+        assert_eq!(initial.activity_pane_default, "full");
+        // Claude's built-in tier menu rides on its agent option so the UI
+        // can offer a default-model pick.
+        let claude = initial
+            .agents
+            .iter()
+            .find(|agent| agent.id == "claude")
+            .expect("claude option present");
+        assert_eq!(claude.default_tier.as_deref(), Some("L"));
+        assert!(
+            claude
+                .models
+                .iter()
+                .any(|tier| tier.alias == "M" && tier.label == "Sonnet")
+        );
         assert!(initial.agents.iter().any(|agent| agent.id == "review-bot"
             && agent.label == "Review Bot"
             && agent.available));
@@ -1285,6 +1553,49 @@ mod tests {
                 .iter()
                 .any(|agent| agent.id == "cursor-agent" && agent.label == "Cursor Agent")
         );
+    }
+
+    #[test]
+    fn theme_catalog_mirrors_the_shared_palette_and_renders_hex() {
+        let options = theme_options();
+        assert_eq!(
+            options.len(),
+            lazybox_tui_core::theme::BUILT_IN_PALETTES.len()
+        );
+        let dark = options
+            .iter()
+            .find(|option| option.name == "Lazybox Dark")
+            .expect("built-in dark theme");
+        // Accent (125, 207, 255) renders as lowercase, zero-padded hex.
+        assert_eq!(dark.colors.accent, "#7dcfff");
+        assert!(theme_exists("Lazybox Dark"));
+        assert!(!theme_exists("No Such Theme"));
+    }
+
+    #[test]
+    fn theme_validation_rejects_a_new_unknown_theme_but_preserves_the_current_one() {
+        // Picking a built-in is fine; switching to a name the desktop
+        // can't render is rejected.
+        assert!(validate_theme_change(Some("Tokyo Night"), Some("Lazybox Dark")).is_ok());
+        assert!(validate_theme_change(Some("Bogus"), Some("Lazybox Dark")).is_err());
+        // A theme registered outside the built-in catalog (set via the
+        // TUI) must not block a save that leaves it unchanged.
+        assert!(validate_theme_change(Some("Custom Plugin"), Some("Custom Plugin")).is_ok());
+        assert!(validate_theme_change(None, Some("Custom Plugin")).is_ok());
+    }
+
+    #[test]
+    fn boundary_parsers_accept_known_values_and_reject_the_rest() {
+        assert_eq!(
+            parse_terminal_layout("tabs").unwrap(),
+            lazybox_config::NewTerminalLayout::Tabs
+        );
+        assert!(parse_terminal_layout("floating").is_err());
+        assert_eq!(
+            parse_activity_pane("hidden").unwrap(),
+            lazybox_config::ActivityPaneMode::Hidden
+        );
+        assert!(parse_activity_pane("collapsed").is_err());
     }
 
     #[test]
@@ -1401,9 +1712,15 @@ mod tests {
         let mut persisted_config = lazybox_config::Config::default();
         apply_desktop_settings(
             &mut persisted_config,
-            BTreeSet::from(["github:acme/widget".to_string()]),
-            "claude".to_string(),
-            false,
+            DesktopSettings {
+                scopes: BTreeSet::from(["github:acme/widget".to_string()]),
+                default_agent: "claude".to_string(),
+                analytics_enabled: false,
+                theme: None,
+                terminal_new_layout: lazybox_config::NewTerminalLayout::Split,
+                activity_pane_default: lazybox_config::ActivityPaneMode::Full,
+                default_model_tier: None,
+            },
         );
         persisted_config
             .save_to(&config_path)

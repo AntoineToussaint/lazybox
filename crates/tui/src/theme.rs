@@ -27,11 +27,17 @@
 //!
 //! ## Adding a theme
 //!
-//! 1. Add a `pub const` Theme literal below.
-//! 2. Append it to the `THEMES` slice.
+//! The raw palette colors are the single source of truth in
+//! `lazybox_tui_core::theme` (client-free so the desktop can read them
+//! too). To add a built-in:
 //!
-//! That's it — `T` cycles include the new entry, and any component
-//! reading from `theme::current()` updates automatically.
+//! 1. Add a `pub const ThemePalette` there and append it to
+//!    `BUILT_IN_PALETTES`.
+//! 2. Nothing else — the ratatui `Theme` values and `BUILT_IN_THEMES`
+//!    below are derived from that slice at compile time.
+//!
+//! `T` cycles include the new entry, and any component reading from
+//! `theme::current()` updates automatically.
 //!
 //! ## Color tokens
 //!
@@ -41,6 +47,7 @@
 //! render truecolor; for the rare 8-color holdouts we still get
 //! reasonable approximations.
 
+use lazybox_tui_core::theme::{self as palette, ThemePalette};
 use ratatui::style::{Color, Modifier, Style};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{OnceLock, RwLock};
@@ -75,127 +82,59 @@ pub struct Theme {
     pub surface: Color,
 }
 
+const fn rgb(c: palette::Rgb) -> Color {
+    Color::Rgb(c.0, c.1, c.2)
+}
+
+/// Build a render-time [`Theme`] from a client-free
+/// [`ThemePalette`](palette::ThemePalette). The palette is the single
+/// source of truth for the colors; this just maps each semantic slot to
+/// a `ratatui::style::Color`.
+const fn from_palette(p: &ThemePalette) -> Theme {
+    Theme {
+        name: p.name,
+        accent: rgb(p.accent),
+        hover: rgb(p.hover),
+        success: rgb(p.success),
+        warn: rgb(p.warn),
+        error: rgb(p.error),
+        text_strong: rgb(p.text_strong),
+        text_dim: rgb(p.text_dim),
+        chrome: rgb(p.chrome),
+        fill: rgb(p.fill),
+        surface: rgb(p.surface),
+    }
+}
+
 /// Lazybox Dark — the default. Restrained palette in the spirit of
-/// yazi's defaults: one cyan accent, one magenta hover, otherwise
-/// grays. Calibrated against a near-black terminal background.
-pub const LAZYBOX_DARK: Theme = Theme {
-    name: "Lazybox Dark",
-    accent: Color::Rgb(125, 207, 255),      // soft sky blue
-    hover: Color::Rgb(247, 118, 142),       // muted coral
-    success: Color::Rgb(158, 206, 106),     // sage green
-    warn: Color::Rgb(224, 175, 104),        // warm amber
-    error: Color::Rgb(247, 118, 142),       // same as hover for cohesion
-    text_strong: Color::Rgb(192, 202, 245), // off-white
-    text_dim: Color::Rgb(122, 130, 167),    // muted blue-gray
-    chrome: Color::Rgb(58, 64, 96),         // slate divider
-    fill: Color::Rgb(41, 46, 66),           // panel bg
-    surface: Color::Rgb(26, 29, 46),        // modal/panel bg, deeper
-};
+/// yazi's defaults: one cyan accent, one magenta hover, otherwise grays.
+pub const LAZYBOX_DARK: Theme = from_palette(&palette::LAZYBOX_DARK);
 
-/// Catppuccin Mocha — popular dark, soft pastels. Balances pinks +
-/// blues, has a deserved reputation for being easy on the eyes during
-/// long sessions.
-pub const CATPPUCCIN_MOCHA: Theme = Theme {
-    name: "Catppuccin Mocha",
-    accent: Color::Rgb(137, 220, 235),      // sky
-    hover: Color::Rgb(245, 194, 231),       // pink
-    success: Color::Rgb(166, 227, 161),     // green
-    warn: Color::Rgb(249, 226, 175),        // yellow
-    error: Color::Rgb(243, 139, 168),       // pink-red
-    text_strong: Color::Rgb(205, 214, 244), // text
-    text_dim: Color::Rgb(147, 153, 178),    // overlay2
-    chrome: Color::Rgb(69, 71, 90),         // surface1
-    fill: Color::Rgb(49, 50, 68),           // surface0
-    surface: Color::Rgb(30, 30, 46),        // base
-};
+/// Catppuccin Mocha — popular dark, soft pastels.
+pub const CATPPUCCIN_MOCHA: Theme = from_palette(&palette::CATPPUCCIN_MOCHA);
 
-/// Tokyo Night — slightly cooler, navy-leaning dark theme. Higher
-/// contrast than Catppuccin; reads well on OLED.
-pub const TOKYO_NIGHT: Theme = Theme {
-    name: "Tokyo Night",
-    accent: Color::Rgb(125, 207, 255),      // blue
-    hover: Color::Rgb(187, 154, 247),       // magenta
-    success: Color::Rgb(158, 206, 106),     // green
-    warn: Color::Rgb(224, 175, 104),        // orange
-    error: Color::Rgb(247, 118, 142),       // red
-    text_strong: Color::Rgb(192, 202, 245), // fg
-    text_dim: Color::Rgb(86, 95, 137),      // comment
-    chrome: Color::Rgb(65, 72, 104),        // bg_visual
-    fill: Color::Rgb(41, 46, 66),           // bg_highlight
-    surface: Color::Rgb(26, 27, 38),        // bg
-};
+/// Tokyo Night — slightly cooler, navy-leaning dark theme.
+pub const TOKYO_NIGHT: Theme = from_palette(&palette::TOKYO_NIGHT);
 
-/// Gruvbox Dark — earthy retro palette. Warmer ambers + olive greens,
-/// for users who like the classic vim feel.
-pub const GRUVBOX_DARK: Theme = Theme {
-    name: "Gruvbox Dark",
-    accent: Color::Rgb(131, 165, 152),      // aqua
-    hover: Color::Rgb(211, 134, 155),       // pink
-    success: Color::Rgb(184, 187, 38),      // green
-    warn: Color::Rgb(250, 189, 47),         // yellow
-    error: Color::Rgb(251, 73, 52),         // red
-    text_strong: Color::Rgb(235, 219, 178), // fg
-    text_dim: Color::Rgb(168, 153, 132),    // gray
-    chrome: Color::Rgb(80, 73, 69),         // bg2
-    fill: Color::Rgb(60, 56, 54),           // bg1
-    surface: Color::Rgb(40, 40, 40),        // bg
-};
+/// Gruvbox Dark — earthy retro palette.
+pub const GRUVBOX_DARK: Theme = from_palette(&palette::GRUVBOX_DARK);
 
-/// Rose Pine — soothing low-saturation pastels on a deep purple
-/// backdrop. Distinct from the others; lots of users swear by it.
-pub const ROSE_PINE: Theme = Theme {
-    name: "Rose Pine",
-    accent: Color::Rgb(156, 207, 216),      // foam
-    hover: Color::Rgb(196, 167, 231),       // iris
-    success: Color::Rgb(49, 116, 143),      // pine
-    warn: Color::Rgb(246, 193, 119),        // gold
-    error: Color::Rgb(235, 111, 146),       // love
-    text_strong: Color::Rgb(224, 222, 244), // text
-    text_dim: Color::Rgb(144, 140, 170),    // subtle
-    chrome: Color::Rgb(57, 53, 82),         // overlay
-    fill: Color::Rgb(38, 35, 58),           // surface
-    surface: Color::Rgb(25, 23, 36),        // base
-};
+/// Rose Pine — soothing low-saturation pastels on a deep purple backdrop.
+pub const ROSE_PINE: Theme = from_palette(&palette::ROSE_PINE);
 
 /// Lazybox Light — the one bright palette. Dark ink on a near-white
 /// surface, with the accent / status hues darkened until they hold
-/// contrast against the light background (the dark themes' pastels
-/// would wash out). For users on a light terminal or in bright rooms.
-pub const LAZYBOX_LIGHT: Theme = Theme {
-    name: "Lazybox Light",
-    accent: Color::Rgb(26, 110, 196),    // strong blue
-    hover: Color::Rgb(193, 53, 116),     // raspberry
-    success: Color::Rgb(35, 134, 78),    // forest green
-    warn: Color::Rgb(159, 106, 0),       // dark amber
-    error: Color::Rgb(193, 53, 116),     // same as hover for cohesion
-    text_strong: Color::Rgb(28, 32, 48), // near-black ink
-    text_dim: Color::Rgb(96, 104, 128),  // slate gray
-    chrome: Color::Rgb(196, 201, 214),   // light divider
-    fill: Color::Rgb(218, 223, 233),     // highlighted-row bg
-    surface: Color::Rgb(247, 248, 250),  // near-white panel bg
-};
+/// contrast against the light background.
+pub const LAZYBOX_LIGHT: Theme = from_palette(&palette::LAZYBOX_LIGHT);
 
 /// High Contrast — accessibility-first. Pure-white text and saturated,
-/// bright status hues on a pure-black surface, with a light-gray chrome
-/// so borders stay visible. Maximizes legibility for low-vision users
-/// and harsh lighting; intentionally not "pretty", just readable.
-pub const HIGH_CONTRAST: Theme = Theme {
-    name: "High Contrast",
-    accent: Color::Rgb(0, 224, 255),        // bright cyan
-    hover: Color::Rgb(255, 110, 200),       // bright magenta
-    success: Color::Rgb(80, 240, 120),      // bright green
-    warn: Color::Rgb(255, 214, 64),         // bright yellow
-    error: Color::Rgb(255, 92, 92),         // bright red
-    text_strong: Color::Rgb(255, 255, 255), // pure white
-    text_dim: Color::Rgb(200, 200, 200),    // light gray (still high-contrast)
-    chrome: Color::Rgb(160, 160, 160),      // visible gray borders
-    fill: Color::Rgb(58, 58, 58),           // highlighted-row bg
-    surface: Color::Rgb(0, 0, 0),           // pure black
-};
+/// bright status hues on a pure-black surface.
+pub const HIGH_CONTRAST: Theme = from_palette(&palette::HIGH_CONTRAST);
 
 /// Built-in themes shipped with the kit, in cycle order. Index 0 is
 /// the default. The runtime registry (see [`register`]) starts with
-/// these and grows as apps register their own.
+/// these and grows as apps register their own. Derived from
+/// [`palette::BUILT_IN_PALETTES`], the shared source of truth.
 pub const BUILT_IN_THEMES: &[&Theme] = &[
     &LAZYBOX_DARK,
     &CATPPUCCIN_MOCHA,
@@ -496,6 +435,20 @@ mod tests {
             "no light theme (brightest surface {lightest})"
         );
         assert!(darkest < 0.1, "no dark theme (darkest surface {darkest})");
+    }
+
+    #[test]
+    fn built_in_themes_track_the_shared_palette_catalog() {
+        // The desktop reads `palette::BUILT_IN_PALETTES`; the ratatui UI
+        // reads these. They must stay the same list, in the same order,
+        // with the same colors, or the two clients disagree on themes.
+        assert_eq!(BUILT_IN_THEMES.len(), palette::BUILT_IN_PALETTES.len());
+        for (theme, pal) in BUILT_IN_THEMES.iter().zip(palette::BUILT_IN_PALETTES) {
+            assert_eq!(theme.name, pal.name);
+            assert_eq!(theme.accent, rgb(pal.accent));
+            assert_eq!(theme.surface, rgb(pal.surface));
+            assert_eq!(theme.text_strong, rgb(pal.text_strong));
+        }
     }
 
     #[test]

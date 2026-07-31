@@ -36,6 +36,7 @@ import {
   renderInboxList,
   workspaceKeysInOrder,
 } from "./inbox_view";
+import { terminalTheme } from "./theme";
 import {
   TerminalFrameDecoder,
   type TerminalBinaryFrame,
@@ -66,10 +67,35 @@ interface ActiveTerminal {
   resyncing: boolean;
 }
 
+interface DesktopModelTier {
+  alias: string;
+  label: string;
+}
+
 interface DesktopAgentOption {
   id: string;
   label: string;
   available: boolean;
+  models: DesktopModelTier[];
+  default_tier: string | null;
+}
+
+interface DesktopThemeColors {
+  accent: string;
+  hover: string;
+  success: string;
+  warn: string;
+  error: string;
+  text_strong: string;
+  text_dim: string;
+  chrome: string;
+  fill: string;
+  surface: string;
+}
+
+interface DesktopThemeOption {
+  name: string;
+  colors: DesktopThemeColors;
 }
 
 interface DesktopSetupState {
@@ -79,6 +105,11 @@ interface DesktopSetupState {
   default_agent: string;
   analytics_enabled: boolean;
   diagnostics_path: string;
+  theme: string | null;
+  themes: DesktopThemeOption[];
+  keymap_preset: string | null;
+  terminal_new_layout: string;
+  activity_pane_default: string;
 }
 
 interface GithubAuthStatus {
@@ -99,6 +130,41 @@ type AnalyticsEvent =
   | "agent_started"
   | "shell_started"
   | "reply_posted";
+
+// Two poles for preview mode only; the live app reads the full catalog
+// from `desktop_setup_state` (sourced from the shared Rust palette).
+const PREVIEW_THEMES: DesktopThemeOption[] = [
+  {
+    name: "Lazybox Dark",
+    colors: {
+      accent: "#7dcfff",
+      hover: "#f7768e",
+      success: "#9ece6a",
+      warn: "#e0af68",
+      error: "#f7768e",
+      text_strong: "#c0caf5",
+      text_dim: "#7a82a7",
+      chrome: "#3a4060",
+      fill: "#292e42",
+      surface: "#1a1d2e",
+    },
+  },
+  {
+    name: "Lazybox Light",
+    colors: {
+      accent: "#1a6ec4",
+      hover: "#c13574",
+      success: "#23864e",
+      warn: "#9f6a00",
+      error: "#c13574",
+      text_strong: "#1c2030",
+      text_dim: "#606880",
+      chrome: "#c4c9d6",
+      fill: "#dadfe9",
+      surface: "#f7f8fa",
+    },
+  },
+];
 
 const workspaceList = element<HTMLDivElement>("workspace-list");
 const workspaceCount = element<HTMLSpanElement>("workspace-count");
@@ -148,6 +214,15 @@ const repositorySelectionCount = element<HTMLParagraphElement>(
 );
 const defaultAgentSelect =
   element<HTMLSelectElement>("default-agent-select");
+const defaultModelSelect =
+  element<HTMLSelectElement>("default-model-select");
+const defaultModelField = element<HTMLLabelElement>("default-model-field");
+const themeList = element<HTMLDivElement>("theme-list");
+const keymapPresetLabel = element<HTMLSpanElement>("keymap-preset-label");
+const terminalLayoutSelect =
+  element<HTMLSelectElement>("terminal-layout-select");
+const activityPaneSelect =
+  element<HTMLSelectElement>("activity-pane-select");
 const analyticsEnabled = element<HTMLInputElement>("analytics-enabled");
 const setupError = element<HTMLParagraphElement>("setup-error");
 const diagnosticsPath = element<HTMLSpanElement>("diagnostics-path");
@@ -181,6 +256,9 @@ let inboxLoading = true;
 let inboxError: string | null = null;
 let setupState: DesktopSetupState | null = null;
 let discoveredRepositories: GithubRepositoryOption[] = [];
+let availableThemes: DesktopThemeOption[] = [];
+let selectedTheme: string | null = null;
+let currentThemeColors: DesktopThemeColors | null = null;
 let selectedScopes = new Set<string>();
 let configuredRepositories: DesktopRepository[] = [];
 let setupRequired = false;
@@ -260,6 +338,9 @@ githubCheckButton.addEventListener("click", () => void refreshGithubAuth());
 githubLoginButton.addEventListener("click", () => void startGithubLogin());
 discoverReposButton.addEventListener("click", () => void discoverRepositories());
 repositorySearch.addEventListener("input", renderRepositories);
+defaultAgentSelect.addEventListener("change", () =>
+  renderModelOptions(defaultAgentSelect.value),
+);
 setupForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void saveSettings();
@@ -815,25 +896,27 @@ function attachTerminal(id: number): void {
     fontSize: 13,
     lineHeight: 1.18,
     scrollback: 10_000,
-    theme: {
-      background: "#0a0d12",
-      foreground: "#dce5e8",
-      cursor: "#82d8bd",
-      cursorAccent: "#0a0d12",
-      selectionBackground: "#2a554d",
-      black: "#0a0d12",
-      brightBlack: "#5d6c73",
-      green: "#82d8bd",
-      brightGreen: "#a5ecd7",
-      cyan: "#78c7dc",
-      brightCyan: "#a4ddec",
-      yellow: "#e3bd75",
-      brightYellow: "#f1d49a",
-      red: "#e47e77",
-      brightRed: "#f2a09b",
-      white: "#dce5e8",
-      brightWhite: "#ffffff",
-    },
+    theme: currentThemeColors
+      ? terminalTheme(currentThemeColors)
+      : {
+          background: "#0a0d12",
+          foreground: "#dce5e8",
+          cursor: "#82d8bd",
+          cursorAccent: "#0a0d12",
+          selectionBackground: "#2a554d",
+          black: "#0a0d12",
+          brightBlack: "#5d6c73",
+          green: "#82d8bd",
+          brightGreen: "#a5ecd7",
+          cyan: "#78c7dc",
+          brightCyan: "#a4ddec",
+          yellow: "#e3bd75",
+          brightYellow: "#f1d49a",
+          red: "#e47e77",
+          brightRed: "#f2a09b",
+          white: "#dce5e8",
+          brightWhite: "#ffffff",
+        },
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
@@ -1302,12 +1385,27 @@ async function openSettings(): Promise<void> {
       first_run: false,
       selected_scopes: ["github:acme/relay"],
       agents: [
-        { id: "codex", label: "Codex", available: true },
-        { id: "claude", label: "Claude Code", available: true },
+        { id: "codex", label: "Codex", available: true, models: [], default_tier: null },
+        {
+          id: "claude",
+          label: "Claude Code",
+          available: true,
+          models: [
+            { alias: "S", label: "Haiku" },
+            { alias: "M", label: "Sonnet" },
+            { alias: "L", label: "Opus" },
+          ],
+          default_tier: "L",
+        },
       ],
       default_agent: defaultAgent,
       analytics_enabled: false,
       diagnostics_path: "~/.lazybox/v2/desktop-crashes",
+      theme: null,
+      themes: PREVIEW_THEMES,
+      keymap_preset: null,
+      terminal_new_layout: "split",
+      activity_pane_default: "full",
     };
   } else {
     try {
@@ -1341,9 +1439,119 @@ function applySetupState(state: DesktopSetupState): void {
     defaultAgentSelect.value =
       state.agents.find((agent) => agent.available)?.id ?? "";
   }
+  renderModelOptions(defaultAgentSelect.value);
+
+  availableThemes = state.themes;
+  selectedTheme = state.theme;
+  renderThemeList();
+  applyThemeByName(selectedTheme);
+  keymapPresetLabel.textContent = `Keymap: ${state.keymap_preset ?? "default"}`;
+
+  terminalLayoutSelect.value = state.terminal_new_layout;
+  activityPaneSelect.value = state.activity_pane_default;
+
   analyticsEnabled.checked = state.analytics_enabled;
   diagnosticsPath.textContent = `Crash reports: ${state.diagnostics_path}`;
   renderRepositories();
+}
+
+function renderModelOptions(agentId: string): void {
+  const agent = setupState?.agents.find((option) => option.id === agentId);
+  const tiers = agent?.models ?? [];
+  defaultModelField.classList.toggle("hidden", tiers.length === 0);
+  defaultModelSelect.replaceChildren();
+  // When the agent has no configured default tier, offer an explicit
+  // "agent default" entry (empty value → saved as null) rather than
+  // letting the first tier auto-select and silently become the new
+  // persisted default.
+  if (agent?.default_tier == null) {
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "Agent default";
+    defaultModelSelect.append(none);
+  }
+  for (const tier of tiers) {
+    const option = document.createElement("option");
+    option.value = tier.alias;
+    option.textContent = tier.label;
+    defaultModelSelect.append(option);
+  }
+  defaultModelSelect.value = agent?.default_tier ?? "";
+}
+
+function renderThemeList(): void {
+  themeList.replaceChildren();
+  for (const theme of availableThemes) {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "theme-swatch";
+    swatch.role = "radio";
+    swatch.setAttribute(
+      "aria-checked",
+      String(theme.name === selectedTheme),
+    );
+    swatch.classList.toggle("selected", theme.name === selectedTheme);
+    swatch.style.setProperty("--swatch-surface", theme.colors.surface);
+    swatch.style.setProperty("--swatch-accent", theme.colors.accent);
+    swatch.style.setProperty("--swatch-text", theme.colors.text_strong);
+    const dots = document.createElement("span");
+    dots.className = "theme-swatch-dots";
+    for (const color of [
+      theme.colors.accent,
+      theme.colors.success,
+      theme.colors.warn,
+      theme.colors.error,
+    ]) {
+      const dot = document.createElement("span");
+      dot.style.background = color;
+      dots.append(dot);
+    }
+    const name = document.createElement("span");
+    name.className = "theme-swatch-name";
+    name.textContent = theme.name;
+    swatch.append(dots, name);
+    swatch.addEventListener("click", () => {
+      selectedTheme = theme.name;
+      renderThemeList();
+      applyThemeColors(theme.colors);
+    });
+    themeList.append(swatch);
+  }
+}
+
+// Resolve a theme name to its palette and apply it. An unset (or
+// unknown) name resolves to the first catalog entry — the shared default
+// theme, exactly what the TUI shows when `ui.theme` is unset — so the two
+// clients agree on the default rather than the desktop keeping a bespoke
+// palette of its own.
+function applyThemeByName(name: string | null): void {
+  const theme =
+    availableThemes.find((option) => option.name === name) ??
+    availableThemes[0];
+  if (theme !== undefined) {
+    applyThemeColors(theme.colors);
+  }
+}
+
+// Live theme application: drive the app chrome through CSS custom
+// properties and re-skin the active xterm terminal so a theme change is
+// visible without a restart.
+function applyThemeColors(colors: DesktopThemeColors): void {
+  currentThemeColors = colors;
+  const root = document.documentElement;
+  root.style.setProperty("--theme-accent", colors.accent);
+  root.style.setProperty("--theme-hover", colors.hover);
+  root.style.setProperty("--theme-success", colors.success);
+  root.style.setProperty("--theme-warn", colors.warn);
+  root.style.setProperty("--theme-error", colors.error);
+  root.style.setProperty("--theme-text-strong", colors.text_strong);
+  root.style.setProperty("--theme-text-dim", colors.text_dim);
+  root.style.setProperty("--theme-chrome", colors.chrome);
+  root.style.setProperty("--theme-fill", colors.fill);
+  root.style.setProperty("--theme-surface", colors.surface);
+  if (activeTerminal) {
+    activeTerminal.terminal.options.theme = terminalTheme(colors);
+  }
 }
 
 function openSetupDialog(required: boolean): void {
@@ -1558,8 +1766,8 @@ async function saveSettings(): Promise<void> {
   }
   const accepted = await confirmUserAction(
     "Save desktop settings?",
-    "lazybox will update the shared configuration and restart so provider scope and agent changes take effect.",
-    "Save and restart",
+    "lazybox will update the shared configuration. Provider scope and default-agent changes restart the app; theme and workspace changes apply immediately.",
+    "Save settings",
   );
   if (!accepted) {
     return;
@@ -1567,23 +1775,36 @@ async function saveSettings(): Promise<void> {
   saveSettingsButton.disabled = true;
   saveSettingsButton.textContent = "Saving…";
   try {
+    let restart = false;
     if (!previewMode) {
-      await invoke("save_desktop_settings", {
+      restart = await invoke<boolean>("save_desktop_settings", {
         settings: {
           github_scopes: [...selectedScopes],
           default_agent: defaultAgentSelect.value,
           analytics_enabled: analyticsEnabled.checked,
+          theme: selectedTheme,
+          terminal_new_layout: terminalLayoutSelect.value,
+          activity_pane_default: activityPaneSelect.value,
+          default_model_tier:
+            defaultModelField.classList.contains("hidden") ||
+            defaultModelSelect.value.length === 0
+              ? null
+              : defaultModelSelect.value,
         },
       });
     }
-    setStatus("Settings saved. Restarting lazybox…");
-    if (previewMode) {
+    if (restart) {
+      setStatus("Settings saved. Restarting lazybox…");
+    } else {
+      setStatus("Settings saved.");
+      saveSettingsButton.disabled = false;
+      saveSettingsButton.textContent = "Save settings";
       setupDialog.close();
     }
   } catch (error) {
     showSetupError(String(error));
     saveSettingsButton.disabled = false;
-    saveSettingsButton.textContent = "Save and restart";
+    saveSettingsButton.textContent = "Save settings";
   }
 }
 

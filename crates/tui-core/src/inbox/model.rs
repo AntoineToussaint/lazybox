@@ -183,22 +183,28 @@ pub enum VisibleRow {
     },
 }
 
-/// Free-text search scoped to a single project (repo group). Invoked
-/// with `/` and filters that project's PRs + Issues live as the user
-/// types — fuzzy match on title, substring match on number. Other
-/// projects are left untouched (the search is deliberately scoped to
-/// one group, not global).
+/// Free-text search over the inbox. Two flavours share this state:
 ///
-/// `editing` is true while the bottom input bar is capturing
-/// keystrokes (between `/` and `Enter`/`Esc`). `Enter` keeps the
-/// query applied but stops capturing so j/k navigates the results;
-/// `Esc` clears the query and closes the bar.
+/// - **Project-scoped** (`scope: Some(label)`) — invoked with `/`,
+///   filters only that project's (repo group's) PRs + Issues, leaving
+///   every other project untouched.
+/// - **Global** (`scope: None`) — invoked from the header search box
+///   (`#`), filters every repo group at once so a query — especially a
+///   PR/issue number — surfaces matches across the whole inbox.
+///
+/// Both fuzzy-match on title and substring-match on number. `editing`
+/// is true while the input bar is capturing keystrokes (between the
+/// open key and `Enter`/`Esc`). `Enter` keeps the query applied but
+/// stops capturing so j/k navigates the results; `Esc` clears the
+/// query and closes the bar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchState {
     /// Repo-header label the search is scoped to — matched against
     /// [`super::group_label`] so only that project's rows are
-    /// filtered. Captured from the row under the cursor when `/` opens.
-    pub scope: String,
+    /// filtered. `Some(label)` is captured from the row under the
+    /// cursor when `/` opens; `None` is a global search across every
+    /// repo group.
+    pub scope: Option<String>,
     pub query: String,
     pub editing: bool,
 }

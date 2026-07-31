@@ -209,6 +209,10 @@ pub enum Action {
     CycleMailbox,
     /// Open the incremental search bar scoped to the focused project.
     OpenSearch,
+    /// Open the global search box — an incremental search across every
+    /// repo group at once, especially for jumping to a PR/issue by
+    /// number without knowing its repo.
+    OpenGlobalSearch,
     /// Collapse or expand the repo group the cursor sits in (or on).
     /// Folds a project's workspaces into a single header row — the
     /// "group the sessions" shortcut. Acts on the list, not a single
@@ -433,6 +437,7 @@ pub enum ActionKind {
     CycleSort,
     CycleMailbox,
     OpenSearch,
+    OpenGlobalSearch,
     ToggleRepoGroup,
     SelectWorkspace,
     BroadcastToSelected,
@@ -557,6 +562,7 @@ impl ActionKind {
         Self::CycleSort,
         Self::CycleMailbox,
         Self::OpenSearch,
+        Self::OpenGlobalSearch,
         Self::ToggleRepoGroup,
         Self::FocusPaneRight,
         Self::SelectWorkspace,
@@ -664,6 +670,7 @@ impl Action {
             Action::CycleSort => ActionKind::CycleSort,
             Action::CycleMailbox => ActionKind::CycleMailbox,
             Action::OpenSearch => ActionKind::OpenSearch,
+            Action::OpenGlobalSearch => ActionKind::OpenGlobalSearch,
             Action::ToggleRepoGroup => ActionKind::ToggleRepoGroup,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
@@ -1173,6 +1180,13 @@ impl ActionDef {
                 default_keys: "/",
                 label: "search",
                 describe: "Open the incremental search bar scoped to the focused project.",
+                section: Section::Sidebar,
+            },
+            ActionKind::OpenGlobalSearch => &Self {
+                kind: ActionKind::OpenGlobalSearch,
+                default_keys: "#",
+                label: "find",
+                describe: "Open the header search box — an incremental search across every repo group at once. Type digits to jump straight to a PR/issue by number without knowing which repo it's in. Composes with the active filters and mailbox.",
                 section: Section::Sidebar,
             },
             ActionKind::ToggleRepoGroup => &Self {
@@ -1788,6 +1802,7 @@ impl ActionKind {
             ActionKind::CycleSort => "cycle_sort",
             ActionKind::CycleMailbox => "cycle_mailbox",
             ActionKind::OpenSearch => "open_search",
+            ActionKind::OpenGlobalSearch => "open_global_search",
             ActionKind::ToggleRepoGroup => "toggle_repo_group",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
@@ -2520,6 +2535,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::CycleSort
         | ActionKind::CycleMailbox
         | ActionKind::OpenSearch
+        | ActionKind::OpenGlobalSearch
         | ActionKind::ToggleRepoGroup => true,
         // Toggling a selection mark needs a row under the cursor; the
         // broadcast itself acts on the selection set (which the catalog

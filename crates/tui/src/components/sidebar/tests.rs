@@ -1633,6 +1633,18 @@ mod search_tests {
         sb
     }
 
+    /// Like [`issue_ws`] but in a caller-chosen repo, so a test can
+    /// spread workspaces across multiple repo groups.
+    fn issue_ws_in_repo(repo: &str, num: &str, title: &str) -> Workspace {
+        let mut t = base_task();
+        t.id.key = format!("{repo}#{num}");
+        t.title = title.into();
+        t.url = format!("https://github.com/{repo}/issues/{num}");
+        let mut w = Workspace::from_task(t, chrono::Utc::now());
+        w.name = title.into();
+        w
+    }
+
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
@@ -1653,8 +1665,153 @@ mod search_tests {
         sb.open_search();
         assert!(sb.search_editing());
         let s = sb.search().expect("search state present");
-        assert_eq!(s.scope, "o/r");
+        assert_eq!(s.scope.as_deref(), Some("o/r"));
         assert!(s.query.is_empty());
+    }
+
+    /// The global search opens with no scope (searches every repo) and
+    /// needs no project under the cursor.
+    #[test]
+    fn open_global_search_is_unscoped() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_global_search();
+        assert!(sb.search_editing());
+        let s = sb.search().expect("search state present");
+        assert_eq!(s.scope, None);
+        assert!(s.query.is_empty());
+    }
+
+    /// A global query filters rows across every repo group, unlike the
+    /// project-scoped `/` search.
+    #[test]
+    fn global_search_filters_across_repos() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        for (repo, num, title) in [
+            ("o/a", "1", "Add search"),
+            ("o/a", "2", "Unrelated"),
+            ("o/b", "3", "Search here too"),
+        ] {
+            let w = issue_ws_in_repo(repo, num, title);
+            sb.workspaces.insert(SessionKey::from(&w.key), w);
+        }
+        sb.recompute_visible();
+        assert_eq!(sb.workspace_count(), 3);
+        sb.open_global_search();
+        type_query(&mut sb, "search");
+        assert_eq!(sb.workspace_count(), 2, "matches in both repos survive");
+    }
+
+    /// The header renders an always-visible `# [find]` box; a click on
+    /// its rect is reported by `search_chip_hit` so the orchestrator
+    /// can open the global search.
+    #[test]
+    fn header_renders_search_box_and_reports_clicks() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        // Row 1 carries the filter / sort / search chips.
+        let header: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect();
+        assert!(header.contains("# [find]"), "{header:?}");
+
+        // A click on the box's rect hits; a click well off it misses.
+        let rect = sb.search_chip_rect.expect("search chip rect recorded");
+        assert!(sb.search_chip_hit(rect.x, rect.y));
+        assert!(!sb.search_chip_hit(rect.x, rect.y + 1));
+        assert!(!sb.search_chip_hit(0, rect.y));
+    }
+
+    /// While a global query is applied the header box shows the query
+    /// rather than the `[find]` placeholder.
+    #[test]
+    fn header_search_box_shows_the_active_query() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_global_search();
+        type_query(&mut sb, "720");
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let header: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect();
+        assert!(header.contains("720"), "{header:?}");
+        assert!(!header.contains("[find]"), "{header:?}");
+    }
+
+    /// A query too long for the header box is truncated to exactly the
+    /// room the `[⌕ …]` frame leaves — the chip stays inside the pane,
+    /// ends with an ellipsis, and drops precisely the overflowing
+    /// characters (pins the measured frame width, not a guessed one).
+    #[test]
+    fn header_search_box_truncates_a_long_query_to_fit() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_global_search();
+        type_query(&mut sb, "abcdefghijklmnopqrst");
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let header: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect();
+
+        // With `f [filter]  o [split]  # ` (25 cells) ahead of it and a
+        // 38-cell inner width, 13 cells remain — a 4-cell `[⌕ ]` frame
+        // leaves 9 for the query, so 8 chars survive before the `…`.
+        assert!(
+            header.contains("abcdefgh…"),
+            "truncated to room: {header:?}"
+        );
+        assert!(
+            !header.contains("abcdefghi"),
+            "9th char dropped: {header:?}"
+        );
+        let rect = sb.search_chip_rect.expect("box still renders");
+        assert!(
+            rect.x + rect.width <= buffer.area.width,
+            "chip stays inside the pane: {rect:?}"
+        );
+    }
+
+    /// Too narrow to fit even the frame → the box is dropped cleanly:
+    /// no rect recorded, no panic, and the pane still renders.
+    #[test]
+    fn header_search_box_dropped_when_pane_too_narrow() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_global_search();
+        type_query(&mut sb, "anything");
+        let backend = TestBackend::new(20, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        assert!(
+            sb.search_chip_rect.is_none(),
+            "box dropped when it can't fit"
+        );
+        assert!(!sb.search_chip_hit(0, 1), "no phantom hit zone");
     }
 
     /// Typing filters the project's rows live; non-matches drop out.
@@ -1711,7 +1868,7 @@ mod search_tests {
         sb.workspaces.insert(key.clone(), workspace);
         sb.filters.replace([Filter::CiFailing]);
         sb.search = Some(SearchState {
-            scope: "o/r".into(),
+            scope: Some("o/r".into()),
             query: "does-not-match".into(),
             editing: false,
         });
@@ -2764,7 +2921,7 @@ mod getting_started_tests {
     fn active_search_query_suppresses_getting_started() {
         let mut sb = Sidebar::new(PaneId::new(1));
         sb.search = Some(SearchState {
-            scope: String::new(),
+            scope: None,
             query: "foo".into(),
             editing: true,
         });

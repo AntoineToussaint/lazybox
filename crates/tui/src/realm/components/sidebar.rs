@@ -182,6 +182,11 @@ impl Sidebar {
         self.inner.handle_search_key(key);
     }
 
+    /// The active search state, if any. See `Sidebar::search`.
+    pub fn search(&self) -> Option<&crate::components::sidebar::SearchState> {
+        self.inner.search()
+    }
+
     /// Read currently selected workspace key (for selection projection).
     pub fn selected_workspace_key(&self) -> Option<&lazybox_core::SessionKey> {
         self.inner.selected_session_key()
@@ -449,6 +454,12 @@ impl Sidebar {
         self.inner.click_to_cycle_sort(col, row)
     }
 
+    /// True when a click at `(col, row)` lands on the header search
+    /// box. The orchestrator opens the global search on a hit.
+    pub fn search_chip_hit(&self, col: u16, row: u16) -> bool {
+        self.inner.search_chip_hit(col, row)
+    }
+
     /// True iff the cursor sits on a repo header row. Used by the
     /// orchestrator's double-click handler to decide whether to
     /// fire `toggle_repo_at_cursor`.
@@ -506,6 +517,11 @@ impl Sidebar {
     /// Open the incremental search bar (catalog `OpenSearch`, default `/`).
     pub fn open_search(&mut self) {
         self.inner.open_search();
+    }
+
+    /// Open the global search box (catalog `OpenGlobalSearch`, default `#`).
+    pub fn open_global_search(&mut self) {
+        self.inner.open_global_search();
     }
 }
 

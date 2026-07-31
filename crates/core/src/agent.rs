@@ -47,6 +47,27 @@ mod tests {
     }
 
     #[test]
+    fn overlay_replaces_set_fields_and_keeps_the_rest() {
+        let mut base = PriorityAliases {
+            best: None,
+            high: Some("L".into()),
+            medium: Some("M".into()),
+            low: Some("S".into()),
+        };
+        base.overlay(&PriorityAliases {
+            best: Some("B".into()),
+            high: Some("X".into()),
+            ..Default::default()
+        });
+        // `best` and `high` came from the overlay; `medium`/`low` the
+        // overlay left unset, so the base mappings survive.
+        assert_eq!(base.best.as_deref(), Some("B"));
+        assert_eq!(base.high.as_deref(), Some("X"));
+        assert_eq!(base.medium.as_deref(), Some("M"));
+        assert_eq!(base.low.as_deref(), Some("S"));
+    }
+
+    #[test]
     fn best_priority_maps_to_its_alias() {
         use crate::PriorityTier;
         let m = AgentModels {
@@ -329,6 +350,26 @@ impl PriorityAliases {
         ]
         .into_iter()
         .filter_map(|(name, alias)| alias.as_deref().map(|a| (name, a)))
+    }
+
+    /// Overlay `other`'s set fields onto `self`, per priority: a priority
+    /// `other` maps replaces `self`'s mapping for it; one `other` leaves
+    /// unset keeps `self`'s. Used to layer a user's partial `priority:`
+    /// map onto an inherited built-in map without wiping the priorities
+    /// the user didn't mention.
+    pub fn overlay(&mut self, other: &PriorityAliases) {
+        if other.best.is_some() {
+            self.best = other.best.clone();
+        }
+        if other.high.is_some() {
+            self.high = other.high.clone();
+        }
+        if other.medium.is_some() {
+            self.medium = other.medium.clone();
+        }
+        if other.low.is_some() {
+            self.low = other.low.clone();
+        }
     }
 }
 

@@ -1143,11 +1143,14 @@ impl Config {
     /// tier chords). A configured block with an empty `tiers` list is
     /// treated as "unset" so it transparently inherits the built-in —
     /// except its `default` and `priority`, which overlay the inherited
-    /// menu (each replaced wholesale when set) so
-    /// `agents.<id>.models.default: L` alone (the Settings default-model
-    /// pick) or a bare `priority:` map works without copying the whole
-    /// tier list into YAML. A `default` naming a Fable tier is never
-    /// honored — it re-points to the first default-eligible tier.
+    /// menu: `default` replaces the inherited default, and each `priority`
+    /// the user maps replaces just that priority's inherited mapping (the
+    /// ones they omit stay inherited). So `agents.<id>.models.default: L`
+    /// alone (the Settings default-model pick) or adding a single
+    /// `priority.best: B` works without copying the whole tier list into
+    /// YAML and without silently dropping the built-in `high`/`medium`/`low`
+    /// mappings. A `default` naming a Fable tier is never honored — it
+    /// re-points to the first default-eligible tier.
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
         let mut models = match self.agents.get(agent_id) {
             Some(entry) if !entry.models.tiers.is_empty() => entry.models.clone(),
@@ -1157,9 +1160,7 @@ impl Config {
                     if let Some(default) = entry.models.default.clone() {
                         models.default = Some(default);
                     }
-                    if !entry.models.priority.is_unset() {
-                        models.priority = entry.models.priority.clone();
-                    }
+                    models.priority.overlay(&entry.models.priority);
                 }
                 models
             }
@@ -2609,26 +2610,33 @@ agents:
     }
 
     #[test]
-    fn agent_models_priority_alone_overlays_the_builtin_menu() {
+    fn agent_models_priority_overlays_per_field_without_wiping_the_builtin() {
+        use lazybox_core::PriorityTier;
+        // The user remaps only `high`; the built-in tiers are inherited,
+        // so the priorities they didn't mention must keep their built-in
+        // mappings (medium → Sonnet, low → Haiku) rather than fall to
+        // nothing and silently upgrade every medium/low task.
         let yaml = r#"
 agents:
   claude:
     models:
       priority:
-        high: M
+        high: S
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse priority-only models");
         let m = cfg.agent_models("claude");
         assert!(!m.tiers.is_empty(), "builtin tiers are inherited");
         assert_eq!(
-            m.alias_for_priority(lazybox_core::PriorityTier::High),
-            Some("M")
+            m.alias_for_priority(PriorityTier::High),
+            Some("S"),
+            "the user's mapping wins for the priority they set"
         );
         assert_eq!(
-            m.alias_for_priority(lazybox_core::PriorityTier::Medium),
-            None,
-            "the user's map replaces the builtin wholesale, like tiers"
+            m.alias_for_priority(PriorityTier::Medium),
+            Some("M"),
+            "an unmentioned priority keeps its built-in mapping"
         );
+        assert_eq!(m.alias_for_priority(PriorityTier::Low), Some("S"));
     }
 
     #[test]

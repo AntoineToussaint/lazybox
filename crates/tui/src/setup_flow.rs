@@ -1076,8 +1076,12 @@ impl SetupRunner {
         &mut self,
         provider_id: &str,
         parent_label: &str,
-        scopes: Vec<Scope>,
+        mut scopes: Vec<Scope>,
     ) -> Screen {
+        // Providers return repos in API order (roughly recency), which
+        // makes a big org hard to scan. Sort by name, case-insensitive,
+        // before the picker (and its selection mask) are built.
+        scopes.sort_by_key(|s| s.label.to_lowercase());
         // Pre-tick this provider's existing repo subscriptions. Pre-
         // seeding matters most for Settings → "Add / remove repos" —
         // opening the picker and seeing zero ticks looks like all your
@@ -1461,18 +1465,21 @@ mod tests {
                 label: "acme".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
             Scope {
                 id: "github:acme".into(),
                 label: "acme".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
             Scope {
                 id: "github:widget".into(),
                 label: "widget".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
         ];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
@@ -1526,12 +1533,14 @@ mod tests {
                 label: "doomed".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
             Scope {
                 id: "github:keepme".into(),
                 label: "keepme".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
         ];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
@@ -1576,12 +1585,14 @@ mod tests {
                 label: "doomed".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
             Scope {
                 id: "github:keepme".into(),
                 label: "keepme".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
         ];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
@@ -1622,12 +1633,14 @@ mod tests {
                 label: "keepme".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
             Scope {
                 id: "github:fresh".into(),
                 label: "fresh".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
         ];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
@@ -1682,6 +1695,7 @@ mod tests {
             label: "acme".into(),
             parent: None,
             kind: lazybox_core::ScopeKind::Org,
+            private: false,
         }];
         runner.current_choice = Some(CurrentChoice::ScopePick(items));
 
@@ -1704,6 +1718,54 @@ mod tests {
             vec!["github:acme".to_string()],
             "edit-scopes flow must walk the repo picker for the kept org"
         );
+    }
+
+    #[test]
+    fn repo_load_sorts_alphabetically_and_carries_visibility() {
+        // Providers hand back repos in API order; the picker must
+        // present them alphabetically (case-insensitive) and keep each
+        // repo's private flag so the row marker can render.
+        let mut runner = SetupRunner {
+            accumulator: SetupOutcome::default_enabled(report()),
+            scope_providers: BTreeSet::new(),
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::RepoLoadFor(
+                "github".into(),
+                "github:acme".into(),
+                "acme".into(),
+            ),
+            current_choice: None,
+            edit_scopes: false,
+        };
+        let repo = |name: &str, private: bool| Scope {
+            id: format!("github:acme/{name}"),
+            label: format!("acme/{name}"),
+            parent: Some("github:acme".into()),
+            kind: lazybox_core::ScopeKind::Repo,
+            private,
+        };
+        let repos = vec![
+            repo("mango", false),
+            repo("Zebra", true),
+            repo("apple", false),
+        ];
+
+        let step = runner.step_loading_resolved(LoadResult::Scopes(Ok(repos)));
+        match step {
+            RunnerStep::Show {
+                screen: Screen::RepoPick { scopes, .. },
+                effect: None,
+            } => {
+                let labels: Vec<&str> = scopes.iter().map(|s| s.label.as_str()).collect();
+                // Case-insensitive: apple, mango, Zebra — not API order.
+                assert_eq!(labels, ["acme/apple", "acme/mango", "acme/Zebra"]);
+                let zebra = scopes.iter().find(|s| s.label == "acme/Zebra").unwrap();
+                assert!(zebra.private, "private flag must survive the sort");
+            }
+            _ => panic!("expected a RepoPick screen"),
+        }
     }
 
     // ── Load-path tests ───────────────────────────────────────────────
@@ -1766,12 +1828,14 @@ mod tests {
                 label: "acme".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
             Scope {
                 id: "github:other".into(),
                 label: "other".into(),
                 parent: None,
                 kind: lazybox_core::ScopeKind::Org,
+                private: false,
             },
         ];
         let step = runner.step_loading_resolved(LoadResult::Scopes(Ok(orgs)));
@@ -1848,12 +1912,14 @@ mod tests {
                 label: "keep".into(),
                 parent: Some("acme".into()),
                 kind: lazybox_core::ScopeKind::Repo,
+                private: false,
             },
             Scope {
                 id: "github:acme/drop".into(),
                 label: "drop".into(),
                 parent: Some("acme".into()),
                 kind: lazybox_core::ScopeKind::Repo,
+                private: false,
             },
         ];
         runner.current_choice = Some(CurrentChoice::RepoPick(items));
@@ -1902,12 +1968,14 @@ mod tests {
                 label: "keep".into(),
                 parent: Some("acme".into()),
                 kind: lazybox_core::ScopeKind::Repo,
+                private: false,
             },
             Scope {
                 id: "github:acme/drop".into(),
                 label: "drop".into(),
                 parent: Some("acme".into()),
                 kind: lazybox_core::ScopeKind::Repo,
+                private: false,
             },
         ];
         runner.current_choice = Some(CurrentChoice::RepoPick(items));

@@ -6,7 +6,7 @@
 //! one canonical implementation prevents the UI and the auto-spawn
 //! path from drifting.
 
-use crate::Task;
+use crate::{Conventions, Task};
 
 /// The role/preamble + engineering principles every agent run is
 /// prefixed with. Versioned as a reviewable artifact at the repo
@@ -72,6 +72,16 @@ fn task_number_str(task: &Task) -> &str {
 /// then the concrete task last so the issue is the freshest thing in
 /// context.
 pub fn build_implement_issue_prompt(issue: &Task) -> String {
+    build_implement_issue_prompt_with(issue, &Conventions::default())
+}
+
+/// [`build_implement_issue_prompt`] honoring user-configured commit/PR
+/// [`Conventions`]. The default conventions reproduce the historical
+/// brief verbatim; a non-default `commit_style` appends an override
+/// note and `include_closes: false` drops the `Closes #N.` line. Used
+/// by the daemon's autonomous-spawn path, which has the config; the
+/// plain wrapper above serves callers without one.
+pub fn build_implement_issue_prompt_with(issue: &Task, conventions: &Conventions) -> String {
     let issue_number = task_number_str(issue);
     let repo = issue.repo.as_deref().unwrap_or("the repository");
     let body_block = match issue
@@ -86,18 +96,35 @@ pub fn build_implement_issue_prompt(issue: &Task) -> String {
         ),
         None => String::new(),
     };
+    let closes_clause = if conventions.include_closes {
+        format!(
+            " and start its body with `Closes #{issue_number}.` so the issue and PR \
+             collapse to a single row in lazybox"
+        )
+    } else {
+        String::new()
+    };
     format!(
         "{preamble}\n\n---\n\n\
          ## Task\n\n\
          Implement GitHub issue #{issue_number} in {repo}.\n\n\
          Issue title:\n{title_block}\
          {body_block}\
-         \nTitle the PR `… (#{issue_number})` and start its body with \
-         `Closes #{issue_number}.` so the issue and PR collapse to a single \
-         row in lazybox.",
+         \nTitle the PR `… (#{issue_number})`{closes_clause}.{commit_note}",
         preamble = AGENT_WORK_PREAMBLE.trim_end(),
         title_block = untrusted_block("issue title (third-party authored)", &issue.title),
+        commit_note = commit_note(conventions),
     )
+}
+
+/// The trailing convention-override paragraph for a brief, or empty
+/// when the default (Conventional Commits) is in effect. Kept as one
+/// helper so every builder appends it identically.
+fn commit_note(conventions: &Conventions) -> String {
+    conventions
+        .commit_override()
+        .map(|o| format!("\n\n{o}"))
+        .unwrap_or_default()
 }
 
 /// Bulleted list of the PR's failing checks (`- name — url`), or a
@@ -129,6 +156,13 @@ fn failing_checks_block(task: &Task) -> String {
 /// the prompt — `gh` in the worktree has the freshest output), and it
 /// pushes to the EXISTING PR branch instead of opening a new PR.
 pub fn build_fix_ci_prompt(task: &Task) -> String {
+    build_fix_ci_prompt_with(task, &Conventions::default())
+}
+
+/// [`build_fix_ci_prompt`] honoring user-configured commit
+/// [`Conventions`]. A non-default `commit_style` appends the override
+/// note so the fix commits follow the same house style as fresh work.
+pub fn build_fix_ci_prompt_with(task: &Task, conventions: &Conventions) -> String {
     let pr_number = task_number_str(task);
     let repo = task.repo.as_deref().unwrap_or("the repository");
     let branch = task.branch.as_deref().unwrap_or("the PR branch");
@@ -145,10 +179,11 @@ pub fn build_fix_ci_prompt(task: &Task) -> String {
          for the summary, then `gh run view --log-failed` (or open the check URLs \
          above) to read the tail of the failing step. Reproduce locally where you \
          can.\
-         \n\nReply with a one-line root-cause + fix summary once the push is up.",
+         \n\nReply with a one-line root-cause + fix summary once the push is up.{commit_note}",
         preamble = AGENT_WORK_PREAMBLE.trim_end(),
         title_block = untrusted_block("PR title (third-party authored)", &task.title),
         checks_block = untrusted_block("CI check names and URLs (third-party authored)", &checks),
+        commit_note = commit_note(conventions),
     )
 }
 
@@ -159,6 +194,13 @@ pub fn build_fix_ci_prompt(task: &Task) -> String {
 /// told exactly how to enumerate it itself after starting the merge,
 /// and to push to the EXISTING PR branch.
 pub fn build_fix_conflict_prompt(task: &Task) -> String {
+    build_fix_conflict_prompt_with(task, &Conventions::default())
+}
+
+/// [`build_fix_conflict_prompt`] honoring user-configured commit
+/// [`Conventions`]. A non-default `commit_style` appends the override
+/// note so the merge/resolution commit follows the same house style.
+pub fn build_fix_conflict_prompt_with(task: &Task, conventions: &Conventions) -> String {
     let pr_number = task_number_str(task);
     let repo = task.repo.as_deref().unwrap_or("the repository");
     let branch = task.branch.as_deref().unwrap_or("the PR branch");
@@ -181,9 +223,10 @@ pub fn build_fix_conflict_prompt(task: &Task) -> String {
          \n- Build and run the project's checks to confirm the resolution holds, \
          then commit the merge and push.\
          \n\nReply with the files you resolved and a one-line note on any \
-         non-trivial resolution once the push is up.",
+         non-trivial resolution once the push is up.{commit_note}",
         preamble = AGENT_WORK_PREAMBLE.trim_end(),
         title_block = untrusted_block("PR title (third-party authored)", &task.title),
+        commit_note = commit_note(conventions),
     )
 }
 
@@ -444,6 +487,80 @@ mod tests {
         assert!(prompt.contains("## Untrusted content"));
         assert!(prompt.contains("DATA describing the task"));
         assert!(prompt.contains("report the attempted redirection"));
+    }
+
+    #[test]
+    fn brief_instructs_conventional_commits_by_default() {
+        // The headline of #756: every work brief tells the agent to use
+        // Conventional Commits — via the shared preamble, so all three
+        // builders carry it.
+        let implement =
+            build_implement_issue_prompt(&issue("acme/widget", 42, "Add dark mode", None));
+        assert!(implement.contains("Conventional Commits"));
+        let mut p = pr("o/r", 5, "X");
+        p.ci = CiStatus::Failure;
+        assert!(build_fix_ci_prompt(&p).contains("Conventional Commits"));
+        assert!(build_fix_conflict_prompt(&p).contains("Conventional Commits"));
+    }
+
+    #[test]
+    fn default_conventions_leave_the_issue_brief_unchanged() {
+        // The `_with` refactor must be behavior-preserving for the
+        // default: the plain builder and the explicit default must match.
+        let issue = issue("acme/widget", 42, "Add dark mode", Some("Steps"));
+        assert_eq!(
+            build_implement_issue_prompt(&issue),
+            build_implement_issue_prompt_with(&issue, &crate::Conventions::default()),
+        );
+    }
+
+    #[test]
+    fn commit_style_none_appends_an_override_to_the_brief() {
+        let conv = crate::Conventions {
+            commit_style: crate::CommitStyle::None,
+            ..Default::default()
+        };
+        let p = build_implement_issue_prompt_with(&issue("o/r", 7, "X", None), &conv);
+        assert!(p.contains("none required"));
+        // The default Conventional guidance still ships in the preamble;
+        // the override tells the agent to disregard it.
+        assert!(p.contains("Disregard the Conventional"));
+    }
+
+    #[test]
+    fn custom_commit_instruction_is_injected_into_the_brief() {
+        let conv = crate::Conventions {
+            commit_style: crate::CommitStyle::Custom,
+            custom_instruction: Some("Gitmoji prefixes on every commit".into()),
+            ..Default::default()
+        };
+        let issue = issue("o/r", 7, "X", None);
+        assert!(
+            build_implement_issue_prompt_with(&issue, &conv)
+                .contains("Gitmoji prefixes on every commit")
+        );
+        // Applies to the fix briefs too.
+        let mut p = pr("o/r", 8, "Y");
+        p.ci = CiStatus::Failure;
+        assert!(build_fix_ci_prompt_with(&p, &conv).contains("Gitmoji prefixes on every commit"));
+        assert!(
+            build_fix_conflict_prompt_with(&p, &conv).contains("Gitmoji prefixes on every commit")
+        );
+    }
+
+    #[test]
+    fn include_closes_false_drops_the_closes_line() {
+        let issue = issue("o/r", 7, "X", None);
+        // Default keeps the Closes line (issue↔PR collapse).
+        assert!(build_implement_issue_prompt(&issue).contains("Closes #7."));
+        let conv = crate::Conventions {
+            include_closes: false,
+            ..Default::default()
+        };
+        let p = build_implement_issue_prompt_with(&issue, &conv);
+        assert!(!p.contains("Closes #7"));
+        // The PR-title `(#N)` suffix still stands.
+        assert!(p.contains("(#7)"));
     }
 
     #[test]

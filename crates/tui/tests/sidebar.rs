@@ -1255,7 +1255,8 @@ fn contextual_bindings_surface_github_group_on_ready_pr() {
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),
     });
-    let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
+    let bindings =
+        s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()), false);
     assert!(
         bindings
             .iter()
@@ -1280,7 +1281,8 @@ fn contextual_bindings_collapse_agent_spawns_into_one_group_cell() {
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),
     });
-    let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
+    let bindings =
+        s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()), false);
     let agent_cells: Vec<_> = bindings.iter().filter(|b| b.label == "agent").collect();
     assert_eq!(
         agent_cells.len(),
@@ -1302,7 +1304,8 @@ fn contextual_bindings_surface_fix_ci_when_red() {
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),
     });
-    let bindings = s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()));
+    let bindings =
+        s.contextual_bindings(&footer_catalog(&std::collections::BTreeMap::new()), false);
     let labels: Vec<String> = bindings.iter().map(|b| b.label.to_string()).collect();
     let labels: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
     assert!(
@@ -1335,7 +1338,7 @@ fn contextual_bindings_honor_user_key_overrides() {
     });
     let mut overrides = std::collections::BTreeMap::new();
     overrides.insert("spawn_shell".to_string(), "Ctrl-t".to_string());
-    let bindings = s.contextual_bindings(&footer_catalog(&overrides));
+    let bindings = s.contextual_bindings(&footer_catalog(&overrides), false);
     let shell = bindings
         .iter()
         .find(|b| b.label == "shell")

@@ -1005,6 +1005,15 @@ pub struct Model<T: TerminalAdapter> {
     synthesized_projects: std::collections::BTreeSet<lazybox_core::ProjectKey>,
     /// IPC client for forwarding pane-emitted commands to the daemon.
     pub client: Client,
+    /// True when this client is attached to a standalone daemon over a
+    /// socket (`--connect`) rather than the in-process embedded daemon.
+    /// The `Client` transport is deliberately opaque, so the entrypoint
+    /// (`run_remote`) sets this. Genuinely-local actions that fire on
+    /// the user's own machine against a *server-side* path — launching a
+    /// local editor at a session's `worktree_path` — are gated on it;
+    /// server-side actions (shell PTY, agents) and machine-local ones
+    /// (browser open, notifications) stay available. See #742.
+    remote: bool,
     /// Watches the inbound daemon-event channel depth after each
     /// drain. A backlog that climbs tick-over-tick means the TUI is
     /// consuming slower than the daemon produces — the signature of a
@@ -1642,6 +1651,7 @@ impl<T: TerminalAdapter> Model<T> {
             synthesized_projects: std::collections::BTreeSet::new(),
             client,
             event_backlog: helpers::BacklogMonitor::default(),
+            remote: false,
             redraw: true,
             quit: false,
             setup: SetupCtx::new(),
@@ -1835,6 +1845,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// the first daemon Snapshot lands.
     pub fn with_preselect(mut self, p: Preselect) -> Self {
         self.preselect = Some(p);
+        self
+    }
+
+    /// Mark this client as attached to a remote daemon over a socket
+    /// (`--connect`). Gates the local-editor-against-a-server-path
+    /// actions; see the `remote` field. See #742.
+    pub fn with_remote(mut self) -> Self {
+        self.remote = true;
         self
     }
 
@@ -3215,6 +3233,22 @@ impl<T: TerminalAdapter> Model<T> {
         self
     }
 
+    /// True when an editor launch must be declined because this client
+    /// is attached to a remote daemon. The editor spawns on the user's
+    /// own machine against a session's `worktree_path`, which is a
+    /// server-side path over `--connect` — opening it locally would
+    /// point at a nonexistent directory. Flashes a notice pointing at
+    /// the remote-safe `s` shell and returns `true` to short-circuit
+    /// the caller. See #742.
+    fn editor_unavailable_remote(&mut self) -> bool {
+        if self.remote {
+            self.flash_info(
+                "editor opens on your machine — unavailable for a remote daemon; use `s` for a server shell",
+            );
+        }
+        self.remote
+    }
+
     /// Open the focused workspace's worktree in an editor. Bound to
     /// `E` from the sidebar. 1 detected editor → launch directly;
     /// 2+ → mount a Choice picker; 0 → footer notice with hint.
@@ -3223,6 +3257,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// side-effect, and the editor launches once `TerminalSpawned`
     /// arrives.
     pub fn open_editor(&mut self) {
+        if self.editor_unavailable_remote() {
+            return;
+        }
         let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() else {
             return;
         };
@@ -3436,6 +3473,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// A requested location is surfaced as unsupported when the
     /// selected macOS app handoff cannot forward it.
     fn open_path_in_editor(&mut self, raw: &str, line: Option<u32>, col: Option<u32>) {
+        if self.editor_unavailable_remote() {
+            return;
+        }
         if self.setup.editors.is_empty() {
             let path = lazybox_core::paths::config_yaml();
             self.flash_info(format!(
@@ -3911,7 +3951,7 @@ impl<T: TerminalAdapter> Model<T> {
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.
         let keymap: Vec<crate::pane::Binding> = match self.focus {
-            PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.catalog),
+            PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.catalog, self.remote),
             PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
             PaneFocus::Terminals => self
                 .terminals

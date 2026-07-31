@@ -414,8 +414,9 @@ impl Sidebar {
     pub fn contextual_bindings(
         &self,
         catalog: &[lazybox_tui_core::action::CatalogEntry],
+        remote: bool,
     ) -> Vec<crate::pane::Binding> {
-        self.inner.contextual_bindings(catalog)
+        self.inner.contextual_bindings(catalog, remote)
     }
 
     /// Click-to-select a row. Returns true on a hit.

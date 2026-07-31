@@ -3136,6 +3136,61 @@ snippets:
         assert!(m.modal_flow.is_none(), "Esc on the picker cancels");
     }
 
+    /// A `--connect` client must not launch a local editor against a
+    /// server-side worktree path. `e` on a remote client declines with
+    /// a notice and issues no command; the same setup on a local client
+    /// provisions a worktree (a `Spawn`) so the editor can open. See
+    /// #742.
+    #[test]
+    fn remote_client_declines_local_editor_launch() {
+        use lazybox_tui_core::action::Action;
+
+        fn editor_dispatch(remote: bool) -> Vec<IpcCommand> {
+            let (client, mut server) = channel::pair();
+            let mut model = {
+                let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+                if remote { m.with_remote() } else { m }
+            };
+            model.cache_editors(vec![crate::editors::EditorTemplate::from(
+                crate::editors::UserEditorEntry {
+                    id: "test".into(),
+                    display: Some("Test".into()),
+                    command: "true".into(),
+                    args: Some(vec![]),
+                },
+            )]);
+            let key = SessionKey::new("github:o/r#742");
+            model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+                lazybox_core::Workspace::empty(
+                    WorkspaceKey::new(key.as_str()),
+                    "main",
+                    chrono::Utc::now(),
+                ),
+            )));
+            assert!(model.sidebar.focus_workspace_key(&key));
+            while server.rx.try_recv().is_ok() {}
+            model.dispatch_action(&Action::OpenEditor);
+            assert!(
+                model.modal_stack.is_empty(),
+                "no editor picker mounts for a single detected editor",
+            );
+            std::iter::from_fn(|| server.rx.try_recv().ok()).collect()
+        }
+
+        assert!(
+            editor_dispatch(false)
+                .iter()
+                .any(|c| matches!(c, IpcCommand::Spawn { .. })),
+            "local client provisions a worktree so the editor can open",
+        );
+        assert!(
+            !editor_dispatch(true)
+                .iter()
+                .any(|c| matches!(c, IpcCommand::Spawn { .. })),
+            "remote client must not act on a server-side worktree path",
+        );
+    }
+
     fn model_with_conversion_source(
         agent: &str,
         on_main: bool,

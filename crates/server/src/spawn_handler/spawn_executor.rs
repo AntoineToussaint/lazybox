@@ -55,6 +55,8 @@ pub(super) async fn execute_spawn_plan(
         cwd_path = ?plan.cwd,
         hint = %plan.hint,
         env_count = plan.env.len(),
+        model_alias = plan.model_alias.as_deref().unwrap_or("<default>"),
+        model = plan.model_label.as_deref().unwrap_or("<agent default>"),
         "execute_spawn_plan: calling backend.spawn"
     );
     let backend_key = match config

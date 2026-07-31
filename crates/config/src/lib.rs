@@ -1182,6 +1182,30 @@ impl Config {
         models
     }
 
+    /// Human-readable warnings for every configured agent whose model
+    /// menu names an alias no tier defines — a `default` or `priority.*`
+    /// that dangles. Such a reference resolves to no args, so the spawn
+    /// silently keeps the agent's own hard-coded model instead of the
+    /// tier the config appears to request; surfacing it makes that no-op
+    /// discoverable (issue #748).
+    pub fn model_alias_warnings(&self) -> Vec<String> {
+        self.agents
+            .keys()
+            .flat_map(|agent_id| {
+                self.agent_models(agent_id)
+                    .dangling_aliases()
+                    .into_iter()
+                    .map(move |(source, alias)| {
+                        format!(
+                            "agents.{agent_id}.models.{source} names alias {alias:?}, \
+                             which no tier defines — the spawn will silently keep \
+                             {agent_id}'s own default model"
+                        )
+                    })
+            })
+            .collect()
+    }
+
     /// Load from `~/.lazybox/config.yaml`, falling back to defaults.
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::default_path();
@@ -1198,6 +1222,9 @@ impl Config {
         let contents = std::fs::read_to_string(path)?;
         let config = Self::parse(&contents)?;
         tracing::info!("Loaded config from {}", path.display());
+        for warning in config.model_alias_warnings() {
+            tracing::warn!("{warning}");
+        }
         // The file can hold Slack tokens — tighten pre-existing
         // group/other-readable configs to owner-only. Best-effort:
         // a read-only mount must not make the config unloadable.
@@ -2601,6 +2628,63 @@ agents:
             m.alias_for_priority(lazybox_core::PriorityTier::Medium),
             None,
             "the user's map replaces the builtin wholesale, like tiers"
+        );
+    }
+
+    #[test]
+    fn best_priority_spawns_a_model_and_effort_tier() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: L
+      tiers:
+        - alias: "B"
+          label: "Opus · max"
+          args: ["--model", "opus", "--reasoning-effort", "max"]
+        - alias: "L"
+          label: "Opus"
+          args: ["--model", "claude-opus-4-8"]
+      priority:
+        best: B
+        high: L
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse best-tier models");
+        let m = cfg.agent_models("claude");
+        assert_eq!(
+            m.alias_for_priority(lazybox_core::PriorityTier::Best),
+            Some("B")
+        );
+        assert_eq!(
+            m.resolve_args(m.alias_for_priority(lazybox_core::PriorityTier::Best)),
+            vec![
+                "--model".to_string(),
+                "opus".to_string(),
+                "--reasoning-effort".to_string(),
+                "max".to_string(),
+            ]
+        );
+        assert!(cfg.model_alias_warnings().is_empty());
+    }
+
+    #[test]
+    fn undefined_model_alias_warns_rather_than_silently_no_ops() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: L
+      tiers: []
+      priority:
+        best: B
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse dangling-alias models");
+        let warnings = cfg.model_alias_warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("priority.best")
+                && w.contains("\"B\"")
+                && w.contains("claude")),
+            "expected a warning naming the dangling priority.best alias, got {warnings:?}"
         );
     }
 

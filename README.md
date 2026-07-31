@@ -40,7 +40,7 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 - **📨 Reactive inbox** — new comments, CI failures, and review requests surface automatically, with per-row read/unread tracking. No refreshing.
 - **🌳 A worktree per task** — every row opens an isolated git worktree, so PRs never step on each other's working trees.
 - **🤖 Point at the work and press `w w`** — lazybox turns the focused issue, CI failure, conflict, or selected review comments into the right brief, then reuses the running agent or starts your default in the task worktree.
-- **🎚️ GitHub-controlled compute** — a `high` / `medium` / `low` label or `@high` / `@medium` / `@low` task-body marker maps through the target agent's model tiers, so GitHub can choose model and reasoning effort before work starts.
+- **🎚️ GitHub-controlled compute** — a `best` / `high` / `medium` / `low` label or `@best` / `@high` / `@medium` / `@low` task-body marker maps through the target agent's model tiers, so GitHub can choose model and reasoning effort before work starts. `best` is the strongest configured tier — pin model *and* max effort together.
 - **⚡ Repeatable workflows with memory** — `]]srev` sends a complete review workflow in one action; Recent remembers what you reuse, and each workspace's `]N` badge tracks up to 12 recently distinct snippet workflows.
 - **🖥️ Embedded terminals** — a live PTY per workspace (split & tile them), powered by a vendored ghostty VT parser.
 - **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
@@ -181,7 +181,7 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 
 Power moves, once the basics feel natural:
 
-- **Model tiers** — a GitHub `high` / `medium` / `low` label (or `@high` / `@medium` / `@low` task-body marker) automatically chooses the target agent's configured model and reasoning-effort arguments at spawn. `w S` / `w M` / `w L` is the direct in-TUI override; Claude ships a Haiku/Sonnet/Opus menu and other agents configure theirs under `agents.<id>.models`. The picked tier rides a `◆ Opus` tab badge.
+- **Model tiers** — a GitHub `best` / `high` / `medium` / `low` label (or `@best` / `@high` / `@medium` / `@low` task-body marker) automatically chooses the target agent's configured model and reasoning-effort arguments at spawn; `best` picks the strongest configured tier (model *and* max effort) and wins over a co-declared `high`. `w S` / `w M` / `w L` is the direct in-TUI override; Claude ships a Haiku/Sonnet/Opus menu and other agents configure theirs under `agents.<id>.models`. Map a priority to a tier under `agents.<id>.models.priority` (e.g. `best: B`); an alias no tier defines warns at config load rather than silently spawning the agent's own default. The picked tier rides a `◆ Opus` tab badge.
 - **Multi-agent orchestration** — `v` selects workspaces across repos, then `Shift-B` lets you review one snippet-seeded or free-text instruction and safely fan it out; follow the [broadcast guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
 - **Focus mode** — `.` (or `]]f` from a terminal) near-fullscreens the agent terminal; `]]<digit>` jumps straight to the Nth agent workspace.
 - **On main** — `b` leader (`b c` / `b s`, confirmed first) runs an agent or shell on the repo's shared main checkout instead of a worktree; the tab carries a `⎇ main` badge.

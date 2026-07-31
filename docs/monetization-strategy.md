@@ -17,7 +17,10 @@ monetize in this order:
    lazybox, and [the reuse work is already scoped in #641][issue-641].
 3. **Lane 2 only after paid demand:** offer hosted, cold-started execution with
    bring-your-own model keys first. Charge separately for compute and managed
-   model usage. Do not offer unlimited agent runs.
+   model usage. Do not offer unlimited agent runs. The narrower "host only the
+   daemon, keep the client local" framing — self-hosted works today, the
+   managed tier stays gated here — is scoped in
+   [remote-daemon-scoping.md](remote-daemon-scoping.md).
 4. **Lane 3 opportunistically:** ship a self-hosted team tier before a managed
    enterprise cloud if inbound teams ask for it. It reuses the daemon without
    first taking custody of every team's source and credentials.

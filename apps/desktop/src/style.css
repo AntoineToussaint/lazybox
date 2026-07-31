@@ -173,22 +173,22 @@ textarea:focus-visible {
 }
 
 .inbox-controls {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  display: flex;
+  justify-content: flex-end;
   gap: 7px;
   padding: 0 16px 10px;
 }
 
-.search-control {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  min-width: 0;
-  padding: 0 9px;
-  border: 1px solid #2a353d;
-  border-radius: 7px;
-  color: #66777d;
-  background: #11171d;
+.sort-button {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sort-button strong {
+  color: #87cbb7;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 input,
@@ -204,22 +204,6 @@ textarea {
 input::placeholder,
 textarea::placeholder {
   color: #5d6b71;
-}
-
-.search-control input {
-  width: 100%;
-  min-width: 0;
-  padding: 7px 0;
-  border: 0;
-  outline: 0;
-  background: transparent;
-  font-size: 10px;
-}
-
-.inbox-controls select {
-  max-width: 112px;
-  padding: 0 7px;
-  font-size: 9px;
 }
 
 .panel-heading,
@@ -303,6 +287,62 @@ h2 {
   overflow: auto;
 }
 
+.repo-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  margin: 10px 0 3px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: #8fa0a6;
+  background: transparent;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-align: left;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.repo-header:hover {
+  background: #151b21;
+}
+
+.repo-caret {
+  color: #5d6c73;
+  font-size: 8px;
+}
+
+.repo-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.repo-count {
+  min-width: 16px;
+  margin-left: auto;
+  color: #66777d;
+  font-size: 9px;
+  text-align: right;
+}
+
+.repo-attention {
+  color: #e3a06b;
+  font-size: 8px;
+}
+
+.section-header {
+  padding: 6px 12px 3px;
+  color: #66777d;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .workspace-row {
   display: flex;
   width: 100%;
@@ -353,6 +393,9 @@ h2 {
 }
 
 .workspace-row-top {
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: flex-start;
   font-family: "SFMono-Regular", "Cascadia Code", monospace;
   font-size: 9px;
 }
@@ -360,6 +403,18 @@ h2 {
 .workspace-reference {
   overflow: hidden;
   color: #7e8d92;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-meta {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -533,6 +588,12 @@ h2 {
   color: #8ad3bd;
   border-color: #2c594c;
   background: #14271f;
+}
+
+.signal-pill.info {
+  color: #86c2d8;
+  border-color: #2c4a58;
+  background: #132029;
 }
 
 .task-description {

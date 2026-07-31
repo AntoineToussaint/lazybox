@@ -65,24 +65,15 @@
             </div>
           </div>
           <div class="inbox-controls">
-            <label class="search-control">
-              <span aria-hidden="true">⌕</span>
-              <input
-                id="workspace-search"
-                type="search"
-                autocomplete="off"
-                placeholder="Search workspaces  /"
-                aria-label="Search workspaces"
-              />
-            </label>
-            <label>
-              <span class="sr-only">Filter workspaces</span>
-              <select id="workspace-filter">
-                <option value="all">All</option>
-                <option value="unread">Unread</option>
-                <option value="attention">Needs attention</option>
-              </select>
-            </label>
+            <button
+              id="sort-button"
+              class="quiet-button sort-button"
+              type="button"
+              aria-label="Cycle sort order"
+              title="Cycle sort order (o)"
+            >
+              Sort: <strong id="sort-label">split</strong>
+            </button>
           </div>
           <div class="inbox-summary">
             <span id="workspace-count">Loading…</span>

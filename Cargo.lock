@@ -1768,6 +1768,7 @@ dependencies = [
  "lazybox-linear",
  "lazybox-slack",
  "lazybox-store",
+ "lazybox-tui-core",
  "libc",
  "libghostty-vt",
  "parking_lot",

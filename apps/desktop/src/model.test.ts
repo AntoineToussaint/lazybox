@@ -5,12 +5,10 @@ import {
   ReplyDrafts,
   applyWorkspaceEvent,
   canReplyToTask,
-  filteredWorkspaces,
   preferredTerminal,
   primaryTask,
   projectKeyLabel,
   shouldHandleWorkspaceEnter,
-  sortedWorkspaces,
   unreadCount,
 } from "./model";
 
@@ -136,16 +134,6 @@ describe("workspace model", () => {
     expect(primaryTask(item)?.title).toBe("PR");
   });
 
-  it("orders unread work before newer read work", () => {
-    const unread = workspace("unread", task("unread", 0, "2026-01-01"));
-    unread.activity = [activity("a", "one")];
-    const newer = workspace("newer", task("newer", 0, "2026-02-01"));
-    expect(sortedWorkspaces([newer, unread]).map((item) => item.key)).toEqual([
-      "unread",
-      "newer",
-    ]);
-  });
-
   it("uses workspace read markers as the authoritative unread state", () => {
     const item = workspace("activity", task("activity", 99));
     item.activity = [
@@ -160,35 +148,6 @@ describe("workspace model", () => {
     item.seen_count = item.activity.length;
     item.read_indices = [];
     expect(unreadCount(item)).toBe(0);
-  });
-
-  it("searches metadata and filters unread and attention work", () => {
-    const failing = workspace("failing", task("Broken release", 0));
-    failing.pr!.ci = "Failure";
-    const mixed = workspace("mixed", task("Mixed checks", 0));
-    mixed.pr!.ci = "Mixed";
-    const unread = workspace("unread", task("Provider labels", 2));
-    unread.activity = [activity("a", "new")];
-    const quiet = workspace("quiet", task("Documentation", 0));
-
-    expect(
-      filteredWorkspaces([quiet, failing, unread], {
-        query: "labels",
-        filter: "all",
-      }).map((item) => item.key),
-    ).toEqual(["unread"]);
-    expect(
-      filteredWorkspaces([quiet, failing, unread], {
-        query: "",
-        filter: "unread",
-      }).map((item) => item.key),
-    ).toEqual(["unread"]);
-    expect(
-      filteredWorkspaces([quiet, failing, mixed, unread], {
-        query: "",
-        filter: "attention",
-      }).map((item) => item.key),
-    ).toEqual(["failing", "mixed"]);
   });
 
   it("replaces the baseline and then applies live upserts and removals", () => {

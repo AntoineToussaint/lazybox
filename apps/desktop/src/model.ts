@@ -5,13 +5,6 @@ import type {
   Workspace,
 } from "./protocol";
 
-export type WorkspaceFilter = "all" | "unread" | "attention";
-
-export interface WorkspaceQuery {
-  query: string;
-  filter: WorkspaceFilter;
-}
-
 export class ReplyDrafts {
   private readonly drafts = new Map<string, string>();
 
@@ -129,56 +122,6 @@ export function shouldHandleWorkspaceEnter(
   interactiveTarget: boolean,
 ): boolean {
   return selectedWorkspace && !editableTarget && !interactiveTarget;
-}
-
-export function sortedWorkspaces(
-  workspaces: Iterable<Workspace>,
-): Workspace[] {
-  return [...workspaces].sort((left, right) => {
-    const unreadDelta = unreadCount(right) - unreadCount(left);
-    if (unreadDelta !== 0) {
-      return unreadDelta;
-    }
-    const leftUpdated = primaryTask(left)?.updated_at ?? "";
-    const rightUpdated = primaryTask(right)?.updated_at ?? "";
-    return rightUpdated.localeCompare(leftUpdated);
-  });
-}
-
-export function filteredWorkspaces(
-  workspaces: Iterable<Workspace>,
-  options: WorkspaceQuery,
-): Workspace[] {
-  const query = options.query.trim().toLocaleLowerCase();
-  return sortedWorkspaces(workspaces).filter((workspace) => {
-    const task = primaryTask(workspace);
-    if (options.filter === "unread" && unreadCount(workspace) === 0) {
-      return false;
-    }
-    if (
-      options.filter === "attention" &&
-      task?.ci !== "Failure" &&
-      task?.ci !== "Mixed" &&
-      task?.review !== "ChangesRequested" &&
-      !task?.needs_reply
-    ) {
-      return false;
-    }
-    if (query.length === 0) {
-      return true;
-    }
-    return [
-      workspace.name,
-      workspace.branch,
-      task?.title,
-      task?.body,
-      task?.repo,
-      taskReference(task),
-      ...workspace.activity.map((activity) => activity.author),
-    ]
-      .filter((value): value is string => value !== null && value !== undefined)
-      .some((value) => value.toLocaleLowerCase().includes(query));
-  });
 }
 
 export function applyWorkspaceEvent(

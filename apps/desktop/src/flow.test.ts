@@ -214,6 +214,7 @@ describe("credential-free desktop workflow", () => {
     }
     snapshot.Snapshot.terminals = [];
     eventChannel().onmessage({ type: "Frame", payload: snapshot });
+    pushInbox([{ number: 42 }]);
     await vi.waitFor(() =>
       expect(element("task-title").textContent).toBe("PR o/r#42"),
     );
@@ -334,6 +335,7 @@ describe("credential-free desktop workflow", () => {
       type: "Frame",
       payload: { Snapshot: { workspaces: [pr(42), pr(43)], terminals: [] } },
     });
+    pushInbox([{ number: 42 }, { number: 43 }]);
     await vi.waitFor(() =>
       expect(document.querySelectorAll(".workspace-row").length).toBe(2),
     );
@@ -621,12 +623,71 @@ function submitEvent(): SubmitEvent {
   return new SubmitEvent("submit", { bubbles: true, cancelable: true });
 }
 
+// `subscribe_events` creates the event channel first, then the inbox
+// channel — so the last two channels are [event, inbox].
 function eventChannel(): { onmessage: (message: unknown) => void } {
-  const channel = harness.channels.at(-1);
+  const channel = harness.channels.at(-2);
   if (channel === undefined) {
     throw new Error("missing desktop event channel");
   }
   return channel;
+}
+
+function inboxChannel(): { onmessage: (message: unknown) => void } {
+  const channel = harness.channels.at(-1);
+  if (channel === undefined) {
+    throw new Error("missing desktop inbox channel");
+  }
+  return channel;
+}
+
+function pushInbox(rows: Array<{ number: number; unread?: number }>): void {
+  inboxChannel().onmessage(inboxViewFor(rows));
+}
+
+function inboxViewFor(rows: Array<{ number: number; unread?: number }>): unknown {
+  return {
+    rows: [
+      { RepoHeader: "o/r" },
+      { KindHeader: "Pr" },
+      ...rows.map((row) => ({ Workspace: `github-o-r-${row.number}` })),
+    ],
+    workspaces: Object.fromEntries(
+      rows.map((row) => [`github-o-r-${row.number}`, workspaceRowFor(row)]),
+    ),
+    summaries: { "o/r": { active: rows.length, attention: 0 } },
+    sort_mode: "ByRoleSplit",
+    sort_label: "split",
+    collapsed: [],
+    total: rows.length,
+    unread_total: rows.reduce((sum, row) => sum + (row.unread ?? 0), 0),
+  };
+}
+
+function workspaceRowFor(row: { number: number; unread?: number }): unknown {
+  return {
+    key: `github-o-r-${row.number}`,
+    title: `PR o/r#${row.number}`,
+    reference: `o/r#${row.number}`,
+    number: row.number,
+    repo: "o/r",
+    kind: "Pr",
+    role: "Author",
+    state: "Open",
+    status: "CiOk",
+    status_label: "CI OK",
+    ci: "Success",
+    review: "None",
+    unread_count: row.unread ?? 0,
+    updated_at: "2026-04-01T12:00:00Z",
+    additions: 0,
+    deletions: 0,
+    labels: [],
+    needs_reply: false,
+    last_commenter: null,
+    session_count: 0,
+    attention: false,
+  };
 }
 
 function commandCalls(): unknown[] {

@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod inbox;
+
 use bytes::Bytes;
+use inbox::InboxModel;
 use lazybox_core::ProviderConfig;
 use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
@@ -11,6 +14,7 @@ use lazybox_server::api_gateway::{
     TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
+use lazybox_tui_core::inbox::{InboxView, SortMode};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::collections::BTreeSet;
@@ -51,6 +55,13 @@ struct DesktopState {
     streams_started: AtomicBool,
     client_runtime: Mutex<Option<ClientRuntime>>,
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// State-of-record for the grouped inbox (#732). Reduced from the
+    /// gateway control stream; the shared `tui-core` logic turns it into
+    /// the `InboxView` emitted to the frontend.
+    inbox: Arc<Mutex<InboxModel>>,
+    /// Frontend channel the recomputed `InboxView` is pushed onto. Set
+    /// once by `subscribe_events`.
+    inbox_channel: Arc<Mutex<Option<Channel<InboxView>>>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -256,7 +267,65 @@ fn record_analytics_best_effort(path: &Path, enabled: bool, event: AnalyticsEven
 
 #[tauri::command]
 async fn list_workspaces(state: State<'_, DesktopState>) -> Result<WorkspacesResponse, String> {
-    list_gateway_workspaces(&state.gateway).await
+    let response = list_gateway_workspaces(&state.gateway).await?;
+    // Seed the inbox model so the first computed view isn't empty while
+    // waiting for the control stream's opening snapshot.
+    state
+        .inbox
+        .lock()
+        .await
+        .seed_workspaces(&response.workspaces);
+    Ok(response)
+}
+
+/// Cycle the inbox sort mode (Recent → ByRole → ByRoleSplit) in the
+/// shared taxonomy and re-emit the recomputed view.
+#[tauri::command]
+async fn cycle_sort_mode(state: State<'_, DesktopState>) -> Result<(), String> {
+    let view = {
+        let mut model = state.inbox.lock().await;
+        model.cycle_sort_mode();
+        model.view(now_utc())
+    };
+    emit_inbox_view(&state, view).await;
+    Ok(())
+}
+
+/// Set the inbox sort mode explicitly (used by tests / a direct picker).
+#[tauri::command]
+async fn set_sort_mode(state: State<'_, DesktopState>, mode: SortMode) -> Result<(), String> {
+    let view = {
+        let mut model = state.inbox.lock().await;
+        model.set_sort_mode(mode);
+        model.view(now_utc())
+    };
+    emit_inbox_view(&state, view).await;
+    Ok(())
+}
+
+/// Collapse / expand a repo group and re-emit the recomputed view.
+#[tauri::command]
+async fn toggle_repo_collapsed(
+    state: State<'_, DesktopState>,
+    label: String,
+) -> Result<(), String> {
+    let view = {
+        let mut model = state.inbox.lock().await;
+        model.toggle_collapsed(&label);
+        model.view(now_utc())
+    };
+    emit_inbox_view(&state, view).await;
+    Ok(())
+}
+
+fn now_utc() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+}
+
+async fn emit_inbox_view(state: &DesktopState, view: InboxView) {
+    if let Some(channel) = state.inbox_channel.lock().await.as_ref() {
+        let _ = channel.send(view);
+    }
 }
 
 async fn list_gateway_workspaces(gateway: &GatewayClient) -> Result<WorkspacesResponse, String> {
@@ -331,17 +400,25 @@ async fn read_terminal_data(
 }
 
 #[tauri::command]
-fn subscribe_events(
+async fn subscribe_events(
     state: State<'_, DesktopState>,
     on_event: Channel<DesktopStreamMessage>,
+    on_inbox: Channel<InboxView>,
 ) -> Result<(), String> {
     if state.streams_started.swap(true, Ordering::AcqRel) {
         return Err("desktop streams are already subscribed".to_string());
     }
 
+    // Register the inbox channel and push the current view immediately so
+    // the frontend has grouped rows before the first stream event lands.
+    *state.inbox_channel.lock().await = Some(on_inbox.clone());
+    let _ = on_inbox.send(state.inbox.lock().await.view(now_utc()));
+
     let control_gateway = state.gateway.clone();
+    let inbox = state.inbox.clone();
+    let inbox_channel = state.inbox_channel.clone();
     tauri::async_runtime::spawn(async move {
-        stream_control_events(control_gateway, on_event).await;
+        stream_control_events(control_gateway, on_event, inbox, inbox_channel).await;
     });
 
     let terminal_gateway = state.gateway.clone();
@@ -393,9 +470,14 @@ async fn decode_response<T: DeserializeOwned>(response: Response) -> Result<T, S
         .map_err(|error| format!("decode gateway response: {error}"))
 }
 
-async fn stream_control_events(gateway: GatewayClient, on_event: Channel<DesktopStreamMessage>) {
+async fn stream_control_events(
+    gateway: GatewayClient,
+    on_event: Channel<DesktopStreamMessage>,
+    inbox: Arc<Mutex<InboxModel>>,
+    inbox_channel: Arc<Mutex<Option<Channel<InboxView>>>>,
+) {
     loop {
-        match stream_control_events_once(&gateway, &on_event).await {
+        match stream_control_events_once(&gateway, &on_event, &inbox, &inbox_channel).await {
             Ok(()) => {
                 let _ = on_event.send(DesktopStreamMessage::Disconnected {
                     message: "gateway control stream ended".to_string(),
@@ -412,6 +494,8 @@ async fn stream_control_events(gateway: GatewayClient, on_event: Channel<Desktop
 async fn stream_control_events_once(
     gateway: &GatewayClient,
     on_event: &Channel<DesktopStreamMessage>,
+    inbox: &Arc<Mutex<InboxModel>>,
+    inbox_channel: &Arc<Mutex<Option<Channel<InboxView>>>>,
 ) -> Result<(), String> {
     let mut response = gateway
         .authorized(gateway.client.get(gateway.url("/v1/events")))
@@ -434,12 +518,24 @@ async fn stream_control_events_once(
     {
         for frame in decoder.push(&chunk)? {
             let JsonServerFrame::Event(event) = frame;
-            if let Some(event) = desktop_event(event)
-                && on_event
+            if let Some(event) = desktop_event(event) {
+                // Reduce into the inbox state-of-record and re-emit the
+                // grouped view when the workspace/agent maps changed.
+                let recomputed = {
+                    let mut model = inbox.lock().await;
+                    model.apply(&event).then(|| model.view(now_utc()))
+                };
+                if let Some(view) = recomputed
+                    && let Some(channel) = inbox_channel.lock().await.as_ref()
+                {
+                    let _ = channel.send(view);
+                }
+                if on_event
                     .send(DesktopStreamMessage::Frame(Box::new(event)))
                     .is_err()
-            {
-                return Ok(());
+                {
+                    return Ok(());
+                }
             }
         }
     }
@@ -855,6 +951,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     let repositories = configured_repositories(&user_config);
     let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
+    let inbox = InboxModel::new(user_config.attention.clone(), inbox_projects(&repositories));
 
     Ok(DesktopState {
         gateway,
@@ -868,7 +965,30 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         streams_started: AtomicBool::new(false),
         client_runtime: Mutex::new(Some(client_runtime)),
         gateway_task: Mutex::new(Some(gateway_task)),
+        inbox: Arc::new(Mutex::new(inbox)),
+        inbox_channel: Arc::new(Mutex::new(None)),
     })
+}
+
+/// Synthesize a project record per configured repository so the grouped
+/// inbox emits a header for a subscribed repo even before its first
+/// workspace arrives — matching the TUI's "subscribed but empty" rows.
+fn inbox_projects(
+    repositories: &[DesktopRepository],
+) -> std::collections::BTreeMap<lazybox_core::ProjectKey, lazybox_core::Project> {
+    repositories
+        .iter()
+        .map(|repository| {
+            (
+                repository.project_key.clone(),
+                lazybox_core::Project::new(
+                    repository.project_key.clone(),
+                    repository.label.clone(),
+                    now_utc(),
+                ),
+            )
+        })
+        .collect()
 }
 
 fn validate_protocol(protocol: &ProtocolResponse) -> Result<(), String> {
@@ -920,6 +1040,9 @@ fn main() {
             save_desktop_settings,
             record_analytics,
             list_workspaces,
+            cycle_sort_mode,
+            set_sort_mode,
+            toggle_repo_collapsed,
             send_command,
             send_terminal_frame,
             read_terminal_data,

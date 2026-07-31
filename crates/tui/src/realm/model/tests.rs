@@ -13824,6 +13824,54 @@ mod mutation_failure_notice_tests {
         ));
     }
 
+    /// A user-initiated mutation is emitted on the wire as a `retryable`
+    /// `ProviderError` (same kind as a self-healing sync transient). It
+    /// must be handled ONLY by its own actionable branch and never leak
+    /// into the sync-poll surface — otherwise a mutation rejection that
+    /// coincides with a manual refresh would consume the sync refresh
+    /// acknowledgment (and, in the general case, risk being swallowed by
+    /// the quiet transient path). Regression guard for the overloaded
+    /// `retryable` kind (#730 review finding 2).
+    #[test]
+    fn mutation_failure_never_leaks_into_the_sync_poll_surface() {
+        let mut m = build_model();
+        m.status.polling = None;
+        // User hit Shift-R and is waiting on the sync result.
+        m.pending_refresh_ack = true;
+
+        // A reviewer mutation the daemon rejected, carried (like every
+        // mutation) as a `retryable` ProviderError.
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "reviewers".into(),
+            message: "GraphQL said no".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+
+        // It surfaces loudly through the mutation branch — never demoted
+        // to a quiet transient.
+        let n = m
+            .status
+            .notice
+            .as_ref()
+            .expect("mutation rejection must surface");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.contains("request reviewers failed"),
+            "must name the action, got {:?}",
+            n.message,
+        );
+        // The mutation is not a sync attempt, so it must not arm the
+        // sync-error banner tag…
+        assert!(m.sync_error_source.is_none());
+        // …nor consume the pending sync refresh — that acknowledgment
+        // belongs to the poll, which hasn't reported yet.
+        assert!(
+            m.pending_refresh_ack,
+            "a mutation rejection must not consume the sync refresh ack"
+        );
+    }
+
     /// #730: a live `retryable` transient the daemon is auto-retrying
     /// must NOT raise the red "✗ sync failed" banner — that noise buries
     /// the failures the user must act on. The spinner still clears (the

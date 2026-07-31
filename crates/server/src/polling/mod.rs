@@ -74,7 +74,7 @@ use crate::ServerConfig;
 use chrono::Utc;
 use futures::FutureExt;
 use lazybox_core::{Task, Workspace, WorkspaceKey};
-use lazybox_ipc::Event;
+use lazybox_ipc::{Event, ProviderErrorKind};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -1045,7 +1045,7 @@ impl TickState {
         source_key: &str,
         error: &lazybox_core::ProviderError,
     ) {
-        let (kind, message): (&str, String) = if error.is_retryable() {
+        let (kind, message): (ProviderErrorKind, String) = if error.is_retryable() {
             let streak = self
                 .retryable_streak
                 .entry(source_key.to_string())
@@ -1053,29 +1053,33 @@ impl TickState {
             *streak += 1;
             if *streak >= RETRYABLE_EXHAUSTION_ATTEMPTS {
                 (
-                    "exhausted",
+                    ProviderErrorKind::Exhausted,
                     format!(
                         "{source} sync failing — check your connection or token",
                         source = error.source()
                     ),
                 )
             } else {
-                ("retryable", error.user_message())
+                (ProviderErrorKind::Retryable, error.user_message())
             }
         } else {
             // A definitive (auth/permanent) failure breaks the retryable
             // streak — a later transient starts counting fresh.
             self.retryable_streak.remove(source_key);
-            let kind = if error.is_auth() { "auth" } else { "permanent" };
+            let kind = if error.is_auth() {
+                ProviderErrorKind::Auth
+            } else {
+                ProviderErrorKind::Permanent
+            };
             (kind, error.user_message())
         };
         // Retryable/exhausted collapse onto stable sentinels so a churning
         // message fires once; auth/permanent key on their real message so
         // a genuine change of condition still re-surfaces.
         let dedupe_key = match kind {
-            "retryable" => RETRYABLE_DEDUPE_KEY,
-            "exhausted" => EXHAUSTED_DEDUPE_KEY,
-            _ => message.as_str(),
+            ProviderErrorKind::Retryable => RETRYABLE_DEDUPE_KEY,
+            ProviderErrorKind::Exhausted => EXHAUSTED_DEDUPE_KEY,
+            ProviderErrorKind::Auth | ProviderErrorKind::Permanent => message.as_str(),
         };
         if self.last_error.get(source_key).map(String::as_str) == Some(dedupe_key) {
             return;
@@ -1086,7 +1090,7 @@ impl TickState {
             source: error.source().to_string(),
             message,
             detail: error.diagnostic(),
-            kind: kind.to_string(),
+            kind: kind.as_str().to_string(),
         });
     }
 
@@ -1507,13 +1511,21 @@ pub async fn tick_with_state(
                                 i + 1,
                                 UPSERT_TIMEOUT_PER_TASK.as_secs(),
                             );
+                            // A single task's upsert timing out is a
+                            // per-task hiccup, NOT a sync-stuck signal: the
+                            // fetch itself succeeded, so this deliberately
+                            // does not feed the exhaustion streak (and could
+                            // not — the successful fetch calls `clear_error`
+                            // below, resetting it). Emitted as a plain quiet
+                            // `retryable` status; the TUI keeps it off the
+                            // error banner (#730).
                             let _ = config.bus.send(Event::ProviderError {
                                 source: source.name().to_string(),
                                 message: format!(
                                     "upsert timed out on {task_id} — task skipped this tick"
                                 ),
                                 detail: "see /tmp/lazybox.log for the slow step".into(),
-                                kind: "retryable".into(),
+                                kind: ProviderErrorKind::Retryable.as_str().to_string(),
                             });
                         }
                     }
@@ -2170,11 +2182,20 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                     tracing::error!(
                         "polling: tick #{tick_n} PANICKED: {msg} — loop will continue at next interval"
                     );
+                    // A caught poll-cycle panic is a code bug, not something
+                    // the user can remediate — escalating it to the
+                    // exhaustion path would mislabel it "check your
+                    // connection or token", and the `TickState` lives inside
+                    // the panicked future (checked out of `poll_state`) and
+                    // is not safely reachable here anyway. It stays a quiet
+                    // `retryable` status for parity with other self-healing
+                    // hiccups; the error-level log above is the developer
+                    // signal (#730).
                     let _ = config.bus.send(Event::ProviderError {
                         source: "github".into(),
                         message: format!("poll cycle crashed: {msg}"),
                         detail: msg,
-                        kind: "retryable".into(),
+                        kind: ProviderErrorKind::Retryable.as_str().to_string(),
                     });
                     TickSummary::default()
                 }
@@ -2519,17 +2540,26 @@ async fn run_tick_inner(
                 "tick_with_state TIMED OUT after {}s — abandoning this tick, next interval will retry",
                 TICK_OVERALL_TIMEOUT.as_secs()
             );
-            let _ = config.bus.send(Event::ProviderError {
-                source: "github".into(),
-                message: format!(
-                    "sync exceeded {}s — see /tmp/lazybox.log for the slow step",
-                    TICK_OVERALL_TIMEOUT.as_secs()
+            // A whole tick overrunning the outer cap IS a sync failure —
+            // route it through the same debounced/escalating path as a
+            // fetch error (not a raw per-tick broadcast) so it coalesces
+            // to one quiet status and, if it keeps happening, escalates to
+            // an actionable `exhausted` error once retries run out (#730).
+            // The timed-out future has been dropped by `.await`, so its
+            // `&mut state` borrow is released and `state` is usable here.
+            state.broadcast_error_debounced(
+                &config.bus,
+                lazybox_gh::SOURCE,
+                &lazybox_core::ProviderError::retryable(
+                    lazybox_gh::SOURCE,
+                    format!(
+                        "sync exceeded {}s — the per-upsert / per-graphql / per-git \
+                         timeouts should catch this; hitting the outer cap means \
+                         something escaped them",
+                        TICK_OVERALL_TIMEOUT.as_secs()
+                    ),
                 ),
-                detail: "the per-upsert / per-graphql / per-git timeouts should catch this; \
-                         hitting the outer cap means something escaped them"
-                    .into(),
-                kind: "retryable".into(),
-            });
+            );
             // Hard-timeout path: NOT a clean view of scope, so leave
             // `all_full = false` to keep rescope conservative.
             TickOutcome {

@@ -12,7 +12,7 @@ use crate::ServerConfig;
 use chrono::Utc;
 use lazybox_core::{AutoFixKind, FetchCoverage, ProviderConfig, Task, WorkspaceKey};
 use lazybox_gh::GhClient;
-use lazybox_ipc::Event;
+use lazybox_ipc::{Event, ProviderErrorKind};
 use lazybox_linear::LinearClient;
 use std::future::Future;
 use std::pin::Pin;
@@ -642,11 +642,14 @@ impl GhSource {
         // user silently loses half their inbox until the next tick
         // maybe recovers.
         if let Some(msg) = partial_warning {
+            // A partial sweep still returned OK (one side's rows), so this
+            // is not a sync-stuck signal and stays a quiet `retryable`
+            // status rather than escalating (#730).
             let _ = self.bus.send(Event::ProviderError {
                 source: "github".into(),
                 message: format!("partial sync — {msg}"),
                 detail: "see /tmp/lazybox.log for the full error".into(),
-                kind: "retryable".into(),
+                kind: ProviderErrorKind::Retryable.as_str().to_string(),
             });
         }
 

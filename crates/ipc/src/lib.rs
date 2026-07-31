@@ -2209,6 +2209,31 @@ impl ProviderErrorKind {
             Self::Permanent => "permanent",
         }
     }
+
+    /// Parse the wire `kind` string back into the classification.
+    /// Inverse of [`as_str`](Self::as_str) — the one place these strings
+    /// are matched, so consumers reason over the enum instead of raw
+    /// literals. An empty (uncategorized/legacy) or unrecognized value
+    /// maps to [`Permanent`](Self::Permanent) — the safe default, since
+    /// an unknown failure is surfaced rather than silently swallowed.
+    pub fn from_wire(kind: &str) -> Self {
+        match kind {
+            "retryable" => Self::Retryable,
+            "exhausted" => Self::Exhausted,
+            "auth" => Self::Auth,
+            _ => Self::Permanent,
+        }
+    }
+
+    /// Whether this failure needs the user to act on it *now* — the flag
+    /// that decides the footer surface (#730). A [`Retryable`](Self::Retryable)
+    /// transient the daemon is still auto-retrying is self-healing and
+    /// stays a quiet status; everything else (retries [`Exhausted`](Self::Exhausted),
+    /// [`Auth`](Self::Auth), [`Permanent`](Self::Permanent)) is actionable
+    /// and earns a real error surface.
+    pub fn is_actionable(self) -> bool {
+        !matches!(self, Self::Retryable)
+    }
 }
 
 /// A single phase of first-time worktree provisioning, reported by
@@ -3205,6 +3230,40 @@ mod transport_admission_tests {
             Command::Subscribe.into_write_chunks().as_slice(),
             [Command::Subscribe]
         ));
+    }
+
+    /// `from_wire` round-trips every `as_str`, unknown/empty wire values
+    /// default to the actionable `Permanent`, and `is_actionable` marks
+    /// exactly the self-healing `Retryable` transient as quiet (#730).
+    #[test]
+    fn provider_error_kind_wire_roundtrip_and_actionability() {
+        for kind in [
+            ProviderErrorKind::Retryable,
+            ProviderErrorKind::Exhausted,
+            ProviderErrorKind::Auth,
+            ProviderErrorKind::Permanent,
+        ] {
+            assert_eq!(ProviderErrorKind::from_wire(kind.as_str()), kind);
+        }
+        // Legacy/uncategorized and unrecognized values are surfaced, not
+        // swallowed.
+        assert_eq!(
+            ProviderErrorKind::from_wire(""),
+            ProviderErrorKind::Permanent
+        );
+        assert_eq!(
+            ProviderErrorKind::from_wire("garbage"),
+            ProviderErrorKind::Permanent
+        );
+
+        assert!(!ProviderErrorKind::Retryable.is_actionable());
+        assert!(ProviderErrorKind::Exhausted.is_actionable());
+        assert!(ProviderErrorKind::Auth.is_actionable());
+        assert!(ProviderErrorKind::Permanent.is_actionable());
+        // An unknown kind is treated as actionable (via the Permanent
+        // fallback) so a producer/consumer version skew never hides a
+        // failure behind the quiet path.
+        assert!(ProviderErrorKind::from_wire("future-kind").is_actionable());
     }
 
     /// The const decimal parser must agree with std's on the actual

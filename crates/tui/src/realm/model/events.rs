@@ -1739,34 +1739,37 @@ impl<T: TerminalAdapter> Model<T> {
                         // key; one naming no pending removal keeps its
                         // quiet sync-log-only handling.
                         self.flash_error(format!("✗ delete failed — {message}"));
-                    }
-                    // A failed in-flight poll owns an explicit footer
-                    // state until that provider recovers. Manual
-                    // refreshes use the same state even if their
-                    // progress event was missed.
-                    //
-                    // But a `retryable` transient is self-healing — the
-                    // daemon is still auto-retrying — so it must NOT raise
-                    // the red "✗ sync failed" banner that buries the errors
-                    // the user must actually act on (#730). Only an
-                    // actionable failure (retries `exhausted`, auth,
-                    // permanent) escalates to the banner; a live transient
-                    // gives calm, auto-fading feedback on an explicit
-                    // refresh and stays silent on background cycles (the
-                    // attempt is still in the Shift-D sync log either way).
-                    if self.pending_refresh_ack || poll_failed {
+                    } else if self.pending_refresh_ack || poll_failed {
+                        // A genuine sync-poll failure — reached only when
+                        // the branches above did NOT already own this error
+                        // (spawn / mutation / repo-labels / optimistic
+                        // rollback), so an actionable mutation rejection can
+                        // never be silently swallowed by the transient path
+                        // below. A failed in-flight poll owns an explicit
+                        // footer state until that provider recovers; manual
+                        // refreshes use the same state even if their
+                        // progress event was missed.
+                        //
+                        // A `retryable` transient is self-healing — the
+                        // daemon is still auto-retrying — so it must NOT
+                        // raise the red "✗ sync failed" banner that buries
+                        // the errors the user must actually act on (#730).
+                        // Only an actionable failure (retries `exhausted`,
+                        // auth, permanent) escalates to the banner; a live
+                        // transient gives calm, auto-fading feedback on an
+                        // explicit refresh and stays silent on background
+                        // cycles (the attempt is still in the Shift-D sync
+                        // log either way).
                         let was_manual = std::mem::take(&mut self.pending_refresh_ack);
-                        if kind == "retryable" {
-                            if was_manual {
-                                self.flash(
-                                    format!("⟳ {message}"),
-                                    crate::realm::components::footer::NoticeSeverity::Retryable,
-                                );
-                            }
-                        } else {
+                        if lazybox_ipc::ProviderErrorKind::from_wire(kind).is_actionable() {
                             self.flash_sync_error(
                                 source,
                                 format!("✗ sync failed — {source}: {message}"),
+                            );
+                        } else if was_manual {
+                            self.flash(
+                                format!("⟳ {message}"),
+                                crate::realm::components::footer::NoticeSeverity::Retryable,
                             );
                         }
                     }

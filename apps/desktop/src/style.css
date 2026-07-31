@@ -930,7 +930,12 @@ dialog::backdrop {
 }
 
 .analytics-choice {
+  display: grid;
   grid-template-columns: auto minmax(0, 1fr);
+  gap: 7px;
+  color: #c2cdd0;
+  font-size: 11px;
+  font-weight: 650;
 }
 
 .analytics-choice input {
@@ -945,6 +950,56 @@ dialog::backdrop {
   font-size: 9px;
   font-weight: 450;
   line-height: 1.45;
+}
+
+.setup-grid-title {
+  grid-column: 1 / -1;
+  margin: 0 !important;
+}
+
+.theme-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.theme-swatch {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #303b43;
+  border-radius: 9px;
+  background: var(--swatch-surface, #151b22);
+  color: var(--swatch-text, #d2dcdf);
+  text-align: left;
+  cursor: pointer;
+}
+
+.theme-swatch:hover {
+  border-color: var(--swatch-accent, #48635d);
+}
+
+.theme-swatch.selected {
+  border-color: var(--swatch-accent, #79d1b7);
+  box-shadow: 0 0 0 1px var(--swatch-accent, #79d1b7);
+}
+
+.theme-swatch-dots {
+  display: flex;
+  gap: 5px;
+}
+
+.theme-swatch-dots span {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.25);
+}
+
+.theme-swatch-name {
+  font-size: 10px;
+  font-weight: 650;
 }
 
 .dialog-error {

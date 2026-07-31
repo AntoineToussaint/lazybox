@@ -244,6 +244,50 @@
             <span id="agent-setup-title">3. Default agent</span>
             <select id="default-agent-select"></select>
           </label>
+          <label id="default-model-field">
+            <span>Default model</span>
+            <select id="default-model-select"></select>
+          </label>
+        </section>
+
+        <section class="setup-section" aria-labelledby="appearance-title">
+          <div class="setup-section-heading">
+            <div>
+              <h3 id="appearance-title">Appearance</h3>
+              <p>Pick a theme. The change applies immediately and persists to
+                the shared <code>ui.theme</code>.</p>
+            </div>
+            <span id="keymap-preset-label" class="setup-badge">Keymap: default</span>
+          </div>
+          <div
+            id="theme-list"
+            class="theme-list"
+            role="radiogroup"
+            aria-label="Color theme"
+          ></div>
+        </section>
+
+        <section class="setup-section setup-grid" aria-labelledby="workspace-title">
+          <h3 id="workspace-title" class="setup-grid-title">Workspace</h3>
+          <label>
+            <span>New terminal opens as</span>
+            <select id="terminal-layout-select">
+              <option value="split">Split tile</option>
+              <option value="tabs">Tab</option>
+            </select>
+          </label>
+          <label>
+            <span>Activity pane default</span>
+            <select id="activity-pane-select">
+              <option value="full">Full feed</option>
+              <option value="summary">Summary line</option>
+              <option value="hidden">Hidden</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="setup-section" aria-labelledby="privacy-title">
+          <h3 id="privacy-title">Privacy</h3>
           <label class="analytics-choice">
             <input id="analytics-enabled" type="checkbox" />
             <span>
@@ -260,7 +304,7 @@
         <div class="dialog-footer">
           <span id="diagnostics-path"></span>
           <button id="save-settings-button" class="primary-button" type="submit">
-            Save and restart
+            Save settings
           </button>
         </div>
       </form>

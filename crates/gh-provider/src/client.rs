@@ -1791,6 +1791,18 @@ impl GhClient {
             .restore_cursors(cursors, chrono::Utc::now());
     }
 
+    /// Durable rate/throttle state for persistence. See
+    /// [`crate::rate_budget::PersistedRateState`].
+    pub fn persisted_rate_state(&self) -> crate::rate_budget::PersistedRateState {
+        self.budget.lock().persisted_state()
+    }
+
+    /// Reload durable rate/throttle state at startup so a fresh daemon
+    /// resumes respecting the limits it learned before the restart.
+    pub fn restore_rate_state(&self, state: crate::rate_budget::PersistedRateState) {
+        self.budget.lock().restore(state);
+    }
+
     /// How long to use the full-sweep fallback after a heartbeat
     /// failure. The governor still admits each fallback unit; this
     /// window prevents retrying the broken REST heartbeat every tick.
@@ -4270,6 +4282,31 @@ mod tests {
 
     fn graphql_error(message: &str) -> GhError {
         GhError::Graphql(message.to_string())
+    }
+
+    #[tokio::test]
+    async fn rate_state_persists_and_restores_through_the_client() {
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let source =
+            GhClient::stub_with_rate_limit_for_tests("cmd", "fp", 4200, 5000, reset_at).unwrap();
+        let state = source.persisted_rate_state();
+        assert!(
+            state
+                .resources
+                .iter()
+                .any(|r| r.resource == "graphql" && r.remaining == 4200)
+        );
+
+        let fresh = GhClient::stub_for_tests("cmd", "fp").unwrap();
+        fresh.restore_rate_state(state);
+        let graphql = fresh
+            .rate_snapshot()
+            .resources
+            .into_iter()
+            .find(|r| r.resource == "graphql")
+            .expect("graphql resource restored");
+        assert_eq!(graphql.remaining, 4200);
+        assert_eq!(graphql.limit, 5000);
     }
 
     #[test]

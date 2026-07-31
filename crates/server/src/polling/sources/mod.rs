@@ -440,6 +440,22 @@ impl GhSource {
         }
     }
 
+    async fn persist_rate_state(&self) {
+        let Some(store) = self.cursor_store.clone() else {
+            return;
+        };
+        let key = format!("github:rate-state:v1:{}", self.client.username());
+        let state = self.client.persisted_rate_state();
+        let Ok(payload) = serde_json::to_string(&state) else {
+            return;
+        };
+        match tokio::task::spawn_blocking(move || store.set_kv(&key, &payload)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!("persist GitHub rate state failed: {error}"),
+            Err(error) => tracing::warn!("persist GitHub rate state task failed: {error}"),
+        }
+    }
+
     fn set_retry_after_secs(&self, retry_after_secs: Option<u64>) {
         *self.retry_after_secs.lock() = retry_after_secs;
     }
@@ -1516,6 +1532,7 @@ impl TaskSource for GhSource {
             log_rate_budget(&governor);
             self.emit_progress(format!("Governor: {governor}"));
             self.persist_sync_cursors().await;
+            self.persist_rate_state().await;
             result
         })
     }
@@ -2458,6 +2475,34 @@ pub(super) async fn sources_for_with_engagement(
                                 }
                                 Err(error) => {
                                     tracing::warn!("load GitHub sync cursors task failed: {error}")
+                                }
+                            }
+                        }
+                        // Reload the rate/throttle state BEFORE the
+                        // governor's first `begin_background_tick` below so
+                        // a restarted daemon resumes respecting the primary
+                        // budget, secondary cooldown, and backoff level it
+                        // learned last run instead of re-bursting into the
+                        // same throttle.
+                        if restore_sync_cursors && let Some(store) = cursor_store.clone() {
+                            let key = format!("github:rate-state:v1:{}", client.username());
+                            match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
+                                Ok(Ok(Some(payload))) => {
+                                    match serde_json::from_str::<lazybox_gh::PersistedRateState>(
+                                        &payload,
+                                    ) {
+                                        Ok(state) => client.restore_rate_state(state),
+                                        Err(error) => tracing::warn!(
+                                            "parse persisted GitHub rate state failed: {error}"
+                                        ),
+                                    }
+                                }
+                                Ok(Ok(None)) => {}
+                                Ok(Err(error)) => {
+                                    tracing::warn!("load GitHub rate state failed: {error}")
+                                }
+                                Err(error) => {
+                                    tracing::warn!("load GitHub rate state task failed: {error}")
                                 }
                             }
                         }

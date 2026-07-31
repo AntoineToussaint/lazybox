@@ -65,6 +65,51 @@ pub struct RemoteRateLimit {
     pub observed_at: Instant,
 }
 
+/// Durable slice of the rate/throttle state — everything an admission
+/// decision needs that is anchored to wall-clock time (and so survives a
+/// process restart) rather than to a monotonic `Instant`. The local
+/// token bucket and latency samples are deliberately omitted: they refill
+/// or repopulate within seconds and mean nothing across a restart. The
+/// server persists this per authenticated user and reloads it at startup
+/// so a fresh daemon resumes respecting the primary budget, secondary
+/// cooldown, external-usage estimate, and backoff level it already
+/// learned instead of re-bursting into the same throttle.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedRateState {
+    #[serde(default)]
+    pub resources: Vec<PersistedResource>,
+    #[serde(default)]
+    pub secondary_circuit: Option<PersistedCircuit>,
+    #[serde(default)]
+    pub primary_circuits: Vec<PersistedCircuit>,
+    #[serde(default)]
+    pub secondary_failures: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedResource {
+    pub resource: String,
+    pub remaining: u32,
+    pub limit: u32,
+    pub used: u32,
+    pub reset_at: DateTime<Utc>,
+    /// Estimated non-daemon burn (interactive `gh`, spawned agents) on
+    /// the shared token, in points per second. Carrying it over keeps
+    /// contention awareness from resetting to zero on restart.
+    pub external_burn_per_sec: f64,
+}
+
+/// A persisted circuit. `resource` is the primary bucket key (`core`,
+/// `graphql`, …); it is empty and ignored for the single global
+/// secondary circuit.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PersistedCircuit {
+    #[serde(default)]
+    pub resource: String,
+    pub reason: String,
+    pub retry_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AcquireError {
     LocalBudgetExhausted {
@@ -1110,6 +1155,90 @@ impl RateBudget {
         }
     }
 
+    /// Capture the wall-clock-anchored state for durable storage. See
+    /// [`PersistedRateState`].
+    pub fn persisted_state(&self) -> PersistedRateState {
+        PersistedRateState {
+            resources: self
+                .resources
+                .iter()
+                .map(|(resource, state)| PersistedResource {
+                    resource: resource.clone(),
+                    remaining: state.remaining,
+                    limit: state.limit,
+                    used: state.used,
+                    reset_at: state.reset_at,
+                    external_burn_per_sec: state.external_burn_per_sec,
+                })
+                .collect(),
+            secondary_circuit: self
+                .secondary_circuit
+                .as_ref()
+                .map(|circuit| PersistedCircuit {
+                    resource: String::new(),
+                    reason: circuit.reason.clone(),
+                    retry_at: circuit.retry_at,
+                }),
+            primary_circuits: self
+                .primary_circuits
+                .iter()
+                .map(|(resource, circuit)| PersistedCircuit {
+                    resource: resource.clone(),
+                    reason: circuit.reason.clone(),
+                    retry_at: circuit.retry_at,
+                })
+                .collect(),
+            secondary_failures: self.secondary_failures,
+        }
+    }
+
+    /// Reload durable state into a freshly-constructed budget at startup.
+    /// Monotonic anchors (`observed_at`, external-burn baselines) are
+    /// re-based to now; the reset/retry timestamps are wall-clock and
+    /// carry over verbatim. An already-expired reset or cooldown is left
+    /// in place — the normal expiry paths (`begin_background_tick`,
+    /// `expire_circuits`) drop it on the next tick, so a stale entry only
+    /// ever fails safe.
+    pub fn restore(&mut self, state: PersistedRateState) {
+        self.restore_at(state, Instant::now());
+    }
+
+    fn restore_at(&mut self, state: PersistedRateState, mono_now: Instant) {
+        for resource in state.resources {
+            self.resources.insert(
+                resource.resource,
+                ResourceState {
+                    remaining: resource.remaining,
+                    limit: resource.limit,
+                    used: resource.used,
+                    reset_at: resource.reset_at,
+                    observed_at: mono_now,
+                    external_burn_per_sec: resource.external_burn_per_sec,
+                    external_baseline_used: resource.used,
+                    external_baseline_remaining: resource.remaining,
+                    external_baseline_at: mono_now,
+                    external_baseline_local_completed: 0,
+                },
+            );
+        }
+        if let Some(circuit) = state.secondary_circuit {
+            self.secondary_circuit = Some(CircuitState {
+                reason: circuit.reason,
+                retry_at: circuit.retry_at,
+            });
+        }
+        for circuit in state.primary_circuits {
+            self.primary_circuits.insert(
+                circuit.resource,
+                CircuitState {
+                    reason: circuit.reason,
+                    retry_at: circuit.retry_at,
+                },
+            );
+        }
+        self.secondary_failures = state.secondary_failures;
+    }
+
     fn clone_for_snapshot(&self) -> Self {
         Self {
             capacity: self.capacity,
@@ -1723,5 +1852,130 @@ mod tests {
         budget.note_items_changed(3);
         assert_eq!(budget.snapshot().tick.items, 3);
         assert_eq!(budget.snapshot().total.items, 3);
+    }
+
+    #[test]
+    fn persisted_state_round_trips_through_json_and_restore() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let reset_at = wall_now + chrono::Duration::hours(1);
+        let mut budget = RateBudget::new(100, 6000.0);
+        // A primary window with observed external burn, plus a live
+        // secondary cooldown with an escalated backoff level.
+        budget.observe_primary("graphql", 5000, 5000, 0, reset_at, mono_now);
+        budget.observe_primary(
+            "graphql",
+            5000,
+            4400,
+            600,
+            reset_at,
+            mono_now + Duration::from_secs(60),
+        );
+        budget.observe_secondary_limit(None, wall_now);
+        budget.observe_secondary_limit(None, wall_now);
+
+        let state = budget.persisted_state();
+        let payload = serde_json::to_string(&state).expect("serialize");
+        let decoded: PersistedRateState = serde_json::from_str(&payload).expect("deserialize");
+        assert_eq!(decoded, state);
+
+        let mut restored = RateBudget::new(100, 6000.0);
+        restored.restore_at(decoded, mono_now + Duration::from_secs(120));
+
+        let graphql = restored
+            .snapshot()
+            .resources
+            .into_iter()
+            .find(|resource| resource.resource == "graphql")
+            .expect("graphql resource restored");
+        assert_eq!(graphql.remaining, 4400);
+        assert_eq!(graphql.limit, 5000);
+        // Contention awareness (ext/h) survives the restart.
+        assert!(graphql.external_burn_per_hour > 0.0);
+        assert_eq!(restored.secondary_failures, 2);
+    }
+
+    #[test]
+    fn restored_secondary_cooldown_blocks_until_it_expires() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let mut source = RateBudget::new(100, 6000.0);
+        let retry_at = source.observe_secondary_limit(None, wall_now);
+        assert!(retry_at > wall_now);
+
+        let mut restored = RateBudget::new(100, 6000.0);
+        restored.restore_at(source.persisted_state(), mono_now);
+        // A fresh daemon must NOT fire until the persisted cooldown expires.
+        assert!(matches!(
+            restored.admit_at(
+                ApiResource::Graphql,
+                "post-restart",
+                RequestPriority::Interactive,
+                1,
+                wall_now,
+                mono_now,
+            ),
+            Err(AcquireError::CircuitOpen { .. })
+        ));
+        // Once the window passes, admission resumes.
+        assert!(
+            restored
+                .admit_at(
+                    ApiResource::Graphql,
+                    "after-cooldown",
+                    RequestPriority::Interactive,
+                    1,
+                    retry_at + chrono::Duration::seconds(1),
+                    mono_now,
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn restored_backoff_level_escalates_instead_of_resetting() {
+        let wall_now = Utc::now();
+        let mut source = RateBudget::new(100, 6000.0);
+        source.observe_secondary_limit(None, wall_now);
+        source.observe_secondary_limit(None, wall_now);
+
+        let mut restored = RateBudget::new(100, 6000.0);
+        restored.restore(source.persisted_state());
+        // The third throttle after restart must back off further than a
+        // first-ever throttle (60s) would — proving the level carried over.
+        let escalated = restored.observe_secondary_limit(None, wall_now);
+        assert!(escalated >= wall_now + chrono::Duration::seconds(240));
+
+        let mut fresh = RateBudget::new(100, 6000.0);
+        let first = fresh.observe_secondary_limit(None, wall_now);
+        assert!(first < wall_now + chrono::Duration::seconds(120));
+    }
+
+    #[test]
+    fn restored_external_burn_shrinks_the_next_allowance() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let reset_at = wall_now + chrono::Duration::hours(1);
+        let persisted = PersistedRateState {
+            resources: vec![PersistedResource {
+                resource: "graphql".to_string(),
+                remaining: 5000,
+                limit: 5000,
+                used: 0,
+                reset_at,
+                external_burn_per_sec: 1.0,
+            }],
+            ..Default::default()
+        };
+        let mut with_burn = RateBudget::new(100, 6000.0);
+        with_burn.restore_at(persisted, mono_now);
+        let contended =
+            with_burn.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
+
+        let mut without_burn = RateBudget::new(100, 6000.0);
+        without_burn.observe_primary("graphql", 5000, 5000, 0, reset_at, mono_now);
+        let idle = without_burn.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
+
+        assert!(contended.graphql_points < idle.graphql_points);
     }
 }

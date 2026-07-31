@@ -1923,6 +1923,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenEditor => Action::OpenEditor,
         ActionKind::ViewDiff => Action::ViewDiff,
         ActionKind::NewWorkspace => Action::NewWorkspace,
+        ActionKind::RenameWorkspace => Action::RenameWorkspace,
         ActionKind::NewProject => Action::NewProject,
         ActionKind::ImportCheckout => Action::ImportCheckout,
         ActionKind::AddScanRoot => Action::AddScanRoot,

@@ -1303,6 +1303,16 @@ pub enum Command {
     CancelAgentReauthentication {
         terminal_id: TerminalId,
     },
+    /// Rename a workspace's display name (issue #744). The daemon loads
+    /// the workspace, replaces its `name`, and re-broadcasts
+    /// `WorkspaceUpserted` (like `SetNotes`), so attached TUIs update the
+    /// sidebar label. Only the display name changes — the workspace key
+    /// and any session worktrees are left untouched. Appended last
+    /// (bincode is ordinal-sensitive).
+    RenameWorkspace {
+        session_key: SessionKey,
+        name: String,
+    },
 }
 
 impl Command {

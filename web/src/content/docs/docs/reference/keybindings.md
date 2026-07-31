@@ -196,6 +196,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | Chord | Action |
 | --- | --- |
 | `x n` | new workspace |
+| `x R` | rename |
 | `x p` | new project |
 | `x i` | import checkout |
 | `x r` | add scan root |

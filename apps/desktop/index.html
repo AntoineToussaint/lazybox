@@ -109,12 +109,13 @@
             </div>
             <button
               id="sort-button"
-              class="quiet-button sort-button"
+              class="sort-button"
               type="button"
-              aria-label="Cycle sort order"
-              title="Cycle sort order (o)"
+              aria-label="Change sort order"
+              title="Change sort order (o)"
             >
-              Sort: <strong id="sort-label">split</strong>
+              <span aria-hidden="true">⇅</span>
+              <span>Sort: <strong id="sort-label">split</strong></span>
             </button>
           </div>
           <div
@@ -224,7 +225,7 @@
         <span id="status-message" role="status" aria-live="polite">
           Loading persisted workspaces…
         </span>
-        <span>↑↓ navigate · ↵ open · r reply · a agent · s shell · ⌘/Ctrl-J snippets</span>
+        <span>↑↓ navigate · ↵ open · o sort · r reply · a agent · s shell · ⌘/Ctrl-J snippets</span>
       </footer>
     </div>
 

@@ -444,13 +444,15 @@ impl GhSource {
         let Some(store) = self.cursor_store.clone() else {
             return;
         };
-        let key = format!("github:rate-state:v1:{}", self.client.username());
-        let state = self.client.persisted_rate_state();
-        let Ok(payload) = serde_json::to_string(&state) else {
+        // Skip the write when nothing persistable changed since the last
+        // confirmed persist (idle notification-only ticks, warm-up).
+        let Some(payload) = self.client.pending_rate_state_payload() else {
             return;
         };
-        match tokio::task::spawn_blocking(move || store.set_kv(&key, &payload)).await {
-            Ok(Ok(())) => {}
+        let key = format!("github:rate-state:v1:{}", self.client.username());
+        let write = payload.clone();
+        match tokio::task::spawn_blocking(move || store.set_kv(&key, &write)).await {
+            Ok(Ok(())) => self.client.mark_rate_state_persisted(payload),
             Ok(Err(error)) => tracing::warn!("persist GitHub rate state failed: {error}"),
             Err(error) => tracing::warn!("persist GitHub rate state task failed: {error}"),
         }

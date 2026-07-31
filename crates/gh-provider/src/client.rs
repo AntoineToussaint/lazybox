@@ -1141,11 +1141,7 @@ impl GhClient {
         T: serde::de::DeserializeOwned,
     {
         let started = std::time::Instant::now();
-        let _permit = self
-            .request_gate
-            .acquire()
-            .await
-            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))?;
+        let _permit = self.request_permit().await?;
         let query = body
             .get("query")
             .and_then(serde_json::Value::as_str)
@@ -1338,10 +1334,27 @@ impl GhClient {
     }
 
     async fn request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
-        self.request_gate
+        let permit = self
+            .request_gate
             .acquire()
             .await
-            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))
+            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))?;
+        self.pace().await;
+        Ok(permit)
+    }
+
+    /// Sleep out the governor-computed inter-request gap so request
+    /// starts stay spaced. Runs after the concurrency permit is held so
+    /// the gap paces the requests that are actually about to fire, and
+    /// never holds the (parking_lot) budget lock across the await.
+    async fn pace(&self) {
+        let wait = self
+            .budget
+            .lock()
+            .reserve_request_slot(std::time::Instant::now());
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
     }
 
     fn observe_unreported_response(
@@ -1916,11 +1929,7 @@ impl GhClient {
 
         self.acquire_or_block("notifications heartbeat")?;
         let started = std::time::Instant::now();
-        let _permit = self
-            .request_gate
-            .acquire()
-            .await
-            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))?;
+        let _permit = self.request_permit().await?;
         self.notifications_state.lock().last_poll_at = Some(std::time::Instant::now());
 
         // Capture the saved header BEFORE the request, so the lock is

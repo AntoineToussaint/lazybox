@@ -15,7 +15,7 @@ use lazybox_server::api_gateway::{
     ProtocolResponse, TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
-use lazybox_tui_core::inbox::{InboxView, SortMode};
+use lazybox_tui_core::inbox::{Filter, InboxView, SortMode};
 use lazybox_tui_core::snippets::{PickerRow, SnippetPickerView};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -518,6 +518,32 @@ async fn snippet_view(
     filter: String,
 ) -> Result<SnippetPickerView, String> {
     Ok(state.snippets.lock().await.view(&filter))
+}
+
+/// Replace the active filter set from the multi-select filter menu and
+/// re-emit the recomputed view. An empty list clears all filters.
+#[tauri::command]
+async fn set_filters(state: State<'_, DesktopState>, filters: Vec<Filter>) -> Result<(), String> {
+    let view = {
+        let mut model = state.inbox.lock().await;
+        model.set_filters(filters);
+        model.view(now_utc())
+    };
+    emit_inbox_view(&state, view).await;
+    Ok(())
+}
+
+/// Set the global search query and re-emit the recomputed view. An
+/// empty query clears the search.
+#[tauri::command]
+async fn set_search(state: State<'_, DesktopState>, query: String) -> Result<(), String> {
+    let view = {
+        let mut model = state.inbox.lock().await;
+        model.set_search(query);
+        model.view(now_utc())
+    };
+    emit_inbox_view(&state, view).await;
+    Ok(())
 }
 
 fn now_utc() -> chrono::DateTime<chrono::Utc> {
@@ -1317,6 +1343,8 @@ fn main() {
             set_sort_mode,
             toggle_repo_collapsed,
             snippet_view,
+            set_filters,
+            set_search,
             send_command,
             send_terminal_frame,
             read_terminal_data,

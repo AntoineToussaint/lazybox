@@ -1840,6 +1840,7 @@ impl Sidebar {
     pub fn contextual_bindings(
         &self,
         catalog: &[lazybox_tui_core::action::CatalogEntry],
+        remote: bool,
     ) -> Vec<crate::Binding> {
         use crate::Binding;
         use lazybox_tui_core::action::{
@@ -1910,7 +1911,11 @@ impl Sidebar {
                 actions.push(Action::SpawnAgent(id));
             }
             actions.push(Action::SpawnShell);
-            actions.push(Action::OpenEditor);
+            // The editor launches locally against a server-side worktree
+            // path, so a remote client can't offer it (#742).
+            if !remote {
+                actions.push(Action::OpenEditor);
+            }
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
         }

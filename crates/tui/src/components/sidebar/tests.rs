@@ -2251,7 +2251,7 @@ mod done_alert_tests {
             "workspace row resolves to a group"
         );
 
-        let expanded = sb.contextual_bindings(&catalog);
+        let expanded = sb.contextual_bindings(&catalog, false);
         assert!(
             expanded
                 .iter()
@@ -2262,12 +2262,38 @@ mod done_alert_tests {
         // Fold it — the verb flips to expand.
         sb.toggle_repo_at_cursor();
         assert_eq!(sb.cursor_repo_collapsed(), Some(true), "group is collapsed");
-        let collapsed = sb.contextual_bindings(&catalog);
+        let collapsed = sb.contextual_bindings(&catalog, false);
         assert!(
             collapsed
                 .iter()
                 .any(|b| b.keys == "Space" && b.label == "expand group"),
             "collapsed group → `Space expand group`: {collapsed:?}",
+        );
+    }
+
+    /// The editor action launches locally against a server-side worktree
+    /// path, so a remote (`--connect`) client omits it from the sidebar
+    /// footer hints while a local client keeps it. See #742.
+    #[test]
+    fn editor_footer_hint_hidden_for_remote_client() {
+        let catalog = lazybox_tui_core::action::ActionDef::catalog(
+            &["claude".to_string()],
+            &std::collections::BTreeMap::new(),
+        );
+        let (mut sb, key) = sidebar_with_one_workspace();
+        assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
+
+        assert!(
+            sb.contextual_bindings(&catalog, false)
+                .iter()
+                .any(|b| b.label == "editor"),
+            "local client offers the editor footer hint",
+        );
+        assert!(
+            !sb.contextual_bindings(&catalog, true)
+                .iter()
+                .any(|b| b.label == "editor"),
+            "remote client hides the editor footer hint",
         );
     }
 
@@ -2285,7 +2311,7 @@ mod done_alert_tests {
         let (mut sb, key) = sidebar_with_one_workspace();
         assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
         assert!(
-            !sb.contextual_bindings(&catalog)
+            !sb.contextual_bindings(&catalog, false)
                 .iter()
                 .any(|b| b.label.contains("focus mode")),
             "no agent → no focus-mode footer hint",
@@ -2307,7 +2333,7 @@ mod done_alert_tests {
         sb.recompute_visible();
         assert!(sb.focus_workspace_key(&key));
         assert!(
-            sb.contextual_bindings(&catalog)
+            sb.contextual_bindings(&catalog, false)
                 .iter()
                 .any(|b| b.label.contains("focus mode") && b.keys == "."),
             "agent present → `.` focus-mode footer hint",

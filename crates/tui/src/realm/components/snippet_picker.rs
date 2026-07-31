@@ -41,7 +41,9 @@ use crate::realm::Msg;
 use crate::realm::UserEvent;
 use crate::realm::components::filterable::FilterableList;
 use crate::theme::Theme;
-use lazybox_config::Snippet;
+use lazybox_tui_core::snippets::{
+    RECENT_CAT, auto_submit_index, category_label, compute_visible, resolve_recent,
+};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
@@ -52,67 +54,21 @@ use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
-/// A single picker row — the bits the picker needs to render the list,
-/// the preview pane, and the filter. Carries the full `body` (unlike
-/// the pre-#244 one-line teaser) so the preview pane can show exactly
-/// what will be sent.
-#[derive(Clone, Debug)]
-pub struct PickerRow {
-    pub key: String,
-    pub description: String,
-    pub category: String,
-    pub body: String,
-    pub origin: lazybox_config::SnippetOrigin,
-}
-
-impl PickerRow {
-    pub fn new(key: &str, snippet: &Snippet) -> Self {
-        Self {
-            key: key.to_string(),
-            description: snippet.description.clone(),
-            category: snippet.category.clone(),
-            body: snippet.body.clone(),
-            origin: snippet.origin,
-        }
-    }
-}
-
-/// Category display order: the opinionated built-in groups first (in
-/// the order the issue lists them), then any custom user category
-/// alphabetically, then the empty "Other" bucket last.
-fn category_rank(cat: &str) -> u8 {
-    match cat {
-        "Review" => 0,
-        "Git & PR" => 1,
-        "Testing" => 2,
-        "Debugging" => 3,
-        "Refactor" => 4,
-        "Performance" => 5,
-        "Security" => 6,
-        "Docs" => 7,
-        "Chores" => 8,
-        "" => 254, // "Other" bucket, always last
-        _ => 200,  // custom categories, before Other, sorted by name
-    }
-}
-
-/// Label shown for a group header — empty category renders as "Other",
-/// and the whitespace-sentinel recent group as "Recent".
-fn category_label(cat: &str) -> &str {
-    match cat {
-        "" => "Other",
-        RECENT_CAT => "Recent",
-        other => other,
-    }
-}
+/// The picker's row view-model, category grouping, filter, recent-float,
+/// and the unique-prefix auto-submit are the client-free
+/// [`lazybox_tui_core::snippets`] algorithm (#734) so the TUI and desktop
+/// pickers cannot drift. Re-exported here so the picker's callers keep
+/// naming it `snippet_picker::PickerRow`.
+pub use lazybox_tui_core::snippets::PickerRow;
 
 /// Deterministic per-category accent, so the same category always
 /// draws in the same color across renders (and custom categories get
-/// a stable color too). Every palette entry is a theme color designed
-/// to be legible as *foreground* (accent / success / warn / error are
-/// all used as text elsewhere) — `theme.hover`, a subtle highlight
-/// tint, is deliberately excluded so no category label lands
-/// low-contrast on the picker surface in either theme.
+/// a stable color too). Theme-coupled, so it stays in the render layer.
+/// Every palette entry is a theme color designed to be legible as
+/// *foreground* (accent / success / warn / error are all used as text
+/// elsewhere) — `theme.hover`, a subtle highlight tint, is deliberately
+/// excluded so no category label lands low-contrast on the picker
+/// surface in either theme.
 fn category_color(theme: &Theme, cat: &str) -> Color {
     if cat.is_empty() {
         return theme.text_dim;
@@ -125,36 +81,11 @@ fn category_color(theme: &Theme, cat: &str) -> Color {
     palette[h % palette.len()]
 }
 
-/// Case-insensitive ASCII prefix check that doesn't allocate.
-fn starts_with_icase(haystack: &str, needle: &str) -> bool {
-    let h = haystack.as_bytes();
-    let n = needle.as_bytes();
-    h.len() >= n.len() && h[..n.len()].eq_ignore_ascii_case(n)
-}
-
-/// Case-insensitive ASCII substring check that doesn't allocate — the
-/// filter re-runs on every keystroke, so we scan bytes rather than
-/// lowercasing a fresh `String` per row.
-fn contains_icase(haystack: &str, needle: &str) -> bool {
-    let n = needle.as_bytes();
-    if n.is_empty() {
-        return true;
-    }
-    let h = haystack.as_bytes();
-    h.len() >= n.len() && h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
-}
-
 /// A rendered list line: either a category header or a snippet row.
 enum LayoutItem {
     Header { cat: String, count: usize },
     Row { pos: usize, row_idx: usize },
 }
-
-/// Header label for the most-recently-used group shown at the top of
-/// the picker on an empty filter. A leading space keeps it from
-/// colliding with a real user category of the same name in
-/// `category_rank` (categories never start with whitespace).
-const RECENT_CAT: &str = " Recent";
 
 pub struct SnippetPicker {
     /// Caller-supplied rows. Must arrive sorted by key (we
@@ -231,51 +162,9 @@ impl SnippetPicker {
     /// duplicates keep their first (most-recent) position. Builder-style
     /// so the many 2-arg test constructions stay untouched (#252).
     pub fn with_recent(mut self, recent: Vec<String>) -> Self {
-        let mut seen = std::collections::HashSet::new();
-        self.recent_rows = recent
-            .iter()
-            .filter(|k| seen.insert((*k).clone()))
-            .filter_map(|k| self.rows.iter().position(|r| &r.key == k))
-            .collect();
+        self.recent_rows = resolve_recent(&self.rows, &recent);
         self.refilter();
         self
-    }
-
-    /// `Some(idx)` when the picker should auto-submit: the typed filter
-    /// exactly equals a snippet key AND that key is the *only* snippet
-    /// whose key starts with the filter. Decided over key-prefix
-    /// matches alone, so the broader description-inclusive display
-    /// filter can't suppress the `]rev` fast path (nor make an
-    /// ambiguous prefix auto-fire).
-    ///
-    /// Case-tie break: matching is ASCII case-insensitive, so a library
-    /// defining both `rev` and `Rev` used to make the fast path
-    /// permanently ambiguous — typing either full key never
-    /// auto-submitted. When several case-insensitive prefix matches
-    /// exist but exactly one is a case-EXACT full-key match of the
-    /// typed text, that one wins.
-    fn auto_submit_index(&self) -> Option<usize> {
-        let q = self.filter.trim();
-        if q.is_empty() {
-            return None;
-        }
-        let prefix_matches: Vec<(usize, &PickerRow)> = self
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| starts_with_icase(&r.key, q))
-            .collect();
-        match prefix_matches.as_slice() {
-            [] => None,
-            [(idx, row)] => row.key.eq_ignore_ascii_case(q).then_some(*idx),
-            many => {
-                let mut exact = many.iter().filter(|(_, r)| r.key == q);
-                let &(idx, _) = exact.next()?;
-                // Keys are unique (BTreeMap-backed), so a second exact
-                // match can't happen — the guard is belt-and-braces.
-                exact.next().is_none().then_some(idx)
-            }
-        }
     }
 
     /// Build the list layout (headers + rows) from `visible_indices`.
@@ -456,7 +345,7 @@ impl SnippetPicker {
             category_label(&r.category).to_string(),
             Style::default().fg(category_color(theme, &r.category)),
         )];
-        let origin = r.origin.label();
+        let origin = r.origin.as_str();
         if !origin.is_empty() {
             meta.push(Span::styled("  ·  ", Style::default().fg(theme.text_dim)));
             meta.push(Span::styled(
@@ -489,41 +378,9 @@ impl FilterableList for SnippetPicker {
     /// exact-key auto-submit fast path is decided separately (see
     /// `auto_submit_index`) and is unaffected by description hits.
     fn compute_visible(&mut self) -> Vec<usize> {
-        let q = self.filter.trim();
-        let mut idxs: Vec<usize> = if q.is_empty() {
-            (0..self.rows.len()).collect()
-        } else {
-            self.rows
-                .iter()
-                .enumerate()
-                .filter_map(|(i, r)| {
-                    (contains_icase(&r.key, q)
-                        || contains_icase(&r.description, q)
-                        || contains_icase(&r.category, q))
-                    .then_some(i)
-                })
-                .collect()
-        };
-        // Group by category (headers), keeping rows key-sorted within a
-        // group — `rows` already arrives key-sorted, so a stable sort by
-        // category rank preserves that.
-        idxs.sort_by(|&a, &b| {
-            let (ca, cb) = (&self.rows[a].category, &self.rows[b].category);
-            category_rank(ca)
-                .cmp(&category_rank(cb))
-                .then_with(|| ca.cmp(cb))
-        });
-        // On an empty filter, float the recently-used snippets into a
-        // "Recent" group at the very top (they also remain in their real
-        // category below — the group is a shortcut, not a move). A
-        // non-empty filter is a deliberate search, so recents step aside.
-        if q.is_empty() && !self.recent_rows.is_empty() {
-            self.recent_count = self.recent_rows.len();
-            self.recent_rows.iter().copied().chain(idxs).collect()
-        } else {
-            self.recent_count = 0;
-            idxs
-        }
+        let visible = compute_visible(&self.rows, &self.filter, &self.recent_rows);
+        self.recent_count = visible.recent_count;
+        visible.indices
     }
 
     fn pick(&self, item_idx: usize) -> Option<Msg> {
@@ -556,7 +413,7 @@ impl FilterableList for SnippetPicker {
     /// Typed-character auto-submit: the `]]srev` fast path. Fires only
     /// when the filter uniquely identifies a snippet key.
     fn auto_submit(&self) -> Option<Msg> {
-        self.auto_submit_index()
+        auto_submit_index(&self.rows, &self.filter)
             .and_then(|idx| self.rows.get(idx))
             .map(|row| Msg::ChoicePicked(vec![ChoicePayload::Text(row.key.clone())]))
     }

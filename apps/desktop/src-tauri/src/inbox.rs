@@ -49,6 +49,7 @@ impl InboxModel {
             DesktopEvent::Snapshot {
                 workspaces,
                 terminals,
+                ..
             } => {
                 self.workspaces = workspaces
                     .iter()
@@ -193,6 +194,7 @@ mod tests {
         assert!(m.apply(&DesktopEvent::Snapshot {
             workspaces: vec![pr("k1", "owner/r", 1)],
             terminals: vec![],
+            recent_snippets: vec![],
         }));
         assert_eq!(m.view(now()).total, 1);
 
@@ -234,6 +236,7 @@ mod tests {
         m.apply(&DesktopEvent::Snapshot {
             workspaces: vec![pr("k1", "owner/r", 1)],
             terminals: vec![],
+            recent_snippets: vec![],
         });
         m.toggle_collapsed("owner/r");
         let view = m.view(now());

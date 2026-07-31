@@ -145,7 +145,18 @@
               <p class="eyebrow">Live daemon PTY</p>
               <h2 id="terminal-title">No terminal attached</h2>
             </div>
-            <span id="terminal-state" class="terminal-state" role="status">idle</span>
+            <div class="terminal-heading-actions">
+              <button
+                id="snippet-button"
+                class="ghost-button"
+                type="button"
+                title="Send a snippet to this terminal (⌘/Ctrl-J)"
+                disabled
+              >
+                Snippets
+              </button>
+              <span id="terminal-state" class="terminal-state" role="status">idle</span>
+            </div>
           </div>
           <div id="terminal-shell" class="terminal-shell">
             <div id="terminal-empty" class="terminal-empty">
@@ -165,7 +176,7 @@
         <span id="status-message" role="status" aria-live="polite">
           Loading persisted workspaces…
         </span>
-        <span>↑↓ navigate · ↵ open · r reply · a agent · s shell</span>
+        <span>↑↓ navigate · ↵ open · r reply · a agent · s shell · ⌘/Ctrl-J snippets</span>
       </footer>
     </div>
 
@@ -354,6 +365,40 @@
           </button>
         </div>
       </form>
+    </dialog>
+
+    <dialog id="snippet-dialog" class="snippet-dialog" aria-labelledby="snippet-title">
+      <div class="snippet-heading">
+        <h2 id="snippet-title" class="sr-only">Send a snippet</h2>
+        <div class="snippet-filter-row">
+          <span class="snippet-filter-mark" aria-hidden="true">]</span>
+          <input
+            id="snippet-filter"
+            type="text"
+            class="snippet-filter"
+            placeholder="Filter snippets…"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="Filter snippets"
+          />
+          <span id="snippet-count" class="snippet-count"></span>
+        </div>
+      </div>
+      <div class="snippet-body">
+        <div
+          id="snippet-list"
+          class="snippet-list"
+          role="listbox"
+          aria-label="Snippets"
+        ></div>
+        <div id="snippet-preview" class="snippet-preview"></div>
+      </div>
+      <p class="snippet-help">
+        <span><kbd>↑↓</kbd> navigate</span>
+        <span><kbd>↵</kbd> send</span>
+        <span><kbd>type</kbd> filter</span>
+        <span><kbd>Esc</kbd> cancel</span>
+      </p>
     </dialog>
 
     <script type="module" src="/src/main.ts"></script>

@@ -5,7 +5,10 @@ import type {
   InboxView,
   LazyboxCommand,
   LazyboxEvent,
+  PickerRow,
   RepoSummary,
+  SnippetGroup,
+  SnippetPickerView,
   SortMode,
   StatusTag,
   Task,
@@ -25,7 +28,10 @@ export type {
   InboxView,
   LazyboxCommand,
   LazyboxEvent,
+  PickerRow,
   RepoSummary,
+  SnippetGroup,
+  SnippetPickerView,
   SortMode,
   StatusTag,
   Task,
@@ -92,6 +98,20 @@ export function commandsForWorkspaceIntent(
       return [{ PostReply: { session_key: sessionKey, body } }];
     }
   }
+}
+
+export function deliverSnippetCommand(
+  terminalId: number,
+  row: PickerRow,
+): LazyboxCommand {
+  return {
+    DeliverSnippet: {
+      terminal_id: terminalId,
+      snippet_key: row.key,
+      category: row.category,
+      body: row.body,
+    },
+  };
 }
 
 export function terminalKindLabel(kind: TerminalKind): string {

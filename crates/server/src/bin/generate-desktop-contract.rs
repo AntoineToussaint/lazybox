@@ -24,6 +24,7 @@ use lazybox_server::api_gateway::{
 use lazybox_tui_core::inbox::{
     InboxView, RepoSummary, SortMode, VisibleRow, WorkspaceKind, WorkspaceRow,
 };
+use lazybox_tui_core::snippets::{PickerRow, SnippetGroup, SnippetPickerView};
 use std::path::PathBuf;
 use ts_rs::{Config, TS};
 
@@ -62,6 +63,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     SortMode::export_all(&config)?;
     WorkspaceKind::export_all(&config)?;
 
+    // Shared snippet-picker view-model (#734): grouped rows + auto-submit
+    // computed by `tui-core::snippets`, so the desktop picker matches the
+    // TUI's grouping/filter/recent/auto-submit.
+    SnippetPickerView::export_all(&config)?;
+    SnippetGroup::export_all(&config)?;
+    PickerRow::export_all(&config)?;
+
     for entry in std::fs::read_dir(&output)? {
         let path = entry?.path();
         if path.extension().is_some_and(|extension| extension == "ts") {
@@ -87,6 +95,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          export type { RepoSummary } from \"./RepoSummary\";\n\
          export type { SortMode } from \"./SortMode\";\n\
          export type { WorkspaceKind } from \"./WorkspaceKind\";\n\
+         export type { SnippetPickerView } from \"./SnippetPickerView\";\n\
+         export type { SnippetGroup } from \"./SnippetGroup\";\n\
+         export type { PickerRow } from \"./PickerRow\";\n\
          export type { StatusTag } from \"./StatusTag\";\n\
          export type { TerminalKind } from \"./TerminalKind\";\n\
          export type { DesktopTerminalSnapshot as TerminalSnapshot } from \"./DesktopTerminalSnapshot\";\n\

@@ -983,6 +983,39 @@ mod effects_tests {
         }
     }
 
+    /// RenameWorkspace input with a non-empty trimmed name AND a
+    /// stashed target produces `RenameWorkspace { session_key, name }`.
+    #[test]
+    fn input_submitted_for_rename_returns_rename_workspace() {
+        let mut m = build_model();
+        let target: lazybox_core::SessionKey = "github:o/r#1".into();
+        m.modal_stack.push(Id::RenameWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::RenameWorkspace {
+            target: target.clone(),
+        });
+        let cmds = m.handle_input_submitted("  Rate limit spike  ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::RenameWorkspace { session_key, name } => {
+                assert_eq!(session_key, &target);
+                assert_eq!(name, "Rate limit spike");
+            }
+            other => panic!("expected RenameWorkspace, got {other:?}"),
+        }
+    }
+
+    /// A blank rename submit commits nothing — the row keeps its name.
+    #[test]
+    fn input_submitted_for_blank_rename_drops() {
+        let mut m = build_model();
+        m.modal_stack.push(Id::RenameWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::RenameWorkspace {
+            target: "github:o/r#1".into(),
+        });
+        let cmds = m.handle_input_submitted("   ".into());
+        assert!(cmds.is_empty(), "blank rename must not emit a command");
+    }
+
     /// `Shift-W` with no projects yet can't resolve a container, so
     /// it surfaces a nudge instead of mounting a picker.
     #[test]

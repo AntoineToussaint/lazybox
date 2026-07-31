@@ -108,6 +108,11 @@ pub enum Id {
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
+    /// Single-line input prompt for renaming the focused workspace,
+    /// prefilled with its current display name (issue #744). Submit →
+    /// `Command::RenameWorkspace { session_key, name }`. Target key lives
+    /// in the `ModalFlow::RenameWorkspace` flow.
+    RenameWorkspace,
     /// Single-line input prompt for naming a brand-new local
     /// Project. Submit → `Command::CreateProject { name }`.
     NewProject,
@@ -618,6 +623,10 @@ pub(crate) enum ModalFlow {
     },
     /// New-workspace name input, carrying the project to create under.
     NewWorkspaceProject { project: lazybox_core::ProjectKey },
+    /// Rename-workspace name input (#744), carrying the workspace to
+    /// rename. Consumed by `handle_input_submitted` →
+    /// `Command::RenameWorkspace`.
+    RenameWorkspace { target: lazybox_core::SessionKey },
     /// Startup update modal: the available target whose dismissal is
     /// persisted on Esc.
     UpdateTarget { target: String },

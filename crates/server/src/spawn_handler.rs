@@ -5831,14 +5831,17 @@ impl Drop for PendingInjectionGuard {
     }
 }
 
-/// Whether an inject must defer because the agent is parked on a chooser /
-/// permission / Y-N prompt — a dialog a single keystroke answers, which a
-/// pasted prompt would corrupt. A free-text `InputNeeded` prompt is itself
-/// waiting for composed text, so the inject IS its answer and delivers
-/// immediately (issue #725). An `InputNeeded` reading with no recorded
-/// shape is not a chooser either, so it delivers too. The two maps are
-/// never co-held: the state lock is released before the shape lock.
-async fn inject_blocked_by_chooser(
+/// Whether an inject must defer because the agent is parked on a prompt a
+/// pasted answer would corrupt. Only a free-text `InputNeeded` prompt (the
+/// agent asking an open question) takes a pasted snippet as its answer, so
+/// that shape alone delivers immediately (issue #725). Every other
+/// `InputNeeded` reading defers: a chooser / permission / Y-N dialog owns
+/// input, and — matching [`lazybox_agents::AgentObservation::from_state`],
+/// which treats a bare/legacy `InputNeeded` as a chooser — an `InputNeeded`
+/// reading with no recorded shape is presumed chooser-like rather than
+/// pasted into blind. The two maps are never co-held: the state lock is
+/// released before the shape lock.
+async fn inject_must_defer(
     states: &tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     shapes: &tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_agents::PromptShape>>,
     id: TerminalId,
@@ -5846,7 +5849,7 @@ async fn inject_blocked_by_chooser(
     if states.lock().await.get(&id).copied() != Some(lazybox_ipc::AgentState::InputNeeded) {
         return false;
     }
-    shapes.lock().await.get(&id).copied() == Some(lazybox_agents::PromptShape::Chooser)
+    shapes.lock().await.get(&id).copied() != Some(lazybox_agents::PromptShape::FreeText)
 }
 
 /// Inject a prompt into an existing agent terminal. Same paste +
@@ -5983,14 +5986,14 @@ async fn handle_inject_prompt_inner(
     // question) is itself waiting for composed text — the pasted snippet IS
     // the answer, so deferring it deadlocks (the prompt never clears because
     // it's waiting for this very input). Gate on the prompt SHAPE, not on
-    // `InputNeeded` alone: only Chooser-shaped prompts defer.
+    // `InputNeeded` alone: only a free-text prompt delivers now; every other
+    // shape defers.
     //
     // Subscribe BEFORE reading the current state so a transition that
     // races between the read and the wait isn't missed.
     let events = config.bus.subscribe();
     let shapes = config.terminal.input_needed_shapes.clone();
-    let blocked =
-        inject_blocked_by_chooser(&config.terminal.agent_states, &shapes, terminal_id).await;
+    let blocked = inject_must_defer(&config.terminal.agent_states, &shapes, terminal_id).await;
     let states = config.terminal.agent_states.clone();
     let bus = config.bus.clone();
     let id = terminal_id;
@@ -6039,7 +6042,7 @@ async fn handle_inject_prompt_inner(
             // a transition racing the check isn't missed.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             events = bus.subscribe();
-            blocked = inject_blocked_by_chooser(&states, &shapes, id).await;
+            blocked = inject_must_defer(&states, &shapes, id).await;
         }
         let Some(interaction) =
             terminal_io::acquire_live(&config_for_confirm, id, &backend_key).await
@@ -6391,6 +6394,27 @@ pub async fn handle_ingest_hook(
     else {
         return;
     };
+    // Record the prompt's shape — whether a bare chooser keystroke is a
+    // complete answer — BEFORE the state is published, so a concurrent
+    // inject (or `handle_write` optimistic flip) that observes the fresh
+    // `InputNeeded` already sees the matching shape rather than a stale one
+    // from the previous prompt (issue #725; the PTY paths order
+    // shape-before-state the same way). Whether the hook yields
+    // `InputNeeded` — the condition that gates recording — is a pure
+    // function of the hook and the current state, so a plain cached read
+    // suffices; the transition below still compare-and-sets the commit under
+    // the state lock. Done even on a no-change re-assert (a chooser
+    // following an elicitation, or vice versa, must update the gate), and
+    // OUTSIDE the states guard so the two maps are never co-held.
+    let cached_current = config.terminal.agent_state_for(terminal_id).await;
+    if lazybox_agents::hook::hook_to_state(&hook, cached_current)
+        == Some(lazybox_ipc::AgentState::InputNeeded)
+    {
+        config.terminal.input_needed_shapes.lock().await.insert(
+            terminal_id,
+            lazybox_agents::hook::notification_prompt_shape(hook.notification.as_deref()),
+        );
+    }
     let transition = transition_and_broadcast_agent_state(
         &config.terminal,
         &config.bus,
@@ -6404,17 +6428,6 @@ pub async fn handle_ingest_hook(
     let Some(new_state) = transition.candidate else {
         return;
     };
-    // Record the prompt's shape — whether a bare chooser keystroke is a
-    // complete answer — for `handle_write`'s optimistic flip. Done even
-    // on a no-change re-assert (a chooser following an elicitation, or
-    // vice versa, must update the gate), and OUTSIDE the states guard so
-    // the two maps are never co-held.
-    if new_state == lazybox_ipc::AgentState::InputNeeded {
-        config.terminal.input_needed_shapes.lock().await.insert(
-            terminal_id,
-            lazybox_agents::hook::notification_prompt_shape(hook.notification.as_deref()),
-        );
-    }
     if !transition.committed {
         return;
     }
@@ -9648,6 +9661,188 @@ mod tests {
         })
         .await
         .expect("injection reservation released after delivery");
+    }
+
+    /// An `InputNeeded` reading with NO recorded prompt shape is presumed
+    /// chooser-like — matching `AgentObservation::from_state`, which treats a
+    /// bare/legacy `InputNeeded` as a chooser — so an inject DEFERS rather
+    /// than pasting blind into a possible chooser. Only a positively
+    /// free-text shape lifts the gate (issue #725). The pre-fix gate keyed on
+    /// `== Chooser`, so an unknown shape wrongly delivered.
+    #[tokio::test]
+    async fn injection_defers_when_prompt_shape_is_unknown() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "unknown-shape-injection")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(7251);
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
+        config.terminal.terminal_meta.lock().await.insert(
+            id,
+            (
+                SessionKey::new("unknown-shape-injection"),
+                TerminalKind::Agent("claude".into()),
+            ),
+        );
+        // InputNeeded with NO `input_needed_shapes` entry.
+        config
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::InputNeeded);
+
+        handle_inject_prompt(&config, id, "not the answer", None, false).await;
+
+        // Deferred behind the readiness waiter: nothing is written into the
+        // possible chooser, and the reservation stays held.
+        assert_eq!(config.spawn.pending_prompt_injections.lock().len(), 1);
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "an unknown-shape prompt must not be pasted into blind",
+        );
+
+        // Terminal exit releases the waiter's reservation (no leaked task).
+        config
+            .bus
+            .send(Event::TerminalExited {
+                terminal_id: id,
+                exit_code: Some(0),
+                last_output: None,
+            })
+            .expect("exit event");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !config.spawn.pending_prompt_injections.lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("injection reservation released after terminal exit");
+    }
+
+    /// A hook-driven `InputNeeded` records the matching prompt shape before
+    /// the state is published, the shape refreshes when the gate re-asserts
+    /// with a different shape, and an unrecognized no-change notification
+    /// leaves the live prompt's shape untouched. Pins the recording
+    /// condition the #725 shape-before-publish reorder preserves.
+    #[tokio::test]
+    async fn hook_input_needed_records_and_refreshes_prompt_shape() {
+        let id = TerminalId(7252);
+        let key: SessionKey = "github-hook-shape".into();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "hook-shape")
+            .await
+            .expect("spawn backend");
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
+        config.terminal.terminal_meta.lock().await.insert(
+            id,
+            (
+                key.clone(),
+                lazybox_ipc::TerminalKind::Agent("claude".into()),
+            ),
+        );
+        config
+            .terminal
+            .agent_state_generations
+            .lock()
+            .await
+            .insert(id, id.0);
+        // A turn has run, so the idle nudge is a genuine "blocked on me" gate
+        // rather than premature startup chrome.
+        config
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::Done);
+
+        let notify = |text: &str| lazybox_ipc::HookEvent {
+            kind: lazybox_ipc::HookEventKind::Notification,
+            session_id: None,
+            cwd: None,
+            tool_name: None,
+            notification: Some(text.to_string()),
+        };
+
+        // Idle nudge → free-text elicitation.
+        handle_ingest_hook(
+            &config,
+            id,
+            Some(backend_key.clone()),
+            notify("Claude is waiting for your input"),
+        )
+        .await;
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::InputNeeded),
+        );
+        assert_eq!(
+            config
+                .terminal
+                .input_needed_shapes
+                .lock()
+                .await
+                .get(&id)
+                .copied(),
+            Some(lazybox_agents::PromptShape::FreeText),
+        );
+
+        // A permission dialog re-asserts InputNeeded → shape refreshes to
+        // chooser, so a later inject correctly defers instead of pasting.
+        handle_ingest_hook(
+            &config,
+            id,
+            Some(backend_key.clone()),
+            notify("Claude needs your permission to run a tool"),
+        )
+        .await;
+        assert_eq!(
+            config
+                .terminal
+                .input_needed_shapes
+                .lock()
+                .await
+                .get(&id)
+                .copied(),
+            Some(lazybox_agents::PromptShape::Chooser),
+        );
+
+        // An unrecognized notification while InputNeeded is a no-change: it
+        // must NOT clobber the live prompt's recorded shape.
+        handle_ingest_hook(
+            &config,
+            id,
+            Some(backend_key.clone()),
+            notify("some unrelated chatter"),
+        )
+        .await;
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::InputNeeded),
+        );
+        assert_eq!(
+            config
+                .terminal
+                .input_needed_shapes
+                .lock()
+                .await
+                .get(&id)
+                .copied(),
+            Some(lazybox_agents::PromptShape::Chooser),
+            "an unrecognized no-change notification must not clobber the shape",
+        );
     }
 
     /// The in-flight spawn guard claims a singleton identity exactly

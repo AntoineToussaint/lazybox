@@ -682,6 +682,12 @@ pub struct GhClient {
     /// (currently we only construct one, but cheap insurance against
     /// future "spawn a worker pool" ideas).
     budget: std::sync::Arc<parking_lot::Mutex<crate::rate_budget::RateBudget>>,
+    /// Serialized rate/throttle state last successfully written to the
+    /// store, so the poller can skip a redundant per-tick write when
+    /// nothing persistable changed (idle notification-only ticks, or before
+    /// the first observation). Shared across clones like `budget`, and
+    /// updated only after a confirmed write so a failed store retries.
+    last_persisted_rate_state: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
     /// GitHub's secondary limits apply across REST and GraphQL. All
     /// client clones therefore share one concurrency gate, and all
     /// mutations additionally share a serial lane.
@@ -775,6 +781,7 @@ impl GhClient {
             budget: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
+            last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
@@ -801,6 +808,7 @@ impl GhClient {
             budget: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
+            last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
@@ -1789,6 +1797,39 @@ impl GhClient {
         self.notifications_state
             .lock()
             .restore_cursors(cursors, chrono::Utc::now());
+    }
+
+    /// Durable rate/throttle state for persistence. See
+    /// [`crate::rate_budget::PersistedRateState`].
+    pub fn persisted_rate_state(&self) -> crate::rate_budget::PersistedRateState {
+        self.budget.lock().persisted_state()
+    }
+
+    /// The serialized rate/throttle state to persist this tick, or `None`
+    /// when it is byte-for-byte identical to the last state we confirmed
+    /// written — so idle notification-only ticks (and the pre-observation
+    /// warm-up) don't rewrite an unchanged blob every poll. The caller
+    /// must call [`Self::mark_rate_state_persisted`] once the write lands.
+    pub fn pending_rate_state_payload(&self) -> Option<String> {
+        let payload = serde_json::to_string(&self.budget.lock().persisted_state()).ok()?;
+        if self.last_persisted_rate_state.lock().as_deref() == Some(payload.as_str()) {
+            None
+        } else {
+            Some(payload)
+        }
+    }
+
+    /// Record that `payload` was successfully persisted. Updating this only
+    /// after a confirmed write means a failed store write is retried on the
+    /// next tick instead of being silently dropped.
+    pub fn mark_rate_state_persisted(&self, payload: String) {
+        *self.last_persisted_rate_state.lock() = Some(payload);
+    }
+
+    /// Reload durable rate/throttle state at startup so a fresh daemon
+    /// resumes respecting the limits it learned before the restart.
+    pub fn restore_rate_state(&self, state: crate::rate_budget::PersistedRateState) {
+        self.budget.lock().restore(state);
     }
 
     /// How long to use the full-sweep fallback after a heartbeat
@@ -4272,6 +4313,63 @@ mod tests {
         GhError::Graphql(message.to_string())
     }
 
+    #[tokio::test]
+    async fn rate_state_persists_and_restores_through_the_client() {
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let source =
+            GhClient::stub_with_rate_limit_for_tests("cmd", "fp", 4200, 5000, reset_at).unwrap();
+        let state = source.persisted_rate_state();
+        assert_eq!(
+            state
+                .resources
+                .get("graphql")
+                .expect("graphql persisted")
+                .remaining,
+            4200
+        );
+
+        let fresh = GhClient::stub_for_tests("cmd", "fp").unwrap();
+        fresh.restore_rate_state(state);
+        let graphql = fresh
+            .rate_snapshot()
+            .resources
+            .into_iter()
+            .find(|r| r.resource == "graphql")
+            .expect("graphql resource restored");
+        assert_eq!(graphql.remaining, 4200);
+        assert_eq!(graphql.limit, 5000);
+    }
+
+    #[tokio::test]
+    async fn rate_state_payload_is_deduped_until_it_changes() {
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let client =
+            GhClient::stub_with_rate_limit_for_tests("cmd", "fp", 4200, 5000, reset_at).unwrap();
+
+        let first = client
+            .pending_rate_state_payload()
+            .expect("the first observed state is a change worth persisting");
+        client.mark_rate_state_persisted(first.clone());
+        // An idle tick with no budget change must not rewrite the blob.
+        assert!(
+            client.pending_rate_state_payload().is_none(),
+            "unchanged state must dedupe to no write"
+        );
+
+        // A genuine budget change produces a fresh, different payload.
+        let mut changed = client.persisted_rate_state();
+        changed
+            .resources
+            .get_mut("graphql")
+            .expect("graphql")
+            .remaining = 3000;
+        client.restore_rate_state(changed);
+        let second = client
+            .pending_rate_state_payload()
+            .expect("a changed budget must persist again");
+        assert_ne!(first, second);
+    }
+
     #[test]
     fn successful_empty_side_keeps_degraded_sync_alive() {
         let outcome = combine_selected_fetches(
@@ -5058,6 +5156,7 @@ mod tests {
             budget: std::sync::Arc::new(parking_lot::Mutex::new(
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
+            last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),

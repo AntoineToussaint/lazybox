@@ -26,6 +26,14 @@ inputs:
     description: Extra rustup components, comma-separated (e.g. "clippy" or "rustfmt").
     required: false
     default: ""
+  cache-workspaces:
+    description: >-
+      Newline-separated Cargo workspaces to cache (Swatinem/rust-cache
+      `workspaces` syntax). Defaults to the root workspace; the desktop job adds
+      `apps/desktop/src-tauri`, which the root workspace `exclude`s and would
+      otherwise recompile uncached every run.
+    required: false
+    default: "."
 
 runs:
   using: composite
@@ -74,4 +82,11 @@ runs:
       with:
         components: ${{ inputs.rust-components }}
 
+    # `save-if` restricts cache *saves* to `main`. GitHub's per-repo cache is a
+    # 10GB LRU pool; if every PR branch saved its own multi-GB target cache they
+    # would evict the shared `main` cache that PR first-builds restore from.
+    # Restores are unaffected — PRs still read the `main` cache on every run.
     - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: ${{ inputs.cache-workspaces }}
+        save-if: ${{ github.ref == 'refs/heads/main' }}

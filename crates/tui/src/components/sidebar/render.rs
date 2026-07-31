@@ -200,26 +200,23 @@ impl Sidebar {
             let sort_prefix_cells = visual_width(sort_prefix) as u16;
             let sort_chip_cells = visual_width(&sort_chip) as u16;
 
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(filter_prefix, key_style),
-                    Span::styled(
-                        filter_chip.clone(),
-                        if filter_active {
-                            active_style
-                        } else {
-                            dim_style
-                        },
-                    ),
-                    Span::raw(sep),
-                    Span::styled(sort_prefix, key_style),
-                    Span::styled(
-                        sort_chip.clone(),
-                        if sort_active { active_style } else { dim_style },
-                    ),
-                ])),
-                row1,
-            );
+            let mut spans = vec![
+                Span::styled(filter_prefix, key_style),
+                Span::styled(
+                    filter_chip.clone(),
+                    if filter_active {
+                        active_style
+                    } else {
+                        dim_style
+                    },
+                ),
+                Span::raw(sep),
+                Span::styled(sort_prefix, key_style),
+                Span::styled(
+                    sort_chip.clone(),
+                    if sort_active { active_style } else { dim_style },
+                ),
+            ];
 
             // Record clickable rects. Filter zone = `f ` + chip;
             // sort zone = `o ` + chip. The intervening separator is
@@ -244,9 +241,63 @@ impl Sidebar {
             } else {
                 None
             };
+
+            // Always-visible global search box, to the right of the
+            // sort chip: `# [find]` when idle, `# [⌕ query]` (accent,
+            // truncated) while a scope-less query is applied. Clicking
+            // it opens the global search (#755). Dropped only when the
+            // pane is too narrow to fit even the placeholder.
+            let global_query = self
+                .search
+                .as_ref()
+                .filter(|s| s.scope.is_none() && !s.query.is_empty())
+                .map(|s| s.query.as_str());
+            let search_prefix = "# ";
+            let search_prefix_cells = visual_width(search_prefix) as u16;
+            let sort_end = sort_x + sort_w;
+            let search_x = sort_end + sep_cells;
+            let box_start = search_x + search_prefix_cells;
+            // Cells left for the chip body after the leading `# `.
+            let chip_room = (row1.x + row1.width).saturating_sub(box_start);
+            // The `[⌕ …]` frame around the query; its width is measured
+            // rather than assumed so a wider search glyph can't push the
+            // chip past the room the guard below reserved for it.
+            const SEARCH_FRAME: &str = "[⌕ ]";
+            let search_chip = match global_query {
+                Some(q) => {
+                    let q_room =
+                        chip_room.saturating_sub(visual_width(SEARCH_FRAME) as u16) as usize;
+                    format!("[⌕ {}]", truncate_ellipsis(q, q_room.max(1)))
+                }
+                None => "[find]".to_string(),
+            };
+            let search_chip_cells = visual_width(&search_chip) as u16;
+            if search_chip_cells <= chip_room {
+                spans.push(Span::raw(sep));
+                spans.push(Span::styled(search_prefix, key_style));
+                spans.push(Span::styled(
+                    search_chip,
+                    if global_query.is_some() {
+                        active_style
+                    } else {
+                        dim_style
+                    },
+                ));
+                self.search_chip_rect = Some(Rect {
+                    x: search_x,
+                    y: row1.y,
+                    width: search_prefix_cells + search_chip_cells,
+                    height: 1,
+                });
+            } else {
+                self.search_chip_rect = None;
+            }
+
+            frame.render_widget(Paragraph::new(Line::from(spans)), row1);
         } else {
             self.filter_chip_rect = None;
             self.sort_chip_rect = None;
+            self.search_chip_rect = None;
         }
 
         // Row 2 — focused automation plus stats summary.
@@ -444,14 +495,15 @@ impl Sidebar {
                                     .add_modifier(Modifier::BOLD),
                             ));
                         }
-                        // While a search filters THIS project, surface
-                        // the match count so the header reads as a
-                        // result tally rather than a vanished tree.
-                        if self
-                            .search
-                            .as_ref()
-                            .is_some_and(|q| !q.query.is_empty() && q.scope == *name)
-                        {
+                        // While a search filters this project — either a
+                        // scoped `/` on it or a global `#` search that
+                        // touches every repo — surface the match count so
+                        // the header reads as a result tally rather than a
+                        // vanished tree.
+                        if self.search.as_ref().is_some_and(|q| {
+                            !q.query.is_empty()
+                                && q.scope.as_deref().is_none_or(|scope| scope == name)
+                        }) {
                             spans.push(Span::styled(
                                 format!("  {} match", s.active),
                                 row_bg
@@ -600,24 +652,33 @@ impl Sidebar {
             self.scroll,
         );
 
-        // Bottom search bar (fzf-style). `/query` while editing, with a
-        // caret; once `Enter` keeps the filter applied the caret drops
-        // and a hint reminds the user `/` re-edits and `esc` clears.
+        // Bottom search bar (fzf-style). A scoped `/` search leads with
+        // `/`; a global search leads with `⌕` (matching the header box)
+        // and names `all repos` so the wider reach is obvious. While
+        // editing a caret trails the query; once `Enter` keeps the
+        // filter applied the caret drops and a hint reminds the user
+        // how to re-edit and clear.
         if search_bar && let Some(s) = self.search.as_ref() {
             let bar = Rect::new(area.x + l_pad, area.y + area.height - 1, inner_width, 1);
+            let global = s.scope.is_none();
+            let (prefix, edit_key) = if global { ("⌕ ", "#") } else { ("/", "/") };
             let mut spans = vec![
-                Span::styled("/", Style::default().fg(theme.accent)),
+                Span::styled(prefix, Style::default().fg(theme.accent)),
                 Span::styled(s.query.clone(), Style::default().fg(theme.text_strong)),
             ];
             if s.editing {
                 spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
                 spans.push(Span::styled(
-                    "  esc clear",
+                    if global {
+                        "  all repos · esc clear".to_string()
+                    } else {
+                        "  esc clear".to_string()
+                    },
                     Style::default().fg(theme.text_dim),
                 ));
             } else {
                 spans.push(Span::styled(
-                    "  / edit · esc clear",
+                    format!("  {edit_key} edit · esc clear"),
                     Style::default().fg(theme.text_dim),
                 ));
             }

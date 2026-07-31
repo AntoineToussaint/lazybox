@@ -14652,6 +14652,20 @@ mod spawn_focus_steal_tests {
         lazybox_core::Workspace::from_task(task, Utc::now())
     }
 
+    /// Dispatching `OpenGlobalSearch` (`#`) opens an unscoped search —
+    /// the wiring `#` → `Action::OpenGlobalSearch` → `open_global_search`
+    /// (cross-repo filtering itself is covered in the sidebar tests).
+    #[test]
+    fn global_search_dispatch_opens_unscoped_search() {
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenGlobalSearch);
+        assert!(m.sidebar.search_editing());
+        let s = m.sidebar.search().expect("search state present");
+        assert_eq!(s.scope, None, "global search is unscoped");
+    }
+
     #[test]
     fn spawn_never_steals_focus_while_search_is_being_typed() {
         let mut m = build_model();

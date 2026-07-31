@@ -75,6 +75,7 @@ Manage the sidebar list itself — only while the sidebar has focus.
 | `o` | order | Cycle the sort order (recency → by-role → by-role with section headers). |
 | `Shift-S` | switch mailbox | Cycle the mailbox view (Inbox → Inactive → Snoozed). |
 | `/` | search | Open the incremental search bar scoped to the focused project. |
+| `#` | find | Open the header search box — an incremental search across every repo group at once. |
 | `Space` | collapse group | Collapse or expand the repo group the cursor is in — fold a project's workspaces into a single header row, and unfold it again. |
 | `Right \| l` | focus right | Move focus one pane to the right — from the sidebar to the activity pane, or straight to the terminal when the activity pane is hidden. |
 | `v` | select | Toggle the focused workspace in/out of the multi-select set. |

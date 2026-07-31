@@ -1170,6 +1170,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenSearch => {
                 self.sidebar.open_search();
             }
+            Action::OpenGlobalSearch => {
+                self.sidebar.open_global_search();
+            }
             Action::ToggleRepoGroup => {
                 self.sidebar.toggle_repo_at_cursor();
             }

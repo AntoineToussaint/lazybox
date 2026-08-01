@@ -77,9 +77,11 @@ pub(crate) fn status_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
 /// FAIL` is something the user needs to see BOTH of.
 ///
 /// **Terminal / blocker** states (`MERGED`, `CLOSED`, `DRAFT`,
-/// `CONFLICT`, `READY`, `QUEUED`, `AUTO`) are single-purpose — they
+/// `CONFLICT`, `READY`, `QUEUED`) are single-purpose — they
 /// override both signals — so they return as the first slot with
-/// the CI slot empty.
+/// the CI slot empty. GitHub-native auto-merge is *not* one of them:
+/// it's a policy, rendered as its own ` AUTO ` row pill (#778), so a
+/// red-CI armed PR still shows `CI FAIL` here.
 ///
 /// **Open PRs in flight** return `(review_pill, ci_pill)` so the
 /// row shows both. Either slot may be `None` (e.g. CI not yet
@@ -226,15 +228,12 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
             style: pill_green,
         });
     }
-    if task.auto_merge_enabled {
-        return Some(StatusPill {
-            label: " AUTO ",
-            style: Style::default()
-                .bg(theme.accent)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        });
-    }
+    // GitHub-native auto-merge (`task.auto_merge_enabled`) is a standing
+    // automation policy, not a task status — it renders as its own row
+    // pill (` AUTO `, see `workspace_row::cell_auto`) alongside ` ARM ` /
+    // ` FIX `, never here. Placing it in this chain hid ` CI FAIL ` on
+    // exactly the armed PRs that need it most (#778).
+    //
     // Behind base is informational only — don't fight for the
     // lifecycle column. `StatusTag` keeps surfacing it via the old
     // path for any consumer that still wants it.
@@ -301,13 +300,6 @@ pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
         Ready => pill(" READY    ", pill_green),
         Approved => pill(
             " APPROVED ",
-            Style::default()
-                .bg(theme.accent)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        AutoMerge => pill(
-            " AUTO     ",
             Style::default()
                 .bg(theme.accent)
                 .fg(Color::Black)

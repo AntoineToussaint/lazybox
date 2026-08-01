@@ -529,9 +529,6 @@ pub enum StatusTag {
     Ready,
     /// Approved but CI not yet green. Signals "human half done."
     Approved,
-    /// Auto-merge is armed (will merge when reviews + CI pass). Not the
-    /// same as Queued — the PR may still be un-approved.
-    AutoMerge,
     /// Awaiting review (review explicitly requested or pending).
     ReviewPending,
     /// CI is still running / pending.
@@ -557,7 +554,6 @@ impl StatusTag {
             Self::Draft => "DRAFT",
             Self::Ready => "READY",
             Self::Approved => "APPROVED",
-            Self::AutoMerge => "AUTO",
             Self::ReviewPending => "REVIEW",
             Self::CiRunning => "CI...",
             Self::CiOk => "CI OK",
@@ -571,8 +567,14 @@ impl StatusTag {
     /// Priority (first match wins):
     /// `Merged` → `Closed` → `Conflict` → `CiFailed` → `CiMixed` →
     /// `ChangesRequested` → `Queued` → `Draft` → `Ready` → `Approved`
-    /// → `AutoMerge` → `ReviewPending` → `CiRunning` → `CiOk` →
-    /// `Behind` → `None`.
+    /// → `ReviewPending` → `CiRunning` → `CiOk` → `Behind` → `None`.
+    ///
+    /// GitHub-native auto-merge (`task.auto_merge_enabled`) is
+    /// deliberately absent: it's a standing automation *policy*, not a
+    /// task status, so it renders as its own row pill (` AUTO `) instead
+    /// of competing in — and overriding — this severity chain. Otherwise
+    /// an armed PR with red CI would hide `CI FAIL`, the one signal you
+    /// most need on an armed PR (auto-merge won't fire while CI is red).
     pub fn for_task(task: &Task) -> Self {
         // Inactive states win over everything: a merged PR's CI
         // history isn't actionable, so showing MERGED beats showing
@@ -608,9 +610,6 @@ impl StatusTag {
                 return Self::Ready;
             }
             return Self::Approved;
-        }
-        if task.auto_merge_enabled {
-            return Self::AutoMerge;
         }
         if task.review == ReviewStatus::Pending {
             return Self::ReviewPending;
@@ -782,16 +781,20 @@ mod status_tag_tests {
     }
 
     #[test]
-    fn auto_merge_armed_is_not_queued() {
-        // REGRESSION: auto_merge_enabled used to render as "QUEUED" even
-        // though the PR was neither approved nor actually in the queue.
-        // Now it renders as AutoMerge (distinct from Queued).
+    fn auto_merge_is_not_a_status_tag() {
+        // REGRESSION (#778): GitHub-native auto-merge is a standing
+        // automation policy, not a task status — it must not enter the
+        // severity chain (where it once hid CI FAIL on armed PRs). With
+        // no other signal, an armed PR carries no status tag; the ` AUTO `
+        // policy pill renders separately from this chain.
         let mut t = base();
         t.auto_merge_enabled = true;
         t.review = ReviewStatus::None;
         t.is_in_merge_queue = false;
-        assert_eq!(StatusTag::for_task(&t), StatusTag::AutoMerge);
-        assert_ne!(StatusTag::for_task(&t), StatusTag::Queued);
+        assert_eq!(StatusTag::for_task(&t), StatusTag::None);
+        // And arming auto-merge never suppresses a red-CI status.
+        t.ci = CiStatus::Failure;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::CiFailed);
     }
 
     #[test]
@@ -934,7 +937,6 @@ mod status_tag_tests {
         assert_eq!(StatusTag::Conflict.label(), "CONFLICT");
         assert_eq!(StatusTag::CiFailed.label(), "CI FAIL");
         assert_eq!(StatusTag::Queued.label(), "QUEUED");
-        assert_eq!(StatusTag::AutoMerge.label(), "AUTO");
         assert_eq!(StatusTag::Ready.label(), "READY");
         assert_eq!(StatusTag::None.label(), "");
     }

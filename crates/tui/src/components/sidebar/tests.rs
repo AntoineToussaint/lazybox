@@ -385,7 +385,7 @@ mod status_pill_consistency_tests {
     //! - Every non-`None` tag produces `Some(pill)`. A missing arm
     //!   would mean the rendered row silently drops a real signal
     //!   (the bug that motivated this audit: status_pill used to
-    //!   skip `ChangesRequested` / `Queued` / `AutoMerge` / `ReviewPending`
+    //!   skip `ChangesRequested` / `Queued` / `ReviewPending`
     //!   entirely).
     //!
     //! - Every pill label is the same 10-cell width so the time
@@ -417,7 +417,6 @@ mod status_pill_consistency_tests {
         StatusTag::Draft,
         StatusTag::Ready,
         StatusTag::Approved,
-        StatusTag::AutoMerge,
         StatusTag::ReviewPending,
         StatusTag::CiRunning,
         StatusTag::CiOk,
@@ -443,7 +442,6 @@ mod status_pill_consistency_tests {
                 StatusTag::Draft => (),
                 StatusTag::Ready => (),
                 StatusTag::Approved => (),
-                StatusTag::AutoMerge => (),
                 StatusTag::ReviewPending => (),
                 StatusTag::CiRunning => (),
                 StatusTag::CiOk => (),
@@ -502,13 +500,21 @@ mod status_pill_consistency_tests {
     }
 
     #[test]
-    fn auto_merge_now_renders_a_pill() {
-        // Same bug class: auto_merge_enabled with no other signal
-        // used to produce no pill. Now renders AUTO.
+    fn auto_merge_is_not_a_status_pill() {
+        // #778: GitHub-native auto-merge is a policy, not a status —
+        // it renders as its own ` AUTO ` row pill (see
+        // `workspace_row::cell_auto`), never in the status column. With
+        // no other signal, an armed PR shows no status pill at all…
         let mut t = base_task();
         t.auto_merge_enabled = true;
-        let pill = status_pill(&t).expect("auto-merge must produce a pill");
-        assert_eq!(pill.label, " AUTO     ");
+        assert!(
+            status_pill(&t).is_none(),
+            "auto-merge alone must not produce a status pill",
+        );
+        // …and, crucially, it never suppresses a red-CI status pill.
+        t.ci = lazybox_core::CiStatus::Failure;
+        let pill = status_pill(&t).expect("failing CI must still produce a pill");
+        assert_eq!(pill.label, " CI FAIL  ");
     }
 
     #[test]

@@ -83,6 +83,12 @@ pub struct WorkspaceRowCtx<'a> {
     /// pill ahead of the status pills so the user can see, at a glance,
     /// which rows will merge themselves once CI goes green.
     pub auto_merge_armed: bool,
+    /// GitHub-native auto-merge is enabled on the PR
+    /// (`Task::auto_merge_enabled`). Renders a distinct ` AUTO ` policy
+    /// pill alongside ` ARM ` — it's a standing automation *policy*, not
+    /// a task status, so it lives here instead of the status column and
+    /// never hides ` CI FAIL ` on an armed PR (#778).
+    pub auto_merge_enabled: bool,
     /// This workspace has CI-failure auto-fix explicitly armed.
     pub auto_fix_ci_armed: bool,
     /// This workspace has merge-conflict auto-fix explicitly armed.
@@ -190,24 +196,25 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    Max semantics.
 /// 8. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 9–14. Passive badge slots — one Max-collapsing, center-aligned
+/// 9–15. Passive badge slots — one Max-collapsing, center-aligned
 ///    column each so every badge type owns a stable x and lines up
 ///    row-to-row instead of being appended as ragged inline spans
 ///    (issue #524): `⎇ local` (linked checkout), `✎` (has notes),
-///    `]N` (snippet count), `ARM` (auto-merge armed), `FIX` (auto-fix
-///    armed), `⤓main`/`behind` (track-main arm + behind state, #535).
+///    `]N` (snippet count), `AUTO` (GitHub-native auto-merge armed,
+///    #778), `ARM` (merge-on-green armed), `FIX` (auto-fix armed),
+///    `⤓main`/`behind` (track-main arm + behind state, #535).
 ///    Each column is `Max(0)`, so a badge type with zero
 ///    occupants across the visible list collapses to 0 width — the
 ///    same trick the status column uses — and centered so a lone glyph
 ///    sits mid-slot. Passive info, so they shed before the actionable
 ///    status/time under width pressure.
-/// 15. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
+/// 16. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
 ///    Right-aligned, sized to the pills actually present (each pill is
 ///    trimmed to its own ` LABEL ` block — no blank-slot filler), so a
 ///    lone CI pill sits one clean gap off the time. Cell is empty
 ///    (width 0) when both review + CI pills are None, so the column
 ///    collapses for an all-empty table.
-/// 16. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 17. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
@@ -240,6 +247,9 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // so it survives width pressure alongside `ARM` rather than shedding
     // with the passive-info badges.
     const P_TRACK: u8 = 25;
+    // GitHub-native auto-merge (#778) is a binding merge automation — it
+    // survives width pressure alongside the other standing arms.
+    const P_AUTO: u8 = 26;
     const P_UNREAD: u8 = 30;
     const P_BADGE_SHELL: u8 = 40;
     const P_BADGE_AGENT: u8 = 50;
@@ -263,11 +273,12 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::max(0).center().priority(P_LINKED), // 9: ⎇ local (linked checkout)
         Column::max(0).center().priority(P_NOTES), // 10: ✎ (has notes)
         Column::max(0).center().priority(P_SNIPPET), // 11: ]N (snippet count)
-        Column::max(0).center().priority(P_ARM), // 12: ARM (auto-merge armed)
-        Column::max(0).center().priority(P_FIX), // 13: FIX (auto-fix armed)
-        Column::max(0).center().priority(P_TRACK), // 14: track main (⤓main / behind)
-        Column::max(0).right().priority(P_STATUS), // 15: status (CI / review pills)
-        Column::max(0).right().priority(P_TIME), // 16: time (carries its own leading space)
+        Column::max(0).center().priority(P_AUTO), // 12: AUTO (GitHub-native auto-merge)
+        Column::max(0).center().priority(P_ARM), // 13: ARM (merge-on-green armed)
+        Column::max(0).center().priority(P_FIX), // 14: FIX (auto-fix armed)
+        Column::max(0).center().priority(P_TRACK), // 15: track main (⤓main / behind)
+        Column::max(0).right().priority(P_STATUS), // 16: status (CI / review pills)
+        Column::max(0).right().priority(P_TIME), // 17: time (carries its own leading space)
     ]
 }
 
@@ -289,6 +300,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_linked(ctx),
         cell_notes(ctx),
         cell_snippet(ctx),
+        cell_auto(ctx),
         cell_arm(ctx),
         cell_fix(ctx),
         cell_track_main(ctx),
@@ -728,6 +740,26 @@ fn cell_snippet(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
+/// The ` AUTO ` GitHub-native auto-merge badge (#778) — a filled accent
+/// block, the same slot family as ` ARM `/` FIX `. It's a standing
+/// automation *policy*, so it lives here rather than in the status
+/// column, where it used to hide ` CI FAIL ` on exactly the armed PRs
+/// that most need it. Its own center-aligned, Max-collapsing column.
+fn cell_auto(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.auto_merge_enabled {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .bg(ctx.theme.accent)
+            .fg(ratatui::style::Color::Black)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(" AUTO ", style))
+}
+
 /// The ` ARM ` auto-merge-on-green badge — a filled block so the "this
 /// row will merge itself once CI goes green" signal reads at a glance.
 /// Its own center-aligned, Max-collapsing column (#524).
@@ -933,6 +965,7 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
+            auto_merge_enabled: false,
             auto_fix_ci_armed: false,
             auto_fix_conflict_armed: false,
             track_main: false,
@@ -949,11 +982,11 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        // 17 columns: the labels column retired into the title cell
-        // (#329), and the six passive badges (`⎇`/`✎`/`]N`/`ARM`/`FIX`/
+        // 18 columns: the labels column retired into the title cell
+        // (#329), and the passive badges (`⎇`/`✎`/`]N`/`AUTO`/`ARM`/`FIX`/
         // `⤓main`) each split out of the shared status cell into their own
-        // collapsing slot (#524, #535).
-        assert_eq!(cols.len(), 17);
+        // collapsing slot (#524, #535, #778).
+        assert_eq!(cols.len(), 18);
         // Title column (idx 5) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -1282,6 +1315,7 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
+            auto_merge_enabled: false,
             auto_fix_ci_armed: false,
             auto_fix_conflict_armed: false,
             track_main: false,
@@ -1508,6 +1542,7 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
+            auto_merge_enabled: false,
             auto_fix_ci_armed: false,
             auto_fix_conflict_armed: false,
             track_main: false,
@@ -1568,6 +1603,34 @@ mod tests {
         assert_eq!(cell.spans[0].content.as_ref(), " ARM ");
         // The status cell stays empty — no CI/review pill here.
         assert_eq!(cell_status(&ctx).width(), 0);
+    }
+
+    /// #778: GitHub-native auto-merge is a policy, not a status. An
+    /// armed PR with failing CI must show BOTH the ` AUTO ` policy pill
+    /// (its own column) AND the ` CI FAIL ` status pill — the whole
+    /// point of the fix is that AUTO no longer hides the red CI it's
+    /// blocked on.
+    #[test]
+    fn auto_merge_pill_and_ci_fail_render_together() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.state = TaskState::Open;
+        task.auto_merge_enabled = true;
+        task.ci = CiStatus::Failure;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_auto(&ctx).width(), 0, "auto-merge off → no AUTO slot");
+        ctx.auto_merge_enabled = true;
+        assert_eq!(
+            cell_auto(&ctx).spans[0].content.as_ref(),
+            " AUTO ",
+            "armed PR shows its AUTO policy pill",
+        );
+        assert_eq!(
+            cell_status(&ctx).spans[0].content.as_ref(),
+            " CI FAIL ",
+            "…and the failing-CI status pill is no longer hidden",
+        );
     }
 
     /// The shared auto-fix column stays compact even on the cursor row.
@@ -2444,6 +2507,7 @@ mod tests {
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
+            auto_merge_enabled: false,
             auto_fix_ci_armed: false,
             auto_fix_conflict_armed: false,
             track_main: false,

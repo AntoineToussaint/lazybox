@@ -101,7 +101,7 @@ mod full_sweep_commit_tests {
 /// `task.repo` matches a selected scope id pass through.
 ///
 /// Fields are private. The one construction site is the struct literal
-/// in [`sources_for_with_engagement`], which resolves every field
+/// in `sources_for_with_engagement`, which resolves every field
 /// (scopes, filters, auto-fix, conventions, …) from config for the
 /// tick. `last_kind` is initialized to `Full` there so a never-fetched
 /// source doesn't block rescope.

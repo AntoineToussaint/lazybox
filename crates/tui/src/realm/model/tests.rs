@@ -14205,6 +14205,151 @@ mod daemon_disconnect_tests {
 }
 
 #[cfg(test)]
+mod reconnect_banner_tests {
+    //! A self-healing `--connect` transport publishes `ConnectionStatus`.
+    //! The model must surface a reconnecting banner (not a silent freeze
+    //! during an extended outage) and refresh the daemon build across a
+    //! reconnect that lands on a restarted daemon.
+    use super::super::*;
+    use crate::realm::components::footer::NoticeSeverity;
+    use lazybox_ipc::{Client, ConnectionState, ConnectionStatus};
+    use tuirealm::ratatui::layout::Size;
+
+    fn connected() -> ConnectionState {
+        ConnectionState {
+            status: ConnectionStatus::Connected,
+            daemon_build: lazybox_ipc::BUILD_VERSION.to_string(),
+        }
+    }
+
+    /// Far ends of the client's command/event channels. These tests only
+    /// drive `tick_daemon_health` (which neither sends nor receives), but
+    /// holding the ends keeps the `Client` off a closed channel for its
+    /// lifetime — bind as `_io` so they live to the end of the test.
+    type ChannelEnds = (
+        tokio::sync::mpsc::Receiver<IpcCommand>,
+        tokio::sync::mpsc::Sender<lazybox_ipc::Event>,
+    );
+
+    /// A model whose client tracks a caller-controlled connection-state
+    /// watch, plus the sender to drive transitions and the channel ends
+    /// to keep alive.
+    fn model_with_status() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        tokio::sync::watch::Sender<ConnectionState>,
+        ChannelEnds,
+    ) {
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<IpcCommand>(8);
+        let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<lazybox_ipc::Event>(8);
+        let (status_tx, status_rx) = tokio::sync::watch::channel(connected());
+        let client =
+            Client::from_bounded_channels(cmd_tx, evt_rx).with_connection_status(status_rx);
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.status.notice = None;
+        (m, status_tx, (cmd_rx, evt_tx))
+    }
+
+    #[test]
+    fn reconnecting_status_raises_a_sticky_banner_then_clears_on_reconnect() {
+        let (mut m, status_tx, _io) = model_with_status();
+
+        status_tx.send_replace(ConnectionState {
+            status: ConnectionStatus::Reconnecting,
+            ..connected()
+        });
+        m.tick_daemon_health();
+        let n = m.status.notice.as_ref().expect("reconnecting banner");
+        assert_eq!(
+            n.severity,
+            NoticeSeverity::Auth,
+            "reconnecting banner must be sticky so it survives an extended outage"
+        );
+        assert!(n.message.contains("reconnecting"), "got {:?}", n.message);
+        assert!(m.daemon_reconnecting_notified);
+
+        status_tx.send_replace(connected());
+        m.tick_daemon_health();
+        assert!(
+            m.status.notice.is_none(),
+            "the banner must retract once the link is back"
+        );
+        assert!(!m.daemon_reconnecting_notified);
+    }
+
+    #[test]
+    fn reconnecting_banner_is_latched_one_shot() {
+        let (mut m, status_tx, _io) = model_with_status();
+        status_tx.send_replace(ConnectionState {
+            status: ConnectionStatus::Reconnecting,
+            ..connected()
+        });
+        for _ in 0..5 {
+            m.tick_daemon_health();
+        }
+        // Stays the single live notice; the one-shot latch means it was
+        // flashed (and logged) exactly once despite five ticks, not
+        // re-recorded per frame.
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("reconnecting"))
+        );
+        let logged = m
+            .status
+            .messages
+            .recent()
+            .filter(|e| e.message.contains("reconnecting"))
+            .count();
+        assert_eq!(
+            logged, 1,
+            "the reconnecting banner must be latched one-shot"
+        );
+    }
+
+    #[test]
+    fn reconnect_to_a_different_build_warns_about_the_mismatch() {
+        let (mut m, status_tx, _io) = model_with_status();
+        status_tx.send_replace(ConnectionState {
+            status: ConnectionStatus::Reconnecting,
+            ..connected()
+        });
+        m.tick_daemon_health();
+        // The daemon came back from a different (wire-compatible) build.
+        status_tx.send_replace(ConnectionState {
+            status: ConnectionStatus::Connected,
+            daemon_build: "v9.9.9-deadbeef".to_string(),
+        });
+        m.tick_daemon_health();
+        let n = m.status.notice.as_ref().expect("build mismatch banner");
+        assert!(
+            n.message.starts_with("build mismatch: daemon v9.9.9"),
+            "reconnect must refresh the daemon build, not keep the first one: {:?}",
+            n.message
+        );
+    }
+
+    #[test]
+    fn matching_build_retracts_a_stale_mismatch_banner() {
+        let (mut m, _status_tx, _io) = model_with_status();
+        m.note_daemon_build("v0.0.1-stale");
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.starts_with("build mismatch")),
+            "a mismatched build raises the banner"
+        );
+        // A later handshake reports a build that now matches this client.
+        m.note_daemon_build(lazybox_ipc::BUILD_VERSION);
+        assert!(
+            m.status.notice.is_none(),
+            "a now-matching build must retract the stale mismatch banner"
+        );
+    }
+}
+
+#[cfg(test)]
 mod notice_severity_slot_tests {
     //! The single footer-notice slot is severity-aware: a routine
     //! Info/Hint flash must not displace a live sticky (Permanent /

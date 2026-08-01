@@ -1009,10 +1009,11 @@ pub struct TickState {
     unknown_mergeable_probes: std::collections::HashMap<String, u32>,
     /// Consecutive retryable-failure count per source. A self-healing
     /// transient stays a quiet status until this reaches
-    /// [`RETRYABLE_EXHAUSTION_ATTEMPTS`]; only then is sync genuinely
-    /// stuck and the failure escalates to an actionable error (#730).
-    /// Reset by [`Self::clear_error`] on any successful fetch or
-    /// rate-limit wait.
+    /// [`RETRYABLE_EXHAUSTION_ATTEMPTS`]; only then is a hintless
+    /// transient (network, 5xx) genuinely stuck and escalated to an
+    /// actionable error (#730). A throttle carries a backoff hint and
+    /// never escalates however high the streak climbs (#772). Reset by
+    /// [`Self::clear_error`] on any successful fetch or rate-limit wait.
     retryable_streak: std::collections::HashMap<String, u32>,
 }
 
@@ -1026,10 +1027,14 @@ impl TickState {
     /// in flight it broadcasts as a quiet `retryable` status, coalesced
     /// onto one stable [`RETRYABLE_DEDUPE_KEY`] sentinel so a churning
     /// message (a ticking "retrying in Ns", a throttle alternating with a
-    /// 502) fires once, not once per cycle (#727). Only once the failure
-    /// persists for [`RETRYABLE_EXHAUSTION_ATTEMPTS`] consecutive cycles —
-    /// retries genuinely exhausted, sync actually stuck — does it escalate
-    /// to an `exhausted` error the user can act on. Auth/permanent errors
+    /// 502) fires once, not once per cycle (#727). Only once a *hintless*
+    /// transient (network, 5xx — not a throttle) persists for
+    /// [`RETRYABLE_EXHAUSTION_ATTEMPTS`] consecutive cycles — retries
+    /// genuinely exhausted, sync actually stuck — does it escalate to an
+    /// `exhausted` error the user can act on, carrying the classified
+    /// cause (#772). A throttle never escalates: it is the daemon backing
+    /// off a rate limit, self-heals on reset, and blaming the token or the
+    /// connection for it is a dead-end the user can't act on. Auth/permanent errors
     /// are actionable immediately and debounce on their real message so a
     /// changed error still surfaces. A genuine recovery calls
     /// [`Self::clear_error`], re-arming the next broadcast.
@@ -1051,14 +1056,17 @@ impl TickState {
                 .entry(source_key.to_string())
                 .or_insert(0);
             *streak += 1;
-            if *streak >= RETRYABLE_EXHAUSTION_ATTEMPTS {
-                (
-                    ProviderErrorKind::Exhausted,
-                    format!(
-                        "{source} sync failing — check your connection or token",
-                        source = error.source()
-                    ),
-                )
+            // A throttle (a rate limit carrying a backoff window) is the
+            // daemon deliberately waiting out the provider's reset — the
+            // token and the connection are both fine and there is nothing
+            // the user can do but wait. It must never escalate to a red
+            // actionable error, however long the backoff runs (#772: the
+            // exemplar throttle mis-surfaced as "check your connection or
+            // token", forever). Only a hintless transient (network, 5xx)
+            // that keeps failing is genuinely stuck, and its escalation
+            // carries the real cause rather than a generic token blame.
+            if error.retry_after_secs().is_none() && *streak >= RETRYABLE_EXHAUSTION_ATTEMPTS {
+                (ProviderErrorKind::Exhausted, error.exhausted_message())
             } else {
                 (ProviderErrorKind::Retryable, error.user_message())
             }
@@ -1081,6 +1089,17 @@ impl TickState {
             ProviderErrorKind::Exhausted => EXHAUSTED_DEDUPE_KEY,
             ProviderErrorKind::Auth | ProviderErrorKind::Permanent => message.as_str(),
         };
+        // A quiet retryable must not overwrite a standing exhausted error.
+        // Once sync is genuinely stuck, a throttle or hiccup arriving
+        // mid-streak would otherwise flicker the surface red→quiet→red
+        // every cycle (#727). The exhausted error stays put until a real
+        // recovery calls [`Self::clear_error`]; an auth/permanent change
+        // of condition still surfaces (only Retryable is suppressed here).
+        if kind == ProviderErrorKind::Retryable
+            && self.last_error.get(source_key).map(String::as_str) == Some(EXHAUSTED_DEDUPE_KEY)
+        {
+            return;
+        }
         if self.last_error.get(source_key).map(String::as_str) == Some(dedupe_key) {
             return;
         }
@@ -5874,6 +5893,126 @@ mod tick_noop_skip_tests {
             count(drain(&mut rx), "exhausted"),
             1,
             "a persisting transient escalates to one actionable error"
+        );
+    }
+
+    /// #772: a pure throttle (a rate limit carrying a backoff window) must
+    /// NEVER escalate to an actionable `exhausted` error, however long the
+    /// throttle persists. The daemon is deliberately backing off a working
+    /// token and connection; "check your connection or token" is a
+    /// dead-end the user can't act on. It stays one quiet `retryable`
+    /// status the whole time.
+    #[tokio::test]
+    async fn pure_throttle_never_escalates_to_exhausted() {
+        struct AlwaysThrottled;
+        impl TaskSource for AlwaysThrottled {
+            fn name(&self) -> &str {
+                lazybox_gh::SOURCE
+            }
+            fn fetch<'a>(
+                &'a self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    Err(lazybox_core::ProviderError::retryable_after(
+                        lazybox_gh::SOURCE,
+                        "secondary rate limit",
+                        30,
+                    ))
+                })
+            }
+        }
+
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(AlwaysThrottled)];
+        let mut state = TickState::default();
+        let mut rx = config.bus.subscribe();
+
+        // Run well past the exhaustion threshold — a throttle that would
+        // otherwise have escalated several times over.
+        for _ in 0..(RETRYABLE_EXHAUSTION_ATTEMPTS + 3) {
+            tick_with_state(&config, &sources, &mut state).await;
+        }
+
+        let events = drain(&mut rx);
+        let count = |want: &str| {
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::ProviderError { kind, .. } if kind == want))
+                .count()
+        };
+        assert_eq!(
+            count("exhausted"),
+            0,
+            "a throttle must never escalate to an actionable error"
+        );
+        assert_eq!(
+            count("retryable"),
+            1,
+            "the throttle surfaces as one quiet, self-healing status"
+        );
+    }
+
+    /// #772: an exhausted escalation carries a terse, one-row message even
+    /// when the underlying error's `detail` is a long diagnostic sentence
+    /// (as the tick-timeout path produces). The raw diagnostic must not
+    /// balloon the `✗ sync failed` banner.
+    #[tokio::test]
+    async fn exhausted_escalation_message_stays_terse() {
+        struct VerboseRetryable;
+        impl TaskSource for VerboseRetryable {
+            fn name(&self) -> &str {
+                lazybox_gh::SOURCE
+            }
+            fn fetch<'a>(
+                &'a self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    Err(lazybox_core::ProviderError::retryable(
+                        lazybox_gh::SOURCE,
+                        "sync exceeded 180s — the per-upsert / per-graphql / per-git \
+                         timeouts should catch this; hitting the outer cap means \
+                         something escaped them and the whole tick was abandoned",
+                    ))
+                })
+            }
+        }
+
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(VerboseRetryable)];
+        let mut state = TickState::default();
+        let mut rx = config.bus.subscribe();
+
+        for _ in 0..RETRYABLE_EXHAUSTION_ATTEMPTS {
+            tick_with_state(&config, &sources, &mut state).await;
+        }
+
+        let exhausted = drain(&mut rx)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::ProviderError { kind, message, .. } if kind == "exhausted" => Some(message),
+                _ => None,
+            })
+            .expect("a persisting hintless transient escalates to exhausted");
+        assert!(
+            exhausted.len() < 80,
+            "the exhausted banner stays one row, got {} chars: {exhausted}",
+            exhausted.len()
+        );
+        assert!(
+            !exhausted.contains("per-graphql"),
+            "the raw diagnostic must not leak into the banner: {exhausted}"
         );
     }
 

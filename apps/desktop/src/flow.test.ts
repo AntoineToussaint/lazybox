@@ -199,7 +199,7 @@ describe("credential-free desktop workflow", () => {
     }
     snapshot.Snapshot.terminals = [];
     eventChannel().onmessage({ type: "Frame", payload: snapshot });
-    pushInbox([{ number: 42 }]);
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
     await vi.waitFor(() =>
       expect(element("task-title").textContent).toBe("PR o/r#42"),
     );
@@ -303,13 +303,6 @@ describe("credential-free desktop workflow", () => {
 
     vi.resetModules();
     await import("./main");
-    // Wait until the initial connect settles (it overwrites the map from
-    // the empty list_workspaces) before injecting the empty view + events,
-    // so a late refreshInbox can't clobber them.
-    await vi.waitFor(() =>
-      expect(element("connection-label").textContent).toBe("Live"),
-    );
-    pushInbox([]);
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -318,7 +311,9 @@ describe("credential-free desktop workflow", () => {
       type: "Frame",
       payload: { Snapshot: { workspaces: [pr(42), pr(43)], terminals: [] } },
     });
-    pushInbox([{ number: 42 }, { number: 43 }]);
+    eventChannel().onmessage(
+      inboxMessage(["github-o-r-42", "github-o-r-43"]),
+    );
     await vi.waitFor(() =>
       expect(document.querySelectorAll(".workspace-row").length).toBe(2),
     );
@@ -345,6 +340,219 @@ describe("credential-free desktop workflow", () => {
 
     releaseReply?.();
     await vi.waitFor(() => expect(button("reply-button").disabled).toBe(false));
+  });
+
+  it("attaches the replacement terminal when the selected workspace is removed", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    // Two workspaces, each with its own live agent terminal.
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42), pr(43)],
+          terminals: [
+            agentTerminal("github-o-r-42", 7),
+            agentTerminal("github-o-r-43", 8),
+          ],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42", "github-o-r-43"]));
+
+    // Initial auto-selection attaches the first workspace's terminal.
+    await vi.waitFor(() =>
+      expect(element("terminal-title").textContent).toContain("github-o-r-42"),
+    );
+
+    // Remove the selected workspace; the recomputed view lists only the
+    // second (the daemon sends the removal Frame before the Inbox).
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { WorkspaceRemoved: "github-o-r-42" },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-43"]));
+
+    // The replacement is auto-selected AND its terminal is attached —
+    // the pane must not stay pinned to the removed workspace's terminal.
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#43"),
+    );
+    expect(element("terminal-title").textContent).toContain("github-o-r-43");
+  });
+
+  it("totals unread only over workspaces the view shows, not the raw map", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    // Both workspaces reach the frontend map (from the snapshot), each
+    // with unread activity — but the recomputed view lists only #42, as
+    // if #43 were filtered out of this mailbox (e.g. inactive).
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [withUnread(pr(42), 3), withUnread(pr(43), 5)],
+          terminals: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row").length).toBe(1),
+    );
+    // Header counts #42's 3 unread only — never 8 (which would leak the
+    // hidden #43's unread into the shown total).
+    expect(element("unread-count").textContent).toBe("3 unread");
+  });
+
+  it("renders the filter menu and delegates filter/search to the daemon (#733)", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42), pr(43)],
+          terminals: [],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(
+      inboxMessage(["github-o-r-42", "github-o-r-43"], filterMenuFixture()),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row").length).toBe(2),
+    );
+
+    // The menu is built from the shared view-model, grouped by axis with
+    // live counts — never a hardcoded predicate list.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "f" }));
+    await vi.waitFor(() =>
+      expect(element("filter-menu").classList.contains("hidden")).toBe(false),
+    );
+    expect(
+      document.querySelectorAll("#filter-menu .filter-section").length,
+    ).toBe(3); // State / Role / Kind
+    expect(
+      document.querySelectorAll("#filter-menu .filter-row").length,
+    ).toBe(4);
+
+    // A single toggle delegates just that predicate to the daemon; the
+    // optimistic chip shows immediately.
+    toggleFilterRow("PR");
+    await vi.waitFor(() => expect(lastFilterCall()).toEqual(["Pr"]));
+    expect(element("filter-chips").textContent).toContain("PR");
+
+    // A second toggle with no intervening view push must COMPOSE — a
+    // view-derived active set would drop the first.
+    toggleFilterRow("author");
+    await vi.waitFor(() =>
+      expect(lastFilterCall()).toEqual(["Pr", "Author"]),
+    );
+    expect(element("filter-button").textContent).toBe("Filter (2)");
+
+    // `f` is a toggle: a second press closes the menu.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "f" }));
+    expect(element("filter-menu").classList.contains("hidden")).toBe(true);
+
+    // Search delegates to the daemon's global search.
+    const search = input("#inbox-search");
+    search.value = "widget";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(harness.invoke).toHaveBeenCalledWith("set_search", {
+        query: "widget",
+      }),
+    );
   });
 
   it("disables New workspace when no repository is available", async () => {
@@ -502,7 +710,7 @@ describe("credential-free desktop workflow", () => {
         },
       },
     });
-    pushInbox([{ number: 42 }]);
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
     await vi.waitFor(() =>
       expect(button("snippet-button").disabled).toBe(false),
     );
@@ -569,13 +777,6 @@ describe("credential-free desktop workflow", () => {
 
     vi.resetModules();
     await import("./main");
-    // Wait until the initial connect settles (it overwrites the map from
-    // the empty list_workspaces) before injecting the empty view + events,
-    // so a late refreshInbox can't clobber them.
-    await vi.waitFor(() =>
-      expect(element("connection-label").textContent).toBe("Live"),
-    );
-    pushInbox([]);
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -787,6 +988,92 @@ describe("credential-free desktop workflow", () => {
   });
 });
 
+// Stand-in for the grouped view `src-tauri` computes and pushes. In
+// production the shared tui-core logic orders these rows; the test only
+// needs a valid structure listing the given workspace keys so the thin
+// renderer draws their rows.
+function inboxMessage(
+  keys: string[],
+  filterMenu: unknown[] = [],
+  filterChips: string[] = [],
+): Record<string, unknown> {
+  return {
+    type: "Inbox",
+    payload: {
+      outcome: {
+        visible: [
+          { RepoHeader: "o/r" },
+          ...keys.map((key) => ({ Workspace: key })),
+        ],
+        summaries: { "o/r": { active: keys.length, attention: 0 } },
+      },
+      sort_mode: "ByRoleSplit",
+      filter_menu: filterMenu,
+      filter_chips: filterChips,
+    },
+  };
+}
+
+// A minimal shared-shape filter menu (#733) so the desktop renders its
+// grouped menu; the counts are fixture data.
+function filterMenuFixture(): unknown[] {
+  return [
+    { filter: "Unread", axis: "State", label: "unread", count: 0, active: false },
+    { filter: "Author", axis: "Role", label: "author", count: 2, active: false },
+    { filter: "Pr", axis: "Kind", label: "PR", count: 2, active: false },
+    { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
+  ];
+}
+
+function toggleFilterRow(label: string): void {
+  const row = [...document.querySelectorAll(".filter-row")].find(
+    (candidate) =>
+      candidate.querySelector(".filter-row-label")?.textContent === label,
+  );
+  row
+    ?.querySelector("input")
+    ?.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function lastFilterCall(): unknown {
+  const call = harness.invoke.mock.calls
+    .filter(([command]) => command === "set_filters")
+    .at(-1);
+  return (call?.[1] as { filters: unknown } | undefined)?.filters;
+}
+
+// A live agent terminal for `sessionKey`, cloned from the contract
+// fixture so its shape stays current. `terminalForWorkspace` matches on
+// `session_key`, so the key must equal the workspace key.
+function agentTerminal(
+  sessionKey: string,
+  terminalId: number,
+): Record<string, unknown> {
+  const template = structuredClone(fixture.events[0]) as {
+    Snapshot: { terminals: Array<Record<string, unknown>> };
+  };
+  const terminal = template.Snapshot.terminals[0];
+  if (terminal === undefined) {
+    throw new Error("fixture snapshot is missing a template terminal");
+  }
+  terminal.session_key = sessionKey;
+  terminal.terminal_id = terminalId;
+  return terminal;
+}
+
+// Give a workspace `count` unread activity items. `unreadCount` reads
+// only `activity.length` against `seen_count`/`read_indices`, so opaque
+// placeholders are enough to move the count.
+function withUnread(
+  workspace: Record<string, unknown>,
+  count: number,
+): Record<string, unknown> {
+  workspace.activity = Array.from({ length: count }, () => ({}));
+  workspace.seen_count = 0;
+  workspace.read_indices = [];
+  return workspace;
+}
+
 function pr(number: number): Record<string, unknown> {
   const template = structuredClone(fixture.events[0]) as {
     Snapshot: { workspaces: Array<Record<string, unknown>> };
@@ -883,94 +1170,12 @@ function submitEvent(): SubmitEvent {
   return new SubmitEvent("submit", { bubbles: true, cancelable: true });
 }
 
-// `subscribe_events` creates the event channel first, then the inbox
-// channel — so the last two channels are [event, inbox].
 function eventChannel(): { onmessage: (message: unknown) => void } {
-  const channel = harness.channels.at(-2);
+  const channel = harness.channels.at(-1);
   if (channel === undefined) {
     throw new Error("missing desktop event channel");
   }
   return channel;
-}
-
-function inboxChannel(): { onmessage: (message: unknown) => void } {
-  const channel = harness.channels.at(-1);
-  if (channel === undefined) {
-    throw new Error("missing desktop inbox channel");
-  }
-  return channel;
-}
-
-function pushInbox(rows: Array<{ number: number; unread?: number }>): void {
-  inboxChannel().onmessage(inboxViewFor(rows));
-}
-
-function inboxViewFor(rows: Array<{ number: number; unread?: number }>): unknown {
-  // An empty inbox is a non-null view with no rows — mirrors the daemon's
-  // opening snapshot for a repo with nothing in flight.
-  const tree =
-    rows.length === 0
-      ? []
-      : [
-          { RepoHeader: "o/r" },
-          { KindHeader: "Pr" },
-          ...rows.map((row) => ({ Workspace: `github-o-r-${row.number}` })),
-        ];
-  const unread = rows.reduce((sum, row) => sum + (row.unread ?? 0), 0);
-  return {
-    rows: tree,
-    workspaces: Object.fromEntries(
-      rows.map((row) => [`github-o-r-${row.number}`, workspaceRowFor(row)]),
-    ),
-    summaries:
-      rows.length === 0
-        ? {}
-        : { "o/r": { active: rows.length, attention: 0, unread } },
-    sort_mode: "ByRoleSplit",
-    sort_label: "split",
-    collapsed: [],
-    total: rows.length,
-    unread_total: unread,
-    filter_menu: filterMenuFor(rows.length),
-    filter_chips: [],
-  };
-}
-
-// A minimal shared-shape filter menu so the desktop renders its grouped
-// menu; counts track the pushed row count.
-function filterMenuFor(count: number): unknown[] {
-  return [
-    { filter: "Unread", axis: "State", label: "unread", count: 0, active: false },
-    { filter: "Author", axis: "Role", label: "author", count, active: false },
-    { filter: "Pr", axis: "Kind", label: "PR", count, active: false },
-    { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
-  ];
-}
-
-function workspaceRowFor(row: { number: number; unread?: number }): unknown {
-  return {
-    key: `github-o-r-${row.number}`,
-    title: `PR o/r#${row.number}`,
-    reference: `o/r#${row.number}`,
-    number: row.number,
-    repo: "o/r",
-    kind: "Pr",
-    role: "Author",
-    state: "Open",
-    status: "CiOk",
-    status_label: "CI OK",
-    ci: "Success",
-    review: "None",
-    unread_count: row.unread ?? 0,
-    updated_at: "2026-04-01T12:00:00Z",
-    additions: 0,
-    deletions: 0,
-    labels: [],
-    needs_reply: false,
-    last_commenter: null,
-    session_count: 0,
-    attention: false,
-  };
 }
 
 function commandCalls(): unknown[] {

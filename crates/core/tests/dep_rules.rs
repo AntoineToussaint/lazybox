@@ -63,10 +63,14 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-linear",
                 "lazybox-slack",
                 "lazybox-store",
-                // Optional, desktop-contract only: the contract generator
-                // exports the shared inbox view-model as TS and the
-                // `DesktopStreamMessage::Inbox` variant carries it (#732).
-                // Off in every daemon build — the daemon never renders.
+                // server hosts the desktop API gateway + the desktop
+                // contract generator. The desktop's inbox view-model
+                // (ComputeOutcome / VisibleRow / SortMode / WorkspaceKind /
+                // RepoSummary from tui-core, #732) crosses the gateway as a
+                // `DesktopStreamMessage::Inbox` variant and is ts-exported
+                // here. tui-core stays client-free (its deps — agents /
+                // config / core / ipc — are already server deps), so this
+                // edge introduces no cycle.
                 "lazybox-tui-core",
             ]),
         ),

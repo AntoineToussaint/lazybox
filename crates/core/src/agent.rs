@@ -47,6 +47,88 @@ mod tests {
     }
 
     #[test]
+    fn overlay_replaces_set_fields_and_keeps_the_rest() {
+        let mut base = PriorityAliases {
+            best: None,
+            high: Some("L".into()),
+            medium: Some("M".into()),
+            low: Some("S".into()),
+        };
+        base.overlay(&PriorityAliases {
+            best: Some("B".into()),
+            high: Some("X".into()),
+            ..Default::default()
+        });
+        // `best` and `high` came from the overlay; `medium`/`low` the
+        // overlay left unset, so the base mappings survive.
+        assert_eq!(base.best.as_deref(), Some("B"));
+        assert_eq!(base.high.as_deref(), Some("X"));
+        assert_eq!(base.medium.as_deref(), Some("M"));
+        assert_eq!(base.low.as_deref(), Some("S"));
+    }
+
+    #[test]
+    fn best_priority_maps_to_its_alias() {
+        use crate::PriorityTier;
+        let m = AgentModels {
+            tiers: vec![ModelTier {
+                alias: "B".into(),
+                label: "Opus · max".into(),
+                args: vec![
+                    "--model".into(),
+                    "opus".into(),
+                    "--reasoning-effort".into(),
+                    "max".into(),
+                ],
+            }],
+            priority: PriorityAliases {
+                best: Some("B".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(m.alias_for_priority(PriorityTier::Best), Some("B"));
+        assert_eq!(
+            m.resolve_args(m.alias_for_priority(PriorityTier::Best)),
+            vec![
+                "--model".to_string(),
+                "opus".to_string(),
+                "--reasoning-effort".to_string(),
+                "max".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dangling_aliases_flags_every_undefined_reference() {
+        // Default names an absent alias, and each priority points at a
+        // tier the (empty) menu doesn't define.
+        let m = AgentModels {
+            default: Some("L".into()),
+            tiers: vec![],
+            priority: PriorityAliases {
+                best: Some("B".into()),
+                high: Some("H".into()),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            m.dangling_aliases(),
+            vec![
+                ("default".to_string(), "L".to_string()),
+                ("priority.best".to_string(), "B".to_string()),
+                ("priority.high".to_string(), "H".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dangling_aliases_empty_when_everything_resolves() {
+        let m = AgentModels::builtin("claude").unwrap();
+        assert!(m.dangling_aliases().is_empty());
+    }
+
+    #[test]
     fn resolve_args_uses_named_alias() {
         let m = AgentModels::builtin("claude").unwrap();
         assert_eq!(
@@ -228,10 +310,10 @@ impl ModelTier {
     }
 }
 
-/// Which tier alias each declared task priority (`high` / `medium` /
-/// `low`) maps to for an **autonomous** or bare-`w` spawn. This is the
-/// config-driven bridge between the priority a task declares (a label
-/// or an `@high`/`@medium`/`@low` body marker; see
+/// Which tier alias each declared task priority (`best` / `high` /
+/// `medium` / `low`) maps to for an **autonomous** or bare-`w` spawn.
+/// This is the config-driven bridge between the priority a task declares
+/// (a label or an `@best`/`@high`/`@medium`/`@low` body marker; see
 /// [`resolve_priority_tier`](crate::resolve_priority_tier)) and this
 /// agent's own alias menu — so `high` can mean `L` (Opus) for Claude
 /// but a different alias for another agent. An unset priority (or one
@@ -239,6 +321,8 @@ impl ModelTier {
 /// spawn falls back to the agent's default tier / default model.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct PriorityAliases {
+    #[serde(default)]
+    pub best: Option<String>,
     #[serde(default)]
     pub high: Option<String>,
     #[serde(default)]
@@ -251,7 +335,41 @@ impl PriorityAliases {
     /// True when no priority maps to an alias — the map is absent from
     /// config and every priority falls through to the default tier.
     pub fn is_unset(&self) -> bool {
-        self.high.is_none() && self.medium.is_none() && self.low.is_none()
+        self.best.is_none() && self.high.is_none() && self.medium.is_none() && self.low.is_none()
+    }
+
+    /// Each `(priority-token, mapped-alias)` pair the user actually set,
+    /// in strongest-first order. Feeds config-load validation that warns
+    /// on an alias the tier menu doesn't define.
+    pub fn declared(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [
+            ("best", &self.best),
+            ("high", &self.high),
+            ("medium", &self.medium),
+            ("low", &self.low),
+        ]
+        .into_iter()
+        .filter_map(|(name, alias)| alias.as_deref().map(|a| (name, a)))
+    }
+
+    /// Overlay `other`'s set fields onto `self`, per priority: a priority
+    /// `other` maps replaces `self`'s mapping for it; one `other` leaves
+    /// unset keeps `self`'s. Used to layer a user's partial `priority:`
+    /// map onto an inherited built-in map without wiping the priorities
+    /// the user didn't mention.
+    pub fn overlay(&mut self, other: &PriorityAliases) {
+        if other.best.is_some() {
+            self.best = other.best.clone();
+        }
+        if other.high.is_some() {
+            self.high = other.high.clone();
+        }
+        if other.medium.is_some() {
+            self.medium = other.medium.clone();
+        }
+        if other.low.is_some() {
+            self.low = other.low.clone();
+        }
     }
 }
 
@@ -284,10 +402,37 @@ impl AgentModels {
     /// spawn path (an explicit `w S` chord bypasses it).
     pub fn alias_for_priority(&self, tier: crate::PriorityTier) -> Option<&str> {
         match tier {
+            crate::PriorityTier::Best => self.priority.best.as_deref(),
             crate::PriorityTier::High => self.priority.high.as_deref(),
             crate::PriorityTier::Medium => self.priority.medium.as_deref(),
             crate::PriorityTier::Low => self.priority.low.as_deref(),
         }
+    }
+
+    /// Aliases named by `default` or any `priority.*` that no tier in the
+    /// menu defines. Each is a dangling reference that resolves to no
+    /// args — the spawn silently keeps the agent's own hard-coded model
+    /// instead of the tier the config appears to request. Config load
+    /// surfaces these as warnings so the no-op is discoverable.
+    ///
+    /// Returns `(source, alias)` pairs where `source` is `"default"` or a
+    /// `"priority.<tier>"` token, in a stable order (`default` first,
+    /// then priorities strongest-first).
+    pub fn dangling_aliases(&self) -> Vec<(String, String)> {
+        let sources = self
+            .default
+            .as_deref()
+            .map(|a| ("default".to_string(), a))
+            .into_iter()
+            .chain(
+                self.priority
+                    .declared()
+                    .map(|(name, alias)| (format!("priority.{name}"), alias)),
+            );
+        sources
+            .filter(|(_, alias)| self.tier(alias).is_none())
+            .map(|(source, alias)| (source, alias.to_string()))
+            .collect()
     }
 
     /// Resolve the spawn args for a chosen `alias`, or for the
@@ -331,8 +476,12 @@ impl AgentModels {
                     },
                 ],
                 // A declared priority routes to the matching tier:
-                // high → Opus, medium → Sonnet, low → Haiku.
+                // high → Opus, medium → Sonnet, low → Haiku. `best` is
+                // left unmapped: the built-in menu has no max-reasoning
+                // tier, so a `best` run is opt-in — define a best tier
+                // (model + effort) and `priority.best` in YAML (#748).
                 priority: PriorityAliases {
+                    best: None,
                     high: Some("L".into()),
                     medium: Some("M".into()),
                     low: Some("S".into()),

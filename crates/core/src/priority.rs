@@ -2,13 +2,14 @@
 //! off a [`Task`].
 //!
 //! A task can request a right-sized model by declaring a priority:
-//! a `high` / `medium` / `low` **label**, or an `@high` / `@medium` /
-//! `@low` **marker** in its body. The autonomous ("pilot") spawn paths
-//! and a bare interactive spawn resolve the tier here; the spawn path
-//! then maps it to one of the target agent's model-tier aliases
+//! a `best` / `high` / `medium` / `low` **label**, or an `@best` /
+//! `@high` / `@medium` / `@low` **marker** in its body. The autonomous
+//! ("pilot") spawn paths and a bare interactive spawn resolve the tier
+//! here; the spawn path then maps it to one of the target agent's
+//! model-tier aliases
 //! ([`AgentModels::alias_for_priority`](crate::AgentModels::alias_for_priority))
-//! and appends that tier's model args. High → the strongest model,
-//! low → the cheapest/fastest.
+//! and appends that tier's model args. Best → the strongest available
+//! run (model *and* reasoning effort), low → the cheapest/fastest.
 //!
 //! This module holds only the pure decision (priority ← task); the
 //! priority → tier-alias → concrete-model mapping lives on
@@ -24,6 +25,7 @@ use crate::Task;
 /// tier when a task somehow declares more than one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriorityTier {
+    Best,
     High,
     Medium,
     Low,
@@ -31,14 +33,15 @@ pub enum PriorityTier {
 
 impl PriorityTier {
     /// Strongest → cheapest. The resolver scans in this order so a task
-    /// carrying, say, both a `high` and a `low` label resolves to
-    /// `High` (the stronger wins).
-    const ORDER: [PriorityTier; 3] = [Self::High, Self::Medium, Self::Low];
+    /// carrying, say, both a `best` and a `high` label resolves to
+    /// `Best` (the stronger wins).
+    const ORDER: [PriorityTier; 4] = [Self::Best, Self::High, Self::Medium, Self::Low];
 
     /// Lowercase token this priority is declared with — the label name
-    /// and the `@`-marker suffix (`high` / `medium` / `low`).
+    /// and the `@`-marker suffix (`best` / `high` / `medium` / `low`).
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Best => "best",
             Self::High => "high",
             Self::Medium => "medium",
             Self::Low => "low",
@@ -49,11 +52,11 @@ impl PriorityTier {
 /// Resolve the [`PriorityTier`] a task declares, if any.
 ///
 /// Precedence:
-/// 1. A `high` / `medium` / `low` **label** (case-insensitive) wins
-///    over a body marker.
-/// 2. Otherwise an `@high` / `@medium` / `@low` **marker** in the body,
-///    matched at a word boundary (so `@highest` / `email@high` don't
-///    count).
+/// 1. A `best` / `high` / `medium` / `low` **label** (case-insensitive)
+///    wins over a body marker.
+/// 2. Otherwise a `@best` / `@high` / `@medium` / `@low` **marker** in
+///    the body, matched at a word boundary (so `@highest` / `email@high`
+///    don't count).
 ///
 /// When a source declares more than one tier (two priority labels, or
 /// two markers), the stronger tier wins — `PriorityTier::ORDER` is
@@ -186,6 +189,10 @@ mod tests {
     #[test]
     fn label_resolves_each_tier() {
         assert_eq!(
+            resolve_priority_tier(&task(vec![Label::new("best")], None)),
+            Some(PriorityTier::Best)
+        );
+        assert_eq!(
             resolve_priority_tier(&task(vec![Label::new("high")], None)),
             Some(PriorityTier::High)
         );
@@ -213,6 +220,10 @@ mod tests {
 
     #[test]
     fn body_marker_resolves_each_tier() {
+        assert_eq!(
+            resolve_priority_tier(&task(vec![], Some("give it your @best"))),
+            Some(PriorityTier::Best)
+        );
         assert_eq!(
             resolve_priority_tier(&task(vec![], Some("please @high this"))),
             Some(PriorityTier::High)
@@ -272,6 +283,14 @@ mod tests {
         assert_eq!(resolve_priority_tier(&t), Some(PriorityTier::High));
         let t = task(vec![Label::new("low"), Label::new("medium")], None);
         assert_eq!(resolve_priority_tier(&t), Some(PriorityTier::Medium));
+    }
+
+    #[test]
+    fn best_beats_a_co_declared_high() {
+        let t = task(vec![Label::new("high"), Label::new("best")], None);
+        assert_eq!(resolve_priority_tier(&t), Some(PriorityTier::Best));
+        let t = task(vec![], Some("@high but really @best"));
+        assert_eq!(resolve_priority_tier(&t), Some(PriorityTier::Best));
     }
 
     #[test]

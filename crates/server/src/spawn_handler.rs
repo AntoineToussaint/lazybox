@@ -4240,7 +4240,15 @@ async fn resync_replay_after_gap(
 /// (the "produced no output" case — the pane then just shows the failure
 /// banner). Bounded so a full 64 KiB ring can't blow up the wire payload.
 fn last_output_tail(bytes: &[u8]) -> Option<String> {
-    const MAX_LINES: usize = 8;
+    agent_output_tail(bytes, 8)
+}
+
+/// Clean and line-limit raw terminal bytes into a legible text tail:
+/// strip escape sequences, collapse in-place `\r` overwrites, drop
+/// blank lines, and keep at most the final `max_lines`. Shared by the
+/// dying-agent recap (`last_output_tail`) and the workspace-addressed
+/// `get_agent_output` gateway read (issue #773).
+pub(crate) fn agent_output_tail(bytes: &[u8], max_lines: usize) -> Option<String> {
     const MAX_LINE_CHARS: usize = 200;
 
     let text = String::from_utf8_lossy(bytes);
@@ -4261,8 +4269,51 @@ fn last_output_tail(bytes: &[u8]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-    let tail = lines.split_off(lines.len().saturating_sub(MAX_LINES));
+    let tail = lines.split_off(lines.len().saturating_sub(max_lines));
     Some(tail.join("\n"))
+}
+
+/// Read a running agent terminal's recent output as a cleaned,
+/// line-limited text tail — the workspace-addressed read behind the
+/// gateway's `get_agent_output` (issue #773). Prefers the backend's
+/// deep scrollback (tmux `capture-pane`) and falls back to the live
+/// ring snapshot for backends without a history source (raw PTY).
+/// `None` when the terminal is unknown or produced no legible output.
+pub async fn agent_output_snapshot(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    max_lines: usize,
+) -> Option<String> {
+    let key = config.terminal.backend_key_for(terminal_id).await?;
+    let bytes = match config.backend.scrollback(&key).await {
+        Ok(Some((replay, _seq))) => replay,
+        _ => match config.backend.snapshot(&key).await {
+            Ok(snapshot) => snapshot.replay,
+            Err(_) => return None,
+        },
+    };
+    // A tmux deep scrollback can be megabytes; cleaning all of it to keep
+    // `max_lines` lines is wasteful on a frequently-polled read. Clean only
+    // a trailing window generously sized to still contain `max_lines` lines
+    // (well above the 200-char per-line cap the cleaner applies). Slicing
+    // mid-sequence can corrupt at most the window's first line, which the
+    // tail extractor drops anyway (see `strip_ansi`).
+    let window = trailing_window(&bytes, max_lines.saturating_mul(TAIL_SCAN_BYTES_PER_LINE));
+    agent_output_tail(window, max_lines)
+}
+
+/// Bytes to scan per requested output line before cleaning — comfortably
+/// above the cleaner's 200-char line cap so the kept tail is never
+/// truncated by the window boundary.
+const TAIL_SCAN_BYTES_PER_LINE: usize = 1024;
+
+/// The trailing `at_most` bytes of `bytes` (or all of them when shorter),
+/// clamped to a sane floor/ceiling so a tiny `max_lines` still gets enough
+/// context and a huge one can't scan an unbounded buffer.
+fn trailing_window(bytes: &[u8], at_most: usize) -> &[u8] {
+    let window = at_most.clamp(64 * 1024, 1024 * 1024);
+    let start = bytes.len().saturating_sub(window);
+    &bytes[start..]
 }
 
 /// Drop ANSI escape sequences and non-printing control bytes from
@@ -7938,6 +7989,110 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         .await
 }
 
+/// One live agent runtime, read straight from the terminal registries.
+/// Unlike [`TerminalSnapshot`] this carries no PTY replay — it is the
+/// lightweight projection `/v1/agents` needs to report what each agent
+/// is doing, so a status poll never assembles (and discards) replay
+/// rings.
+#[derive(Debug, Clone)]
+pub struct AgentTerminalRuntime {
+    pub terminal_id: TerminalId,
+    pub session_key: SessionKey,
+    /// Agent id — `claude`, `codex`, `cursor`, ….
+    pub agent_id: String,
+    pub agent_state: Option<lazybox_ipc::AgentState>,
+    /// The durable workspace session this terminal runs in, read in the
+    /// same lock section as the rest of its metadata so it can't race a
+    /// concurrent teardown.
+    pub session_id: Option<SessionId>,
+    pub on_main: bool,
+    pub no_permission: bool,
+    pub model_label: Option<String>,
+    /// The most recent prompt submitted to this agent, if any.
+    pub last_prompt: Option<UserPrompt>,
+}
+
+/// Point-in-time snapshot of every running agent, for the `/v1/agents`
+/// read surface (issue #768). Reads only the in-memory terminal
+/// registries — no `backend.snapshot`, so no replay is assembled — in a
+/// single consistent lock section, then loads each agent's last prompt
+/// from the store. Shells, log-tails, superseded terminals, and
+/// still-authenticating login terminals are all excluded: only a live
+/// agent doing (or ready to do) work is an agent to coordinate.
+pub async fn agent_runtime_snapshot(config: &ServerConfig) -> Vec<AgentTerminalRuntime> {
+    let entries: Vec<(
+        TerminalId,
+        String,
+        SessionKey,
+        String,
+        Option<lazybox_ipc::AgentState>,
+        Option<SessionId>,
+        bool,
+        bool,
+        Option<String>,
+    )> = {
+        let map = config.terminal.terminals.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
+        let superseded = config.terminal.superseded_terminals.lock().await;
+        let authenticating = config.terminal.authenticating_terminals.lock().await;
+        let agent_states = config.terminal.agent_states.lock().await;
+        let sessions = config.terminal.terminal_sessions.lock().await;
+        let no_permission = config.terminal.no_permission_terminals.lock().await;
+        let on_main = config.terminal.on_main_terminals.lock().await;
+        let terminal_models = config.terminal.terminal_models.lock().await;
+        map.iter()
+            .filter_map(|(id, backend_key)| {
+                if superseded.contains(id) || authenticating.contains(id) {
+                    return None;
+                }
+                let (session_key, kind) = meta.get(id).cloned()?;
+                let TerminalKind::Agent(agent_id) = kind else {
+                    return None;
+                };
+                Some((
+                    *id,
+                    backend_key.clone(),
+                    session_key,
+                    agent_id,
+                    agent_states.get(id).copied(),
+                    sessions.get(id).copied(),
+                    no_permission.contains(id),
+                    on_main.contains(id),
+                    terminal_models.get(id).cloned(),
+                ))
+            })
+            .collect()
+    };
+
+    let mut runtimes = Vec::with_capacity(entries.len());
+    for (
+        terminal_id,
+        backend_key,
+        session_key,
+        agent_id,
+        agent_state,
+        session_id,
+        no_permission,
+        on_main,
+        model_label,
+    ) in entries
+    {
+        let last_prompt = load_prompt_history(config, &backend_key).await.pop();
+        runtimes.push(AgentTerminalRuntime {
+            terminal_id,
+            session_key,
+            agent_id,
+            agent_state,
+            session_id,
+            on_main,
+            no_permission,
+            model_label,
+            last_prompt,
+        });
+    }
+    runtimes
+}
+
 /// Serve a client-observed sequence gap from the backend replay. This path
 /// is defense in depth for drops below the daemon's normal pump/forwarder
 /// recovery machinery.
@@ -10790,6 +10945,69 @@ mod tests {
         assert!(snap.replay.is_empty());
     }
 
+    /// `agent_runtime_snapshot` is the `/v1/agents` read: only live
+    /// agents surface — shells and still-authenticating login terminals
+    /// are excluded — and each agent's durable session id is read in the
+    /// same lock section it collects the rest of its metadata.
+    #[tokio::test]
+    async fn agent_runtime_snapshot_filters_to_live_agents() {
+        let config = ServerConfig::in_memory();
+        let workspace: SessionKey = "acme/widget#1".into();
+
+        let agent = TerminalId(1);
+        config
+            .terminal
+            .register_terminal(
+                agent,
+                "backend:agent".into(),
+                workspace.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        let session_id = SessionId::new();
+        config.terminal.associate_session(agent, session_id).await;
+        config
+            .terminal
+            .record_agent_state(agent, lazybox_ipc::AgentState::Working)
+            .await;
+
+        config
+            .terminal
+            .register_terminal(
+                TerminalId(2),
+                "backend:shell".into(),
+                workspace.clone(),
+                TerminalKind::Shell,
+            )
+            .await;
+
+        let authenticating = TerminalId(3);
+        config
+            .terminal
+            .register_terminal(
+                authenticating,
+                "backend:auth".into(),
+                workspace.clone(),
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+        config
+            .terminal
+            .authenticating_terminals
+            .lock()
+            .await
+            .insert(authenticating);
+
+        let runtimes = agent_runtime_snapshot(&config).await;
+        assert_eq!(runtimes.len(), 1, "only the live, non-auth agent surfaces");
+        let runtime = &runtimes[0];
+        assert_eq!(runtime.terminal_id, agent);
+        assert_eq!(runtime.agent_id, "claude");
+        assert_eq!(runtime.agent_state, Some(lazybox_ipc::AgentState::Working));
+        assert_eq!(runtime.session_id, Some(session_id));
+        assert!(runtime.last_prompt.is_none());
+    }
+
     /// A client-requested resync must be served from a wrapped ring. On
     /// reconnect a `>ring-capacity` terminal arrives `replay_available: false`
     /// and the client fires `RequestTerminalResync`; rejecting `!complete`
@@ -12254,6 +12472,32 @@ mod tests {
         assert_eq!(lines.len(), 8);
         assert_eq!(lines.first(), Some(&"line 12"));
         assert_eq!(lines.last(), Some(&"line 19"));
+    }
+
+    #[test]
+    fn trailing_window_clamps_between_a_floor_and_ceiling() {
+        // Below the floor, the whole (short) buffer is returned.
+        let small = vec![b'x'; 10];
+        assert_eq!(trailing_window(&small, 1).len(), 10);
+        // A big buffer with a modest request is clipped to the 64 KiB floor,
+        // keeping the tail (the window is taken from the end).
+        let big = vec![b'y'; 2 * 1024 * 1024];
+        let floored = trailing_window(&big, 1);
+        assert_eq!(floored.len(), 64 * 1024);
+        assert_eq!(floored, &big[big.len() - 64 * 1024..]);
+        // A huge request can never scan more than the 1 MiB ceiling.
+        assert_eq!(trailing_window(&big, usize::MAX).len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn agent_output_tail_honors_a_custom_line_budget() {
+        // The gateway's `get_agent_output` reads more than the 8-line
+        // dying-agent recap; the shared cleaner respects the requested cap.
+        let raw: Vec<u8> = (0..20)
+            .flat_map(|n| format!("line {n}\n").into_bytes())
+            .collect();
+        let tail = agent_output_tail(&raw, 3).expect("tail");
+        assert_eq!(tail, "line 17\nline 18\nline 19");
     }
 
     #[test]

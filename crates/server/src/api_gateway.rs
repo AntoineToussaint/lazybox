@@ -189,6 +189,101 @@ pub struct WorkspacesResponse {
     pub warnings: Vec<String>,
 }
 
+/// Live-state read surface for coordinating agents (issue #768): every
+/// agent terminal the daemon is currently running, with the workspace,
+/// task, lifecycle state, and last prompt an outside caller needs to
+/// tell what each agent is doing without scraping any PTY.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentsResponse {
+    pub agents: Vec<RunningAgent>,
+    /// Persisted workspace rows that were preserved but could not be
+    /// decoded, mirroring [`WorkspacesResponse::warnings`].
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// One running agent terminal, projected from the daemon's live
+/// registries joined with its persisted workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningAgent {
+    pub terminal_id: TerminalId,
+    /// The workspace this agent runs in (also its `SessionKey` string).
+    pub workspace_key: String,
+    pub workspace_name: String,
+    /// `owner/repo`, when the workspace tracks a repository.
+    pub repo: Option<String>,
+    /// Agent id — `claude`, `codex`, `cursor`, ….
+    pub agent: String,
+    /// Lifecycle state (working / input-needed / idle / done / exited).
+    /// `None` for an agent that has not committed its first state yet.
+    pub state: Option<lazybox_ipc::AgentState>,
+    /// The PR/issue this workspace is about, when it tracks one.
+    pub task: Option<AgentTaskInfo>,
+    /// What the agent is working on: the most recent prompt submitted to
+    /// it. `None` for an agent that hasn't received one yet.
+    pub last_prompt: Option<String>,
+    /// Unix-epoch milliseconds of `last_prompt`.
+    pub last_prompt_at: Option<u64>,
+    /// Model-tier label the session launched with (`Opus`, …), when not
+    /// the default.
+    pub model: Option<String>,
+    /// Running on the repo's shared main checkout rather than a worktree.
+    pub on_main: bool,
+    /// Launched in no-permission / bypass mode.
+    pub no_permission: bool,
+    /// When this agent's worktree session was created. A session
+    /// persists across agent restarts in the same worktree, so this is
+    /// "how long this workspace has been active" rather than the current
+    /// process's launch time — the daemon keeps no wall-clock per-run
+    /// spawn timestamp (only a monotonic one that can't be serialized).
+    pub session_started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Compact PR/issue reference carried on a [`RunningAgent`], so one
+/// `/v1/agents` call tells which agent is on which task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTaskInfo {
+    /// Provider-qualified id, e.g. `github:owner/repo#123`.
+    pub id: String,
+    pub kind: AgentTaskKind,
+    /// The trailing number (`#123` → `123`), when the id carries one.
+    pub number: Option<u64>,
+    pub title: String,
+    pub url: String,
+    pub repo: Option<String>,
+    pub ci: lazybox_core::CiStatus,
+}
+
+/// Whether a [`AgentTaskInfo`] is a pull request or an issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskKind {
+    Pr,
+    Issue,
+}
+
+impl AgentTaskInfo {
+    fn from_task(task: &lazybox_core::Task) -> Self {
+        Self {
+            id: task.id.to_string(),
+            kind: if task.is_pr() {
+                AgentTaskKind::Pr
+            } else {
+                AgentTaskKind::Issue
+            },
+            number: task
+                .id
+                .key
+                .rsplit_once('#')
+                .and_then(|(_, n)| n.parse().ok()),
+            title: task.title.clone(),
+            url: task.url.clone(),
+            repo: task.repo.clone(),
+            ci: task.ci,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct CommandResponse {
@@ -200,6 +295,62 @@ pub struct CommandResponse {
     pub error: Option<String>,
     /// Connection-scoped outcomes emitted directly by the command handler.
     pub events: Vec<Event>,
+}
+
+/// Body of `POST /v1/agents/inject` — the write side of the meta-agent
+/// control surface (issue #773). `workspace` is the target workspace
+/// key; the gateway resolves it to that workspace's running agent
+/// terminal server-side, so a caller never handles terminal ids.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InjectRequest {
+    pub workspace: String,
+    pub text: String,
+    /// Press Enter after pasting `text` (paste + run). `false` drops it
+    /// into the composer for later submission, mirroring `InjectPrompt`.
+    #[serde(default = "default_inject_submit")]
+    pub submit: bool,
+}
+
+fn default_inject_submit() -> bool {
+    true
+}
+
+/// Reply to `POST /v1/agents/inject`. `accepted` reports only that the
+/// workspace resolved to a running agent and the prompt was handed to
+/// the settle-gated inject path — *not* that it was delivered or
+/// submitted. The settle/submit outcome (a drop on a stuck permission
+/// prompt, a paste that could not be submitted) arrives asynchronously
+/// on `/v1/events` as `TerminalInputRejected`, exactly as for an
+/// interactive inject.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectResponse {
+    pub accepted: bool,
+    pub workspace: String,
+    pub terminal_id: TerminalId,
+}
+
+/// Body of `POST /v1/agents/output` — read a running agent's recent
+/// output by workspace key (issue #773). POST rather than GET so the
+/// workspace key (which carries `#` and `/`) travels in a JSON body
+/// instead of a fragile, unencoded query string.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutputRequest {
+    pub workspace: String,
+    /// Maximum cleaned lines to return, newest-last. Clamped to
+    /// [`AGENT_OUTPUT_MAX_LINES`]; omitted defaults to
+    /// [`AGENT_OUTPUT_DEFAULT_LINES`].
+    #[serde(default)]
+    pub tail: Option<usize>,
+}
+
+/// Reply to `POST /v1/agents/output` — a running agent's recent output
+/// as a cleaned, line-limited text tail (issue #773).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentOutputResponse {
+    pub workspace: String,
+    pub terminal_id: TerminalId,
+    pub output: String,
+    pub lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -640,6 +791,67 @@ pub async fn workspaces_response(
     })
 }
 
+/// Live snapshot of every running agent, joining the daemon's in-memory
+/// terminal registries ([`crate::spawn_handler::agent_runtime_snapshot`],
+/// a replay-free read) with each agent's persisted workspace. Shells,
+/// log-tails, and still-authenticating login terminals are omitted —
+/// only a live `TerminalKind::Agent` is an agent to coordinate. The
+/// subscribe stream (`/v1/events`) carries the deltas; this is the
+/// point-in-time read a polling client starts from.
+pub async fn agents_response(config: &ServerConfig) -> Result<AgentsResponse, GatewayError> {
+    let WorkspacesResponse {
+        workspaces,
+        warnings,
+    } = workspaces_response(config).await?;
+    let by_key: std::collections::HashMap<&str, &lazybox_core::Workspace> = workspaces
+        .iter()
+        .map(|workspace| (workspace.key.as_str(), workspace))
+        .collect();
+
+    let mut agents = Vec::new();
+    for runtime in crate::spawn_handler::agent_runtime_snapshot(config).await {
+        let workspace = by_key.get(runtime.session_key.as_str()).copied();
+        let session_started_at = runtime.session_id.and_then(|session_id| {
+            workspace
+                .and_then(|workspace| workspace.sessions.iter().find(|s| s.id == session_id))
+                .map(|session| session.created_at)
+        });
+        let task = workspace
+            .and_then(|workspace| workspace.primary_task())
+            .map(AgentTaskInfo::from_task);
+        agents.push(RunningAgent {
+            terminal_id: runtime.terminal_id,
+            workspace_key: runtime.session_key.as_str().to_string(),
+            workspace_name: workspace
+                .map(|workspace| workspace.name.clone())
+                .unwrap_or_default(),
+            repo: workspace.and_then(|workspace| workspace.repo_slug()),
+            agent: runtime.agent_id,
+            state: runtime.agent_state,
+            task,
+            last_prompt: runtime
+                .last_prompt
+                .as_ref()
+                .map(|prompt| prompt.text.clone()),
+            last_prompt_at: runtime
+                .last_prompt
+                .as_ref()
+                .map(|prompt| prompt.timestamp_ms),
+            model: runtime.model_label,
+            on_main: runtime.on_main,
+            no_permission: runtime.no_permission,
+            session_started_at,
+        });
+    }
+    // Stable order so a polling client sees a deterministic list.
+    agents.sort_by(|a, b| {
+        a.workspace_key
+            .cmp(&b.workspace_key)
+            .then(a.terminal_id.0.cmp(&b.terminal_id.0))
+    });
+    Ok(AgentsResponse { agents, warnings })
+}
+
 /// Create a local IPC bridge backed by the existing `Server::serve`
 /// connection model. API handlers feed decoded `JsonClientFrame`
 /// commands into `command_tx` and serialize `event_rx` values as
@@ -802,7 +1014,20 @@ where
                 &serde_json::json!({ "error": error.to_string() }),
             ),
         },
+        (&Method::GET, "/v1/agents") => match agents_response(&config).await {
+            Ok(payload) => json_response(StatusCode::OK, &payload),
+            Err(error) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({ "error": error.to_string() }),
+            ),
+        },
         (&Method::GET, "/v1/events") => stream_events_response(config),
+        (&Method::POST, "/v1/agents/inject") => {
+            inject_response(config, &options, request.into_body()).await
+        }
+        (&Method::POST, "/v1/agents/output") => {
+            agent_output_response(config, &options, request.into_body()).await
+        }
         (&Method::POST, "/v1/commands") => {
             command_response(config, &options, request.into_body()).await
         }
@@ -892,6 +1117,161 @@ where
             )
         }
     }
+}
+
+/// Default `tail` for `POST /v1/agents/output` when the caller omits it.
+pub const AGENT_OUTPUT_DEFAULT_LINES: usize = 40;
+/// Upper bound on `tail` — a meta-agent asking for the whole scrollback
+/// should still get a bounded, readable slice.
+pub const AGENT_OUTPUT_MAX_LINES: usize = 500;
+
+/// `POST /v1/agents/inject`: deliver an instruction to a workspace's
+/// running agent (issue #773). Resolves the workspace to its agent
+/// terminal, then hands the prompt to the same settle-gated inject path
+/// the TUI's `w` press uses (#725) — so a paste never lands in a
+/// permission/chooser prompt. The settle/submit outcome surfaces
+/// asynchronously on `/v1/events` (`TerminalInputRejected` on a drop),
+/// exactly as it does for an interactive inject.
+async fn inject_response<B>(
+    config: ServerConfig,
+    options: &GatewayOptions,
+    body: B,
+) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let bytes = match collect_command_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return json_response(error.status, &serde_json::json!({ "error": error.message }));
+        }
+    };
+    let request: InjectRequest = match serde_json::from_slice(&bytes) {
+        Ok(request) => request,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": format!("decode inject request: {error}") }),
+            );
+        }
+    };
+    if request.text.trim().is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "text must not be empty" }),
+        );
+    }
+    let session_key = lazybox_core::SessionKey::from(request.workspace.as_str());
+    let Some(terminal_id) = config.terminal.running_agent_terminal(&session_key).await else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({
+                "error": format!("no running agent in workspace {}", request.workspace)
+            }),
+        );
+    };
+    // Audit trail: who drove whom. The prompt body is not logged — only
+    // its size — so an injected instruction never leaks into daemon logs.
+    tracing::info!(
+        workspace = %request.workspace,
+        terminal_id = ?terminal_id,
+        chars = request.text.chars().count(),
+        submit = request.submit,
+        "gateway inject: delivering prompt to a running agent"
+    );
+    // Bound the handler like `/v1/commands` does: `handle_inject_prompt`
+    // returns once the injection is *registered*, but registration waits
+    // on the per-terminal interaction lock, which a concurrent write can
+    // hold. A wedged lock must not pin this HTTP connection open forever.
+    let injected = crate::spawn_handler::handle_inject_prompt(
+        &config,
+        terminal_id,
+        &request.text,
+        None,
+        request.submit,
+    );
+    match tokio::time::timeout(options.command_timeout, injected).await {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            &InjectResponse {
+                accepted: true,
+                workspace: request.workspace,
+                terminal_id,
+            },
+        ),
+        Err(_) => json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            &serde_json::json!({ "error": "inject timed out acquiring the agent terminal" }),
+        ),
+    }
+}
+
+/// `POST /v1/agents/output`: read a workspace's running agent recent
+/// output as a cleaned text tail (issue #773).
+async fn agent_output_response<B>(
+    config: ServerConfig,
+    options: &GatewayOptions,
+    body: B,
+) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let bytes = match collect_command_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return json_response(error.status, &serde_json::json!({ "error": error.message }));
+        }
+    };
+    let request: OutputRequest = match serde_json::from_slice(&bytes) {
+        Ok(request) => request,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": format!("decode output request: {error}") }),
+            );
+        }
+    };
+    let max_lines = request
+        .tail
+        .unwrap_or(AGENT_OUTPUT_DEFAULT_LINES)
+        .clamp(1, AGENT_OUTPUT_MAX_LINES);
+    let session_key = lazybox_core::SessionKey::from(request.workspace.as_str());
+    let Some(terminal_id) = config.terminal.running_agent_terminal(&session_key).await else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({
+                "error": format!("no running agent in workspace {}", request.workspace)
+            }),
+        );
+    };
+    // A tmux `capture-pane` shells out; bound it so a slow backend can't
+    // pin the connection, matching `/v1/commands`.
+    let snapshot = crate::spawn_handler::agent_output_snapshot(&config, terminal_id, max_lines);
+    let output = match tokio::time::timeout(options.command_timeout, snapshot).await {
+        Ok(output) => output.unwrap_or_default(),
+        Err(_) => {
+            return json_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                &serde_json::json!({ "error": "reading agent output timed out" }),
+            );
+        }
+    };
+    let lines = if output.is_empty() {
+        0
+    } else {
+        output.lines().count()
+    };
+    json_response(
+        StatusCode::OK,
+        &AgentOutputResponse {
+            workspace: request.workspace,
+            terminal_id,
+            output,
+            lines,
+        },
+    )
 }
 
 async fn dispatch_one_shot_command(

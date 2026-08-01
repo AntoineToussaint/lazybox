@@ -242,6 +242,9 @@ impl InboxModel {
             show_inactive_in_inbox: false,
             projects: &projects,
             collapsed_repos: &self.collapsed_repos,
+            // The desktop client has no pin-to-top UI yet; the shared
+            // builder honors pins when a caller supplies them (#760).
+            pinned_repos: &[],
             attention: &self.attention,
             agents: &self.agents,
             now,

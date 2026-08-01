@@ -97,6 +97,11 @@ pub struct Sidebar {
     /// repos are still tracked in `workspaces` but are skipped when
     /// `recompute_visible` rebuilds the view.
     collapsed_repos: BTreeSet<String>,
+    /// Repo groups the user pinned to the top, in pin order. Pinned
+    /// groups render first (in this order); the rest keep the
+    /// algorithmic order. Persisted to `ui.pinned_repos`. A `Vec`, not
+    /// a set — the order the user pinned in is the display order.
+    pinned_repos: Vec<String>,
     /// Per-repo counters computed during `recompute_visible`. Keys
     /// are the same display strings used by `VisibleRow::RepoHeader`.
     repo_summaries: BTreeMap<String, RepoSummary>,
@@ -270,6 +275,7 @@ impl Sidebar {
             workspaces: HashMap::new(),
             visible: Vec::new(),
             collapsed_repos: BTreeSet::new(),
+            pinned_repos: Vec::new(),
             repo_summaries: BTreeMap::new(),
             cursor: 0,
             scroll: 0,
@@ -564,7 +570,7 @@ impl Sidebar {
         }
     }
 
-    /// Override the attention thresholds + initial collapse set
+    /// Override the attention thresholds + initial collapse / pin sets
     /// from `~/.lazybox/config.yaml`. Call once after construction
     /// (typically in main, between `Sidebar::new` and the first
     /// daemon Subscribe).
@@ -572,11 +578,13 @@ impl Sidebar {
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: BTreeSet<String>,
+        pinned_repos: Vec<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
+        self.pinned_repos = pinned_repos;
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
@@ -1676,6 +1684,54 @@ impl Sidebar {
         true
     }
 
+    /// True when the cursor's repo group is currently pinned. `None`
+    /// when the cursor isn't in a group at all. Drives the footer's
+    /// pin-vs-unpin verb (#760).
+    pub fn cursor_repo_pinned(&self) -> Option<bool> {
+        self.cursor_repo()
+            .map(|repo| self.pinned_repos.contains(&repo))
+    }
+
+    /// Pin / unpin the repo group at or above the cursor to the top of
+    /// the sidebar (`p`). A fresh pin is appended, so pin order tracks
+    /// the order the user pinned in. Returns `(repo, now_pinned)` so the
+    /// caller can surface a footer notice, or `None` when the cursor
+    /// isn't in a group.
+    ///
+    /// Pinning only reorders the groups — no rows are hidden — so
+    /// `recompute_visible` keeps the cursor on the exact row the user
+    /// was on (a workspace by key, a header by name). We deliberately do
+    /// NOT re-park onto the header the way `toggle_repo_at_cursor`
+    /// does: collapse needs that because it removes the rows under the
+    /// cursor, whereas re-parking here would silently drop the user's
+    /// workspace selection (and the right-pane / terminal context that
+    /// follows it) on a pin that left their row fully visible.
+    pub fn toggle_pin_at_cursor(&mut self) -> Option<(String, bool)> {
+        let repo = self.cursor_repo()?;
+        let now_pinned = if let Some(idx) = self.pinned_repos.iter().position(|r| r == &repo) {
+            self.pinned_repos.remove(idx);
+            false
+        } else {
+            self.pinned_repos.push(repo.clone());
+            true
+        };
+        self.recompute_visible();
+        // Persist to ~/.lazybox/config.yaml::ui.pinned_repos so the
+        // order survives restart. Best-effort; a write error just means
+        // the pins reset next launch.
+        let snapshot = self.pinned_repos.clone();
+        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.pinned_repos = snapshot) {
+            tracing::warn!("save pinned_repos failed: {e}");
+        }
+        Some((repo, now_pinned))
+    }
+
+    /// True when the repo is currently pinned (used by the header
+    /// render to draw the pin marker).
+    pub fn is_repo_pinned(&self, name: &str) -> bool {
+        self.pinned_repos.iter().any(|r| r == name)
+    }
+
     /// Read-only view of the per-repo summary for render. Headers
     /// look up by their display name.
     pub fn repo_summary(&self, name: &str) -> Option<&RepoSummary> {
@@ -1779,6 +1835,7 @@ impl Sidebar {
                 show_inactive_in_inbox: self.show_inactive_in_inbox,
                 projects: &self.projects,
                 collapsed_repos: &self.collapsed_repos,
+                pinned_repos: &self.pinned_repos,
                 attention: &self.attention,
                 agents: &self.agents,
                 now: self.now(),
@@ -1961,6 +2018,7 @@ impl Sidebar {
         // or kind sub-row) — the same predicate the key dispatches on.
         if self.cursor_repo().is_some() {
             actions.push(Action::ToggleRepoGroup);
+            actions.push(Action::ToggleRepoPin);
         }
         // Focus mode (`.`) surfaces only when the selected workspace
         // has a coding agent to maximize — otherwise the key is a
@@ -2033,6 +2091,16 @@ impl Sidebar {
                                 "collapse group"
                             },
                         ),
+                        // The verb tracks the cursor's pin state so the
+                        // footer never says "pin" over an already-pinned
+                        // group.
+                        Action::ToggleRepoPin => {
+                            std::borrow::Cow::Borrowed(if self.cursor_repo_pinned() == Some(true) {
+                                "unpin group"
+                            } else {
+                                "pin group"
+                            })
+                        }
                         _ => std::borrow::Cow::Borrowed(contextual_label(&a, workspace)),
                     };
                     out.push(Binding {

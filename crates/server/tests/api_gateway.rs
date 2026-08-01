@@ -1,6 +1,7 @@
 pub use lazybox_server::metrics;
 pub use lazybox_server::polling;
 pub use lazybox_server::pty;
+pub use lazybox_server::spawn_handler;
 pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 
 #[allow(dead_code)]
@@ -8,9 +9,10 @@ pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 mod api_gateway;
 
 use api_gateway::{
-    CommandResponse, DesktopCommand, DesktopEvent, DesktopTerminalSnapshot, GatewayOptions,
-    HealthResponse, JsonClientFrame, JsonServerFrame, ProtocolResponse,
-    UnsupportedFingerprintResponse, UnsupportedProtocolResponse, WorkspacesResponse,
+    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCommand, DesktopEvent,
+    DesktopTerminalSnapshot, GatewayOptions, HealthResponse, JsonClientFrame, JsonServerFrame,
+    ProtocolResponse, UnsupportedFingerprintResponse, UnsupportedProtocolResponse,
+    WorkspacesResponse,
 };
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
@@ -1117,6 +1119,158 @@ async fn workspaces_route_reports_and_preserves_unreadable_records() {
     );
 }
 #[tokio::test]
+async fn agents_route_projects_running_agents_and_omits_shells() {
+    let config = ServerConfig::in_memory();
+    let now = Utc::now();
+
+    let mut workspace = Workspace::from_task(make_task("o/r#42"), now);
+    let session = lazybox_core::WorkspaceSession::new(
+        workspace.key.clone(),
+        lazybox_core::SessionKind::Agent {
+            agent_id: "claude".into(),
+        },
+        std::path::PathBuf::from("/tmp/agent-worktree"),
+        now,
+    );
+    let session_id = session.id;
+    workspace.sessions.push(session);
+    let workspace_key = workspace.key.as_str().to_string();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: workspace_key.clone(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+
+    // One live agent terminal joined to that workspace, plus a shell in
+    // the same workspace that must not surface as an agent.
+    let agent_terminal = TerminalId(7);
+    config
+        .terminal
+        .register_terminal(
+            agent_terminal,
+            "backend:agent".into(),
+            workspace_key.as_str().into(),
+            TerminalKind::Agent("claude".into()),
+        )
+        .await;
+    config
+        .terminal
+        .associate_session(agent_terminal, session_id)
+        .await;
+    config
+        .terminal
+        .record_agent_state(agent_terminal, AgentState::Working)
+        .await;
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(8),
+            "backend:shell".into(),
+            workspace_key.as_str().into(),
+            TerminalKind::Shell,
+        )
+        .await;
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/agents")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: AgentsResponse = read_json(response).await;
+    assert_eq!(payload.agents.len(), 1, "shells are not agents");
+    let agent = &payload.agents[0];
+    assert_eq!(agent.agent, "claude");
+    assert_eq!(agent.workspace_key, workspace_key);
+    assert_eq!(agent.workspace_name, "PR o/r#42");
+    assert_eq!(agent.state, Some(AgentState::Working));
+    assert!(
+        agent.session_started_at.is_some(),
+        "session_started_at joins the workspace session"
+    );
+    assert!(agent.last_prompt.is_none());
+    let task = agent.task.as_ref().expect("agent carries its task");
+    assert_eq!(task.id, "github:o/r#42");
+    assert_eq!(task.number, Some(42));
+    assert!(matches!(task.kind, AgentTaskKind::Pr));
+    assert_eq!(task.repo.as_deref(), Some("o/r"));
+    assert_eq!(agent.repo.as_deref(), Some("o/r"));
+}
+
+#[tokio::test]
+async fn agents_route_reports_repo_for_a_task_less_workspace() {
+    let config = ServerConfig::in_memory();
+    let now = Utc::now();
+
+    // A hand-created workspace: no PR/issue, but it knows its repo via
+    // the project key.
+    let mut workspace = Workspace::empty(lazybox_core::WorkspaceKey::new("scratch"), "main", now);
+    workspace.name = "Scratch".into();
+    workspace.project_key = Some(lazybox_core::ProjectKey::github("owner", "repo"));
+    let workspace_key = workspace.key.as_str().to_string();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: workspace_key.clone(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(3),
+            "backend:scratch".into(),
+            workspace_key.as_str().into(),
+            TerminalKind::Agent("codex".into()),
+        )
+        .await;
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/agents")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: AgentsResponse = read_json(response).await;
+    assert_eq!(payload.agents.len(), 1);
+    let agent = &payload.agents[0];
+    assert!(agent.task.is_none(), "no PR/issue attached");
+    assert_eq!(
+        agent.repo.as_deref(),
+        Some("owner/repo"),
+        "repo falls back to the project key"
+    );
+}
+
+#[tokio::test]
+async fn agents_route_reports_an_empty_fleet() {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/agents")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: AgentsResponse = read_json(response).await;
+    assert!(payload.agents.is_empty());
+    assert!(payload.warnings.is_empty());
+}
+
+#[tokio::test]
 async fn command_route_accepts_json_client_frame() {
     let frame = JsonClientFrame::Command(Command::Refresh);
     let request = Request::builder()
@@ -1643,4 +1797,257 @@ async fn stream_route_can_start_structured_agent_run() {
     }
     assert!(saw_delta);
     assert!(saw_turn_finished);
+}
+
+// ── issue #773: workspace-addressed inject + read-output ──────────────
+
+/// Spawn a mock-backed agent terminal for `workspace`, seed its deep
+/// scrollback, and return the backend key the mock records writes under.
+async fn register_mock_agent(
+    config: &ServerConfig,
+    mock: &lazybox_server::backend::MockBackend,
+    terminal_id: TerminalId,
+    workspace: &str,
+    agent: &str,
+) -> String {
+    use lazybox_server::backend::SessionBackend;
+    let key = mock
+        .spawn(&[], None, &[], "issue-773")
+        .await
+        .expect("spawn mock terminal");
+    config
+        .terminal
+        .register_terminal(
+            terminal_id,
+            key.clone(),
+            lazybox_core::SessionKey::new(workspace),
+            TerminalKind::Agent(agent.into()),
+        )
+        .await;
+    key
+}
+
+fn json_post(uri: &str, body: serde_json::Value) -> Request<Full<Bytes>> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .body(Full::new(Bytes::from(serde_json::to_vec(&body).unwrap())))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn inject_route_resolves_the_workspace_and_delivers_to_the_running_agent() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+
+    let request = json_post(
+        "/v1/agents/inject",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "text": "drive the fleet" }),
+    );
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: api_gateway::InjectResponse = read_json(response).await;
+    assert!(payload.accepted);
+    assert_eq!(payload.terminal_id, terminal_id);
+    assert_eq!(payload.workspace, "github:owner/repo#7");
+
+    // The prompt reaches the agent's PTY through the settle-gated path.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let joined: Vec<u8> = mock.writes_for(&key).await.concat();
+            if String::from_utf8_lossy(&joined).contains("drive the fleet") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("inject must deliver the prompt to the resolved agent terminal");
+}
+
+#[tokio::test]
+async fn inject_route_rejects_empty_text_without_touching_the_agent() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = register_mock_agent(
+        &config,
+        &mock,
+        TerminalId(1),
+        "github:owner/repo#7",
+        "claude",
+    )
+    .await;
+
+    let request = json_post(
+        "/v1/agents/inject",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "text": "   " }),
+    );
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(mock.writes_for(&key).await.is_empty());
+}
+
+#[tokio::test]
+async fn inject_route_404s_a_workspace_with_no_running_agent() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    // A shell in the workspace is not an agent — inject must not target it.
+    use lazybox_server::backend::SessionBackend;
+    let key = mock.spawn(&[], None, &[], "shell").await.expect("spawn");
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(1),
+            key,
+            lazybox_core::SessionKey::new("github:owner/repo#7"),
+            TerminalKind::Shell,
+        )
+        .await;
+
+    let request = json_post(
+        "/v1/agents/inject",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "text": "hello" }),
+    );
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn output_route_returns_the_cleaned_and_line_limited_tail() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+    // ANSI colour, a blank line, and a progress-bar `\r` overwrite the
+    // cleaner must resolve to the post-carriage-return content.
+    mock.set_deep_scrollback(
+        &key,
+        "\x1b[32mline-one\x1b[0m\n\nprogress\rline-two\nline-three\n".as_bytes(),
+    )
+    .await;
+
+    let request = json_post(
+        "/v1/agents/output",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "tail": 2 }),
+    );
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: api_gateway::AgentOutputResponse = read_json(response).await;
+    assert_eq!(payload.terminal_id, terminal_id);
+    assert_eq!(payload.lines, 2);
+    assert_eq!(payload.output, "line-two\nline-three");
+}
+
+#[tokio::test]
+async fn output_route_404s_an_unknown_workspace() {
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let request = json_post(
+        "/v1/agents/output",
+        serde_json::json!({ "workspace": "github:owner/repo#404" }),
+    );
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn output_route_tails_a_large_scrollback_correctly() {
+    // A megabyte-scale deep scrollback must still return the exact last
+    // lines — the read only cleans a bounded trailing window, and that
+    // window must not clip the tail it keeps.
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+    let mut huge = String::new();
+    for n in 0..100_000 {
+        huge.push_str(&format!("scroll {n}\n"));
+    }
+    assert!(huge.len() > 1024 * 1024, "buffer must exceed the scan cap");
+    mock.set_deep_scrollback(&key, huge.as_bytes()).await;
+
+    let request = json_post(
+        "/v1/agents/output",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "tail": 2 }),
+    );
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: api_gateway::AgentOutputResponse = read_json(response).await;
+    assert_eq!(payload.lines, 2);
+    assert_eq!(payload.output, "scroll 99998\nscroll 99999");
+}
+
+#[tokio::test]
+async fn output_route_times_out_a_wedged_backend_read() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+    // No deep scrollback → the read falls back to `snapshot`, which we
+    // wedge so it never resolves. A bounded handler must return 504
+    // instead of pinning the connection open forever.
+    mock.wedge_snapshot(&key).await;
+    let options = GatewayOptions {
+        command_timeout: std::time::Duration::from_millis(50),
+        ..GatewayOptions::default()
+    };
+
+    let request = json_post(
+        "/v1/agents/output",
+        serde_json::json!({ "workspace": "github:owner/repo#7" }),
+    );
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api_gateway::handle_request(config, options, request),
+    )
+    .await
+    .expect("handler must return, not hang, on a wedged backend");
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+}
+
+#[tokio::test]
+async fn inject_route_times_out_when_the_terminal_lock_is_held() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+    // A wedged write pins the per-terminal interaction lock: the background
+    // Write acquires `acquire_live`, then hangs in the backend, holding it.
+    // Inject registration must wait on that lock, so the bounded handler
+    // returns 504 instead of pinning the HTTP connection open indefinitely.
+    mock.wedge_write(&key).await;
+    let writer = {
+        let config = config.clone();
+        tokio::spawn(async move {
+            spawn_handler::handle_write(&config, terminal_id, b"x", TerminalInputIntent::Submit)
+                .await;
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !mock.write_attempts().await.contains(&key) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the wedged write must take the interaction lock");
+
+    let options = GatewayOptions {
+        command_timeout: std::time::Duration::from_millis(50),
+        ..GatewayOptions::default()
+    };
+    let request = json_post(
+        "/v1/agents/inject",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "text": "drive the fleet" }),
+    );
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api_gateway::handle_request(config, options, request),
+    )
+    .await
+    .expect("inject handler must return, not hang, while the lock is held");
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    writer.abort();
 }

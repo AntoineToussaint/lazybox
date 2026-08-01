@@ -7155,6 +7155,24 @@ mod chord_resolution_tests {
         );
     }
 
+    /// `p` under sidebar focus pins/unpins the cursor's repo group
+    /// (#760). Guards the key-routing contract: nothing pane-native
+    /// swallows `p` before catalog dispatch, and it doesn't leak into
+    /// the activity pane (which has no pin action).
+    #[test]
+    fn p_pins_repo_group_via_catalog() {
+        assert_eq!(
+            resolve("p", PaneFocus::Sidebar),
+            Some(ActionKind::ToggleRepoPin),
+            "`p` on the sidebar pins the repo group",
+        );
+        assert_eq!(
+            resolve("p", PaneFocus::Right),
+            None,
+            "`p` has no meaning in the activity pane",
+        );
+    }
+
     #[test]
     fn navigation_synonyms_stay_clear_of_the_catalog() {
         // `j` / `k` are pane-handler bindings (cursor movement); the

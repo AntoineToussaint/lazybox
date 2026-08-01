@@ -220,9 +220,16 @@ fn default_inject_submit() -> bool {
     true
 }
 
+/// Reply to `POST /v1/agents/inject`. `accepted` reports only that the
+/// workspace resolved to a running agent and the prompt was handed to
+/// the settle-gated inject path — *not* that it was delivered or
+/// submitted. The settle/submit outcome (a drop on a stuck permission
+/// prompt, a paste that could not be submitted) arrives asynchronously
+/// on `/v1/events` as `TerminalInputRejected`, exactly as for an
+/// interactive inject.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InjectResponse {
-    pub ok: bool,
+    pub accepted: bool,
     pub workspace: String,
     pub terminal_id: TerminalId,
 }
@@ -817,9 +824,11 @@ where
             ),
         },
         (&Method::GET, "/v1/events") => stream_events_response(config),
-        (&Method::POST, "/v1/agents/inject") => inject_response(config, request.into_body()).await,
+        (&Method::POST, "/v1/agents/inject") => {
+            inject_response(config, &options, request.into_body()).await
+        }
         (&Method::POST, "/v1/agents/output") => {
-            agent_output_response(config, request.into_body()).await
+            agent_output_response(config, &options, request.into_body()).await
         }
         (&Method::POST, "/v1/commands") => {
             command_response(config, &options, request.into_body()).await
@@ -925,7 +934,11 @@ pub const AGENT_OUTPUT_MAX_LINES: usize = 500;
 /// permission/chooser prompt. The settle/submit outcome surfaces
 /// asynchronously on `/v1/events` (`TerminalInputRejected` on a drop),
 /// exactly as it does for an interactive inject.
-async fn inject_response<B>(config: ServerConfig, body: B) -> Response<Body>
+async fn inject_response<B>(
+    config: ServerConfig,
+    options: &GatewayOptions,
+    body: B,
+) -> Response<Body>
 where
     B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
     B::Error: Display + Send + Sync + 'static,
@@ -969,27 +982,40 @@ where
         submit = request.submit,
         "gateway inject: delivering prompt to a running agent"
     );
-    crate::spawn_handler::handle_inject_prompt(
+    // Bound the handler like `/v1/commands` does: `handle_inject_prompt`
+    // returns once the injection is *registered*, but registration waits
+    // on the per-terminal interaction lock, which a concurrent write can
+    // hold. A wedged lock must not pin this HTTP connection open forever.
+    let injected = crate::spawn_handler::handle_inject_prompt(
         &config,
         terminal_id,
         &request.text,
         None,
         request.submit,
-    )
-    .await;
-    json_response(
-        StatusCode::OK,
-        &InjectResponse {
-            ok: true,
-            workspace: request.workspace,
-            terminal_id,
-        },
-    )
+    );
+    match tokio::time::timeout(options.command_timeout, injected).await {
+        Ok(()) => json_response(
+            StatusCode::OK,
+            &InjectResponse {
+                accepted: true,
+                workspace: request.workspace,
+                terminal_id,
+            },
+        ),
+        Err(_) => json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            &serde_json::json!({ "error": "inject timed out acquiring the agent terminal" }),
+        ),
+    }
 }
 
 /// `POST /v1/agents/output`: read a workspace's running agent recent
 /// output as a cleaned text tail (issue #773).
-async fn agent_output_response<B>(config: ServerConfig, body: B) -> Response<Body>
+async fn agent_output_response<B>(
+    config: ServerConfig,
+    options: &GatewayOptions,
+    body: B,
+) -> Response<Body>
 where
     B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
     B::Error: Display + Send + Sync + 'static,
@@ -1022,9 +1048,18 @@ where
             }),
         );
     };
-    let output = crate::spawn_handler::agent_output_snapshot(&config, terminal_id, max_lines)
-        .await
-        .unwrap_or_default();
+    // A tmux `capture-pane` shells out; bound it so a slow backend can't
+    // pin the connection, matching `/v1/commands`.
+    let snapshot = crate::spawn_handler::agent_output_snapshot(&config, terminal_id, max_lines);
+    let output = match tokio::time::timeout(options.command_timeout, snapshot).await {
+        Ok(output) => output.unwrap_or_default(),
+        Err(_) => {
+            return json_response(
+                StatusCode::GATEWAY_TIMEOUT,
+                &serde_json::json!({ "error": "reading agent output timed out" }),
+            );
+        }
+    };
     let lines = if output.is_empty() {
         0
     } else {

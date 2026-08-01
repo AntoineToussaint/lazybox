@@ -1697,7 +1697,7 @@ async fn inject_route_resolves_the_workspace_and_delivers_to_the_running_agent()
         api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
     assert_eq!(response.status(), StatusCode::OK);
     let payload: api_gateway::InjectResponse = read_json(response).await;
-    assert!(payload.ok);
+    assert!(payload.accepted);
     assert_eq!(payload.terminal_id, terminal_id);
     assert_eq!(payload.workspace, "github:owner/repo#7");
 
@@ -1797,4 +1797,104 @@ async fn output_route_404s_an_unknown_workspace() {
     );
     let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn output_route_tails_a_large_scrollback_correctly() {
+    // A megabyte-scale deep scrollback must still return the exact last
+    // lines — the read only cleans a bounded trailing window, and that
+    // window must not clip the tail it keeps.
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+    let mut huge = String::new();
+    for n in 0..100_000 {
+        huge.push_str(&format!("scroll {n}\n"));
+    }
+    assert!(huge.len() > 1024 * 1024, "buffer must exceed the scan cap");
+    mock.set_deep_scrollback(&key, huge.as_bytes()).await;
+
+    let request = json_post(
+        "/v1/agents/output",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "tail": 2 }),
+    );
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: api_gateway::AgentOutputResponse = read_json(response).await;
+    assert_eq!(payload.lines, 2);
+    assert_eq!(payload.output, "scroll 99998\nscroll 99999");
+}
+
+#[tokio::test]
+async fn output_route_times_out_a_wedged_backend_read() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+    // No deep scrollback → the read falls back to `snapshot`, which we
+    // wedge so it never resolves. A bounded handler must return 504
+    // instead of pinning the connection open forever.
+    mock.wedge_snapshot(&key).await;
+    let options = GatewayOptions {
+        command_timeout: std::time::Duration::from_millis(50),
+        ..GatewayOptions::default()
+    };
+
+    let request = json_post(
+        "/v1/agents/output",
+        serde_json::json!({ "workspace": "github:owner/repo#7" }),
+    );
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api_gateway::handle_request(config, options, request),
+    )
+    .await
+    .expect("handler must return, not hang, on a wedged backend");
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+}
+
+#[tokio::test]
+async fn inject_route_times_out_when_the_terminal_lock_is_held() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+    // A wedged write pins the per-terminal interaction lock: the background
+    // Write acquires `acquire_live`, then hangs in the backend, holding it.
+    // Inject registration must wait on that lock, so the bounded handler
+    // returns 504 instead of pinning the HTTP connection open indefinitely.
+    mock.wedge_write(&key).await;
+    let writer = {
+        let config = config.clone();
+        tokio::spawn(async move {
+            spawn_handler::handle_write(&config, terminal_id, b"x", TerminalInputIntent::Submit)
+                .await;
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !mock.write_attempts().await.contains(&key) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the wedged write must take the interaction lock");
+
+    let options = GatewayOptions {
+        command_timeout: std::time::Duration::from_millis(50),
+        ..GatewayOptions::default()
+    };
+    let request = json_post(
+        "/v1/agents/inject",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "text": "drive the fleet" }),
+    );
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        api_gateway::handle_request(config, options, request),
+    )
+    .await
+    .expect("inject handler must return, not hang, while the lock is held");
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    writer.abort();
 }

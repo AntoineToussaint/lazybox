@@ -202,6 +202,55 @@ pub struct CommandResponse {
     pub events: Vec<Event>,
 }
 
+/// Body of `POST /v1/agents/inject` — the write side of the meta-agent
+/// control surface (issue #773). `workspace` is the target workspace
+/// key; the gateway resolves it to that workspace's running agent
+/// terminal server-side, so a caller never handles terminal ids.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InjectRequest {
+    pub workspace: String,
+    pub text: String,
+    /// Press Enter after pasting `text` (paste + run). `false` drops it
+    /// into the composer for later submission, mirroring `InjectPrompt`.
+    #[serde(default = "default_inject_submit")]
+    pub submit: bool,
+}
+
+fn default_inject_submit() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectResponse {
+    pub ok: bool,
+    pub workspace: String,
+    pub terminal_id: TerminalId,
+}
+
+/// Body of `POST /v1/agents/output` — read a running agent's recent
+/// output by workspace key (issue #773). POST rather than GET so the
+/// workspace key (which carries `#` and `/`) travels in a JSON body
+/// instead of a fragile, unencoded query string.
+#[derive(Debug, Clone, Deserialize)]
+pub struct OutputRequest {
+    pub workspace: String,
+    /// Maximum cleaned lines to return, newest-last. Clamped to
+    /// [`AGENT_OUTPUT_MAX_LINES`]; omitted defaults to
+    /// [`AGENT_OUTPUT_DEFAULT_LINES`].
+    #[serde(default)]
+    pub tail: Option<usize>,
+}
+
+/// Reply to `POST /v1/agents/output` — a running agent's recent output
+/// as a cleaned, line-limited text tail (issue #773).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentOutputResponse {
+    pub workspace: String,
+    pub terminal_id: TerminalId,
+    pub output: String,
+    pub lines: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 #[serde(tag = "type", content = "payload")]
@@ -768,6 +817,10 @@ where
             ),
         },
         (&Method::GET, "/v1/events") => stream_events_response(config),
+        (&Method::POST, "/v1/agents/inject") => inject_response(config, request.into_body()).await,
+        (&Method::POST, "/v1/agents/output") => {
+            agent_output_response(config, request.into_body()).await
+        }
         (&Method::POST, "/v1/commands") => {
             command_response(config, &options, request.into_body()).await
         }
@@ -857,6 +910,135 @@ where
             )
         }
     }
+}
+
+/// Default `tail` for `POST /v1/agents/output` when the caller omits it.
+pub const AGENT_OUTPUT_DEFAULT_LINES: usize = 40;
+/// Upper bound on `tail` — a meta-agent asking for the whole scrollback
+/// should still get a bounded, readable slice.
+pub const AGENT_OUTPUT_MAX_LINES: usize = 500;
+
+/// `POST /v1/agents/inject`: deliver an instruction to a workspace's
+/// running agent (issue #773). Resolves the workspace to its agent
+/// terminal, then hands the prompt to the same settle-gated inject path
+/// the TUI's `w` press uses (#725) — so a paste never lands in a
+/// permission/chooser prompt. The settle/submit outcome surfaces
+/// asynchronously on `/v1/events` (`TerminalInputRejected` on a drop),
+/// exactly as it does for an interactive inject.
+async fn inject_response<B>(config: ServerConfig, body: B) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let bytes = match collect_command_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return json_response(error.status, &serde_json::json!({ "error": error.message }));
+        }
+    };
+    let request: InjectRequest = match serde_json::from_slice(&bytes) {
+        Ok(request) => request,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": format!("decode inject request: {error}") }),
+            );
+        }
+    };
+    if request.text.trim().is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "text must not be empty" }),
+        );
+    }
+    let session_key = lazybox_core::SessionKey::from(request.workspace.as_str());
+    let Some(terminal_id) = config.terminal.running_agent_terminal(&session_key).await else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({
+                "error": format!("no running agent in workspace {}", request.workspace)
+            }),
+        );
+    };
+    // Audit trail: who drove whom. The prompt body is not logged — only
+    // its size — so an injected instruction never leaks into daemon logs.
+    tracing::info!(
+        workspace = %request.workspace,
+        terminal_id = ?terminal_id,
+        chars = request.text.chars().count(),
+        submit = request.submit,
+        "gateway inject: delivering prompt to a running agent"
+    );
+    crate::spawn_handler::handle_inject_prompt(
+        &config,
+        terminal_id,
+        &request.text,
+        None,
+        request.submit,
+    )
+    .await;
+    json_response(
+        StatusCode::OK,
+        &InjectResponse {
+            ok: true,
+            workspace: request.workspace,
+            terminal_id,
+        },
+    )
+}
+
+/// `POST /v1/agents/output`: read a workspace's running agent recent
+/// output as a cleaned text tail (issue #773).
+async fn agent_output_response<B>(config: ServerConfig, body: B) -> Response<Body>
+where
+    B: HttpBody<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: Display + Send + Sync + 'static,
+{
+    let bytes = match collect_command_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return json_response(error.status, &serde_json::json!({ "error": error.message }));
+        }
+    };
+    let request: OutputRequest = match serde_json::from_slice(&bytes) {
+        Ok(request) => request,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": format!("decode output request: {error}") }),
+            );
+        }
+    };
+    let max_lines = request
+        .tail
+        .unwrap_or(AGENT_OUTPUT_DEFAULT_LINES)
+        .clamp(1, AGENT_OUTPUT_MAX_LINES);
+    let session_key = lazybox_core::SessionKey::from(request.workspace.as_str());
+    let Some(terminal_id) = config.terminal.running_agent_terminal(&session_key).await else {
+        return json_response(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({
+                "error": format!("no running agent in workspace {}", request.workspace)
+            }),
+        );
+    };
+    let output = crate::spawn_handler::agent_output_snapshot(&config, terminal_id, max_lines)
+        .await
+        .unwrap_or_default();
+    let lines = if output.is_empty() {
+        0
+    } else {
+        output.lines().count()
+    };
+    json_response(
+        StatusCode::OK,
+        &AgentOutputResponse {
+            workspace: request.workspace,
+            terminal_id,
+            output,
+            lines,
+        },
+    )
 }
 
 async fn dispatch_one_shot_command(

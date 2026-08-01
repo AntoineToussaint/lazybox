@@ -143,9 +143,20 @@ Endpoints: `GET /` (local read-only browser shell), `GET /v1/health`, `GET
 /v1/protocol`, `GET /v1/metrics`
 (event-pipeline drop/lag counters), `GET /v1/workspaces`, `GET /v1/events`
 (NDJSON control stream), `POST /v1/commands` (single command), `POST
-/v1/stream` (duplex NDJSON), and `POST /v1/terminal` (bounded binary terminal
-duplex). The browser shell loads without auth; every `/v1/*` request it makes
-still requires the configured bearer token.
+/v1/stream` (duplex NDJSON), `POST /v1/terminal` (bounded binary terminal
+duplex), and the workspace-addressed agent-control pair `POST
+/v1/agents/inject` + `POST /v1/agents/output`. The browser shell loads without
+auth; every `/v1/*` request it makes still requires the configured bearer token.
+
+`POST /v1/agents/inject` (`{workspace, text, submit?}`) and `POST
+/v1/agents/output` (`{workspace, tail?}`) are the meta-agent control surface: a
+controller agent given the gateway can read a running agent's recent output
+and inject the next instruction, orchestrating the fleet by workspace key
+without ever handling terminal ids. The gateway resolves the workspace to its
+running agent terminal; inject rides the same settle gate as the TUI's `w`
+press (never pasting into a permission/chooser prompt), and its settle/submit
+outcome surfaces on `/v1/events`. Both return 404 when the workspace has no
+running agent.
 
 ### How it works (brief)
 `server_api` (`crates/tui-boot/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`

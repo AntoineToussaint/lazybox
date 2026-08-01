@@ -1,6 +1,7 @@
 pub use lazybox_server::metrics;
 pub use lazybox_server::polling;
 pub use lazybox_server::pty;
+pub use lazybox_server::spawn_handler;
 pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 
 #[allow(dead_code)]
@@ -1643,4 +1644,157 @@ async fn stream_route_can_start_structured_agent_run() {
     }
     assert!(saw_delta);
     assert!(saw_turn_finished);
+}
+
+// ── issue #773: workspace-addressed inject + read-output ──────────────
+
+/// Spawn a mock-backed agent terminal for `workspace`, seed its deep
+/// scrollback, and return the backend key the mock records writes under.
+async fn register_mock_agent(
+    config: &ServerConfig,
+    mock: &lazybox_server::backend::MockBackend,
+    terminal_id: TerminalId,
+    workspace: &str,
+    agent: &str,
+) -> String {
+    use lazybox_server::backend::SessionBackend;
+    let key = mock
+        .spawn(&[], None, &[], "issue-773")
+        .await
+        .expect("spawn mock terminal");
+    config
+        .terminal
+        .register_terminal(
+            terminal_id,
+            key.clone(),
+            lazybox_core::SessionKey::new(workspace),
+            TerminalKind::Agent(agent.into()),
+        )
+        .await;
+    key
+}
+
+fn json_post(uri: &str, body: serde_json::Value) -> Request<Full<Bytes>> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .body(Full::new(Bytes::from(serde_json::to_vec(&body).unwrap())))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn inject_route_resolves_the_workspace_and_delivers_to_the_running_agent() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+
+    let request = json_post(
+        "/v1/agents/inject",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "text": "drive the fleet" }),
+    );
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: api_gateway::InjectResponse = read_json(response).await;
+    assert!(payload.ok);
+    assert_eq!(payload.terminal_id, terminal_id);
+    assert_eq!(payload.workspace, "github:owner/repo#7");
+
+    // The prompt reaches the agent's PTY through the settle-gated path.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let joined: Vec<u8> = mock.writes_for(&key).await.concat();
+            if String::from_utf8_lossy(&joined).contains("drive the fleet") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("inject must deliver the prompt to the resolved agent terminal");
+}
+
+#[tokio::test]
+async fn inject_route_rejects_empty_text_without_touching_the_agent() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = register_mock_agent(
+        &config,
+        &mock,
+        TerminalId(1),
+        "github:owner/repo#7",
+        "claude",
+    )
+    .await;
+
+    let request = json_post(
+        "/v1/agents/inject",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "text": "   " }),
+    );
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(mock.writes_for(&key).await.is_empty());
+}
+
+#[tokio::test]
+async fn inject_route_404s_a_workspace_with_no_running_agent() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    // A shell in the workspace is not an agent — inject must not target it.
+    use lazybox_server::backend::SessionBackend;
+    let key = mock.spawn(&[], None, &[], "shell").await.expect("spawn");
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(1),
+            key,
+            lazybox_core::SessionKey::new("github:owner/repo#7"),
+            TerminalKind::Shell,
+        )
+        .await;
+
+    let request = json_post(
+        "/v1/agents/inject",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "text": "hello" }),
+    );
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn output_route_returns_the_cleaned_and_line_limited_tail() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let terminal_id = TerminalId(773);
+    let key =
+        register_mock_agent(&config, &mock, terminal_id, "github:owner/repo#7", "claude").await;
+    // ANSI colour, a blank line, and a progress-bar `\r` overwrite the
+    // cleaner must resolve to the post-carriage-return content.
+    mock.set_deep_scrollback(
+        &key,
+        "\x1b[32mline-one\x1b[0m\n\nprogress\rline-two\nline-three\n".as_bytes(),
+    )
+    .await;
+
+    let request = json_post(
+        "/v1/agents/output",
+        serde_json::json!({ "workspace": "github:owner/repo#7", "tail": 2 }),
+    );
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: api_gateway::AgentOutputResponse = read_json(response).await;
+    assert_eq!(payload.terminal_id, terminal_id);
+    assert_eq!(payload.lines, 2);
+    assert_eq!(payload.output, "line-two\nline-three");
+}
+
+#[tokio::test]
+async fn output_route_404s_an_unknown_workspace() {
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let request = json_post(
+        "/v1/agents/output",
+        serde_json::json!({ "workspace": "github:owner/repo#404" }),
+    );
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

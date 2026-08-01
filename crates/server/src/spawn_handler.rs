@@ -4195,7 +4195,15 @@ async fn resync_replay_after_gap(
 /// (the "produced no output" case — the pane then just shows the failure
 /// banner). Bounded so a full 64 KiB ring can't blow up the wire payload.
 fn last_output_tail(bytes: &[u8]) -> Option<String> {
-    const MAX_LINES: usize = 8;
+    agent_output_tail(bytes, 8)
+}
+
+/// Clean and line-limit raw terminal bytes into a legible text tail:
+/// strip escape sequences, collapse in-place `\r` overwrites, drop
+/// blank lines, and keep at most the final `max_lines`. Shared by the
+/// dying-agent recap (`last_output_tail`) and the workspace-addressed
+/// `get_agent_output` gateway read (issue #773).
+pub(crate) fn agent_output_tail(bytes: &[u8], max_lines: usize) -> Option<String> {
     const MAX_LINE_CHARS: usize = 200;
 
     let text = String::from_utf8_lossy(bytes);
@@ -4216,8 +4224,30 @@ fn last_output_tail(bytes: &[u8]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-    let tail = lines.split_off(lines.len().saturating_sub(MAX_LINES));
+    let tail = lines.split_off(lines.len().saturating_sub(max_lines));
     Some(tail.join("\n"))
+}
+
+/// Read a running agent terminal's recent output as a cleaned,
+/// line-limited text tail — the workspace-addressed read behind the
+/// gateway's `get_agent_output` (issue #773). Prefers the backend's
+/// deep scrollback (tmux `capture-pane`) and falls back to the live
+/// ring snapshot for backends without a history source (raw PTY).
+/// `None` when the terminal is unknown or produced no legible output.
+pub async fn agent_output_snapshot(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    max_lines: usize,
+) -> Option<String> {
+    let key = config.terminal.backend_key_for(terminal_id).await?;
+    let bytes = match config.backend.scrollback(&key).await {
+        Ok(Some((replay, _seq))) => replay,
+        _ => match config.backend.snapshot(&key).await {
+            Ok(snapshot) => snapshot.replay,
+            Err(_) => return None,
+        },
+    };
+    agent_output_tail(&bytes, max_lines)
 }
 
 /// Drop ANSI escape sequences and non-printing control bytes from
@@ -12189,6 +12219,17 @@ mod tests {
         assert_eq!(lines.len(), 8);
         assert_eq!(lines.first(), Some(&"line 12"));
         assert_eq!(lines.last(), Some(&"line 19"));
+    }
+
+    #[test]
+    fn agent_output_tail_honors_a_custom_line_budget() {
+        // The gateway's `get_agent_output` reads more than the 8-line
+        // dying-agent recap; the shared cleaner respects the requested cap.
+        let raw: Vec<u8> = (0..20)
+            .flat_map(|n| format!("line {n}\n").into_bytes())
+            .collect();
+        let tail = agent_output_tail(&raw, 3).expect("tail");
+        assert_eq!(tail, "line 17\nline 18\nline 19");
     }
 
     #[test]

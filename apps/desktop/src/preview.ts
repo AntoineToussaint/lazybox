@@ -1,43 +1,20 @@
 import type { TerminalRecord } from "./main";
-import type { InboxView, Workspace, WorkspaceRow } from "./protocol";
+import type {
+  ComputeOutcome,
+  FilterMenuItem,
+  SortMode,
+  Workspace,
+} from "./protocol";
 
 export interface PreviewState {
   defaultAgent: string;
   workspaces: Map<string, Workspace>;
   terminals: Map<number, TerminalRecord>;
-  inboxView: InboxView;
   selectedKey: string;
-}
-
-function previewRow(
-  workspace: Workspace,
-  overrides: Partial<WorkspaceRow>,
-): WorkspaceRow {
-  const task = workspace.pr!;
-  return {
-    key: workspace.key,
-    title: task.title,
-    reference: task.id.key,
-    number: Number(task.id.key.split("#")[1] ?? "0"),
-    repo: task.repo,
-    kind: "Pr",
-    role: task.role,
-    state: task.state,
-    status: "CiOk",
-    status_label: "CI OK",
-    ci: task.ci,
-    review: task.review,
-    unread_count: task.unread_count,
-    updated_at: task.updated_at,
-    additions: task.additions,
-    deletions: task.deletions,
-    labels: task.labels,
-    needs_reply: task.needs_reply,
-    last_commenter: task.last_commenter,
-    session_count: workspace.sessions.length,
-    attention: task.needs_reply,
-    ...overrides,
-  };
+  inboxView: ComputeOutcome;
+  sortMode: SortMode;
+  filterMenu: FilterMenuItem[];
+  filterChips: string[];
 }
 
 export function loadPreview(): PreviewState {
@@ -145,40 +122,37 @@ export function loadPreview(): PreviewState {
     activity: [],
     seen_count: 0,
   };
-  const inboxView: InboxView = {
-    rows: [
+  // The inbox view-model is produced by the shared `tui-core` logic in
+  // `src-tauri` at runtime; here it is hand-written fixture *data* (no
+  // grouping/sort logic) so the DEV `?preview` page renders the grouped
+  // list without a live daemon.
+  const inboxView: ComputeOutcome = {
+    visible: [
       { RepoHeader: "acme/relay" },
       { KindHeader: "Pr" },
-      { Workspace: selected.key },
+      { Workspace: selectedKey },
       { Workspace: second.key },
     ],
-    workspaces: {
-      [selected.key]: previewRow(selected, {
-        status: "ReviewPending",
-        status_label: "REVIEW",
-      }),
-      [second.key]: previewRow(second, {}),
-    },
-    summaries: { "acme/relay": { active: 2, attention: 1, unread: 2 } },
-    sort_mode: "ByRoleSplit",
-    sort_label: "split",
-    collapsed: [],
-    total: 2,
-    unread_total: 2,
-    filter_menu: [
-      { filter: "WithAgent", axis: "State", label: "with-agent", count: 1, active: false },
-      { filter: "CiFailing", axis: "State", label: "ci-failing", count: 0, active: false },
-      { filter: "Unread", axis: "State", label: "unread", count: 1, active: false },
-      { filter: "Author", axis: "Role", label: "author", count: 2, active: false },
-      { filter: "Reviewer", axis: "Role", label: "reviewer", count: 0, active: false },
-      { filter: "Pr", axis: "Kind", label: "PR", count: 2, active: false },
-      { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
-    ],
-    filter_chips: [],
+    summaries: { "acme/relay": { active: 2, attention: 1 } },
   };
+  // Filter menu + chips ride on the runtime `DesktopInboxView` (#733);
+  // in preview they are separate fixture data since `inboxView` here is
+  // just the `ComputeOutcome`.
+  const filterMenu: FilterMenuItem[] = [
+    { filter: "WithAgent", axis: "State", label: "with-agent", count: 1, active: false },
+    { filter: "CiFailing", axis: "State", label: "ci-failing", count: 0, active: false },
+    { filter: "Unread", axis: "State", label: "unread", count: 1, active: false },
+    { filter: "Author", axis: "Role", label: "author", count: 2, active: false },
+    { filter: "Reviewer", axis: "Role", label: "reviewer", count: 0, active: false },
+    { filter: "Pr", axis: "Kind", label: "PR", count: 2, active: false },
+    { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
+  ];
   return {
     defaultAgent: "codex",
     inboxView,
+    sortMode: "ByRoleSplit",
+    filterMenu,
+    filterChips: [],
     workspaces: new Map([
       [selected.key, selected],
       [second.key, second],

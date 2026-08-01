@@ -464,13 +464,48 @@ pub enum DesktopEvent {
     },
 }
 
+/// The grouped inbox view-model the desktop renders. Computed by the
+/// shared, client-free `lazybox_tui_core::inbox::compute_visible` — the
+/// same code the ratatui TUI builds its sidebar from — so the desktop
+/// and TUI can never drift on grouping or sort order (#732). The
+/// desktop's `src-tauri` layer maintains the workspace + agent state,
+/// calls `compute_visible`, and pushes the result to the webview as a
+/// [`DesktopStreamMessage::Inbox`]; the frontend is a thin renderer that
+/// draws headers + rows + badges from this structure.
+///
+/// Only labels and workspace keys ride here — never server filesystem
+/// paths — so the same boundary is safe for a future remote/iOS client
+/// (#738).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopInboxView {
+    /// Ordered rows (repo headers, PR/Issue/Other section headers, and
+    /// workspace / session rows) plus the per-repo summaries.
+    pub outcome: lazybox_tui_core::inbox::ComputeOutcome,
+    /// The sort mode this view was computed with, so the frontend can
+    /// label its sort control (`recent` / `by-role` / `split`).
+    pub sort_mode: lazybox_tui_core::inbox::SortMode,
+    /// The filter menu the desktop draws (#733): every predicate in axis
+    /// order with its live match count and active flag. Built by
+    /// `Filter::menu` so the desktop never hardcodes the predicate list.
+    pub filter_menu: Vec<lazybox_tui_core::inbox::FilterMenuItem>,
+    /// Labels of the active filters, in menu order — the removable header
+    /// chips. Empty when no filter is active.
+    pub filter_chips: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 #[serde(tag = "type", content = "payload")]
 pub enum DesktopStreamMessage {
     Connected,
-    Disconnected { message: String },
+    Disconnected {
+        message: String,
+    },
     Frame(Box<DesktopEvent>),
+    /// The recomputed grouped inbox view. Emitted by `src-tauri`
+    /// whenever the workspace/agent state or sort mode changes.
+    Inbox(Box<DesktopInboxView>),
 }
 
 pub fn desktop_event(event: Event) -> Option<DesktopEvent> {

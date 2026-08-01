@@ -1,26 +1,28 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod inbox;
 mod snippets;
 
 use bytes::Bytes;
-use inbox::InboxModel;
 use lazybox_core::ProviderConfig;
+use lazybox_ipc::{AgentState, TerminalId};
 use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
     CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
     DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand,
-    DesktopEvent, DesktopInfo, DesktopRepository, DesktopStreamMessage, GatewayOptions,
-    JsonClientFrame, JsonServerFrame, PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER,
-    ProtocolResponse, TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
+    DesktopEvent, DesktopInboxView, DesktopInfo, DesktopRepository, DesktopStreamMessage,
+    GatewayOptions, JsonClientFrame, JsonServerFrame, PROTOCOL_FINGERPRINT_HEADER,
+    PROTOCOL_VERSION_HEADER, ProtocolResponse, TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse,
+    desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
-use lazybox_tui_core::inbox::{Filter, InboxView, SortMode};
+use lazybox_tui_core::inbox::{
+    self, ComputeInputs, Filter, FilterSet, Mailbox, SearchState, SortMode, mailbox_membership,
+};
 use lazybox_tui_core::snippets::{PickerRow, SnippetPickerView};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use snippets::SnippetModel;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -37,6 +39,234 @@ use tokio::sync::{Mutex, mpsc};
 enum TerminalStreamItem {
     Reset,
     Data(Bytes),
+}
+
+/// Desktop-side state-of-record for the grouped inbox (#732). The
+/// `src-tauri` layer maintains the workspace + agent maps from gateway
+/// events and calls the shared, client-free
+/// [`lazybox_tui_core::inbox::compute_visible`] — the exact code the
+/// ratatui TUI builds its sidebar from — so the desktop and TUI can't
+/// drift on grouping or sort. The webview is a thin renderer over the
+/// emitted [`DesktopInboxView`].
+struct InboxModel {
+    workspaces: HashMap<lazybox_core::SessionKey, lazybox_core::Workspace>,
+    /// Per-terminal agent state, keyed by terminal id so one agent in a
+    /// multi-session workspace can't clobber another (mirrors the TUI's
+    /// `agent_terminal_states`). Aggregated into `agents` per session.
+    agent_terminal_states: HashMap<TerminalId, (lazybox_core::SessionKey, AgentState)>,
+    /// The derived per-session agent state that `compute_visible`'s
+    /// attention scoring reads.
+    agents: HashMap<lazybox_core::SessionKey, AgentState>,
+    sort_mode: SortMode,
+    collapsed_repos: BTreeSet<String>,
+    attention: lazybox_config::AttentionConfig,
+    /// Active filter set from the multi-select filter menu (#733).
+    filters: FilterSet,
+    /// Global free-text search query (empty = inactive). Fed into the
+    /// shared search with a `None` scope so it filters every project,
+    /// unlike the TUI's cursor-scoped `/` (#733).
+    search: String,
+}
+
+impl InboxModel {
+    fn new(collapsed_repos: BTreeSet<String>, attention: lazybox_config::AttentionConfig) -> Self {
+        Self {
+            workspaces: HashMap::new(),
+            agent_terminal_states: HashMap::new(),
+            agents: HashMap::new(),
+            sort_mode: SortMode::default(),
+            collapsed_repos,
+            attention,
+            filters: FilterSet::new(),
+            search: String::new(),
+        }
+    }
+
+    /// Replace the active filter set (the multi-select filter menu's
+    /// output). An empty list clears all filters (#733).
+    fn set_filters(&mut self, filters: impl IntoIterator<Item = Filter>) {
+        self.filters.replace(filters);
+    }
+
+    /// Set the global search query; an empty/blank query is inactive (#733).
+    fn set_search(&mut self, query: String) {
+        self.search = query;
+    }
+
+    /// Seed the workspace map from the initial `list_workspaces`
+    /// response so the view (and `set_sort_mode`) works before the
+    /// first `Snapshot` event arrives.
+    fn seed_workspaces(&mut self, workspaces: &[lazybox_core::Workspace]) {
+        self.workspaces = workspaces
+            .iter()
+            .map(|w| ((&w.key).into(), w.clone()))
+            .collect();
+    }
+
+    /// Fold a desktop event into the model. Returns whether the inbox
+    /// view should be recomputed + re-emitted.
+    fn apply_event(&mut self, event: &DesktopEvent) -> bool {
+        match event {
+            DesktopEvent::Snapshot {
+                workspaces,
+                terminals,
+                ..
+            } => {
+                self.seed_workspaces(workspaces);
+                self.agent_terminal_states.clear();
+                for terminal in terminals {
+                    if let Some(state) = terminal.agent_state {
+                        self.agent_terminal_states
+                            .insert(terminal.terminal_id, (terminal.session_key.clone(), state));
+                    }
+                }
+                self.rebuild_agents();
+                true
+            }
+            DesktopEvent::WorkspaceUpserted(workspace) => {
+                self.workspaces
+                    .insert((&workspace.key).into(), (**workspace).clone());
+                true
+            }
+            DesktopEvent::WorkspaceRemoved(key) => {
+                let session_key = lazybox_core::SessionKey::from(key);
+                self.workspaces.remove(&session_key);
+                self.agent_terminal_states
+                    .retain(|_, (owner, _)| owner != &session_key);
+                self.agents.remove(&session_key);
+                true
+            }
+            DesktopEvent::AgentState {
+                session_key,
+                terminal_id,
+                state,
+            } => {
+                // Re-emit only when this transition changes the set of
+                // sessions the view actually reflects. `compute_visible`
+                // reads agent state solely through `workspace_is_asking`
+                // (the `InputNeeded` set), so a Working⇄Idle⇄Done flap
+                // leaves the grouped view byte-identical and must not
+                // churn the webview.
+                let asking_before = self.asking_sessions();
+                self.agent_terminal_states
+                    .insert(*terminal_id, (session_key.clone(), *state));
+                self.rebuild_agents();
+                asking_before != self.asking_sessions()
+            }
+            DesktopEvent::TerminalExited { terminal_id, .. } => {
+                if !self.agent_terminal_states.contains_key(terminal_id) {
+                    return false;
+                }
+                // Same gate as `AgentState`: dropping a terminal only
+                // needs a re-emit if it changes which sessions are asking.
+                let asking_before = self.asking_sessions();
+                self.agent_terminal_states.remove(terminal_id);
+                self.rebuild_agents();
+                asking_before != self.asking_sessions()
+            }
+            _ => false,
+        }
+    }
+
+    /// The sessions currently aggregated to `InputNeeded` (asking) —
+    /// the only agent-derived signal `compute_visible` reflects, via
+    /// `workspace_is_asking`. The event fold re-emits exactly when this
+    /// set changes, matching the ratatui sidebar's `asking_changed` gate.
+    fn asking_sessions(&self) -> HashSet<lazybox_core::SessionKey> {
+        self.agents
+            .iter()
+            .filter(|(_, state)| matches!(state, AgentState::InputNeeded))
+            .map(|(session_key, _)| session_key.clone())
+            .collect()
+    }
+
+    /// Recompute the per-session agent state from the terminal-keyed
+    /// states, with the TUI's attention precedence.
+    fn rebuild_agents(&mut self) {
+        self.agents.clear();
+        let sessions: HashSet<lazybox_core::SessionKey> = self
+            .agent_terminal_states
+            .values()
+            .map(|(session_key, _)| session_key.clone())
+            .collect();
+        for session_key in sessions {
+            let aggregated = aggregate_agent_state(
+                self.agent_terminal_states
+                    .values()
+                    .filter_map(|(owner, state)| (owner == &session_key).then_some(*state)),
+            );
+            if let Some(state) = aggregated {
+                self.agents.insert(session_key, state);
+            }
+        }
+    }
+
+    fn cycle_sort_mode(&mut self) -> SortMode {
+        self.sort_mode = self.sort_mode.next();
+        self.sort_mode
+    }
+
+    /// Run the shared grouping/sort logic and wrap it with the current
+    /// sort mode for the frontend's sort control.
+    fn compute(&self) -> DesktopInboxView {
+        // Projects are not mirrored to the desktop yet; `group_label`
+        // still derives owner/repo labels from `project_key`/`task.repo`,
+        // so an empty map is correct here. Passing the real project
+        // table (empty-repo headers, prettier Linear labels) is a
+        // follow-up.
+        let projects = BTreeMap::new();
+        let now = chrono::Utc::now();
+        // `scope: None` = global search across every project (the desktop
+        // has no cursor-scoped repo like the TUI's `/`) (#733).
+        let search = (!self.search.trim().is_empty()).then(|| SearchState {
+            scope: None,
+            query: self.search.clone(),
+            editing: false,
+        });
+        // The filter menu counts over the workspaces the mailbox admits
+        // *before* the active set narrows further — same candidate set the
+        // count answers "what would this toggle surface" (#733).
+        let candidates: Vec<&lazybox_core::Workspace> = self
+            .workspaces
+            .values()
+            .filter(|w| mailbox_membership(w, Mailbox::Inbox, now, false))
+            .collect();
+        let filter_menu = Filter::menu(&candidates, &self.agents, &self.filters);
+        let filter_chips: Vec<String> =
+            self.filters.chips().iter().map(|c| c.to_string()).collect();
+        let outcome = inbox::compute_visible(ComputeInputs {
+            workspaces: &self.workspaces,
+            mailbox: Mailbox::Inbox,
+            filters: &self.filters,
+            sort_mode: self.sort_mode,
+            show_inactive_in_inbox: false,
+            projects: &projects,
+            collapsed_repos: &self.collapsed_repos,
+            attention: &self.attention,
+            agents: &self.agents,
+            now,
+            search: search.as_ref(),
+        });
+        DesktopInboxView {
+            outcome,
+            sort_mode: self.sort_mode,
+            filter_menu,
+            filter_chips,
+        }
+    }
+}
+
+/// Reduce several per-terminal agent states for one session into the
+/// single value the sidebar shows, with `InputNeeded` (attention)
+/// winning. Mirrors the TUI's `aggregate_agent_state`.
+fn aggregate_agent_state(states: impl Iterator<Item = AgentState>) -> Option<AgentState> {
+    states.max_by_key(|state| match state {
+        AgentState::InputNeeded => 5,
+        AgentState::Working => 4,
+        AgentState::Done => 3,
+        AgentState::Exited { .. } => 2,
+        AgentState::Idle => 1,
+    })
 }
 
 #[derive(Clone)]
@@ -58,13 +288,13 @@ struct DesktopState {
     streams_started: AtomicBool,
     client_runtime: Mutex<Option<ClientRuntime>>,
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// State-of-record for the grouped inbox (#732). Reduced from the
-    /// gateway control stream; the shared `tui-core` logic turns it into
-    /// the `InboxView` emitted to the frontend.
+    /// Grouped-inbox state-of-record (#732). Shared between the event
+    /// stream (which folds in workspace/agent changes and re-emits the
+    /// view) and the `set_sort_mode` command.
     inbox: Arc<Mutex<InboxModel>>,
-    /// Frontend channel the recomputed `InboxView` is pushed onto. Set
-    /// once by `subscribe_events`.
-    inbox_channel: Arc<Mutex<Option<Channel<InboxView>>>>,
+    /// The live webview channel, stored so `set_sort_mode` can push a
+    /// recomputed inbox view on the same channel the event stream uses.
+    event_channel: Arc<Mutex<Option<Channel<DesktopStreamMessage>>>>,
     /// State-of-record for the snippet picker (#734): the catalog plus the
     /// daemon-owned MRU, reduced from the control stream. The frontend
     /// pulls a recomputed view per keystroke via `snippet_view`.
@@ -455,56 +685,29 @@ fn record_analytics_best_effort(path: &Path, enabled: bool, event: AnalyticsEven
 #[tauri::command]
 async fn list_workspaces(state: State<'_, DesktopState>) -> Result<WorkspacesResponse, String> {
     let response = list_gateway_workspaces(&state.gateway).await?;
-    // Seed the inbox model so the first computed view isn't empty while
-    // waiting for the control stream's opening snapshot, and re-emit the
-    // recomputed view so a manual refresh reflects the refetch (the
-    // channel is unset on the pre-subscribe first call, so `emit` no-ops).
-    let view = {
-        let mut model = state.inbox.lock().await;
-        model.seed_workspaces(&response.workspaces);
-        model.view(now_utc())
-    };
-    emit_inbox_view(&state, view).await;
+    // Seed the grouped-inbox model so `set_sort_mode` and the first
+    // computed view have data even before the `Snapshot` event lands.
+    state
+        .inbox
+        .lock()
+        .await
+        .seed_workspaces(&response.workspaces);
     Ok(response)
 }
 
-/// Cycle the inbox sort mode (Recent → ByRole → ByRoleSplit) in the
-/// shared taxonomy and re-emit the recomputed view.
+/// Cycle the inbox sort mode (`split → recent → by-role → …`) and push
+/// a recomputed grouped view to the webview. The order itself is
+/// computed only by the shared `tui-core` logic.
 #[tauri::command]
-async fn cycle_sort_mode(state: State<'_, DesktopState>) -> Result<(), String> {
+async fn set_sort_mode(state: State<'_, DesktopState>) -> Result<(), String> {
     let view = {
-        let mut model = state.inbox.lock().await;
-        model.cycle_sort_mode();
-        model.view(now_utc())
+        let mut inbox = state.inbox.lock().await;
+        inbox.cycle_sort_mode();
+        inbox.compute()
     };
-    emit_inbox_view(&state, view).await;
-    Ok(())
-}
-
-/// Set the inbox sort mode explicitly (used by tests / a direct picker).
-#[tauri::command]
-async fn set_sort_mode(state: State<'_, DesktopState>, mode: SortMode) -> Result<(), String> {
-    let view = {
-        let mut model = state.inbox.lock().await;
-        model.set_sort_mode(mode);
-        model.view(now_utc())
-    };
-    emit_inbox_view(&state, view).await;
-    Ok(())
-}
-
-/// Collapse / expand a repo group and re-emit the recomputed view.
-#[tauri::command]
-async fn toggle_repo_collapsed(
-    state: State<'_, DesktopState>,
-    label: String,
-) -> Result<(), String> {
-    let view = {
-        let mut model = state.inbox.lock().await;
-        model.toggle_collapsed(&label);
-        model.view(now_utc())
-    };
-    emit_inbox_view(&state, view).await;
+    if let Some(channel) = state.event_channel.lock().await.as_ref() {
+        let _ = channel.send(DesktopStreamMessage::Inbox(Box::new(view)));
+    }
     Ok(())
 }
 
@@ -521,39 +724,33 @@ async fn snippet_view(
 }
 
 /// Replace the active filter set from the multi-select filter menu and
-/// re-emit the recomputed view. An empty list clears all filters.
+/// re-emit the recomputed view. An empty list clears all filters (#733).
 #[tauri::command]
 async fn set_filters(state: State<'_, DesktopState>, filters: Vec<Filter>) -> Result<(), String> {
     let view = {
-        let mut model = state.inbox.lock().await;
-        model.set_filters(filters);
-        model.view(now_utc())
+        let mut inbox = state.inbox.lock().await;
+        inbox.set_filters(filters);
+        inbox.compute()
     };
-    emit_inbox_view(&state, view).await;
+    if let Some(channel) = state.event_channel.lock().await.as_ref() {
+        let _ = channel.send(DesktopStreamMessage::Inbox(Box::new(view)));
+    }
     Ok(())
 }
 
 /// Set the global search query and re-emit the recomputed view. An
-/// empty query clears the search.
+/// empty query clears the search (#733).
 #[tauri::command]
 async fn set_search(state: State<'_, DesktopState>, query: String) -> Result<(), String> {
     let view = {
-        let mut model = state.inbox.lock().await;
-        model.set_search(query);
-        model.view(now_utc())
+        let mut inbox = state.inbox.lock().await;
+        inbox.set_search(query);
+        inbox.compute()
     };
-    emit_inbox_view(&state, view).await;
-    Ok(())
-}
-
-fn now_utc() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
-}
-
-async fn emit_inbox_view(state: &DesktopState, view: InboxView) {
-    if let Some(channel) = state.inbox_channel.lock().await.as_ref() {
-        let _ = channel.send(view);
+    if let Some(channel) = state.event_channel.lock().await.as_ref() {
+        let _ = channel.send(DesktopStreamMessage::Inbox(Box::new(view)));
     }
+    Ok(())
 }
 
 async fn list_gateway_workspaces(gateway: &GatewayClient) -> Result<WorkspacesResponse, String> {
@@ -628,26 +825,21 @@ async fn read_terminal_data(
 }
 
 #[tauri::command]
-async fn subscribe_events(
+fn subscribe_events(
     state: State<'_, DesktopState>,
     on_event: Channel<DesktopStreamMessage>,
-    on_inbox: Channel<InboxView>,
 ) -> Result<(), String> {
     if state.streams_started.swap(true, Ordering::AcqRel) {
         return Err("desktop streams are already subscribed".to_string());
     }
 
-    // Register the inbox channel and push the current view immediately so
-    // the frontend has grouped rows before the first stream event lands.
-    *state.inbox_channel.lock().await = Some(on_inbox.clone());
-    let _ = on_inbox.send(state.inbox.lock().await.view(now_utc()));
-
     let control_gateway = state.gateway.clone();
     let inbox = state.inbox.clone();
-    let inbox_channel = state.inbox_channel.clone();
+    let event_channel = state.event_channel.clone();
     let snippets = state.snippets.clone();
     tauri::async_runtime::spawn(async move {
-        stream_control_events(control_gateway, on_event, inbox, inbox_channel, snippets).await;
+        *event_channel.lock().await = Some(on_event.clone());
+        stream_control_events(control_gateway, on_event, inbox, snippets).await;
     });
 
     let terminal_gateway = state.gateway.clone();
@@ -703,13 +895,10 @@ async fn stream_control_events(
     gateway: GatewayClient,
     on_event: Channel<DesktopStreamMessage>,
     inbox: Arc<Mutex<InboxModel>>,
-    inbox_channel: Arc<Mutex<Option<Channel<InboxView>>>>,
     snippets: Arc<Mutex<SnippetModel>>,
 ) {
     loop {
-        match stream_control_events_once(&gateway, &on_event, &inbox, &inbox_channel, &snippets)
-            .await
-        {
+        match stream_control_events_once(&gateway, &on_event, &inbox, &snippets).await {
             Ok(()) => {
                 let _ = on_event.send(DesktopStreamMessage::Disconnected {
                     message: "gateway control stream ended".to_string(),
@@ -726,9 +915,8 @@ async fn stream_control_events(
 async fn stream_control_events_once(
     gateway: &GatewayClient,
     on_event: &Channel<DesktopStreamMessage>,
-    inbox: &Arc<Mutex<InboxModel>>,
-    inbox_channel: &Arc<Mutex<Option<Channel<InboxView>>>>,
-    snippets: &Arc<Mutex<SnippetModel>>,
+    inbox: &Mutex<InboxModel>,
+    snippets: &Mutex<SnippetModel>,
 ) -> Result<(), String> {
     let mut response = gateway
         .authorized(gateway.client.get(gateway.url("/v1/events")))
@@ -742,6 +930,9 @@ async fn stream_control_events_once(
         ));
     }
     let _ = on_event.send(DesktopStreamMessage::Connected);
+    // Emit the current grouped view immediately (seeded from
+    // `list_workspaces`), before the daemon's own `Snapshot` arrives.
+    emit_inbox_view(inbox, on_event).await;
 
     let mut decoder = NdjsonDecoder::default();
     while let Some(chunk) = response
@@ -765,27 +956,28 @@ async fn stream_control_events_once(
                     }
                     _ => {}
                 }
-                // Reduce into the inbox state-of-record and re-emit the
-                // grouped view when the workspace/agent maps changed.
-                let recomputed = {
-                    let mut model = inbox.lock().await;
-                    model.apply(&event).then(|| model.view(now_utc()))
-                };
-                if let Some(view) = recomputed
-                    && let Some(channel) = inbox_channel.lock().await.as_ref()
-                {
-                    let _ = channel.send(view);
-                }
+                let recompute = inbox.lock().await.apply_event(&event);
                 if on_event
                     .send(DesktopStreamMessage::Frame(Box::new(event)))
                     .is_err()
                 {
                     return Ok(());
                 }
+                if recompute {
+                    emit_inbox_view(inbox, on_event).await;
+                }
             }
         }
     }
     decoder.finish()
+}
+
+/// Compute the grouped inbox view from the current model and push it to
+/// the webview. A failed send means the webview reader is gone; callers
+/// treat that as a benign disconnect.
+async fn emit_inbox_view(inbox: &Mutex<InboxModel>, on_event: &Channel<DesktopStreamMessage>) {
+    let view = inbox.lock().await.compute();
+    let _ = on_event.send(DesktopStreamMessage::Inbox(Box::new(view)));
 }
 
 async fn stream_terminal_events(
@@ -1238,7 +1430,10 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     let repositories = configured_repositories(&user_config);
     let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
-    let inbox = InboxModel::new(user_config.attention.clone(), inbox_projects(&repositories));
+    let inbox = InboxModel::new(
+        user_config.ui.collapsed_repos.clone(),
+        user_config.attention.clone(),
+    );
     let snippets = SnippetModel::new(load_snippet_catalog());
 
     Ok(DesktopState {
@@ -1254,7 +1449,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         client_runtime: Mutex::new(Some(client_runtime)),
         gateway_task: Mutex::new(Some(gateway_task)),
         inbox: Arc::new(Mutex::new(inbox)),
-        inbox_channel: Arc::new(Mutex::new(None)),
+        event_channel: Arc::new(Mutex::new(None)),
         snippets: Arc::new(Mutex::new(snippets)),
     })
 }
@@ -1266,27 +1461,6 @@ fn load_snippet_catalog() -> Vec<PickerRow> {
     lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref())
         .all()
         .map(|(key, snippet)| PickerRow::new(key, snippet))
-        .collect()
-}
-
-/// Synthesize a project record per configured repository so the grouped
-/// inbox emits a header for a subscribed repo even before its first
-/// workspace arrives — matching the TUI's "subscribed but empty" rows.
-fn inbox_projects(
-    repositories: &[DesktopRepository],
-) -> std::collections::BTreeMap<lazybox_core::ProjectKey, lazybox_core::Project> {
-    repositories
-        .iter()
-        .map(|repository| {
-            (
-                repository.project_key.clone(),
-                lazybox_core::Project::new(
-                    repository.project_key.clone(),
-                    repository.label.clone(),
-                    now_utc(),
-                ),
-            )
-        })
         .collect()
 }
 
@@ -1339,9 +1513,9 @@ fn main() {
             save_desktop_settings,
             record_analytics,
             list_workspaces,
-            cycle_sort_mode,
             set_sort_mode,
-            toggle_repo_collapsed,
+            set_filters,
+            set_search,
             snippet_view,
             set_filters,
             set_search,
@@ -1933,5 +2107,332 @@ mod tests {
             ]))),
             vec![DESKTOP_TERMINAL_STREAM_ITEM_DATA, 0, 27, 255]
         );
+    }
+
+    // ── grouped inbox view-model (#732) ──────────────────────────────
+
+    fn contract_task(repo: &str, number: u64, is_pr: bool) -> lazybox_core::Task {
+        lazybox_core::Task {
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: format!("{repo}#{number}"),
+            },
+            title: format!("Task {number}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: if is_pr {
+                format!("https://github.com/{repo}/pull/{number}")
+            } else {
+                format!("https://github.com/{repo}/issues/{number}")
+            },
+            repo: Some(repo.to_string()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: Some(if is_pr {
+                lazybox_core::TaskKind::Pr
+            } else {
+                lazybox_core::TaskKind::Issue
+            }),
+            closes_issues: vec![],
+        }
+    }
+
+    fn contract_workspace(repo: &str, number: u64, is_pr: bool) -> lazybox_core::Workspace {
+        lazybox_core::Workspace::from_task(contract_task(repo, number, is_pr), chrono::Utc::now())
+    }
+
+    fn empty_model() -> InboxModel {
+        InboxModel::new(BTreeSet::new(), lazybox_config::AttentionConfig::default())
+    }
+
+    #[test]
+    fn snapshot_groups_prs_above_issues_through_shared_logic() {
+        let mut model = empty_model();
+        let pr = contract_workspace("octo/widget", 10, true);
+        let issue = contract_workspace("octo/widget", 11, false);
+        assert!(model.apply_event(&DesktopEvent::Snapshot {
+            workspaces: vec![pr, issue],
+            terminals: vec![],
+            recent_snippets: vec![],
+        }));
+
+        let view = model.compute();
+        assert_eq!(view.sort_mode, SortMode::ByRoleSplit);
+        // repo header → PR section → PR row → Issue section → Issue row.
+        let rows = &view.outcome.visible;
+        assert!(matches!(&rows[0], inbox::VisibleRow::RepoHeader(name) if name == "octo/widget"));
+        assert!(matches!(
+            &rows[1],
+            inbox::VisibleRow::KindHeader(inbox::WorkspaceKind::Pr)
+        ));
+        assert!(matches!(&rows[2], inbox::VisibleRow::Workspace(_)));
+        assert!(matches!(
+            &rows[3],
+            inbox::VisibleRow::KindHeader(inbox::WorkspaceKind::Issue)
+        ));
+        assert!(matches!(&rows[4], inbox::VisibleRow::Workspace(_)));
+        assert_eq!(view.outcome.summaries["octo/widget"].active, 2);
+    }
+
+    #[test]
+    fn cycling_sort_mode_reorders_and_drops_kind_headers() {
+        let mut model = empty_model();
+        model.apply_event(&DesktopEvent::Snapshot {
+            workspaces: vec![
+                contract_workspace("octo/widget", 10, true),
+                contract_workspace("octo/widget", 11, false),
+            ],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+        // Default split emits kind-section headers.
+        assert!(
+            model
+                .compute()
+                .outcome
+                .visible
+                .iter()
+                .any(|row| matches!(row, inbox::VisibleRow::KindHeader(_)))
+        );
+
+        // split → recent: kind headers disappear (flat recency order).
+        assert_eq!(model.cycle_sort_mode(), SortMode::Recent);
+        let recent = model.compute();
+        assert_eq!(recent.sort_mode, SortMode::Recent);
+        assert!(
+            !recent
+                .outcome
+                .visible
+                .iter()
+                .any(|row| matches!(row, inbox::VisibleRow::KindHeader(_)))
+        );
+
+        assert_eq!(model.cycle_sort_mode(), SortMode::ByRole);
+        assert_eq!(model.cycle_sort_mode(), SortMode::ByRoleSplit);
+    }
+
+    #[test]
+    fn workspace_upsert_and_removal_update_the_view() {
+        let mut model = empty_model();
+        let workspace = contract_workspace("octo/widget", 10, true);
+        let key = lazybox_core::SessionKey::from(&workspace.key);
+        assert!(model.apply_event(&DesktopEvent::WorkspaceUpserted(Box::new(
+            workspace.clone()
+        ))));
+        assert_eq!(model.compute().outcome.summaries["octo/widget"].active, 1);
+
+        assert!(model.apply_event(&DesktopEvent::WorkspaceRemoved(workspace.key.clone())));
+        assert!(model.compute().outcome.summaries.is_empty());
+        assert!(!model.workspaces.contains_key(&key));
+    }
+
+    #[test]
+    fn agent_input_needed_raises_repo_attention() {
+        let mut model = empty_model();
+        let workspace = contract_workspace("octo/widget", 10, true);
+        let session_key = lazybox_core::SessionKey::from(&workspace.key);
+        model.apply_event(&DesktopEvent::Snapshot {
+            workspaces: vec![workspace],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+        assert_eq!(
+            model.compute().outcome.summaries["octo/widget"].attention,
+            0
+        );
+
+        assert!(model.apply_event(&DesktopEvent::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::InputNeeded,
+        }));
+        assert_eq!(
+            model.compute().outcome.summaries["octo/widget"].attention,
+            1
+        );
+
+        // A terminal exit clears the aggregated state and the attention.
+        assert!(model.apply_event(&DesktopEvent::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: None,
+        }));
+        assert!(!model.agents.contains_key(&session_key));
+    }
+
+    #[test]
+    fn multiple_terminals_aggregate_with_input_needed_winning() {
+        assert_eq!(
+            aggregate_agent_state(
+                [
+                    AgentState::Working,
+                    AgentState::InputNeeded,
+                    AgentState::Idle
+                ]
+                .into_iter()
+            ),
+            Some(AgentState::InputNeeded)
+        );
+        assert_eq!(
+            aggregate_agent_state([AgentState::Done, AgentState::Working].into_iter()),
+            Some(AgentState::Working)
+        );
+        assert_eq!(aggregate_agent_state(std::iter::empty()), None);
+    }
+
+    #[test]
+    fn agent_state_re_emits_only_when_the_asking_set_changes() {
+        let mut model = empty_model();
+        let workspace = contract_workspace("octo/widget", 10, true);
+        let session_key = lazybox_core::SessionKey::from(&workspace.key);
+        model.apply_event(&DesktopEvent::Snapshot {
+            workspaces: vec![workspace],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+
+        // Working/Done are invisible to the grouped view (only the
+        // `InputNeeded` set is reflected), so folding them in must NOT
+        // request a re-emit — otherwise an active agent churns the
+        // webview on every transition.
+        assert!(!model.apply_event(&DesktopEvent::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        }));
+        assert!(!model.apply_event(&DesktopEvent::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Done,
+        }));
+
+        // Entering InputNeeded flips the asking set → re-emit.
+        assert!(model.apply_event(&DesktopEvent::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::InputNeeded,
+        }));
+        // A redundant repeat of InputNeeded leaves the set intact → no-op.
+        assert!(!model.apply_event(&DesktopEvent::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::InputNeeded,
+        }));
+        // Leaving InputNeeded flips it back → re-emit.
+        assert!(model.apply_event(&DesktopEvent::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        }));
+
+        // Re-arm asking, then an unrelated terminal's exit leaves the
+        // asking set intact → no re-emit; the asking terminal's exit
+        // clears it → re-emit.
+        assert!(model.apply_event(&DesktopEvent::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::InputNeeded,
+        }));
+        assert!(!model.apply_event(&DesktopEvent::TerminalExited {
+            terminal_id: TerminalId(2),
+            exit_code: Some(0),
+            last_output: None,
+        }));
+        assert!(model.apply_event(&DesktopEvent::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: None,
+        }));
+    }
+
+    fn workspace_rows(view: &DesktopInboxView) -> usize {
+        view.outcome
+            .visible
+            .iter()
+            .filter(|row| matches!(row, inbox::VisibleRow::Workspace(_)))
+            .count()
+    }
+
+    #[test]
+    fn set_filters_narrows_the_view_and_surfaces_menu_and_chips() {
+        let mut model = empty_model();
+        model.apply_event(&DesktopEvent::Snapshot {
+            workspaces: vec![
+                contract_workspace("owner/r", 1, true),
+                contract_workspace("owner/r", 2, true),
+            ],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+
+        // The menu is always present with every predicate and live counts.
+        let base = model.compute();
+        assert_eq!(base.filter_menu.len(), Filter::ALL.len());
+        assert!(base.filter_chips.is_empty());
+        assert_eq!(
+            base.filter_menu
+                .iter()
+                .find(|i| i.filter == Filter::Pr)
+                .map(|i| i.count),
+            Some(2)
+        );
+
+        // An Issue filter hides both PRs; the chip and active flag show.
+        model.set_filters([Filter::Issue]);
+        let filtered = model.compute();
+        assert_eq!(workspace_rows(&filtered), 0);
+        assert_eq!(filtered.filter_chips, vec!["issue".to_string()]);
+        assert!(
+            filtered
+                .filter_menu
+                .iter()
+                .find(|i| i.filter == Filter::Issue)
+                .is_some_and(|i| i.active)
+        );
+
+        // Clearing restores the full view.
+        model.set_filters([]);
+        assert_eq!(workspace_rows(&model.compute()), 2);
+    }
+
+    #[test]
+    fn set_search_filters_globally_across_repos() {
+        let mut model = empty_model();
+        model.apply_event(&DesktopEvent::Snapshot {
+            workspaces: vec![
+                contract_workspace("owner/a", 1, true),
+                contract_workspace("owner/b", 2, true),
+            ],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+        // A number search keeps only the matching workspace, even though the
+        // two live in different repo groups (global scope, #733).
+        model.set_search("2".into());
+        assert_eq!(workspace_rows(&model.compute()), 1);
+        // Clearing the query restores everything.
+        model.set_search(String::new());
+        assert_eq!(workspace_rows(&model.compute()), 2);
     }
 }

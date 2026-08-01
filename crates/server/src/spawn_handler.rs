@@ -164,12 +164,46 @@ pub(crate) fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId 
     TerminalId(id)
 }
 
+/// How a workspace task's declared priority routes onto an agent's model
+/// menu. Keeps "no priority declared" distinct from "declared but this
+/// agent maps it to nothing": the latter silently falls back to the
+/// default model, and looks from the outside exactly like the label was
+/// ignored, so the spawn path logs it (issue #748).
+#[derive(Debug, PartialEq, Eq)]
+enum PriorityRoute {
+    /// The task declared no priority — nothing to route.
+    None,
+    /// The declared priority maps to this tier alias.
+    Mapped(String),
+    /// The priority is declared, but this agent's menu maps it to no
+    /// tier — the spawn keeps its default tier / model.
+    Unmapped(lazybox_core::PriorityTier),
+}
+
+/// Pure decision behind [`priority_alias_for`]: route the (optional)
+/// declared priority onto `models`, without touching the store, so the
+/// three outcomes are individually testable.
+fn route_declared_priority(
+    tier: Option<lazybox_core::PriorityTier>,
+    models: &lazybox_core::AgentModels,
+) -> PriorityRoute {
+    match tier {
+        None => PriorityRoute::None,
+        Some(tier) => match models.alias_for_priority(tier) {
+            Some(alias) => PriorityRoute::Mapped(alias.to_string()),
+            None => PriorityRoute::Unmapped(tier),
+        },
+    }
+}
+
 /// The tier alias the workspace task's declared priority
-/// (`high`/`medium`/`low` label or `@high`/`@medium`/`@low` body marker)
-/// maps to for `models`. `None` when the task declares no priority, the
-/// workspace/task can't be loaded, or this agent maps that priority to
-/// nothing — the spawn then keeps its default tier / model. Used only as
-/// the fallback when no explicit tier chord was passed.
+/// (`best`/`high`/`medium`/`low` label or `@best`/`@high`/`@medium`/`@low`
+/// body marker) maps to for `models`. `None` when the task declares no
+/// priority, the workspace/task can't be loaded, or this agent maps that
+/// priority to nothing — the spawn then keeps its default tier / model.
+/// The declared-but-unmapped case is logged so it doesn't look like the
+/// priority was silently ignored. Used only as the fallback when no
+/// explicit tier chord was passed.
 fn priority_alias_for(
     config: &ServerConfig,
     session_key: &SessionKey,
@@ -180,8 +214,19 @@ fn priority_alias_for(
         .and_then(|w| {
             w.primary_task()
                 .and_then(lazybox_core::resolve_priority_tier)
-        })?;
-    models.alias_for_priority(tier).map(String::from)
+        });
+    match route_declared_priority(tier, models) {
+        PriorityRoute::None => None,
+        PriorityRoute::Mapped(alias) => Some(alias),
+        PriorityRoute::Unmapped(tier) => {
+            tracing::info!(
+                priority = tier.as_str(),
+                "spawn: task declares `{}` priority but this agent maps it to no model tier — falling back to the default model",
+                tier.as_str()
+            );
+            None
+        }
+    }
 }
 
 /// Absolute path to the per-terminal Claude settings file lazybox writes
@@ -8226,6 +8271,26 @@ mod tests {
         argv_for as build_argv, gateway_env_for_agent, skip_permissions_for,
         with_agent_pty_spawn_env, with_agent_spawn_defaults, with_worktree_cargo_target,
     };
+
+    #[test]
+    fn route_declared_priority_distinguishes_unmapped_from_absent() {
+        use lazybox_core::PriorityTier;
+        let models = lazybox_core::AgentModels::builtin("claude").unwrap();
+        // No priority declared → nothing to route.
+        assert_eq!(route_declared_priority(None, &models), PriorityRoute::None);
+        // A mapped priority yields its tier alias.
+        assert_eq!(
+            route_declared_priority(Some(PriorityTier::High), &models),
+            PriorityRoute::Mapped("L".into())
+        );
+        // `best` is declared but the built-in menu maps it to nothing —
+        // this must be distinct from `None` so the fallback is logged,
+        // not silently indistinguishable from "no priority".
+        assert_eq!(
+            route_declared_priority(Some(PriorityTier::Best), &models),
+            PriorityRoute::Unmapped(PriorityTier::Best)
+        );
+    }
 
     fn argv_for(
         config: &ServerConfig,

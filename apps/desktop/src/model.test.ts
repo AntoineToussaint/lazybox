@@ -1,15 +1,23 @@
 import { describe, expect, it } from "vitest";
-import type { Task, Workspace } from "./protocol";
+import type { ComputeOutcome, Task, Workspace } from "./protocol";
 import {
   InboxConnection,
   ReplyDrafts,
   applyWorkspaceEvent,
   canReplyToTask,
+  ciSignal,
+  detailSignals,
+  kindHeaderLabel,
+  orderedWorkspaceKeys,
   preferredTerminal,
   primaryTask,
   projectKeyLabel,
+  reviewSignal,
+  rowSignals,
   shouldHandleWorkspaceEnter,
+  sortModeLabel,
   unreadCount,
+  visibleUnreadCount,
 } from "./model";
 
 function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
@@ -148,6 +156,105 @@ describe("workspace model", () => {
     item.seen_count = item.activity.length;
     item.read_indices = [];
     expect(unreadCount(item)).toBe(0);
+  });
+
+  it("totals unread only over workspaces the view placed as rows", () => {
+    const shown = workspace("shown", task("shown"));
+    shown.activity = [activity("a", "one"), activity("b", "two")];
+    expect(unreadCount(shown)).toBe(2);
+
+    // Present in the map but filtered out of the view (e.g. inactive):
+    // its unread must not reach the header total.
+    const hidden = workspace("hidden", task("hidden"));
+    hidden.activity = [activity("c", "three")];
+    expect(unreadCount(hidden)).toBe(1);
+
+    const items = new Map([
+      ["shown", shown],
+      ["hidden", hidden],
+    ]);
+    const view: ComputeOutcome = {
+      visible: [{ RepoHeader: "owner/repo" }, { Workspace: "shown" }],
+      summaries: { "owner/repo": { active: 1, attention: 0 } },
+    };
+    // 2 (only `shown`), never 3 — `hidden` has no row.
+    expect(visibleUnreadCount(view, items)).toBe(2);
+
+    // A row whose workspace hasn't landed in the map yet is skipped,
+    // exactly as the renderer skips the row — no NaN, no over-count.
+    const pending: ComputeOutcome = {
+      visible: [{ Workspace: "shown" }, { Workspace: "not-in-map" }],
+      summaries: {},
+    };
+    expect(visibleUnreadCount(pending, items)).toBe(2);
+  });
+
+  it("derives CI and review badges with the right tone", () => {
+    const failing = task("Broken release");
+    failing.ci = "Failure";
+    failing.review = "ChangesRequested";
+    expect(ciSignal(failing)).toEqual({ label: "CI failure", tone: "attention" });
+    expect(reviewSignal(failing)).toEqual({
+      label: "Review changes requested",
+      tone: "attention",
+    });
+
+    const green = task("Ready");
+    green.ci = "Success";
+    green.review = "Approved";
+    expect(ciSignal(green)).toEqual({ label: "CI success", tone: "success" });
+    expect(reviewSignal(green)).toEqual({
+      label: "Review approved",
+      tone: "success",
+    });
+
+    const none = task("Draft");
+    none.ci = "None";
+    none.review = "None";
+    expect(ciSignal(none)).toBeNull();
+    expect(reviewSignal(none)).toBeNull();
+  });
+
+  it("builds compact row badges and fuller detail badges", () => {
+    const item = task("Ship it");
+    item.ci = "Failure";
+    item.review = "Pending";
+    item.needs_reply = true;
+    item.additions = 12;
+    item.deletions = 3;
+
+    const row = rowSignals(item, 2).map((signal) => signal.label);
+    expect(row).toEqual(["CI failure", "Review pending", "reply", "2 unread"]);
+
+    const detail = detailSignals(item).map((signal) => signal.label);
+    expect(detail).toContain("Open");
+    expect(detail).toContain("CI failure");
+    expect(detail).toContain("+12 −3");
+  });
+
+  it("labels sort modes and section headers like the TUI", () => {
+    expect(sortModeLabel("Recent")).toBe("recent");
+    expect(sortModeLabel("ByRole")).toBe("by-role");
+    expect(sortModeLabel("ByRoleSplit")).toBe("split");
+    expect(kindHeaderLabel("Pr")).toBe("PRs");
+    expect(kindHeaderLabel("Issue")).toBe("Issues");
+  });
+
+  it("projects workspace keys from the view-model in order, skipping headers", () => {
+    const view: ComputeOutcome = {
+      visible: [
+        { RepoHeader: "octo/widget" },
+        { KindHeader: "Pr" },
+        { Workspace: "octo/widget#2" },
+        { KindHeader: "Issue" },
+        { Workspace: "octo/widget#1" },
+      ],
+      summaries: { "octo/widget": { active: 2, attention: 0 } },
+    };
+    expect(orderedWorkspaceKeys(view)).toEqual([
+      "octo/widget#2",
+      "octo/widget#1",
+    ]);
   });
 
   it("replaces the baseline and then applies live upserts and removals", () => {

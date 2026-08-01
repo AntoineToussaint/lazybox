@@ -3,8 +3,8 @@ compile_error!("run with --features desktop-contract");
 
 use lazybox_server::api_gateway::{
     DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION, DESKTOP_TERMINAL_STREAM_ITEM_DATA,
-    DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand, DesktopEvent, DesktopInfo,
-    DesktopRepository, DesktopStreamMessage, DesktopTerminalSnapshot, HealthResponse,
+    DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand, DesktopEvent, DesktopInboxView,
+    DesktopInfo, DesktopRepository, DesktopStreamMessage, DesktopTerminalSnapshot, HealthResponse,
     ProtocolResponse, TERMINAL_CLIENT_COMMAND_CLOSE, TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK,
     TERMINAL_CLIENT_COMMAND_RESIZE, TERMINAL_CLIENT_COMMAND_RESYNC, TERMINAL_CLIENT_COMMAND_WRITE,
     TERMINAL_CLIENT_FRAME_HEADER_BYTES, TERMINAL_CLIENT_FRAME_KIND_OFFSET,
@@ -21,10 +21,7 @@ use lazybox_server::api_gateway::{
     TERMINAL_WRITE_INTENT_SUBMIT, TERMINAL_WRITE_INTENT_VIEW, UnsupportedFingerprintResponse,
     UnsupportedProtocolResponse, WorkspacesResponse,
 };
-use lazybox_tui_core::inbox::{
-    Filter, FilterAxis, FilterMenuItem, InboxView, RepoSummary, SortMode, VisibleRow,
-    WorkspaceKind, WorkspaceRow,
-};
+use lazybox_tui_core::inbox::{Filter, FilterAxis, FilterMenuItem};
 use lazybox_tui_core::snippets::{PickerRow, SnippetGroup, SnippetPickerView};
 use std::path::PathBuf;
 use ts_rs::{Config, TS};
@@ -53,16 +50,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     DesktopInfo::export_all(&config)?;
     DesktopRepository::export_all(&config)?;
     DesktopStreamMessage::export_all(&config)?;
-
-    // Shared inbox view-model (#732): the grouped rows, per-row badge
-    // data, per-repo summaries, and sort taxonomy the desktop renders.
-    // `export_all` pulls transitive deps (StatusTag, CiStatus, …).
-    InboxView::export_all(&config)?;
-    WorkspaceRow::export_all(&config)?;
-    VisibleRow::export_all(&config)?;
-    RepoSummary::export_all(&config)?;
-    SortMode::export_all(&config)?;
-    WorkspaceKind::export_all(&config)?;
+    // The grouped inbox view-model (#732). `export_all` pulls in the
+    // shared tui-core types it embeds: ComputeOutcome, VisibleRow,
+    // WorkspaceKind, SortMode, RepoSummary.
+    DesktopInboxView::export_all(&config)?;
     // Filter menu contract (#733): the desktop builds its filter menu
     // generically from these, never hardcoding the predicate list.
     FilterMenuItem::export_all(&config)?;
@@ -92,14 +83,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let index = "export type { DesktopCommand as LazyboxCommand } from \"./DesktopCommand\";\n\
          export type { DesktopEvent as LazyboxEvent } from \"./DesktopEvent\";\n\
+         export type { DesktopInboxView } from \"./DesktopInboxView\";\n\
          export type { DesktopInfo } from \"./DesktopInfo\";\n\
          export type { DesktopRepository } from \"./DesktopRepository\";\n\
          export type { DesktopStreamMessage } from \"./DesktopStreamMessage\";\n\
-         export type { InboxView } from \"./InboxView\";\n\
-         export type { WorkspaceRow } from \"./WorkspaceRow\";\n\
+         export type { ComputeOutcome } from \"./ComputeOutcome\";\n\
          export type { VisibleRow } from \"./VisibleRow\";\n\
-         export type { RepoSummary } from \"./RepoSummary\";\n\
-         export type { SortMode } from \"./SortMode\";\n\
          export type { WorkspaceKind } from \"./WorkspaceKind\";\n\
          export type { SnippetPickerView } from \"./SnippetPickerView\";\n\
          export type { SnippetGroup } from \"./SnippetGroup\";\n\
@@ -107,7 +96,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          export type { Filter } from \"./Filter\";\n\
          export type { FilterAxis } from \"./FilterAxis\";\n\
          export type { FilterMenuItem } from \"./FilterMenuItem\";\n\
-         export type { StatusTag } from \"./StatusTag\";\n\
+         export type { SortMode } from \"./SortMode\";\n\
+         export type { RepoSummary } from \"./RepoSummary\";\n\
          export type { TerminalKind } from \"./TerminalKind\";\n\
          export type { DesktopTerminalSnapshot as TerminalSnapshot } from \"./DesktopTerminalSnapshot\";\n\
          export type { Task } from \"./Task\";\n\

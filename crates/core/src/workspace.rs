@@ -1033,7 +1033,7 @@ impl Workspace {
     /// workspace (a hand-created or freshly-provisioned one) still
     /// reports its repo. `None` for a repo-less/local/Linear workspace,
     /// or a GitHub key whose owner-or-repo boundary is ambiguous
-    /// ([`ProjectKey::unambiguous_github_slug`]).
+    /// ([`crate::ProjectKey::unambiguous_github_slug`]).
     pub fn repo_slug(&self) -> Option<String> {
         if let Some(repo) = self.primary_task().and_then(|task| task.repo.clone()) {
             return Some(repo);

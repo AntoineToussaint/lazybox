@@ -4240,7 +4240,15 @@ async fn resync_replay_after_gap(
 /// (the "produced no output" case — the pane then just shows the failure
 /// banner). Bounded so a full 64 KiB ring can't blow up the wire payload.
 fn last_output_tail(bytes: &[u8]) -> Option<String> {
-    const MAX_LINES: usize = 8;
+    agent_output_tail(bytes, 8)
+}
+
+/// Clean and line-limit raw terminal bytes into a legible text tail:
+/// strip escape sequences, collapse in-place `\r` overwrites, drop
+/// blank lines, and keep at most the final `max_lines`. Shared by the
+/// dying-agent recap (`last_output_tail`) and the workspace-addressed
+/// `get_agent_output` gateway read (issue #773).
+pub(crate) fn agent_output_tail(bytes: &[u8], max_lines: usize) -> Option<String> {
     const MAX_LINE_CHARS: usize = 200;
 
     let text = String::from_utf8_lossy(bytes);
@@ -4261,8 +4269,51 @@ fn last_output_tail(bytes: &[u8]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
-    let tail = lines.split_off(lines.len().saturating_sub(MAX_LINES));
+    let tail = lines.split_off(lines.len().saturating_sub(max_lines));
     Some(tail.join("\n"))
+}
+
+/// Read a running agent terminal's recent output as a cleaned,
+/// line-limited text tail — the workspace-addressed read behind the
+/// gateway's `get_agent_output` (issue #773). Prefers the backend's
+/// deep scrollback (tmux `capture-pane`) and falls back to the live
+/// ring snapshot for backends without a history source (raw PTY).
+/// `None` when the terminal is unknown or produced no legible output.
+pub async fn agent_output_snapshot(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    max_lines: usize,
+) -> Option<String> {
+    let key = config.terminal.backend_key_for(terminal_id).await?;
+    let bytes = match config.backend.scrollback(&key).await {
+        Ok(Some((replay, _seq))) => replay,
+        _ => match config.backend.snapshot(&key).await {
+            Ok(snapshot) => snapshot.replay,
+            Err(_) => return None,
+        },
+    };
+    // A tmux deep scrollback can be megabytes; cleaning all of it to keep
+    // `max_lines` lines is wasteful on a frequently-polled read. Clean only
+    // a trailing window generously sized to still contain `max_lines` lines
+    // (well above the 200-char per-line cap the cleaner applies). Slicing
+    // mid-sequence can corrupt at most the window's first line, which the
+    // tail extractor drops anyway (see `strip_ansi`).
+    let window = trailing_window(&bytes, max_lines.saturating_mul(TAIL_SCAN_BYTES_PER_LINE));
+    agent_output_tail(window, max_lines)
+}
+
+/// Bytes to scan per requested output line before cleaning — comfortably
+/// above the cleaner's 200-char line cap so the kept tail is never
+/// truncated by the window boundary.
+const TAIL_SCAN_BYTES_PER_LINE: usize = 1024;
+
+/// The trailing `at_most` bytes of `bytes` (or all of them when shorter),
+/// clamped to a sane floor/ceiling so a tiny `max_lines` still gets enough
+/// context and a huge one can't scan an unbounded buffer.
+fn trailing_window(bytes: &[u8], at_most: usize) -> &[u8] {
+    let window = at_most.clamp(64 * 1024, 1024 * 1024);
+    let start = bytes.len().saturating_sub(window);
+    &bytes[start..]
 }
 
 /// Drop ANSI escape sequences and non-printing control bytes from
@@ -12421,6 +12472,32 @@ mod tests {
         assert_eq!(lines.len(), 8);
         assert_eq!(lines.first(), Some(&"line 12"));
         assert_eq!(lines.last(), Some(&"line 19"));
+    }
+
+    #[test]
+    fn trailing_window_clamps_between_a_floor_and_ceiling() {
+        // Below the floor, the whole (short) buffer is returned.
+        let small = vec![b'x'; 10];
+        assert_eq!(trailing_window(&small, 1).len(), 10);
+        // A big buffer with a modest request is clipped to the 64 KiB floor,
+        // keeping the tail (the window is taken from the end).
+        let big = vec![b'y'; 2 * 1024 * 1024];
+        let floored = trailing_window(&big, 1);
+        assert_eq!(floored.len(), 64 * 1024);
+        assert_eq!(floored, &big[big.len() - 64 * 1024..]);
+        // A huge request can never scan more than the 1 MiB ceiling.
+        assert_eq!(trailing_window(&big, usize::MAX).len(), 1024 * 1024);
+    }
+
+    #[test]
+    fn agent_output_tail_honors_a_custom_line_budget() {
+        // The gateway's `get_agent_output` reads more than the 8-line
+        // dying-agent recap; the shared cleaner respects the requested cap.
+        let raw: Vec<u8> = (0..20)
+            .flat_map(|n| format!("line {n}\n").into_bytes())
+            .collect();
+        let tail = agent_output_tail(&raw, 3).expect("tail");
+        assert_eq!(tail, "line 17\nline 18\nline 19");
     }
 
     #[test]

@@ -3,7 +3,7 @@ source: crates/tui/tests/snapshots.rs
 expression: rendered
 ---
  LAZYBOX v0.1.9 (dev)       3 items  7d
- f [filter]  o [recent]
+ f [filter]  o [recent]  # [find]
 
  ──────────────────────────────────────
 

@@ -648,6 +648,15 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MountHandoffPicker { .. } => {}
                 }
             }
+            Action::RenameWorkspace => {
+                // Rename targets the focused workspace's display label
+                // (any workspace, even session-less). Section::Workspace,
+                // so this fires from both Sidebar and Right focus.
+                if let Some(ws) = self.sidebar.selected_workspace() {
+                    let session_key: lazybox_core::SessionKey = (&ws.key).into();
+                    self.mount_rename_workspace_input(session_key);
+                }
+            }
             Action::NewProject => {
                 self.mount_new_workspace_repo_picker();
             }
@@ -1169,6 +1178,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::OpenSearch => {
                 self.sidebar.open_search();
+            }
+            Action::OpenGlobalSearch => {
+                self.sidebar.open_global_search();
             }
             Action::ToggleRepoGroup => {
                 self.sidebar.toggle_repo_at_cursor();

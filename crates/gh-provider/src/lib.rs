@@ -17,8 +17,8 @@ pub use notifications::{
     NotificationsSnapshot, SyncCursors,
 };
 pub use rate_budget::{
-    AcquireError, ApiResource, BackgroundPlan, RateBudget, RemoteRateLimit, RequestPriority,
-    Snapshot as RateSnapshot,
+    AcquireError, ApiResource, BackgroundPlan, PersistedRateState, RateBudget, RemoteRateLimit,
+    RequestPriority, Snapshot as RateSnapshot,
 };
 
 use lazybox_auth::{CommandProvider, CredentialChain, EnvProvider};

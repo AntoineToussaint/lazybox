@@ -31,12 +31,14 @@ vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 80;
     rows = 24;
+    options: Record<string, unknown> = {};
 
     loadAddon(): void {}
     open(): void {}
     focus(): void {}
     reset(): void {}
     dispose(): void {}
+    attachCustomKeyEventHandler(): void {}
     onData(): { dispose: () => void } {
       return { dispose: () => {} };
     }
@@ -69,30 +71,14 @@ describe("credential-free desktop workflow", () => {
       if (command === "desktop_setup_state") {
         return Promise.resolve(
           phase === "onboarding"
-            ? {
+            ? settingsStateFixture({
                 first_run: true,
-                selected_scopes: [],
-                agents: [
-                  {
-                    id: "cursor-agent",
-                    label: "Cursor Agent",
-                    available: true,
-                  },
-                ],
+                agents: [agentOption("cursor-agent", "Cursor Agent")],
                 default_agent: "cursor-agent",
-                analytics_enabled: false,
-                diagnostics_path: "/tmp/lazybox-crashes",
-              }
-            : {
-                first_run: false,
+              })
+            : settingsStateFixture({
                 selected_scopes: ["github:acme/widget"],
-                agents: [
-                  { id: "codex", label: "Codex", available: true },
-                ],
-                default_agent: "codex",
-                analytics_enabled: false,
-                diagnostics_path: "/tmp/lazybox-crashes",
-              },
+              }),
         );
       }
       if (command === "desktop_info") {
@@ -166,11 +152,10 @@ describe("credential-free desktop workflow", () => {
     button("confirm-accept").click();
     await vi.waitFor(() => {
       expect(harness.invoke).toHaveBeenCalledWith("save_desktop_settings", {
-        settings: {
+        settings: savePayload({
           github_scopes: ["github:acme"],
           default_agent: "cursor-agent",
-          analytics_enabled: false,
-        },
+        }),
       });
     });
 
@@ -264,11 +249,7 @@ describe("credential-free desktop workflow", () => {
     await vi.waitFor(() => expect(dialog("confirm-dialog").open).toBe(true));
     button("confirm-accept").click();
     await vi.waitFor(() =>
-      expect(settingsCalls().at(-1)).toEqual({
-        github_scopes: [],
-        default_agent: "codex",
-        analytics_enabled: false,
-      }),
+      expect(settingsCalls().at(-1)).toEqual(savePayload()),
     );
     button("setup-close").click();
 
@@ -288,14 +269,9 @@ describe("credential-free desktop workflow", () => {
 
     harness.invoke.mockImplementation((command: string, args?: unknown) => {
       if (command === "desktop_setup_state") {
-        return Promise.resolve({
-          first_run: false,
-          selected_scopes: ["github:acme/widget"],
-          agents: [{ id: "codex", label: "Codex", available: true }],
-          default_agent: "codex",
-          analytics_enabled: false,
-          diagnostics_path: "/tmp/lazybox-crashes",
-        });
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:acme/widget"] }),
+        );
       }
       if (command === "desktop_info") {
         return Promise.resolve({
@@ -374,14 +350,9 @@ describe("credential-free desktop workflow", () => {
   it("disables New workspace when no repository is available", async () => {
     harness.invoke.mockImplementation((command: string) => {
       if (command === "desktop_setup_state") {
-        return Promise.resolve({
-          first_run: false,
-          selected_scopes: ["github:acme"],
-          agents: [{ id: "codex", label: "Codex", available: true }],
-          default_agent: "codex",
-          analytics_enabled: false,
-          diagnostics_path: "/tmp/lazybox-crashes",
-        });
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:acme"] }),
+        );
       }
       if (command === "desktop_info") {
         return Promise.resolve({
@@ -419,14 +390,9 @@ describe("credential-free desktop workflow", () => {
 
     harness.invoke.mockImplementation((command: string, args?: unknown) => {
       if (command === "desktop_setup_state") {
-        return Promise.resolve({
-          first_run: false,
-          selected_scopes: ["github:acme/widget"],
-          agents: [{ id: "codex", label: "Codex", available: true }],
-          default_agent: "codex",
-          analytics_enabled: false,
-          diagnostics_path: "/tmp/lazybox-crashes",
-        });
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:acme/widget"] }),
+        );
       }
       if (command === "desktop_info") {
         return Promise.resolve({
@@ -478,17 +444,109 @@ describe("credential-free desktop workflow", () => {
     releaseCreate?.();
   });
 
+  it("opens the snippet picker over the focused terminal and delivers a pick", async () => {
+    harness.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:acme/widget"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      if (command === "snippet_view") {
+        return Promise.resolve(snippetView((args as { filter: string }).filter));
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    // No terminal yet → the snippet button is inert.
+    expect(button("snippet-button").disabled).toBe(true);
+
+    // Attach an agent terminal to the selected workspace, so ⌘/Ctrl-J has
+    // a target.
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    pushInbox([{ number: 42 }]);
+    await vi.waitFor(() =>
+      expect(button("snippet-button").disabled).toBe(false),
+    );
+
+    // Open via the keyboard shortcut and pick a row → it delivers to the
+    // focused terminal id.
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", metaKey: true }),
+    );
+    await vi.waitFor(() => expect(dialog("snippet-dialog").open).toBe(true));
+    const rows = document.querySelectorAll<HTMLButtonElement>(".snippet-row");
+    expect(rows.length).toBe(2);
+    rows[0]?.click();
+    await vi.waitFor(() =>
+      expect(deliverCommands()).toContainEqual({
+        terminal_id: 7,
+        snippet_key: "rev",
+        category: "Review",
+        body: "Review the current diff.",
+      }),
+    );
+    await vi.waitFor(() => expect(dialog("snippet-dialog").open).toBe(false));
+
+    // Typing a full unique key auto-submits without a click (parity with
+    // the TUI `]]srev` fast path).
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", metaKey: true }),
+    );
+    await vi.waitFor(() => expect(dialog("snippet-dialog").open).toBe(true));
+    const filter = input("#snippet-filter");
+    filter.value = "rev";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(
+        deliverCommands().filter((c) => c.snippet_key === "rev"),
+      ).toHaveLength(2),
+    );
+    expect(dialog("snippet-dialog").open).toBe(false);
+  });
+
   it("labels a task-less workspace with a friendly name in the picker", async () => {
     harness.invoke.mockImplementation((command: string) => {
       if (command === "desktop_setup_state") {
-        return Promise.resolve({
-          first_run: false,
-          selected_scopes: [],
-          agents: [{ id: "codex", label: "Codex", available: true }],
-          default_agent: "codex",
-          analytics_enabled: false,
-          diagnostics_path: "/tmp/lazybox-crashes",
-        });
+        return Promise.resolve(settingsStateFixture());
       }
       if (command === "desktop_info") {
         return Promise.resolve({
@@ -538,6 +596,194 @@ describe("credential-free desktop workflow", () => {
     );
     expect(options).toContain("scratch");
     expect(options).not.toContain("local-scratch");
+  });
+
+  it("renders theme / agent / workspace settings and saves the full payload", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({
+            selected_scopes: ["github:acme/widget"],
+            default_agent: "claude",
+            agents: [
+              {
+                id: "claude",
+                label: "Claude Code",
+                available: true,
+                models: [
+                  { alias: "S", label: "Haiku" },
+                  { alias: "M", label: "Sonnet" },
+                  { alias: "L", label: "Opus" },
+                ],
+                default_tier: "L",
+              },
+            ],
+            theme: "Lazybox Dark",
+            themes: [
+              { name: "Lazybox Dark", colors: darkColors() },
+              { name: "Lazybox Light", colors: lightColors() },
+            ],
+            keymap_preset: "vim",
+          }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["claude"],
+          default_agent: "claude",
+          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+        });
+      }
+      if (command === "github_auth_status") {
+        return Promise.resolve({
+          authenticated: true,
+          account: "fixture",
+          message: "GitHub credential verified",
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      // Theme / layout / model changes need no restart.
+      if (command === "save_desktop_settings") {
+        return Promise.resolve(false);
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(button("settings-button").disabled).toBe(false),
+    );
+
+    button("settings-button").click();
+    await vi.waitFor(() => expect(dialog("setup-dialog").open).toBe(true));
+
+    // Theme catalog renders swatches; the model menu and workspace
+    // enums seed from config.
+    expect(document.querySelectorAll(".theme-swatch")).toHaveLength(2);
+    expect(element("keymap-preset-label").textContent).toBe("Keymap: vim");
+    expect([...select("default-model-select").options].map((o) => o.value)).toEqual([
+      "S",
+      "M",
+      "L",
+    ]);
+    expect(select("default-model-select").value).toBe("L");
+    expect(select("terminal-layout-select").value).toBe("split");
+    expect(select("activity-pane-select").value).toBe("full");
+
+    themeSwatch("Lazybox Light").click();
+    setSelect("default-model-select", "M");
+    setSelect("terminal-layout-select", "tabs");
+    setSelect("activity-pane-select", "hidden");
+
+    form("setup-form").dispatchEvent(submitEvent());
+    await vi.waitFor(() => expect(dialog("confirm-dialog").open).toBe(true));
+    button("confirm-accept").click();
+
+    await vi.waitFor(() =>
+      expect(settingsCalls().at(-1)).toEqual(
+        savePayload({
+          github_scopes: ["github:acme/widget"],
+          default_agent: "claude",
+          theme: "Lazybox Light",
+          terminal_new_layout: "tabs",
+          activity_pane_default: "hidden",
+          default_model_tier: "M",
+        }),
+      ),
+    );
+    // No restart requested → the dialog closes on its own.
+    await vi.waitFor(() => expect(dialog("setup-dialog").open).toBe(false));
+  });
+
+  it("does not persist a model tier the user never chose", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({
+            selected_scopes: ["github:acme/widget"],
+            default_agent: "custombot",
+            agents: [
+              {
+                id: "custombot",
+                label: "Custom Bot",
+                available: true,
+                // Tiers defined, but no configured default.
+                models: [
+                  { alias: "F", label: "Fast" },
+                  { alias: "S", label: "Slow" },
+                ],
+                default_tier: null,
+              },
+            ],
+          }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["custombot"],
+          default_agent: "custombot",
+          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+        });
+      }
+      if (command === "github_auth_status") {
+        return Promise.resolve({
+          authenticated: true,
+          account: "fixture",
+          message: "GitHub credential verified",
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      if (command === "save_desktop_settings") {
+        return Promise.resolve(false);
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(button("settings-button").disabled).toBe(false),
+    );
+
+    button("settings-button").click();
+    await vi.waitFor(() => expect(dialog("setup-dialog").open).toBe(true));
+
+    // The menu leads with an explicit "Agent default" entry so an
+    // untouched save keeps the tier unset instead of adopting the first.
+    const model = select("default-model-select");
+    expect([...model.options].map((o) => o.value)).toEqual(["", "F", "S"]);
+    expect(model.value).toBe("");
+
+    form("setup-form").dispatchEvent(submitEvent());
+    await vi.waitFor(() => expect(dialog("confirm-dialog").open).toBe(true));
+    button("confirm-accept").click();
+
+    await vi.waitFor(() =>
+      expect(settingsCalls().at(-1)).toEqual(
+        savePayload({
+          github_scopes: ["github:acme/widget"],
+          default_agent: "custombot",
+          default_model_tier: null,
+        }),
+      ),
+    );
   });
 });
 
@@ -685,7 +931,20 @@ function inboxViewFor(rows: Array<{ number: number; unread?: number }>): unknown
     collapsed: [],
     total: rows.length,
     unread_total: unread,
+    filter_menu: filterMenuFor(rows.length),
+    filter_chips: [],
   };
+}
+
+// A minimal shared-shape filter menu so the desktop renders its grouped
+// menu; counts track the pushed row count.
+function filterMenuFor(count: number): unknown[] {
+  return [
+    { filter: "Unread", axis: "State", label: "unread", count: 0, active: false },
+    { filter: "Author", axis: "Role", label: "author", count, active: false },
+    { filter: "Pr", axis: "Kind", label: "PR", count, active: false },
+    { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
+  ];
 }
 
 function workspaceRowFor(row: { number: number; unread?: number }): unknown {
@@ -738,10 +997,152 @@ function createCommands(): unknown[] {
   );
 }
 
+// The `DeliverSnippet` payloads sent to the gateway, unwrapped.
+function deliverCommands(): Array<{
+  terminal_id: number;
+  snippet_key: string;
+  category: string;
+  body: string;
+}> {
+  return commandCalls()
+    .filter(
+      (command): command is { DeliverSnippet: Record<string, unknown> } =>
+        typeof command === "object" &&
+        command !== null &&
+        "DeliverSnippet" in command,
+    )
+    .map((command) => command.DeliverSnippet as never);
+}
+
+// The grouped view `snippet_view` would return: `rev` and `pr`, with the
+// exact-key auto-submit target set only when the filter uniquely matches.
+function snippetView(filter: string): unknown {
+  return {
+    filter,
+    groups: [
+      {
+        category: "Review",
+        label: "Review",
+        rows: [
+          {
+            key: "rev",
+            description: "Review the current diff",
+            category: "Review",
+            body: "Review the current diff.",
+            origin: "built-in",
+          },
+        ],
+      },
+      {
+        category: "Git & PR",
+        label: "Git & PR",
+        rows: [
+          {
+            key: "pr",
+            description: "Open a PR",
+            category: "Git & PR",
+            body: "Open a PR.",
+            origin: "built-in",
+          },
+        ],
+      },
+    ],
+    auto_submit: filter === "rev" ? "rev" : null,
+    visible_count: 2,
+    total: 2,
+  };
+}
+
 function settingsCalls(): unknown[] {
   return harness.invoke.mock.calls
     .filter(([command]) => command === "save_desktop_settings")
     .map(([, args]) => (args as { settings: unknown }).settings);
+}
+
+function agentOption(id: string, label: string): Record<string, unknown> {
+  return { id, label, available: true, models: [], default_tier: null };
+}
+
+function darkColors(): Record<string, string> {
+  return {
+    accent: "#7dcfff",
+    hover: "#f7768e",
+    success: "#9ece6a",
+    warn: "#e0af68",
+    error: "#f7768e",
+    text_strong: "#c0caf5",
+    text_dim: "#7a82a7",
+    chrome: "#3a4060",
+    fill: "#292e42",
+    surface: "#1a1d2e",
+  };
+}
+
+function lightColors(): Record<string, string> {
+  return {
+    accent: "#1a6ec4",
+    hover: "#c13574",
+    success: "#23864e",
+    warn: "#9f6a00",
+    error: "#c13574",
+    text_strong: "#1c2030",
+    text_dim: "#606880",
+    chrome: "#c4c9d6",
+    fill: "#dadfe9",
+    surface: "#f7f8fa",
+  };
+}
+
+function themeSwatch(name: string): HTMLButtonElement {
+  const swatch = [
+    ...document.querySelectorAll<HTMLButtonElement>(".theme-swatch"),
+  ].find((candidate) => candidate.textContent?.includes(name));
+  if (swatch === undefined) {
+    throw new Error(`missing theme swatch for ${name}`);
+  }
+  return swatch;
+}
+
+function setSelect(id: string, value: string): void {
+  const control = select(id);
+  control.value = value;
+  control.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function settingsStateFixture(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    first_run: false,
+    selected_scopes: [],
+    agents: [agentOption("codex", "Codex")],
+    default_agent: "codex",
+    analytics_enabled: false,
+    diagnostics_path: "/tmp/lazybox-crashes",
+    theme: null,
+    themes: [],
+    keymap_preset: null,
+    terminal_new_layout: "split",
+    activity_pane_default: "full",
+    ...overrides,
+  };
+}
+
+// The full save payload the frontend now emits; the extra appearance /
+// workspace fields default to their unset values in these flows.
+function savePayload(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    github_scopes: [],
+    default_agent: "codex",
+    analytics_enabled: false,
+    theme: null,
+    terminal_new_layout: "split",
+    activity_pane_default: "full",
+    default_model_tier: null,
+    ...overrides,
+  };
 }
 
 function nativeTerminalData(frame: Uint8Array): Uint8Array {

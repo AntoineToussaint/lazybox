@@ -892,6 +892,7 @@ impl Server {
                         lazybox_ipc::Command::CancelAgentReauthentication { .. } => {
                             "CancelAgentReauthentication"
                         }
+                        lazybox_ipc::Command::RenameWorkspace { .. } => "RenameWorkspace",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1587,6 +1588,10 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::SetNotes { session_key, notes } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_notes(config, &key, notes).await;
+        }
+        lazybox_ipc::Command::RenameWorkspace { session_key, name } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            workspace::rename_workspace(config, &key, name).await;
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;

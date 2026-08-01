@@ -1303,6 +1303,16 @@ pub enum Command {
     CancelAgentReauthentication {
         terminal_id: TerminalId,
     },
+    /// Rename a workspace's display name (issue #744). The daemon loads
+    /// the workspace, replaces its `name`, and re-broadcasts
+    /// `WorkspaceUpserted` (like `SetNotes`), so attached TUIs update the
+    /// sidebar label. Only the display name changes — the workspace key
+    /// and any session worktrees are left untouched. Appended last
+    /// (bincode is ordinal-sensitive).
+    RenameWorkspace {
+        session_key: SessionKey,
+        name: String,
+    },
 }
 
 impl Command {
@@ -2183,9 +2193,15 @@ pub struct AgentCliUpdateStatus {
 /// by `as_str` so existing TUI matches keep working.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderErrorKind {
-    /// Network blip, rate limit, transient API failure. The TUI
-    /// shows a footer notice and we keep polling.
+    /// Network blip, rate limit, transient API failure that the daemon
+    /// is auto-retrying. Self-healing, so the TUI keeps it quiet — a
+    /// non-alarming sync status, never a red banner (#730).
     Retryable,
+    /// A retryable transient whose retries are exhausted: the daemon
+    /// kept failing across successive cycles, so sync is genuinely
+    /// stuck and now actionable ("check your connection or token").
+    /// The TUI surfaces this as a real error (#730).
+    Exhausted,
     /// Credentials failed to resolve / unauthorized. The TUI walks
     /// the user through re-auth.
     Auth,
@@ -2198,9 +2214,35 @@ impl ProviderErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Retryable => "retryable",
+            Self::Exhausted => "exhausted",
             Self::Auth => "auth",
             Self::Permanent => "permanent",
         }
+    }
+
+    /// Parse the wire `kind` string back into the classification.
+    /// Inverse of [`as_str`](Self::as_str) — the one place these strings
+    /// are matched, so consumers reason over the enum instead of raw
+    /// literals. An empty (uncategorized/legacy) or unrecognized value
+    /// maps to [`Permanent`](Self::Permanent) — the safe default, since
+    /// an unknown failure is surfaced rather than silently swallowed.
+    pub fn from_wire(kind: &str) -> Self {
+        match kind {
+            "retryable" => Self::Retryable,
+            "exhausted" => Self::Exhausted,
+            "auth" => Self::Auth,
+            _ => Self::Permanent,
+        }
+    }
+
+    /// Whether this failure needs the user to act on it *now* — the flag
+    /// that decides the footer surface (#730). A [`Retryable`](Self::Retryable)
+    /// transient the daemon is still auto-retrying is self-healing and
+    /// stays a quiet status; everything else (retries [`Exhausted`](Self::Exhausted),
+    /// [`Auth`](Self::Auth), [`Permanent`](Self::Permanent)) is actionable
+    /// and earns a real error surface.
+    pub fn is_actionable(self) -> bool {
+        !matches!(self, Self::Retryable)
     }
 }
 
@@ -3198,6 +3240,40 @@ mod transport_admission_tests {
             Command::Subscribe.into_write_chunks().as_slice(),
             [Command::Subscribe]
         ));
+    }
+
+    /// `from_wire` round-trips every `as_str`, unknown/empty wire values
+    /// default to the actionable `Permanent`, and `is_actionable` marks
+    /// exactly the self-healing `Retryable` transient as quiet (#730).
+    #[test]
+    fn provider_error_kind_wire_roundtrip_and_actionability() {
+        for kind in [
+            ProviderErrorKind::Retryable,
+            ProviderErrorKind::Exhausted,
+            ProviderErrorKind::Auth,
+            ProviderErrorKind::Permanent,
+        ] {
+            assert_eq!(ProviderErrorKind::from_wire(kind.as_str()), kind);
+        }
+        // Legacy/uncategorized and unrecognized values are surfaced, not
+        // swallowed.
+        assert_eq!(
+            ProviderErrorKind::from_wire(""),
+            ProviderErrorKind::Permanent
+        );
+        assert_eq!(
+            ProviderErrorKind::from_wire("garbage"),
+            ProviderErrorKind::Permanent
+        );
+
+        assert!(!ProviderErrorKind::Retryable.is_actionable());
+        assert!(ProviderErrorKind::Exhausted.is_actionable());
+        assert!(ProviderErrorKind::Auth.is_actionable());
+        assert!(ProviderErrorKind::Permanent.is_actionable());
+        // An unknown kind is treated as actionable (via the Permanent
+        // fallback) so a producer/consumer version skew never hides a
+        // failure behind the quiet path.
+        assert!(ProviderErrorKind::from_wire("future-kind").is_actionable());
     }
 
     /// The const decimal parser must agree with std's on the actual

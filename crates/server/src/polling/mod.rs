@@ -74,7 +74,7 @@ use crate::ServerConfig;
 use chrono::Utc;
 use futures::FutureExt;
 use lazybox_core::{Task, Workspace, WorkspaceKey};
-use lazybox_ipc::Event;
+use lazybox_ipc::{Event, ProviderErrorKind};
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -1007,64 +1007,101 @@ pub struct TickState {
     /// the normal cadence. Entries clear the moment the task reports
     /// a definitive value (or stops being polled Unknown).
     unknown_mergeable_probes: std::collections::HashMap<String, u32>,
+    /// Consecutive retryable-failure count per source. A self-healing
+    /// transient stays a quiet status until this reaches
+    /// [`RETRYABLE_EXHAUSTION_ATTEMPTS`]; only then is sync genuinely
+    /// stuck and the failure escalates to an actionable error (#730).
+    /// Reset by [`Self::clear_error`] on any successful fetch or
+    /// rate-limit wait.
+    retryable_streak: std::collections::HashMap<String, u32>,
 }
 
 impl TickState {
     /// Broadcast a `ProviderError` for `source_key` unless it merely
     /// repeats the failure already surfaced for that source this session.
     ///
-    /// Retryable transients — a throttle, an HTTP 502, a "retrying in Ns"
-    /// hiccup the daemon is already auto-retrying — churn their message
-    /// every cycle (the countdown ticks down, a throttle alternates with a
-    /// 502). Keying the debounce on the exact text re-fired the footer
-    /// toast on every retry: a flicker that never cleared while the
-    /// condition persisted (#727). So the whole retryable streak collapses
-    /// onto one stable [`RETRYABLE_DEDUPE_KEY`] sentinel and broadcasts
-    /// once; auth/permanent errors debounce on their real message so a
+    /// A retryable transient the daemon is auto-retrying is self-healing,
+    /// so it must NOT shout as a red error — noise that buries the
+    /// failures the user actually has to act on (#730). While retries are
+    /// in flight it broadcasts as a quiet `retryable` status, coalesced
+    /// onto one stable [`RETRYABLE_DEDUPE_KEY`] sentinel so a churning
+    /// message (a ticking "retrying in Ns", a throttle alternating with a
+    /// 502) fires once, not once per cycle (#727). Only once the failure
+    /// persists for [`RETRYABLE_EXHAUSTION_ATTEMPTS`] consecutive cycles —
+    /// retries genuinely exhausted, sync actually stuck — does it escalate
+    /// to an `exhausted` error the user can act on. Auth/permanent errors
+    /// are actionable immediately and debounce on their real message so a
     /// changed error still surfaces. A genuine recovery calls
     /// [`Self::clear_error`], re-arming the next broadcast.
     ///
     /// Every path that surfaces a poll failure (fetch error, client-init
     /// failure) MUST go through here so the two never drift onto different
-    /// key schemes for the shared `last_error` slot.
+    /// key schemes for the shared `last_error` slot — and so a transient
+    /// alternating across those call sites counts toward one exhaustion
+    /// streak.
     fn broadcast_error_debounced(
         &mut self,
         bus: &tokio::sync::broadcast::Sender<Event>,
         source_key: &str,
         error: &lazybox_core::ProviderError,
     ) {
-        let message = error.user_message();
-        let dedupe_key = if error.is_retryable() {
-            RETRYABLE_DEDUPE_KEY
+        let (kind, message): (ProviderErrorKind, String) = if error.is_retryable() {
+            let streak = self
+                .retryable_streak
+                .entry(source_key.to_string())
+                .or_insert(0);
+            *streak += 1;
+            if *streak >= RETRYABLE_EXHAUSTION_ATTEMPTS {
+                (
+                    ProviderErrorKind::Exhausted,
+                    format!(
+                        "{source} sync failing — check your connection or token",
+                        source = error.source()
+                    ),
+                )
+            } else {
+                (ProviderErrorKind::Retryable, error.user_message())
+            }
         } else {
-            message.as_str()
+            // A definitive (auth/permanent) failure breaks the retryable
+            // streak — a later transient starts counting fresh.
+            self.retryable_streak.remove(source_key);
+            let kind = if error.is_auth() {
+                ProviderErrorKind::Auth
+            } else {
+                ProviderErrorKind::Permanent
+            };
+            (kind, error.user_message())
+        };
+        // Retryable/exhausted collapse onto stable sentinels so a churning
+        // message fires once; auth/permanent key on their real message so
+        // a genuine change of condition still re-surfaces.
+        let dedupe_key = match kind {
+            ProviderErrorKind::Retryable => RETRYABLE_DEDUPE_KEY,
+            ProviderErrorKind::Exhausted => EXHAUSTED_DEDUPE_KEY,
+            ProviderErrorKind::Auth | ProviderErrorKind::Permanent => message.as_str(),
         };
         if self.last_error.get(source_key).map(String::as_str) == Some(dedupe_key) {
             return;
         }
         self.last_error
             .insert(source_key.to_string(), dedupe_key.to_string());
-        let kind = if error.is_retryable() {
-            "retryable"
-        } else if error.is_auth() {
-            "auth"
-        } else {
-            "permanent"
-        };
         let _ = bus.send(Event::ProviderError {
             source: error.source().to_string(),
             message,
             detail: error.diagnostic(),
-            kind: kind.to_string(),
+            kind: kind.as_str().to_string(),
         });
     }
 
     /// Forget the last surfaced failure for `source_key` so its next
-    /// failure broadcasts even if it repeats an earlier message. Called
-    /// when the source recovers — a successful fetch or a rate-limit wait
-    /// replacing the error state.
+    /// failure broadcasts even if it repeats an earlier message, and
+    /// reset its retryable-exhaustion streak. Called when the source
+    /// recovers — a successful fetch or a rate-limit wait replacing the
+    /// error state.
     fn clear_error(&mut self, source_key: &str) {
         self.last_error.remove(source_key);
+        self.retryable_streak.remove(source_key);
     }
 }
 
@@ -1266,6 +1303,19 @@ mod rate_limit_wait_tests {
 /// [`TickState::broadcast_error_debounced`] (#727).
 const RETRYABLE_DEDUPE_KEY: &str = "\u{0}retryable";
 
+/// Debounce sentinel for the escalated `exhausted` error, distinct from
+/// [`RETRYABLE_DEDUPE_KEY`] so the quiet→actionable transition
+/// re-broadcasts once while the exhausted state itself stays coalesced.
+/// See [`TickState::broadcast_error_debounced`] (#730).
+const EXHAUSTED_DEDUPE_KEY: &str = "\u{0}exhausted";
+
+/// Consecutive retryable-failure cycles a source may burn before its
+/// transient escalates from a quiet status to an actionable `exhausted`
+/// error. Below this the daemon is still auto-retrying and the failure
+/// is self-healing noise; at it, retries are exhausted and sync is
+/// genuinely stuck (#730).
+const RETRYABLE_EXHAUSTION_ATTEMPTS: u32 = 3;
+
 pub async fn tick_with_state(
     config: &ServerConfig,
     sources: &[Box<dyn TaskSource>],
@@ -1461,13 +1511,21 @@ pub async fn tick_with_state(
                                 i + 1,
                                 UPSERT_TIMEOUT_PER_TASK.as_secs(),
                             );
+                            // A single task's upsert timing out is a
+                            // per-task hiccup, NOT a sync-stuck signal: the
+                            // fetch itself succeeded, so this deliberately
+                            // does not feed the exhaustion streak (and could
+                            // not — the successful fetch calls `clear_error`
+                            // below, resetting it). Emitted as a plain quiet
+                            // `retryable` status; the TUI keeps it off the
+                            // error banner (#730).
                             let _ = config.bus.send(Event::ProviderError {
                                 source: source.name().to_string(),
                                 message: format!(
                                     "upsert timed out on {task_id} — task skipped this tick"
                                 ),
                                 detail: "see /tmp/lazybox.log for the slow step".into(),
-                                kind: "retryable".into(),
+                                kind: ProviderErrorKind::Retryable.as_str().to_string(),
                             });
                         }
                     }
@@ -2124,11 +2182,20 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                     tracing::error!(
                         "polling: tick #{tick_n} PANICKED: {msg} — loop will continue at next interval"
                     );
+                    // A caught poll-cycle panic is a code bug, not something
+                    // the user can remediate — escalating it to the
+                    // exhaustion path would mislabel it "check your
+                    // connection or token", and the `TickState` lives inside
+                    // the panicked future (checked out of `poll_state`) and
+                    // is not safely reachable here anyway. It stays a quiet
+                    // `retryable` status for parity with other self-healing
+                    // hiccups; the error-level log above is the developer
+                    // signal (#730).
                     let _ = config.bus.send(Event::ProviderError {
                         source: "github".into(),
                         message: format!("poll cycle crashed: {msg}"),
                         detail: msg,
-                        kind: "retryable".into(),
+                        kind: ProviderErrorKind::Retryable.as_str().to_string(),
                     });
                     TickSummary::default()
                 }
@@ -2473,17 +2540,26 @@ async fn run_tick_inner(
                 "tick_with_state TIMED OUT after {}s — abandoning this tick, next interval will retry",
                 TICK_OVERALL_TIMEOUT.as_secs()
             );
-            let _ = config.bus.send(Event::ProviderError {
-                source: "github".into(),
-                message: format!(
-                    "sync exceeded {}s — see /tmp/lazybox.log for the slow step",
-                    TICK_OVERALL_TIMEOUT.as_secs()
+            // A whole tick overrunning the outer cap IS a sync failure —
+            // route it through the same debounced/escalating path as a
+            // fetch error (not a raw per-tick broadcast) so it coalesces
+            // to one quiet status and, if it keeps happening, escalates to
+            // an actionable `exhausted` error once retries run out (#730).
+            // The timed-out future has been dropped by `.await`, so its
+            // `&mut state` borrow is released and `state` is usable here.
+            state.broadcast_error_debounced(
+                &config.bus,
+                lazybox_gh::SOURCE,
+                &lazybox_core::ProviderError::retryable(
+                    lazybox_gh::SOURCE,
+                    format!(
+                        "sync exceeded {}s — the per-upsert / per-graphql / per-git \
+                         timeouts should catch this; hitting the outer cap means \
+                         something escaped them",
+                        TICK_OVERALL_TIMEOUT.as_secs()
+                    ),
                 ),
-                detail: "the per-upsert / per-graphql / per-git timeouts should catch this; \
-                         hitting the outer cap means something escaped them"
-                    .into(),
-                kind: "retryable".into(),
-            });
+            );
             // Hard-timeout path: NOT a clean view of scope, so leave
             // `all_full = false` to keep rescope conservative.
             TickOutcome {
@@ -5637,15 +5713,16 @@ mod tick_noop_skip_tests {
         );
     }
 
-    /// #727: a self-healing retryable transient whose specific message
-    /// churns every retry cycle (a throttle with a ticking "retrying in
-    /// Ns", then a 502) must collapse to a SINGLE `ProviderError`
-    /// broadcast — not re-fire the footer toast on every attempt.
-    /// Pre-fix the debounce keyed on the exact message, so each varying
-    /// message looked new and re-broadcast, flickering a red banner that
-    /// never cleared while the condition persisted.
+    /// #727 + #730: a self-healing retryable transient whose specific
+    /// message churns every retry cycle (a throttle with a ticking
+    /// "retrying in Ns", then a 502) must collapse to a SINGLE quiet
+    /// `retryable` broadcast while the daemon is still auto-retrying — not
+    /// re-fire on every attempt (pre-#727 the debounce keyed on the exact
+    /// message, so each varying message looked new and flickered a banner).
+    /// Once retries are exhausted it escalates to exactly one `exhausted`
+    /// error, still coalesced, not one per subsequent cycle.
     #[tokio::test]
-    async fn churning_retryable_streak_broadcasts_one_provider_error() {
+    async fn churning_retryable_streak_broadcasts_one_quiet_then_one_exhausted() {
         struct ChurningRetryable {
             attempt: std::sync::atomic::AtomicU64,
         }
@@ -5692,17 +5769,111 @@ mod tick_noop_skip_tests {
         let mut state = TickState::default();
         let mut rx = config.bus.subscribe();
 
-        for _ in 0..4 {
+        // Run past the exhaustion threshold so both regimes are exercised.
+        for _ in 0..(RETRYABLE_EXHAUSTION_ATTEMPTS + 2) {
             tick_with_state(&config, &sources, &mut state).await;
         }
 
-        let errors = drain(&mut rx)
-            .into_iter()
-            .filter(|event| matches!(event, Event::ProviderError { .. }))
-            .count();
+        let events = drain(&mut rx);
+        let count = |want: &str| {
+            events
+                .iter()
+                .filter(|event| matches!(event, Event::ProviderError { kind, .. } if kind == want))
+                .count()
+        };
         assert_eq!(
-            errors, 1,
-            "a churning retryable streak must broadcast one ProviderError, not one per retry"
+            count("retryable"),
+            1,
+            "the still-retrying streak must broadcast one quiet status, not one per retry"
+        );
+        assert_eq!(
+            count("exhausted"),
+            1,
+            "exhausted retries escalate to exactly one actionable error, not one per cycle"
+        );
+    }
+
+    /// #730: a retryable transient must stay a quiet `retryable` status
+    /// while the daemon is still auto-retrying and only escalate to an
+    /// actionable `exhausted` error once its retries are exhausted. A
+    /// recovery before the threshold resets the streak, so an intermittent
+    /// hiccup that heals every couple of cycles never escalates.
+    #[tokio::test]
+    async fn retryable_escalates_to_exhausted_only_after_retries_run_out() {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Mode {
+            Retryable,
+            Ok,
+        }
+        struct ModedSource {
+            mode: Arc<Mutex<Mode>>,
+        }
+        impl TaskSource for ModedSource {
+            fn name(&self) -> &str {
+                lazybox_gh::SOURCE
+            }
+            fn fetch<'a>(
+                &'a self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                let mode = *self.mode.lock();
+                Box::pin(async move {
+                    match mode {
+                        Mode::Retryable => Err(lazybox_core::ProviderError::retryable(
+                            lazybox_gh::SOURCE,
+                            "transient hiccup",
+                        )),
+                        Mode::Ok => Ok(Vec::new()),
+                    }
+                })
+            }
+        }
+
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let mode = Arc::new(Mutex::new(Mode::Retryable));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(ModedSource { mode: mode.clone() })];
+        let mut state = TickState::default();
+        let mut rx = config.bus.subscribe();
+        let count = |events: Vec<Event>, want: &str| {
+            events
+                .into_iter()
+                .filter(|event| matches!(event, Event::ProviderError { kind, .. } if kind == want))
+                .count()
+        };
+
+        // A hiccup that heals just short of exhaustion never escalates:
+        // the recovery resets the streak.
+        for _ in 0..(RETRYABLE_EXHAUSTION_ATTEMPTS - 1) {
+            tick_with_state(&config, &sources, &mut state).await;
+        }
+        *mode.lock() = Mode::Ok;
+        tick_with_state(&config, &sources, &mut state).await;
+        let healed = drain(&mut rx);
+        assert_eq!(
+            count(healed.clone(), "retryable"),
+            1,
+            "the pre-recovery streak surfaces one quiet status"
+        );
+        assert_eq!(
+            count(healed, "exhausted"),
+            0,
+            "a transient that heals before exhaustion must never escalate"
+        );
+
+        // Now a streak that actually persists to exhaustion escalates.
+        *mode.lock() = Mode::Retryable;
+        for _ in 0..RETRYABLE_EXHAUSTION_ATTEMPTS {
+            tick_with_state(&config, &sources, &mut state).await;
+        }
+        assert_eq!(
+            count(drain(&mut rx), "exhausted"),
+            1,
+            "a persisting transient escalates to one actionable error"
         );
     }
 

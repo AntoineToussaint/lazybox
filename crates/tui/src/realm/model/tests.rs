@@ -528,11 +528,14 @@ mod effects_tests {
         m.status.polling = None;
 
         m.pending_refresh_ack = true;
+        // `exhausted` (retries run out) is the actionable failure that
+        // arms the sticky banner; a live `retryable` transient stays quiet
+        // (#730).
         m.handle_daemon_event(IpcEvent::ProviderError {
             source: source.into(),
             message: "boom".into(),
             detail: String::new(),
-            kind: "retryable".into(),
+            kind: "exhausted".into(),
         });
 
         assert_eq!(
@@ -978,6 +981,39 @@ mod effects_tests {
             }
             other => panic!("expected CreateWorkspace, got {other:?}"),
         }
+    }
+
+    /// RenameWorkspace input with a non-empty trimmed name AND a
+    /// stashed target produces `RenameWorkspace { session_key, name }`.
+    #[test]
+    fn input_submitted_for_rename_returns_rename_workspace() {
+        let mut m = build_model();
+        let target: lazybox_core::SessionKey = "github:o/r#1".into();
+        m.modal_stack.push(Id::RenameWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::RenameWorkspace {
+            target: target.clone(),
+        });
+        let cmds = m.handle_input_submitted("  Rate limit spike  ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::RenameWorkspace { session_key, name } => {
+                assert_eq!(session_key, &target);
+                assert_eq!(name, "Rate limit spike");
+            }
+            other => panic!("expected RenameWorkspace, got {other:?}"),
+        }
+    }
+
+    /// A blank rename submit commits nothing — the row keeps its name.
+    #[test]
+    fn input_submitted_for_blank_rename_drops() {
+        let mut m = build_model();
+        m.modal_stack.push(Id::RenameWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::RenameWorkspace {
+            target: "github:o/r#1".into(),
+        });
+        let cmds = m.handle_input_submitted("   ".into());
+        assert!(cmds.is_empty(), "blank rename must not emit a command");
     }
 
     /// `Shift-W` with no projects yet can't resolve a container, so
@@ -3134,6 +3170,61 @@ snippets:
         m.dispatch_action(&Action::SendToSession);
         m.handle_modal_dismissed();
         assert!(m.modal_flow.is_none(), "Esc on the picker cancels");
+    }
+
+    /// A `--connect` client must not launch a local editor against a
+    /// server-side worktree path. `e` on a remote client declines with
+    /// a notice and issues no command; the same setup on a local client
+    /// provisions a worktree (a `Spawn`) so the editor can open. See
+    /// #742.
+    #[test]
+    fn remote_client_declines_local_editor_launch() {
+        use lazybox_tui_core::action::Action;
+
+        fn editor_dispatch(remote: bool) -> Vec<IpcCommand> {
+            let (client, mut server) = channel::pair();
+            let mut model = {
+                let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+                if remote { m.with_remote() } else { m }
+            };
+            model.cache_editors(vec![crate::editors::EditorTemplate::from(
+                crate::editors::UserEditorEntry {
+                    id: "test".into(),
+                    display: Some("Test".into()),
+                    command: "true".into(),
+                    args: Some(vec![]),
+                },
+            )]);
+            let key = SessionKey::new("github:o/r#742");
+            model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+                lazybox_core::Workspace::empty(
+                    WorkspaceKey::new(key.as_str()),
+                    "main",
+                    chrono::Utc::now(),
+                ),
+            )));
+            assert!(model.sidebar.focus_workspace_key(&key));
+            while server.rx.try_recv().is_ok() {}
+            model.dispatch_action(&Action::OpenEditor);
+            assert!(
+                model.modal_stack.is_empty(),
+                "no editor picker mounts for a single detected editor",
+            );
+            std::iter::from_fn(|| server.rx.try_recv().ok()).collect()
+        }
+
+        assert!(
+            editor_dispatch(false)
+                .iter()
+                .any(|c| matches!(c, IpcCommand::Spawn { .. })),
+            "local client provisions a worktree so the editor can open",
+        );
+        assert!(
+            !editor_dispatch(true)
+                .iter()
+                .any(|c| matches!(c, IpcCommand::Spawn { .. })),
+            "remote client must not act on a server-side worktree path",
+        );
     }
 
     fn model_with_conversion_source(
@@ -13742,7 +13833,11 @@ mod mutation_failure_notice_tests {
             source: source.into(),
             message: message.into(),
             detail: String::new(),
-            kind: "retryable".into(),
+            // `exhausted`: an actionable sync failure. A live `retryable`
+            // transient no longer raises the banner (#730); mutation
+            // rejections and exhausted syncs are the actionable surface
+            // these tests cover.
+            kind: "exhausted".into(),
         }
     }
 
@@ -13815,6 +13910,138 @@ mod mutation_failure_notice_tests {
             Some(crate::realm::status_ctx::SyncOutcome::Err { message, .. })
                 if message == "request failed"
         ));
+    }
+
+    /// A user-initiated mutation is emitted on the wire as a `retryable`
+    /// `ProviderError` (same kind as a self-healing sync transient). It
+    /// must be handled ONLY by its own actionable branch and never leak
+    /// into the sync-poll surface — otherwise a mutation rejection that
+    /// coincides with a manual refresh would consume the sync refresh
+    /// acknowledgment (and, in the general case, risk being swallowed by
+    /// the quiet transient path). Regression guard for the overloaded
+    /// `retryable` kind (#730 review finding 2).
+    #[test]
+    fn mutation_failure_never_leaks_into_the_sync_poll_surface() {
+        let mut m = build_model();
+        m.status.polling = None;
+        // User hit Shift-R and is waiting on the sync result.
+        m.pending_refresh_ack = true;
+
+        // A reviewer mutation the daemon rejected, carried (like every
+        // mutation) as a `retryable` ProviderError.
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "reviewers".into(),
+            message: "GraphQL said no".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+
+        // It surfaces loudly through the mutation branch — never demoted
+        // to a quiet transient.
+        let n = m
+            .status
+            .notice
+            .as_ref()
+            .expect("mutation rejection must surface");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.contains("request reviewers failed"),
+            "must name the action, got {:?}",
+            n.message,
+        );
+        // The mutation is not a sync attempt, so it must not arm the
+        // sync-error banner tag…
+        assert!(m.sync_error_source.is_none());
+        // …nor consume the pending sync refresh — that acknowledgment
+        // belongs to the poll, which hasn't reported yet.
+        assert!(
+            m.pending_refresh_ack,
+            "a mutation rejection must not consume the sync refresh ack"
+        );
+    }
+
+    /// #730: a live `retryable` transient the daemon is auto-retrying
+    /// must NOT raise the red "✗ sync failed" banner — that noise buries
+    /// the failures the user must act on. The spinner still clears (the
+    /// poll did end) and the attempt still lands in the Shift-D sync log,
+    /// but the footer stays quiet on a background cycle.
+    #[test]
+    fn live_retryable_transient_clears_spinner_without_a_banner() {
+        let mut m = build_model();
+        m.status.polling = None;
+        m.handle_daemon_event(IpcEvent::PollProgress {
+            source: "github".into(),
+            message: "Fetching issues".into(),
+        });
+        assert!(m.status.bg_poll.is_some());
+
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "github".into(),
+            message: "github hiccup, retrying next cycle".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        assert!(
+            m.status.bg_poll.is_none(),
+            "the poll ended, so its spinner must clear even for a quiet transient"
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "a self-healing transient must not raise a footer banner, got {:?}",
+            m.status.notice.as_ref().map(|n| &n.message),
+        );
+        assert!(
+            m.sync_error_source.is_none(),
+            "a quiet transient must not arm the sticky sync-error tag"
+        );
+        assert!(
+            matches!(
+                m.status
+                    .sync
+                    .latest_per_source()
+                    .first()
+                    .map(|entry| &entry.outcome),
+                Some(crate::realm::status_ctx::SyncOutcome::Err { kind, .. }) if kind == "retryable"
+            ),
+            "the transient still records in the sync log for Shift-D"
+        );
+    }
+
+    /// #730: a manual refresh (Shift-R) that hits a live transient gets
+    /// calm, auto-fading feedback so it doesn't look ignored — but still
+    /// not the red banner reserved for actionable failures.
+    #[test]
+    fn manual_refresh_transient_gets_calm_feedback_not_a_banner() {
+        let mut m = build_model();
+        m.status.polling = None;
+        m.pending_refresh_ack = true;
+
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "github".into(),
+            message: "github hiccup, retrying next cycle".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        let n = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a manual refresh deserves feedback");
+        assert_eq!(
+            n.severity,
+            NoticeSeverity::Retryable,
+            "calm auto-fading feedback, not a sticky error"
+        );
+        assert!(
+            !n.message.contains("sync failed"),
+            "must not read as a hard failure, got {:?}",
+            n.message,
+        );
+        assert!(
+            m.sync_error_source.is_none(),
+            "the calm feedback must not arm the sticky sync-error tag"
+        );
+        assert!(!m.pending_refresh_ack, "the refresh ack is consumed");
     }
 
     /// A failed reply names the action AND parks the (otherwise lost)
@@ -14065,7 +14292,10 @@ mod notice_severity_slot_tests {
             source: "github".into(),
             message: "boom".into(),
             detail: String::new(),
-            kind: "retryable".into(),
+            // `exhausted` (retries run out) is the actionable failure that
+            // arms the banner; a live `retryable` transient stays quiet
+            // (#730).
+            kind: "exhausted".into(),
         });
         assert!(
             m.status
@@ -14650,6 +14880,20 @@ mod spawn_focus_steal_tests {
             closes_issues: vec![],
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
+    }
+
+    /// Dispatching `OpenGlobalSearch` (`#`) opens an unscoped search —
+    /// the wiring `#` → `Action::OpenGlobalSearch` → `open_global_search`
+    /// (cross-repo filtering itself is covered in the sidebar tests).
+    #[test]
+    fn global_search_dispatch_opens_unscoped_search() {
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenGlobalSearch);
+        assert!(m.sidebar.search_editing());
+        let s = m.sidebar.search().expect("search state present");
+        assert_eq!(s.scope, None, "global search is unscoped");
     }
 
     #[test]

@@ -14204,29 +14204,36 @@ mod reconnect_banner_tests {
         }
     }
 
+    /// Far ends of the client's command/event channels. These tests only
+    /// drive `tick_daemon_health` (which neither sends nor receives), but
+    /// holding the ends keeps the `Client` off a closed channel for its
+    /// lifetime — bind as `_io` so they live to the end of the test.
+    type ChannelEnds = (
+        tokio::sync::mpsc::Receiver<IpcCommand>,
+        tokio::sync::mpsc::Sender<lazybox_ipc::Event>,
+    );
+
     /// A model whose client tracks a caller-controlled connection-state
-    /// watch, plus the sender to drive transitions.
+    /// watch, plus the sender to drive transitions and the channel ends
+    /// to keep alive.
     fn model_with_status() -> (
         Model<tuirealm::terminal::TestTerminalAdapter>,
         tokio::sync::watch::Sender<ConnectionState>,
+        ChannelEnds,
     ) {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel::<IpcCommand>(8);
         let (evt_tx, evt_rx) = tokio::sync::mpsc::channel::<lazybox_ipc::Event>(8);
         let (status_tx, status_rx) = tokio::sync::watch::channel(connected());
-        // Leak the far ends so the channels stay open for the model's
-        // lifetime — these tests only drive `tick_daemon_health`.
-        std::mem::forget(cmd_rx);
-        std::mem::forget(evt_tx);
         let client =
             Client::from_bounded_channels(cmd_tx, evt_rx).with_connection_status(status_rx);
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         m.status.notice = None;
-        (m, status_tx)
+        (m, status_tx, (cmd_rx, evt_tx))
     }
 
     #[test]
     fn reconnecting_status_raises_a_sticky_banner_then_clears_on_reconnect() {
-        let (mut m, status_tx) = model_with_status();
+        let (mut m, status_tx, _io) = model_with_status();
 
         status_tx.send_replace(ConnectionState {
             status: ConnectionStatus::Reconnecting,
@@ -14253,7 +14260,7 @@ mod reconnect_banner_tests {
 
     #[test]
     fn reconnecting_banner_is_latched_one_shot() {
-        let (mut m, status_tx) = model_with_status();
+        let (mut m, status_tx, _io) = model_with_status();
         status_tx.send_replace(ConnectionState {
             status: ConnectionStatus::Reconnecting,
             ..connected()
@@ -14284,7 +14291,7 @@ mod reconnect_banner_tests {
 
     #[test]
     fn reconnect_to_a_different_build_warns_about_the_mismatch() {
-        let (mut m, status_tx) = model_with_status();
+        let (mut m, status_tx, _io) = model_with_status();
         status_tx.send_replace(ConnectionState {
             status: ConnectionStatus::Reconnecting,
             ..connected()
@@ -14306,7 +14313,7 @@ mod reconnect_banner_tests {
 
     #[test]
     fn matching_build_retracts_a_stale_mismatch_banner() {
-        let (mut m, _status_tx) = model_with_status();
+        let (mut m, _status_tx, _io) = model_with_status();
         m.note_daemon_build("v0.0.1-stale");
         assert!(
             m.status

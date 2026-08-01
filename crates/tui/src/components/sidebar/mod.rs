@@ -1661,8 +1661,16 @@ impl Sidebar {
     /// the sidebar (`p`). A fresh pin is appended, so pin order tracks
     /// the order the user pinned in. Returns `(repo, now_pinned)` so the
     /// caller can surface a footer notice, or `None` when the cursor
-    /// isn't in a group. The cursor rides the toggled header so a
-    /// pin/unpin pair leaves it where the user was looking.
+    /// isn't in a group.
+    ///
+    /// Pinning only reorders the groups — no rows are hidden — so
+    /// `recompute_visible` keeps the cursor on the exact row the user
+    /// was on (a workspace by key, a header by name). We deliberately do
+    /// NOT re-park onto the header the way [`toggle_repo_at_cursor`]
+    /// does: collapse needs that because it removes the rows under the
+    /// cursor, whereas re-parking here would silently drop the user's
+    /// workspace selection (and the right-pane / terminal context that
+    /// follows it) on a pin that left their row fully visible.
     pub fn toggle_pin_at_cursor(&mut self) -> Option<(String, bool)> {
         let repo = self.cursor_repo()?;
         let now_pinned = if let Some(idx) = self.pinned_repos.iter().position(|r| r == &repo) {
@@ -1679,13 +1687,6 @@ impl Sidebar {
         let snapshot = self.pinned_repos.clone();
         if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.pinned_repos = snapshot) {
             tracing::warn!("save pinned_repos failed: {e}");
-        }
-        if let Some(idx) = self
-            .visible
-            .iter()
-            .position(|r| matches!(r, VisibleRow::RepoHeader(n) if n == &repo))
-        {
-            self.set_cursor(idx);
         }
         Some((repo, now_pinned))
     }

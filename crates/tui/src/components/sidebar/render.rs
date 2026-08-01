@@ -430,6 +430,13 @@ impl Sidebar {
                     ];
                     // A pin marker on a pinned group — the visual
                     // affordance for the "float to top" order (#760).
+                    // Read the field directly rather than via
+                    // `is_repo_pinned`: this closure already borrows
+                    // `self.visible`, and a `&self` method call would
+                    // extend that to a whole-`self` borrow that clashes
+                    // with the `self.scroll` writes below (same reason
+                    // the collapsed-glyph check above reads its field
+                    // directly).
                     if self.pinned_repos.iter().any(|r| r == name) {
                         spans.push(Span::styled(
                             format!(" {}", icons::PIN),

@@ -2254,6 +2254,14 @@ fn toggle_pin_at_cursor_reorders_and_reports() {
     let reported = s.toggle_pin_at_cursor();
     assert_eq!(reported, Some(("owner/beta".to_string(), true)));
     assert!(s.is_repo_pinned("owner/beta"));
+    // Pinning hides no rows, so the user's workspace selection (and the
+    // right-pane / terminal context that follows it) must survive — the
+    // cursor stays on beta's workspace, not jump to the repo header.
+    assert_eq!(
+        s.selected_session_key(),
+        Some(&beta_key),
+        "pin keeps the selected workspace, doesn't yank the cursor to the header",
+    );
     let headers: Vec<&str> = s
         .visible_rows()
         .iter()
@@ -2264,10 +2272,16 @@ fn toggle_pin_at_cursor_reorders_and_reports() {
         .collect();
     assert_eq!(headers, ["owner/beta", "owner/alpha"], "pinned beta leads");
 
-    // A second toggle unpins and restores the alphabetical order.
+    // A second toggle unpins and restores the alphabetical order, still
+    // without disturbing the workspace selection.
     let reported = s.toggle_pin_at_cursor();
     assert_eq!(reported, Some(("owner/beta".to_string(), false)));
     assert!(!s.is_repo_pinned("owner/beta"));
+    assert_eq!(
+        s.selected_session_key(),
+        Some(&beta_key),
+        "unpin also preserves the selected workspace",
+    );
     let headers: Vec<&str> = s
         .visible_rows()
         .iter()

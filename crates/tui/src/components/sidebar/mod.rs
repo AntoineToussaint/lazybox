@@ -229,6 +229,10 @@ pub struct Sidebar {
     /// Same idea for the sort chip on row 1, sitting to the right of
     /// the filter chip. Click cycles the sort mode.
     sort_chip_rect: Option<Rect>,
+    /// Same idea for the always-visible global search box on row 1,
+    /// sitting to the right of the sort chip. Click opens the global
+    /// search (`open_global_search`).
+    search_chip_rect: Option<Rect>,
     /// Test-only override for the "now" reference `render` uses to
     /// format relative timestamps (`1mo`, `2d`, …). Production leaves
     /// this `None` and reads the wall clock; golden snapshot tests set
@@ -296,6 +300,7 @@ impl Sidebar {
             spinner_epoch: std::time::Instant::now(),
             filter_chip_rect: None,
             sort_chip_rect: None,
+            search_chip_rect: None,
             now_override: None,
             search: None,
             broadcast_selected: std::collections::HashSet::new(),
@@ -752,6 +757,16 @@ impl Sidebar {
         true
     }
 
+    /// True when `(col, row)` falls on the header search box — a hit
+    /// opens the global search (same effect as `#`). Pure hit test:
+    /// the caller fires `open_global_search`.
+    pub fn search_chip_hit(&self, col: u16, row: u16) -> bool {
+        let Some(rect) = self.search_chip_rect else {
+            return false;
+        };
+        row == rect.y && col >= rect.x && col < rect.x + rect.width
+    }
+
     pub fn click_to_select(&mut self, area: Rect, click_row: u16) -> bool {
         // Mirror the constants from `render`.
         const HEADER_HEIGHT: u16 = 5;
@@ -906,7 +921,7 @@ impl Sidebar {
         });
         let search_hides = self.search.as_ref().is_some_and(|search| {
             !search.query.is_empty()
-                && search.scope == group
+                && search.scope.as_deref().is_none_or(|scope| scope == group)
                 && !crate::components::visible_rows::search_matches(&search.query, workspace)
         });
 
@@ -1345,10 +1360,10 @@ impl Sidebar {
             return;
         };
         match self.search.as_mut() {
-            Some(s) if s.scope == scope => s.editing = true,
+            Some(s) if s.scope.as_deref() == Some(scope.as_str()) => s.editing = true,
             _ => {
                 self.search = Some(SearchState {
-                    scope,
+                    scope: Some(scope),
                     query: String::new(),
                     editing: true,
                 });
@@ -1356,6 +1371,26 @@ impl Sidebar {
         }
         // The query is scoped to the CURSOR's project — make sure
         // that's the project on screen while the user types.
+        self.scroll_detached = false;
+    }
+
+    /// Open (or re-focus) the global search box — an incremental
+    /// search across every repo group (catalog `OpenGlobalSearch`,
+    /// default `#`). Re-pressing `#` while a global query is already
+    /// applied resumes editing it; a scoped `/` search in flight is
+    /// replaced with a fresh global one. Unlike `/`, this needs no
+    /// project under the cursor.
+    pub fn open_global_search(&mut self) {
+        match self.search.as_mut() {
+            Some(s) if s.scope.is_none() => s.editing = true,
+            _ => {
+                self.search = Some(SearchState {
+                    scope: None,
+                    query: String::new(),
+                    editing: true,
+                });
+            }
+        }
         self.scroll_detached = false;
     }
 
@@ -1897,6 +1932,7 @@ impl Sidebar {
     pub fn contextual_bindings(
         &self,
         catalog: &[lazybox_tui_core::action::CatalogEntry],
+        remote: bool,
     ) -> Vec<crate::Binding> {
         use crate::Binding;
         use lazybox_tui_core::action::{
@@ -1967,7 +2003,11 @@ impl Sidebar {
                 actions.push(Action::SpawnAgent(id));
             }
             actions.push(Action::SpawnShell);
-            actions.push(Action::OpenEditor);
+            // The editor launches locally against a server-side worktree
+            // path, so a remote client can't offer it (#742).
+            if !remote {
+                actions.push(Action::OpenEditor);
+            }
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
         }

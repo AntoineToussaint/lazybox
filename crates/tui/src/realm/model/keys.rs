@@ -1476,7 +1476,12 @@ impl<T: TerminalAdapter> Model<T> {
                         if filter_hit {
                             self.mount_filter_menu();
                         }
+                        let search_hit = self.sidebar.search_chip_hit(m.column, m.row);
+                        if search_hit {
+                            self.sidebar.open_global_search();
+                        }
                         let handled = filter_hit
+                            || search_hit
                             || self.sidebar.click_to_cycle_sort(m.column, m.row)
                             || self.sidebar.click_to_select(sidebar_rect, m.row);
                         if handled {
@@ -1923,6 +1928,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenEditor => Action::OpenEditor,
         ActionKind::ViewDiff => Action::ViewDiff,
         ActionKind::NewWorkspace => Action::NewWorkspace,
+        ActionKind::RenameWorkspace => Action::RenameWorkspace,
         ActionKind::NewProject => Action::NewProject,
         ActionKind::ImportCheckout => Action::ImportCheckout,
         ActionKind::AddScanRoot => Action::AddScanRoot,
@@ -1974,6 +1980,7 @@ pub(super) fn action_from_kind(
         ActionKind::CycleSort => Action::CycleSort,
         ActionKind::CycleMailbox => Action::CycleMailbox,
         ActionKind::OpenSearch => Action::OpenSearch,
+        ActionKind::OpenGlobalSearch => Action::OpenGlobalSearch,
         ActionKind::ToggleRepoGroup => Action::ToggleRepoGroup,
         ActionKind::ToggleRepoPin => Action::ToggleRepoPin,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,

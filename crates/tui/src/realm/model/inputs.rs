@@ -379,6 +379,30 @@ impl<T: TerminalAdapter> Model<T> {
                     _ => {}
                 }
             }
+            Some(Id::RenameWorkspace) => {
+                let name = text.trim().to_string();
+                let target = match self.modal_flow.take() {
+                    Some(ModalFlow::RenameWorkspace { target }) => Some(target),
+                    _ => None,
+                };
+                match (name.is_empty(), target) {
+                    (false, Some(session_key)) => {
+                        tracing::info!(
+                            workspace = %session_key,
+                            new_name = %name,
+                            "renaming workspace",
+                        );
+                        cmds.push(IpcCommand::RenameWorkspace { session_key, name });
+                    }
+                    (true, _) => {}
+                    (false, None) => {
+                        tracing::warn!(
+                            new_name = %name,
+                            "rename submit without a stashed target — dropped",
+                        );
+                    }
+                }
+            }
             Some(Id::NewProject) => {
                 let name = text.trim().to_string();
                 if !name.is_empty() {

@@ -30,5 +30,7 @@ pub mod intent;
 pub mod notify;
 pub mod platform;
 pub mod prompts;
+pub mod snippets;
+pub mod theme;
 pub mod tips;
 pub mod util;

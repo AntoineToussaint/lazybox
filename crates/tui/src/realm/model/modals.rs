@@ -410,6 +410,35 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::NewWorkspace, modal);
     }
 
+    /// Mount the "Rename workspace" prompt for the focused workspace,
+    /// prefilled with its current display name (issue #744). Submit →
+    /// `Msg::InputSubmitted(name)` while `Id::RenameWorkspace` is on top
+    /// → `Command::RenameWorkspace { session_key, name }`. The target key
+    /// is stashed on the `ModalFlow::RenameWorkspace` flow and consumed by
+    /// `handle_input_submitted`.
+    pub(super) fn mount_rename_workspace_input(&mut self, workspace_key: lazybox_core::SessionKey) {
+        use crate::realm::components::input::Input;
+
+        if matches!(self.modal_stack.last(), Some(Id::RenameWorkspace)) {
+            return;
+        }
+
+        let current = self
+            .sidebar
+            .workspace_by_key(&workspace_key)
+            .map(|w| w.name.clone())
+            .unwrap_or_default();
+        self.set_modal_flow(ModalFlow::RenameWorkspace {
+            target: workspace_key,
+        });
+
+        let modal = Input::new("Rename this workspace")
+            .title("Rename workspace")
+            .with_input(current)
+            .with_validator(|s: &str| !s.trim().is_empty());
+        self.mount_modal(Id::RenameWorkspace, modal);
+    }
+
     /// Mount the "New project" name prompt. Submit →
     /// `Msg::InputSubmitted(name)` while `Id::NewProject` is on top
     /// → `Command::CreateProject { name }`. Daemon creates a local

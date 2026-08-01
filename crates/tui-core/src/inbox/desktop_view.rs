@@ -15,8 +15,8 @@
 //! paths).
 
 use super::{
-    ComputeInputs, ComputeOutcome, RepoSummary, SortMode, VisibleRow, WorkspaceKind,
-    compute_visible, pr_number, workspace_needs_attention,
+    ComputeInputs, ComputeOutcome, Filter, FilterMenuItem, RepoSummary, SortMode, VisibleRow,
+    WorkspaceKind, compute_visible, mailbox_membership, pr_number, workspace_needs_attention,
 };
 use lazybox_core::{CiStatus, Label, ReviewStatus, StatusTag, TaskRole, TaskState, Workspace};
 use std::collections::BTreeMap;
@@ -124,6 +124,14 @@ pub struct InboxView {
     pub total: u32,
     /// Sum of unread across all workspace rows.
     pub unread_total: u32,
+    /// The filter menu the renderer draws: every predicate in axis
+    /// order, each with its per-filter match count and active flag.
+    /// Built by [`Filter::menu`] so the desktop groups by axis without
+    /// hardcoding the predicate list. See [`FilterMenuItem`].
+    pub filter_menu: Vec<FilterMenuItem>,
+    /// Labels of the active filters, in menu order — the removable
+    /// header chips. Mirrors [`super::FilterSet::chips`].
+    pub filter_chips: Vec<String>,
 }
 
 /// Run the shared grouping/sort pass and attach per-row badge data,
@@ -138,6 +146,23 @@ pub fn compute_inbox_view(input: ComputeInputs<'_>) -> InboxView {
     let workspaces = input.workspaces;
     let attention = input.attention;
     let agents = input.agents;
+
+    // The filter menu counts over the workspaces the mailbox admits
+    // *before* the active set narrows further — same candidate set as
+    // the TUI's `filter_counts`, so a toggle's `(N)` reads "what would
+    // this surface". Built here (not inside `compute_visible`) because
+    // it's desktop-only enrichment.
+    let candidates: Vec<&Workspace> = workspaces
+        .values()
+        .filter(|w| mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox))
+        .collect();
+    let filter_menu = Filter::menu(&candidates, agents, input.filters);
+    let filter_chips: Vec<String> = input
+        .filters
+        .chips()
+        .iter()
+        .map(|c| c.to_string())
+        .collect();
 
     let ComputeOutcome { visible, summaries } = compute_visible(input);
 
@@ -169,6 +194,8 @@ pub fn compute_inbox_view(input: ComputeInputs<'_>) -> InboxView {
         collapsed,
         total,
         unread_total,
+        filter_menu,
+        filter_chips,
     }
 }
 
@@ -292,6 +319,33 @@ mod tests {
         assert_eq!(row.kind, WorkspaceKind::Pr);
         assert!(row.attention, "a failing PR needs attention");
         assert!(row.updated_at.is_some());
+    }
+
+    #[test]
+    fn view_carries_the_filter_menu_and_active_chips() {
+        use super::super::{Filter, FilterAxis};
+        let mut ws = HashMap::new();
+        let w = pr_workspace("k1", "owner/r", 7, CiStatus::Failure);
+        ws.insert(SessionKey::from(&w.key), w);
+        let collapsed = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut filters = FilterSet::new();
+        filters.toggle(Filter::CiFailing);
+        let view = compute_inbox_view(inputs(&ws, &collapsed, &att, &agents, &projects, &filters));
+
+        // Every predicate present, in axis order, with the ci-failing PR counted.
+        assert_eq!(view.filter_menu.len(), Filter::ALL.len());
+        assert_eq!(view.filter_menu[0].axis, FilterAxis::State);
+        let ci = view
+            .filter_menu
+            .iter()
+            .find(|i| i.filter == Filter::CiFailing)
+            .expect("ci-failing row");
+        assert_eq!(ci.count, 1);
+        assert!(ci.active);
+        assert_eq!(view.filter_chips, vec!["ci-failing".to_string()]);
     }
 
     #[test]

@@ -249,7 +249,9 @@ cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
 the active filters; matches title, number, repo, labels, reviewers /
 assignees). `x` is a
 leader for the **workspace** group (which-key popup): `x n` new
-workspace, `x p` new project, `x a` adopt sessions, `x s` send to
+workspace, `x R` rename (change the focused workspace's display name
+in place — key/worktree stay put; #744), `x p` new project, `x a`
+adopt sessions, `x s` send to
 session (agent-to-agent handoff, #431 — capture the focused agent's
 on-screen output, pick a target workspace, edit the brief, and
 inject + submit it into that session's agent; the source is excluded

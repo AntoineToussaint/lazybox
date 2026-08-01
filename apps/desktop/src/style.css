@@ -188,15 +188,29 @@ textarea:focus-visible {
 }
 
 .sort-button {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid #2a353d;
+  border-radius: 7px;
+  color: #8a999f;
+  background: #11171d;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.sort-button:hover {
+  color: #c5d1d5;
+  border-color: #48635d;
 }
 
 .sort-button strong {
-  color: #87cbb7;
-  text-transform: none;
-  letter-spacing: 0;
+  color: #7fd0b8;
+  font-weight: 700;
+  text-transform: lowercase;
 }
 
 .filter-button {
@@ -426,56 +440,62 @@ h2 {
   display: flex;
   align-items: center;
   gap: 7px;
-  width: 100%;
-  margin: 10px 0 3px;
-  padding: 4px 8px;
-  border: 0;
+  margin: 10px 2px 4px;
+  padding: 4px 6px;
   border-radius: 6px;
-  color: #8fa0a6;
-  background: transparent;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  text-align: left;
-  text-transform: uppercase;
+  color: #9fb0b6;
+  font-size: 11px;
+  font-weight: 680;
   cursor: pointer;
 }
 
 .repo-header:hover {
-  background: #151b21;
+  background: #131920;
 }
 
-.repo-caret {
-  color: #5d6c73;
-  font-size: 8px;
+.repo-twisty {
+  width: 10px;
+  color: #5f6f76;
+  font-size: 9px;
 }
 
-.repo-name {
+.repo-label {
   overflow: hidden;
+  flex: 1;
+  font-family: "SFMono-Regular", "Cascadia Code", monospace;
+  letter-spacing: 0.01em;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.repo-count {
-  min-width: 16px;
-  margin-left: auto;
-  color: #66777d;
+.repo-meta {
+  color: #66757c;
   font-size: 9px;
-  text-align: right;
+  font-weight: 650;
+  letter-spacing: 0.04em;
 }
 
-.repo-attention {
-  color: #e3a06b;
+.kind-header {
+  margin: 4px 4px 3px 20px;
+  color: #66767d;
   font-size: 8px;
-}
-
-.section-header {
-  padding: 6px 12px 3px;
-  color: #66777d;
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
+  font-weight: 750;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
+}
+
+.kind-header.kind-pr {
+  color: #7fbfe0;
+}
+
+.kind-header.kind-issue {
+  color: #e0b878;
+}
+
+.workspace-list .workspace-row {
+  scroll-margin: 8px;
+  margin-left: 12px;
+  width: calc(100% - 12px);
 }
 
 .workspace-row {
@@ -528,33 +548,33 @@ h2 {
 }
 
 .workspace-row-top {
-  flex-wrap: wrap;
-  gap: 5px;
-  justify-content: flex-start;
+  gap: 7px;
   font-family: "SFMono-Regular", "Cascadia Code", monospace;
   font-size: 9px;
 }
 
 .workspace-reference {
   overflow: hidden;
+  flex: 1;
   color: #7e8d92;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.workspace-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.workspace-role {
+  color: #6c7b81;
+  text-transform: lowercase;
 }
 
-.workspace-meta {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.workspace-time {
+  color: #5f6e75;
   white-space: nowrap;
 }
 
 .workspace-row-bottom {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 5px;
   color: #68777e;
   font-size: 10px;
 }
@@ -723,12 +743,6 @@ h2 {
   color: #8ad3bd;
   border-color: #2c594c;
   background: #14271f;
-}
-
-.signal-pill.info {
-  color: #86c2d8;
-  border-color: #2c4a58;
-  background: #132029;
 }
 
 .task-description {

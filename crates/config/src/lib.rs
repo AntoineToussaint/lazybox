@@ -363,6 +363,12 @@ where
 pub struct UiSection {
     /// Repo names whose workspace rows should start collapsed.
     pub collapsed_repos: std::collections::BTreeSet<String>,
+    /// Repo names the user has pinned to the top of the sidebar, in
+    /// pin order. Pinned groups render first (in this order); the rest
+    /// keep the algorithmic order. A `Vec` — not a set — because the
+    /// order the user pinned in *is* the display order.
+    #[serde(default)]
+    pub pinned_repos: Vec<String>,
     /// Sidebar column width as a percentage of total. None = use
     /// the default (40%).
     pub sidebar_pct: Option<u16>,
@@ -498,6 +504,7 @@ impl Default for UiSection {
     fn default() -> Self {
         Self {
             collapsed_repos: std::collections::BTreeSet::new(),
+            pinned_repos: Vec::new(),
             keymap_preset: None,
             theme: None,
             sidebar_pct: None,
@@ -2244,6 +2251,26 @@ repos:
         assert!(
             reparsed.ui.tour_seen,
             "marking the tour seen survives a save/load round-trip"
+        );
+    }
+
+    /// `ui.pinned_repos` is empty on a fresh config (group order stays
+    /// fully algorithmic) and a pin list survives a save/load
+    /// round-trip *in order* — the persistence half of the sidebar
+    /// pin-to-top shortcut.
+    #[test]
+    fn pinned_repos_default_empty_and_round_trip_preserves_order() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.ui.pinned_repos.is_empty(), "no pins on a fresh config");
+
+        let mut cfg = Config::default();
+        cfg.ui.pinned_repos = vec!["owner/b".into(), "owner/a".into()];
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(
+            reparsed.ui.pinned_repos,
+            vec!["owner/b".to_string(), "owner/a".to_string()],
+            "pin order is preserved across a round-trip",
         );
     }
 

@@ -1,6 +1,7 @@
 pub use lazybox_server::metrics;
 pub use lazybox_server::polling;
 pub use lazybox_server::pty;
+pub use lazybox_server::spawn_handler;
 pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 
 #[allow(dead_code)]
@@ -8,9 +9,10 @@ pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 mod api_gateway;
 
 use api_gateway::{
-    CommandResponse, DesktopCommand, DesktopEvent, DesktopTerminalSnapshot, GatewayOptions,
-    HealthResponse, JsonClientFrame, JsonServerFrame, ProtocolResponse,
-    UnsupportedFingerprintResponse, UnsupportedProtocolResponse, WorkspacesResponse,
+    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCommand, DesktopEvent,
+    DesktopTerminalSnapshot, GatewayOptions, HealthResponse, JsonClientFrame, JsonServerFrame,
+    ProtocolResponse, UnsupportedFingerprintResponse, UnsupportedProtocolResponse,
+    WorkspacesResponse,
 };
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
@@ -1116,6 +1118,158 @@ async fn workspaces_route_reports_and_preserves_unreadable_records() {
         "recovery diagnostics must not delete the unreadable record"
     );
 }
+#[tokio::test]
+async fn agents_route_projects_running_agents_and_omits_shells() {
+    let config = ServerConfig::in_memory();
+    let now = Utc::now();
+
+    let mut workspace = Workspace::from_task(make_task("o/r#42"), now);
+    let session = lazybox_core::WorkspaceSession::new(
+        workspace.key.clone(),
+        lazybox_core::SessionKind::Agent {
+            agent_id: "claude".into(),
+        },
+        std::path::PathBuf::from("/tmp/agent-worktree"),
+        now,
+    );
+    let session_id = session.id;
+    workspace.sessions.push(session);
+    let workspace_key = workspace.key.as_str().to_string();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: workspace_key.clone(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+
+    // One live agent terminal joined to that workspace, plus a shell in
+    // the same workspace that must not surface as an agent.
+    let agent_terminal = TerminalId(7);
+    config
+        .terminal
+        .register_terminal(
+            agent_terminal,
+            "backend:agent".into(),
+            workspace_key.as_str().into(),
+            TerminalKind::Agent("claude".into()),
+        )
+        .await;
+    config
+        .terminal
+        .associate_session(agent_terminal, session_id)
+        .await;
+    config
+        .terminal
+        .record_agent_state(agent_terminal, AgentState::Working)
+        .await;
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(8),
+            "backend:shell".into(),
+            workspace_key.as_str().into(),
+            TerminalKind::Shell,
+        )
+        .await;
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/agents")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: AgentsResponse = read_json(response).await;
+    assert_eq!(payload.agents.len(), 1, "shells are not agents");
+    let agent = &payload.agents[0];
+    assert_eq!(agent.agent, "claude");
+    assert_eq!(agent.workspace_key, workspace_key);
+    assert_eq!(agent.workspace_name, "PR o/r#42");
+    assert_eq!(agent.state, Some(AgentState::Working));
+    assert!(
+        agent.session_started_at.is_some(),
+        "session_started_at joins the workspace session"
+    );
+    assert!(agent.last_prompt.is_none());
+    let task = agent.task.as_ref().expect("agent carries its task");
+    assert_eq!(task.id, "github:o/r#42");
+    assert_eq!(task.number, Some(42));
+    assert!(matches!(task.kind, AgentTaskKind::Pr));
+    assert_eq!(task.repo.as_deref(), Some("o/r"));
+    assert_eq!(agent.repo.as_deref(), Some("o/r"));
+}
+
+#[tokio::test]
+async fn agents_route_reports_repo_for_a_task_less_workspace() {
+    let config = ServerConfig::in_memory();
+    let now = Utc::now();
+
+    // A hand-created workspace: no PR/issue, but it knows its repo via
+    // the project key.
+    let mut workspace = Workspace::empty(lazybox_core::WorkspaceKey::new("scratch"), "main", now);
+    workspace.name = "Scratch".into();
+    workspace.project_key = Some(lazybox_core::ProjectKey::github("owner", "repo"));
+    let workspace_key = workspace.key.as_str().to_string();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: workspace_key.clone(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(3),
+            "backend:scratch".into(),
+            workspace_key.as_str().into(),
+            TerminalKind::Agent("codex".into()),
+        )
+        .await;
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/agents")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: AgentsResponse = read_json(response).await;
+    assert_eq!(payload.agents.len(), 1);
+    let agent = &payload.agents[0];
+    assert!(agent.task.is_none(), "no PR/issue attached");
+    assert_eq!(
+        agent.repo.as_deref(),
+        Some("owner/repo"),
+        "repo falls back to the project key"
+    );
+}
+
+#[tokio::test]
+async fn agents_route_reports_an_empty_fleet() {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/agents")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = api_gateway::handle_request(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        request,
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: AgentsResponse = read_json(response).await;
+    assert!(payload.agents.is_empty());
+    assert!(payload.warnings.is_empty());
+}
+
 #[tokio::test]
 async fn command_route_accepts_json_client_frame() {
     let frame = JsonClientFrame::Command(Command::Refresh);

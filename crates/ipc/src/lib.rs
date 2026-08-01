@@ -2881,7 +2881,7 @@ impl Client {
     }
 
     /// Attach a reconnect supervisor's connection-state watch (see
-    /// [`socket::connect_reconnecting`](crate::socket::connect_reconnecting)).
+    /// [`crate::socket::connect_reconnecting`]).
     pub fn with_connection_status(mut self, connection: watch::Receiver<ConnectionState>) -> Self {
         self.connection = Some(connection);
         self

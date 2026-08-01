@@ -16,10 +16,4 @@ active: number,
  * the future; defaults are the indicators lazybox already
  * surfaces as badges on workspace rows.
  */
-attention: number,
-/**
- * Total unread across this repo's workspaces. Counted over every
- * workspace in the group regardless of collapse, so a repo's — and
- * the inbox's — unread total stays stable when a group is folded.
- */
-unread: number, };
+attention: number, };

@@ -6,26 +6,37 @@ import "./style.css";
 import {
   InboxConnection,
   ReplyDrafts,
+  activeFilters,
   applyWorkspaceEvent,
   canReplyToTask,
+  detailSignals,
+  filterMenuGroups,
+  kindHeaderLabel,
+  orderedWorkspaceKeys,
   preferredTerminal,
   primaryTask,
   projectKeyLabel,
+  rowSignals,
   shouldHandleWorkspaceEnter,
+  sortModeLabel,
   taskReference,
+  type TaskSignal,
   unreadCount,
+  visibleUnreadCount,
 } from "./model";
 import {
+  type ComputeOutcome,
   type DesktopInfo,
   type DesktopRepository,
   type DesktopStreamMessage,
   type Filter,
   type FilterMenuItem,
-  type InboxView,
   type LazyboxCommand,
   type LazyboxEvent,
   type PickerRow,
   type SnippetPickerView,
+  type SortMode,
+  type Task,
   type TerminalKind,
   type TerminalSnapshot,
   type Workspace,
@@ -43,13 +54,6 @@ import {
   renderSnippetList,
   renderSnippetPreview,
 } from "./snippet_picker";
-import {
-  activeFilters,
-  filterMenuGroups,
-  relativeTime,
-  renderInboxList,
-  workspaceKeysInOrder,
-} from "./inbox_view";
 import { terminalTheme } from "./theme";
 import {
   TerminalFrameDecoder,
@@ -275,7 +279,18 @@ const snippetCount = element<HTMLSpanElement>("snippet-count");
 let workspaces = new Map<string, Workspace>();
 let terminals = new Map<number, TerminalRecord>();
 let selectedKey: string | null = null;
-let inboxView: InboxView | null = null;
+// The grouped inbox view-model computed by the shared `tui-core` logic
+// in `src-tauri` and pushed over the event channel (#732). The frontend
+// never computes grouping or sort — it only renders this structure.
+let inboxView: ComputeOutcome | null = null;
+let sortMode: SortMode = "ByRoleSplit";
+// The filter menu (#733) — every predicate with its live count and
+// active flag — carried on the pushed `DesktopInboxView` alongside the
+// outcome. The frontend renders it; it never derives the predicate list.
+let inboxFilterMenu: FilterMenuItem[] = [];
+// Repos the user has visually collapsed in this session. Display-only:
+// it hides already-grouped rows, it does not regroup anything.
+const collapsedRepos = new Set<string>();
 let defaultAgent = "claude";
 let previewMode = false;
 let inboxLoading = true;
@@ -284,7 +299,7 @@ let filterMenuOpen = false;
 let searchTimer: number | undefined;
 // Optimistic active-filter set: updated synchronously on each toggle so
 // rapid clicks compose instead of racing the server round-trip. The
-// pushed view reconciles it (see `applyInboxView`).
+// pushed `Inbox` view reconciles it (see `handleStreamMessage`).
 let activeFilterSet = new Set<Filter>();
 let setupState: DesktopSetupState | null = null;
 let discoveredRepositories: GithubRepositoryOption[] = [];
@@ -320,18 +335,12 @@ const pendingTerminalFrames = new Map<number, TerminalBinaryFrame[]>();
 let desktopMetadataLoaded = false;
 let terminalReaderStarted = false;
 let eventChannel: Channel<DesktopStreamMessage> | null = null;
-let inboxChannel: Channel<InboxView> | null = null;
 const inboxConnection = new InboxConnection(
   () => invoke<WorkspacesResponse>("list_workspaces"),
   async () => {
     eventChannel = new Channel<DesktopStreamMessage>();
     eventChannel.onmessage = handleStreamMessage;
-    inboxChannel = new Channel<InboxView>();
-    inboxChannel.onmessage = applyInboxView;
-    await invoke("subscribe_events", {
-      onEvent: eventChannel,
-      onInbox: inboxChannel,
-    });
+    await invoke("subscribe_events", { onEvent: eventChannel });
     if (!terminalReaderStarted) {
       terminalReaderStarted = true;
       void readTerminalData();
@@ -432,6 +441,8 @@ async function boot(): Promise<void> {
     workspaces = preview.workspaces;
     terminals = preview.terminals;
     inboxView = preview.inboxView;
+    sortMode = preview.sortMode;
+    inboxFilterMenu = preview.filterMenu;
     inboxLoading = false;
     setConnection(true, "Preview data");
     selectWorkspace(preview.selectedKey);
@@ -520,6 +531,30 @@ function handleStreamMessage(message: DesktopStreamMessage): void {
   if (message.type === "Disconnected") {
     setConnection(false, "Reconnecting…");
     setStatus(message.payload.message);
+    return;
+  }
+  if (message.type === "Inbox") {
+    inboxView = message.payload.outcome;
+    sortMode = message.payload.sort_mode;
+    inboxFilterMenu = message.payload.filter_menu;
+    inboxLoading = false;
+    // The server is authoritative: reconcile the optimistic filter set to
+    // the computed view (#733). Each `set_filters` sends the full local
+    // set, so the final push after a burst of toggles carries the
+    // complete result — convergence is guaranteed, flicker at worst.
+    activeFilterSet = new Set(
+      activeFilters(message.payload.filter_menu).map((item) => item.filter),
+    );
+    // "Had a *live* selection" — a `selectedKey` that still points at a
+    // present workspace. A stale key (its workspace was just removed)
+    // must count as no selection so the terminal for the workspace
+    // `chooseInitialWorkspace` auto-picks in its place gets attached.
+    const hadSelection = hasLiveSelection();
+    chooseInitialWorkspace();
+    render();
+    if (!hadSelection && selectedKey !== null) {
+      attachSelectedTerminal();
+    }
     return;
   }
   handleEvent(message.payload);
@@ -692,50 +727,8 @@ function updateNewWorkspaceButton(): void {
   newWorkspaceButton.disabled = availableRepositories().length === 0;
 }
 
-function applyInboxView(view: InboxView): void {
-  inboxView = view;
-  inboxLoading = false;
-  // The server is authoritative: reconcile the optimistic set to the
-  // computed view. Each `set_filters` sends the full local set, so the
-  // final push after a burst of toggles carries the complete result and
-  // convergence is guaranteed — intermediate flicker at worst.
-  activeFilterSet = new Set(
-    activeFilters(view.filter_menu).map((item) => item.filter),
-  );
-  const hadSelection = selectedKey !== null && workspaces.has(selectedKey);
-  chooseInitialWorkspace();
-  if (!hadSelection && selectedKey !== null) {
-    render();
-    attachSelectedTerminal();
-  } else {
-    renderInbox();
-  }
-}
-
-async function cycleSortMode(): Promise<void> {
-  if (previewMode) {
-    return;
-  }
-  try {
-    await invoke("cycle_sort_mode");
-  } catch (error) {
-    setStatus(String(error));
-  }
-}
-
-async function toggleRepoCollapsed(label: string): Promise<void> {
-  if (previewMode) {
-    return;
-  }
-  try {
-    await invoke("toggle_repo_collapsed", { label });
-  } catch (error) {
-    setStatus(String(error));
-  }
-}
-
 function currentFilterMenu(): FilterMenuItem[] {
-  return inboxView?.filter_menu ?? [];
+  return inboxFilterMenu;
 }
 
 /**
@@ -880,36 +873,168 @@ function renderFilterMenuBody(): void {
 function renderInbox(): void {
   workspaceList.replaceChildren();
   workspaceList.setAttribute("aria-busy", String(inboxLoading));
-  sortLabel.textContent = inboxView?.sort_label ?? "split";
-  const total = inboxView?.total ?? 0;
-  const unread = inboxView?.unread_total ?? 0;
-  workspaceCount.textContent = `${total} workspace${total === 1 ? "" : "s"}`;
+  sortLabel.textContent = sortModeLabel(sortMode);
+
+  const allItems = [...workspaces.values()];
+  // Scope the header total to the workspaces the view-model actually
+  // placed — never the raw map, which also holds workspaces filtered out
+  // of this mailbox (e.g. inactive) and would inflate the count past
+  // what the list shows.
+  const unread =
+    inboxView === null ? 0 : visibleUnreadCount(inboxView, workspaces);
   unreadTotal.textContent = `${unread} unread`;
   renderFilterControls();
 
-  if (inboxError !== null) {
-    renderInboxMessage(inboxError, true);
-    return;
-  }
-  // `null` means "connected but the first view hasn't arrived yet" — keep
-  // showing loading rather than flashing "empty" before the daemon's
-  // opening snapshot lands. An empty inbox is a non-null view with no rows.
-  if (inboxLoading || inboxView === null) {
+  if (inboxLoading) {
+    workspaceCount.textContent = "Loading…";
     renderInboxMessage("Loading persisted workspaces…");
     return;
   }
-  if (inboxView.rows.length === 0) {
+  if (inboxError !== null) {
+    workspaceCount.textContent = "";
+    renderInboxMessage(inboxError, true);
+    return;
+  }
+
+  const rows = inboxView?.visible ?? [];
+  const workspaceRowCount = rows.filter((row) => "Workspace" in row).length;
+  workspaceCount.textContent = `${workspaceRowCount} workspace${
+    workspaceRowCount === 1 ? "" : "s"
+  }`;
+
+  if (workspaceRowCount === 0) {
     renderInboxMessage(
-      "Your inbox is empty. Refresh after setup to fetch GitHub work.",
+      allItems.length === 0
+        ? "Your inbox is empty. Refresh after setup to fetch GitHub work."
+        : "No workspaces to show.",
     );
     return;
   }
 
-  renderInboxList(workspaceList, inboxView, {
-    selectedKey,
-    onSelectWorkspace: selectWorkspace,
-    onToggleRepo: (label) => void toggleRepoCollapsed(label),
+  // The Rust view-model already ordered and grouped everything (#732):
+  // walk it top-to-bottom, drawing repo headers, PR/Issue/Other section
+  // headers, and workspace rows. Collapse only hides already-grouped
+  // rows; it never reorders.
+  let collapsed = false;
+  for (const row of rows) {
+    if ("RepoHeader" in row) {
+      collapsed = collapsedRepos.has(row.RepoHeader);
+      workspaceList.append(renderRepoHeader(row.RepoHeader));
+    } else if ("KindHeader" in row) {
+      if (!collapsed) {
+        workspaceList.append(renderKindHeader(row.KindHeader));
+      }
+    } else if ("Workspace" in row) {
+      if (collapsed) {
+        continue;
+      }
+      const workspace = workspaces.get(row.Workspace);
+      // A workspace row can briefly precede its map entry (the view is
+      // recomputed a frame ahead of the WorkspaceUpserted echo). Skip
+      // it; the next view refresh fills it in.
+      if (workspace !== undefined) {
+        workspaceList.append(renderWorkspaceRow(workspace));
+      }
+    }
+    // `Session` sub-rows are represented by their workspace row for now.
+  }
+}
+
+function renderRepoHeader(repo: string): HTMLDivElement {
+  const header = document.createElement("div");
+  header.className = "repo-header";
+  header.setAttribute("role", "presentation");
+  const collapsed = collapsedRepos.has(repo);
+  header.classList.toggle("collapsed", collapsed);
+  const twisty = document.createElement("span");
+  twisty.className = "repo-twisty";
+  twisty.setAttribute("aria-hidden", "true");
+  twisty.textContent = collapsed ? "▸" : "▾";
+  const label = document.createElement("span");
+  label.className = "repo-label";
+  label.textContent = repo;
+  const summary = inboxView?.summaries[repo];
+  const meta = document.createElement("span");
+  meta.className = "repo-meta";
+  const active = summary?.active ?? 0;
+  const attention = summary?.attention ?? 0;
+  meta.textContent = attention > 0 ? `${active} · ${attention} ⚑` : `${active}`;
+  header.append(twisty, label, meta);
+  header.addEventListener("click", () => {
+    if (collapsedRepos.has(repo)) {
+      collapsedRepos.delete(repo);
+    } else {
+      collapsedRepos.add(repo);
+    }
+    renderInbox();
   });
+  return header;
+}
+
+function renderKindHeader(kind: "Pr" | "Issue" | "Other"): HTMLDivElement {
+  const header = document.createElement("div");
+  header.className = `kind-header kind-${kind.toLowerCase()}`;
+  header.setAttribute("role", "presentation");
+  header.textContent = kindHeaderLabel(kind);
+  return header;
+}
+
+function renderWorkspaceRow(workspace: Workspace): HTMLButtonElement {
+  const task = primaryTask(workspace);
+  const button = document.createElement("button");
+  button.className = "workspace-row";
+  button.dataset.key = workspace.key;
+  button.classList.toggle("selected", workspace.key === selectedKey);
+  button.type = "button";
+  button.role = "option";
+  button.ariaSelected = String(workspace.key === selectedKey);
+  button.tabIndex = workspace.key === selectedKey ? 0 : -1;
+  const count = unreadCount(workspace);
+  button.setAttribute(
+    "aria-label",
+    `${task?.title ?? workspace.name}, ${task?.repo ?? workspace.branch}, ${
+      count === 0 ? "read" : `${count} unread`
+    }`,
+  );
+  button.addEventListener("click", () => selectWorkspace(workspace.key));
+
+  const top = document.createElement("span");
+  top.className = "workspace-row-top";
+  const reference = document.createElement("span");
+  reference.className = "workspace-reference";
+  reference.textContent = taskReference(task);
+  top.append(reference);
+  if (task?.role !== undefined) {
+    const role = document.createElement("span");
+    role.className = "workspace-role";
+    role.textContent = task.role.toLowerCase();
+    top.append(role);
+  }
+  const updatedAt = task?.updated_at;
+  if (updatedAt !== undefined && updatedAt !== null) {
+    const time = document.createElement("time");
+    time.className = "workspace-time";
+    time.dateTime = updatedAt;
+    time.textContent = relativeTime(updatedAt);
+    top.append(time);
+  }
+
+  const title = document.createElement("strong");
+  title.className = "workspace-row-title";
+  title.textContent = task?.title ?? workspace.name;
+
+  const bottom = document.createElement("span");
+  bottom.className = "workspace-row-bottom";
+  renderTaskBadges(bottom, rowSignals(task, count));
+  if (bottom.childElementCount === 0) {
+    const state = document.createElement("span");
+    state.className = `task-state task-state-${(task?.state ?? "local").toLowerCase()}`;
+    state.textContent = task?.state ?? "local";
+    bottom.append(state);
+  }
+
+  button.append(top, title, bottom);
+  return button;
 }
 
 function renderWorkspace(): void {
@@ -932,41 +1057,7 @@ function renderWorkspace(): void {
     .join(" · ");
   taskSignals.replaceChildren();
   if (task !== null) {
-    addTaskSignal(task.state);
-    if (task.ci !== "None") {
-      addTaskSignal(
-        `CI ${task.ci.toLowerCase()}`,
-        task.ci === "Success"
-          ? "success"
-          : task.ci === "Failure" || task.ci === "Mixed"
-            ? "attention"
-            : undefined,
-      );
-    }
-    if (task.review !== "None") {
-      addTaskSignal(
-        `Review ${task.review.replace(/([A-Z])/g, " $1").trim().toLowerCase()}`,
-        task.review === "Approved"
-          ? "success"
-          : task.review === "ChangesRequested"
-            ? "attention"
-            : undefined,
-      );
-    }
-    if (task.needs_reply) {
-      addTaskSignal(
-        task.last_commenter === null
-          ? "Reply needed"
-          : `Reply to @${task.last_commenter}`,
-        "attention",
-      );
-    }
-    if (task.additions > 0 || task.deletions > 0) {
-      addTaskSignal(`+${task.additions} −${task.deletions}`);
-    }
-    for (const label of task.labels.slice(0, 4)) {
-      addTaskSignal(label.name);
-    }
+    renderTaskBadges(taskSignals, detailSignals(task));
   }
   taskDescription.textContent =
     task?.body?.trim() || "No description was provided for this workspace.";
@@ -1044,14 +1135,21 @@ function renderInboxMessage(message: string, error = false): void {
   workspaceList.append(empty);
 }
 
-function addTaskSignal(
-  label: string,
-  tone?: "attention" | "success",
-): void {
-  const signal = document.createElement("span");
-  signal.className = `signal-pill${tone === undefined ? "" : ` ${tone}`}`;
-  signal.textContent = label;
-  taskSignals.append(signal);
+/**
+ * Render a set of badge pills into `container`. Shared by the detail
+ * pane and the inbox list rows so CI / review / reply / unread badges
+ * look and read the same everywhere. The badge *set* is derived by the
+ * pure helpers in `model.ts`; this only turns them into DOM.
+ */
+function renderTaskBadges(container: HTMLElement, signals: TaskSignal[]): void {
+  for (const signal of signals) {
+    const pill = document.createElement("span");
+    pill.className = `signal-pill${
+      signal.tone === undefined ? "" : ` ${signal.tone}`
+    }`;
+    pill.textContent = signal.label;
+    container.append(pill);
+  }
 }
 
 function selectWorkspace(key: string): void {
@@ -1078,12 +1176,50 @@ function changeSelectedWorkspace(key: string | null): boolean {
   return true;
 }
 
+/** True when the current selection still points at a present workspace. */
+function hasLiveSelection(): boolean {
+  return selectedKey !== null && workspaces.has(selectedKey);
+}
+
 function chooseInitialWorkspace(): void {
-  if (selectedKey !== null && workspaces.has(selectedKey)) {
+  if (hasLiveSelection()) {
     return;
   }
-  const keys = inboxView === null ? [] : workspaceKeysInOrder(inboxView);
-  changeSelectedWorkspace(keys.find((key) => workspaces.has(key)) ?? null);
+  const ordered = inboxView === null ? [] : orderedWorkspaceKeys(inboxView);
+  changeSelectedWorkspace(
+    ordered.find((key) => workspaces.has(key)) ?? null,
+  );
+}
+
+/** Workspace keys of the rows currently rendered (skips collapsed
+ * repos), in the shared view-model's order. Drives keyboard nav. */
+function navigableWorkspaceKeys(): string[] {
+  return [...workspaceList.querySelectorAll<HTMLButtonElement>(".workspace-row")]
+    .map((row) => row.dataset.key)
+    .filter((key): key is string => key !== undefined);
+}
+
+async function cycleSortMode(): Promise<void> {
+  if (previewMode) {
+    sortMode = nextSortMode(sortMode);
+    sortLabel.textContent = sortModeLabel(sortMode);
+    return;
+  }
+  // The daemon-side model owns the sort; it recomputes and pushes a new
+  // Inbox view, which updates the label and re-renders.
+  try {
+    await invoke("set_sort_mode");
+  } catch (error) {
+    setStatus(String(error));
+  }
+}
+
+function nextSortMode(mode: SortMode): SortMode {
+  return mode === "Recent"
+    ? "ByRole"
+    : mode === "ByRole"
+      ? "ByRoleSplit"
+      : "Recent";
 }
 
 function attachSelectedTerminal(): void {
@@ -2313,7 +2449,10 @@ function handleKeyboard(event: KeyboardEvent): void {
     selectWorkspace(selectedKey);
     return;
   }
-  if (event.key === "r") {
+  if (event.key === "o") {
+    event.preventDefault();
+    void cycleSortMode();
+  } else if (event.key === "r") {
     event.preventDefault();
     replyBody.focus();
   } else if (event.key === "a") {
@@ -2325,9 +2464,6 @@ function handleKeyboard(event: KeyboardEvent): void {
   } else if (event.key === "m") {
     event.preventDefault();
     void markSelectedRead();
-  } else if (event.key === "o") {
-    event.preventDefault();
-    void cycleSortMode();
   } else if (event.key === "f") {
     event.preventDefault();
     toggleFilterMenu();
@@ -2341,11 +2477,11 @@ function handleKeyboard(event: KeyboardEvent): void {
 }
 
 function navigateWorkspaces(delta: number): void {
-  const keys = inboxView === null ? [] : workspaceKeysInOrder(inboxView);
+  const keys = navigableWorkspaceKeys();
   if (keys.length === 0) {
     return;
   }
-  const current = keys.findIndex((key) => key === selectedKey);
+  const current = keys.indexOf(selectedKey ?? "");
   const next =
     current < 0
       ? 0
@@ -2407,6 +2543,27 @@ function setStatus(message: string): void {
 function setTerminalState(state: string): void {
   terminalState.textContent = state;
   terminalState.dataset.state = state;
+}
+
+function relativeTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return "";
+  }
+  const seconds = Math.round((timestamp - Date.now()) / 1000);
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  if (Math.abs(seconds) < 60) {
+    return formatter.format(seconds, "second");
+  }
+  const minutes = Math.round(seconds / 60);
+  if (Math.abs(minutes) < 60) {
+    return formatter.format(minutes, "minute");
+  }
+  const hours = Math.round(minutes / 60);
+  if (Math.abs(hours) < 24) {
+    return formatter.format(hours, "hour");
+  }
+  return formatter.format(Math.round(hours / 24), "day");
 }
 
 function element<T extends HTMLElement>(id: string): T {

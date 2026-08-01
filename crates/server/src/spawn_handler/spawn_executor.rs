@@ -57,6 +57,17 @@ pub(super) async fn execute_spawn_plan(
         env_count = plan.env.len(),
         "execute_spawn_plan: calling backend.spawn"
     );
+    // Model identity is meaningful only for agent spawns; shells and log
+    // tails carry none. Surface the resolved tier so which model actually
+    // ran is visible even when no `◆` badge shows (issue #748).
+    if let TerminalKind::Agent(agent_id) = &plan.kind {
+        tracing::info!(
+            agent = %agent_id,
+            model_alias = plan.model_alias.as_deref().unwrap_or("<none>"),
+            model = plan.model_label.as_deref().unwrap_or("<agent built-in default>"),
+            "execute_spawn_plan: resolved agent model tier"
+        );
+    }
     let backend_key = match config
         .backend
         .spawn_persistent(

@@ -320,20 +320,25 @@ impl ProviderError {
         }
     }
 
-    /// User-facing message for a retryable transient whose retries are
-    /// exhausted — the daemon kept failing across cycles and sync is now
-    /// genuinely stuck. Carries the *classified cause* through escalation
-    /// (the `Retryable` detail) instead of collapsing every stuck
-    /// transient into one misattributed "check your connection or token":
-    /// a repeated 5xx or a dropped connection is not a token problem, and
-    /// telling the user to rotate a working token is an action that can't
-    /// fix it. Auth is its own non-retryable class, surfaced through
-    /// [`user_message`](Self::user_message).
+    /// Terse user-facing message for a retryable transient whose retries
+    /// are exhausted — the daemon kept failing across cycles and sync is
+    /// now genuinely stuck. Stays one row like [`user_message`](Self::user_message):
+    /// it names the failure *class* (a stuck transient) without embedding
+    /// the raw `detail`, which is diagnostic-grade text meant for
+    /// [`diagnostic`](Self::diagnostic) / the log file, not the status bar.
+    /// The precise cause (a 502, a dropped connection, a timed-out tick)
+    /// still travels to the client in the event's diagnostic field.
+    ///
+    /// Crucially it never misattributes the failure to the token: a stuck
+    /// transient is a reachability problem, not an expired credential, so
+    /// telling the user to rotate a working token is a dead-end action.
+    /// Auth is its own non-retryable class and falls through to
+    /// [`user_message`](Self::user_message), as does every non-retryable
+    /// variant (only a retryable ever exhausts its retries).
     pub fn exhausted_message(&self) -> String {
         match self {
-            Self::Retryable { source, detail, .. } => {
-                let cause = detail.lines().next().unwrap_or(detail);
-                format!("{source} sync stuck — {cause}")
+            Self::Retryable { source, .. } => {
+                format!("{source} sync stuck — still failing after retries")
             }
             _ => self.user_message(),
         }
@@ -611,13 +616,14 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_message_carries_the_cause_not_a_token_blame() {
-        // #772: the escalation message must preserve the classified
-        // cause of a stuck transient, never collapse it into "check your
-        // connection or token" — a repeated 5xx is not a token problem.
+    fn exhausted_message_names_the_class_without_blaming_the_token() {
+        // #772: a stuck transient is a reachability failure, not a token
+        // problem — the escalation must never tell the user to rotate a
+        // working token, and it must read as a stuck sync.
         let r = ProviderError::retryable("github", "HTTP 502 (Bad Gateway)");
         let msg = r.exhausted_message();
-        assert!(msg.contains("HTTP 502"), "got {msg}");
+        assert!(msg.starts_with("github"), "names the source: {msg}");
+        assert!(msg.contains("stuck"), "reads as a stuck sync: {msg}");
         assert!(
             !msg.to_lowercase().contains("token"),
             "a retryable transient must not blame the token: {msg}"
@@ -625,13 +631,43 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_message_takes_first_detail_line() {
-        // The status bar is one row; a multi-line diagnostic collapses to
-        // its first line, mirroring `user_message`'s Permanent handling.
-        let r = ProviderError::retryable("github", "connection reset\nchain frame 2");
+    fn exhausted_message_stays_terse_even_for_a_long_detail() {
+        // The status bar is one row. `detail` is diagnostic-grade text —
+        // the tick-timeout path stuffs a ~200-char developer explanation
+        // there — so the terse message must NOT embed it. Regression for
+        // the escalation banner ballooning to the full diagnostic.
+        let verbose = "sync exceeded 180s — the per-upsert / per-graphql / per-git \
+             timeouts should catch this; hitting the outer cap means something \
+             escaped them and the whole tick was abandoned this cycle";
+        let r = ProviderError::retryable("github", verbose);
         let msg = r.exhausted_message();
-        assert!(msg.contains("connection reset"), "got {msg}");
-        assert!(!msg.contains("chain frame 2"), "got {msg}");
+        assert!(
+            msg.len() < 80,
+            "exhausted message stays one row, got {} chars: {msg}",
+            msg.len()
+        );
+        assert!(
+            !msg.contains("per-graphql"),
+            "raw diagnostic detail must not leak into the terse message: {msg}"
+        );
+    }
+
+    #[test]
+    fn exhausted_message_falls_through_for_non_retryable() {
+        // Only a retryable ever exhausts its retries; every other class
+        // keeps its normal message (auth stays an auth prompt, not a
+        // "sync stuck"). Documents the total contract of the public method.
+        for e in [
+            ProviderError::auth("github", "401"),
+            ProviderError::permanent("github", "bad query"),
+            ProviderError::unsupported("github", "merge"),
+        ] {
+            assert_eq!(
+                e.exhausted_message(),
+                e.user_message(),
+                "non-retryable falls through to user_message"
+            );
+        }
     }
 
     #[test]

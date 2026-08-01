@@ -5958,6 +5958,64 @@ mod tick_noop_skip_tests {
         );
     }
 
+    /// #772: an exhausted escalation carries a terse, one-row message even
+    /// when the underlying error's `detail` is a long diagnostic sentence
+    /// (as the tick-timeout path produces). The raw diagnostic must not
+    /// balloon the `✗ sync failed` banner.
+    #[tokio::test]
+    async fn exhausted_escalation_message_stays_terse() {
+        struct VerboseRetryable;
+        impl TaskSource for VerboseRetryable {
+            fn name(&self) -> &str {
+                lazybox_gh::SOURCE
+            }
+            fn fetch<'a>(
+                &'a self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    Err(lazybox_core::ProviderError::retryable(
+                        lazybox_gh::SOURCE,
+                        "sync exceeded 180s — the per-upsert / per-graphql / per-git \
+                         timeouts should catch this; hitting the outer cap means \
+                         something escaped them and the whole tick was abandoned",
+                    ))
+                })
+            }
+        }
+
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(VerboseRetryable)];
+        let mut state = TickState::default();
+        let mut rx = config.bus.subscribe();
+
+        for _ in 0..RETRYABLE_EXHAUSTION_ATTEMPTS {
+            tick_with_state(&config, &sources, &mut state).await;
+        }
+
+        let exhausted = drain(&mut rx)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::ProviderError { kind, message, .. } if kind == "exhausted" => Some(message),
+                _ => None,
+            })
+            .expect("a persisting hintless transient escalates to exhausted");
+        assert!(
+            exhausted.len() < 80,
+            "the exhausted banner stays one row, got {} chars: {exhausted}",
+            exhausted.len()
+        );
+        assert!(
+            !exhausted.contains("per-graphql"),
+            "the raw diagnostic must not leak into the banner: {exhausted}"
+        );
+    }
+
     /// Finding #1: the fetch-failure path and the client-init-failure
     /// path both surface through [`TickState::broadcast_error_debounced`],
     /// so they can never drift onto different key schemes for the shared

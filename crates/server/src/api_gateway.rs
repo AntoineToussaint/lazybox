@@ -189,6 +189,97 @@ pub struct WorkspacesResponse {
     pub warnings: Vec<String>,
 }
 
+/// Live-state read surface for coordinating agents (issue #768): every
+/// agent terminal the daemon is currently running, with the workspace,
+/// task, lifecycle state, and last prompt an outside caller needs to
+/// tell what each agent is doing without scraping any PTY.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentsResponse {
+    pub agents: Vec<RunningAgent>,
+    /// Persisted workspace rows that were preserved but could not be
+    /// decoded, mirroring [`WorkspacesResponse::warnings`].
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// One running agent terminal, projected from the daemon's live
+/// registries joined with its persisted workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunningAgent {
+    pub terminal_id: TerminalId,
+    /// The workspace this agent runs in (also its `SessionKey` string).
+    pub workspace_key: String,
+    pub workspace_name: String,
+    /// `owner/repo`, when the workspace tracks a repository.
+    pub repo: Option<String>,
+    /// Agent id — `claude`, `codex`, `cursor`, ….
+    pub agent: String,
+    /// Lifecycle state (working / input-needed / idle / done / exited).
+    /// `None` for an agent that has not committed its first state yet.
+    pub state: Option<lazybox_ipc::AgentState>,
+    /// The PR/issue this workspace is about, when it tracks one.
+    pub task: Option<AgentTaskInfo>,
+    /// What the agent is working on: the most recent prompt submitted to
+    /// it. `None` for an agent that hasn't received one yet.
+    pub last_prompt: Option<String>,
+    /// Unix-epoch milliseconds of `last_prompt`.
+    pub last_prompt_at: Option<u64>,
+    /// Model-tier label the session launched with (`Opus`, …), when not
+    /// the default.
+    pub model: Option<String>,
+    /// Running on the repo's shared main checkout rather than a worktree.
+    pub on_main: bool,
+    /// Launched in no-permission / bypass mode.
+    pub no_permission: bool,
+    /// When this agent's session was created.
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Compact PR/issue reference carried on a [`RunningAgent`], so one
+/// `/v1/agents` call tells which agent is on which task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTaskInfo {
+    /// Provider-qualified id, e.g. `github:owner/repo#123`.
+    pub id: String,
+    pub kind: AgentTaskKind,
+    /// The trailing number (`#123` → `123`), when the id carries one.
+    pub number: Option<u64>,
+    pub title: String,
+    pub url: String,
+    pub repo: Option<String>,
+    pub ci: lazybox_core::CiStatus,
+}
+
+/// Whether a [`AgentTaskInfo`] is a pull request or an issue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskKind {
+    Pr,
+    Issue,
+}
+
+impl AgentTaskInfo {
+    fn from_task(task: &lazybox_core::Task) -> Self {
+        Self {
+            id: task.id.to_string(),
+            kind: if task.is_pr() {
+                AgentTaskKind::Pr
+            } else {
+                AgentTaskKind::Issue
+            },
+            number: task
+                .id
+                .key
+                .rsplit_once('#')
+                .and_then(|(_, n)| n.parse().ok()),
+            title: task.title.clone(),
+            url: task.url.clone(),
+            repo: task.repo.clone(),
+            ci: task.ci,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct CommandResponse {
@@ -605,6 +696,68 @@ pub async fn workspaces_response(
     })
 }
 
+/// Live snapshot of every running agent, joining the daemon's in-memory
+/// terminal registries (the same source the TUI's `Subscribe` reads)
+/// with each agent's persisted workspace. Shells and log-tails are
+/// omitted — only `TerminalKind::Agent` terminals are agents to
+/// coordinate. The subscribe stream (`/v1/events`) carries the deltas;
+/// this is the point-in-time read a polling client starts from.
+pub async fn agents_response(config: &ServerConfig) -> Result<AgentsResponse, GatewayError> {
+    let WorkspacesResponse {
+        workspaces,
+        warnings,
+    } = workspaces_response(config).await?;
+    let by_key: std::collections::HashMap<&str, &lazybox_core::Workspace> = workspaces
+        .iter()
+        .map(|workspace| (workspace.key.as_str(), workspace))
+        .collect();
+
+    let mut agents = Vec::new();
+    for terminal in crate::spawn_handler::snapshot_terminals(config).await {
+        let lazybox_ipc::TerminalKind::Agent(agent) = &terminal.kind else {
+            continue;
+        };
+        let workspace = by_key.get(terminal.session_key.as_str()).copied();
+        let session_id = config
+            .terminal
+            .terminal_session_for(terminal.terminal_id)
+            .await;
+        let started_at = session_id.and_then(|session_id| {
+            workspace
+                .and_then(|workspace| workspace.sessions.iter().find(|s| s.id == session_id))
+                .map(|session| session.created_at)
+        });
+        let task = workspace
+            .and_then(|workspace| workspace.primary_task())
+            .map(AgentTaskInfo::from_task);
+        let last_prompt = terminal.prompt_history.last();
+        agents.push(RunningAgent {
+            terminal_id: terminal.terminal_id,
+            workspace_key: terminal.session_key.as_str().to_string(),
+            workspace_name: workspace
+                .map(|workspace| workspace.name.clone())
+                .unwrap_or_default(),
+            repo: task.as_ref().and_then(|task| task.repo.clone()),
+            agent: agent.clone(),
+            state: terminal.agent_state,
+            task,
+            last_prompt: last_prompt.map(|prompt| prompt.text.clone()),
+            last_prompt_at: last_prompt.map(|prompt| prompt.timestamp_ms),
+            model: terminal.model_label,
+            on_main: terminal.on_main,
+            no_permission: terminal.no_permission,
+            started_at,
+        });
+    }
+    // Stable order so a polling client sees a deterministic list.
+    agents.sort_by(|a, b| {
+        a.workspace_key
+            .cmp(&b.workspace_key)
+            .then(a.terminal_id.0.cmp(&b.terminal_id.0))
+    });
+    Ok(AgentsResponse { agents, warnings })
+}
+
 /// Create a local IPC bridge backed by the existing `Server::serve`
 /// connection model. API handlers feed decoded `JsonClientFrame`
 /// commands into `command_tx` and serialize `event_rx` values as
@@ -761,6 +914,13 @@ where
         (&Method::GET, "/v1/protocol") => json_response(StatusCode::OK, &protocol_response()),
         (&Method::GET, "/v1/metrics") => json_response(StatusCode::OK, &metrics_response(&config)),
         (&Method::GET, "/v1/workspaces") => match workspaces_response(&config).await {
+            Ok(payload) => json_response(StatusCode::OK, &payload),
+            Err(error) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &serde_json::json!({ "error": error.to_string() }),
+            ),
+        },
+        (&Method::GET, "/v1/agents") => match agents_response(&config).await {
             Ok(payload) => json_response(StatusCode::OK, &payload),
             Err(error) => json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,

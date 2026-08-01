@@ -241,7 +241,10 @@ menu (a multi-select over state / role / kind predicates — with-agent,
 CI-failing, conflict, unread, asking, review-requested, auto-merge,
 author/reviewer/assignee/mentioned, PR/issue — combined AND-across /
 OR-within-axis, shown with match counts and as removable header chips),
-`o` cycle sort, `Space` collapse/expand repo group, `Shift-S`
+`o` cycle sort, `Space` collapse/expand repo group, `p`
+pin/unpin the cursor's repo group to the top of the sidebar (pinned
+repos render first in pin order, the rest keep the algorithmic order;
+the pin set persists — #760), `Shift-S`
 cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
 the active filters; matches title, number, repo, labels, reviewers /
 assignees). `x` is a

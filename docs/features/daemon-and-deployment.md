@@ -141,7 +141,8 @@ disabled until TLS and principal-scoped authorization exist.
 
 Endpoints: `GET /` (local read-only browser shell), `GET /v1/health`, `GET
 /v1/protocol`, `GET /v1/metrics`
-(event-pipeline drop/lag counters), `GET /v1/workspaces`, `GET /v1/events`
+(event-pipeline drop/lag counters), `GET /v1/workspaces`, `GET /v1/agents`
+(live running-agent snapshot for fleet coordination), `GET /v1/events`
 (NDJSON control stream), `POST /v1/commands` (single command), `POST
 /v1/stream` (duplex NDJSON), `POST /v1/terminal` (bounded binary terminal
 duplex), and the workspace-addressed agent-control pair `POST
@@ -157,6 +158,16 @@ running agent terminal; inject rides the same settle gate as the TUI's `w`
 press (never pasting into a permission/chooser prompt), and its settle/submit
 outcome surfaces on `/v1/events`. Both return 404 when the workspace has no
 running agent.
+
+`GET /v1/agents` is the focused read another agent uses to coordinate: it
+projects every live `Agent` terminal (shells and log-tails excluded) — the
+workspace, `owner/repo` (from the task or, for a task-less workspace, its
+project key), PR/issue reference, agent id, lifecycle state, the last prompt it
+received, model tier, and `session_started_at` — joining the daemon's
+replay-free terminal-registry read with each agent's persisted workspace.
+Shells, log-tails, and still-authenticating login terminals are excluded. It is a
+point-in-time snapshot; `GET /v1/events` carries the ongoing `AgentState` /
+workspace deltas a client subscribes to after the initial read.
 
 ### How it works (brief)
 `server_api` (`crates/tui-boot/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`
@@ -183,6 +194,7 @@ or `~/.lazybox/config.yaml` until an encrypted credential store is available.
 - [ ] `GET /v1/protocol` reports the supported contract and terminal transport.
 - [ ] `GET /v1/metrics` returns the event-pipeline drop/lag counters as JSON.
 - [ ] `GET /v1/workspaces` lists current workspaces as JSON.
+- [ ] `GET /v1/agents` lists running agents and omits shells.
 - [ ] `GET /v1/events` streams NDJSON events.
 - [ ] `POST /v1/commands` accepts a single command frame.
 - [ ] `POST /v1/stream` round-trips commands → events.

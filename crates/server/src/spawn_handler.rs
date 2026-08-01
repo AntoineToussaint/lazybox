@@ -7989,6 +7989,110 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         .await
 }
 
+/// One live agent runtime, read straight from the terminal registries.
+/// Unlike [`TerminalSnapshot`] this carries no PTY replay — it is the
+/// lightweight projection `/v1/agents` needs to report what each agent
+/// is doing, so a status poll never assembles (and discards) replay
+/// rings.
+#[derive(Debug, Clone)]
+pub struct AgentTerminalRuntime {
+    pub terminal_id: TerminalId,
+    pub session_key: SessionKey,
+    /// Agent id — `claude`, `codex`, `cursor`, ….
+    pub agent_id: String,
+    pub agent_state: Option<lazybox_ipc::AgentState>,
+    /// The durable workspace session this terminal runs in, read in the
+    /// same lock section as the rest of its metadata so it can't race a
+    /// concurrent teardown.
+    pub session_id: Option<SessionId>,
+    pub on_main: bool,
+    pub no_permission: bool,
+    pub model_label: Option<String>,
+    /// The most recent prompt submitted to this agent, if any.
+    pub last_prompt: Option<UserPrompt>,
+}
+
+/// Point-in-time snapshot of every running agent, for the `/v1/agents`
+/// read surface (issue #768). Reads only the in-memory terminal
+/// registries — no `backend.snapshot`, so no replay is assembled — in a
+/// single consistent lock section, then loads each agent's last prompt
+/// from the store. Shells, log-tails, superseded terminals, and
+/// still-authenticating login terminals are all excluded: only a live
+/// agent doing (or ready to do) work is an agent to coordinate.
+pub async fn agent_runtime_snapshot(config: &ServerConfig) -> Vec<AgentTerminalRuntime> {
+    let entries: Vec<(
+        TerminalId,
+        String,
+        SessionKey,
+        String,
+        Option<lazybox_ipc::AgentState>,
+        Option<SessionId>,
+        bool,
+        bool,
+        Option<String>,
+    )> = {
+        let map = config.terminal.terminals.lock().await;
+        let meta = config.terminal.terminal_meta.lock().await;
+        let superseded = config.terminal.superseded_terminals.lock().await;
+        let authenticating = config.terminal.authenticating_terminals.lock().await;
+        let agent_states = config.terminal.agent_states.lock().await;
+        let sessions = config.terminal.terminal_sessions.lock().await;
+        let no_permission = config.terminal.no_permission_terminals.lock().await;
+        let on_main = config.terminal.on_main_terminals.lock().await;
+        let terminal_models = config.terminal.terminal_models.lock().await;
+        map.iter()
+            .filter_map(|(id, backend_key)| {
+                if superseded.contains(id) || authenticating.contains(id) {
+                    return None;
+                }
+                let (session_key, kind) = meta.get(id).cloned()?;
+                let TerminalKind::Agent(agent_id) = kind else {
+                    return None;
+                };
+                Some((
+                    *id,
+                    backend_key.clone(),
+                    session_key,
+                    agent_id,
+                    agent_states.get(id).copied(),
+                    sessions.get(id).copied(),
+                    no_permission.contains(id),
+                    on_main.contains(id),
+                    terminal_models.get(id).cloned(),
+                ))
+            })
+            .collect()
+    };
+
+    let mut runtimes = Vec::with_capacity(entries.len());
+    for (
+        terminal_id,
+        backend_key,
+        session_key,
+        agent_id,
+        agent_state,
+        session_id,
+        no_permission,
+        on_main,
+        model_label,
+    ) in entries
+    {
+        let last_prompt = load_prompt_history(config, &backend_key).await.pop();
+        runtimes.push(AgentTerminalRuntime {
+            terminal_id,
+            session_key,
+            agent_id,
+            agent_state,
+            session_id,
+            on_main,
+            no_permission,
+            model_label,
+            last_prompt,
+        });
+    }
+    runtimes
+}
+
 /// Serve a client-observed sequence gap from the backend replay. This path
 /// is defense in depth for drops below the daemon's normal pump/forwarder
 /// recovery machinery.
@@ -10839,6 +10943,69 @@ mod tests {
             "a failed snapshot carries no authoritative replay"
         );
         assert!(snap.replay.is_empty());
+    }
+
+    /// `agent_runtime_snapshot` is the `/v1/agents` read: only live
+    /// agents surface — shells and still-authenticating login terminals
+    /// are excluded — and each agent's durable session id is read in the
+    /// same lock section it collects the rest of its metadata.
+    #[tokio::test]
+    async fn agent_runtime_snapshot_filters_to_live_agents() {
+        let config = ServerConfig::in_memory();
+        let workspace: SessionKey = "acme/widget#1".into();
+
+        let agent = TerminalId(1);
+        config
+            .terminal
+            .register_terminal(
+                agent,
+                "backend:agent".into(),
+                workspace.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        let session_id = SessionId::new();
+        config.terminal.associate_session(agent, session_id).await;
+        config
+            .terminal
+            .record_agent_state(agent, lazybox_ipc::AgentState::Working)
+            .await;
+
+        config
+            .terminal
+            .register_terminal(
+                TerminalId(2),
+                "backend:shell".into(),
+                workspace.clone(),
+                TerminalKind::Shell,
+            )
+            .await;
+
+        let authenticating = TerminalId(3);
+        config
+            .terminal
+            .register_terminal(
+                authenticating,
+                "backend:auth".into(),
+                workspace.clone(),
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+        config
+            .terminal
+            .authenticating_terminals
+            .lock()
+            .await
+            .insert(authenticating);
+
+        let runtimes = agent_runtime_snapshot(&config).await;
+        assert_eq!(runtimes.len(), 1, "only the live, non-auth agent surfaces");
+        let runtime = &runtimes[0];
+        assert_eq!(runtime.terminal_id, agent);
+        assert_eq!(runtime.agent_id, "claude");
+        assert_eq!(runtime.agent_state, Some(lazybox_ipc::AgentState::Working));
+        assert_eq!(runtime.session_id, Some(session_id));
+        assert!(runtime.last_prompt.is_none());
     }
 
     /// A client-requested resync must be served from a wrapped ring. On

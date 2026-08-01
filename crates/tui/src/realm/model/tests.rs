@@ -983,6 +983,39 @@ mod effects_tests {
         }
     }
 
+    /// RenameWorkspace input with a non-empty trimmed name AND a
+    /// stashed target produces `RenameWorkspace { session_key, name }`.
+    #[test]
+    fn input_submitted_for_rename_returns_rename_workspace() {
+        let mut m = build_model();
+        let target: lazybox_core::SessionKey = "github:o/r#1".into();
+        m.modal_stack.push(Id::RenameWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::RenameWorkspace {
+            target: target.clone(),
+        });
+        let cmds = m.handle_input_submitted("  Rate limit spike  ".into());
+        assert_eq!(cmds.len(), 1);
+        match &cmds[0] {
+            IpcCommand::RenameWorkspace { session_key, name } => {
+                assert_eq!(session_key, &target);
+                assert_eq!(name, "Rate limit spike");
+            }
+            other => panic!("expected RenameWorkspace, got {other:?}"),
+        }
+    }
+
+    /// A blank rename submit commits nothing — the row keeps its name.
+    #[test]
+    fn input_submitted_for_blank_rename_drops() {
+        let mut m = build_model();
+        m.modal_stack.push(Id::RenameWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::RenameWorkspace {
+            target: "github:o/r#1".into(),
+        });
+        let cmds = m.handle_input_submitted("   ".into());
+        assert!(cmds.is_empty(), "blank rename must not emit a command");
+    }
+
     /// `Shift-W` with no projects yet can't resolve a container, so
     /// it surfaces a nudge instead of mounting a picker.
     #[test]
@@ -3137,6 +3170,61 @@ snippets:
         m.dispatch_action(&Action::SendToSession);
         m.handle_modal_dismissed();
         assert!(m.modal_flow.is_none(), "Esc on the picker cancels");
+    }
+
+    /// A `--connect` client must not launch a local editor against a
+    /// server-side worktree path. `e` on a remote client declines with
+    /// a notice and issues no command; the same setup on a local client
+    /// provisions a worktree (a `Spawn`) so the editor can open. See
+    /// #742.
+    #[test]
+    fn remote_client_declines_local_editor_launch() {
+        use lazybox_tui_core::action::Action;
+
+        fn editor_dispatch(remote: bool) -> Vec<IpcCommand> {
+            let (client, mut server) = channel::pair();
+            let mut model = {
+                let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+                if remote { m.with_remote() } else { m }
+            };
+            model.cache_editors(vec![crate::editors::EditorTemplate::from(
+                crate::editors::UserEditorEntry {
+                    id: "test".into(),
+                    display: Some("Test".into()),
+                    command: "true".into(),
+                    args: Some(vec![]),
+                },
+            )]);
+            let key = SessionKey::new("github:o/r#742");
+            model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+                lazybox_core::Workspace::empty(
+                    WorkspaceKey::new(key.as_str()),
+                    "main",
+                    chrono::Utc::now(),
+                ),
+            )));
+            assert!(model.sidebar.focus_workspace_key(&key));
+            while server.rx.try_recv().is_ok() {}
+            model.dispatch_action(&Action::OpenEditor);
+            assert!(
+                model.modal_stack.is_empty(),
+                "no editor picker mounts for a single detected editor",
+            );
+            std::iter::from_fn(|| server.rx.try_recv().ok()).collect()
+        }
+
+        assert!(
+            editor_dispatch(false)
+                .iter()
+                .any(|c| matches!(c, IpcCommand::Spawn { .. })),
+            "local client provisions a worktree so the editor can open",
+        );
+        assert!(
+            !editor_dispatch(true)
+                .iter()
+                .any(|c| matches!(c, IpcCommand::Spawn { .. })),
+            "remote client must not act on a server-side worktree path",
+        );
     }
 
     fn model_with_conversion_source(
@@ -14792,6 +14880,20 @@ mod spawn_focus_steal_tests {
             closes_issues: vec![],
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
+    }
+
+    /// Dispatching `OpenGlobalSearch` (`#`) opens an unscoped search —
+    /// the wiring `#` → `Action::OpenGlobalSearch` → `open_global_search`
+    /// (cross-repo filtering itself is covered in the sidebar tests).
+    #[test]
+    fn global_search_dispatch_opens_unscoped_search() {
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenGlobalSearch);
+        assert!(m.sidebar.search_editing());
+        let s = m.sidebar.search().expect("search state present");
+        assert_eq!(s.scope, None, "global search is unscoped");
     }
 
     #[test]

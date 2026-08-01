@@ -159,6 +159,7 @@ describe("workspace model", () => {
         Snapshot: {
           workspaces: [first],
           terminals: [],
+          recent_snippets: [],
         },
       },
     );

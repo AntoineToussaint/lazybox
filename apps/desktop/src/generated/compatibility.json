@@ -34,11 +34,22 @@
         "session_key": "github:o/r#42"
       }
     },
+    {
+      "DeliverSnippet": {
+        "body": "Review the current diff.",
+        "category": "Review",
+        "snippet_key": "rev",
+        "terminal_id": 7
+      }
+    },
     "Refresh"
   ],
   "events": [
     {
       "Snapshot": {
+        "recent_snippets": [
+          "rev"
+        ],
         "terminals": [
           {
             "agent_state": "Working",
@@ -216,6 +227,13 @@
       }
     },
     {
+      "SnippetDelivered": {
+        "session_key": "github:o/r#42",
+        "snippet_key": "rev",
+        "terminal_id": 7
+      }
+    },
+    {
       "ProviderError": {
         "message": "unavailable",
         "source": "github"
@@ -249,6 +267,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 3101634084,
+  "protocol_fingerprint": 3407742646,
   "protocol_version": 1
 }

@@ -1435,6 +1435,7 @@ impl GhClient {
                 label: self.user.clone(),
                 parent: None,
                 kind: ScopeKind::Org,
+                private: false,
             });
         }
 
@@ -1474,6 +1475,7 @@ impl GhClient {
                 label: org.login.clone(),
                 parent: None,
                 kind: ScopeKind::Org,
+                private: false,
             });
         }
 
@@ -1527,6 +1529,7 @@ impl GhClient {
                         label: full,
                         parent: Some(parent_id.to_string()),
                         kind: ScopeKind::Repo,
+                        private: repo.private.unwrap_or(false),
                     });
                 }
                 if page.next.is_none() {
@@ -1584,6 +1587,7 @@ impl GhClient {
                         label: full,
                         parent: Some(parent_id.to_string()),
                         kind: ScopeKind::Repo,
+                        private: repo.private.unwrap_or(false),
                     });
                 }
                 if page.next.is_none() {

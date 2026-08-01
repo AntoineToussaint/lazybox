@@ -271,6 +271,27 @@ pub async fn set_notes(config: &ServerConfig, key: &WorkspaceKey, notes: String)
     commit_upsert_offloaded_reported(config, key, workspace, "set workspace notes").await;
 }
 
+/// Rename a workspace's display name (issue #744). Mirrors
+/// [`set_notes`]: load, replace the field, commit (persists the JSON blob
+/// and broadcasts `WorkspaceUpserted` so every TUI updates the sidebar
+/// label). Only the display `name` changes — the workspace key and any
+/// session worktrees stay put, so nothing is orphaned. A blank name is
+/// ignored so the row never renders empty; re-submitting the current
+/// name emits nothing because `commit_upsert`'s no-change compare skips
+/// the write + broadcast when the serialized row is identical.
+pub async fn rename_workspace(config: &ServerConfig, key: &WorkspaceKey, name: String) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.name = trimmed.to_string();
+    commit_upsert_offloaded_reported(config, key, workspace, "rename workspace").await;
+}
+
 /// Record a snippet key as sent to a workspace's agent (issue #463).
 /// Mirrors [`set_notes`]: load, push onto the MRU, commit (which
 /// persists the JSON blob and broadcasts `WorkspaceUpserted` so every
@@ -413,6 +434,95 @@ mod auto_fix_policy_tests {
         )
         .expect("decode workspace");
         assert_eq!(stored.policies, workspace.policies);
+    }
+}
+
+#[cfg(test)]
+mod rename_workspace_tests {
+    use super::*;
+
+    fn seed(config: &ServerConfig, key: &WorkspaceKey, name: &str) {
+        let mut workspace = Workspace::empty(key.clone(), "scratch", Utc::now());
+        workspace.name = name.to_string();
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).expect("workspace json")),
+            })
+            .expect("seed workspace");
+    }
+
+    fn stored_name(config: &ServerConfig, key: &WorkspaceKey) -> String {
+        let record = config
+            .store
+            .get_workspace(key)
+            .expect("read workspace")
+            .expect("stored workspace");
+        let workspace: Workspace = serde_json::from_str(
+            record
+                .workspace_json
+                .as_deref()
+                .expect("stored workspace json"),
+        )
+        .expect("decode workspace");
+        workspace.name
+    }
+
+    #[tokio::test]
+    async fn rename_persists_and_broadcasts_the_new_name() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("local:scratch#1");
+        seed(&config, &key, "Work");
+        let mut events = config.bus.subscribe();
+
+        rename_workspace(&config, &key, "  Rate limit spike  ".to_string()).await;
+
+        let Event::WorkspaceUpserted(workspace) = events.recv().await.expect("workspace update")
+        else {
+            panic!("expected WorkspaceUpserted");
+        };
+        // Trimmed on the way in.
+        assert_eq!(workspace.name, "Rate limit spike");
+        // Key is left untouched so sessions/worktrees aren't orphaned.
+        assert_eq!(workspace.key, key);
+        assert_eq!(stored_name(&config, &key), "Rate limit spike");
+    }
+
+    #[tokio::test]
+    async fn blank_rename_is_ignored() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("local:scratch#2");
+        seed(&config, &key, "Work");
+        let mut events = config.bus.subscribe();
+
+        rename_workspace(&config, &key, "   ".to_string()).await;
+
+        assert!(
+            events.try_recv().is_err(),
+            "a blank name must not commit or broadcast"
+        );
+        assert_eq!(stored_name(&config, &key), "Work");
+    }
+
+    #[tokio::test]
+    async fn unchanged_rename_does_not_rebroadcast() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("local:scratch#3");
+        seed(&config, &key, "Work");
+        let mut events = config.bus.subscribe();
+
+        // Submitting the current name (here with surrounding whitespace,
+        // as an Enter-through on the prefilled input would) resolves to
+        // the same stored name and must not force a write + broadcast.
+        rename_workspace(&config, &key, "  Work  ".to_string()).await;
+
+        assert!(
+            events.try_recv().is_err(),
+            "renaming to the current name must be a no-op"
+        );
+        assert_eq!(stored_name(&config, &key), "Work");
     }
 }
 

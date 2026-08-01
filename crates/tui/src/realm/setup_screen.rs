@@ -32,6 +32,16 @@ use tuirealm::component::AppComponent;
 /// one by `provider_id` to enumerate orgs / repos.
 pub type ScopeSources = Arc<Vec<Box<dyn ScopeSource>>>;
 
+/// Repo-picker row label: the repo's full name, tagged with a lock
+/// marker when it's private so a mixed org's scopes are easy to scan.
+fn repo_pick_row_label(s: &Scope) -> String {
+    if s.private {
+        format!("{} 🔒 private", s.label)
+    } else {
+        s.label.clone()
+    }
+}
+
 /// Turn a pure [`Screen`] into a mountable modal widget. For
 /// [`Screen::Loading`] the second tuple element is the producer handle
 /// the executor delivers the effect's result into; every other screen
@@ -140,7 +150,7 @@ pub fn render(screen: Screen) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<
                     scopes,
                 )
                 .title(format!("Setup · {parent_label} repos"))
-                .label(|s: &Scope| s.label.clone())
+                .label(repo_pick_row_label)
                 .selected_mask(selected)
                 .with_back(true),
             ),
@@ -244,5 +254,34 @@ fn accent_for(kind: InfoKind) -> Accent {
         InfoKind::Retryable => Accent::warn("retryable"),
         InfoKind::Permanent => Accent::error("permanent"),
         InfoKind::Notice => Accent::warn("notice"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lazybox_core::ScopeKind;
+
+    fn repo(label: &str, private: bool) -> Scope {
+        Scope {
+            id: format!("github:{label}"),
+            label: label.to_string(),
+            parent: Some("github:acme".into()),
+            kind: ScopeKind::Repo,
+            private,
+        }
+    }
+
+    #[test]
+    fn private_repo_row_gets_lock_marker() {
+        assert_eq!(
+            repo_pick_row_label(&repo("acme/web", true)),
+            "acme/web 🔒 private"
+        );
+    }
+
+    #[test]
+    fn public_repo_row_is_plain() {
+        assert_eq!(repo_pick_row_label(&repo("acme/web", false)), "acme/web");
     }
 }

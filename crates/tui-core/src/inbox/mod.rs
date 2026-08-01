@@ -26,7 +26,7 @@ pub use attention::{
     workspace_attention_signals, workspace_needs_attention,
 };
 pub use desktop_view::{InboxView, WorkspaceRow, compute_inbox_view};
-pub use filter::{Filter, FilterAxis, FilterCtx, FilterSet};
+pub use filter::{Filter, FilterAxis, FilterCtx, FilterMenuItem, FilterSet};
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind, role_rank,
 };
@@ -73,10 +73,11 @@ pub struct ComputeInputs<'a> {
     pub attention: &'a lazybox_config::AttentionConfig,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     pub now: chrono::DateTime<chrono::Utc>,
-    /// Free-text search scoped to one project, or `None`. When `Some`
-    /// with a non-empty query, workspaces whose `group_label` matches
-    /// `scope` are kept only if they fuzzy-match; other projects pass
-    /// through untouched. See [`search_matches`].
+    /// Free-text search, or `None`. When `Some` with a non-empty
+    /// query, a scoped search (`scope: Some`) keeps only that
+    /// project's fuzzy-matching rows while other projects pass through
+    /// untouched; a global search (`scope: None`) keeps only
+    /// fuzzy-matching rows across every project. See [`search_matches`].
     pub search: Option<&'a SearchState>,
 }
 
@@ -101,15 +102,18 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 agents: input.agents,
             })
         })
-        // Scoped free-text search: only the matching project's rows
-        // are filtered; every other project stays fully visible.
+        // Free-text search. A scoped search (`scope: Some`) filters
+        // only the matching project's rows and leaves every other
+        // project fully visible; a global search (`scope: None`)
+        // filters every repo group at once.
         .filter(|(_, w)| match input.search {
-            Some(s)
-                if !s.query.is_empty()
-                    && group_label(w, input.projects, input.workspaces) == s.scope =>
-            {
-                search_matches(&s.query, w)
-            }
+            Some(s) if !s.query.is_empty() => match &s.scope {
+                None => search_matches(&s.query, w),
+                Some(scope) if group_label(w, input.projects, input.workspaces) == *scope => {
+                    search_matches(&s.query, w)
+                }
+                Some(_) => true,
+            },
             _ => true,
         })
         .collect();
@@ -169,9 +173,15 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // subscriptions), and omitted while a filter is active — a
     // narrowed view listing every subscribed repo as an empty header
     // buries the few matches behind a wall of chrome, so under a
-    // filter only repos with matching workspaces get a header.
+    // filter only repos with matching workspaces get a header. A
+    // *global* search (`scope: None`, the desktop's global `/`) narrows
+    // the same way, so it suppresses them too; the TUI's scoped search
+    // leaves other projects untouched, so it keeps their headers.
+    let global_search = input
+        .search
+        .is_some_and(|s| !s.query.is_empty() && s.scope.is_none());
     let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
-    if input.mailbox == Mailbox::Inbox && input.filters.is_empty() {
+    if input.mailbox == Mailbox::Inbox && input.filters.is_empty() && !global_search {
         all_repos.extend(
             input
                 .projects
@@ -732,7 +742,15 @@ mod tests {
 
     fn search(scope: &str, query: &str) -> SearchState {
         SearchState {
-            scope: scope.into(),
+            scope: Some(scope.into()),
+            query: query.into(),
+            editing: true,
+        }
+    }
+
+    fn global_search(query: &str) -> SearchState {
+        SearchState {
+            scope: None,
             query: query.into(),
             editing: true,
         }
@@ -826,6 +844,103 @@ mod tests {
         assert_eq!(out.summaries.get("owner/b").unwrap().active, 1);
     }
 
+    /// A global search (`scope: None`) filters EVERY project at once —
+    /// a matching row survives in each repo, non-matching rows drop.
+    #[test]
+    fn global_search_filters_all_projects() {
+        let mut ws = HashMap::new();
+        for w in [
+            titled("k1", "owner/a", 1, "Add search"),
+            titled("k2", "owner/a", 2, "Unrelated"),
+            titled("k3", "owner/b", 3, "Search elsewhere"),
+            titled("k4", "owner/b", 4, "Unrelated"),
+        ] {
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let s = global_search("search");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&s);
+        let out = compute_visible(i);
+        let keys: Vec<&str> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["k1", "k3"]);
+        assert_eq!(out.summaries.get("owner/a").unwrap().active, 1);
+        assert_eq!(out.summaries.get("owner/b").unwrap().active, 1);
+    }
+
+    /// The killer case: a bare PR/issue number typed into the global
+    /// box surfaces the match no matter which repo it lives in.
+    #[test]
+    fn global_search_jumps_to_number_across_repos() {
+        let mut ws = HashMap::new();
+        for w in [
+            titled("k1", "owner/a", 100, "Alpha"),
+            titled("k2", "owner/a", 7, "Beta"),
+            titled("k3", "owner/b", 720, "Gamma"),
+        ] {
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let s = global_search("#720");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&s);
+        let out = compute_visible(i);
+        let keys: Vec<&str> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(keys, vec!["k3"]);
+    }
+
+    /// A global search suppresses empty subscribed-project headers (the
+    /// desktop's global `/`), while a scoped search keeps them (the
+    /// TUI's `/`).
+    #[test]
+    fn global_search_suppresses_empty_project_headers_scoped_keeps_them() {
+        let ws = HashMap::new();
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let mut projects = BTreeMap::new();
+        let pk = ProjectKey::github("owner", "empty");
+        projects.insert(
+            pk.clone(),
+            Project::new(pk, "owner/empty", chrono::Utc::now()),
+        );
+
+        // Global (scope None): the empty repo header is gone.
+        let global = global_search("anything");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&global);
+        assert!(compute_visible(i).visible.is_empty());
+
+        // Scoped (named repo): unrelated empty projects still get a header.
+        let scoped = search("some/other", "anything");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&scoped);
+        assert!(compute_visible(i).summaries.contains_key("owner/empty"));
+    }
+
     /// An empty query is a no-op even when search state is present.
     #[test]
     fn empty_query_shows_full_tree() {
@@ -908,6 +1023,7 @@ mod contract_tests {
         assert!(SortMode::decl(&cfg).contains("SortMode"));
         assert!(Filter::decl(&cfg).contains("Filter"));
         assert!(FilterAxis::decl(&cfg).contains("FilterAxis"));
+        assert!(FilterMenuItem::decl(&cfg).contains("FilterMenuItem"));
         assert!(RepoSummary::decl(&cfg).contains("RepoSummary"));
         assert!(InboxView::decl(&cfg).contains("InboxView"));
         assert!(WorkspaceRow::decl(&cfg).contains("WorkspaceRow"));

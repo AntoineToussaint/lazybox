@@ -86,6 +86,11 @@ pub enum Action {
     ViewDiff,
     /// Create a brand-new pre-PR workspace (asks for a name).
     NewWorkspace,
+    /// Rename the focused workspace's display name in place — opens an
+    /// input prefilled with the current name. Only the display label
+    /// changes; the workspace key and worktree path stay stable so
+    /// sessions/terminals/worktrees aren't orphaned.
+    RenameWorkspace,
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under. Asks for a name. Idempotent
     /// on collision (re-opens the existing local project).
@@ -204,6 +209,10 @@ pub enum Action {
     CycleMailbox,
     /// Open the incremental search bar scoped to the focused project.
     OpenSearch,
+    /// Open the global search box — an incremental search across every
+    /// repo group at once, especially for jumping to a PR/issue by
+    /// number without knowing its repo.
+    OpenGlobalSearch,
     /// Collapse or expand the repo group the cursor sits in (or on).
     /// Folds a project's workspaces into a single header row — the
     /// "group the sessions" shortcut. Acts on the list, not a single
@@ -397,6 +406,7 @@ pub enum ActionKind {
     OpenEditor,
     ViewDiff,
     NewWorkspace,
+    RenameWorkspace,
     NewProject,
     ImportCheckout,
     AddScanRoot,
@@ -427,6 +437,7 @@ pub enum ActionKind {
     CycleSort,
     CycleMailbox,
     OpenSearch,
+    OpenGlobalSearch,
     ToggleRepoGroup,
     SelectWorkspace,
     BroadcastToSelected,
@@ -520,6 +531,7 @@ impl ActionKind {
         // hiding/destructive actions last. The runtime which-key popup
         // inherits this order directly.
         Self::NewWorkspace,
+        Self::RenameWorkspace,
         Self::NewProject,
         Self::ImportCheckout,
         Self::AddScanRoot,
@@ -550,6 +562,7 @@ impl ActionKind {
         Self::CycleSort,
         Self::CycleMailbox,
         Self::OpenSearch,
+        Self::OpenGlobalSearch,
         Self::ToggleRepoGroup,
         Self::FocusPaneRight,
         Self::SelectWorkspace,
@@ -628,6 +641,7 @@ impl Action {
             Action::OpenEditor => ActionKind::OpenEditor,
             Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
+            Action::RenameWorkspace => ActionKind::RenameWorkspace,
             Action::NewProject => ActionKind::NewProject,
             Action::ImportCheckout => ActionKind::ImportCheckout,
             Action::AddScanRoot => ActionKind::AddScanRoot,
@@ -656,6 +670,7 @@ impl Action {
             Action::CycleSort => ActionKind::CycleSort,
             Action::CycleMailbox => ActionKind::CycleMailbox,
             Action::OpenSearch => ActionKind::OpenSearch,
+            Action::OpenGlobalSearch => ActionKind::OpenGlobalSearch,
             Action::ToggleRepoGroup => ActionKind::ToggleRepoGroup,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
@@ -960,6 +975,13 @@ impl ActionDef {
                 describe: "Create a pre-PR workspace (asks for a name).",
                 section: Section::Workspace,
             },
+            ActionKind::RenameWorkspace => &Self {
+                kind: ActionKind::RenameWorkspace,
+                default_keys: "x R",
+                label: "rename",
+                describe: "Rename this workspace's display name (opens an input prefilled with the current name). Only the label changes — the worktree and any sessions stay put.",
+                section: Section::Workspace,
+            },
             ActionKind::NewProject => &Self {
                 kind: ActionKind::NewProject,
                 default_keys: "x p",
@@ -1158,6 +1180,13 @@ impl ActionDef {
                 default_keys: "/",
                 label: "search",
                 describe: "Open the incremental search bar scoped to the focused project.",
+                section: Section::Sidebar,
+            },
+            ActionKind::OpenGlobalSearch => &Self {
+                kind: ActionKind::OpenGlobalSearch,
+                default_keys: "#",
+                label: "find",
+                describe: "Open the header search box — an incremental search across every repo group at once. Type digits to jump straight to a PR/issue by number without knowing which repo it's in. Composes with the active filters and mailbox.",
                 section: Section::Sidebar,
             },
             ActionKind::ToggleRepoGroup => &Self {
@@ -1744,6 +1773,7 @@ impl ActionKind {
             ActionKind::OpenEditor => "open_editor",
             ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
+            ActionKind::RenameWorkspace => "rename_workspace",
             ActionKind::NewProject => "new_project",
             ActionKind::ImportCheckout => "import_checkout",
             ActionKind::AddScanRoot => "add_scan_root",
@@ -1772,6 +1802,7 @@ impl ActionKind {
             ActionKind::CycleSort => "cycle_sort",
             ActionKind::CycleMailbox => "cycle_mailbox",
             ActionKind::OpenSearch => "open_search",
+            ActionKind::OpenGlobalSearch => "open_global_search",
             ActionKind::ToggleRepoGroup => "toggle_repo_group",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
@@ -2001,6 +2032,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
         ActionKind::NewWorkspace
+        | ActionKind::RenameWorkspace
         | ActionKind::NewProject
         | ActionKind::ImportCheckout
         | ActionKind::AddScanRoot
@@ -2465,6 +2497,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         ActionKind::OpenWorkspace
         | ActionKind::SpawnAgent
         | ActionKind::MarkAllRead
+        // Rename targets any workspace's display label — even a
+        // session-less/empty one — so gate purely on a workspace
+        // being under the cursor, like EditNotes below.
+        | ActionKind::RenameWorkspace
         | ActionKind::ToggleSnooze
         | ActionKind::LongSnooze
         | ActionKind::RequestReviewers
@@ -2499,6 +2535,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::CycleSort
         | ActionKind::CycleMailbox
         | ActionKind::OpenSearch
+        | ActionKind::OpenGlobalSearch
         | ActionKind::ToggleRepoGroup => true,
         // Toggling a selection mark needs a row under the cursor; the
         // broadcast itself acts on the selection set (which the catalog

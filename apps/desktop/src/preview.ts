@@ -165,6 +165,16 @@ export function loadPreview(): PreviewState {
     collapsed: [],
     total: 2,
     unread_total: 2,
+    filter_menu: [
+      { filter: "WithAgent", axis: "State", label: "with-agent", count: 1, active: false },
+      { filter: "CiFailing", axis: "State", label: "ci-failing", count: 0, active: false },
+      { filter: "Unread", axis: "State", label: "unread", count: 1, active: false },
+      { filter: "Author", axis: "Role", label: "author", count: 2, active: false },
+      { filter: "Reviewer", axis: "Role", label: "reviewer", count: 0, active: false },
+      { filter: "Pr", axis: "Kind", label: "PR", count: 2, active: false },
+      { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
+    ],
+    filter_chips: [],
   };
   return {
     defaultAgent: "codex",

@@ -731,7 +731,7 @@ async fn run_remote(
         };
         build_guard::available_update(store).await
     });
-    let (client, daemon) = match socket::connect(socket_path).await {
+    let (client, daemon) = match socket::connect_reconnecting(socket_path).await {
         Ok(pair) => pair,
         Err(e) => {
             // println, not just the bail: stderr already points at the

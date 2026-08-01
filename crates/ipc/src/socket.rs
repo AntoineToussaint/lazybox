@@ -9,15 +9,15 @@
 
 use crate::transport;
 use crate::{
-    BUILD_VERSION, COMMAND_CHANNEL_CAPACITY, Client, Command, Connection, EVENT_CHANNEL_CAPACITY,
-    Event, MAX_COMMAND_FRAME_BYTES, MAX_FRAME_BYTES, PROTOCOL_FINGERPRINT, PROTOCOL_MAGIC,
-    event_forward_channel,
+    BUILD_VERSION, COMMAND_CHANNEL_CAPACITY, Client, Command, Connection, ConnectionState,
+    ConnectionStatus, EVENT_CHANNEL_CAPACITY, Event, MAX_COMMAND_FRAME_BYTES, MAX_FRAME_BYTES,
+    PROTOCOL_FINGERPRINT, PROTOCOL_MAGIC, event_forward_channel,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FrameError {
@@ -397,6 +397,296 @@ pub async fn connect(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
     tokio::spawn(reader_loop_bounded(rd, evt_tx, MAX_FRAME_BYTES));
 
     Ok((Client::from_bounded_channels(cmd_tx, evt_rx), peer))
+}
+
+/// Initial delay before the first reconnect attempt, and the value the
+/// backoff resets to after a connection has proved stable.
+const RECONNECT_BACKOFF_START: Duration = Duration::from_millis(250);
+/// Ceiling on the reconnect backoff so a daemon that stays down (box
+/// asleep, tunnel closed) is retried about every five seconds forever
+/// rather than drifting to minutes-long gaps.
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// A connection that served at least this long before dropping is
+/// treated as healthy: the next drop starts damping from
+/// [`RECONNECT_BACKOFF_START`] again. A connection that drops sooner is
+/// flapping (accept-then-close, half-open tunnel) and keeps escalating.
+const STABLE_CONNECTION: Duration = Duration::from_secs(5);
+
+/// Double a backoff, capped at [`RECONNECT_BACKOFF_MAX`].
+fn grow_backoff(current: Duration) -> Duration {
+    (current * 2).min(RECONNECT_BACKOFF_MAX)
+}
+
+/// Next backoff after a live connection dropped, given how long it was
+/// up. A connection that lasted [`STABLE_CONNECTION`] proved healthy, so
+/// a genuine one-off drop reconnects fast; a connection that flapped
+/// keeps escalating so a broken endpoint isn't hammered at a fixed rate.
+fn next_backoff_after_drop(current: Duration, served: Duration) -> Duration {
+    if served >= STABLE_CONNECTION {
+        RECONNECT_BACKOFF_START
+    } else {
+        grow_backoff(current)
+    }
+}
+
+/// Like [`connect`], but the client transparently re-dials the daemon
+/// whenever the connection drops — a daemon restart, an SSH tunnel
+/// reset, a laptop sleep, or a wifi change — instead of tearing the
+/// event stream down and forcing a manual restart.
+///
+/// The first connection is established synchronously, so a genuinely
+/// unreachable or wire-incompatible daemon still fails fast with the
+/// same error [`connect`] returns. After that a supervisor task owns the
+/// socket: on EOF or I/O error it reconnects with capped exponential
+/// backoff and re-sends [`Command::Subscribe`], so the daemon replays a
+/// fresh [`Event::Snapshot`] (workspaces plus terminal ring buffers) and
+/// the client resyncs without the caller ever observing the drop. A wire
+/// fingerprint mismatch on reconnect (the daemon came back from an
+/// incompatible build) is terminal: the supervisor stops and drops the
+/// event stream, which the UI surfaces as its usual disconnect state.
+///
+/// The returned [`Client`] tracks live [`ConnectionState`]: it flips to
+/// [`ConnectionStatus::Reconnecting`] while re-dialing (so the UI can say
+/// so instead of freezing), back to `Connected` with the reconnected
+/// daemon's build on success.
+pub async fn connect_reconnecting(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
+    let (mut rd, mut wr) = transport::connect(path)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let peer = client_handshake_with_timeout(&mut rd, &mut wr, HANDSHAKE_TIMEOUT).await?;
+
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
+    let (evt_tx, evt_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
+    // Same wire choke-point as `connect`: oversized `Command::Write`s are
+    // split into frame-sized chunks before they reach the supervisor's
+    // writer, so every reconnected connection inherits the chunking.
+    let (wire_tx, wire_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
+    let (status_tx, status_rx) = watch::channel(ConnectionState {
+        status: ConnectionStatus::Connected,
+        daemon_build: peer.build.clone(),
+    });
+    tokio::spawn(chunk_commands_loop(cmd_rx, wire_tx));
+    tokio::spawn(reconnect_supervisor(
+        path.to_path_buf(),
+        (rd, wr),
+        wire_rx,
+        evt_tx,
+        status_tx,
+    ));
+
+    let client = Client::from_bounded_channels(cmd_tx, evt_rx).with_connection_status(status_rx);
+    Ok((client, peer))
+}
+
+/// How a served connection ended.
+enum ConnectionEnd {
+    /// The socket died (EOF / write error); the supervisor should
+    /// reconnect.
+    Dropped,
+    /// The caller dropped its `Client`; the supervisor should exit.
+    CallerGone,
+}
+
+/// Outcome of a reconnect attempt loop.
+enum ReconnectResult {
+    Connected {
+        conn: (transport::BoxRead, transport::BoxWrite),
+        peer: PeerInfo,
+    },
+    /// The daemon is reachable but wire-incompatible; retrying can't
+    /// help, so stop and let the event stream close.
+    Fatal,
+    /// The caller dropped its `Client` while we were retrying.
+    CallerGone,
+}
+
+/// Supervises one logical client session across many physical socket
+/// connections. Holds the persistent command receiver and event sender
+/// so the caller's `Client` never sees a channel close during a
+/// transient outage, and publishes [`ConnectionState`] transitions so
+/// the UI can surface a reconnecting indicator.
+async fn reconnect_supervisor(
+    path: std::path::PathBuf,
+    initial: (transport::BoxRead, transport::BoxWrite),
+    mut wire_rx: mpsc::Receiver<Command>,
+    evt_tx: mpsc::Sender<Event>,
+    status_tx: watch::Sender<ConnectionState>,
+) {
+    // The initial connection carries no injected Subscribe — the caller
+    // (the TUI Model) sends its own on startup. Every *reconnection*
+    // injects one so the daemon replays a resync Snapshot.
+    let mut conn = Some(initial);
+    let mut inject_subscribe = false;
+    // Backoff persists across serve/reconnect cycles so a flapping
+    // endpoint actually damps instead of pinning at the floor.
+    let mut backoff = RECONNECT_BACKOFF_START;
+    let mut daemon_build = status_tx.borrow().daemon_build.clone();
+    loop {
+        let (rd, wr) = match conn.take() {
+            Some(pair) => pair,
+            None => {
+                status_tx.send_replace(ConnectionState {
+                    status: ConnectionStatus::Reconnecting,
+                    daemon_build: daemon_build.clone(),
+                });
+                match reconnect_with_backoff(&path, &mut wire_rx, &mut backoff).await {
+                    ReconnectResult::Connected { conn, peer } => {
+                        daemon_build = peer.build.clone();
+                        status_tx.send_replace(ConnectionState {
+                            status: ConnectionStatus::Connected,
+                            daemon_build: peer.build,
+                        });
+                        conn
+                    }
+                    ReconnectResult::Fatal => {
+                        tracing::warn!("reconnect: daemon is wire-incompatible; giving up");
+                        return;
+                    }
+                    ReconnectResult::CallerGone => return,
+                }
+            }
+        };
+        let served_at = tokio::time::Instant::now();
+        match serve_one_connection(rd, wr, &mut wire_rx, &evt_tx, inject_subscribe).await {
+            ConnectionEnd::Dropped => {
+                inject_subscribe = true;
+                backoff = next_backoff_after_drop(backoff, served_at.elapsed());
+                continue;
+            }
+            ConnectionEnd::CallerGone => return,
+        }
+    }
+}
+
+/// Bridge the persistent channels to one physical connection until it
+/// dies. The reader task feeding `evt_tx` is the liveness signal: its
+/// completion (clean EOF or read error) means the connection dropped.
+async fn serve_one_connection(
+    rd: transport::BoxRead,
+    mut wr: transport::BoxWrite,
+    wire_rx: &mut mpsc::Receiver<Command>,
+    evt_tx: &mpsc::Sender<Event>,
+    inject_subscribe: bool,
+) -> ConnectionEnd {
+    if inject_subscribe {
+        // Discard exactly the command backlog that queued during the
+        // outage: it predates the resync Snapshot the injected Subscribe
+        // pulls, so replaying it would fire stale keystrokes against
+        // freshly-authoritative state. Draining a bounded snapshot of the
+        // queue (not `while try_recv`) leaves any command that races in
+        // *after* the reconnect untouched — FIFO guarantees the first
+        // `backlog` items are the stale ones. Only reconnections drain:
+        // the initial connection's backlog is the caller's own first
+        // Subscribe, which must reach the daemon.
+        let backlog = wire_rx.len();
+        for _ in 0..backlog {
+            if wire_rx.try_recv().is_err() {
+                break;
+            }
+        }
+        if write_frame(&mut wr, &Command::Subscribe).await.is_err() {
+            return ConnectionEnd::Dropped;
+        }
+    }
+    let mut reader = tokio::spawn(reader_loop_bounded(rd, evt_tx.clone(), MAX_FRAME_BYTES));
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut reader => {
+                // The reader also ends when the caller drops `evt_rx`
+                // (Model quit); distinguish that from a socket drop so we
+                // don't pointlessly reconnect to a dead UI.
+                return if evt_tx.is_closed() {
+                    ConnectionEnd::CallerGone
+                } else {
+                    ConnectionEnd::Dropped
+                };
+            }
+            cmd = wire_rx.recv() => match cmd {
+                Some(cmd) => {
+                    if write_frame(&mut wr, &cmd).await.is_err() {
+                        reader.abort();
+                        return ConnectionEnd::Dropped;
+                    }
+                }
+                None => {
+                    reader.abort();
+                    return ConnectionEnd::CallerGone;
+                }
+            },
+        }
+    }
+}
+
+/// Retry the connect+handshake, waiting out `backoff` before each
+/// attempt and growing it on every connect failure. `backoff` is owned
+/// by the supervisor so it persists across drops (see
+/// [`next_backoff_after_drop`]). While waiting we drain and discard any
+/// commands the caller emits — input into a disconnected session is
+/// dropped, and the resync Snapshot restores authoritative state on
+/// reconnect — but a closed command channel means the caller is gone and
+/// we stop.
+async fn reconnect_with_backoff(
+    path: &Path,
+    wire_rx: &mut mpsc::Receiver<Command>,
+    backoff: &mut Duration,
+) -> ReconnectResult {
+    loop {
+        if !backoff_wait(wire_rx, *backoff).await {
+            return ReconnectResult::CallerGone;
+        }
+        match try_reconnect(path).await {
+            Ok((conn, peer)) => return ReconnectResult::Connected { conn, peer },
+            Err(ReconnectError::Fatal) => return ReconnectResult::Fatal,
+            Err(ReconnectError::Retryable) => {
+                *backoff = grow_backoff(*backoff);
+            }
+        }
+    }
+}
+
+/// Sleep for `backoff`, discarding any commands that arrive meanwhile.
+/// Returns `true` once the delay elapses, or `false` if the caller's
+/// command channel closes first (caller gone).
+async fn backoff_wait(wire_rx: &mut mpsc::Receiver<Command>, backoff: Duration) -> bool {
+    let sleep = tokio::time::sleep(backoff);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            biased;
+            () = &mut sleep => return true,
+            cmd = wire_rx.recv() => match cmd {
+                Some(_) => continue,
+                None => return false,
+            },
+        }
+    }
+}
+
+enum ReconnectError {
+    /// Transient: socket refused/absent or peer closed mid-handshake
+    /// (a daemon that is restarting). Worth another attempt.
+    Retryable,
+    /// The daemon answered but its wire fingerprint doesn't match — a
+    /// different, incompatible build. Retrying won't fix it.
+    Fatal,
+}
+
+async fn try_reconnect(
+    path: &Path,
+) -> Result<((transport::BoxRead, transport::BoxWrite), PeerInfo), ReconnectError> {
+    let (mut rd, mut wr) = transport::connect(path)
+        .await
+        .map_err(|_| ReconnectError::Retryable)?;
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, client_handshake(&mut rd, &mut wr)).await {
+        Ok(Ok(peer)) => Ok(((rd, wr), peer)),
+        Ok(Err(HandshakeError::FingerprintMismatch { .. } | HandshakeError::BadMagic(_))) => {
+            Err(ReconnectError::Fatal)
+        }
+        // Peer closed mid-handshake (restarting daemon) or the handshake
+        // timed out — both worth retrying.
+        Ok(Err(HandshakeError::Io(_))) | Err(_) => Err(ReconnectError::Retryable),
+    }
 }
 
 /// Outbound command normalizer for the socket client: forwards every
@@ -937,5 +1227,325 @@ mod batching_tests {
         // Room for every test batch without back-pressure, so the
         // writer loop can run to completion before the test reads.
         tokio::io::duplex(1024 * 1024)
+    }
+
+    /// The BYO-remote acceptance path: a socket drop must not surface to
+    /// the caller. The reconnecting client re-dials on its own, re-sends
+    /// `Subscribe` so the daemon can replay a resync `Snapshot`, and the
+    /// post-drop event still arrives on the same `rx` — no manual restart.
+    #[tokio::test]
+    async fn reconnecting_client_resyncs_after_the_socket_drops() {
+        use lazybox_core::ProjectKey;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("reconnect.sock");
+        let listener = transport::Listener::bind(&path).await.expect("bind");
+
+        let (subscribed_tx, subscribed_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            // Connection 1: hand off one event, then drop the socket to
+            // stand in for a sleep / wifi-change / tunnel reset.
+            let (mut rd, mut wr) = listener.accept().await.expect("accept 1");
+            server_handshake(&mut rd, &mut wr)
+                .await
+                .expect("handshake 1");
+            write_frame(&mut wr, &Event::ProjectRemoved(ProjectKey("before".into())))
+                .await
+                .expect("event 1");
+            drop((rd, wr));
+
+            // Connection 2: the client re-dials unprompted. Its first
+            // frame must be the injected Subscribe (the resync trigger),
+            // after which a fresh event flows.
+            let (mut rd, mut wr) = listener.accept().await.expect("accept 2");
+            server_handshake(&mut rd, &mut wr)
+                .await
+                .expect("handshake 2");
+            let first = read_frame::<_, Command>(&mut rd)
+                .await
+                .expect("frame 2")
+                .expect("command 2");
+            let _ = subscribed_tx.send(matches!(first, Command::Subscribe));
+            write_frame(&mut wr, &Event::ProjectRemoved(ProjectKey("after".into())))
+                .await
+                .expect("event 2");
+            std::future::pending::<()>().await;
+        });
+
+        let (mut client, _peer) = connect_reconnecting(&path).await.expect("connect");
+
+        assert_eq!(
+            client.connection_status(),
+            ConnectionStatus::Connected,
+            "a freshly connected client is Connected"
+        );
+        let before = tokio::time::timeout(Duration::from_secs(5), client.rx.recv())
+            .await
+            .expect("event before drop")
+            .expect("channel stays open");
+        assert!(matches!(before, Event::ProjectRemoved(k) if k.0 == "before"));
+
+        // While re-dialing (during the backoff before conn 2), the client
+        // advertises Reconnecting so the UI can surface it instead of
+        // freezing silently.
+        assert!(
+            poll_status_becomes(
+                &client,
+                ConnectionStatus::Reconnecting,
+                Duration::from_secs(2)
+            )
+            .await,
+            "client must report Reconnecting while the socket is down"
+        );
+
+        // The caller never observed a channel close: the next event
+        // arrives on the same `rx` after a transparent reconnect.
+        let after = tokio::time::timeout(Duration::from_secs(5), client.rx.recv())
+            .await
+            .expect("event after reconnect")
+            .expect("channel stays open");
+        assert!(matches!(after, Event::ProjectRemoved(k) if k.0 == "after"));
+        assert_eq!(
+            client.connection_status(),
+            ConnectionStatus::Connected,
+            "status returns to Connected once the socket is back"
+        );
+
+        assert!(
+            subscribed_rx.await.expect("subscribe signal"),
+            "reconnect must re-send Subscribe to trigger a resync Snapshot",
+        );
+
+        server.abort();
+    }
+
+    /// Commands typed into a disconnected session must not replay against
+    /// the freshly-resynced daemon: the stale backlog is dropped, only a
+    /// post-reconnect command reaches the socket after the Subscribe.
+    #[tokio::test]
+    async fn reconnecting_client_discards_commands_queued_while_disconnected() {
+        use lazybox_core::ProjectKey;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("discard.sock");
+        let listener = transport::Listener::bind(&path).await.expect("bind");
+
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut rd, mut wr) = listener.accept().await.expect("accept 1");
+            server_handshake(&mut rd, &mut wr)
+                .await
+                .expect("handshake 1");
+            write_frame(&mut wr, &Event::ProjectRemoved(ProjectKey("before".into())))
+                .await
+                .expect("event 1");
+            drop((rd, wr));
+
+            let (mut rd, mut wr) = listener.accept().await.expect("accept 2");
+            server_handshake(&mut rd, &mut wr)
+                .await
+                .expect("handshake 2");
+            // The injected resync Subscribe leads.
+            let first = read_frame::<_, Command>(&mut rd)
+                .await
+                .expect("frame")
+                .expect("command");
+            assert!(matches!(first, Command::Subscribe), "expected Subscribe");
+            // Signal the client it's connected again, then capture the
+            // very next command it forwards.
+            write_frame(&mut wr, &Event::ProjectRemoved(ProjectKey("after".into())))
+                .await
+                .expect("event 2");
+            let next = read_frame::<_, Command>(&mut rd)
+                .await
+                .expect("frame")
+                .expect("command");
+            let _ = seen_tx.send(next);
+            std::future::pending::<()>().await;
+        });
+
+        let (mut client, _peer) = connect_reconnecting(&path).await.expect("connect");
+        let before = tokio::time::timeout(Duration::from_secs(5), client.rx.recv())
+            .await
+            .expect("event before drop")
+            .expect("channel stays open");
+        assert!(matches!(before, Event::ProjectRemoved(k) if k.0 == "before"));
+
+        // Type into the dead session — this command must be discarded.
+        assert!(
+            poll_status_becomes(
+                &client,
+                ConnectionStatus::Reconnecting,
+                Duration::from_secs(2)
+            )
+            .await,
+            "client must be Reconnecting before we queue the stale command"
+        );
+        client
+            .send(cmd(1))
+            .expect("queue a stale command while disconnected");
+
+        // Once reconnected, a fresh command is the only one that should
+        // reach the daemon after the Subscribe.
+        let after = tokio::time::timeout(Duration::from_secs(5), client.rx.recv())
+            .await
+            .expect("event after reconnect")
+            .expect("channel stays open");
+        assert!(matches!(after, Event::ProjectRemoved(k) if k.0 == "after"));
+        client.send(cmd(2)).expect("fresh post-reconnect command");
+
+        let seen = tokio::time::timeout(Duration::from_secs(5), seen_rx)
+            .await
+            .expect("server saw a post-Subscribe command")
+            .expect("oneshot");
+        assert!(
+            matches!(seen, Command::Write { terminal_id, .. } if terminal_id == TerminalId(2)),
+            "the first post-Subscribe command must be the fresh one, not the \
+             stale queued command: {seen:?}"
+        );
+
+        server.abort();
+    }
+
+    /// Reconnecting to a wire-incompatible daemon (fingerprint mismatch —
+    /// the box came back from a different build) is terminal: the
+    /// supervisor gives up and closes the event stream so the UI shows
+    /// its disconnect banner, rather than retrying a hopeless handshake.
+    #[tokio::test]
+    async fn reconnecting_client_gives_up_on_a_wire_incompatible_daemon() {
+        use lazybox_core::ProjectKey;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("mismatch.sock");
+        let listener = transport::Listener::bind(&path).await.expect("bind");
+
+        let server = tokio::spawn(async move {
+            let (mut rd, mut wr) = listener.accept().await.expect("accept 1");
+            server_handshake(&mut rd, &mut wr)
+                .await
+                .expect("handshake 1");
+            write_frame(&mut wr, &Event::ProjectRemoved(ProjectKey("before".into())))
+                .await
+                .expect("event 1");
+            drop((rd, wr));
+
+            // Connection 2 answers the handshake with a valid magic but a
+            // deliberately wrong fingerprint — an incompatible build.
+            let (mut rd, mut wr) = listener.accept().await.expect("accept 2");
+            let mut preamble = [0u8; 8];
+            preamble[..4].copy_from_slice(&PROTOCOL_MAGIC);
+            preamble[4..].copy_from_slice(&PROTOCOL_FINGERPRINT.wrapping_add(1).to_le_bytes());
+            wr.write_all(&preamble).await.expect("bad preamble");
+            wr.flush().await.expect("flush");
+            // Read the client's preamble so its write doesn't error first.
+            let mut _client_preamble = [0u8; 8];
+            let _ = rd.read_exact(&mut _client_preamble).await;
+            std::future::pending::<()>().await;
+        });
+
+        let (mut client, _peer) = connect_reconnecting(&path).await.expect("connect");
+        let before = tokio::time::timeout(Duration::from_secs(5), client.rx.recv())
+            .await
+            .expect("event before drop")
+            .expect("channel stays open");
+        assert!(matches!(before, Event::ProjectRemoved(k) if k.0 == "before"));
+
+        // The supervisor gives up on the mismatch and drops its event
+        // sender, closing the stream — `recv` returns None.
+        let closed = tokio::time::timeout(Duration::from_secs(5), client.rx.recv())
+            .await
+            .expect("stream closes within the timeout");
+        assert!(
+            closed.is_none(),
+            "an incompatible daemon must close the event stream, not hang: {closed:?}"
+        );
+
+        server.abort();
+    }
+
+    /// When the caller drops its `Client`, the supervisor tears the
+    /// socket down instead of leaking the task: the daemon sees EOF.
+    #[tokio::test]
+    async fn reconnecting_client_supervisor_exits_when_the_caller_drops() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("caller-gone.sock");
+        let listener = transport::Listener::bind(&path).await.expect("bind");
+
+        let server = tokio::spawn(async move {
+            let (mut rd, mut wr) = listener.accept().await.expect("accept");
+            server_handshake(&mut rd, &mut wr).await.expect("handshake");
+            // Read to EOF; `None` means the client tore the connection
+            // down when its `Client` dropped.
+            loop {
+                match read_frame::<_, Command>(&mut rd).await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let (client, _peer) = connect_reconnecting(&path).await.expect("connect");
+        drop(client);
+
+        // Dropping the client closes its command channel, which the
+        // supervisor observes and uses to tear the socket down — the
+        // server's read completes rather than hanging forever.
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server read completes after the client drops")
+            .expect("server task");
+    }
+
+    /// Poll `connection_status` until it reaches `want` or the budget
+    /// elapses. Cheap busy-wait with yields — the reconnect backoff floor
+    /// guarantees a Reconnecting window long enough to observe.
+    async fn poll_status_becomes(
+        client: &Client,
+        want: ConnectionStatus,
+        budget: Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + budget;
+        while tokio::time::Instant::now() < deadline {
+            if client.connection_status() == want {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        client.connection_status() == want
+    }
+
+    #[test]
+    fn backoff_grows_geometrically_and_caps() {
+        assert_eq!(
+            grow_backoff(RECONNECT_BACKOFF_START),
+            RECONNECT_BACKOFF_START * 2
+        );
+        // Never exceeds the ceiling, and is idempotent once there.
+        assert_eq!(grow_backoff(RECONNECT_BACKOFF_MAX), RECONNECT_BACKOFF_MAX);
+        assert_eq!(
+            grow_backoff(RECONNECT_BACKOFF_MAX / 2 + Duration::from_secs(1)),
+            RECONNECT_BACKOFF_MAX
+        );
+    }
+
+    #[test]
+    fn backoff_resets_only_after_a_stable_connection() {
+        // A connection that lasted long enough resets to the floor so a
+        // genuine one-off drop reconnects fast.
+        assert_eq!(
+            next_backoff_after_drop(RECONNECT_BACKOFF_MAX, STABLE_CONNECTION),
+            RECONNECT_BACKOFF_START
+        );
+        // A flapping connection (dropped almost immediately) keeps
+        // escalating instead of pinning at the floor — the #2 fix.
+        assert_eq!(
+            next_backoff_after_drop(RECONNECT_BACKOFF_START, Duration::from_millis(10)),
+            grow_backoff(RECONNECT_BACKOFF_START)
+        );
+        assert_eq!(
+            next_backoff_after_drop(RECONNECT_BACKOFF_MAX, Duration::from_millis(10)),
+            RECONNECT_BACKOFF_MAX
+        );
     }
 }

@@ -4,8 +4,11 @@ import {
   TERMINAL_WRITE_PAYLOAD_LAYOUT,
 } from "./generated/terminal-wire";
 import { loadPreview } from "./preview";
-import { applyWorkspaceEvent, primaryTask } from "./model";
-import { workspaceKeysInOrder } from "./inbox_view";
+import {
+  applyWorkspaceEvent,
+  orderedWorkspaceKeys,
+  primaryTask,
+} from "./model";
 import { commandsForWorkspaceIntent } from "./protocol";
 import {
   discardTerminalView,
@@ -17,11 +20,11 @@ import {
 describe("desktop inbox-to-terminal workflow mapping", () => {
   it("triages, replies, starts work, and reconnects terminal replay", () => {
     const fixture = loadPreview();
-    // The grouped view-model drives ordering; take the first workspace row.
-    const [firstKey] = workspaceKeysInOrder(fixture.inboxView);
-    const workspace = firstKey === undefined
-      ? undefined
-      : fixture.workspaces.get(firstKey);
+    // The order comes from the shared view-model, not a TS sort; pick
+    // the first row it placed.
+    const [firstKey] = orderedWorkspaceKeys(fixture.inboxView);
+    const workspace =
+      firstKey === undefined ? undefined : fixture.workspaces.get(firstKey);
     expect(workspace).toBeDefined();
     expect(primaryTask(workspace!)?.needs_reply).toBe(true);
 

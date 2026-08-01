@@ -477,6 +477,47 @@ fn click_outside_search_dismisses_it() {
 }
 
 #[test]
+fn right_click_in_host_mouse_mode_still_exits_search() {
+    // #780 follow-up: dismissing search must not hinge on the button or
+    // the mouse-capture mode. A right-click while host-native selection
+    // is on short-circuits the mouse handler early (it flashes a "how to
+    // enable link clicks" notice and returns) — that early-return path
+    // must still free the user from the search bar, not strand them in
+    // "find land".
+    let mut m = build_model();
+    let workspace = Workspace::empty(WorkspaceKey("github:o/r#1".into()), "main", Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: Vec::new(),
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    // Turn host-native mouse mode on BEFORE opening search — once the
+    // query is capturing keys, F8 would type into it instead.
+    m.dispatch_key(key(Key::Function(8)));
+    m.dispatch_key(key(Key::Char('/')));
+    m.dispatch_key(key(Key::Char('m')));
+    assert!(m.sidebar().search_editing(), "search is capturing keys");
+
+    m.view();
+    let area = Rect::new(0, 0, 100, 30);
+    m.dispatch_mouse_in(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 80,
+            row: 20,
+            modifiers: CtKeyModifiers::empty(),
+        },
+        area,
+    );
+    assert!(
+        !m.sidebar().search_editing(),
+        "a right-click in host mouse mode must still exit search",
+    );
+}
+
+#[test]
 fn click_in_sidebar_keeps_or_returns_focus_to_sidebar() {
     let mut m = build_model();
     // Move focus elsewhere first.

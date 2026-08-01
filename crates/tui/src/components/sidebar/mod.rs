@@ -168,6 +168,11 @@ pub struct Sidebar {
     /// Agent the `f` (fix) shortcut spawns. Defaults to `claude`; the
     /// AppRoot can override from YAML (`setup.default_agent`).
     default_agent: String,
+    /// Commit/PR conventions injected into the `w` work brief. Defaults
+    /// to Conventional Commits; the model wires this from YAML
+    /// (`conventions:`) at startup so an interactive `w` honors the same
+    /// house style as autonomous spawns.
+    conventions: lazybox_core::Conventions,
     /// Surface merged + closed tasks in the Inbox view. Off by default
     /// — the Inbox stays focused on actionable work and the Inactive
     /// mailbox owns the history. Wired from
@@ -290,6 +295,7 @@ impl Sidebar {
             attention: lazybox_config::AttentionConfig::default(),
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
+            conventions: lazybox_core::Conventions::default(),
             show_inactive_in_inbox: false,
             ascii_glyphs: false,
             pending_notifications: Vec::new(),
@@ -553,6 +559,19 @@ impl Sidebar {
     /// agent"). Mirrors `with_default_agent` for the in-session path.
     pub fn set_default_agent(&mut self, agent: impl Into<String>) {
         self.default_agent = agent.into();
+    }
+
+    /// The commit/PR conventions the `w` work brief injects. See
+    /// [`Self::set_conventions`].
+    pub fn conventions(&self) -> &lazybox_core::Conventions {
+        &self.conventions
+    }
+
+    /// Wire the YAML-configured `conventions:` block at startup so an
+    /// interactive `w` builds the same convention-aware brief the
+    /// daemon uses for autonomous spawns.
+    pub fn set_conventions(&mut self, conventions: lazybox_core::Conventions) {
+        self.conventions = conventions;
     }
 
     /// Replace the mirrored project table. Driven from the model's

@@ -79,6 +79,21 @@ pub struct Config {
     /// [`ScanConfig`].
     #[serde(default)]
     pub scan: ScanConfig,
+    /// Commit / PR naming conventions injected into the agent-work
+    /// brief. Defaults to Conventional Commits with the `Closes #N.`
+    /// issue↔PR collapse; override `commit_style` / `include_closes`
+    /// to change or disable it. Honored on autonomous spawns (the
+    /// daemon's `@lazybox`-mention and label paths). See
+    /// [`lazybox_core::Conventions`].
+    ///
+    /// ```yaml
+    /// conventions:
+    ///   commit_style: conventional   # conventional | none | custom
+    ///   custom_instruction: null     # free text used when style is `custom`
+    ///   include_closes: true         # keep the `Closes #N` body line
+    /// ```
+    #[serde(default)]
+    pub conventions: lazybox_core::Conventions,
 }
 
 /// `setup:` block — wizard-driven user config. Mirrors
@@ -1924,6 +1939,45 @@ repos:
         let serialized = serde_yaml::to_string(&configured).expect("serialize desktop");
         let round_tripped = Config::parse(&serialized).expect("parse serialized desktop");
         assert!(round_tripped.desktop.analytics_enabled);
+    }
+
+    #[test]
+    fn conventions_default_to_conventional_and_parse() {
+        // Unset → Conventional Commits + Closes line (the historical
+        // default the shared preamble already bakes in).
+        let default_config = Config::parse("").expect("parse defaults");
+        assert_eq!(
+            default_config.conventions.commit_style,
+            lazybox_core::CommitStyle::Conventional
+        );
+        assert!(default_config.conventions.include_closes);
+
+        // An explicit block parses and round-trips.
+        let configured =
+            Config::parse("conventions:\n  commit_style: none\n  include_closes: false\n")
+                .expect("parse conventions");
+        assert_eq!(
+            configured.conventions.commit_style,
+            lazybox_core::CommitStyle::None
+        );
+        assert!(!configured.conventions.include_closes);
+        let serialized = serde_yaml::to_string(&configured).expect("serialize conventions");
+        let round_tripped = Config::parse(&serialized).expect("parse serialized conventions");
+        assert_eq!(
+            round_tripped.conventions.commit_style,
+            lazybox_core::CommitStyle::None
+        );
+    }
+
+    #[test]
+    fn unknown_commit_style_does_not_break_config_load() {
+        // A typo in `commit_style` must degrade to the safe default, not
+        // sink the whole config load (which carries Slack tokens, etc.).
+        let config = Config::parse("conventions:\n  commit_style: bogus\n").expect("lenient parse");
+        assert_eq!(
+            config.conventions.commit_style,
+            lazybox_core::CommitStyle::Conventional
+        );
     }
 
     /// `ui.terminal_new_layout` defaults to `split` (unchanged

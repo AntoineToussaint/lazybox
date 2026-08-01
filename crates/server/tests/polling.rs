@@ -1508,7 +1508,11 @@ fn spawn_agent_fields(
 #[test]
 fn label_spawn_actions_parses_agent_and_model_for_owned_issue() {
     let issue = labeled_issue("1", TaskRole::Author, "lazybox:codex/xhigh");
-    let acts = polling::label_spawn_actions(&[issue], &std::collections::HashSet::new());
+    let acts = polling::label_spawn_actions(
+        &[issue],
+        &std::collections::HashSet::new(),
+        &lazybox_core::Conventions::default(),
+    );
     assert_eq!(acts.len(), 1);
     let (agent, model, dedup) = spawn_agent_fields(&acts[0].1);
     assert_eq!(agent, "codex");
@@ -1522,11 +1526,39 @@ fn label_spawn_actions_parses_agent_and_model_for_owned_issue() {
 #[test]
 fn label_spawn_actions_bare_label_uses_agent_default_model() {
     let issue = labeled_issue("1", TaskRole::Assignee, "lazybox:claude");
-    let acts = polling::label_spawn_actions(&[issue], &std::collections::HashSet::new());
+    let acts = polling::label_spawn_actions(
+        &[issue],
+        &std::collections::HashSet::new(),
+        &lazybox_core::Conventions::default(),
+    );
     assert_eq!(acts.len(), 1);
     let (agent, model, _) = spawn_agent_fields(&acts[0].1);
     assert_eq!(agent, "claude");
     assert_eq!(model, None);
+}
+
+#[test]
+fn label_spawn_actions_injects_configured_conventions_into_the_prompt() {
+    // The `conventions:` config must reach the autonomous-spawn brief:
+    // a custom house style overrides the default Conventional Commits
+    // guidance in the generated prompt.
+    let issue = labeled_issue("1", TaskRole::Author, "lazybox:codex/xhigh");
+    let conventions = lazybox_core::Conventions {
+        commit_style: lazybox_core::CommitStyle::Custom,
+        custom_instruction: Some("Gitmoji prefixes on every commit".into()),
+        ..Default::default()
+    };
+    let acts =
+        polling::label_spawn_actions(&[issue], &std::collections::HashSet::new(), &conventions);
+    assert_eq!(acts.len(), 1);
+    let polling::ProviderAction::AutoSpawnAgent { prompt, .. } = &acts[0].1 else {
+        panic!("expected AutoSpawnAgent");
+    };
+    let prompt = prompt.as_deref().expect("label spawn carries a prompt");
+    assert!(
+        prompt.contains("Gitmoji prefixes on every commit"),
+        "configured conventions must be injected into the spawn brief"
+    );
 }
 
 #[test]
@@ -1535,8 +1567,11 @@ fn label_spawn_actions_ignores_issues_the_user_does_not_own() {
     // reviewing — must NOT spend your tokens.
     let mentioned = labeled_issue("1", TaskRole::Mentioned, "lazybox:codex/xhigh");
     let reviewer = labeled_issue("2", TaskRole::Reviewer, "lazybox:codex/xhigh");
-    let acts =
-        polling::label_spawn_actions(&[mentioned, reviewer], &std::collections::HashSet::new());
+    let acts = polling::label_spawn_actions(
+        &[mentioned, reviewer],
+        &std::collections::HashSet::new(),
+        &lazybox_core::Conventions::default(),
+    );
     assert!(acts.is_empty(), "only authored/assigned issues trigger");
 }
 
@@ -1544,7 +1579,11 @@ fn label_spawn_actions_ignores_issues_the_user_does_not_own() {
 fn label_spawn_actions_skips_prs() {
     let mut pr = make_typed_task("1", TaskRole::Author, true);
     pr.labels = vec![lazybox_core::Label::new("lazybox:codex/xhigh")];
-    let acts = polling::label_spawn_actions(&[pr], &std::collections::HashSet::new());
+    let acts = polling::label_spawn_actions(
+        &[pr],
+        &std::collections::HashSet::new(),
+        &lazybox_core::Conventions::default(),
+    );
     assert!(
         acts.is_empty(),
         "the implement-issue prompt is wrong for a PR"
@@ -1557,7 +1596,8 @@ fn label_spawn_actions_skips_workspace_a_mention_already_queued() {
     let key = lazybox_core::workspace_key_for(&issue);
     let mut queued = std::collections::HashSet::new();
     queued.insert(key);
-    let acts = polling::label_spawn_actions(&[issue], &queued);
+    let acts =
+        polling::label_spawn_actions(&[issue], &queued, &lazybox_core::Conventions::default());
     assert!(
         acts.is_empty(),
         "a mention + a label on one issue must not start two agents"

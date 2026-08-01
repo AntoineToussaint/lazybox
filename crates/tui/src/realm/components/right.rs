@@ -48,6 +48,12 @@ impl Right {
         self.inner.set_default_agent(agent);
     }
 
+    /// Forward the YAML-configured `conventions:` block to the inner
+    /// pane so a `w` from the activity pane is convention-aware.
+    pub fn set_conventions(&mut self, conventions: lazybox_core::Conventions) {
+        self.inner.set_conventions(conventions);
+    }
+
     /// Forward viewer identities (source → login) to the inner pane
     /// so activity bylines authored by the local user render as `@me`.
     /// Called by the orchestrator on `IpcEvent::ViewerIdentities`.

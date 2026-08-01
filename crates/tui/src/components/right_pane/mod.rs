@@ -105,6 +105,11 @@ pub struct RightPane {
     /// Agent the `f` (fix) shortcut spawns. Configurable via YAML
     /// (`setup.default_agent`); defaults to `"claude"`.
     default_agent: String,
+    /// Commit/PR conventions injected into the `w` work brief. Wired
+    /// from YAML (`conventions:`) at startup; defaults to Conventional
+    /// Commits. Mirrors the sidebar so `w` from either pane is
+    /// convention-aware.
+    conventions: lazybox_core::Conventions,
     /// Visibility of the task-body / description teaser.
     /// Default `Collapsed`: the activity feed is what users come to
     /// the inbox for; the body is reference material they can pop
@@ -363,6 +368,7 @@ impl RightPane {
             mark_timer_target: None,
             last_marked_read: None,
             default_agent: "claude".to_string(),
+            conventions: lazybox_core::Conventions::default(),
             task_body_view: TaskBodyView::Collapsed,
             task_body_max_rows: lazybox_config::UiDefaults::default().task_body_max_rows,
             auto_mark_delay: lazybox_config::UiDefaults::default().auto_mark_delay,
@@ -396,6 +402,13 @@ impl RightPane {
     /// Replace the default agent at runtime (used by `apply_config`).
     pub fn set_default_agent(&mut self, agent: impl Into<String>) {
         self.default_agent = agent.into();
+    }
+
+    /// Wire the YAML-configured `conventions:` block at startup so a
+    /// `w` from the activity pane builds the same convention-aware brief
+    /// as the sidebar. Mirrors [`Self::set_default_agent`].
+    pub fn set_conventions(&mut self, conventions: lazybox_core::Conventions) {
+        self.conventions = conventions;
     }
 
     /// Install the daemon-announced viewer identities (source →
@@ -1953,8 +1966,12 @@ impl RightPane {
             (KeyCode::Char('w'), KeyModifiers::NONE) => {
                 let mut selected: Vec<usize> = self.feed.selected().iter().copied().collect();
                 selected.sort();
-                let intent =
-                    crate::intent::resolve_work(Some(workspace), &selected, &self.default_agent);
+                let intent = crate::intent::resolve_work(
+                    Some(workspace),
+                    &selected,
+                    &self.default_agent,
+                    &self.conventions,
+                );
                 if let crate::intent::Intent::SpawnAgent {
                     workspace_key,
                     agent_id,

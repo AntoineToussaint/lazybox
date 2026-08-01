@@ -989,6 +989,7 @@ async fn run_embedded_realm(
             user_config.setup.default_agent.clone(),
             &user_config.display,
             &ui_defaults,
+            user_config.conventions.clone(),
         );
         model.apply_auto_fix_config(
             user_config.auto_fix.enabled,

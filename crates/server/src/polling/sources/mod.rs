@@ -100,9 +100,11 @@ mod full_sweep_commit_tests {
 /// narrows by repo / org: when non-empty, only tasks whose
 /// `task.repo` matches a selected scope id pass through.
 ///
-/// Fields are private + constructed through [`GhSource::new`]: the
-/// `last_kind` cache has an invariant (initialized to `Full`) that a
-/// struct literal could trivially break. Use `new`.
+/// Fields are private. The one construction site is the struct literal
+/// in `sources_for_with_engagement`, which resolves every field
+/// (scopes, filters, auto-fix, conventions, …) from config for the
+/// tick. `last_kind` is initialized to `Full` there so a never-fetched
+/// source doesn't block rescope.
 pub struct GhSource {
     client: GhClient,
     filter: ProviderConfig,
@@ -125,6 +127,12 @@ pub struct GhSource {
     /// the auto-fix scan is skipped entirely. See
     /// `lazybox_core::autofix`.
     auto_fix: lazybox_core::AutoFixSettings,
+    /// Commit/PR naming conventions, resolved by `sources_for` from
+    /// `config.yaml::conventions`. Injected into the work brief for
+    /// autonomous spawns (`@lazybox` mentions, `lazybox:` labels,
+    /// auto-fix). Defaults to Conventional Commits. See
+    /// `lazybox_core::Conventions`.
+    conventions: lazybox_core::Conventions,
     /// Side channel for actions the source wants the polling tick to
     /// take after `fetch()` returns — today, auto-spawn requests
     /// triggered by `@lazybox` mentions. Populated inside `fetch` and
@@ -356,41 +364,6 @@ impl GhSource {
             .collect()
     }
 
-    pub fn new(
-        client: GhClient,
-        filter: ProviderConfig,
-        scopes: std::collections::BTreeSet<String>,
-        bus: tokio::sync::broadcast::Sender<Event>,
-        mention_allowed_logins: std::collections::BTreeSet<String>,
-        auto_fix: lazybox_core::AutoFixSettings,
-        scheduling: RoundRobinPick,
-    ) -> Self {
-        let governor_plan = client.begin_background_tick(Duration::from_secs(60));
-        Self {
-            client,
-            filter,
-            scopes,
-            watch_repos: std::collections::BTreeSet::new(),
-            detect_needs_reply: true,
-            bus,
-            mention_allowed_logins,
-            auto_fix,
-            pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            scheduling,
-            governor_plan,
-            cursor_store: None,
-            // Default to Full so a never-fetched source doesn't
-            // accidentally block rescope.
-            last_kind: parking_lot::Mutex::new(FetchMode::Full),
-            retry_after_secs: parking_lot::Mutex::new(None),
-            last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
-            last_windowed: parking_lot::Mutex::new(false),
-            hot_targets: Vec::new(),
-            cold_targets: std::collections::BTreeSet::new(),
-            poll_notifications: true,
-        }
-    }
-
     fn set_last_kind(&self, kind: FetchMode) {
         *self.last_kind.lock() = kind;
     }
@@ -516,9 +489,11 @@ impl GhSource {
             };
             let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(task));
             let prompt = match kind {
-                AutoFixKind::CiFailure => lazybox_core::prompts::build_fix_ci_prompt(task),
+                AutoFixKind::CiFailure => {
+                    lazybox_core::prompts::build_fix_ci_prompt_with(task, &self.conventions)
+                }
                 AutoFixKind::MergeConflict => {
-                    lazybox_core::prompts::build_fix_conflict_prompt(task)
+                    lazybox_core::prompts::build_fix_conflict_prompt_with(task, &self.conventions)
                 }
             };
             let reason = format!("auto-fix ({}) on {repo}#{pr_number}", kind.describe());
@@ -749,7 +724,10 @@ impl GhSource {
                 };
                 let session_key =
                     lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(task));
-                let prompt = Some(lazybox_core::prompts::build_implement_issue_prompt(task));
+                let prompt = Some(lazybox_core::prompts::build_implement_issue_prompt_with(
+                    task,
+                    &self.conventions,
+                ));
                 mentioned_tasks.push(task.clone());
                 mention_queued_keys.insert(session_key.as_str().to_string());
                 let reason = format!(
@@ -794,7 +772,8 @@ impl GhSource {
         // spawn lands in a real workspace (issue #50).
         if !self.mention_allowed_logins.is_empty() {
             let mut pending = self.pending_actions.lock();
-            for (task, action) in label_spawn_actions(&raw, &mention_queued_keys) {
+            for (task, action) in label_spawn_actions(&raw, &mention_queued_keys, &self.conventions)
+            {
                 if let ProviderAction::AutoSpawnAgent {
                     reason,
                     agent_id,
@@ -1902,6 +1881,7 @@ pub fn github_watch_repos_from_filters(
 pub fn label_spawn_actions(
     tasks: &[Task],
     mention_queued_keys: &std::collections::HashSet<String>,
+    conventions: &lazybox_core::Conventions,
 ) -> Vec<(Task, ProviderAction)> {
     let mut out = Vec::new();
     for task in tasks {
@@ -1924,7 +1904,10 @@ pub fn label_spawn_actions(
         }) else {
             continue;
         };
-        let prompt = Some(lazybox_core::prompts::build_implement_issue_prompt(task));
+        let prompt = Some(lazybox_core::prompts::build_implement_issue_prompt_with(
+            task,
+            conventions,
+        ));
         let reason = format!("{label_name} label on {}", task.id.key);
         let dedup_key = Some(format!("autospawn-label:{session_key}:{label_name}"));
         out.push((
@@ -2558,6 +2541,12 @@ pub(super) async fn sources_for_with_engagement(
                             .as_ref()
                             .map(|c| c.auto_fix.to_settings())
                             .unwrap_or_default();
+                        // Commit/PR conventions injected into autonomous
+                        // work briefs (default Conventional Commits).
+                        let conventions = cfg
+                            .as_ref()
+                            .map(|c| c.conventions.clone())
+                            .unwrap_or_default();
                         // Round-robin scheduling. Pre-fetch we:
                         //   1. Ask the client whether this tick will
                         //      actually run a full sweep. Most ticks
@@ -2639,6 +2628,7 @@ pub(super) async fn sources_for_with_engagement(
                             bus: bus.clone(),
                             mention_allowed_logins: mention_allowed,
                             auto_fix,
+                            conventions,
                             pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(
                                 Vec::new(),
                             )),

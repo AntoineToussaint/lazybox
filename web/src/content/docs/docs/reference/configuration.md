@@ -36,6 +36,7 @@ which is the canonical source of truth for defaults and field names.
 | [`hooks`](#hooks) | Periodic maintenance scripts |
 | [`mention`](#mention) | Auto-spawn on `@lazybox` mention |
 | [`auto_fix`](#auto_fix) | Auto-fix PRs on CI failure / conflict |
+| [`conventions`](#conventions) | Commit / PR conventions injected into the agent-work brief |
 | [`shell`](#shell) | Shell command for the `s` spawn |
 
 Snippet workflows are **not** part of `config.yaml` — they live in their own
@@ -525,6 +526,20 @@ Opt-in — it pushes commits to your PRs with no manual nudge.
 | `max_attempts` | int | `3` | Attempts per PR, per failure-kind, per `window` |
 | `cooldown` | duration | `1h` | Minimum gap between attempts on the same PR (floored at 60s) |
 | `window` | duration | `24h` | Rolling window the `max_attempts` budget is measured over |
+
+## `conventions`
+
+Commit / PR naming conventions injected into the agent-work brief. Defaults
+reproduce the built-in guidance (Conventional Commits, a `Closes #N.` line that
+collapses an issue and its PR into one row), so an unset block changes nothing.
+Honored on autonomous spawns (`@lazybox` mentions, `lazybox:` labels, auto-fix)
+and on the interactive `w` work command.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `commit_style` | `conventional` \| `none` \| `custom` | `conventional` | Commit-message / PR-title-prefix style. `conventional` = [Conventional Commits](https://www.conventionalcommits.org/); `none` = no convention; `custom` = use `custom_instruction`. An unknown value falls back to `conventional`. |
+| `custom_instruction` | string | _(unset)_ | House style injected verbatim when `commit_style: custom`. A blank value falls back to the default guidance. |
+| `include_closes` | bool | `true` | Keep the `Closes #N.` body line that collapses an issue and its PR. Set `false` to have the brief tell the agent NOT to add it (repos that close issues manually). |
 
 ## `shell`
 

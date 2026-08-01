@@ -51,7 +51,10 @@ Hold to these principles. They matter more than moving fast.
 ## PR hygiene
 
 - One logical change per PR. Don't bundle unrelated work.
-- Title is concise and references the issue, e.g. `Add foo to bar (#N)`.
+- Use [Conventional Commits](https://www.conventionalcommits.org/) for commit
+  messages — a type prefix (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`,
+  `test:`, …) then a concise summary. Give the PR title the same prefix.
+- Title is concise and references the issue, e.g. `fix: add foo to bar (#N)`.
   Don't copy the issue title verbatim.
 - Body starts with a `Closes #N.` line on its own (so the issue auto-closes
   on merge), then a `## Summary` (1–3 bullets on *why*, not a diff recap),

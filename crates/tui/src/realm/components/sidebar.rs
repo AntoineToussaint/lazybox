@@ -206,6 +206,18 @@ impl Sidebar {
         self.inner.set_default_agent(agent);
     }
 
+    /// The commit/PR conventions the `w` work brief injects. Delegates
+    /// to the inner pane.
+    pub fn conventions(&self) -> &lazybox_core::Conventions {
+        self.inner.conventions()
+    }
+
+    /// Wire the YAML-configured `conventions:` block at startup.
+    /// Delegates to the inner pane.
+    pub fn set_conventions(&mut self, conventions: lazybox_core::Conventions) {
+        self.inner.set_conventions(conventions);
+    }
+
     /// Conversation `w` should target on `workspace_key`: one running
     /// conversation wins over `default_agent`; several ask the user
     /// which exact terminal should receive the prompt (#418).

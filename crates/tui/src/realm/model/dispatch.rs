@@ -1382,7 +1382,8 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         let workspace = self.sidebar.selected_workspace();
         let selected = self.right.selected_activity_indices();
-        let intent = crate::intent::resolve_work(workspace, &selected, agent_id);
+        let intent =
+            crate::intent::resolve_work(workspace, &selected, agent_id, self.sidebar.conventions());
         match intent {
             crate::intent::Intent::SpawnAgent {
                 workspace_key,

@@ -18,7 +18,7 @@
 //! means" lives in a pure function, the test reads:
 //!
 //! ```text
-//! let intent = resolve_work(Some(&ci_failing_pr), &[], "claude");
+//! let intent = resolve_work(Some(&ci_failing_pr), &[], "claude", &lazybox_core::Conventions::default());
 //! assert!(matches!(intent, Intent::SpawnAgent { prompt, .. }
 //!     if prompt.unwrap().contains("CI is failing")));
 //! ```
@@ -29,7 +29,7 @@
 
 use std::time::Duration;
 
-use lazybox_core::{ActivityFingerprint, SessionKey, Workspace, WorkspaceKey};
+use lazybox_core::{ActivityFingerprint, Conventions, SessionKey, Workspace, WorkspaceKey};
 
 /// One activity row to persist as read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +300,7 @@ pub fn resolve_work(
     workspace: Option<&Workspace>,
     selected_comments: &[usize],
     agent_id: &str,
+    conventions: &Conventions,
 ) -> Intent {
     let Some(ws) = workspace else {
         return Intent::NoOp;
@@ -313,7 +314,12 @@ pub fn resolve_work(
     let prompt = match priority {
         WorkPriority::TidyUp => return Intent::Notice(terminal_steer_message(ws)),
         WorkPriority::StartHere => None,
-        _ => Some(prompt_for_priority(ws, priority, selected_comments)),
+        _ => Some(prompt_for_priority(
+            ws,
+            priority,
+            selected_comments,
+            conventions,
+        )),
     };
     Intent::SpawnAgent {
         workspace_key: session_key,
@@ -336,6 +342,7 @@ fn prompt_for_priority(
     ws: &Workspace,
     priority: WorkPriority,
     selected_comments: &[usize],
+    conventions: &Conventions,
 ) -> String {
     let fallback = |ws: &Workspace| {
         tracing::debug!(
@@ -369,7 +376,9 @@ fn prompt_for_priority(
         WorkPriority::ReviewCode => build_review_pr_prompt(ws),
         WorkPriority::WorkOnPr => build_general_pr_prompt(ws),
         WorkPriority::ImplementIssue => match ws.gh_issues.first() {
-            Some(issue) => lazybox_core::prompts::build_implement_issue_prompt(issue),
+            Some(issue) => {
+                lazybox_core::prompts::build_implement_issue_prompt_with(issue, conventions)
+            }
             None => fallback(ws),
         },
         // Handled directly in `resolve_work` (a bare spawn / a steer
@@ -956,7 +965,10 @@ mod tests {
 
     #[test]
     fn work_with_no_workspace_is_noop() {
-        assert_eq!(resolve_work(None, &[], "claude"), Intent::NoOp);
+        assert_eq!(
+            resolve_work(None, &[], "claude", &lazybox_core::Conventions::default()),
+            Intent::NoOp
+        );
     }
 
     // ── classifier/builder drift must not panic ───────────────────
@@ -973,7 +985,12 @@ mod tests {
         // A workspace with no PR at all can never satisfy
         // build_fix_ci_prompt — the drifted FixCi must fall back.
         let ws = empty();
-        let prompt = prompt_for_priority(&ws, WorkPriority::FixCi, &[]);
+        let prompt = prompt_for_priority(
+            &ws,
+            WorkPriority::FixCi,
+            &[],
+            &lazybox_core::Conventions::default(),
+        );
         assert!(
             prompt.contains("Continue work on"),
             "expected the generic work prompt, got: {prompt}"
@@ -986,7 +1003,12 @@ mod tests {
         // returns None even though the (drifted) classification says
         // FixConflict.
         let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
-        let prompt = prompt_for_priority(&ws, WorkPriority::FixConflict, &[]);
+        let prompt = prompt_for_priority(
+            &ws,
+            WorkPriority::FixConflict,
+            &[],
+            &lazybox_core::Conventions::default(),
+        );
         assert!(
             prompt.contains("Continue work on"),
             "expected the generic work prompt, got: {prompt}"
@@ -998,7 +1020,12 @@ mod tests {
         // No gh_issues on the workspace — the drifted ImplementIssue
         // must fall back instead of expecting `.first()`.
         let ws = empty();
-        let prompt = prompt_for_priority(&ws, WorkPriority::ImplementIssue, &[]);
+        let prompt = prompt_for_priority(
+            &ws,
+            WorkPriority::ImplementIssue,
+            &[],
+            &lazybox_core::Conventions::default(),
+        );
         assert!(
             prompt.contains("Continue work on"),
             "expected the generic work prompt, got: {prompt}"
@@ -1006,9 +1033,48 @@ mod tests {
     }
 
     #[test]
+    fn interactive_work_honors_configured_conventions() {
+        // #3: the interactive `w w` path must inject the user's
+        // conventions into the issue brief, not silently use defaults.
+        let ws = issue("o/r#7");
+        let conv = lazybox_core::Conventions {
+            commit_style: lazybox_core::CommitStyle::Custom,
+            custom_instruction: Some("Gitmoji prefixes on every commit".into()),
+            ..Default::default()
+        };
+        let intent = resolve_work(Some(&ws), &[], "claude", &conv);
+        let Intent::SpawnAgent { prompt, .. } = intent else {
+            panic!("expected SpawnAgent");
+        };
+        let prompt = prompt.expect("issue work carries a prompt");
+        assert!(
+            prompt.contains("Gitmoji prefixes on every commit"),
+            "interactive brief must honor configured conventions"
+        );
+        // Default conventions leave the brief on the built-in Conventional
+        // Commits guidance (no override paragraph).
+        let default_prompt = match resolve_work(
+            Some(&ws),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        ) {
+            Intent::SpawnAgent { prompt, .. } => prompt.unwrap(),
+            _ => panic!("expected SpawnAgent"),
+        };
+        assert!(!default_prompt.contains("Gitmoji"));
+        assert!(default_prompt.contains("Conventional Commits"));
+    }
+
+    #[test]
     fn work_on_ci_failing_pr_returns_fix_ci_agent() {
         let ws = pr("o/r#1", CiStatus::Failure, ReviewStatus::Pending);
-        let intent = resolve_work(Some(&ws), &[], "claude");
+        let intent = resolve_work(
+            Some(&ws),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        );
         match intent {
             Intent::SpawnAgent {
                 agent_id, prompt, ..
@@ -1028,7 +1094,12 @@ mod tests {
         // and the hint bar shows nothing under `w`.
         let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
         ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
-        let intent = resolve_work(Some(&ws), &[], "claude");
+        let intent = resolve_work(
+            Some(&ws),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        );
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
                 let prompt = prompt.expect("conflict-fix carries a prompt");
@@ -1052,7 +1123,12 @@ mod tests {
         // doesn't accidentally swap the order.
         let mut ws = pr("o/r#7", CiStatus::Failure, ReviewStatus::None);
         ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
-        let intent = resolve_work(Some(&ws), &[], "claude");
+        let intent = resolve_work(
+            Some(&ws),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        );
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
                 let prompt = prompt.expect("carries prompt");
@@ -1137,7 +1213,12 @@ mod tests {
                 classified, expected,
                 "classify_work mismatch for `{name}`: got {classified:?}, expected {expected:?}",
             );
-            let intent = resolve_work(Some(&ws), comments, "claude");
+            let intent = resolve_work(
+                Some(&ws),
+                comments,
+                "claude",
+                &lazybox_core::Conventions::default(),
+            );
             match (classified, &intent) {
                 // StartHere spawns a bare agent (prompt None); the rest
                 // carry a prompt — both are `SpawnAgent`.
@@ -1191,7 +1272,12 @@ mod tests {
             diff_hunk: None,
             thread_id: None,
         });
-        let intent = resolve_work(Some(&ws), &[0], "claude");
+        let intent = resolve_work(
+            Some(&ws),
+            &[0],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        );
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
                 let prompt = prompt.expect("carries prompt");
@@ -1210,7 +1296,12 @@ mod tests {
         // PR with nothing flagged still fires, with a neutral
         // "keep working on this PR" prompt — never a silent no-op.
         let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Pending);
-        match resolve_work(Some(&ws), &[], "claude") {
+        match resolve_work(
+            Some(&ws),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        ) {
             Intent::SpawnAgent { prompt, .. } => {
                 let prompt = prompt.expect("work-on-PR carries a prompt");
                 assert!(prompt.contains("Continue work on"), "{prompt}");
@@ -1225,7 +1316,12 @@ mod tests {
         // footer action, but `w` must still launch the default agent
         // when pressed — the user expects it to work from every PR.
         let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
-        match resolve_work(Some(&ws), &[], "claude") {
+        match resolve_work(
+            Some(&ws),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        ) {
             Intent::SpawnAgent { .. } => {}
             other => panic!("expected SpawnAgent, got {other:?}"),
         }
@@ -1234,7 +1330,12 @@ mod tests {
     #[test]
     fn work_on_issue_returns_implement_agent() {
         let ws = issue("o/r#42");
-        let intent = resolve_work(Some(&ws), &[], "claude");
+        let intent = resolve_work(
+            Some(&ws),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        );
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
                 let prompt = prompt.expect("implement carries a prompt");
@@ -1254,7 +1355,12 @@ mod tests {
             classify_work(Some(&empty()), &[]),
             Some(WorkPriority::StartHere)
         );
-        match resolve_work(Some(&empty()), &[], "claude") {
+        match resolve_work(
+            Some(&empty()),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        ) {
             Intent::SpawnAgent {
                 agent_id, prompt, ..
             } => {
@@ -1273,7 +1379,12 @@ mod tests {
         let mut ws = pr("o/r#7", CiStatus::Success, ReviewStatus::Approved);
         ws.pr.as_mut().expect("pr present").state = TaskState::Merged;
         assert_eq!(classify_work(Some(&ws), &[]), Some(WorkPriority::TidyUp));
-        match resolve_work(Some(&ws), &[], "claude") {
+        match resolve_work(
+            Some(&ws),
+            &[],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        ) {
             Intent::Notice(msg) => {
                 assert!(msg.contains("merged"), "{msg}");
                 assert!(msg.contains("x x"), "names the archive chord: {msg}");
@@ -1290,7 +1401,12 @@ mod tests {
         ws.gh_issues[0].state = TaskState::Closed;
         assert_eq!(classify_work(Some(&ws), &[]), Some(WorkPriority::TidyUp));
         assert!(matches!(
-            resolve_work(Some(&ws), &[], "claude"),
+            resolve_work(
+                Some(&ws),
+                &[],
+                "claude",
+                &lazybox_core::Conventions::default()
+            ),
             Intent::Notice(_)
         ));
     }
@@ -1317,7 +1433,12 @@ mod tests {
             Some(WorkPriority::AddressComments)
         );
         assert!(matches!(
-            resolve_work(Some(&ws), &[0], "claude"),
+            resolve_work(
+                Some(&ws),
+                &[0],
+                "claude",
+                &lazybox_core::Conventions::default()
+            ),
             Intent::SpawnAgent { .. }
         ));
     }
@@ -1338,7 +1459,12 @@ mod tests {
             diff_hunk: None,
             thread_id: None,
         });
-        let intent = resolve_work(Some(&ws), &[0], "claude");
+        let intent = resolve_work(
+            Some(&ws),
+            &[0],
+            "claude",
+            &lazybox_core::Conventions::default(),
+        );
         match intent {
             Intent::SpawnAgent { prompt, .. } => {
                 let prompt = prompt.expect("carries prompt");
@@ -1706,7 +1832,12 @@ mod tests {
     #[test]
     fn agent_id_is_honored() {
         let ws = pr("o/r#1", CiStatus::Failure, ReviewStatus::Pending);
-        let intent = resolve_work(Some(&ws), &[], "codex");
+        let intent = resolve_work(
+            Some(&ws),
+            &[],
+            "codex",
+            &lazybox_core::Conventions::default(),
+        );
         match intent {
             Intent::SpawnAgent { agent_id, .. } => assert_eq!(agent_id, "codex"),
             other => panic!("expected SpawnAgent, got {other:?}"),

@@ -12,7 +12,7 @@ use lazybox_core::{Project, ProjectKey, SessionKey, Workspace};
 use lazybox_ipc::AgentState;
 use lazybox_server::api_gateway::DesktopEvent;
 use lazybox_tui_core::inbox::{
-    ComputeInputs, FilterSet, InboxView, Mailbox, SortMode, compute_inbox_view,
+    ComputeInputs, Filter, FilterSet, InboxView, Mailbox, SearchState, SortMode, compute_inbox_view,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -27,6 +27,10 @@ pub struct InboxModel {
     attention: AttentionConfig,
     projects: BTreeMap<ProjectKey, Project>,
     filters: FilterSet,
+    /// Global free-text search query (empty = inactive). Fed into the
+    /// shared search with a `None` scope so it filters every project,
+    /// unlike the TUI's cursor-scoped `/`.
+    search: String,
 }
 
 impl InboxModel {
@@ -39,6 +43,7 @@ impl InboxModel {
             attention,
             projects,
             filters: FilterSet::new(),
+            search: String::new(),
         }
     }
 
@@ -49,6 +54,7 @@ impl InboxModel {
             DesktopEvent::Snapshot {
                 workspaces,
                 terminals,
+                ..
             } => {
                 self.workspaces = workspaces
                     .iter()
@@ -110,7 +116,25 @@ impl InboxModel {
         }
     }
 
+    /// Replace the active filter set (the multi-select filter menu's
+    /// output). An empty list clears all filters.
+    pub fn set_filters(&mut self, filters: impl IntoIterator<Item = Filter>) {
+        self.filters.replace(filters);
+    }
+
+    /// Set the global search query. Trimmed; an empty query is inactive.
+    pub fn set_search(&mut self, query: String) {
+        self.search = query;
+    }
+
     pub fn view(&self, now: chrono::DateTime<chrono::Utc>) -> InboxView {
+        // `scope: None` = global search across every project (the
+        // desktop has no cursor-scoped repo like the TUI's `/`).
+        let search = (!self.search.trim().is_empty()).then(|| SearchState {
+            scope: None,
+            query: self.search.clone(),
+            editing: false,
+        });
         compute_inbox_view(ComputeInputs {
             workspaces: &self.workspaces,
             mailbox: Mailbox::Inbox,
@@ -122,7 +146,7 @@ impl InboxModel {
             attention: &self.attention,
             agents: &self.agents,
             now,
-            search: None,
+            search: search.as_ref(),
         })
     }
 }
@@ -193,6 +217,7 @@ mod tests {
         assert!(m.apply(&DesktopEvent::Snapshot {
             workspaces: vec![pr("k1", "owner/r", 1)],
             terminals: vec![],
+            recent_snippets: vec![],
         }));
         assert_eq!(m.view(now()).total, 1);
 
@@ -234,6 +259,7 @@ mod tests {
         m.apply(&DesktopEvent::Snapshot {
             workspaces: vec![pr("k1", "owner/r", 1)],
             terminals: vec![],
+            recent_snippets: vec![],
         });
         m.toggle_collapsed("owner/r");
         let view = m.view(now());
@@ -251,6 +277,64 @@ mod tests {
         );
         m.toggle_collapsed("owner/r");
         assert!(m.view(now()).collapsed.is_empty());
+    }
+
+    #[test]
+    fn set_filters_narrows_the_view_and_surfaces_menu_and_chips() {
+        use lazybox_tui_core::inbox::Filter;
+        let mut m = model();
+        m.apply(&DesktopEvent::Snapshot {
+            workspaces: vec![pr("k1", "owner/r", 1), pr("k2", "owner/r", 2)],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+
+        // Menu is always present with all predicates and live counts.
+        let base = m.view(now());
+        assert_eq!(base.filter_menu.len(), Filter::ALL.len());
+        assert!(base.filter_chips.is_empty());
+        let pr_count = base
+            .filter_menu
+            .iter()
+            .find(|i| i.filter == Filter::Pr)
+            .map(|i| i.count);
+        assert_eq!(pr_count, Some(2));
+
+        // An Issue filter hides both PRs; the chip and active flag show.
+        m.set_filters([Filter::Issue]);
+        let filtered = m.view(now());
+        assert_eq!(filtered.total, 0);
+        assert_eq!(filtered.filter_chips, vec!["issue".to_string()]);
+        assert!(
+            filtered
+                .filter_menu
+                .iter()
+                .find(|i| i.filter == Filter::Issue)
+                .is_some_and(|i| i.active)
+        );
+
+        // Clearing restores the full view.
+        m.set_filters([]);
+        assert_eq!(m.view(now()).total, 2);
+    }
+
+    #[test]
+    fn set_search_filters_globally_across_repos() {
+        let mut m = model();
+        m.apply(&DesktopEvent::Snapshot {
+            workspaces: vec![pr("k1", "owner/a", 1), pr("k2", "owner/b", 2)],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+        // Number search keeps only the matching workspace, even though the
+        // two live in different repo groups (global scope).
+        m.set_search("2".into());
+        let view = m.view(now());
+        assert_eq!(view.total, 1);
+        assert!(view.workspaces.contains_key("k2"));
+        // Clearing the query restores everything.
+        m.set_search(String::new());
+        assert_eq!(m.view(now()).total, 2);
     }
 
     #[test]

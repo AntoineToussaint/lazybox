@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod inbox;
+mod snippets;
 
 use bytes::Bytes;
 use inbox::InboxModel;
@@ -9,14 +10,16 @@ use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
     CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
     DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand,
-    DesktopInfo, DesktopRepository, DesktopStreamMessage, GatewayOptions, JsonClientFrame,
-    JsonServerFrame, PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER, ProtocolResponse,
-    TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
+    DesktopEvent, DesktopInfo, DesktopRepository, DesktopStreamMessage, GatewayOptions,
+    JsonClientFrame, JsonServerFrame, PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER,
+    ProtocolResponse, TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
-use lazybox_tui_core::inbox::{InboxView, SortMode};
+use lazybox_tui_core::inbox::{Filter, InboxView, SortMode};
+use lazybox_tui_core::snippets::{PickerRow, SnippetPickerView};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use snippets::SnippetModel;
 use std::collections::BTreeSet;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
@@ -62,6 +65,10 @@ struct DesktopState {
     /// Frontend channel the recomputed `InboxView` is pushed onto. Set
     /// once by `subscribe_events`.
     inbox_channel: Arc<Mutex<Option<Channel<InboxView>>>>,
+    /// State-of-record for the snippet picker (#734): the catalog plus the
+    /// daemon-owned MRU, reduced from the control stream. The frontend
+    /// pulls a recomputed view per keystroke via `snippet_view`.
+    snippets: Arc<Mutex<SnippetModel>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -501,6 +508,44 @@ async fn toggle_repo_collapsed(
     Ok(())
 }
 
+/// Recompute the snippet picker view for `filter` from the catalog and
+/// the daemon-owned MRU. Called on open and on every keystroke; the
+/// shared `tui-core::snippets` logic does the grouping / filter / recent
+/// float / auto-submit so the desktop matches the TUI picker (#734).
+#[tauri::command]
+async fn snippet_view(
+    state: State<'_, DesktopState>,
+    filter: String,
+) -> Result<SnippetPickerView, String> {
+    Ok(state.snippets.lock().await.view(&filter))
+}
+
+/// Replace the active filter set from the multi-select filter menu and
+/// re-emit the recomputed view. An empty list clears all filters.
+#[tauri::command]
+async fn set_filters(state: State<'_, DesktopState>, filters: Vec<Filter>) -> Result<(), String> {
+    let view = {
+        let mut model = state.inbox.lock().await;
+        model.set_filters(filters);
+        model.view(now_utc())
+    };
+    emit_inbox_view(&state, view).await;
+    Ok(())
+}
+
+/// Set the global search query and re-emit the recomputed view. An
+/// empty query clears the search.
+#[tauri::command]
+async fn set_search(state: State<'_, DesktopState>, query: String) -> Result<(), String> {
+    let view = {
+        let mut model = state.inbox.lock().await;
+        model.set_search(query);
+        model.view(now_utc())
+    };
+    emit_inbox_view(&state, view).await;
+    Ok(())
+}
+
 fn now_utc() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
 }
@@ -600,8 +645,9 @@ async fn subscribe_events(
     let control_gateway = state.gateway.clone();
     let inbox = state.inbox.clone();
     let inbox_channel = state.inbox_channel.clone();
+    let snippets = state.snippets.clone();
     tauri::async_runtime::spawn(async move {
-        stream_control_events(control_gateway, on_event, inbox, inbox_channel).await;
+        stream_control_events(control_gateway, on_event, inbox, inbox_channel, snippets).await;
     });
 
     let terminal_gateway = state.gateway.clone();
@@ -658,9 +704,12 @@ async fn stream_control_events(
     on_event: Channel<DesktopStreamMessage>,
     inbox: Arc<Mutex<InboxModel>>,
     inbox_channel: Arc<Mutex<Option<Channel<InboxView>>>>,
+    snippets: Arc<Mutex<SnippetModel>>,
 ) {
     loop {
-        match stream_control_events_once(&gateway, &on_event, &inbox, &inbox_channel).await {
+        match stream_control_events_once(&gateway, &on_event, &inbox, &inbox_channel, &snippets)
+            .await
+        {
             Ok(()) => {
                 let _ = on_event.send(DesktopStreamMessage::Disconnected {
                     message: "gateway control stream ended".to_string(),
@@ -679,6 +728,7 @@ async fn stream_control_events_once(
     on_event: &Channel<DesktopStreamMessage>,
     inbox: &Arc<Mutex<InboxModel>>,
     inbox_channel: &Arc<Mutex<Option<Channel<InboxView>>>>,
+    snippets: &Arc<Mutex<SnippetModel>>,
 ) -> Result<(), String> {
     let mut response = gateway
         .authorized(gateway.client.get(gateway.url("/v1/events")))
@@ -702,6 +752,19 @@ async fn stream_control_events_once(
         for frame in decoder.push(&chunk)? {
             let JsonServerFrame::Event(event) = frame;
             if let Some(event) = desktop_event(event) {
+                // Keep the snippet MRU aligned with the daemon: seed from
+                // every snapshot, advance on every delivery (from any
+                // client). The frontend pulls a recomputed view per
+                // keystroke, so there's no channel to push here.
+                match &event {
+                    DesktopEvent::Snapshot {
+                        recent_snippets, ..
+                    } => snippets.lock().await.seed_recent(recent_snippets.clone()),
+                    DesktopEvent::SnippetDelivered { snippet_key, .. } => {
+                        snippets.lock().await.record_recent(snippet_key.clone())
+                    }
+                    _ => {}
+                }
                 // Reduce into the inbox state-of-record and re-emit the
                 // grouped view when the workspace/agent maps changed.
                 let recomputed = {
@@ -1176,6 +1239,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
     let inbox = InboxModel::new(user_config.attention.clone(), inbox_projects(&repositories));
+    let snippets = SnippetModel::new(load_snippet_catalog());
 
     Ok(DesktopState {
         gateway,
@@ -1191,7 +1255,18 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         gateway_task: Mutex::new(Some(gateway_task)),
         inbox: Arc::new(Mutex::new(inbox)),
         inbox_channel: Arc::new(Mutex::new(None)),
+        snippets: Arc::new(Mutex::new(snippets)),
     })
+}
+
+/// Load the client-wide snippet catalog (built-in → global → launch
+/// directory) and project it to the key-sorted picker rows the shared
+/// logic expects, mirroring how the TUI seeds its picker.
+fn load_snippet_catalog() -> Vec<PickerRow> {
+    lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref())
+        .all()
+        .map(|(key, snippet)| PickerRow::new(key, snippet))
+        .collect()
 }
 
 /// Synthesize a project record per configured repository so the grouped
@@ -1267,6 +1342,9 @@ fn main() {
             cycle_sort_mode,
             set_sort_mode,
             toggle_repo_collapsed,
+            snippet_view,
+            set_filters,
+            set_search,
             send_command,
             send_terminal_frame,
             read_terminal_data,

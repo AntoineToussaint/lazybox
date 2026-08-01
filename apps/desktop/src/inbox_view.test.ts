@@ -1,8 +1,15 @@
 // @vitest-environment happy-dom
 
 import { describe, expect, it, vi } from "vitest";
-import type { InboxView, StatusTag, WorkspaceRow } from "./generated";
+import type {
+  FilterMenuItem,
+  InboxView,
+  StatusTag,
+  WorkspaceRow,
+} from "./generated";
 import {
+  activeFilters,
+  filterMenuGroups,
   kindHeaderLabel,
   renderInboxList,
   statusTone,
@@ -78,6 +85,8 @@ function groupedView(): InboxView {
     collapsed: [],
     total: 3,
     unread_total: 2,
+    filter_menu: [],
+    filter_chips: [],
   };
 }
 
@@ -195,5 +204,55 @@ describe("inbox view rendering", () => {
       "owner/repo#11",
       "owner/repo#20",
     ]);
+  });
+});
+
+describe("filter menu", () => {
+  function item(overrides: Partial<FilterMenuItem>): FilterMenuItem {
+    return {
+      filter: "Author",
+      axis: "Role",
+      label: "author",
+      count: 0,
+      active: false,
+      ...overrides,
+    };
+  }
+
+  // A shape mirroring `tui-core`'s ordered menu: State rows, then Role,
+  // then Kind. The grouping is derived purely from this — nothing about
+  // the 14 predicates is hardcoded on the TS side.
+  const menu: FilterMenuItem[] = [
+    item({ filter: "WithAgent", axis: "State", label: "with-agent", count: 3 }),
+    item({ filter: "CiFailing", axis: "State", label: "ci-failing", count: 1 }),
+    item({ filter: "Author", axis: "Role", label: "author", count: 5, active: true }),
+    item({ filter: "Reviewer", axis: "Role", label: "reviewer", count: 2 }),
+    item({ filter: "Pr", axis: "Kind", label: "PR", count: 6, active: true }),
+    item({ filter: "Issue", axis: "Kind", label: "issue", count: 4 }),
+  ];
+
+  it("groups the menu by axis, preserving the shared order", () => {
+    const groups = filterMenuGroups(menu);
+    expect(groups.map((group) => group.axis)).toEqual(["State", "Role", "Kind"]);
+    expect(groups[0]?.items.map((entry) => entry.label)).toEqual([
+      "with-agent",
+      "ci-failing",
+    ]);
+    expect(groups[2]?.items.map((entry) => entry.label)).toEqual([
+      "PR",
+      "issue",
+    ]);
+  });
+
+  it("selects the active filters in menu order for chips", () => {
+    expect(activeFilters(menu).map((entry) => entry.filter)).toEqual([
+      "Author",
+      "Pr",
+    ]);
+  });
+
+  it("returns no groups for an empty menu", () => {
+    expect(filterMenuGroups([])).toEqual([]);
+    expect(activeFilters([])).toEqual([]);
   });
 });

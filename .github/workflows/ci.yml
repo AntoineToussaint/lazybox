@@ -8,12 +8,22 @@
 #
 # Stable Linux clippy, tests, and rustdoc run in one job so the slow native
 # build and target cache are restored once and reused by all three gates.
+#
+# `push: main` exists only to seed the cache, not to gate anything. GitHub
+# shares a cache with a PR only if it was created on the PR's base branch, so
+# without a run on `main` every PR's first build restores nothing and
+# recompiles the whole workspace from scratch (the bulk of the 9-13m runs).
+# The post-merge `main` run compiles once and saves the caches that every
+# later PR restores; `rust-build-env` gates cache *saves* to `main` for the
+# same reason (see that action).
 
 name: CI
 
 on:
   pull_request:
   merge_group:
+  push:
+    branches: [main]
 
 jobs:
   changes:
@@ -220,6 +230,9 @@ jobs:
       - uses: ./.github/actions/rust-build-env
         with:
           rust-components: clippy,rustfmt
+          cache-workspaces: |
+            .
+            apps/desktop/src-tauri
       - name: Verify generated desktop contract
         run: |
           cargo run -p lazybox-server --features desktop-contract --bin generate-desktop-contract

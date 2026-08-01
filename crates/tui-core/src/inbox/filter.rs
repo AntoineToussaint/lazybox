@@ -180,6 +180,55 @@ pub struct FilterCtx<'a> {
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
 }
 
+/// One row of the filter menu, carrying everything a non-TUI client
+/// needs to draw it without re-deriving any predicate metadata: the
+/// [`Filter`] itself, its [`FilterAxis`] (for the State/Role/Kind
+/// grouping), the human label, how many of the candidate workspaces
+/// match this predicate, and whether it's currently active. Built by
+/// [`Filter::menu`] in [`Filter::ALL`] order so the desktop can group
+/// by axis with a single linear pass.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct FilterMenuItem {
+    pub filter: Filter,
+    pub axis: FilterAxis,
+    pub label: String,
+    pub count: u32,
+    pub active: bool,
+}
+
+impl Filter {
+    /// The full filter menu in [`Filter::ALL`] order: every predicate
+    /// with its axis, label, per-filter match count over `candidates`,
+    /// and active flag. `candidates` are the workspaces the current
+    /// mailbox admits *before* the active set narrows further — the
+    /// count answers "what would this toggle surface", matching the
+    /// TUI's `filter_counts`. Both clients build their menu from this,
+    /// so the 14 predicates and their grouping live in one place.
+    pub fn menu(
+        candidates: &[&Workspace],
+        agents: &HashMap<SessionKey, lazybox_ipc::AgentState>,
+        active: &FilterSet,
+    ) -> Vec<FilterMenuItem> {
+        Filter::ALL
+            .into_iter()
+            .map(|filter| {
+                let count = candidates
+                    .iter()
+                    .filter(|w| filter.matches(&FilterCtx { w, agents }))
+                    .count() as u32;
+                FilterMenuItem {
+                    filter,
+                    axis: filter.axis(),
+                    label: filter.label().to_string(),
+                    count,
+                    active: active.active.contains(&filter),
+                }
+            })
+            .collect()
+    }
+}
+
 /// The active set of filters. Empty (the default) is a no-op that
 /// accepts every workspace.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -242,5 +291,142 @@ impl FilterSet {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+    use lazybox_core::{
+        CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskKind, TaskRole, TaskState, Workspace,
+        WorkspaceKey,
+    };
+
+    fn now() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 4, 1, 12, 0, 0).unwrap()
+    }
+
+    fn workspace(key: &str, role: TaskRole, ci: CiStatus, kind: TaskKind) -> Workspace {
+        let task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("owner/r#{key}"),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role,
+            ci,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "x".into(),
+            repo: Some("owner/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: Some(kind),
+            closes_issues: vec![],
+        };
+        let mut ws = Workspace::from_task(task, now());
+        ws.key = WorkspaceKey(key.into());
+        ws
+    }
+
+    #[test]
+    fn menu_lists_every_filter_in_axis_order_with_counts() {
+        let agents = HashMap::new();
+        let a = workspace("a", TaskRole::Author, CiStatus::Failure, TaskKind::Pr);
+        let b = workspace("b", TaskRole::Reviewer, CiStatus::Success, TaskKind::Issue);
+        let candidates = vec![&a, &b];
+        let menu = Filter::menu(&candidates, &agents, &FilterSet::new());
+
+        // All 14, in ALL order, none active.
+        assert_eq!(menu.len(), Filter::ALL.len());
+        assert!(menu.iter().all(|item| !item.active));
+        assert_eq!(menu.first().map(|i| i.filter), Some(Filter::WithAgent));
+        assert_eq!(menu[0].axis, FilterAxis::State);
+
+        let count = |f: Filter| menu.iter().find(|i| i.filter == f).map(|i| i.count);
+        assert_eq!(count(Filter::CiFailing), Some(1));
+        assert_eq!(count(Filter::Author), Some(1));
+        assert_eq!(count(Filter::Reviewer), Some(1));
+        assert_eq!(count(Filter::Pr), Some(1));
+        assert_eq!(count(Filter::Issue), Some(1));
+    }
+
+    #[test]
+    fn menu_marks_active_filters() {
+        let agents = HashMap::new();
+        let a = workspace("a", TaskRole::Author, CiStatus::Success, TaskKind::Pr);
+        let mut active = FilterSet::new();
+        active.toggle(Filter::Author);
+        let menu = Filter::menu(&[&a], &agents, &active);
+        let author = menu.iter().find(|i| i.filter == Filter::Author).unwrap();
+        assert!(author.active);
+        assert!(
+            menu.iter()
+                .filter(|i| i.filter != Filter::Author)
+                .all(|i| !i.active)
+        );
+    }
+
+    /// Within an axis filters OR; across axes they AND. Author-OR-Reviewer
+    /// keeps either role, but adding the PR kind axis drops the issue.
+    #[test]
+    fn within_axis_is_or_across_axes_is_and() {
+        let agents = HashMap::new();
+        let author_pr = workspace("a", TaskRole::Author, CiStatus::Success, TaskKind::Pr);
+        let reviewer_issue = workspace("b", TaskRole::Reviewer, CiStatus::Success, TaskKind::Issue);
+
+        let mut roles = FilterSet::new();
+        roles.toggle(Filter::Author);
+        roles.toggle(Filter::Reviewer);
+        assert!(roles.accepts(&FilterCtx {
+            w: &author_pr,
+            agents: &agents
+        }));
+        assert!(roles.accepts(&FilterCtx {
+            w: &reviewer_issue,
+            agents: &agents
+        }));
+
+        roles.toggle(Filter::Pr);
+        assert!(roles.accepts(&FilterCtx {
+            w: &author_pr,
+            agents: &agents
+        }));
+        assert!(
+            !roles.accepts(&FilterCtx {
+                w: &reviewer_issue,
+                agents: &agents
+            }),
+            "PR-kind axis ANDs, so the reviewer issue is filtered out"
+        );
+    }
+
+    #[test]
+    fn chips_are_active_labels_in_menu_order() {
+        let mut set = FilterSet::new();
+        set.toggle(Filter::Issue);
+        set.toggle(Filter::CiFailing);
+        // Insertion order was Issue then CiFailing, but chips follow ALL order.
+        assert_eq!(set.chips(), vec!["ci-failing", "issue"]);
     }
 }

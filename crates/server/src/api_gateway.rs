@@ -259,6 +259,17 @@ pub enum DesktopCommand {
         session_key: lazybox_core::SessionKey,
         body: String,
     },
+    /// Deliver a snippet to a live terminal (the `]]s` picker's send).
+    /// The daemon derives the workspace from `terminal_id`, does the
+    /// agent-vs-shell encoding + settle-gated inject, records both MRUs,
+    /// and emits [`DesktopEvent::SnippetDelivered`] — the desktop only
+    /// picks the row and targets the focused terminal.
+    DeliverSnippet {
+        terminal_id: TerminalId,
+        snippet_key: String,
+        category: String,
+        body: String,
+    },
     Refresh,
 }
 
@@ -309,6 +320,17 @@ impl DesktopCommand {
             DesktopCommand::PostReply { session_key, body } => {
                 Command::PostReply { session_key, body }
             }
+            DesktopCommand::DeliverSnippet {
+                terminal_id,
+                snippet_key,
+                category,
+                body,
+            } => Command::DeliverSnippet {
+                terminal_id,
+                snippet_key,
+                category,
+                body,
+            },
             DesktopCommand::Refresh => Command::Refresh,
         }
     }
@@ -330,6 +352,10 @@ pub enum DesktopEvent {
     Snapshot {
         workspaces: Vec<lazybox_core::Workspace>,
         terminals: Vec<DesktopTerminalSnapshot>,
+        /// Global most-recently-used snippet keys, newest first, owned by
+        /// the daemon (#548) so the desktop's "Recent" group shares one
+        /// MRU with the in-process TUI.
+        recent_snippets: Vec<String>,
     },
     WorkspaceUpserted(Box<lazybox_core::Workspace>),
     WorkspaceRemoved(lazybox_core::WorkspaceKey),
@@ -350,6 +376,14 @@ pub enum DesktopEvent {
         session_key: lazybox_core::SessionKey,
         terminal_id: TerminalId,
         state: lazybox_ipc::AgentState,
+    },
+    /// A snippet delivery reached its terminal and the daemon updated the
+    /// MRU. Every client applies the same dedup/prepend/cap locally so
+    /// the "Recent" group stays in sync across clients between snapshots.
+    SnippetDelivered {
+        terminal_id: TerminalId,
+        session_key: lazybox_core::SessionKey,
+        snippet_key: String,
     },
     ProviderError {
         source: String,
@@ -388,6 +422,7 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
         Event::Snapshot {
             workspaces,
             terminals,
+            recent_snippets,
             ..
         } => Some(DesktopEvent::Snapshot {
             workspaces,
@@ -401,6 +436,7 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
                     agent_state: terminal.agent_state,
                 })
                 .collect(),
+            recent_snippets,
         }),
         Event::WorkspaceUpserted(workspace) => Some(DesktopEvent::WorkspaceUpserted(workspace)),
         Event::WorkspaceRemoved(key) => Some(DesktopEvent::WorkspaceRemoved(key)),
@@ -434,6 +470,16 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             session_key,
             terminal_id,
             state,
+        }),
+        Event::SnippetDelivered {
+            terminal_id,
+            session_key,
+            snippet_key,
+            ..
+        } => Some(DesktopEvent::SnippetDelivered {
+            terminal_id,
+            session_key,
+            snippet_key,
         }),
         Event::ProviderError {
             source, message, ..

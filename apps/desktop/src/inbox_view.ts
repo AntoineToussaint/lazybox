@@ -4,6 +4,8 @@
 // view-model's rows and enums to DOM, classes, and colors.
 
 import type {
+  FilterAxis,
+  FilterMenuItem,
   InboxView,
   StatusTag,
   VisibleRow,
@@ -42,6 +44,35 @@ export function statusTone(status: StatusTag): BadgeTone {
     case "None":
       return "neutral";
   }
+}
+
+export interface FilterMenuGroup {
+  axis: FilterAxis;
+  items: FilterMenuItem[];
+}
+
+/**
+ * Group the shared filter menu by axis (State / Role / Kind),
+ * preserving the order `tui-core` emits. The menu is already ordered so
+ * an axis's rows are contiguous, so a single linear pass suffices — the
+ * desktop never hardcodes the predicate list or its grouping.
+ */
+export function filterMenuGroups(menu: FilterMenuItem[]): FilterMenuGroup[] {
+  const groups: FilterMenuGroup[] = [];
+  for (const item of menu) {
+    const last = groups[groups.length - 1];
+    if (last === undefined || last.axis !== item.axis) {
+      groups.push({ axis: item.axis, items: [item] });
+    } else {
+      last.items.push(item);
+    }
+  }
+  return groups;
+}
+
+/** The active filters, in menu order — the removable header chips. */
+export function activeFilters(menu: FilterMenuItem[]): FilterMenuItem[] {
+  return menu.filter((item) => item.active);
 }
 
 /** Section header label for a workspace-kind band. */

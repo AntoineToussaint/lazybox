@@ -38,6 +38,7 @@ vi.mock("@xterm/xterm", () => ({
     focus(): void {}
     reset(): void {}
     dispose(): void {}
+    attachCustomKeyEventHandler(): void {}
     onData(): { dispose: () => void } {
       return { dispose: () => {} };
     }
@@ -443,6 +444,105 @@ describe("credential-free desktop workflow", () => {
     releaseCreate?.();
   });
 
+  it("opens the snippet picker over the focused terminal and delivers a pick", async () => {
+    harness.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:acme/widget"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      if (command === "snippet_view") {
+        return Promise.resolve(snippetView((args as { filter: string }).filter));
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    // No terminal yet → the snippet button is inert.
+    expect(button("snippet-button").disabled).toBe(true);
+
+    // Attach an agent terminal to the selected workspace, so ⌘/Ctrl-J has
+    // a target.
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    pushInbox([{ number: 42 }]);
+    await vi.waitFor(() =>
+      expect(button("snippet-button").disabled).toBe(false),
+    );
+
+    // Open via the keyboard shortcut and pick a row → it delivers to the
+    // focused terminal id.
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", metaKey: true }),
+    );
+    await vi.waitFor(() => expect(dialog("snippet-dialog").open).toBe(true));
+    const rows = document.querySelectorAll<HTMLButtonElement>(".snippet-row");
+    expect(rows.length).toBe(2);
+    rows[0]?.click();
+    await vi.waitFor(() =>
+      expect(deliverCommands()).toContainEqual({
+        terminal_id: 7,
+        snippet_key: "rev",
+        category: "Review",
+        body: "Review the current diff.",
+      }),
+    );
+    await vi.waitFor(() => expect(dialog("snippet-dialog").open).toBe(false));
+
+    // Typing a full unique key auto-submits without a click (parity with
+    // the TUI `]]srev` fast path).
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", metaKey: true }),
+    );
+    await vi.waitFor(() => expect(dialog("snippet-dialog").open).toBe(true));
+    const filter = input("#snippet-filter");
+    filter.value = "rev";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(
+        deliverCommands().filter((c) => c.snippet_key === "rev"),
+      ).toHaveLength(2),
+    );
+    expect(dialog("snippet-dialog").open).toBe(false);
+  });
+
   it("labels a task-less workspace with a friendly name in the picker", async () => {
     harness.invoke.mockImplementation((command: string) => {
       if (command === "desktop_setup_state") {
@@ -831,7 +931,20 @@ function inboxViewFor(rows: Array<{ number: number; unread?: number }>): unknown
     collapsed: [],
     total: rows.length,
     unread_total: unread,
+    filter_menu: filterMenuFor(rows.length),
+    filter_chips: [],
   };
+}
+
+// A minimal shared-shape filter menu so the desktop renders its grouped
+// menu; counts track the pushed row count.
+function filterMenuFor(count: number): unknown[] {
+  return [
+    { filter: "Unread", axis: "State", label: "unread", count: 0, active: false },
+    { filter: "Author", axis: "Role", label: "author", count, active: false },
+    { filter: "Pr", axis: "Kind", label: "PR", count, active: false },
+    { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
+  ];
 }
 
 function workspaceRowFor(row: { number: number; unread?: number }): unknown {
@@ -882,6 +995,62 @@ function createCommands(): unknown[] {
       command !== null &&
       "CreateWorkspace" in command,
   );
+}
+
+// The `DeliverSnippet` payloads sent to the gateway, unwrapped.
+function deliverCommands(): Array<{
+  terminal_id: number;
+  snippet_key: string;
+  category: string;
+  body: string;
+}> {
+  return commandCalls()
+    .filter(
+      (command): command is { DeliverSnippet: Record<string, unknown> } =>
+        typeof command === "object" &&
+        command !== null &&
+        "DeliverSnippet" in command,
+    )
+    .map((command) => command.DeliverSnippet as never);
+}
+
+// The grouped view `snippet_view` would return: `rev` and `pr`, with the
+// exact-key auto-submit target set only when the filter uniquely matches.
+function snippetView(filter: string): unknown {
+  return {
+    filter,
+    groups: [
+      {
+        category: "Review",
+        label: "Review",
+        rows: [
+          {
+            key: "rev",
+            description: "Review the current diff",
+            category: "Review",
+            body: "Review the current diff.",
+            origin: "built-in",
+          },
+        ],
+      },
+      {
+        category: "Git & PR",
+        label: "Git & PR",
+        rows: [
+          {
+            key: "pr",
+            description: "Open a PR",
+            category: "Git & PR",
+            body: "Open a PR.",
+            origin: "built-in",
+          },
+        ],
+      },
+    ],
+    auto_submit: filter === "rev" ? "rev" : null,
+    visible_count: 2,
+    total: 2,
+  };
 }
 
 function settingsCalls(): unknown[] {

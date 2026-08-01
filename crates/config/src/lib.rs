@@ -1143,11 +1143,14 @@ impl Config {
     /// tier chords). A configured block with an empty `tiers` list is
     /// treated as "unset" so it transparently inherits the built-in —
     /// except its `default` and `priority`, which overlay the inherited
-    /// menu (each replaced wholesale when set) so
-    /// `agents.<id>.models.default: L` alone (the Settings default-model
-    /// pick) or a bare `priority:` map works without copying the whole
-    /// tier list into YAML. A `default` naming a Fable tier is never
-    /// honored — it re-points to the first default-eligible tier.
+    /// menu: `default` replaces the inherited default, and each `priority`
+    /// the user maps replaces just that priority's inherited mapping (the
+    /// ones they omit stay inherited). So `agents.<id>.models.default: L`
+    /// alone (the Settings default-model pick) or adding a single
+    /// `priority.best: B` works without copying the whole tier list into
+    /// YAML and without silently dropping the built-in `high`/`medium`/`low`
+    /// mappings. A `default` naming a Fable tier is never honored — it
+    /// re-points to the first default-eligible tier.
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
         let mut models = match self.agents.get(agent_id) {
             Some(entry) if !entry.models.tiers.is_empty() => entry.models.clone(),
@@ -1157,9 +1160,7 @@ impl Config {
                     if let Some(default) = entry.models.default.clone() {
                         models.default = Some(default);
                     }
-                    if !entry.models.priority.is_unset() {
-                        models.priority = entry.models.priority.clone();
-                    }
+                    models.priority.overlay(&entry.models.priority);
                 }
                 models
             }
@@ -1182,6 +1183,30 @@ impl Config {
         models
     }
 
+    /// Human-readable warnings for every configured agent whose model
+    /// menu names an alias no tier defines — a `default` or `priority.*`
+    /// that dangles. Such a reference resolves to no args, so the spawn
+    /// silently keeps the agent's own hard-coded model instead of the
+    /// tier the config appears to request; surfacing it makes that no-op
+    /// discoverable (issue #748).
+    pub fn model_alias_warnings(&self) -> Vec<String> {
+        self.agents
+            .keys()
+            .flat_map(|agent_id| {
+                self.agent_models(agent_id)
+                    .dangling_aliases()
+                    .into_iter()
+                    .map(move |(source, alias)| {
+                        format!(
+                            "agents.{agent_id}.models.{source} names alias {alias:?}, \
+                             which no tier defines — the spawn will silently keep \
+                             {agent_id}'s own default model"
+                        )
+                    })
+            })
+            .collect()
+    }
+
     /// Load from `~/.lazybox/config.yaml`, falling back to defaults.
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::default_path();
@@ -1198,6 +1223,9 @@ impl Config {
         let contents = std::fs::read_to_string(path)?;
         let config = Self::parse(&contents)?;
         tracing::info!("Loaded config from {}", path.display());
+        for warning in config.model_alias_warnings() {
+            tracing::warn!("{warning}");
+        }
         // The file can hold Slack tokens — tighten pre-existing
         // group/other-readable configs to owner-only. Best-effort:
         // a read-only mount must not make the config unloadable.
@@ -2582,25 +2610,89 @@ agents:
     }
 
     #[test]
-    fn agent_models_priority_alone_overlays_the_builtin_menu() {
+    fn agent_models_priority_overlays_per_field_without_wiping_the_builtin() {
+        use lazybox_core::PriorityTier;
+        // The user remaps only `high`; the built-in tiers are inherited,
+        // so the priorities they didn't mention must keep their built-in
+        // mappings (medium → Sonnet, low → Haiku) rather than fall to
+        // nothing and silently upgrade every medium/low task.
         let yaml = r#"
 agents:
   claude:
     models:
       priority:
-        high: M
+        high: S
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse priority-only models");
         let m = cfg.agent_models("claude");
         assert!(!m.tiers.is_empty(), "builtin tiers are inherited");
         assert_eq!(
-            m.alias_for_priority(lazybox_core::PriorityTier::High),
-            Some("M")
+            m.alias_for_priority(PriorityTier::High),
+            Some("S"),
+            "the user's mapping wins for the priority they set"
         );
         assert_eq!(
-            m.alias_for_priority(lazybox_core::PriorityTier::Medium),
-            None,
-            "the user's map replaces the builtin wholesale, like tiers"
+            m.alias_for_priority(PriorityTier::Medium),
+            Some("M"),
+            "an unmentioned priority keeps its built-in mapping"
+        );
+        assert_eq!(m.alias_for_priority(PriorityTier::Low), Some("S"));
+    }
+
+    #[test]
+    fn best_priority_spawns_a_model_and_effort_tier() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: L
+      tiers:
+        - alias: "B"
+          label: "Opus · max"
+          args: ["--model", "opus", "--reasoning-effort", "max"]
+        - alias: "L"
+          label: "Opus"
+          args: ["--model", "claude-opus-4-8"]
+      priority:
+        best: B
+        high: L
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse best-tier models");
+        let m = cfg.agent_models("claude");
+        assert_eq!(
+            m.alias_for_priority(lazybox_core::PriorityTier::Best),
+            Some("B")
+        );
+        assert_eq!(
+            m.resolve_args(m.alias_for_priority(lazybox_core::PriorityTier::Best)),
+            vec![
+                "--model".to_string(),
+                "opus".to_string(),
+                "--reasoning-effort".to_string(),
+                "max".to_string(),
+            ]
+        );
+        assert!(cfg.model_alias_warnings().is_empty());
+    }
+
+    #[test]
+    fn undefined_model_alias_warns_rather_than_silently_no_ops() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: L
+      tiers: []
+      priority:
+        best: B
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse dangling-alias models");
+        let warnings = cfg.model_alias_warnings();
+        assert!(
+            warnings.iter().any(|w| w.contains("priority.best")
+                && w.contains("\"B\"")
+                && w.contains("claude")),
+            "expected a warning naming the dangling priority.best alias, got {warnings:?}"
         );
     }
 

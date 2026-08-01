@@ -61,6 +61,20 @@ impl Default for Conventions {
 }
 
 impl Conventions {
+    /// Directive that countermands the preamble's standing "start the
+    /// PR body with a `Closes #N.` line" guidance when the user has
+    /// disabled the issue↔PR auto-close. `None` when `include_closes`
+    /// is true (the preamble stands unchallenged). Needed because the
+    /// preamble is a static, unconditional instruction — dropping the
+    /// concrete `Closes #N.` clause from the task text alone leaves the
+    /// agent still told to close the issue.
+    pub fn closes_override(&self) -> Option<&'static str> {
+        (!self.include_closes).then_some(
+            "Do NOT add a `Closes #N.` line to the PR body — this repository closes \
+             issues manually. Disregard the auto-close guidance in the principles above.",
+        )
+    }
+
     /// Guidance to append to a work brief when the configured style
     /// *differs* from the preamble's Conventional-Commits default.
     /// `None` when the default is in effect (the preamble already
@@ -125,6 +139,19 @@ mod tests {
         assert!(text.contains("Gitmoji prefixes on every commit"));
         // Trimmed, not verbatim with surrounding whitespace.
         assert!(!text.contains("  Gitmoji"));
+    }
+
+    #[test]
+    fn closes_override_only_when_disabled() {
+        // Default (include_closes: true) leaves the preamble unchallenged.
+        assert_eq!(Conventions::default().closes_override(), None);
+        let off = Conventions {
+            include_closes: false,
+            ..Default::default()
+        };
+        let text = off.closes_override().expect("override present");
+        assert!(text.contains("Do NOT add a `Closes #N.` line"));
+        assert!(text.contains("Disregard the auto-close guidance"));
     }
 
     #[test]

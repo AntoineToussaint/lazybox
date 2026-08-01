@@ -104,27 +104,39 @@ pub fn build_implement_issue_prompt_with(issue: &Task, conventions: &Conventions
     } else {
         String::new()
     };
+    // Order: the closes-override (issue↔PR) then the commit-style
+    // override, each as its own trailing paragraph. When
+    // `include_closes` is false the concrete clause above is dropped
+    // AND this note countermands the preamble's standing "add Closes #N"
+    // instruction — dropping the clause alone would leave the agent
+    // still told to close the issue.
+    let notes = notes_block(&[
+        conventions.closes_override().map(str::to_string),
+        conventions.commit_override(),
+    ]);
     format!(
         "{preamble}\n\n---\n\n\
          ## Task\n\n\
          Implement GitHub issue #{issue_number} in {repo}.\n\n\
          Issue title:\n{title_block}\
          {body_block}\
-         \nTitle the PR `… (#{issue_number})`{closes_clause}.{commit_note}",
+         \nTitle the PR `… (#{issue_number})`{closes_clause}.{notes}",
         preamble = AGENT_WORK_PREAMBLE.trim_end(),
         title_block = untrusted_block("issue title (third-party authored)", &issue.title),
-        commit_note = commit_note(conventions),
     )
 }
 
-/// The trailing convention-override paragraph for a brief, or empty
-/// when the default (Conventional Commits) is in effect. Kept as one
-/// helper so every builder appends it identically.
-fn commit_note(conventions: &Conventions) -> String {
-    conventions
-        .commit_override()
-        .map(|o| format!("\n\n{o}"))
-        .unwrap_or_default()
+/// Join zero or more convention-override notes into trailing
+/// paragraphs (each prefixed with a blank line), skipping the ones that
+/// are `None`. Empty when the default (Conventional Commits, closes on)
+/// is in effect, so a default config leaves the brief byte-for-byte
+/// unchanged.
+fn notes_block<S: AsRef<str>>(overrides: &[Option<S>]) -> String {
+    overrides
+        .iter()
+        .flatten()
+        .map(|o| format!("\n\n{}", o.as_ref()))
+        .collect()
 }
 
 /// Bulleted list of the PR's failing checks (`- name — url`), or a
@@ -178,12 +190,12 @@ pub fn build_fix_ci_prompt_with(task: &Task, conventions: &Conventions) -> Strin
          \n\nPull the failing logs before you theorize — `gh pr checks {pr_number}` \
          for the summary, then `gh run view --log-failed` (or open the check URLs \
          above) to read the tail of the failing step. Reproduce locally where you \
-         can.\
-         \n\nReply with a one-line root-cause + fix summary once the push is up.{commit_note}",
+         can.{notes}\
+         \n\nReply with a one-line root-cause + fix summary once the push is up.",
         preamble = AGENT_WORK_PREAMBLE.trim_end(),
         title_block = untrusted_block("PR title (third-party authored)", &task.title),
         checks_block = untrusted_block("CI check names and URLs (third-party authored)", &checks),
-        commit_note = commit_note(conventions),
+        notes = notes_block(&[conventions.commit_override()]),
     )
 }
 
@@ -221,12 +233,12 @@ pub fn build_fix_conflict_prompt_with(task: &Task, conventions: &Conventions) ->
          resolve each, preserving BOTH the PR's intent and the incoming base \
          changes — never blindly take one side.\
          \n- Build and run the project's checks to confirm the resolution holds, \
-         then commit the merge and push.\
+         then commit the merge and push.{notes}\
          \n\nReply with the files you resolved and a one-line note on any \
-         non-trivial resolution once the push is up.{commit_note}",
+         non-trivial resolution once the push is up.",
         preamble = AGENT_WORK_PREAMBLE.trim_end(),
         title_block = untrusted_block("PR title (third-party authored)", &task.title),
-        commit_note = commit_note(conventions),
+        notes = notes_block(&[conventions.commit_override()]),
     )
 }
 
@@ -528,6 +540,32 @@ mod tests {
     }
 
     #[test]
+    fn fix_brief_override_precedes_the_closing_reply_line() {
+        // #4: the convention override must come BEFORE the trailing
+        // "Reply with…" instruction so the closing directive stays last.
+        let conv = crate::Conventions {
+            commit_style: crate::CommitStyle::None,
+            ..Default::default()
+        };
+        let mut t = pr("o/r", 8, "Y");
+        t.ci = CiStatus::Failure;
+        for p in [
+            build_fix_ci_prompt_with(&t, &conv),
+            build_fix_conflict_prompt_with(&t, &conv),
+        ] {
+            let note_at = p.find("none required").expect("override present");
+            // `rfind`: the preamble's Workflow section also ends with a
+            // "Reply with the PR URL" line — we mean the builder's own
+            // closing reply, which is the LAST such occurrence.
+            let reply_at = p.rfind("Reply with").expect("closing reply line present");
+            assert!(
+                note_at < reply_at,
+                "override must precede the closing reply line"
+            );
+        }
+    }
+
+    #[test]
     fn custom_commit_instruction_is_injected_into_the_brief() {
         let conv = crate::Conventions {
             commit_style: crate::CommitStyle::Custom,
@@ -549,16 +587,25 @@ mod tests {
     }
 
     #[test]
-    fn include_closes_false_drops_the_closes_line() {
+    fn include_closes_false_countermands_the_preamble_close_line() {
         let issue = issue("o/r", 7, "X", None);
-        // Default keeps the Closes line (issue↔PR collapse).
+        // Default keeps the concrete Closes line (issue↔PR collapse).
         assert!(build_implement_issue_prompt(&issue).contains("Closes #7."));
         let conv = crate::Conventions {
             include_closes: false,
             ..Default::default()
         };
         let p = build_implement_issue_prompt_with(&issue, &conv);
+        // The concrete task-section clause is gone…
         assert!(!p.contains("Closes #7"));
+        // …AND, crucially, the brief actively tells the agent NOT to add
+        // one — otherwise the preamble's standing "start the body with a
+        // `Closes #N.` line" instruction would still make it close the
+        // issue. Dropping the clause alone (the original defect) left
+        // that preamble line uncontested.
+        assert!(p.contains("Do NOT add a `Closes #N.` line"));
+        assert!(p.contains("## PR hygiene")); // preamble's close line still present
+        assert!(p.contains("Closes #N.")); // the very instruction being countermanded
         // The PR-title `(#N)` suffix still stands.
         assert!(p.contains("(#7)"));
     }

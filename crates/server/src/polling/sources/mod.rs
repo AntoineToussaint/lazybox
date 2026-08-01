@@ -100,9 +100,11 @@ mod full_sweep_commit_tests {
 /// narrows by repo / org: when non-empty, only tasks whose
 /// `task.repo` matches a selected scope id pass through.
 ///
-/// Fields are private + constructed through [`GhSource::new`]: the
-/// `last_kind` cache has an invariant (initialized to `Full`) that a
-/// struct literal could trivially break. Use `new`.
+/// Fields are private. The one construction site is the struct literal
+/// in [`sources_for_with_engagement`], which resolves every field
+/// (scopes, filters, auto-fix, conventions, …) from config for the
+/// tick. `last_kind` is initialized to `Full` there so a never-fetched
+/// source doesn't block rescope.
 pub struct GhSource {
     client: GhClient,
     filter: ProviderConfig,
@@ -360,42 +362,6 @@ impl GhSource {
             .iter()
             .map(|hot| hot.target.clone())
             .collect()
-    }
-
-    pub fn new(
-        client: GhClient,
-        filter: ProviderConfig,
-        scopes: std::collections::BTreeSet<String>,
-        bus: tokio::sync::broadcast::Sender<Event>,
-        mention_allowed_logins: std::collections::BTreeSet<String>,
-        auto_fix: lazybox_core::AutoFixSettings,
-        scheduling: RoundRobinPick,
-    ) -> Self {
-        let governor_plan = client.begin_background_tick(Duration::from_secs(60));
-        Self {
-            client,
-            filter,
-            scopes,
-            watch_repos: std::collections::BTreeSet::new(),
-            detect_needs_reply: true,
-            bus,
-            mention_allowed_logins,
-            auto_fix,
-            conventions: lazybox_core::Conventions::default(),
-            pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
-            scheduling,
-            governor_plan,
-            cursor_store: None,
-            // Default to Full so a never-fetched source doesn't
-            // accidentally block rescope.
-            last_kind: parking_lot::Mutex::new(FetchMode::Full),
-            retry_after_secs: parking_lot::Mutex::new(None),
-            last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
-            last_windowed: parking_lot::Mutex::new(false),
-            hot_targets: Vec::new(),
-            cold_targets: std::collections::BTreeSet::new(),
-            poll_notifications: true,
-        }
     }
 
     fn set_last_kind(&self, kind: FetchMode) {

@@ -1939,12 +1939,17 @@ impl<T: TerminalAdapter> Model<T> {
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
+        conventions: lazybox_core::Conventions,
     ) {
         // Both panes consume the configured agent: sidebar `f` for
         // CI-fail, right pane `f` for selected comments.
         if let Some(agent) = default_agent.clone().filter(|s| !s.is_empty()) {
             self.right.set_default_agent(agent);
         }
+        // Both panes carry the conventions so a `w` from either builds
+        // the same convention-aware brief the daemon uses.
+        self.right.set_conventions(conventions.clone());
+        self.sidebar.set_conventions(conventions);
         self.sidebar
             .apply_inner_config(attention, collapsed_repos, default_agent, display);
         self.sidebar.set_keep_awake(ui.keep_awake);

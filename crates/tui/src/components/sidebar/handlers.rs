@@ -80,6 +80,7 @@ impl Sidebar {
                         self.selected_workspace(),
                         &[],
                         &self.default_agent,
+                        &self.conventions,
                     ),
                     crate::intent::Intent::SpawnAgent { .. }
                 ) =>
@@ -91,6 +92,7 @@ impl Sidebar {
                     self.selected_workspace(),
                     &[],
                     &self.default_agent,
+                    &self.conventions,
                 );
                 if let crate::intent::Intent::SpawnAgent {
                     workspace_key,

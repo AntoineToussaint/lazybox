@@ -931,7 +931,20 @@ function inboxViewFor(rows: Array<{ number: number; unread?: number }>): unknown
     collapsed: [],
     total: rows.length,
     unread_total: unread,
+    filter_menu: filterMenuFor(rows.length),
+    filter_chips: [],
   };
+}
+
+// A minimal shared-shape filter menu so the desktop renders its grouped
+// menu; counts track the pushed row count.
+function filterMenuFor(count: number): unknown[] {
+  return [
+    { filter: "Unread", axis: "State", label: "unread", count: 0, active: false },
+    { filter: "Author", axis: "Role", label: "author", count, active: false },
+    { filter: "Pr", axis: "Kind", label: "PR", count, active: false },
+    { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
+  ];
 }
 
 function workspaceRowFor(row: { number: number; unread?: number }): unknown {

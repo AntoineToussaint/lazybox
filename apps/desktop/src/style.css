@@ -174,9 +174,17 @@ textarea:focus-visible {
 
 .inbox-controls {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
   gap: 7px;
   padding: 0 16px 10px;
+}
+
+.inbox-search {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 9px;
+  border-radius: 7px;
+  font-size: 10px;
 }
 
 .sort-button {
@@ -189,6 +197,133 @@ textarea:focus-visible {
   color: #87cbb7;
   text-transform: none;
   letter-spacing: 0;
+}
+
+.filter-button {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.filter-button.active {
+  color: #87cbb7;
+  border-color: #48635d;
+}
+
+.filter-wrap {
+  position: relative;
+  display: flex;
+}
+
+.filter-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: 232px;
+  padding: 10px;
+  border: 1px solid #2f3a43;
+  border-radius: 9px;
+  background: #131a20;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.filter-menu.hidden {
+  display: none;
+}
+
+.filter-menu-hint {
+  margin: 0 0 8px;
+  color: #7d8d93;
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.filter-section {
+  margin-bottom: 6px;
+}
+
+.filter-section-heading {
+  margin: 6px 0 3px;
+  color: #6f7f85;
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.filter-row:hover {
+  background: #1a222a;
+}
+
+.filter-row input {
+  accent-color: #4f8f78;
+}
+
+.filter-row-label {
+  flex: 1 1 auto;
+  color: #cdd7da;
+  font-size: 10px;
+}
+
+.filter-row-count {
+  color: #7d8d93;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.filter-menu-footer {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.filter-menu-footer .quiet-button {
+  font-size: 9px;
+  padding: 5px 8px;
+}
+
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0 16px 10px;
+}
+
+.filter-chips.empty {
+  display: none;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px 3px 8px;
+  border: 1px solid #2c594c;
+  border-radius: 999px;
+  color: #8ad3bd;
+  background: #14271f;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.filter-chip:hover {
+  border-color: #3d7a66;
+}
+
+.filter-chip-remove {
+  font-size: 11px;
+  line-height: 1;
+  color: #6fae99;
 }
 
 input,

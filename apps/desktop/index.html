@@ -65,6 +65,48 @@
             </div>
           </div>
           <div class="inbox-controls">
+            <input
+              id="inbox-search"
+              class="inbox-search"
+              type="search"
+              placeholder="Search (/)"
+              aria-label="Search workspaces"
+              autocomplete="off"
+            />
+            <div class="filter-wrap">
+              <button
+                id="filter-button"
+                class="quiet-button filter-button"
+                type="button"
+                aria-haspopup="true"
+                aria-expanded="false"
+                aria-label="Filter workspaces"
+                title="Filter workspaces (f)"
+              >
+                Filter
+              </button>
+              <div
+                id="filter-menu"
+                class="filter-menu hidden"
+                role="dialog"
+                aria-label="Filter workspaces"
+              >
+                <p class="filter-menu-hint">
+                  Same section matches any (OR); across sections all must
+                  match (AND).
+                </p>
+                <div id="filter-menu-body" class="filter-menu-body"></div>
+                <div class="filter-menu-footer">
+                  <button
+                    id="filter-clear"
+                    class="quiet-button"
+                    type="button"
+                  >
+                    Clear filters
+                  </button>
+                </div>
+              </div>
+            </div>
             <button
               id="sort-button"
               class="quiet-button sort-button"
@@ -75,6 +117,12 @@
               Sort: <strong id="sort-label">split</strong>
             </button>
           </div>
+          <div
+            id="filter-chips"
+            class="filter-chips"
+            role="list"
+            aria-label="Active filters"
+          ></div>
           <div class="inbox-summary">
             <span id="workspace-count">Loading…</span>
             <span id="unread-count">0 unread</span>

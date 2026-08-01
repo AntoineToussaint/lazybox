@@ -26,7 +26,7 @@ pub use attention::{
     workspace_attention_signals, workspace_needs_attention,
 };
 pub use desktop_view::{InboxView, WorkspaceRow, compute_inbox_view};
-pub use filter::{Filter, FilterAxis, FilterCtx, FilterSet};
+pub use filter::{Filter, FilterAxis, FilterCtx, FilterMenuItem, FilterSet};
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind, role_rank,
 };
@@ -173,9 +173,15 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // subscriptions), and omitted while a filter is active — a
     // narrowed view listing every subscribed repo as an empty header
     // buries the few matches behind a wall of chrome, so under a
-    // filter only repos with matching workspaces get a header.
+    // filter only repos with matching workspaces get a header. A
+    // *global* search (`scope: None`, the desktop's global `/`) narrows
+    // the same way, so it suppresses them too; the TUI's scoped search
+    // leaves other projects untouched, so it keeps their headers.
+    let global_search = input
+        .search
+        .is_some_and(|s| !s.query.is_empty() && s.scope.is_none());
     let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
-    if input.mailbox == Mailbox::Inbox && input.filters.is_empty() {
+    if input.mailbox == Mailbox::Inbox && input.filters.is_empty() && !global_search {
         all_repos.extend(
             input
                 .projects
@@ -905,6 +911,36 @@ mod tests {
         assert_eq!(keys, vec!["k3"]);
     }
 
+    /// A global search suppresses empty subscribed-project headers (the
+    /// desktop's global `/`), while a scoped search keeps them (the
+    /// TUI's `/`).
+    #[test]
+    fn global_search_suppresses_empty_project_headers_scoped_keeps_them() {
+        let ws = HashMap::new();
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let mut projects = BTreeMap::new();
+        let pk = ProjectKey::github("owner", "empty");
+        projects.insert(
+            pk.clone(),
+            Project::new(pk, "owner/empty", chrono::Utc::now()),
+        );
+
+        // Global (scope None): the empty repo header is gone.
+        let global = global_search("anything");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&global);
+        assert!(compute_visible(i).visible.is_empty());
+
+        // Scoped (named repo): unrelated empty projects still get a header.
+        let scoped = search("some/other", "anything");
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.search = Some(&scoped);
+        assert!(compute_visible(i).summaries.contains_key("owner/empty"));
+    }
+
     /// An empty query is a no-op even when search state is present.
     #[test]
     fn empty_query_shows_full_tree() {
@@ -987,6 +1023,7 @@ mod contract_tests {
         assert!(SortMode::decl(&cfg).contains("SortMode"));
         assert!(Filter::decl(&cfg).contains("Filter"));
         assert!(FilterAxis::decl(&cfg).contains("FilterAxis"));
+        assert!(FilterMenuItem::decl(&cfg).contains("FilterMenuItem"));
         assert!(RepoSummary::decl(&cfg).contains("RepoSummary"));
         assert!(InboxView::decl(&cfg).contains("InboxView"));
         assert!(WorkspaceRow::decl(&cfg).contains("WorkspaceRow"));

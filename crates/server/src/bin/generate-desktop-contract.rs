@@ -22,7 +22,8 @@ use lazybox_server::api_gateway::{
     UnsupportedProtocolResponse, WorkspacesResponse,
 };
 use lazybox_tui_core::inbox::{
-    InboxView, RepoSummary, SortMode, VisibleRow, WorkspaceKind, WorkspaceRow,
+    Filter, FilterAxis, FilterMenuItem, InboxView, RepoSummary, SortMode, VisibleRow,
+    WorkspaceKind, WorkspaceRow,
 };
 use lazybox_tui_core::snippets::{PickerRow, SnippetGroup, SnippetPickerView};
 use std::path::PathBuf;
@@ -62,6 +63,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     RepoSummary::export_all(&config)?;
     SortMode::export_all(&config)?;
     WorkspaceKind::export_all(&config)?;
+    // Filter menu contract (#733): the desktop builds its filter menu
+    // generically from these, never hardcoding the predicate list.
+    FilterMenuItem::export_all(&config)?;
+    Filter::export_all(&config)?;
+    FilterAxis::export_all(&config)?;
 
     // Shared snippet-picker view-model (#734): grouped rows + auto-submit
     // computed by `tui-core::snippets`, so the desktop picker matches the
@@ -98,6 +104,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          export type { SnippetPickerView } from \"./SnippetPickerView\";\n\
          export type { SnippetGroup } from \"./SnippetGroup\";\n\
          export type { PickerRow } from \"./PickerRow\";\n\
+         export type { Filter } from \"./Filter\";\n\
+         export type { FilterAxis } from \"./FilterAxis\";\n\
+         export type { FilterMenuItem } from \"./FilterMenuItem\";\n\
          export type { StatusTag } from \"./StatusTag\";\n\
          export type { TerminalKind } from \"./TerminalKind\";\n\
          export type { DesktopTerminalSnapshot as TerminalSnapshot } from \"./DesktopTerminalSnapshot\";\n\

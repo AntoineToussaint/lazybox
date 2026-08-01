@@ -19,6 +19,8 @@ import {
   type DesktopInfo,
   type DesktopRepository,
   type DesktopStreamMessage,
+  type Filter,
+  type FilterMenuItem,
   type InboxView,
   type LazyboxCommand,
   type LazyboxEvent,
@@ -42,6 +44,8 @@ import {
   renderSnippetPreview,
 } from "./snippet_picker";
 import {
+  activeFilters,
+  filterMenuGroups,
   relativeTime,
   renderInboxList,
   workspaceKeysInOrder,
@@ -181,6 +185,12 @@ const workspaceCount = element<HTMLSpanElement>("workspace-count");
 const unreadTotal = element<HTMLSpanElement>("unread-count");
 const sortButton = element<HTMLButtonElement>("sort-button");
 const sortLabel = element<HTMLElement>("sort-label");
+const inboxSearch = element<HTMLInputElement>("inbox-search");
+const filterButton = element<HTMLButtonElement>("filter-button");
+const filterMenu = element<HTMLDivElement>("filter-menu");
+const filterMenuBody = element<HTMLDivElement>("filter-menu-body");
+const filterClear = element<HTMLButtonElement>("filter-clear");
+const filterChips = element<HTMLDivElement>("filter-chips");
 const newWorkspaceButton =
   element<HTMLButtonElement>("new-workspace-button");
 const workspaceEmpty = element<HTMLDivElement>("workspace-empty");
@@ -270,6 +280,12 @@ let defaultAgent = "claude";
 let previewMode = false;
 let inboxLoading = true;
 let inboxError: string | null = null;
+let filterMenuOpen = false;
+let searchTimer: number | undefined;
+// Optimistic active-filter set: updated synchronously on each toggle so
+// rapid clicks compose instead of racing the server round-trip. The
+// pushed view reconciles it (see `applyInboxView`).
+let activeFilterSet = new Set<Filter>();
 let setupState: DesktopSetupState | null = null;
 let discoveredRepositories: GithubRepositoryOption[] = [];
 let availableThemes: DesktopThemeOption[] = [];
@@ -352,6 +368,33 @@ replyForm.addEventListener("submit", (event) => {
 });
 
 sortButton.addEventListener("click", () => void cycleSortMode());
+filterButton.addEventListener("click", toggleFilterMenu);
+filterClear.addEventListener("click", () => {
+  activeFilterSet.clear();
+  renderFilterControls();
+  void applyFilters([]);
+});
+inboxSearch.addEventListener("input", () => {
+  if (searchTimer !== undefined) {
+    window.clearTimeout(searchTimer);
+  }
+  searchTimer = window.setTimeout(() => {
+    void applySearch(inboxSearch.value.trim());
+  }, 120);
+});
+document.addEventListener("click", (event) => {
+  if (!filterMenuOpen) {
+    return;
+  }
+  const target = event.target;
+  if (
+    target instanceof Node &&
+    (filterMenu.contains(target) || filterButton.contains(target))
+  ) {
+    return;
+  }
+  closeFilterMenu();
+});
 settingsButton.addEventListener("click", () => void openSettings());
 snippetButton.addEventListener("click", () => void openSnippetPicker());
 snippetFilter.addEventListener("input", () => void onSnippetFilterInput());
@@ -652,6 +695,13 @@ function updateNewWorkspaceButton(): void {
 function applyInboxView(view: InboxView): void {
   inboxView = view;
   inboxLoading = false;
+  // The server is authoritative: reconcile the optimistic set to the
+  // computed view. Each `set_filters` sends the full local set, so the
+  // final push after a burst of toggles carries the complete result and
+  // convergence is guaranteed — intermediate flicker at worst.
+  activeFilterSet = new Set(
+    activeFilters(view.filter_menu).map((item) => item.filter),
+  );
   const hadSelection = selectedKey !== null && workspaces.has(selectedKey);
   chooseInitialWorkspace();
   if (!hadSelection && selectedKey !== null) {
@@ -684,6 +734,149 @@ async function toggleRepoCollapsed(label: string): Promise<void> {
   }
 }
 
+function currentFilterMenu(): FilterMenuItem[] {
+  return inboxView?.filter_menu ?? [];
+}
+
+/**
+ * The shared menu with each row's `active` flag taken from the local
+ * optimistic set, so a just-clicked toggle shows immediately (and
+ * composes) rather than waiting for the server round-trip.
+ */
+function localizedFilterMenu(): FilterMenuItem[] {
+  return currentFilterMenu().map((item) => ({
+    ...item,
+    active: activeFilterSet.has(item.filter),
+  }));
+}
+
+async function applyFilters(filters: Filter[]): Promise<void> {
+  if (previewMode) {
+    return;
+  }
+  try {
+    await invoke("set_filters", { filters });
+  } catch (error) {
+    setStatus(String(error));
+  }
+}
+
+/** Toggle one predicate in the active set and re-request the view. */
+function toggleFilter(filter: Filter): void {
+  // Mutate the local set (not the last-pushed view) so back-to-back
+  // toggles compose instead of each reading a stale `active` flag.
+  if (!activeFilterSet.delete(filter)) {
+    activeFilterSet.add(filter);
+  }
+  renderFilterControls();
+  void applyFilters([...activeFilterSet]);
+}
+
+async function applySearch(query: string): Promise<void> {
+  if (previewMode) {
+    return;
+  }
+  try {
+    await invoke("set_search", { query });
+  } catch (error) {
+    setStatus(String(error));
+  }
+}
+
+function openFilterMenu(): void {
+  filterMenuOpen = true;
+  filterButton.setAttribute("aria-expanded", "true");
+  filterMenu.classList.remove("hidden");
+  renderFilterMenuBody();
+  filterMenu.querySelector<HTMLInputElement>("input")?.focus();
+}
+
+function closeFilterMenu(): void {
+  filterMenuOpen = false;
+  filterButton.setAttribute("aria-expanded", "false");
+  // Rescue focus back to the trigger before hiding, so an Escape/`f`
+  // close from inside the menu doesn't strand it on a display:none node.
+  // An outside click has already moved focus, so leave that case alone.
+  if (
+    document.activeElement instanceof Node &&
+    filterMenu.contains(document.activeElement)
+  ) {
+    filterButton.focus();
+  }
+  filterMenu.classList.add("hidden");
+}
+
+function toggleFilterMenu(): void {
+  if (filterMenuOpen) {
+    closeFilterMenu();
+  } else {
+    openFilterMenu();
+  }
+}
+
+function renderFilterControls(): void {
+  const menu = localizedFilterMenu();
+  const active = activeFilters(menu);
+  filterButton.textContent =
+    active.length === 0 ? "Filter" : `Filter (${active.length})`;
+  filterButton.classList.toggle("active", active.length > 0);
+  renderFilterChips(active);
+  if (filterMenuOpen) {
+    renderFilterMenuBody();
+  }
+}
+
+function renderFilterChips(active: FilterMenuItem[]): void {
+  filterChips.replaceChildren();
+  filterChips.classList.toggle("empty", active.length === 0);
+  for (const item of active) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "filter-chip";
+    chip.setAttribute("role", "listitem");
+    chip.setAttribute("aria-label", `Remove ${item.label} filter`);
+    chip.title = `Remove ${item.label} filter`;
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    const remove = document.createElement("span");
+    remove.className = "filter-chip-remove";
+    remove.setAttribute("aria-hidden", "true");
+    remove.textContent = "×";
+    chip.append(label, remove);
+    chip.addEventListener("click", () => toggleFilter(item.filter));
+    filterChips.append(chip);
+  }
+}
+
+function renderFilterMenuBody(): void {
+  filterMenuBody.replaceChildren();
+  for (const group of filterMenuGroups(localizedFilterMenu())) {
+    const section = document.createElement("div");
+    section.className = "filter-section";
+    const heading = document.createElement("p");
+    heading.className = "filter-section-heading";
+    heading.textContent = group.axis;
+    section.append(heading);
+    for (const item of group.items) {
+      const row = document.createElement("label");
+      row.className = "filter-row";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = item.active;
+      checkbox.addEventListener("change", () => toggleFilter(item.filter));
+      const label = document.createElement("span");
+      label.className = "filter-row-label";
+      label.textContent = item.label;
+      const count = document.createElement("span");
+      count.className = "filter-row-count";
+      count.textContent = String(item.count);
+      row.append(checkbox, label, count);
+      section.append(row);
+    }
+    filterMenuBody.append(section);
+  }
+}
+
 function renderInbox(): void {
   workspaceList.replaceChildren();
   workspaceList.setAttribute("aria-busy", String(inboxLoading));
@@ -692,6 +885,7 @@ function renderInbox(): void {
   const unread = inboxView?.unread_total ?? 0;
   workspaceCount.textContent = `${total} workspace${total === 1 ? "" : "s"}`;
   unreadTotal.textContent = `${unread} unread`;
+  renderFilterControls();
 
   if (inboxError !== null) {
     renderInboxMessage(inboxError, true);
@@ -2064,6 +2258,19 @@ function handleKeyboard(event: KeyboardEvent): void {
     void openSnippetPicker();
     return;
   }
+  // Escape closes the filter menu or leaves the search box, ahead of
+  // the editable guard so it works while the search input has focus.
+  if (event.key === "Escape") {
+    if (filterMenuOpen) {
+      event.preventDefault();
+      closeFilterMenu();
+      return;
+    }
+    if (document.activeElement === inboxSearch) {
+      inboxSearch.blur();
+      return;
+    }
+  }
   const target = event.target;
   const editable =
     target instanceof HTMLInputElement ||
@@ -2121,6 +2328,12 @@ function handleKeyboard(event: KeyboardEvent): void {
   } else if (event.key === "o") {
     event.preventDefault();
     void cycleSortMode();
+  } else if (event.key === "f") {
+    event.preventDefault();
+    toggleFilterMenu();
+  } else if (event.key === "/") {
+    event.preventDefault();
+    inboxSearch.focus();
   } else if (event.key === "R") {
     event.preventDefault();
     void refreshInbox(true);

@@ -84,6 +84,30 @@ pub struct AgentAuthCommands {
     pub login: Vec<String>,
 }
 
+/// How to give an agent a per-session credential home so an expired token
+/// or an account switch on one session never disturbs the machine-wide
+/// login shared by every other session.
+///
+/// A CLI that reads `home_env` to relocate its credential/config directory
+/// can be pointed at a private directory per lazybox workspace. lazybox
+/// seeds `seed_files` from the machine-wide home (`$home_env`, else
+/// `$HOME/<default_home>`) once, so the session starts already
+/// authenticated but re-logs in isolation — a `logout`/`login` on one
+/// session rewrites only that session's copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialIsolation {
+    /// Env var the CLI reads to relocate its credential/config home
+    /// (Codex → `CODEX_HOME`).
+    pub home_env: &'static str,
+    /// Machine-wide home relative to `$HOME`, used as the seed source when
+    /// `home_env` is unset (Codex → `.codex`).
+    pub default_home: &'static str,
+    /// Files under the home carrying login (and user config) state that
+    /// must be copied into a fresh per-session home so it starts
+    /// authenticated.
+    pub seed_files: &'static [&'static str],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthFailure {
     pub reason: &'static str,
@@ -227,6 +251,14 @@ pub trait Agent: Send + Sync {
     /// from recent PTY output.
     fn detect_auth_failure(&self, recent_output: &[u8]) -> Option<AuthFailure> {
         let _ = recent_output;
+        None
+    }
+
+    /// Per-session credential-home isolation for this agent, when its CLI
+    /// can relocate its credential directory through an environment
+    /// variable. `None` (the default) leaves the agent on the machine-wide
+    /// login, where a re-auth on one session cascades to every other.
+    fn credential_isolation(&self) -> Option<CredentialIsolation> {
         None
     }
 
@@ -827,6 +859,22 @@ pub mod builtins {
             crate::detect::codex_auth_failure(recent_output)
         }
 
+        /// Isolate each Codex session's login under its own `CODEX_HOME` so
+        /// a re-auth (expired token / account switch) on one session never
+        /// re-logs the machine-wide `~/.codex` and disrupts the fleet. The
+        /// login lives in `auth.json` inside the home; `config.toml` carries
+        /// the user's provider/model config, so both are seeded. Claude
+        /// deliberately opts out: on macOS its OAuth credential lives in the
+        /// login Keychain, not under `CLAUDE_CONFIG_DIR`, so relocating the
+        /// config dir would not isolate the credential.
+        fn credential_isolation(&self) -> Option<CredentialIsolation> {
+            Some(CredentialIsolation {
+                home_env: "CODEX_HOME",
+                default_home: ".codex",
+                seed_files: &["auth.json", "config.toml"],
+            })
+        }
+
         /// Suppress Homebrew's implicit self-update inside a spawned Codex
         /// session. Codex's Homebrew build shells out to
         /// `brew upgrade --cask codex` when the user accepts its on-launch
@@ -1304,6 +1352,19 @@ mod tests {
             super::builtins::Codex.spawn_env(),
             vec![("HOMEBREW_NO_AUTO_UPDATE".to_string(), "1".to_string())]
         );
+    }
+
+    #[test]
+    fn codex_isolates_credentials_per_session_claude_does_not() {
+        let iso = super::builtins::Codex
+            .credential_isolation()
+            .expect("codex isolates its login");
+        assert_eq!(iso.home_env, "CODEX_HOME");
+        assert_eq!(iso.default_home, ".codex");
+        assert!(iso.seed_files.contains(&"auth.json"));
+        // Claude's macOS credential lives in the Keychain, not under a
+        // relocatable config dir, so it stays on the machine-wide login.
+        assert!(Claude.credential_isolation().is_none());
     }
 
     #[test]

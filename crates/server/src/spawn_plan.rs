@@ -1,4 +1,4 @@
-use lazybox_agents::{Agent, Registry, SpawnCtx};
+use lazybox_agents::{Agent, CredentialIsolation, Registry, SpawnCtx};
 use lazybox_core::{SessionId, SessionKey};
 use lazybox_ipc::{AgentRunAccess, SpawnOrigin, TerminalId, TerminalKind, UserPrompt};
 use std::path::{Path, PathBuf};
@@ -162,6 +162,11 @@ pub(crate) fn build_spawn_plan(
             env.push((key, value));
         }
     }
+    for (key, value) in credential_home_env(agent.as_deref(), &session_key) {
+        if !env.iter().any(|(existing, _)| existing == &key) {
+            env.push((key, value));
+        }
+    }
     let env = with_agent_spawn_defaults(env, agent.as_deref());
     let env = with_agent_pty_spawn_env(env, agent.as_deref());
     let env = with_worktree_cargo_target(env, Some(&cwd));
@@ -263,6 +268,80 @@ pub(crate) fn gateway_env_for_agent(
         .gateway_url()
         .map(|url| vec![(provider.base_url_env().to_string(), url.to_string())])
         .unwrap_or_default()
+}
+
+/// Per-session credential-home env for `agent`, or empty when the agent
+/// keeps the machine-wide login. Pure: computes the directory path only;
+/// [`seed_credential_home`] performs the one-time seed copy. Because the
+/// path is a deterministic function of `(agent_id, session_key)`, every
+/// launch of the same workspace's agent — fresh spawn, restart, and
+/// post-auth resume — points at the same isolated home without persisting
+/// anything.
+pub(crate) fn credential_home_env(
+    agent: Option<&dyn Agent>,
+    session_key: &SessionKey,
+) -> Vec<(String, String)> {
+    let Some(agent) = agent else {
+        return Vec::new();
+    };
+    let Some(iso) = agent.credential_isolation() else {
+        return Vec::new();
+    };
+    let dir = lazybox_core::paths::agent_home_dir(agent.id(), session_key.as_str());
+    vec![(iso.home_env.to_string(), dir.to_string_lossy().into_owned())]
+}
+
+/// Ensure the per-session credential home for `agent` in `session_key`
+/// exists and is seeded from the machine-wide login, so a fresh session
+/// starts authenticated. Best-effort: each `seed_files` entry is copied
+/// only when the destination lacks it, so a later re-auth (which rewrites
+/// the destination copy) is never clobbered, and IO failures are logged
+/// and left for the CLI's own login flow to surface. No-op for an agent
+/// that keeps the machine-wide login.
+pub(crate) fn seed_credential_home(agent: &dyn Agent, session_key: &SessionKey) {
+    let Some(iso) = agent.credential_isolation() else {
+        return;
+    };
+    let dest = lazybox_core::paths::agent_home_dir(agent.id(), session_key.as_str());
+    let source = machine_wide_credential_home(&iso);
+    seed_credential_files(iso.seed_files, &source, &dest);
+}
+
+/// Copy each `seed_files` entry from `source` into `dest`, but only where
+/// `dest` lacks it — so a re-auth that rewrote `dest`'s copy is never
+/// clobbered. Best-effort: a `dest == source` no-op (isolation disabled)
+/// and per-file IO errors are logged, not propagated; the CLI's own login
+/// surfaces any real gap.
+fn seed_credential_files(seed_files: &[&str], source: &Path, dest: &Path) {
+    if dest == source {
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(dest) {
+        tracing::warn!(dir = %dest.display(), "credential-home: create failed: {e}");
+        return;
+    }
+    for file in seed_files {
+        let dest_file = dest.join(file);
+        if dest_file.exists() {
+            continue;
+        }
+        let src_file = source.join(file);
+        if src_file.exists()
+            && let Err(e) = std::fs::copy(&src_file, &dest_file)
+        {
+            tracing::warn!(src = %src_file.display(), "credential-home: seed copy failed: {e}");
+        }
+    }
+}
+
+/// The machine-wide credential home lazybox seeds a per-session copy from:
+/// the daemon's own `$home_env` when set, else `$HOME/<default_home>`.
+fn machine_wide_credential_home(iso: &CredentialIsolation) -> PathBuf {
+    if let Some(dir) = std::env::var_os(iso.home_env).filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(iso.default_home)
 }
 
 pub(crate) fn with_agent_spawn_defaults(
@@ -408,6 +487,84 @@ mod tests {
             }
         );
         assert_eq!(plan.model_label.as_deref(), Some("Sonnet"));
+    }
+
+    #[test]
+    fn codex_plan_isolates_credentials_with_per_session_home() {
+        let cfg = lazybox_config::Config::default();
+        let input = input(TerminalKind::Agent("codex".into()));
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        let codex_home = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == "CODEX_HOME")
+            .map(|(_, v)| v.clone())
+            .expect("codex spawn gets an isolated CODEX_HOME");
+        assert!(
+            codex_home.ends_with("agent-homes/codex/github-acme-widget-657"),
+            "unexpected CODEX_HOME: {codex_home}"
+        );
+    }
+
+    #[test]
+    fn credential_seed_copies_login_once_and_never_clobbers_a_reauth() {
+        let base = std::env::temp_dir().join(format!("lazybox-credseed-{}", std::process::id()));
+        let source = base.join("source");
+        let dest = base.join("dest");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("auth.json"), b"machine-wide token").unwrap();
+        std::fs::write(source.join("config.toml"), b"model = \"o1\"").unwrap();
+
+        // Fresh home: both files are seeded from the machine-wide login.
+        seed_credential_files(&["auth.json", "config.toml"], &source, &dest);
+        assert_eq!(
+            std::fs::read(dest.join("auth.json")).unwrap(),
+            b"machine-wide token"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("config.toml")).unwrap(),
+            b"model = \"o1\""
+        );
+
+        // A re-auth rewrote this session's own copy; re-seeding must leave
+        // it alone (isolation is the whole point) while still filling any
+        // gap left behind.
+        std::fs::write(dest.join("auth.json"), b"this-session token").unwrap();
+        std::fs::remove_file(dest.join("config.toml")).unwrap();
+        seed_credential_files(&["auth.json", "config.toml"], &source, &dest);
+        assert_eq!(
+            std::fs::read(dest.join("auth.json")).unwrap(),
+            b"this-session token",
+            "an existing (re-authed) credential must never be overwritten"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("config.toml")).unwrap(),
+            b"model = \"o1\"",
+            "a missing seed file is refilled"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn claude_plan_stays_on_machine_wide_login() {
+        let cfg = lazybox_config::Config::default();
+        let input = input(TerminalKind::Agent("claude".into()));
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert!(
+            !plan
+                .env
+                .iter()
+                .any(|(k, _)| k == "CODEX_HOME" || k == "CLAUDE_CONFIG_DIR"),
+            "claude must not get a per-session credential home: {:?}",
+            plan.env
+        );
     }
 
     #[test]

@@ -51,6 +51,7 @@ struct RequiredAuth {
     display_name: String,
     reason: String,
     other_session_count: usize,
+    credentials_isolated: bool,
 }
 
 #[derive(Clone, Default)]
@@ -134,6 +135,7 @@ impl AgentRecoveryRegistry {
         display_name: String,
         reason: String,
         other_session_count: usize,
+        credentials_isolated: bool,
     ) -> bool {
         let mut requirements = self.requirements.lock().await;
         if requirements.contains_key(&terminal_id) {
@@ -146,6 +148,7 @@ impl AgentRecoveryRegistry {
                 display_name,
                 reason,
                 other_session_count,
+                credentials_isolated,
             },
         );
         true
@@ -395,6 +398,7 @@ impl AgentRecoveryRegistry {
                     display_name: required.display_name.clone(),
                     reason: required.reason.clone(),
                     other_session_count: required.other_session_count,
+                    credentials_isolated: required.credentials_isolated,
                 }),
         );
         (events, replay_backends)
@@ -428,17 +432,28 @@ pub(crate) async fn detect_required(
         .lock()
         .await
         .clone();
-    let meta = config.terminal.terminal_meta.lock().await;
-    let other_session_count = meta
-        .iter()
-        .filter(|(id, (_, kind))| {
-            **id != terminal_id
-                && !superseded.contains(id)
-                && !authenticating.contains(id)
-                && matches!(kind, TerminalKind::Agent(agent_id) if agent_id == &context.agent_id)
-        })
-        .count();
-    drop(meta);
+    // When this agent isolates its login per session (Codex → a private
+    // `CODEX_HOME`), a re-auth only rewrites this session's own credential;
+    // the rest of the fleet is untouched, so there is no cascade to warn
+    // about and the "other running sessions" count is moot.
+    let credentials_isolated = config
+        .agents
+        .get(&context.agent_id)
+        .and_then(|agent| agent.credential_isolation())
+        .is_some();
+    let other_session_count = if credentials_isolated {
+        0
+    } else {
+        let meta = config.terminal.terminal_meta.lock().await;
+        meta.iter()
+            .filter(|(id, (_, kind))| {
+                **id != terminal_id
+                    && !superseded.contains(id)
+                    && !authenticating.contains(id)
+                    && matches!(kind, TerminalKind::Agent(agent_id) if agent_id == &context.agent_id)
+            })
+            .count()
+    };
     let display_name = config
         .agents
         .get(&context.agent_id)
@@ -453,6 +468,7 @@ pub(crate) async fn detect_required(
             display_name.clone(),
             reason.clone(),
             other_session_count,
+            credentials_isolated,
         )
         .await
     {
@@ -464,6 +480,7 @@ pub(crate) async fn detect_required(
         display_name,
         reason,
         other_session_count,
+        credentials_isolated,
     });
 }
 
@@ -650,6 +667,12 @@ async fn run_reauthentication(
 ) {
     let recovery_terminal_id = context.terminal_id;
     let display_name = agent_display_name(&config, &context.agent_id);
+    // Scope the logout/login/resume to this session's own credential home
+    // (Codex → an isolated `CODEX_HOME`) so the provider commands rewrite
+    // only this session's login, never the machine-wide one the rest of the
+    // fleet shares. Empty for an agent that keeps the machine-wide login;
+    // the resume itself re-derives the same env through the spawn plan.
+    let auth_env = auth_credential_env(&config, &context);
     let previous_failure = config
         .agent_recovery
         .take_failure(recovery_terminal_id)
@@ -696,6 +719,7 @@ async fn run_reauthentication(
             recovery_terminal_id,
             &commands.logout,
             &context.cwd,
+            &auth_env,
         )
         .await;
         if config
@@ -764,7 +788,7 @@ async fn run_reauthentication(
         .await;
     let login_key = match config
         .backend
-        .spawn(&commands.login, Some(&context.cwd), &[], "agent-auth")
+        .spawn(&commands.login, Some(&context.cwd), &auth_env, "agent-auth")
         .await
     {
         Ok(key) => key,
@@ -969,15 +993,31 @@ async fn run_reauthentication(
     config.agent_recovery.finish(recovery_terminal_id).await;
 }
 
+/// Isolated credential-home env for a re-auth flow. Seeds the per-session
+/// home so the provider `login` writes into this session's own
+/// `CODEX_HOME` rather than the machine-wide login every other session
+/// shares. Empty for an agent that keeps the machine-wide login.
+fn auth_credential_env(
+    config: &ServerConfig,
+    context: &AgentResumeContext,
+) -> Vec<(String, String)> {
+    let Some(agent) = config.agents.get(&context.agent_id) else {
+        return Vec::new();
+    };
+    crate::spawn_plan::seed_credential_home(agent.as_ref(), &context.session_key);
+    crate::spawn_plan::credential_home_env(Some(agent.as_ref()), &context.session_key)
+}
+
 async fn run_quiet_command(
     config: &ServerConfig,
     terminal_id: TerminalId,
     argv: &[String],
     cwd: &std::path::Path,
+    env: &[(String, String)],
 ) -> Result<Option<i32>, crate::backend::BackendError> {
     let key = config
         .backend
-        .spawn(argv, Some(cwd), &[], "agent-auth")
+        .spawn(argv, Some(cwd), env, "agent-auth")
         .await?;
     config
         .agent_recovery
@@ -1142,6 +1182,7 @@ mod tests {
                         agent_display_name(&config, agent_id)
                     ),
                     0,
+                    false,
                 )
                 .await
         );
@@ -1282,6 +1323,51 @@ mod tests {
             .expect("resumed terminal snapshot");
         assert_eq!(resumed.prompt_history[0].text, "keep this prompt");
         assert_eq!(resumed.composing_buffer.as_deref(), Some("keep this draft"));
+    }
+
+    #[tokio::test]
+    async fn codex_reauthentication_scopes_provider_commands_to_the_isolated_home() {
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-777")).await;
+        start_reauthentication(&config, terminal_id, true, None).await;
+
+        // Logout runs in this session's own CODEX_HOME, so it rewrites only
+        // this session's credential — never the machine-wide `~/.codex` the
+        // rest of the fleet shares.
+        wait_for_argv(&mock, &["codex", "logout"]).await;
+        let logout_env = mock
+            .env_for("mock-agent-auth-1")
+            .await
+            .expect("logout command spawned");
+        let codex_home = logout_env
+            .iter()
+            .find(|(k, _)| k == "CODEX_HOME")
+            .map(|(_, v)| v.clone())
+            .expect("logout is scoped to an isolated CODEX_HOME");
+        assert!(
+            codex_home.contains("agent-homes/codex/"),
+            "unexpected CODEX_HOME: {codex_home}"
+        );
+
+        // Login reuses the very same isolated home so the refreshed token
+        // lands where this session — and only this session — reads it.
+        mock.finish("mock-agent-auth-1", 0).await;
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        let login_env = mock
+            .env_for(&login_key)
+            .await
+            .expect("login command spawned");
+        assert!(
+            login_env
+                .iter()
+                .any(|(k, v)| k == "CODEX_HOME" && v == &codex_home),
+            "login must reuse the same isolated CODEX_HOME: {login_env:?}"
+        );
     }
 
     #[tokio::test]
@@ -1584,6 +1670,7 @@ mod tests {
                     "Codex".into(),
                     "Codex authentication is no longer valid.".into(),
                     1,
+                    false,
                 )
                 .await
         );

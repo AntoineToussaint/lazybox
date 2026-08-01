@@ -936,6 +936,7 @@ fn all_events() -> Vec<Event> {
             display_name: "Codex".into(),
             reason: "provider sign-in expired".into(),
             other_session_count: 2,
+            credentials_isolated: true,
         },
         Event::AgentAuthProgress {
             recovery_terminal_id: TerminalId(12),

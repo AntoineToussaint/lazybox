@@ -654,6 +654,9 @@ pub(crate) struct AgentAuthPrompt {
     pub terminal_id: lazybox_ipc::TerminalId,
     pub display_name: String,
     pub other_session_count: usize,
+    /// The agent isolates its login per session, so re-auth affects only
+    /// this session — the modal drops the machine-wide cascade warning.
+    pub credentials_isolated: bool,
     pub retry: bool,
     pub error: Option<String>,
 }

@@ -2097,6 +2097,11 @@ pub enum Event {
         display_name: String,
         reason: String,
         other_session_count: usize,
+        /// The agent isolates its login per session (Codex → a private
+        /// `CODEX_HOME`), so re-auth rewrites only this session's
+        /// credential and leaves the rest of the fleet on their own
+        /// logins — no machine-wide cascade to warn about.
+        credentials_isolated: bool,
     },
     /// Non-secret orchestration progress. Provider PTY bytes continue over
     /// the terminal stream and are never copied into this message.

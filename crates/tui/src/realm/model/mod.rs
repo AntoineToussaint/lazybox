@@ -1936,6 +1936,7 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
+        pinned_repos: Vec<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
@@ -1950,8 +1951,13 @@ impl<T: TerminalAdapter> Model<T> {
         // the same convention-aware brief the daemon uses.
         self.right.set_conventions(conventions.clone());
         self.sidebar.set_conventions(conventions);
-        self.sidebar
-            .apply_inner_config(attention, collapsed_repos, default_agent, display);
+        self.sidebar.apply_inner_config(
+            attention,
+            collapsed_repos,
+            pinned_repos,
+            default_agent,
+            display,
+        );
         self.sidebar.set_keep_awake(ui.keep_awake);
         // Stash resolved defaults for model-level knobs (`q-q`
         // window, terminal-escape char, split step) that used to be

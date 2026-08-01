@@ -1574,6 +1574,7 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
     s.apply_config(
         lazybox_config::AttentionConfig::default(),
         BTreeSet::new(),
+        Vec::new(),
         None,
         &display,
     );
@@ -1927,6 +1928,7 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
     s.apply_config(
         attention,
         BTreeSet::new(),
+        Vec::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2026,6 +2028,7 @@ fn ci_failure_transition_respects_desktop_notify_off() {
             ..lazybox_config::AttentionConfig::default()
         },
         BTreeSet::new(),
+        Vec::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2172,4 +2175,127 @@ fn bang_is_a_noop_when_nothing_is_asking() {
     let moved = s.focus_next_asking_workspace();
     assert!(!moved);
     assert_eq!(s.selected_session_key().cloned(), before);
+}
+
+// ── Pin repo group to top (#760) ───────────────────────────────────────
+
+/// A repo configured as pinned floats above the algorithmic
+/// (alphabetical) order; `is_repo_pinned` reflects it. Uses
+/// `apply_config` so no disk write is involved.
+#[test]
+fn pinned_repo_config_floats_group_to_top() {
+    use std::collections::BTreeSet;
+    let mut s = Sidebar::new(PaneId::new(1));
+    while s.sort_mode() != lazybox_tui::components::sidebar::SortMode::Recent {
+        s.cycle_sort_mode();
+    }
+    s.apply_config(
+        lazybox_config::AttentionConfig::default(),
+        BTreeSet::new(),
+        vec!["owner/charlie".to_string()],
+        None,
+        &lazybox_config::DisplayConfig::default(),
+    );
+    let now = Utc::now();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            make_workspace("owner/alpha", "alpha#1", now),
+            make_workspace("owner/beta", "beta#1", now),
+            make_workspace("owner/charlie", "charlie#1", now),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    let headers: Vec<&str> = s
+        .visible_rows()
+        .iter()
+        .filter_map(|r| match r {
+            VisibleRow::RepoHeader(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headers, ["owner/charlie", "owner/alpha", "owner/beta"]);
+    assert!(s.is_repo_pinned("owner/charlie"));
+    assert!(!s.is_repo_pinned("owner/alpha"));
+}
+
+/// `p` on a repo group pins it to the top, reports `(repo, true)`, and
+/// a second `p` unpins it back to the algorithmic order. Sandboxes the
+/// config path so the persistence side effect writes to a temp dir.
+#[test]
+fn toggle_pin_at_cursor_reorders_and_reports() {
+    let home = tempfile::tempdir().expect("tempdir");
+    // SAFETY: single-threaded test-time env mutation, scoped to a temp
+    // dir so the persistence write can't touch the real config.
+    unsafe {
+        std::env::set_var("LAZYBOX_HOME", home.path());
+    }
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    while s.sort_mode() != lazybox_tui::components::sidebar::SortMode::Recent {
+        s.cycle_sort_mode();
+    }
+    let now = Utc::now();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            make_workspace("owner/alpha", "alpha#1", now),
+            make_workspace("owner/beta", "beta#1", now),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    // Park the cursor in the beta group (its workspace row), so
+    // `cursor_repo()` walks back to the beta header, then pin it.
+    let beta_key = SessionKey::new(expected_session_key("beta#1").as_str());
+    assert!(s.focus_workspace_key(&beta_key), "beta workspace present");
+
+    let reported = s.toggle_pin_at_cursor();
+    assert_eq!(reported, Some(("owner/beta".to_string(), true)));
+    assert!(s.is_repo_pinned("owner/beta"));
+    // Pinning hides no rows, so the user's workspace selection (and the
+    // right-pane / terminal context that follows it) must survive — the
+    // cursor stays on beta's workspace, not jump to the repo header.
+    assert_eq!(
+        s.selected_session_key(),
+        Some(&beta_key),
+        "pin keeps the selected workspace, doesn't yank the cursor to the header",
+    );
+    let headers: Vec<&str> = s
+        .visible_rows()
+        .iter()
+        .filter_map(|r| match r {
+            VisibleRow::RepoHeader(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headers, ["owner/beta", "owner/alpha"], "pinned beta leads");
+
+    // A second toggle unpins and restores the alphabetical order, still
+    // without disturbing the workspace selection.
+    let reported = s.toggle_pin_at_cursor();
+    assert_eq!(reported, Some(("owner/beta".to_string(), false)));
+    assert!(!s.is_repo_pinned("owner/beta"));
+    assert_eq!(
+        s.selected_session_key(),
+        Some(&beta_key),
+        "unpin also preserves the selected workspace",
+    );
+    let headers: Vec<&str> = s
+        .visible_rows()
+        .iter()
+        .filter_map(|r| match r {
+            VisibleRow::RepoHeader(name) => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headers, ["owner/alpha", "owner/beta"]);
+
+    unsafe {
+        std::env::remove_var("LAZYBOX_HOME");
+    }
 }

@@ -478,6 +478,10 @@ mod tests {
         assert_eq!(plan.persist_key, None);
         assert!(plan.flags.on_main);
         assert!(!plan.flags.no_permission);
+        // A shell has no model tier — the plan must carry no model
+        // identity, so the spawn log doesn't invent a bogus one.
+        assert_eq!(plan.model_alias, None);
+        assert_eq!(plan.model_label, None);
     }
 
     #[test]

@@ -1932,6 +1932,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// before the first daemon Subscribe so the saved collapse state
     /// is in place when the Snapshot arrives. Per-agent spawn keys are
     /// no longer wired here — they're catalog rows; see `set_agents`.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_sidebar_config(
         &mut self,
         attention: lazybox_config::AttentionConfig,

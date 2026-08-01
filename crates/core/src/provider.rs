@@ -180,6 +180,13 @@ pub enum ProviderError {
         source: String,
         detail: String,
         retry_after_secs: Option<u64>,
+        /// `true` when the retry is the provider deliberately pacing
+        /// ITSELF — a governor backoff under shared-token contention, not
+        /// a fault. Such a backoff is expected and self-clearing, so it
+        /// must surface honestly ("busy — backing off") and never escalate
+        /// to an actionable "sync failing — check your token" error the way
+        /// a persistent transport failure does (#782).
+        self_throttled: bool,
     },
     /// Credentials wrong / expired. Don't retry without user action.
     Auth { source: String, detail: String },
@@ -200,6 +207,7 @@ impl ProviderError {
             source: source.into(),
             detail: detail.into(),
             retry_after_secs: None,
+            self_throttled: false,
         }
     }
 
@@ -215,6 +223,21 @@ impl ProviderError {
             source: source.into(),
             detail: detail.into(),
             retry_after_secs: Some(secs),
+            self_throttled: false,
+        }
+    }
+
+    /// A retryable that is the provider's OWN governor deliberately
+    /// backing off (shared-token contention), not a fault. Carries the
+    /// same retry hint as [`retryable_after`](Self::retryable_after) but
+    /// is flagged `self_throttled` so the polling layer surfaces it
+    /// honestly and never escalates it to an actionable error (#782).
+    pub fn self_throttle(source: impl Into<String>, detail: impl Into<String>, secs: u64) -> Self {
+        Self::Retryable {
+            source: source.into(),
+            detail: detail.into(),
+            retry_after_secs: Some(secs),
+            self_throttled: true,
         }
     }
 
@@ -256,6 +279,20 @@ impl ProviderError {
         matches!(self, Self::Auth { .. })
     }
 
+    /// True when this retryable is the provider's OWN governor pacing
+    /// itself under shared-token contention rather than a fault. Such a
+    /// backoff self-clears and must never be escalated to an actionable
+    /// "sync failing — check your token" error (#782).
+    pub fn is_self_throttle(&self) -> bool {
+        matches!(
+            self,
+            Self::Retryable {
+                self_throttled: true,
+                ..
+            }
+        )
+    }
+
     /// Provider-supplied "wait at least this long before retrying"
     /// hint. Only populated for `Retryable` errors that came with a
     /// known reset window; everything else returns None. The polling
@@ -279,11 +316,17 @@ impl ProviderError {
                 source,
                 detail,
                 retry_after_secs,
+                self_throttled,
             } => {
                 let after = retry_after_secs
                     .map(|s| format!(" (retry after {s}s)"))
                     .unwrap_or_default();
-                format!("[{source}] retryable{after}: {detail}")
+                let tag = if *self_throttled {
+                    " self-throttle"
+                } else {
+                    ""
+                };
+                format!("[{source}] retryable{tag}{after}: {detail}")
             }
             Self::Auth { source, detail } => format!("[{source}] auth: {detail}"),
             Self::Permanent { source, detail } => {
@@ -302,11 +345,24 @@ impl ProviderError {
             Self::Retryable {
                 source,
                 retry_after_secs,
+                self_throttled,
                 ..
-            } => match retry_after_secs {
-                Some(s) => format!("{source} throttled, retrying in {s}s"),
-                None => format!("{source} hiccup, retrying next cycle"),
-            },
+            } => {
+                if *self_throttled {
+                    // The token, connection, and budget are all fine; lazybox
+                    // is deliberately pacing its OWN sync to stay within the
+                    // rate budget. Say that, not "check your token" (#782).
+                    // Kept cause-neutral: the pressure is usually external
+                    // (`gh`/agents on the shared token) but can be the
+                    // daemon's own concurrent work, so don't assert "elsewhere".
+                    format!("{source} busy — pacing its own sync to stay within the rate budget")
+                } else {
+                    match retry_after_secs {
+                        Some(s) => format!("{source} throttled, retrying in {s}s"),
+                        None => format!("{source} hiccup, retrying next cycle"),
+                    }
+                }
+            }
             Self::Auth { source, .. } => {
                 format!("{source} auth failed — rotate token then `lazybox --fresh`")
             }
@@ -613,6 +669,60 @@ mod tests {
         let msg = r.user_message();
         assert!(msg.contains("300s"), "got {msg}");
         assert!(msg.contains("throttled"), "got {msg}");
+    }
+
+    #[test]
+    fn self_throttle_is_a_retryable_flagged_and_carries_its_backoff_hint() {
+        // #782: a governor self-throttle is a retryable that the polling
+        // layer must be able to single out (via `is_self_throttle`) and
+        // whose backoff window round-trips through `retry_after_secs` — the
+        // latter is what keeps it exempt from the exhaustion escalation.
+        let s = ProviderError::self_throttle("github", "background allowance spent", 15);
+        assert!(s.is_retryable(), "a self-throttle is still a retryable");
+        assert!(s.is_self_throttle(), "and is flagged as self-imposed");
+        assert_eq!(s.retry_after_secs(), Some(15), "carries its backoff hint");
+
+        // A plain retryable — even a throttling one with a retry hint — is
+        // NOT a self-throttle: the flag distinguishes lazybox pacing itself
+        // from GitHub imposing a limit.
+        let plain = ProviderError::retryable_after("github", "secondary rate limit", 30);
+        assert!(
+            !plain.is_self_throttle(),
+            "a remote throttle is not self-imposed"
+        );
+        assert!(!ProviderError::auth("github", "401").is_self_throttle());
+    }
+
+    #[test]
+    fn self_throttle_message_is_honest_and_never_blames_the_token() {
+        // #782: the exemplar bug surfaced a self-imposed backoff as "check
+        // your connection or token" — a dead-end the user can't act on. The
+        // token, connection, and budget are all fine; the message must say
+        // lazybox is deliberately pacing itself, not that something is
+        // wrong. Guards the wording so a future reword can't regress it.
+        let s = ProviderError::self_throttle("github", "background allowance spent", 15);
+        let msg = s.user_message();
+        assert!(msg.starts_with("github"), "names the source: {msg}");
+        assert!(
+            msg.contains("pacing"),
+            "names the deliberate self-pacing: {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("token"),
+            "must not blame the token: {msg}"
+        );
+        assert!(
+            !msg.contains("check your"),
+            "must not tell the user to check anything: {msg}"
+        );
+        assert!(msg.len() < 80, "stays one status row: {msg}");
+        // The self-throttle is tagged in the diagnostic so the log
+        // distinguishes it from a remote throttle at a glance.
+        assert!(
+            s.diagnostic().contains("self-throttle"),
+            "diagnostic tags the self-throttle: {}",
+            s.diagnostic()
+        );
     }
 
     #[test]

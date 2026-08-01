@@ -1060,11 +1060,16 @@ impl TickState {
             // daemon deliberately waiting out the provider's reset — the
             // token and the connection are both fine and there is nothing
             // the user can do but wait. It must never escalate to a red
-            // actionable error, however long the backoff runs (#772: the
-            // exemplar throttle mis-surfaced as "check your connection or
-            // token", forever). Only a hintless transient (network, 5xx)
-            // that keeps failing is genuinely stuck, and its escalation
-            // carries the real cause rather than a generic token blame.
+            // actionable error, however long the backoff runs (#772/#782:
+            // the exemplar throttle mis-surfaced as "check your connection
+            // or token", forever; a governor self-throttle under
+            // shared-token contention is the same story). A self-throttle
+            // always carries a retry hint, so this gate already exempts it
+            // — no separate `is_self_throttle` branch is needed; its honest
+            // wording lives in `ProviderError::user_message`. Only a
+            // hintless transient (network, 5xx) that keeps failing is
+            // genuinely stuck, and its escalation carries the real cause
+            // rather than a generic token blame.
             if error.retry_after_secs().is_none() && *streak >= RETRYABLE_EXHAUSTION_ATTEMPTS {
                 (ProviderErrorKind::Exhausted, error.exhausted_message())
             } else {
@@ -6013,6 +6018,89 @@ mod tick_noop_skip_tests {
         assert!(
             !exhausted.contains("per-graphql"),
             "the raw diagnostic must not leak into the banner: {exhausted}"
+        );
+    }
+
+    /// #782: a governor self-throttle — lazybox deliberately pacing its
+    /// own sync under shared-token contention — must never escalate to the
+    /// actionable "check your token" error, no matter how long it lasts.
+    /// The token, connection, and GitHub budget are all fine; it's an
+    /// honest, self-clearing backoff, so it stays one quiet `retryable`
+    /// status with a message that blames neither the token nor the
+    /// connection.
+    #[tokio::test]
+    async fn governor_self_throttle_never_escalates_and_stays_honest() {
+        struct SelfThrottled;
+        impl TaskSource for SelfThrottled {
+            fn name(&self) -> &str {
+                lazybox_gh::SOURCE
+            }
+            fn fetch<'a>(
+                &'a self,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>>
+                        + Send
+                        + 'a,
+                >,
+            > {
+                Box::pin(async move {
+                    Err(lazybox_core::ProviderError::self_throttle(
+                        lazybox_gh::SOURCE,
+                        "GitHub graphql background allowance spent (0/3, retry in 15s)",
+                        15,
+                    ))
+                })
+            }
+        }
+
+        let config = ServerConfig::with_store(Arc::new(lazybox_store::MemoryStore::new()));
+        let sources: Vec<Box<dyn TaskSource>> = vec![Box::new(SelfThrottled)];
+        let mut state = TickState::default();
+        let mut rx = config.bus.subscribe();
+
+        // Well past the exhaustion threshold — a genuine transient would
+        // have escalated by now.
+        for _ in 0..(RETRYABLE_EXHAUSTION_ATTEMPTS + 3) {
+            tick_with_state(&config, &sources, &mut state).await;
+        }
+
+        let events = drain(&mut rx);
+        let exhausted = events
+            .iter()
+            .filter(
+                |event| matches!(event, Event::ProviderError { kind, .. } if kind == "exhausted"),
+            )
+            .count();
+        assert_eq!(
+            exhausted, 0,
+            "a governor self-throttle must never escalate to an actionable error"
+        );
+        let messages: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ProviderError { kind, message, .. } if kind == "retryable" => {
+                    Some(message.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            messages.len(),
+            1,
+            "the self-throttle surfaces exactly one quiet status"
+        );
+        let message = messages[0];
+        // The message may explain the token is *in use* (it is), but must
+        // never tell the user something is wrong with it or the connection —
+        // that's the lie #782 is about.
+        assert!(
+            !message.contains("check your"),
+            "the message must not tell the user to check the token/connection: {message}"
+        );
+        assert!(
+            message.contains("pacing"),
+            "the message names the deliberate self-pacing backoff: {message}"
         );
     }
 

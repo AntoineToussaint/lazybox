@@ -2655,7 +2655,7 @@ pub struct TerminalSnapshot {
 
 // ── Transport abstraction ──────────────────────────────────────────────
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// Capacity of the bounded daemon→client event channel. This is the
 /// hard memory ceiling on inbound events: the channel never holds more
@@ -2823,6 +2823,33 @@ pub struct Client {
     /// Pub so the realm orchestrator can `try_recv` non-blocking from a
     /// sync main loop. (Old async loop uses `Client::recv` instead.)
     pub rx: mpsc::Receiver<Event>,
+    /// Live connection state, present only for a self-healing transport
+    /// (`socket::connect_reconnecting`). `None` for the in-process
+    /// channel and one-shot socket clients, which never drop mid-session
+    /// — those always read as [`ConnectionStatus::Connected`].
+    connection: Option<watch::Receiver<ConnectionState>>,
+}
+
+/// Whether the client currently has a live link to the daemon. A
+/// self-healing transport flips to [`Reconnecting`](Self::Reconnecting)
+/// while it re-dials so the UI can say so instead of freezing silently;
+/// giving up entirely closes the event stream instead (surfaced as the
+/// usual disconnect banner), so there is no terminal variant here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    Connected,
+    Reconnecting,
+}
+
+/// A snapshot of the transport's link to the daemon, published on every
+/// (re)connect and drop by the reconnect supervisor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionState {
+    pub status: ConnectionStatus,
+    /// Build version of the daemon on the *current* connection. Refreshed
+    /// on every reconnect so a daemon restarted to a different build is
+    /// reflected instead of stuck at the first handshake's value.
+    pub daemon_build: String,
 }
 
 enum ClientCommandSender {
@@ -2838,6 +2865,7 @@ impl Client {
         Self {
             tx: ClientCommandSender::Unbounded(tx),
             rx,
+            connection: None,
         }
     }
 
@@ -2848,7 +2876,32 @@ impl Client {
         Self {
             tx: ClientCommandSender::Bounded(tx),
             rx,
+            connection: None,
         }
+    }
+
+    /// Attach a reconnect supervisor's connection-state watch (see
+    /// [`socket::connect_reconnecting`](crate::socket::connect_reconnecting)).
+    pub fn with_connection_status(mut self, connection: watch::Receiver<ConnectionState>) -> Self {
+        self.connection = Some(connection);
+        self
+    }
+
+    /// Current link state. `Connected` for transports without a
+    /// reconnect supervisor (in-process channel, one-shot socket).
+    pub fn connection_status(&self) -> ConnectionStatus {
+        self.connection
+            .as_ref()
+            .map(|rx| rx.borrow().status)
+            .unwrap_or(ConnectionStatus::Connected)
+    }
+
+    /// Build version reported by the daemon on the current connection, if
+    /// this client tracks connection state. Refreshed across reconnects.
+    pub fn daemon_build(&self) -> Option<String> {
+        self.connection
+            .as_ref()
+            .map(|rx| rx.borrow().daemon_build.clone())
     }
 
     // The Err variant carries a full Command (144 bytes); boxing

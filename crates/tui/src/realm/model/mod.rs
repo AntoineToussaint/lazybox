@@ -1108,6 +1108,11 @@ pub struct Model<T: TerminalAdapter> {
     /// wake on the closed event channel), but the banner should be
     /// raised once, not re-flashed per keypress.
     daemon_disconnect_notified: bool,
+    /// One-shot latch for the "reconnecting…" banner a self-healing
+    /// remote client (`--connect`) shows while its transport re-dials.
+    /// Polled from [`Self::tick_daemon_health`]; cleared when the link
+    /// returns so a transient drop isn't an invisible freeze.
+    daemon_reconnecting_notified: bool,
     /// Whether lazybox is capturing mouse events. Toggled by F8 /
     /// Alt-s. When `false`, lazybox has issued `DisableMouseCapture`
     /// so the host terminal regains native text selection (which
@@ -1544,6 +1549,15 @@ use lazybox_config::ActivityPaneMode;
 /// no `Msg`. See `Model::forward_modal_event`.
 const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 
+/// Banner shown while a self-healing `--connect` transport re-dials a
+/// dropped daemon. Matched exactly to retract it once the link returns.
+const RECONNECTING_NOTICE: &str = "⟳ daemon connection lost — reconnecting…";
+
+/// Stable prefix of the daemon/client build-mismatch banner. Used to
+/// find and retract a stale mismatch notice once the builds match again
+/// (e.g. after the daemon is restarted across a reconnect).
+const BUILD_MISMATCH_PREFIX: &str = "build mismatch: daemon ";
+
 /// How many recently-used snippets the picker's "Recent" group holds
 /// (#252). Small enough to stay a shortcut list, not a second library —
 /// the group is a fast lane for the handful of snippets in active use.
@@ -1678,6 +1692,7 @@ impl<T: TerminalAdapter> Model<T> {
             cmd_send_failed: std::cell::Cell::new(false),
             cmd_send_overloaded: std::cell::Cell::new(false),
             daemon_disconnect_notified: false,
+            daemon_reconnecting_notified: false,
             mouse_capture_on: true,
             mouse_input_observed_at: None,
             mouse_unverified_logged: false,
@@ -2800,6 +2815,59 @@ impl<T: TerminalAdapter> Model<T> {
         if self.cmd_send_failed.take() {
             self.note_daemon_disconnected();
         }
+        self.tick_connection_status();
+    }
+
+    /// Reflect a self-healing transport's live link state (see
+    /// [`lazybox_ipc::ConnectionStatus`]). A `--connect` client whose
+    /// socket drops now re-dials transparently, so without this the UI
+    /// would freeze silently during an extended outage — the disconnect
+    /// banner only fires once the transport gives up entirely. Cheap:
+    /// non-reconnecting transports always read `Connected` and no-op.
+    fn tick_connection_status(&mut self) {
+        match self.client.connection_status() {
+            lazybox_ipc::ConnectionStatus::Reconnecting => self.note_daemon_reconnecting(),
+            lazybox_ipc::ConnectionStatus::Connected => self.note_daemon_reconnected(),
+        }
+    }
+
+    /// Raise the one-shot "reconnecting…" banner while the transport
+    /// re-dials. `Auth` severity: sticky (won't auto-fade mid-outage) and
+    /// warn-colored rather than the alarming red of a terminal
+    /// disconnect, since the link is expected back.
+    fn note_daemon_reconnecting(&mut self) {
+        if self.daemon_reconnecting_notified {
+            return;
+        }
+        self.daemon_reconnecting_notified = true;
+        self.flash(
+            RECONNECTING_NOTICE,
+            crate::realm::components::footer::NoticeSeverity::Auth,
+        );
+    }
+
+    /// Retract the reconnecting banner once the link is back and refresh
+    /// the daemon build (a restart across the reconnect may have changed
+    /// it). One-shot via the latch, so a steady connection no-ops.
+    fn note_daemon_reconnected(&mut self) {
+        if !self.daemon_reconnecting_notified {
+            return;
+        }
+        self.daemon_reconnecting_notified = false;
+        // Clear the banner only if it's still ours — a real error raised
+        // during the outage must survive.
+        if self
+            .status
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.message == RECONNECTING_NOTICE)
+        {
+            self.status.notice = None;
+            self.redraw = true;
+        }
+        if let Some(build) = self.client.daemon_build() {
+            self.note_daemon_build(&build);
+        }
     }
 
     /// Set the footer notice + mark the screen dirty. Three
@@ -2898,10 +2966,21 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn note_daemon_build(&mut self, daemon_build: &str) {
         if daemon_build != lazybox_ipc::BUILD_VERSION {
             self.flash_error(format!(
-                "build mismatch: daemon {daemon_build}, client {} — restart the daemon \
+                "{BUILD_MISMATCH_PREFIX}{daemon_build}, client {} — restart the daemon \
                  (`lazybox server stop`) to pick up this build",
                 lazybox_ipc::BUILD_VERSION
             ));
+        } else if self
+            .status
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.message.starts_with(BUILD_MISMATCH_PREFIX))
+        {
+            // Builds now match — e.g. the daemon was restarted to this
+            // build and a reconnect re-checked it. Retract the stale
+            // mismatch banner instead of leaving it up forever.
+            self.status.notice = None;
+            self.redraw = true;
         }
     }
 

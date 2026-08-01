@@ -46,9 +46,16 @@ A dropped socket — laptop sleep, wifi change, the SSH tunnel resetting — no
 longer kills the session. The `--connect` client re-dials the socket on its
 own with capped backoff, re-`Subscribe`s, and the daemon replays a resync
 snapshot (workspaces plus each terminal's ring buffer), so the screen
-reconstructs without a manual restart. Re-establish the `ssh -L` forward (or
-use an autossh/`ServerAliveInterval` keepalive) and the client reattaches as
-soon as the socket is back.
+reconstructs without a manual restart. While it's re-dialing, a
+`⟳ daemon connection lost — reconnecting…` banner shows so an extended outage
+isn't a silent freeze; it clears the moment the link is back. Re-establish the
+`ssh -L` forward (or use an autossh/`ServerAliveInterval` keepalive) and the
+client reattaches as soon as the socket is back.
+
+A flapping endpoint (connects, then drops immediately) is backed off
+progressively instead of hammered, and if the box comes back on an
+incompatible lazybox build the client stops retrying and shows the usual
+disconnect banner naming the build mismatch.
 
 ## What degrades under remote
 

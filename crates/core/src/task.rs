@@ -504,12 +504,7 @@ pub enum ActionPriority {
 ///
 /// Priority order matters: the first matching variant in `for_task`
 /// wins. Comments at each branch explain why.
-///
-/// Serializable so the desktop view-model can carry the derived tag
-/// straight to its thin renderer (#732) — the badge priority stays a
-/// single source of truth here instead of being reimplemented client-side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusTag {
     /// PR is merged. Past-tense state — trumps everything CI / review
     /// related because there's nothing actionable left.

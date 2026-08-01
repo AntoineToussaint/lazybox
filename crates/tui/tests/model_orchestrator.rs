@@ -434,6 +434,49 @@ fn click_in_right_pane_changes_focus() {
 }
 
 #[test]
+fn click_outside_search_dismisses_it() {
+    // #780: while the `/` search bar is capturing keystrokes, a click in
+    // another pane must exit "find land" — the mouse counterpart of Esc
+    // — instead of leaving the user trapped. The click then focuses the
+    // pane it landed in as usual.
+    let mut m = build_model();
+    let workspace = Workspace::empty(WorkspaceKey("github:o/r#1".into()), "main", Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![workspace],
+        terminals: Vec::new(),
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    m.dispatch_key(key(Key::Char('/')));
+    m.dispatch_key(key(Key::Char('m')));
+    assert!(m.sidebar().search_editing(), "search is capturing keys");
+
+    // Render so the search-bar / chip hit rects are populated, then
+    // click well into the right column (outside the search input).
+    m.view();
+    let area = Rect::new(0, 0, 100, 30);
+    m.dispatch_mouse_in(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 80,
+            row: 5,
+            modifiers: CtKeyModifiers::empty(),
+        },
+        area,
+    );
+    assert!(
+        !m.sidebar().search_editing(),
+        "click outside the search input must exit it",
+    );
+    assert_eq!(
+        m.focus(),
+        PaneFocus::Right,
+        "the click still focuses the clicked pane"
+    );
+}
+
+#[test]
 fn click_in_sidebar_keeps_or_returns_focus_to_sidebar() {
     let mut m = build_model();
     // Move focus elsewhere first.

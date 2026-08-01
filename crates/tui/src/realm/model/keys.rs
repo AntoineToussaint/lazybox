@@ -1224,6 +1224,21 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.q_latch.disarm();
                 self.cancel_leader_chords();
+                // A click landing anywhere off the `/` search input
+                // dismisses the search instead of trapping keystrokes
+                // in it — the mouse counterpart of `Esc` (#780). The
+                // click then falls through to its normal routing
+                // (focus the pane, select the row it landed on). Clicks
+                // on the input itself (bottom bar or header search
+                // chip) are left alone so they keep editing.
+                if self.sidebar.search_editing()
+                    && !self.sidebar.search_bar_hit(m.column, m.row)
+                    && !self.sidebar.search_chip_hit(m.column, m.row)
+                {
+                    self.sidebar.dismiss_search();
+                    self.sync_panes();
+                    self.redraw = true;
+                }
                 // Tab-strip click on the terminal pane top row →
                 // switch active tab. Checked BEFORE the
                 // "forward to inner program" path because the tab

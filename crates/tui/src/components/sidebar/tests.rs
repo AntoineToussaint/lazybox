@@ -1729,6 +1729,39 @@ mod search_tests {
         assert!(!sb.search_chip_hit(0, rect.y));
     }
 
+    /// The bottom `/` search bar records its rect so a click on the
+    /// input itself is distinguishable from a click that should dismiss
+    /// the search (#780).
+    #[test]
+    fn search_bar_records_its_rect_for_hit_testing() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        assert!(sb.search_bar_rect.is_none(), "no bar before a search opens");
+        sb.open_search();
+        type_query(&mut sb, "al");
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+
+        let rect = sb.search_bar_rect.expect("search bar rect recorded");
+        assert!(sb.search_bar_hit(rect.x, rect.y), "click on the bar hits");
+        assert!(!sb.search_bar_hit(rect.x, rect.y.saturating_sub(1)));
+
+        // Closing the search drops the recorded rect on the next render.
+        sb.handle_search_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        assert!(
+            sb.search_bar_rect.is_none(),
+            "rect cleared once the bar is gone"
+        );
+    }
+
     /// While a global query is applied the header box shows the query
     /// rather than the `[find]` placeholder.
     #[test]
@@ -1846,6 +1879,53 @@ mod search_tests {
         sb.handle_search_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(sb.search().is_none());
         assert_eq!(sb.workspace_count(), 2, "full tree restored");
+    }
+
+    /// A click outside the input dismisses a non-empty search the same
+    /// way `Enter` does — the filter stays applied but editing stops, so
+    /// keystrokes reach the pane the click focused instead of being
+    /// trapped in "find land" (#780).
+    #[test]
+    fn dismiss_search_commits_a_nonempty_query() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        sb.open_search();
+        type_query(&mut sb, "search");
+        assert!(sb.search_editing());
+        sb.dismiss_search();
+        assert!(!sb.search_editing(), "click-outside exits editing mode");
+        assert!(sb.search().is_some(), "the filter stays applied");
+        assert_eq!(sb.workspace_count(), 1);
+    }
+
+    /// An empty search has nothing to keep, so a click outside closes
+    /// the bar outright and restores the full tree (#780).
+    #[test]
+    fn dismiss_search_closes_an_empty_query() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        sb.open_search();
+        assert!(sb.search_editing());
+        sb.dismiss_search();
+        assert!(sb.search().is_none(), "an empty search closes outright");
+        assert_eq!(sb.workspace_count(), 2, "full tree restored");
+    }
+
+    /// `dismiss_search` never re-opens or re-edits a committed filter,
+    /// and is a no-op when no search is open (#780).
+    #[test]
+    fn dismiss_search_is_a_noop_without_active_editing() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        sb.dismiss_search();
+        assert!(sb.search().is_none());
+        sb.open_search();
+        type_query(&mut sb, "search");
+        sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!sb.search_editing());
+        sb.dismiss_search();
+        assert!(
+            !sb.search_editing(),
+            "an already-committed filter is untouched"
+        );
+        assert!(sb.search().is_some());
     }
 
     /// Backspace shrinks the query and re-widens the result set.

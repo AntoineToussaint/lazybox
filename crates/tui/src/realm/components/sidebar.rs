@@ -182,6 +182,18 @@ impl Sidebar {
         self.inner.handle_search_key(key);
     }
 
+    /// True when `(col, row)` lands on the bottom `/` search input bar.
+    /// See `Sidebar::search_bar_hit`.
+    pub fn search_bar_hit(&self, col: u16, row: u16) -> bool {
+        self.inner.search_bar_hit(col, row)
+    }
+
+    /// Dismiss the search from a click outside the input. See
+    /// `Sidebar::dismiss_search`.
+    pub fn dismiss_search(&mut self) {
+        self.inner.dismiss_search();
+    }
+
     /// The active search state, if any. See `Sidebar::search`.
     pub fn search(&self) -> Option<&crate::components::sidebar::SearchState> {
         self.inner.search()

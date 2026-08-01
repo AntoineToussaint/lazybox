@@ -235,20 +235,22 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // badges rode inside the status cell and dropped as one unit at the
     // near-last `P_STATUS`: each now yields its width independently, well
     // ahead of the actionable signals. Ordered notes → snippet → linked →
-    // fix → arm so the least-consequential info drops first and the
-    // auto-merge arm — the one that changes what lazybox does on its own —
-    // survives longest.
+    // fix → track → arm → auto so the least-consequential info drops first
+    // and the two merge-when-green arms — the ones that decide whether the
+    // PR merges itself — survive longest, adjacent to each other.
     const P_NOTES: u8 = 20;
     const P_SNIPPET: u8 = 21;
     const P_LINKED: u8 = 22;
     const P_FIX: u8 = 23;
-    const P_ARM: u8 = 24;
-    // Track-main (#535) is a standing automation arm like the merge arm,
-    // so it survives width pressure alongside `ARM` rather than shedding
-    // with the passive-info badges.
-    const P_TRACK: u8 = 25;
-    // GitHub-native auto-merge (#778) is a binding merge automation — it
-    // survives width pressure alongside the other standing arms.
+    // Track-main (#535) is a standing automation arm, so it outlives the
+    // passive-info badges — but it doesn't merge the PR, so it sheds ahead
+    // of the two merge arms below.
+    const P_TRACK: u8 = 24;
+    // The two "merge when green" arms are the same class of signal, so they
+    // shed adjacently and survive longest. `AUTO` (GitHub-native #778) is
+    // binding even while lazybox is off, so it outlives `ARM` (lazybox
+    // merge-on-green, which only acts while lazybox runs).
+    const P_ARM: u8 = 25;
     const P_AUTO: u8 = 26;
     const P_UNREAD: u8 = 30;
     const P_BADGE_SHELL: u8 = 40;
@@ -2353,6 +2355,66 @@ mod tests {
             "labels should shed before the status pill: {line:?}",
         );
         assert!(line.contains("Fix bug"), "title dropped: {line:?}");
+    }
+
+    /// #778 follow-up: `ARM` and `AUTO` are the two "merge when green"
+    /// arms — the same class of signal — so they must shed adjacently and
+    /// outlive `⤓main` (track-main, which never merges the PR). The bug
+    /// this pins: track-main once sat *between* the two merge arms in shed
+    /// order, so under width pressure `ARM` vanished while the less
+    /// consequential `⤓main` stayed. Shed order (widest → narrowest) must
+    /// be track → arm → auto.
+    #[test]
+    fn merge_arms_outlive_track_main_under_width_pressure() {
+        let mut task = make_task("owner/repo#1", "Readable title text");
+        task.state = TaskState::Open;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.track_main = true; // ⤓main
+        ctx.auto_merge_armed = true; // ARM
+        ctx.auto_merge_enabled = true; // AUTO
+
+        let columns = build_columns(4);
+        let visible = |w: usize| -> (bool, bool, bool) {
+            let rows = vec![build_row(&ctx)];
+            let lines = crate::components::table::render_table(&rows, &columns, w);
+            let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            (
+                line.contains("⤓main"),
+                line.contains("ARM"),
+                line.contains("AUTO"),
+            )
+        };
+
+        // All three arms fit when the row is wide.
+        assert_eq!(
+            visible(100),
+            (true, true, true),
+            "all arms visible when wide"
+        );
+
+        // Sweep narrower and record the order each arm disappears in.
+        let mut order = vec![];
+        let (mut pt, mut pa, mut pu) = (true, true, true);
+        for w in (10..100).rev() {
+            let (t, a, u) = visible(w);
+            if pt && !t {
+                order.push("track");
+            }
+            if pa && !a {
+                order.push("arm");
+            }
+            if pu && !u {
+                order.push("auto");
+            }
+            (pt, pa, pu) = (t, a, u);
+        }
+        assert_eq!(
+            order,
+            vec!["track", "arm", "auto"],
+            "the two merge arms must outlive track-main, AUTO shedding last",
+        );
     }
 
     /// Issue #328, part 3: the status pill is trimmed to its ` LABEL `

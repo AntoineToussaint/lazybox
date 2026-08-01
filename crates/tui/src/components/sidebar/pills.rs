@@ -161,7 +161,7 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
 /// take over the whole status area (no review+ci pair beside them).
 /// `None` for normal open PRs in flight.
 fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
-    use lazybox_core::{CiStatus, ReviewStatus, StatusTag, TaskState};
+    use lazybox_core::{CiStatus, ReviewStatus, TaskState};
     let pill_red = Style::default()
         .bg(Color::Indexed(196))
         .fg(Color::Black)
@@ -234,10 +234,8 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     // ` FIX `, never here. Placing it in this chain hid ` CI FAIL ` on
     // exactly the armed PRs that need it most (#778).
     //
-    // Behind base is informational only — don't fight for the
-    // lifecycle column. `StatusTag` keeps surfacing it via the old
-    // path for any consumer that still wants it.
-    let _ = StatusTag::for_task(task);
+    // Everything else — behind-base and plain open PRs — has no lifecycle
+    // override; the review + CI pair in `status_pills` carries the signal.
     None
 }
 

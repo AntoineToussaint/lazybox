@@ -289,6 +289,23 @@ impl TerminalRegistry {
             .collect()
     }
 
+    /// The live agent terminal a workspace-addressed injection or
+    /// output read should target: the lowest-id `Agent` terminal
+    /// registered for `session_key`, mirroring the TUI's
+    /// `agent_terminal_for` tie-break. `None` when the workspace has no
+    /// running agent (only shells, or nothing at all).
+    pub async fn running_agent_terminal(&self, session_key: &SessionKey) -> Option<TerminalId> {
+        self.terminal_meta
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, (owner, kind))| {
+                owner == session_key && matches!(kind, TerminalKind::Agent(_))
+            })
+            .map(|(id, _)| *id)
+            .min_by_key(|id| id.0)
+    }
+
     pub(crate) async fn agent_terminals_for_review(
         &self,
         session_key: &SessionKey,
@@ -634,6 +651,48 @@ impl SpawnCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn running_agent_terminal_prefers_the_lowest_id_agent_and_skips_shells() {
+        let terminals = TerminalRegistry::default();
+        let workspace = SessionKey::from("github:owner/repo#7");
+        // A shell in the same workspace must never be an inject target.
+        terminals
+            .register_terminal(
+                TerminalId(1),
+                "shell".to_string(),
+                workspace.clone(),
+                TerminalKind::Shell,
+            )
+            .await;
+        terminals
+            .register_terminal(
+                TerminalId(9),
+                "agent-late".to_string(),
+                workspace.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        terminals
+            .register_terminal(
+                TerminalId(5),
+                "agent-early".to_string(),
+                workspace.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+
+        assert_eq!(
+            terminals.running_agent_terminal(&workspace).await,
+            Some(TerminalId(5))
+        );
+        assert_eq!(
+            terminals
+                .running_agent_terminal(&SessionKey::from("github:owner/repo#404"))
+                .await,
+            None
+        );
+    }
 
     #[tokio::test]
     async fn registries_are_independently_constructible() {

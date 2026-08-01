@@ -1189,7 +1189,10 @@ async fn agents_route_projects_running_agents_and_omits_shells() {
     assert_eq!(agent.workspace_key, workspace_key);
     assert_eq!(agent.workspace_name, "PR o/r#42");
     assert_eq!(agent.state, Some(AgentState::Working));
-    assert!(agent.started_at.is_some(), "started_at joins the session");
+    assert!(
+        agent.session_started_at.is_some(),
+        "session_started_at joins the workspace session"
+    );
     assert!(agent.last_prompt.is_none());
     let task = agent.task.as_ref().expect("agent carries its task");
     assert_eq!(task.id, "github:o/r#42");
@@ -1197,6 +1200,54 @@ async fn agents_route_projects_running_agents_and_omits_shells() {
     assert!(matches!(task.kind, AgentTaskKind::Pr));
     assert_eq!(task.repo.as_deref(), Some("o/r"));
     assert_eq!(agent.repo.as_deref(), Some("o/r"));
+}
+
+#[tokio::test]
+async fn agents_route_reports_repo_for_a_task_less_workspace() {
+    let config = ServerConfig::in_memory();
+    let now = Utc::now();
+
+    // A hand-created workspace: no PR/issue, but it knows its repo via
+    // the project key.
+    let mut workspace = Workspace::empty(lazybox_core::WorkspaceKey::new("scratch"), "main", now);
+    workspace.name = "Scratch".into();
+    workspace.project_key = Some(lazybox_core::ProjectKey::github("owner", "repo"));
+    let workspace_key = workspace.key.as_str().to_string();
+    config
+        .store
+        .save_workspace(&WorkspaceRecord {
+            key: workspace_key.clone(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(3),
+            "backend:scratch".into(),
+            workspace_key.as_str().into(),
+            TerminalKind::Agent("codex".into()),
+        )
+        .await;
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/agents")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response = api_gateway::handle_request(config, GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: AgentsResponse = read_json(response).await;
+    assert_eq!(payload.agents.len(), 1);
+    let agent = &payload.agents[0];
+    assert!(agent.task.is_none(), "no PR/issue attached");
+    assert_eq!(
+        agent.repo.as_deref(),
+        Some("owner/repo"),
+        "repo falls back to the project key"
+    );
 }
 
 #[tokio::test]

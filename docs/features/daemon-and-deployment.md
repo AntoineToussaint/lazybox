@@ -150,9 +150,11 @@ still requires the configured bearer token.
 
 `GET /v1/agents` is the focused read another agent uses to coordinate: it
 projects every live `Agent` terminal (shells and log-tails excluded) — the
-workspace, `owner/repo`, PR/issue reference, agent id, lifecycle state, the
-last prompt it received, model tier, and `started_at` — joining the daemon's
-in-memory terminal registries with each agent's persisted workspace. It is a
+workspace, `owner/repo` (from the task or, for a task-less workspace, its
+project key), PR/issue reference, agent id, lifecycle state, the last prompt it
+received, model tier, and `session_started_at` — joining the daemon's
+replay-free terminal-registry read with each agent's persisted workspace.
+Shells, log-tails, and still-authenticating login terminals are excluded. It is a
 point-in-time snapshot; `GET /v1/events` carries the ongoing `AgentState` /
 workspace deltas a client subscribes to after the initial read.
 

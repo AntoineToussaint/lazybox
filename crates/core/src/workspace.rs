@@ -1026,6 +1026,20 @@ impl Workspace {
         let slug = crate::slug::slugify(key.as_str());
         (!slug.is_empty()).then_some(slug)
     }
+
+    /// Best-effort `owner/repo` this workspace belongs to. Prefers the
+    /// primary task's repo (authoritative when a PR/issue is attached),
+    /// and falls back to the project key's GitHub slug so a task-less
+    /// workspace (a hand-created or freshly-provisioned one) still
+    /// reports its repo. `None` for a repo-less/local/Linear workspace,
+    /// or a GitHub key whose owner-or-repo boundary is ambiguous
+    /// ([`ProjectKey::unambiguous_github_slug`]).
+    pub fn repo_slug(&self) -> Option<String> {
+        if let Some(repo) = self.primary_task().and_then(|task| task.repo.clone()) {
+            return Some(repo);
+        }
+        workspace_project_key(self).and_then(|key| key.unambiguous_github_slug())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1811,6 +1825,28 @@ mod tests {
         let ws = Workspace::from_task(issue("github", "o/r#42"), now());
         assert!(ws.pr.is_none());
         assert_eq!(ws.gh_issues.len(), 1);
+    }
+
+    #[test]
+    fn repo_slug_prefers_task_repo() {
+        let ws = Workspace::from_task(pr("o/r#1"), now());
+        assert_eq!(ws.repo_slug().as_deref(), Some("o/r"));
+    }
+
+    #[test]
+    fn repo_slug_falls_back_to_project_key_when_task_less() {
+        // A hand-created workspace with no PR/issue still knows its repo
+        // through the project key.
+        let mut ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", now());
+        ws.project_key = Some(crate::ProjectKey::github("owner", "repo"));
+        assert!(ws.primary_task().is_none());
+        assert_eq!(ws.repo_slug().as_deref(), Some("owner/repo"));
+    }
+
+    #[test]
+    fn repo_slug_is_none_for_a_repo_less_workspace() {
+        let ws = Workspace::empty(WorkspaceKey::new("scratch"), "main", now());
+        assert_eq!(ws.repo_slug(), None);
     }
 
     #[test]

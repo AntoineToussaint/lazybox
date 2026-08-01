@@ -231,8 +231,12 @@ pub struct RunningAgent {
     pub on_main: bool,
     /// Launched in no-permission / bypass mode.
     pub no_permission: bool,
-    /// When this agent's session was created.
-    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// When this agent's worktree session was created. A session
+    /// persists across agent restarts in the same worktree, so this is
+    /// "how long this workspace has been active" rather than the current
+    /// process's launch time — the daemon keeps no wall-clock per-run
+    /// spawn timestamp (only a monotonic one that can't be serialized).
+    pub session_started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Compact PR/issue reference carried on a [`RunningAgent`], so one
@@ -697,11 +701,12 @@ pub async fn workspaces_response(
 }
 
 /// Live snapshot of every running agent, joining the daemon's in-memory
-/// terminal registries (the same source the TUI's `Subscribe` reads)
-/// with each agent's persisted workspace. Shells and log-tails are
-/// omitted — only `TerminalKind::Agent` terminals are agents to
-/// coordinate. The subscribe stream (`/v1/events`) carries the deltas;
-/// this is the point-in-time read a polling client starts from.
+/// terminal registries ([`crate::spawn_handler::agent_runtime_snapshot`],
+/// a replay-free read) with each agent's persisted workspace. Shells,
+/// log-tails, and still-authenticating login terminals are omitted —
+/// only a live `TerminalKind::Agent` is an agent to coordinate. The
+/// subscribe stream (`/v1/events`) carries the deltas; this is the
+/// point-in-time read a polling client starts from.
 pub async fn agents_response(config: &ServerConfig) -> Result<AgentsResponse, GatewayError> {
     let WorkspacesResponse {
         workspaces,
@@ -713,16 +718,9 @@ pub async fn agents_response(config: &ServerConfig) -> Result<AgentsResponse, Ga
         .collect();
 
     let mut agents = Vec::new();
-    for terminal in crate::spawn_handler::snapshot_terminals(config).await {
-        let lazybox_ipc::TerminalKind::Agent(agent) = &terminal.kind else {
-            continue;
-        };
-        let workspace = by_key.get(terminal.session_key.as_str()).copied();
-        let session_id = config
-            .terminal
-            .terminal_session_for(terminal.terminal_id)
-            .await;
-        let started_at = session_id.and_then(|session_id| {
+    for runtime in crate::spawn_handler::agent_runtime_snapshot(config).await {
+        let workspace = by_key.get(runtime.session_key.as_str()).copied();
+        let session_started_at = runtime.session_id.and_then(|session_id| {
             workspace
                 .and_then(|workspace| workspace.sessions.iter().find(|s| s.id == session_id))
                 .map(|session| session.created_at)
@@ -730,23 +728,28 @@ pub async fn agents_response(config: &ServerConfig) -> Result<AgentsResponse, Ga
         let task = workspace
             .and_then(|workspace| workspace.primary_task())
             .map(AgentTaskInfo::from_task);
-        let last_prompt = terminal.prompt_history.last();
         agents.push(RunningAgent {
-            terminal_id: terminal.terminal_id,
-            workspace_key: terminal.session_key.as_str().to_string(),
+            terminal_id: runtime.terminal_id,
+            workspace_key: runtime.session_key.as_str().to_string(),
             workspace_name: workspace
                 .map(|workspace| workspace.name.clone())
                 .unwrap_or_default(),
-            repo: task.as_ref().and_then(|task| task.repo.clone()),
-            agent: agent.clone(),
-            state: terminal.agent_state,
+            repo: workspace.and_then(|workspace| workspace.repo_slug()),
+            agent: runtime.agent_id,
+            state: runtime.agent_state,
             task,
-            last_prompt: last_prompt.map(|prompt| prompt.text.clone()),
-            last_prompt_at: last_prompt.map(|prompt| prompt.timestamp_ms),
-            model: terminal.model_label,
-            on_main: terminal.on_main,
-            no_permission: terminal.no_permission,
-            started_at,
+            last_prompt: runtime
+                .last_prompt
+                .as_ref()
+                .map(|prompt| prompt.text.clone()),
+            last_prompt_at: runtime
+                .last_prompt
+                .as_ref()
+                .map(|prompt| prompt.timestamp_ms),
+            model: runtime.model_label,
+            on_main: runtime.on_main,
+            no_permission: runtime.no_permission,
+            session_started_at,
         });
     }
     // Stable order so a polling client sees a deterministic list.

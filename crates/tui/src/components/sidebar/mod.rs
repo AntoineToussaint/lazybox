@@ -1701,7 +1701,7 @@ impl Sidebar {
     /// Pinning only reorders the groups — no rows are hidden — so
     /// `recompute_visible` keeps the cursor on the exact row the user
     /// was on (a workspace by key, a header by name). We deliberately do
-    /// NOT re-park onto the header the way [`toggle_repo_at_cursor`]
+    /// NOT re-park onto the header the way `toggle_repo_at_cursor`
     /// does: collapse needs that because it removes the rows under the
     /// cursor, whereas re-parking here would silently drop the user's
     /// workspace selection (and the right-pane / terminal context that

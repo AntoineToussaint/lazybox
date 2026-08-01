@@ -319,6 +319,25 @@ impl ProviderError {
             }
         }
     }
+
+    /// User-facing message for a retryable transient whose retries are
+    /// exhausted — the daemon kept failing across cycles and sync is now
+    /// genuinely stuck. Carries the *classified cause* through escalation
+    /// (the `Retryable` detail) instead of collapsing every stuck
+    /// transient into one misattributed "check your connection or token":
+    /// a repeated 5xx or a dropped connection is not a token problem, and
+    /// telling the user to rotate a working token is an action that can't
+    /// fix it. Auth is its own non-retryable class, surfaced through
+    /// [`user_message`](Self::user_message).
+    pub fn exhausted_message(&self) -> String {
+        match self {
+            Self::Retryable { source, detail, .. } => {
+                let cause = detail.lines().next().unwrap_or(detail);
+                format!("{source} sync stuck — {cause}")
+            }
+            _ => self.user_message(),
+        }
+    }
 }
 
 impl std::fmt::Display for ProviderError {
@@ -589,6 +608,30 @@ mod tests {
         let msg = r.user_message();
         assert!(msg.contains("300s"), "got {msg}");
         assert!(msg.contains("throttled"), "got {msg}");
+    }
+
+    #[test]
+    fn exhausted_message_carries_the_cause_not_a_token_blame() {
+        // #772: the escalation message must preserve the classified
+        // cause of a stuck transient, never collapse it into "check your
+        // connection or token" — a repeated 5xx is not a token problem.
+        let r = ProviderError::retryable("github", "HTTP 502 (Bad Gateway)");
+        let msg = r.exhausted_message();
+        assert!(msg.contains("HTTP 502"), "got {msg}");
+        assert!(
+            !msg.to_lowercase().contains("token"),
+            "a retryable transient must not blame the token: {msg}"
+        );
+    }
+
+    #[test]
+    fn exhausted_message_takes_first_detail_line() {
+        // The status bar is one row; a multi-line diagnostic collapses to
+        // its first line, mirroring `user_message`'s Permanent handling.
+        let r = ProviderError::retryable("github", "connection reset\nchain frame 2");
+        let msg = r.exhausted_message();
+        assert!(msg.contains("connection reset"), "got {msg}");
+        assert!(!msg.contains("chain frame 2"), "got {msg}");
     }
 
     #[test]

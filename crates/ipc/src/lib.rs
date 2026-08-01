@@ -2199,7 +2199,10 @@ pub enum ProviderErrorKind {
     Retryable,
     /// A retryable transient whose retries are exhausted: the daemon
     /// kept failing across successive cycles, so sync is genuinely
-    /// stuck and now actionable ("check your connection or token").
+    /// stuck and now actionable. The message carries the classified
+    /// cause (e.g. a repeated 5xx or a dropped connection), never a
+    /// generic token blame — a throttle never reaches this state, it
+    /// stays a quiet [`Retryable`](Self::Retryable) backoff (#772).
     /// The TUI surfaces this as a real error (#730).
     Exhausted,
     /// Credentials failed to resolve / unauthorized. The TUI walks

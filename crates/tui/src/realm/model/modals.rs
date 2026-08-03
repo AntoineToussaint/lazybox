@@ -1084,7 +1084,12 @@ impl<T: TerminalAdapter> Model<T> {
                 prompt.error.as_deref().unwrap_or("Provider login failed.")
             )
         } else {
-            let affected = if prompt.other_session_count == 0 {
+            let affected = if prompt.credentials_isolated {
+                format!(
+                    "Only this agent is affected — every other {} session keeps its own login.",
+                    prompt.display_name
+                )
+            } else if prompt.other_session_count == 0 {
                 format!(
                     "This changes the machine-wide {} login.",
                     prompt.display_name

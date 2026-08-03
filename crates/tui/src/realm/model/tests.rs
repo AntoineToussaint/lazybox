@@ -76,12 +76,14 @@ mod agent_auth_recovery_tests {
     #[test]
     fn auth_required_warns_about_other_provider_sessions_and_confirms() {
         let mut model = build_model();
+        // A non-isolated provider still warns that re-auth is machine-wide.
         model.handle_daemon_event(Event::AgentAuthRequired {
             terminal_id: TerminalId(7),
-            agent_id: "codex".into(),
-            display_name: "Codex".into(),
+            agent_id: "claude".into(),
+            display_name: "Claude Code".into(),
             reason: "provider sign-in expired".into(),
             other_session_count: 2,
+            credentials_isolated: false,
         });
 
         assert_eq!(model.top_modal(), Some(&Id::AgentAuth));
@@ -89,9 +91,13 @@ mod agent_auth_recovery_tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(screen.contains("Codex authentication is no longer valid"));
+        assert!(screen.contains("Claude Code authentication is no longer valid"));
+        // Wrapping can insert the modal border between words, so assert on
+        // fragments that each stay on one line.
         assert!(
-            screen.contains("may affect 2 other running Codex") && screen.contains("sessions."),
+            screen.contains("machine-wide Claude Code login")
+                && screen.contains("may affect 2 other running")
+                && screen.contains("sessions."),
             "{screen}"
         );
         assert!(screen.contains("Sign in and continue"));
@@ -105,6 +111,29 @@ mod agent_auth_recovery_tests {
     }
 
     #[test]
+    fn isolated_auth_required_drops_the_machine_wide_cascade_warning() {
+        let mut model = build_model();
+        // An isolated provider (Codex → per-session `CODEX_HOME`) never
+        // cascades, so the modal reassures instead of warning.
+        model.handle_daemon_event(Event::AgentAuthRequired {
+            terminal_id: TerminalId(7),
+            agent_id: "codex".into(),
+            display_name: "Codex".into(),
+            reason: "provider sign-in expired".into(),
+            other_session_count: 0,
+            credentials_isolated: true,
+        });
+
+        let screen = rendered_auth_modal(&mut model)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(screen.contains("Only this agent is affected"), "{screen}");
+        assert!(!screen.contains("machine-wide"), "{screen}");
+        assert!(!screen.contains("other running"), "{screen}");
+    }
+
+    #[test]
     fn auth_prompt_escape_leaves_the_pane_untouched() {
         let mut model = build_model();
         model.handle_daemon_event(Event::AgentAuthRequired {
@@ -113,6 +142,7 @@ mod agent_auth_recovery_tests {
             display_name: "Claude Code".into(),
             reason: "provider sign-in expired".into(),
             other_session_count: 0,
+            credentials_isolated: false,
         });
 
         assert!(model.handle_modal_dismissed().is_empty());

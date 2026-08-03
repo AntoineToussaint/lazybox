@@ -103,6 +103,41 @@ pub fn config_yaml() -> PathBuf {
     home().join("config.yaml")
 }
 
+/// Root for per-session agent credential homes. `<home>/v2/agent-homes/`.
+/// An agent kind that isolates its login (Codex → `CODEX_HOME`) gets a
+/// private directory per workspace here, seeded once from the machine-wide
+/// login, so a re-auth on one session never re-logs the others.
+pub fn agent_homes_root() -> PathBuf {
+    state_root().join("agent-homes")
+}
+
+/// Per-session credential home for `agent_id` in `session_key`:
+/// `<home>/v2/agent-homes/<agent_id>/<session>`. The session component is
+/// slugged to a filesystem-safe name because a session key can carry
+/// `:`/`/`/`#` (`github:owner/repo#123`).
+pub fn agent_home_dir(agent_id: &str, session_key: &str) -> PathBuf {
+    agent_homes_root()
+        .join(agent_id)
+        .join(path_slug(session_key))
+}
+
+/// Collapse a string to a filesystem-safe path component: ASCII
+/// alphanumerics and `.`/`_`/`-` survive, everything else becomes `-`.
+/// Empty input yields `"_"` so the result is never an empty component.
+fn path_slug(s: &str) -> String {
+    let slug: String = s
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if slug.is_empty() { "_".into() } else { slug }
+}
+
 /// Daemon runtime artifacts (socket, pid). `<home>/run/`. Honors
 /// the older `LAZYBOX_RUNTIME_DIR` env var for back-compat — set both
 /// to the same value if you want, or just unset it and let
@@ -233,6 +268,23 @@ mod tests {
         assert_eq!(
             worktrees_root(),
             PathBuf::from("/tmp/lazybox-x/v2/worktrees")
+        );
+    }
+
+    #[test]
+    fn agent_home_dir_slugs_unsafe_session_keys_under_state_root() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
+        // A raw key with `:`/`/`/`#` must not escape the agent-homes root
+        // into nested or sibling directories.
+        assert_eq!(
+            agent_home_dir("codex", "github:owner/repo#123"),
+            PathBuf::from("/tmp/lazybox-x/v2/agent-homes/codex/github-owner-repo-123")
+        );
+        // A slug-form key survives unchanged.
+        assert_eq!(
+            agent_home_dir("codex", "github-acme-widget-657"),
+            PathBuf::from("/tmp/lazybox-x/v2/agent-homes/codex/github-acme-widget-657")
         );
     }
 

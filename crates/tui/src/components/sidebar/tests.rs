@@ -2180,6 +2180,58 @@ mod broadcast_select_tests {
         assert!(screen.contains("FIX"), "compact row pill is still visible");
     }
 
+    /// #794: the focused row's merge automation is spelled out in the
+    /// header so the durability difference the ` ARM ` / ` AUTO ` pills
+    /// can't show is legible. lazybox's client-side arm names its
+    /// while-running limit; GitHub-native auto-merge names that it works
+    /// offline, and wins the header when both are set.
+    #[test]
+    fn focused_merge_automation_is_explained_in_the_sidebar_header() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        fn header_of(sb: &mut Sidebar) -> String {
+            let backend = TestBackend::new(60, 12);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(frame.area(), frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, 2)].symbol())
+                .collect()
+        }
+
+        fn pr_ws() -> Workspace {
+            let mut t = base_task();
+            t.url = "https://github.com/o/r/pull/1".into();
+            let mut w = Workspace::from_task(t, chrono::Utc::now());
+            w.name = "Alpha".into();
+            w
+        }
+
+        // lazybox client-side arm.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut armed = pr_ws();
+        armed.auto_merge_on_green = true;
+        sb.workspaces.insert(SessionKey::from(&armed.key), armed);
+        sb.recompute_visible();
+        let header = header_of(&mut sb);
+        assert!(header.contains("MERGE ON GREEN"), "{header:?}");
+        assert!(header.contains("lazybox only"), "{header:?}");
+
+        // GitHub-native auto-merge takes precedence in the label.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut both = pr_ws();
+        both.auto_merge_on_green = true;
+        both.pr.as_mut().expect("pr").auto_merge_enabled = true;
+        sb.workspaces.insert(SessionKey::from(&both.key), both);
+        sb.recompute_visible();
+        let header = header_of(&mut sb);
+        assert!(header.contains("AUTO-MERGE · GitHub"), "{header:?}");
+        assert!(header.contains("works offline"), "{header:?}");
+    }
+
     /// `v` marks the cursor row and the mark survives navigating away
     /// — the selection is keyed by workspace, not row index.
     #[test]

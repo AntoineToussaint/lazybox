@@ -776,6 +776,12 @@ fn cell_snippet(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// automation *policy*, so it lives here rather than in the status
 /// column, where it used to hide ` CI FAIL ` on exactly the armed PRs
 /// that most need it. Its own center-aligned, Max-collapsing column.
+///
+/// Accent-filled, deliberately *not* the same color as ` ARM ` (#794):
+/// ` AUTO ` is GitHub's server-side merge, so it lands the PR even while
+/// lazybox is closed. The accent block reads as the durable, "handled by
+/// GitHub" state; ` ARM ` carries the softer green of the lazybox-local
+/// arm that only fires while the client runs.
 fn cell_auto(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if !ctx.auto_merge_enabled {
         return Cell::empty();
@@ -794,6 +800,13 @@ fn cell_auto(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// The ` ARM ` auto-merge-on-green badge — a filled block so the "this
 /// row will merge itself once CI goes green" signal reads at a glance.
 /// Its own center-aligned, Max-collapsing column (#524).
+///
+/// Filled with `success` (green), not the accent of ` AUTO ` (#794), so
+/// the two merge-on-green arms never blur into one pill: ` ARM ` is
+/// lazybox's *client-side* merge, fired by the daemon only while lazybox
+/// is running (quit lazybox and nothing merges), whereas ` AUTO ` is
+/// GitHub's durable server-side merge. Green doubles as a mnemonic — this
+/// is the arm that lands the PR "on green."
 fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if !ctx.auto_merge_armed {
         return Cell::empty();
@@ -802,7 +815,7 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.row_style()
     } else {
         Style::default()
-            .bg(ctx.theme.accent)
+            .bg(ctx.theme.success)
             .fg(ratatui::style::Color::Black)
             .add_modifier(Modifier::BOLD)
     };
@@ -1714,6 +1727,31 @@ mod tests {
             cell_status(&ctx).spans[0].content.as_ref(),
             " CI FAIL ",
             "…and the failing-CI status pill is no longer hidden",
+        );
+    }
+
+    /// #794: ` ARM ` (lazybox client-side merge-on-green) and ` AUTO `
+    /// (GitHub-native, durable) must not render as the same pill. They sit
+    /// in adjacent columns and both mean "merges itself on green," so a
+    /// shared accent-on-black block hid the durability difference — ` ARM `
+    /// dies when lazybox closes, ` AUTO ` doesn't. Pin the distinct fills so
+    /// they never collapse back to one look.
+    #[test]
+    fn arm_and_auto_pills_are_visually_distinct() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.state = TaskState::Open;
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.auto_merge_armed = true;
+        ctx.auto_merge_enabled = true;
+        let arm_style = cell_arm(&ctx).spans[0].style;
+        let auto_style = cell_auto(&ctx).spans[0].style;
+        assert_eq!(arm_style.bg, Some(theme.success), "ARM is lazybox-green");
+        assert_eq!(auto_style.bg, Some(theme.accent), "AUTO is GitHub-accent");
+        assert_ne!(
+            arm_style.bg, auto_style.bg,
+            "ARM and AUTO must not share a fill color"
         );
     }
 

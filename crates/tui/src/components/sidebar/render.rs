@@ -302,28 +302,57 @@ impl Sidebar {
 
         // Row 2 — focused automation plus stats summary.
         let mut stats_spans: Vec<Span> = Vec::new();
-        let focused_auto_fix = self
-            .visible
-            .get(self.cursor)
-            .and_then(|row| match row {
-                VisibleRow::Workspace(key) => self.workspaces.get(key),
-                _ => None,
-            })
-            .and_then(|workspace| {
-                let ci = workspace.policies.arm(lazybox_core::AutoFixKind::CiFailure)
-                    == lazybox_core::PolicyArm::Arm;
-                let conflict = workspace
-                    .policies
-                    .arm(lazybox_core::AutoFixKind::MergeConflict)
-                    == lazybox_core::PolicyArm::Arm;
-                match (ci, conflict) {
-                    (true, true) => Some(" AUTO-FIX ON · CI+CONFLICT "),
-                    (true, false) => Some(" AUTO-FIX ON · CI FAIL "),
-                    (false, true) => Some(" AUTO-FIX ON · CONFLICT "),
-                    (false, false) => None,
-                }
-            });
+        let focused_workspace = self.visible.get(self.cursor).and_then(|row| match row {
+            VisibleRow::Workspace(key) => self.workspaces.get(key),
+            _ => None,
+        });
+        // Spell out the focused row's merge automation in words — the
+        // compact ` ARM ` / ` AUTO ` pills look alike but guarantee
+        // different things (#794). GitHub-native auto-merge wins when both
+        // are set (it merges server-side, even with lazybox closed), so it
+        // takes the label; otherwise the lazybox arm names its while-running
+        // limit. Colored to match each pill: accent for GitHub, green for
+        // the lazybox arm.
+        let focused_merge = focused_workspace.and_then(|workspace| {
+            if workspace
+                .pr
+                .as_ref()
+                .is_some_and(|pr| pr.auto_merge_enabled)
+            {
+                Some((" AUTO-MERGE · GitHub, works offline ", theme.accent))
+            } else if workspace.auto_merge_on_green {
+                Some((" MERGE ON GREEN · lazybox only ", theme.success))
+            } else {
+                None
+            }
+        });
+        if let Some((label, bg)) = focused_merge {
+            stats_spans.push(Span::styled(
+                label,
+                Style::default()
+                    .bg(bg)
+                    .fg(ratatui::style::Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        let focused_auto_fix = focused_workspace.and_then(|workspace| {
+            let ci = workspace.policies.arm(lazybox_core::AutoFixKind::CiFailure)
+                == lazybox_core::PolicyArm::Arm;
+            let conflict = workspace
+                .policies
+                .arm(lazybox_core::AutoFixKind::MergeConflict)
+                == lazybox_core::PolicyArm::Arm;
+            match (ci, conflict) {
+                (true, true) => Some(" AUTO-FIX ON · CI+CONFLICT "),
+                (true, false) => Some(" AUTO-FIX ON · CI FAIL "),
+                (false, true) => Some(" AUTO-FIX ON · CONFLICT "),
+                (false, false) => None,
+            }
+        });
         if let Some(label) = focused_auto_fix {
+            if !stats_spans.is_empty() {
+                stats_spans.push(Span::raw("  "));
+            }
             stats_spans.push(Span::styled(
                 label,
                 Style::default()

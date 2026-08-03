@@ -673,8 +673,10 @@ impl Sidebar {
         // editing a caret trails the query; once `Enter` keeps the
         // filter applied the caret drops and a hint reminds the user
         // how to re-edit and clear.
+        self.search_bar_rect = None;
         if search_bar && let Some(s) = self.search.as_ref() {
             let bar = Rect::new(area.x + l_pad, area.y + area.height - 1, inner_width, 1);
+            self.search_bar_rect = Some(bar);
             let global = s.scope.is_none();
             let (prefix, edit_key) = if global { ("⌕ ", "#") } else { ("/", "/") };
             let mut spans = vec![

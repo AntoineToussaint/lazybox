@@ -238,6 +238,11 @@ pub struct Sidebar {
     /// sitting to the right of the sort chip. Click opens the global
     /// search (`open_global_search`).
     search_chip_rect: Option<Rect>,
+    /// Screen rect of the bottom `/` search input bar, stashed by
+    /// `render` while a search is open. A click anywhere off this bar
+    /// (and off the header search chip) dismisses the search instead of
+    /// being trapped in it (#780). `None` while no search bar is drawn.
+    search_bar_rect: Option<Rect>,
     /// Test-only override for the "now" reference `render` uses to
     /// format relative timestamps (`1mo`, `2d`, …). Production leaves
     /// this `None` and reads the wall clock; golden snapshot tests set
@@ -307,6 +312,7 @@ impl Sidebar {
             filter_chip_rect: None,
             sort_chip_rect: None,
             search_chip_rect: None,
+            search_bar_rect: None,
             now_override: None,
             search: None,
             broadcast_selected: std::collections::HashSet::new(),
@@ -781,6 +787,16 @@ impl Sidebar {
     /// the caller fires `open_global_search`.
     pub fn search_chip_hit(&self, col: u16, row: u16) -> bool {
         let Some(rect) = self.search_chip_rect else {
+            return false;
+        };
+        row == rect.y && col >= rect.x && col < rect.x + rect.width
+    }
+
+    /// True when `(col, row)` falls on the bottom `/` search input bar.
+    /// A click here keeps the search alive (it's the input itself); a
+    /// click anywhere else dismisses it (#780).
+    pub fn search_bar_hit(&self, col: u16, row: u16) -> bool {
+        let Some(rect) = self.search_bar_rect else {
             return false;
         };
         row == rect.y && col >= rect.x && col < rect.x + rect.width
@@ -1424,6 +1440,26 @@ impl Sidebar {
     /// `render` to draw the bottom bar and the per-project match count.
     pub fn search(&self) -> Option<&SearchState> {
         self.search.as_ref()
+    }
+
+    /// Dismiss the search from a click that landed outside the input —
+    /// the mouse equivalent of the keyboard exit, so a user who never
+    /// learned `Esc` isn't trapped in "find land" (#780). Mirrors
+    /// `Enter`: an empty query closes the bar outright; a non-empty one
+    /// keeps its filter applied but stops capturing keystrokes so the
+    /// click can focus the pane it landed in. No-op when nothing is
+    /// being edited.
+    pub fn dismiss_search(&mut self) {
+        match self.search.as_mut() {
+            Some(s) if !s.editing => {}
+            Some(s) if s.query.is_empty() => {
+                self.search = None;
+                self.scroll_detached = false;
+                self.recompute_visible();
+            }
+            Some(s) => s.editing = false,
+            None => {}
+        }
     }
 
     /// Feed one keystroke into the open search bar. Printable chars

@@ -1191,6 +1191,25 @@ impl<T: TerminalAdapter> Model<T> {
 
         match m.kind {
             MouseEventKind::Down(button) => {
+                // A click landing anywhere off the `/` search input
+                // dismisses the search instead of trapping keystrokes
+                // in it — the mouse counterpart of `Esc` (#780). This
+                // runs BEFORE any button/capture-specific early return
+                // below so every down-click frees the user, not just a
+                // left-click into a pane: a right-click, or any click
+                // while host-native mouse mode short-circuits, still
+                // exits find. The click then falls through to its
+                // normal routing. Clicks on the input itself (bottom
+                // bar or header search chip) are left alone so they
+                // keep editing.
+                if self.sidebar.search_editing()
+                    && !self.sidebar.search_bar_hit(m.column, m.row)
+                    && !self.sidebar.search_chip_hit(m.column, m.row)
+                {
+                    self.sidebar.dismiss_search();
+                    self.sync_panes();
+                    self.redraw = true;
+                }
                 let right_click_span =
                     matches!(button, crossterm::event::MouseButton::Right).then(|| {
                         tracing::info_span!("terminal_right_click", column = m.column, row = m.row)

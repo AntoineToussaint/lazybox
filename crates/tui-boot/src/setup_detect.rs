@@ -14,7 +14,8 @@
 //!   binary with `--version` and looking for a 0 exit.
 //! - **GitHub** — the same credential chain the daemon uses
 //!   (`GH_TOKEN` → `GITHUB_TOKEN` → `gh auth token`).
-//! - **Linear** — `LINEAR_API_KEY` env var present and non-empty.
+//! - **Linear** — the credential chain (`LINEAR_API_KEY` env var, then
+//!   `linear auth token` from the `schpet/linear-cli` keyring).
 //!
 //! Detection is fully concurrent: each probe runs as its own future and
 //! they're joined together, so a slow `claude --version` doesn't delay
@@ -195,23 +196,28 @@ async fn detect_linear() -> ToolStatus {
         display_name: "Linear",
         category: Category::Provider,
         state,
-        install_hint: "export LINEAR_API_KEY=lin_api_…",
+        install_hint: "export LINEAR_API_KEY=lin_api_… (or run `linear auth login`)",
     };
 
-    if !matches!(std::env::var("LINEAR_API_KEY"), Ok(v) if !v.is_empty()) {
-        return mk(ToolState::Missing {
-            kind: MissingKind::EnvVarMissing,
-            hint: "export LINEAR_API_KEY=lin_api_…".into(),
-        });
-    }
-
-    match lazybox_linear::LinearClient::from_env() {
-        Ok(_) => mk(ToolState::Found {
-            detail: "LINEAR_API_KEY set".into(),
+    // Resolve through the same credential chain the daemon polls with,
+    // rather than reading `LINEAR_API_KEY` directly. The chain also
+    // backstops the env var with `linear auth token` (the
+    // `schpet/linear-cli` keyring), so a user who authenticated through
+    // the CLI is detected here too — parity with the GitHub probe,
+    // which resolves `gh auth token`. Bounded: `linear auth token` can
+    // spawn a subprocess, so it must not stall setup detection.
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        lazybox_linear::credential_chain().resolve(lazybox_linear::SOURCE),
+    )
+    .await
+    {
+        Ok(Ok(cred)) => mk(ToolState::Found {
+            detail: cred.source,
         }),
-        Err(_) => mk(ToolState::Missing {
-            kind: MissingKind::TokenInvalid,
-            hint: "check LINEAR_API_KEY value".into(),
+        _ => mk(ToolState::Missing {
+            kind: MissingKind::EnvVarMissing,
+            hint: "export LINEAR_API_KEY=lin_api_… (or run `linear auth login`)".into(),
         }),
     }
 }

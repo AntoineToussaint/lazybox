@@ -2665,9 +2665,15 @@ pub(super) async fn sources_for_with_engagement(
     }
 
     if setup.enabled_providers.contains("linear") {
-        match LinearClient::from_env() {
-            Ok(client) => sources.push(Box::new(LinearSource::new(
-                client,
+        // Resolve through the full credential chain (env var, then
+        // `linear auth token`) rather than `from_env`, so a CLI-only
+        // Linear login polls just like the setup screen detects it.
+        match lazybox_linear::credential_chain()
+            .resolve(lazybox_linear::SOURCE)
+            .await
+        {
+            Ok(cred) => sources.push(Box::new(LinearSource::new(
+                LinearClient::from_credential(cred),
                 setup.provider_config("linear"),
                 bus.clone(),
             ))),

@@ -1432,6 +1432,72 @@ fn codex_footer_pos(compact: &str) -> Option<usize> {
         .max()
 }
 
+/// Reasoning-effort tokens Codex prints as the second word of its
+/// `<model> <effort>` composer footer. Matched as whole words (exact
+/// equality, so order and prefix overlaps don't matter). `default` and
+/// `max` are the labels Codex uses for a model's own default and its
+/// maximum reasoning setting; the rest are the standard effort levels.
+const CODEX_EFFORT_TOKENS: &[&str] = &[
+    "minimal", "low", "medium", "high", "xhigh", "max", "default", "none",
+];
+
+/// Model-name prefixes Codex renders in its composer footer. The footer
+/// glues the rotating placeholder text directly onto the model name (the
+/// cursor move between the composer row and the footer row leaves no byte
+/// between them — see the fixtures: `…@filenamegpt-5.5 xhigh · /repo`), so
+/// the model is isolated by anchoring on its own prefix rather than by
+/// tokenizing. Codex runs OpenAI models only — `gpt-*` today, the
+/// `o1`/`o3`/`o4` and `codex-*` families historically.
+const CODEX_MODEL_PREFIXES: &[&str] = &["gpt-", "o1", "o3", "o4", "codex-"];
+
+/// Extract Codex's live `<model> <effort>` from the composer footer as a
+/// compact display string (`"gpt-5.5 · xhigh"`), or `None` when the footer
+/// isn't on screen or its trailing token isn't a recognised effort.
+///
+/// Unlike the state detectors this reads the ANSI-stripped-but-NOT-compacted
+/// buffer: Codex paints the footer with real space bytes
+/// (`gpt-5.5 xhigh · /repo`), so the model/effort split survives — whereas
+/// `compact_lower` would glue them into `gpt-5.5xhigh`. The `<effort>` word
+/// is validated against `CODEX_EFFORT_TOKENS` (so a stray `foo · /bar` in
+/// output can't be mistaken for a footer) and the model is cut from the
+/// rightmost `CODEX_MODEL_PREFIXES` anchor to drop the placeholder text
+/// glued in front of it. Cheap enough to ride the daemon's per-settle
+/// detection.
+pub fn codex_model_effort(recent_output: &[u8]) -> Option<String> {
+    let s = strip_ansi_lossy(recent_output);
+    // The footer is `<model> <effort> · <cwd>`; find the bottom-most `·`
+    // followed by an absolute or home-relative path (the same cwd anchor
+    // `codex_footer_pos` uses, but on the spaced form so the tokens before
+    // it keep their separators). `rev` picks the most recent footer, so a
+    // stale one in scrollback never wins.
+    let dot = s
+        .match_indices('\u{b7}')
+        .rev()
+        .find(|(i, _)| {
+            let rest = s[i + '\u{b7}'.len_utf8()..].trim_start();
+            rest.starts_with('/') || rest.starts_with('~')
+        })
+        .map(|(i, _)| i)?;
+    let head = s[..dot].trim_end();
+    // The effort is the last whitespace-delimited word; require it to be a
+    // known effort so an arbitrary `word · /path` line can't false-match.
+    let (before_effort, effort) = head.rsplit_once(char::is_whitespace)?;
+    if !CODEX_EFFORT_TOKENS.contains(&effort) {
+        return None;
+    }
+    // The model name is glued to the placeholder text, so cut it from the
+    // rightmost recognised model prefix rather than by tokenizing.
+    // `before_effort` keeps whatever whitespace separated the model from the
+    // effort (`rsplit_once` only removes the final char), so trim it off the
+    // model slice — otherwise a multi-space footer leaks padding into the name.
+    let model = CODEX_MODEL_PREFIXES
+        .iter()
+        .filter_map(|p| before_effort.rfind(p))
+        .max()
+        .map(|start| before_effort[start..].trim_end())?;
+    Some(format!("{model} · {effort}"))
+}
+
 /// Byte offset of Codex's most recent live "working" status line in `compact`
 /// — the `esc to interrupt` hint on a status-bar-shaped line (reusing
 /// [`is_interrupt_status_line`], which rejects prose that merely mentions the
@@ -2207,6 +2273,81 @@ mod tests {
         // Recency: the most recent footer wins.
         let two = "·/old\nwork\n·/new";
         assert_eq!(codex_footer_pos(two), two.rfind("·/new"));
+    }
+
+    #[test]
+    fn codex_model_effort_extracts_model_and_effort_from_footer() {
+        // The footer keeps real spaces; the rotating placeholder is glued
+        // directly onto the model name (no separating byte survives), so the
+        // model is cut from its own prefix. Shapes taken from the real
+        // fixtures (`codex_real_*`).
+        assert_eq!(
+            codex_model_effort(b"...@filenamegpt-5.5 xhigh \xc2\xb7 /private/tmp/x"),
+            Some("gpt-5.5 · xhigh".to_string())
+        );
+        assert_eq!(
+            codex_model_effort(b"Summarize recent commitsgpt-5.6-sol max \xc2\xb7 /repo"),
+            Some("gpt-5.6-sol · max".to_string())
+        );
+        assert_eq!(
+            codex_model_effort(b"...gpt-5.5 default \xc2\xb7 /repo"),
+            Some("gpt-5.5 · default".to_string())
+        );
+        // Home-relative cwd anchors too.
+        assert_eq!(
+            codex_model_effort(b"gpt-5.5 high \xc2\xb7 ~/proj"),
+            Some("gpt-5.5 · high".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_model_effort_trims_multi_space_padding_from_the_model() {
+        // `rsplit_once` only drops the final separator, so a footer that
+        // pads model→effort with more than one space would otherwise leak
+        // the extra spaces into the model name (`"gpt-5.5   · xhigh"`).
+        assert_eq!(
+            codex_model_effort(b"gpt-5.5   xhigh \xc2\xb7 /repo"),
+            Some("gpt-5.5 · xhigh".to_string())
+        );
+        assert_eq!(
+            codex_model_effort(b"...@filegpt-5.6-sol  \t max \xc2\xb7 /repo"),
+            Some("gpt-5.6-sol · max".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_model_effort_is_none_without_a_recognised_footer() {
+        // No footer at all.
+        assert_eq!(codex_model_effort(b"just some agent output"), None);
+        // A `word · /path` line whose trailing token isn't a known effort
+        // must not be mistaken for the footer.
+        assert_eq!(
+            codex_model_effort(b"see the file gpt-5.5 \xc2\xb7 /path"),
+            None
+        );
+        assert_eq!(
+            codex_model_effort(b"gpt-5.5 turbocharged \xc2\xb7 /repo"),
+            None
+        );
+        // A middle-dot not followed by a path (the status-line separator)
+        // is not a footer.
+        assert_eq!(
+            codex_model_effort(b"gpt-5.5 high \xc2\xb7 esc to interrupt"),
+            None
+        );
+        // A valid effort but no recognisable model prefix → nothing to show.
+        assert_eq!(codex_model_effort(b"mystery high \xc2\xb7 /repo"), None);
+    }
+
+    #[test]
+    fn codex_model_effort_prefers_the_most_recent_footer() {
+        // A stale footer earlier in the buffer must lose to the bottom-most
+        // one (the live composer's).
+        let two = "oldgpt-5.5 low \u{b7} /old\nworkgpt-5.6-sol max \u{b7} /new";
+        assert_eq!(
+            codex_model_effort(two.as_bytes()),
+            Some("gpt-5.6-sol · max".to_string())
+        );
     }
 
     #[test]

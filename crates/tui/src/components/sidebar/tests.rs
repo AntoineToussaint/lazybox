@@ -2958,6 +2958,161 @@ mod rebadge_attention_tests {
     }
 }
 
+mod agent_model_badge_tests {
+    //! #779: the sidebar surfaces each agent's model + reasoning-effort
+    //! label next to its runner badge. `agent_models` is the single
+    //! producer feeding the row; it reads the per-terminal `terminal_models`
+    //! map kept in sync by the spawn / model-changed / exit / snapshot
+    //! handlers.
+    use super::super::*;
+    use lazybox_core::WorkspaceKey;
+    use lazybox_ipc::{Event, TerminalSnapshot};
+
+    fn spawn(sb: &mut Sidebar, id: u64, key: &SessionKey, agent: &str, model: Option<&str>) {
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(id),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent(agent.into()),
+            no_permission: false,
+            on_main: false,
+            model_label: model.map(str::to_string),
+        });
+    }
+
+    fn models(sb: &Sidebar, key: &SessionKey) -> Vec<(char, String)> {
+        let mut got = sb.agent_models(key);
+        got.sort();
+        got
+    }
+
+    #[test]
+    fn spawn_model_label_surfaces_next_to_the_badge() {
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#1")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        spawn(&mut sb, 1, &ws, "claude", Some("Opus"));
+        assert_eq!(models(&sb, &ws), vec![('C', "Opus".to_string())]);
+    }
+
+    #[test]
+    fn spawn_without_a_tier_shows_no_label() {
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#2")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        spawn(&mut sb, 1, &ws, "codex", None);
+        assert_eq!(models(&sb, &ws), vec![], "a default-model spawn stays bare");
+    }
+
+    #[test]
+    fn model_changed_supersedes_the_spawn_tier() {
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#3")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        spawn(&mut sb, 1, &ws, "codex", None);
+        sb.on_event(&Event::TerminalModelChanged {
+            session_key: ws.clone(),
+            terminal_id: TerminalId(1),
+            model_label: "gpt-5.5 · xhigh".to_string(),
+        });
+        assert_eq!(
+            models(&sb, &ws),
+            vec![('X', "gpt-5.5 · xhigh".to_string())],
+            "the live-detected model must win over the spawn tier",
+        );
+    }
+
+    #[test]
+    fn snapshot_seeds_the_model_from_the_terminal() {
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#4")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.on_event(&Event::Snapshot {
+            workspaces: Vec::new(),
+            terminals: vec![TerminalSnapshot {
+                terminal_id: TerminalId(1),
+                session_key: ws.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                replay: Vec::new(),
+                last_seq: 0,
+                replay_available: true,
+                no_permission: false,
+                on_main: false,
+                model_label: Some("Sonnet".to_string()),
+                prompt_history: Vec::new(),
+                composing_buffer: None,
+                agent_state: None,
+                authenticating: false,
+            }],
+            projects: Vec::new(),
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert_eq!(
+            models(&sb, &ws),
+            vec![('C', "Sonnet".to_string())],
+            "a reconnect snapshot must not lose the model label",
+        );
+    }
+
+    #[test]
+    fn terminal_exit_drops_the_model() {
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#5")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        spawn(&mut sb, 1, &ws, "claude", Some("Opus"));
+        sb.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(0),
+            last_output: None,
+        });
+        assert_eq!(models(&sb, &ws), vec![], "the exited agent's model clears");
+    }
+
+    #[test]
+    fn two_same_kind_agents_drop_the_ambiguous_model() {
+        // Two Claude terminals collapse to a single `C×2` badge, so their
+        // models are ambiguous against one letter — dropped, not guessed.
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#6")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        spawn(&mut sb, 1, &ws, "claude", Some("Opus"));
+        spawn(&mut sb, 2, &ws, "claude", Some("Sonnet"));
+        assert_eq!(
+            models(&sb, &ws),
+            vec![],
+            "same-kind agents can't attribute a model to the collapsed badge",
+        );
+    }
+
+    #[test]
+    fn distinct_agents_each_keep_their_own_model() {
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#7")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        spawn(&mut sb, 1, &ws, "claude", Some("Opus"));
+        spawn(&mut sb, 2, &ws, "codex", None);
+        sb.on_event(&Event::TerminalModelChanged {
+            session_key: ws.clone(),
+            terminal_id: TerminalId(2),
+            model_label: "gpt-5.5 · xhigh".to_string(),
+        });
+        assert_eq!(
+            models(&sb, &ws),
+            vec![
+                ('C', "Opus".to_string()),
+                ('X', "gpt-5.5 · xhigh".to_string()),
+            ],
+            "distinct letters each attribute their own model",
+        );
+    }
+
+    #[test]
+    fn show_agent_model_off_suppresses_every_label() {
+        let ws: SessionKey = (&WorkspaceKey::new("github:o/r#8")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_show_agent_model(false);
+        spawn(&mut sb, 1, &ws, "claude", Some("Opus"));
+        assert_eq!(
+            models(&sb, &ws),
+            vec![],
+            "the opt-out keeps the sidebar compact",
+        );
+    }
+}
+
 mod getting_started_tests {
     use super::super::*;
     use super::status_pill_tests::base_task;

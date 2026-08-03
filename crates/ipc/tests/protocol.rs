@@ -954,6 +954,11 @@ fn all_events() -> Vec<Event> {
             terminal_id: TerminalId(12),
             display_name: "Codex".into(),
         },
+        Event::TerminalModelChanged {
+            session_key: key.clone(),
+            terminal_id: TerminalId(13),
+            model_label: "gpt-5.5 · xhigh".into(),
+        },
     ]
 }
 
@@ -1119,6 +1124,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentAuthProgress { .. } => "AgentAuthProgress",
         Event::AgentAuthFinished { .. } => "AgentAuthFinished",
         Event::AgentResumeFallback { .. } => "AgentResumeFallback",
+        Event::TerminalModelChanged { .. } => "TerminalModelChanged",
     }
 }
 
@@ -1135,7 +1141,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        77,
+        78,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

@@ -819,6 +819,7 @@ impl Sidebar {
                     self.working_spinner_frame,
                 ),
                 badges: self.runner_badges(key),
+                agent_models: self.agent_models(key),
                 agent_number: agent_numbers.get(key).copied(),
                 ascii_glyphs: self.ascii_glyphs,
                 auto_merge_armed: workspace.is_some_and(|w| w.auto_merge_on_green),

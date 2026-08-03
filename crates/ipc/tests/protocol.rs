@@ -432,6 +432,20 @@ fn all_commands() -> Vec<Command> {
             session_key: "github:o/r#1".into(),
             name: "spike-rate-limit".into(),
         },
+        Command::RecreateWorktree {
+            spawn: Box::new(lazybox_ipc::SpawnFallback {
+                session_key: "github:o/r#1".into(),
+                session_id: None,
+                client_request_id: Some("recreate-1".into()),
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: Some("/tmp".into()),
+                model_alias: Some("L".into()),
+                access: lazybox_ipc::AgentRunAccess::ReadOnly,
+            }),
+            initial_prompt: Some("fix the thing".into()),
+            on_main: false,
+            preserve_holder: Some("/tmp/holder".into()),
+        },
         Command::Shutdown,
     ]
 }
@@ -1042,6 +1056,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ReauthenticateAgent { .. } => "ReauthenticateAgent",
         Command::CancelAgentReauthentication { .. } => "CancelAgentReauthentication",
         Command::RenameWorkspace { .. } => "RenameWorkspace",
+        Command::RecreateWorktree { .. } => "RecreateWorktree",
     }
 }
 
@@ -1141,7 +1156,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        71,
+        72,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

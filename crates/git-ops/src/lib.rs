@@ -1597,6 +1597,76 @@ impl WorktreeManager {
         }
         Ok(())
     }
+
+    /// The branch a valid managed worktree at `wt_path` currently sits on,
+    /// or `None` when the path is not a healthy worktree of this bare
+    /// clone or is on a detached HEAD. Used by the provisioner to reuse a
+    /// workspace's *own* prior worktree branch instead of re-deriving a
+    /// colliding one from a mutated title (issue #787) — so a second
+    /// attempt on the same issue adopts the branch already on disk rather
+    /// than hard-failing `BranchMismatch` against it.
+    pub async fn existing_worktree_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        wt_path: &Path,
+    ) -> Result<Option<String>, GitError> {
+        if !wt_path.exists() {
+            return Ok(None);
+        }
+        let bare_path = self.bare_clone_path(owner, repo);
+        let lock = repo_lock(&bare_path);
+        let _guard = lock.lock().await;
+        if validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
+            != WorktreeDirState::Valid
+        {
+            return Ok(None);
+        }
+        current_worktree_branch(wt_path).await
+    }
+
+    /// Preserve a conflicting checkout by renaming it to a sibling
+    /// `<path>.bak-<n>` and pruning the bare clone's now-dangling worktree
+    /// registration so the branch it held is freed for re-provisioning
+    /// (issue #787's in-modal "recreate" recovery). The rename keeps any
+    /// uncommitted work recoverable rather than deleting it. Returns the
+    /// backup path, or `None` when nothing was at `worktree_path` (a prune
+    /// still runs so a stale registration can't block the fresh add).
+    pub async fn preserve_worktree_aside(
+        &self,
+        bare_path: &Path,
+        worktree_path: &Path,
+    ) -> Result<Option<PathBuf>, GitError> {
+        let lock = repo_lock(bare_path);
+        let _guard = lock.lock().await;
+        if !worktree_path.exists() {
+            let _ = run_git_in(self.git_runner(), bare_path, &["worktree", "prune"]).await;
+            return Ok(None);
+        }
+        let backup = backup_sibling_path(worktree_path);
+        tokio::fs::rename(worktree_path, &backup).await?;
+        // The worktree dir is gone from its registered location, so a
+        // prune drops the registration and releases its branch; the fresh
+        // `git worktree add` that follows then sees a clean slate.
+        let _ = run_git_in(self.git_runner(), bare_path, &["worktree", "prune"]).await;
+        Ok(Some(backup))
+    }
+}
+
+/// First free `<path>.bak-<n>` sibling for a preserved worktree. Counts
+/// up so repeated recreates on the same stuck workspace never clobber an
+/// earlier backup.
+fn backup_sibling_path(path: &Path) -> PathBuf {
+    let mut n = 1u32;
+    loop {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(format!(".bak-{n}"));
+        let candidate = PathBuf::from(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// Sibling staging path for an in-flight bare clone:
@@ -5147,5 +5217,72 @@ mod track_main_tests {
             wt.join("build.log").exists(),
             "the untracked file is preserved through the fast-forward"
         );
+    }
+
+    /// Issue #787: `existing_worktree_branch` reads a managed worktree's
+    /// own branch, so the provisioner can reuse it instead of deriving a
+    /// colliding one. A missing path (or one that isn't a worktree of the
+    /// bare clone) reports `None`.
+    #[tokio::test]
+    async fn existing_worktree_branch_reads_the_checked_out_branch() {
+        let (tmp, mgr, _src, wt) = tracked_worktree().await;
+        assert_eq!(
+            mgr.existing_worktree_branch("acme", "widgets", &wt)
+                .await
+                .expect("read branch")
+                .as_deref(),
+            Some("scratch"),
+        );
+        let missing = tmp.path().join("nope");
+        assert_eq!(
+            mgr.existing_worktree_branch("acme", "widgets", &missing)
+                .await
+                .expect("missing path is not an error"),
+            None,
+        );
+    }
+
+    /// Issue #787: preserving a conflicting worktree aside keeps its
+    /// (uncommitted) files under a `.bak-<n>` sibling and frees the branch
+    /// it held, so a fresh provision on that same branch succeeds where it
+    /// would previously have hit `BranchHeldLive` / `BranchMismatch`.
+    #[tokio::test]
+    async fn preserve_worktree_aside_keeps_files_and_frees_the_branch() {
+        let (_tmp, mgr, _src, wt) = tracked_worktree().await;
+        let bare = mgr.bare_path("acme", "widgets");
+        std::fs::write(wt.join("wip.txt"), "unsaved\n").expect("write wip");
+
+        let backup = mgr
+            .preserve_worktree_aside(&bare, &wt)
+            .await
+            .expect("preserve runs")
+            .expect("a backup was created");
+        assert!(!wt.exists(), "the conflicting worktree moved aside");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("wip.txt")).expect("read backup"),
+            "unsaved\n",
+            "uncommitted work is preserved, not deleted",
+        );
+
+        // The branch `scratch` is no longer checked out anywhere, so a
+        // fresh worktree add on it succeeds.
+        mgr.checkout_new_branch_at(&wt, "acme", "widgets", "scratch", "main")
+            .await
+            .expect("re-provision on the freed branch");
+        assert_eq!(
+            mgr.existing_worktree_branch("acme", "widgets", &wt)
+                .await
+                .expect("read branch")
+                .as_deref(),
+            Some("scratch"),
+        );
+
+        // A second preserve counts up rather than clobbering the first.
+        let backup2 = mgr
+            .preserve_worktree_aside(&bare, &wt)
+            .await
+            .expect("preserve runs")
+            .expect("second backup");
+        assert_ne!(backup, backup2, "backups never collide");
     }
 }

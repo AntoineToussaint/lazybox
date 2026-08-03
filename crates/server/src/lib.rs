@@ -893,6 +893,7 @@ impl Server {
                             "CancelAgentReauthentication"
                         }
                         lazybox_ipc::Command::RenameWorkspace { .. } => "RenameWorkspace",
+                        lazybox_ipc::Command::RecreateWorktree { .. } => "RecreateWorktree",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1598,6 +1599,21 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::RenameWorkspace { session_key, name } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::rename_workspace(config, &key, name).await;
+        }
+        lazybox_ipc::Command::RecreateWorktree {
+            spawn,
+            initial_prompt,
+            on_main,
+            preserve_holder,
+        } => {
+            spawn_handler::handle_recreate_worktree(
+                config,
+                *spawn,
+                initial_prompt,
+                on_main,
+                preserve_holder,
+            )
+            .await;
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;

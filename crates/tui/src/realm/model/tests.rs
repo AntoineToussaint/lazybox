@@ -11963,6 +11963,104 @@ mod worktree_progress_recovery_tests {
         }
         assert!(saw_spawn, "retry must re-issue the spawn to the daemon");
     }
+
+    /// Issue #787: `r` on a `BranchMismatch` modal dispatches a
+    /// `RecreateWorktree` carrying the remembered spawn, so the daemon
+    /// preserves the conflicting checkout aside and re-provisions — no
+    /// out-of-band `git` needed.
+    #[test]
+    fn recreate_dispatches_recreate_worktree_from_the_remembered_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            on_main: false,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(
+                "checkout_at: worktree /tmp/wt is checked out on branch 'issue-42-old', \
+                 not the requested branch 'issue-42-new' — refusing to reuse it"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+        while server.rx.try_recv().is_ok() {}
+
+        m.recreate_worktree_provision();
+
+        assert!(!m.modal_stack.contains(&Id::WorktreeProgress));
+        let mut recreate = None;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let lazybox_ipc::Command::RecreateWorktree { spawn, .. } = cmd {
+                recreate = Some(spawn);
+            }
+        }
+        let spawn = recreate.expect("recreate must issue a RecreateWorktree command");
+        assert!(matches!(spawn.kind, TerminalKind::Agent(ref id) if id == "claude"));
+        // A plain BranchMismatch moves the workspace's own target, not a holder.
+        // (holder preservation only applies to BranchHeldManaged.)
+    }
+
+    /// Issue #787: `g` on a `BranchHeldLive` modal reveals the workspace
+    /// whose session worktree path matches the holder named in the error.
+    #[test]
+    fn jump_to_holder_reveals_the_session_owning_the_checkout() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+
+        // A holder workspace with a session at a known worktree path.
+        let holder_key = WorkspaceKey::new("github:acme/widget#7");
+        let mut holder = Workspace::empty(holder_key.clone(), "feat", Utc::now());
+        let session = lazybox_core::WorkspaceSession::new(
+            holder_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            std::path::PathBuf::from("/tmp/holder-wt"),
+            Utc::now(),
+        );
+        holder.add_session(session);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(holder)));
+
+        // The stuck workspace's failed modal names that holder path.
+        let stuck_key = WorkspaceKey::new("github:acme/widget#42");
+        let stuck_session_key: lazybox_core::SessionKey = (&stuck_key).into();
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: stuck_session_key,
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(
+                "checkout_at: branch 'feat' is already checked out at /tmp/holder-wt \
+                 — refusing to take it from another live worktree"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+
+        m.jump_to_worktree_holder();
+
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "a successful jump closes the recovery modal",
+        );
+        assert_eq!(
+            m.sidebar.selected_workspace().map(|w| w.key.clone()),
+            Some(holder_key),
+            "jump reveals the workspace holding the branch",
+        );
+    }
 }
 
 #[cfg(test)]

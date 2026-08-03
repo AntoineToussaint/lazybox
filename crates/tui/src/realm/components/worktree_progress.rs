@@ -281,6 +281,12 @@ impl WorktreeProgressState {
         self.recovery
     }
 
+    /// The raw failure text, once a step has failed. Carries the holder
+    /// path the recovery actions parse out (issue #787).
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
     /// Queue dismissal: the session is live (`TerminalSpawned`), so the
     /// modal should close once the display has walked through every step
     /// for its dwell. The work itself already finished in the background.
@@ -343,6 +349,13 @@ pub struct WorktreeProgress {
     /// Whether the failed operation can be retried without first leaving
     /// the modal to resolve a conflict or invalid input.
     retryable: bool,
+    /// Whether lazybox can recover in-modal by preserving the conflicting
+    /// checkout aside and re-provisioning (issue #787) — a wrong-branch,
+    /// dirty-leftover, or non-live managed holder.
+    recreatable: bool,
+    /// Whether the conflict is a live session holding the branch, so the
+    /// modal offers a jump to that session instead of a recreate.
+    jump: bool,
     warning: Option<String>,
     spinner_idx: usize,
 }
@@ -355,6 +368,12 @@ impl WorktreeProgress {
             error: state.error.clone(),
             recovery: state.recovery,
             retryable: state.recovery.is_some_and(|recovery| recovery.retryable()),
+            recreatable: state
+                .recovery
+                .is_some_and(|recovery| recovery.recreatable()),
+            jump: state
+                .recovery
+                .is_some_and(|recovery| recovery.jump_to_holder()),
             warning: state.warning.clone(),
             spinner_idx: 0,
         }
@@ -414,8 +433,17 @@ impl Component for WorktreeProgress {
                 format!("  {}", recovery.hint()),
                 Style::default().fg(theme.warn),
             )));
+            // Every recoverable class offers a one-keypress path back to a
+            // working state (issue #787): `r` retries the transient
+            // classes and recreates the ones lazybox can safely rebuild
+            // (preserve the conflicting checkout aside, re-provision); `g`
+            // jumps to the live session holding a branch we can't take.
             let affordance = if self.retryable {
                 "  r retry · Esc dismiss"
+            } else if self.recreatable {
+                "  r recreate · Esc dismiss"
+            } else if self.jump {
+                "  g go to holder · Esc dismiss"
             } else {
                 "  Esc dismiss"
             };
@@ -487,6 +515,18 @@ impl AppComponent<Msg, UserEvent> for WorktreeProgress {
                 code: Key::Char('r'),
                 ..
             }) if self.retryable => Some(Msg::WorktreeRetry),
+            // `r` on a recreatable failure preserves the conflicting
+            // checkout aside and re-provisions (issue #787) — the same
+            // "get me unstuck" key, since retry is meaningless there.
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('r'),
+                ..
+            }) if self.recreatable => Some(Msg::WorktreeRecreate),
+            // `g` jumps to the live session already holding the branch.
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('g'),
+                ..
+            }) if self.jump => Some(Msg::WorktreeJumpToHolder),
             // Advance the spinner and ask the run loop to repaint — the
             // checkout phase emits no events for seconds, so without a
             // per-tick redraw the spinner would look frozen.
@@ -877,6 +917,67 @@ mod tests {
         assert!(out.contains("or remove it"), "{out}");
         assert!(!out.contains("join the live session"), "{out}");
         assert!(!out.contains("r retry"), "{out}");
+    }
+
+    /// Issue #787: a `BranchMismatch` (the workspace's own leftover on
+    /// another branch) is no Esc-only dead end — the modal offers a
+    /// one-keypress recreate and `r` dispatches it.
+    #[test]
+    fn branch_mismatch_modal_offers_recreate() {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "checkout_at: worktree /tmp/wt is checked out on branch 'issue-1-old', \
+                 not the requested branch 'issue-1-new' — refusing to reuse it; preserve \
+                 or switch that checkout, then retry"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchMismatch));
+        let out = render(&mut WorktreeProgress::from_state(&st), 72, 20);
+        assert!(out.contains('✗'), "{out}");
+        assert!(out.contains("r recreate"), "recreate affordance: {out}");
+        assert!(
+            !out.contains("r retry"),
+            "must not advertise a bare retry: {out}"
+        );
+        let mut comp = WorktreeProgress::from_state(&st);
+        assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('r')))),
+            Some(Msg::WorktreeRecreate)
+        ));
+    }
+
+    /// Issue #787: a `BranchHeldLive` failure offers a jump to the live
+    /// session holding the branch; `g` dispatches it and `r` stays inert
+    /// (recreating a live holder would be destructive).
+    #[test]
+    fn branch_held_live_modal_offers_jump() {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "worktree: checkout_at: branch 'feat' is already checked out at \
+                 /tmp/other — refusing to take it from another live worktree"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldLive));
+        let out = render(&mut WorktreeProgress::from_state(&st), 72, 20);
+        assert!(out.contains("go to holder"), "jump affordance: {out}");
+        let mut comp = WorktreeProgress::from_state(&st);
+        assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('g')))),
+            Some(Msg::WorktreeJumpToHolder)
+        ));
+        assert!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('r'))))
+                .is_none(),
+            "r must not recreate a live holder"
+        );
     }
 
     /// The `r` key only fires for a retryable failure — a stray `r`

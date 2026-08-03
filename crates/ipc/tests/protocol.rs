@@ -484,6 +484,10 @@ fn all_events() -> Vec<Event> {
             command: "/bin/zsh".into(),
             configured: false,
         },
+        Event::AgentAvailabilityConfig {
+            agents: vec!["claude".into(), "codex".into()],
+            default_agent: Some("codex".into()),
+        },
         Event::WorkspaceUpserted(Box::new(sample_workspace())),
         Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(key.as_str())),
         Event::ProjectUpserted(Box::new(sample_project())),
@@ -1051,6 +1055,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::ViewerIdentities { .. } => "ViewerIdentities",
         Event::AutoFixPolicyConfig { .. } => "AutoFixPolicyConfig",
         Event::ShellCommandConfig { .. } => "ShellCommandConfig",
+        Event::AgentAvailabilityConfig { .. } => "AgentAvailabilityConfig",
         Event::WorkspaceUpserted(_) => "WorkspaceUpserted",
         Event::WorkspaceRemoved(_) => "WorkspaceRemoved",
         Event::ProjectUpserted(_) => "ProjectUpserted",
@@ -1141,7 +1146,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        78,
+        79,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

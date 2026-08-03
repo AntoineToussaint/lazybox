@@ -1483,6 +1483,21 @@ pub enum Event {
         command: String,
         configured: bool,
     },
+    /// The daemon's spawnable-agent set — the agent ids it is configured
+    /// to run (`setup.agents`, or the built-in trio when unconfigured),
+    /// plus its configured default work agent (`setup.default_agent`,
+    /// `None` when unset). Emitted once per subscribe so a remote
+    /// `--connect` client offers the agents the box actually runs, and
+    /// defaults `w` to the box's chosen agent, instead of the hardcoded
+    /// trio + `claude` it otherwise falls back to: the client's own local
+    /// config never applies over the socket, and its PATH is the wrong
+    /// machine's. Mirrors `ShellCommandConfig` / `AutoFixPolicyConfig` —
+    /// the daemon owns the PTYs and reads the authoritative config, so it
+    /// reports the availability the client can't otherwise know. See #742.
+    AgentAvailabilityConfig {
+        agents: Vec<String>,
+        default_agent: Option<String>,
+    },
     /// A workspace was created or updated.
     /// Boxed because Workspace is several KB once activity is
     /// populated; keeping the `Event` enum slim avoids worst-case

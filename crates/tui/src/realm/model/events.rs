@@ -791,6 +791,7 @@ impl<T: TerminalAdapter> Model<T> {
                 IpcEvent::ViewerIdentities { .. }
                 | IpcEvent::AutoFixPolicyConfig { .. }
                 | IpcEvent::ShellCommandConfig { .. }
+                | IpcEvent::AgentAvailabilityConfig { .. }
                 | IpcEvent::WorkspaceRemoved(_)
                 | IpcEvent::ProjectUpserted(_)
                 | IpcEvent::ProjectRemoved(_)
@@ -930,6 +931,31 @@ impl<T: TerminalAdapter> Model<T> {
                 configured: *configured,
             });
             self.redraw = true;
+            return;
+        }
+        // The daemon's spawnable-agent set and its default work agent,
+        // arriving among the post-subscribe pushes. Only a remote
+        // (`--connect`) client adopts them: it otherwise falls back to
+        // the hardcoded trio + `claude` because its own local config
+        // never applies over the socket (its PATH is the wrong machine's).
+        // The embedded client already applied its authoritative local
+        // config at startup — the same file the daemon reads — so
+        // re-applying here would be a no-op that needlessly rebuilds the
+        // catalog over the startup keymap/model wiring. Set the box's
+        // default first; `set_agents` then reconciles a default the set
+        // doesn't include. See #742.
+        if let IpcEvent::AgentAvailabilityConfig {
+            agents,
+            default_agent,
+        } = &event
+        {
+            if self.remote {
+                if let Some(default) = default_agent {
+                    self.set_default_agent(default);
+                }
+                self.set_agents(agents.clone());
+                self.redraw = true;
+            }
             return;
         }
         // Project lifecycle events. Mirror into `self.projects` so
@@ -1535,6 +1561,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::ViewerIdentities { .. }
             | IpcEvent::AutoFixPolicyConfig { .. }
             | IpcEvent::ShellCommandConfig { .. }
+            | IpcEvent::AgentAvailabilityConfig { .. }
             | IpcEvent::WorkspaceUpserted(_)
             | IpcEvent::WorkspaceRemoved(_)
             | IpcEvent::ProjectUpserted(_)
@@ -1787,6 +1814,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::ViewerIdentities { .. }
                 | IpcEvent::AutoFixPolicyConfig { .. }
                 | IpcEvent::ShellCommandConfig { .. }
+                | IpcEvent::AgentAvailabilityConfig { .. }
                 | IpcEvent::WorkspaceUpserted(_)
                 | IpcEvent::WorkspaceRemoved(_)
                 | IpcEvent::ProjectUpserted(_)

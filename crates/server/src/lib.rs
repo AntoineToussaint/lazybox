@@ -1314,14 +1314,20 @@ pub async fn dispatch_command(
                     shell_command,
                     shell_configured,
                     config.auto_fix.to_settings(),
+                    spawnable_agents(&config),
+                    config.setup.default_agent.clone(),
                 )
             })
             .await;
             let auto_fix = match daemon_settings {
-                Ok((shell_command, shell_configured, auto_fix)) => {
+                Ok((shell_command, shell_configured, auto_fix, agents, default_agent)) => {
                     let _ = tx.send(Event::ShellCommandConfig {
                         command: shell_command,
                         configured: shell_configured,
+                    });
+                    let _ = tx.send(Event::AgentAvailabilityConfig {
+                        agents,
+                        default_agent,
                     });
                     auto_fix
                 }
@@ -1825,6 +1831,45 @@ pub fn persisted_from_config(c: &lazybox_config::Config) -> lazybox_core::Persis
             })
             .collect(),
         selected_scopes: c.setup.scopes.clone(),
+    }
+}
+
+/// The agent ids this daemon offers for spawning — its configured
+/// `setup.agents`, or the built-in trio when unconfigured so the
+/// zero-config `a c` / `a x` / `a u` chords still work. Mirrors the
+/// embedded client's own resolution (`tui-boot::run_embedded_realm`)
+/// so a remote `--connect` client sees the same set the daemon would
+/// spawn. See #742.
+fn spawnable_agents(config: &lazybox_config::Config) -> Vec<String> {
+    if config.setup.agents.is_empty() {
+        ["claude", "codex", "cursor"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        config.setup.agents.iter().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod spawnable_agents_tests {
+    use super::*;
+
+    #[test]
+    fn unconfigured_daemon_offers_the_builtin_trio() {
+        let config = lazybox_config::Config::default();
+        assert!(config.setup.agents.is_empty());
+        assert_eq!(spawnable_agents(&config), vec!["claude", "codex", "cursor"]);
+    }
+
+    #[test]
+    fn configured_daemon_offers_only_its_enabled_agents() {
+        let mut config = lazybox_config::Config::default();
+        config.setup.agents.insert("claude".into());
+        config.setup.agents.insert("codex".into());
+        // No `cursor`: a remote client must not be offered an agent the
+        // box isn't set up to run.
+        assert_eq!(spawnable_agents(&config), vec!["claude", "codex"]);
     }
 }
 

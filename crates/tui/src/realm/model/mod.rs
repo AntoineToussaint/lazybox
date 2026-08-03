@@ -2554,7 +2554,19 @@ impl<T: TerminalAdapter> Model<T> {
     /// Set the enabled agents (catalog-display order) and rebuild the
     /// catalog so each gets its own `SpawnAgent` row. Called at startup
     /// from `setup.agents`.
+    ///
+    /// Enforces the invariant that the default work agent is one the user
+    /// can actually spawn: if the new set omits the current default — a
+    /// config that enables only `codex`, or a remote box whose set omits
+    /// the client's default — `w` and the bare default spawn would target
+    /// a phantom agent that isn't offered anywhere else. Fall back to the
+    /// first enabled agent so the default stays spawnable. See #742.
     pub fn set_agents(&mut self, agents: Vec<String>) {
+        if !agents.is_empty() && !agents.iter().any(|id| id == self.sidebar.default_agent()) {
+            let first = agents[0].clone();
+            self.sidebar.set_default_agent(&first);
+            self.right.set_default_agent(&first);
+        }
         self.agents = agents;
         self.rebuild_catalog();
     }

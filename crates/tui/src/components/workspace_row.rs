@@ -299,10 +299,15 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
 }
 
 fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let s = if ctx.is_cursor {
-        "▶"
-    } else if ctx.is_selected {
+    // A selected row shows `✓` even under the cursor. The cursor already
+    // reads through the full-row highlight (`row_style`), so letting the
+    // caret win this single-cell gutter would hide the mark on the very
+    // row you just pressed `v` on — the "no immediate feedback" bug
+    // (issue #786). Selection wins the glyph; cursor keeps the highlight.
+    let s = if ctx.is_selected {
         "✓"
+    } else if ctx.is_cursor {
+        "▶"
     } else {
         " "
     };
@@ -995,8 +1000,9 @@ mod tests {
     }
 
     /// Broadcast multi-select: a selected row shows `✓` in the shared
-    /// gutter; the cursor row keeps its caret (accent-styled) so the
-    /// slot stays a single cell either way.
+    /// gutter — including under the cursor, so pressing `v` marks the
+    /// current row visibly and immediately (issue #786). The slot stays
+    /// a single cell either way.
     #[test]
     fn cell_prefix_shows_check_for_selected_rows() {
         let task = make_task("owner/repo#1", "x");
@@ -1010,11 +1016,13 @@ mod tests {
         assert_eq!(cell_text(&cell), "✓");
         assert_eq!(cell.spans[0].style.fg, Some(theme.accent));
 
-        // Cursor + selected: the cursor marker wins the glyph, accent keeps the
-        // selected signal.
+        // Cursor + selected: the `✓` still shows (selection wins the
+        // glyph); the cursor is carried by the full-row highlight, not
+        // the caret.
         ctx.is_cursor = true;
         let cell = cell_prefix(&ctx);
-        assert_eq!(cell_text(&cell), "▶");
+        assert_eq!(cell.width(), 1);
+        assert_eq!(cell_text(&cell), "✓");
         assert_eq!(cell.spans[0].style.fg, Some(theme.accent));
     }
 

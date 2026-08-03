@@ -2196,6 +2196,44 @@ mod broadcast_select_tests {
         assert_eq!(sb.broadcast_selected_count(), 1);
     }
 
+    /// Issue #786: pressing `v` marks the *current* row visibly and
+    /// immediately — the cursor row shows its `✓` (not just the caret) —
+    /// and the header carries a persistent `N selected` count.
+    #[test]
+    fn selection_shows_on_cursor_row_and_header_count() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
+        // Mark the row the cursor is already on — the repro case.
+        assert_eq!(sb.toggle_broadcast_select(), Some(true));
+
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        let header: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect();
+        assert!(header.contains("1 selected"), "header count: {header:?}");
+
+        // The cursor row itself carries the `✓` gutter mark, so `v` gives
+        // feedback without moving off the row.
+        let marked_rows = (0..buffer.area.height)
+            .filter(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains('✓')
+            })
+            .count();
+        // One `✓` in the header, one in the cursor row's gutter.
+        assert_eq!(marked_rows, 2, "expected header + cursor-row check marks");
+    }
+
     /// The broadcast target list comes out in visible (sidebar) order
     /// regardless of the order rows were marked in.
     #[test]

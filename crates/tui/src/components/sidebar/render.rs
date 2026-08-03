@@ -80,7 +80,23 @@ impl Sidebar {
             }
         }
         let mut signal_spans: Vec<Span> = Vec::with_capacity(8);
+        // Broadcast multi-select mode: a persistent count so you can see
+        // how many rows are marked and what acts on them — the header
+        // counterpart to the per-row `✓` (issue #786). Leads the signal
+        // strip while active since it's a live mode, not a passive tally.
+        let selected = self.broadcast_selected.len();
+        if selected > 0 {
+            signal_spans.push(Span::styled(
+                format!("✓ {selected} selected"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         if unread > 0 {
+            if !signal_spans.is_empty() {
+                signal_spans.push(Span::raw("  "));
+            }
             signal_spans.push(Span::styled(
                 "● ",
                 Style::default()

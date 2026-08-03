@@ -126,13 +126,6 @@ fn main() {
         build.env("PATH", joined);
     }
 
-    // Run zig build. On macOS without Xcode.app, the xcframework step fails
-    // but the actual library + headers are still produced. Check outputs
-    // instead of panicking on exit code.
-    let status = build
-        .status()
-        .unwrap_or_else(|error| panic!("failed to execute zig build: {error}"));
-
     let lib_dir = install_prefix.join("lib");
     let include_dir = install_prefix.join("include");
 
@@ -141,6 +134,38 @@ fn main() {
     } else {
         "libghostty-vt.so.0.1.0"
     };
+
+    // Run zig build. On macOS without Xcode.app, the xcframework step fails
+    // but the actual library + headers are still produced. Check outputs
+    // instead of panicking on exit code.
+    //
+    // On a cold cache `zig build` downloads Ghostty's ~15 package
+    // dependencies from deps.files.ghostty.org before it compiles anything.
+    // That network step has no internal retry, so — like `fetch_ghostty`'s
+    // git clone before this fix — a single transient stream cancellation
+    // used to abort the whole build with exit 101, and a plain rebuild then
+    // succeeded. Retry a few times: zig persists already-fetched packages in
+    // the global cache and compiled objects in the local cache, so a retry
+    // resumes from where it left off rather than rebuilding from scratch. A
+    // genuinely deterministic failure just exhausts the retries and falls
+    // through to the same diagnostic below.
+    const MAX_ZIG_ATTEMPTS: u32 = 3;
+    let outputs_present =
+        || lib_dir.join(lib_name).exists() && include_dir.join("ghostty").join("vt.h").exists();
+    let mut status = build
+        .status()
+        .unwrap_or_else(|error| panic!("failed to execute zig build: {error}"));
+    for attempt in 2..=MAX_ZIG_ATTEMPTS {
+        if status.success() || outputs_present() {
+            break;
+        }
+        eprintln!(
+            "libghostty-vt: zig build failed ({status}); retrying (attempt {attempt}/{MAX_ZIG_ATTEMPTS}) ..."
+        );
+        status = build
+            .status()
+            .unwrap_or_else(|error| panic!("failed to execute zig build: {error}"));
+    }
 
     if !status.success() {
         // Check if outputs exist despite build failure (xcframework issue).

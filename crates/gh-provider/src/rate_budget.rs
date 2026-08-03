@@ -29,7 +29,7 @@ const LATENCY_SAMPLE_CAPACITY: usize = 1024;
 /// its whole allowance back-to-back trips it with thousands of primary
 /// points still unspent. The concurrency gate bounds in-flight
 /// requests; this bounds how fast new ones may launch.
-pub const DEFAULT_MIN_REQUEST_GAP: Duration = Duration::from_millis(200);
+pub(crate) const DEFAULT_MIN_REQUEST_GAP: Duration = Duration::from_millis(200);
 /// Ceiling on the adaptive gap so a hot token never stalls a request
 /// for longer than the poll cadence would tolerate.
 const MAX_REQUEST_GAP: Duration = Duration::from_secs(5);
@@ -489,7 +489,7 @@ impl RateBudget {
     /// An idle gap never banks burst credit: a slot in the past
     /// collapses to `now`, so the first request after a quiet period
     /// fires immediately.
-    pub fn reserve_request_slot(&mut self, now: Instant) -> Duration {
+    pub(crate) fn reserve_request_slot(&mut self, now: Instant) -> Duration {
         let gap = self.request_gap();
         let start = self.next_request_slot.map_or(now, |slot| slot.max(now));
         self.next_request_slot = Some(start + gap);

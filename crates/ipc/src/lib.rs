@@ -1274,6 +1274,12 @@ pub enum Command {
         snippet_key: String,
         category: String,
         body: String,
+        /// `true` inserts the body and submits it (the `Enter` pick);
+        /// `false` inserts it into the composer/command line without the
+        /// trailing submit so the user can edit before sending (the
+        /// `Shift-Enter` pick, issue #791). Appended last (bincode is
+        /// ordinal-sensitive).
+        submit: bool,
     },
     /// Mark an update target as dismissed so the startup update modal
     /// stops re-appearing for it (issue #548). `target` is the opaque

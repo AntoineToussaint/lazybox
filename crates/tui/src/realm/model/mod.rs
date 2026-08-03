@@ -704,6 +704,11 @@ pub enum Msg {
     /// order differs from insertion order (issue #512). See
     /// [`ChoicePayload`].
     ChoicePicked(Vec<ChoicePayload>),
+    /// `Shift-Enter` on a picker: like [`Msg::ChoicePicked`] but the
+    /// snippet picker inserts the body into the composer *without*
+    /// submitting it, so the user can edit before sending (issue #791).
+    /// Other pickers treat it identically to a plain pick.
+    ChoicePickedNoSubmit(Vec<ChoicePayload>),
     ChoiceRefresh,
     ChoiceBack,
     /// `?` pressed on the Shortcuts panel — return to Ask Lazybox.
@@ -4381,6 +4386,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // rewrite the keyboard path gets — the `w` multi-agent
                 // chooser (#418) and the sidebar context menu both emit
                 // Spawns that must fold into a running agent.
+                self.flush_dispatched_cmds(cmds);
+            }
+            Msg::ChoicePickedNoSubmit(picks) => {
+                let cmds = self.handle_choice_picked_no_submit(picks);
                 self.flush_dispatched_cmds(cmds);
             }
             Msg::ChoiceRefresh => {

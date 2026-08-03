@@ -1424,9 +1424,17 @@ pub async fn dispatch_command(
             snippet_key,
             category,
             body,
+            submit,
         } => {
-            spawn_handler::handle_deliver_snippet(config, terminal_id, snippet_key, category, body)
-                .await;
+            spawn_handler::handle_deliver_snippet(
+                config,
+                terminal_id,
+                snippet_key,
+                category,
+                body,
+                submit,
+            )
+            .await;
         }
         lazybox_ipc::Command::RecordComposingBuffer {
             terminal_id,

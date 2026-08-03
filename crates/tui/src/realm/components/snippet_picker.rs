@@ -388,6 +388,15 @@ impl FilterableList for SnippetPicker {
         Some(Msg::ChoicePicked(vec![ChoicePayload::Text(key)]))
     }
 
+    /// `Shift-Enter`: insert the snippet body into the composer without
+    /// submitting, so the user can edit it before sending (issue #791).
+    /// Resolution is otherwise identical to [`SnippetPicker::pick`] — the
+    /// same key travels; only the submit intent differs.
+    fn pick_no_submit(&self, item_idx: usize) -> Option<Msg> {
+        let key = self.rows.get(item_idx)?.key.clone();
+        Some(Msg::ChoicePickedNoSubmit(vec![ChoicePayload::Text(key)]))
+    }
+
     fn filter(&self) -> &str {
         &self.filter
     }
@@ -549,6 +558,8 @@ impl Component for SnippetPicker {
             Span::raw(" navigate  "),
             Span::styled("Enter", Style::default().fg(theme.success).bold()),
             Span::raw(" send  "),
+            Span::styled("Shift-Enter", Style::default().fg(theme.accent).bold()),
+            Span::raw(" edit first  "),
             Span::styled("Type", Style::default().fg(theme.accent).bold()),
             Span::raw(" filter  "),
         ];
@@ -883,6 +894,37 @@ mod tests {
             }
             other => panic!("expected ChoicePicked, got {other:?}"),
         }
+    }
+
+    /// Shift-Enter on the cursor row picks the snippet *without* submit —
+    /// the daemon inserts the body for editing rather than sending it
+    /// (issue #791). Enter still submits (covered by
+    /// `enter_submits_cursor_selection`).
+    #[test]
+    fn shift_enter_picks_without_submit() {
+        let mut picker = SnippetPicker::new(make_rows(), String::new());
+        let shift_enter = KeyEvent::new(Key::Enter, KeyModifiers::SHIFT);
+        match picker.on_key(&shift_enter) {
+            Some(Msg::ChoicePickedNoSubmit(v)) => {
+                // Display order puts Review's `rev` first (cursor row).
+                assert_eq!(v, vec![ChoicePayload::Text("rev".into())])
+            }
+            other => panic!("expected a no-submit pick, got {other:?}"),
+        }
+    }
+
+    /// The footer names both commit keys so the insert-without-send path is
+    /// discoverable (issue #791).
+    #[test]
+    fn help_line_names_both_commit_keys() {
+        let mut picker = SnippetPicker::new(make_rows(), String::new());
+        let screen = render(&mut picker, 92, 26);
+        assert!(screen.contains("Enter"), "names Enter: {screen}");
+        assert!(
+            screen.contains("Shift-Enter"),
+            "names Shift-Enter: {screen}"
+        );
+        assert!(screen.contains("edit first"), "explains it: {screen}");
     }
 
     #[test]

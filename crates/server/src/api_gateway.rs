@@ -481,6 +481,7 @@ impl DesktopCommand {
                 snippet_key,
                 category,
                 body,
+                submit: true,
             },
             DesktopCommand::Refresh => Command::Refresh,
         }

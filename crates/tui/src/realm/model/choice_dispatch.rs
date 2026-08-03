@@ -6,13 +6,17 @@ use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
 
 impl<T: TerminalAdapter> Model<T> {
-    pub(super) fn choice_picked_inner(&mut self, picks: Vec<ChoicePayload>) -> Vec<IpcCommand> {
+    pub(super) fn choice_picked_inner(
+        &mut self,
+        picks: Vec<ChoicePayload>,
+        submit: bool,
+    ) -> Vec<IpcCommand> {
         use lazybox_tui_core::choice::{PickOutcome, resolve_pick};
 
         let Some(top) = self.modal_stack.last().cloned() else {
             return Vec::new();
         };
-        let outcome = resolve_pick(&picks, self.pick_flow(&top));
+        let outcome = resolve_pick(&picks, self.pick_flow(&top, submit));
         if let PickOutcome::Runner(indices) = outcome {
             if let Some(mut runner) = self.setup.runner.take() {
                 let step = runner.step_choice_picked(indices);
@@ -26,7 +30,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.apply_pick_outcome(outcome)
     }
 
-    fn pick_flow(&self, top: &Id) -> lazybox_tui_core::choice::PickFlow {
+    fn pick_flow(&self, top: &Id, submit: bool) -> lazybox_tui_core::choice::PickFlow {
         use lazybox_tui_core::choice::{PickFlow, SnippetPick, WorkPickTarget, WorkPickerState};
 
         let snippets = || {
@@ -47,6 +51,7 @@ impl<T: TerminalAdapter> Model<T> {
             Id::SnippetPicker => PickFlow::Snippet {
                 terminal_id: self.terminals.active_terminal_id(),
                 snippets: snippets(),
+                submit,
             },
             Id::PromptHistoryPicker => {
                 let terminal_id = match &self.modal_flow {

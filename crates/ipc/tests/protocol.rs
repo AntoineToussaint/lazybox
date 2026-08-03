@@ -414,6 +414,7 @@ fn all_commands() -> Vec<Command> {
             snippet_key: "rev".into(),
             category: "Review".into(),
             body: "review the diff".into(),
+            submit: true,
         },
         Command::SetUpdateDismissal {
             target: "release:v0.2.0".into(),

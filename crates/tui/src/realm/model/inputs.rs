@@ -227,6 +227,7 @@ impl<T: TerminalAdapter> Model<T> {
                             snippet_key: snippet_key.clone(),
                             category: snippet_category.clone(),
                             body: body.to_string(),
+                            submit: true,
                         });
                     } else {
                         self.deliver_prompt(
@@ -632,7 +633,25 @@ showing keybinding search only",
     /// internally through their effect helpers; directly-visible IPC
     /// commands land in the Vec.
     pub fn handle_choice_picked(&mut self, picks: Vec<ChoicePayload>) -> Vec<IpcCommand> {
-        let cmds = self.choice_picked_inner(picks);
+        self.handle_choice_picked_with_submit(picks, true)
+    }
+
+    /// The `Shift-Enter` counterpart of [`Self::handle_choice_picked`]: the
+    /// snippet picker inserts the body into the composer *without* the
+    /// trailing submit CR, so the user can edit it before sending (issue
+    /// #791). Every other picker ignores the distinction — its
+    /// `pick_no_submit` falls back to `pick` — so this is a plain pick for
+    /// them.
+    pub fn handle_choice_picked_no_submit(&mut self, picks: Vec<ChoicePayload>) -> Vec<IpcCommand> {
+        self.handle_choice_picked_with_submit(picks, false)
+    }
+
+    fn handle_choice_picked_with_submit(
+        &mut self,
+        picks: Vec<ChoicePayload>,
+        submit: bool,
+    ) -> Vec<IpcCommand> {
+        let cmds = self.choice_picked_inner(picks, submit);
         // The inner handler has many early-return arms; drain queued
         // daemon prompts HERE so every one of them gets the "modal
         // stack may have just emptied" treatment. (No-op while any

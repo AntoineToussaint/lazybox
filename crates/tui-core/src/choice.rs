@@ -73,6 +73,10 @@ pub enum PickFlow {
     Snippet {
         terminal_id: Option<TerminalId>,
         snippets: Vec<SnippetPick>,
+        /// `Enter` picks submit (`true`); `Shift-Enter` inserts the body
+        /// without submitting (`false`), so the user can edit it before
+        /// sending (issue #791).
+        submit: bool,
     },
     PromptHistory {
         terminal_id: Option<TerminalId>,
@@ -228,6 +232,7 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
         PickFlow::Snippet {
             terminal_id,
             snippets,
+            submit,
         } => {
             let Some(key) = picks.first().and_then(P::as_text) else {
                 return PickOutcome::NoOp;
@@ -247,6 +252,7 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     snippet_key: snippet.key.clone(),
                     category: snippet.category.clone(),
                     body: snippet.body.clone(),
+                    submit,
                 }],
                 notice: None,
             }
@@ -753,12 +759,32 @@ mod tests {
                 &picked,
                 PickFlow::Snippet {
                     terminal_id: Some(TerminalId(4)),
-                    snippets,
+                    snippets: snippets.clone(),
+                    submit: true,
                 },
             ),
             PickOutcome::Commands { commands, .. }
                 if matches!(commands.as_slice(), [Command::DeliverSnippet {
                     terminal_id: TerminalId(4),
+                    submit: true,
+                    ..
+                }])
+        ));
+        // Shift-Enter resolves the same snippet with `submit: false` so the
+        // daemon inserts the body without the trailing CR (issue #791).
+        assert!(matches!(
+            resolve_pick(
+                &picked,
+                PickFlow::Snippet {
+                    terminal_id: Some(TerminalId(4)),
+                    snippets: snippets.clone(),
+                    submit: false,
+                },
+            ),
+            PickOutcome::Commands { commands, .. }
+                if matches!(commands.as_slice(), [Command::DeliverSnippet {
+                    terminal_id: TerminalId(4),
+                    submit: false,
                     ..
                 }])
         ));

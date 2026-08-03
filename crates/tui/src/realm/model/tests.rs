@@ -2231,12 +2231,14 @@ snippets:
                     snippet_key,
                     category,
                     body,
+                    submit,
                 },
             ] => {
                 assert_eq!(body, "review the diff", "body delivered verbatim");
                 assert_eq!(*terminal_id, lazybox_ipc::TerminalId(1));
                 assert_eq!(snippet_key, "rev");
                 assert!(category.is_empty());
+                assert!(*submit, "Enter picks submit");
             }
             _ => panic!("agent snippet must use DeliverSnippet, got {cmds:?}"),
         }
@@ -2244,6 +2246,32 @@ snippets:
             m.recent_snippets.is_empty(),
             "the client must wait for confirmed delivery",
         );
+    }
+
+    /// Shift-Enter (`handle_choice_picked_no_submit`) delivers the same
+    /// snippet with `submit: false`, so the daemon inserts the body into
+    /// the composer without the trailing CR and the user edits before
+    /// sending (issue #791).
+    #[test]
+    fn snippet_shift_enter_delivers_without_submit() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "agent-nosubmit",
+            r#"
+snippets:
+  rev:
+    description: Review
+    body: review the diff
+"#,
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        );
+        let cmds = m.handle_choice_picked_no_submit(vec![ChoicePayload::Text("rev".into())]);
+        match cmds.as_slice() {
+            [IpcCommand::DeliverSnippet { body, submit, .. }] => {
+                assert_eq!(body, "review the diff", "body delivered verbatim");
+                assert!(!*submit, "Shift-Enter inserts without submitting");
+            }
+            _ => panic!("agent snippet must use DeliverSnippet, got {cmds:?}"),
+        }
     }
 
     /// A multi-line body preserves its content and trailing newline;

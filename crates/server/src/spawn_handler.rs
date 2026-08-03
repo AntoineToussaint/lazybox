@@ -752,16 +752,45 @@ pub async fn handle_spawn(
     handle_spawn_inner(config, session_key, session_id, kind, options).await
 }
 
+/// The worktree path a spawn for this workspace resolves to, mirroring
+/// the resolution order in [`resolve_or_create_session`] so the recreate
+/// preserves the checkout that actually blocked *this* spawn rather than
+/// always session index 0. `None` for a linked (no-worktree) workspace,
+/// whose sessions run in the user's real checkout and must never be moved
+/// aside, and for an `on_main` spawn on a repo-less workspace (no shared
+/// checkout to resolve).
+fn spawn_target_worktree_path(
+    workspace: &Workspace,
+    session_id: Option<SessionId>,
+    on_main: bool,
+) -> Option<PathBuf> {
+    if workspace.is_linked() {
+        return None;
+    }
+    if on_main {
+        return main_worktree_path(workspace);
+    }
+    if let Some(id) = session_id {
+        return workspace.find_session(id).map(|s| s.worktree_path.clone());
+    }
+    if let Some(session) = workspace.default_session() {
+        return Some(session.worktree_path.clone());
+    }
+    Some(worktree_path_for_session(workspace, 0))
+}
+
 /// Move the checkout blocking a stuck spawn aside so its branch is freed
 /// and a fresh worktree can be provisioned (issue #787's recreate). The
 /// backup path (or `None` when nothing needed moving) is returned; the
 /// branch-conflict classes only arise on repo-backed worktrees, so a
 /// repo-less workspace is a no-op. `preserve_holder` is a
-/// `BranchHeldManaged` holder at a different path; `None` moves the
-/// workspace's own target worktree.
+/// `BranchHeldManaged` holder at a different path; `None` moves the exact
+/// worktree the recreate's spawn (`session_id` / `on_main`) will target.
 async fn preserve_stuck_worktree(
     config: &ServerConfig,
     session_key: &SessionKey,
+    session_id: Option<SessionId>,
+    on_main: bool,
     preserve_holder: Option<String>,
 ) -> Result<Option<PathBuf>, lazybox_git_ops::GitError> {
     let workspace_key = WorkspaceKey::new(session_key.as_str());
@@ -775,12 +804,17 @@ async fn preserve_stuck_worktree(
     let Some((owner, name)) = repo.split_once('/') else {
         return Ok(None);
     };
+    let preserve_path = match preserve_holder {
+        Some(holder) => PathBuf::from(holder),
+        None => match spawn_target_worktree_path(&workspace, session_id, on_main) {
+            Some(path) => path,
+            // Linked / unresolvable target: never move the user's real
+            // checkout — leave the spawn to surface its own error.
+            None => return Ok(None),
+        },
+    };
     let mgr = config.worktree_manager();
     let bare_path = mgr.bare_path(owner, name);
-    let preserve_path = match &preserve_holder {
-        Some(holder) => PathBuf::from(holder),
-        None => worktree_path_for_session(&workspace, 0),
-    };
     let backup = mgr
         .preserve_worktree_aside(&bare_path, &preserve_path)
         .await?;
@@ -811,7 +845,15 @@ pub async fn handle_recreate_worktree(
     preserve_holder: Option<String>,
 ) {
     let session_key = spawn.session_key.clone();
-    if let Err(error) = preserve_stuck_worktree(config, &session_key, preserve_holder).await {
+    if let Err(error) = preserve_stuck_worktree(
+        config,
+        &session_key,
+        spawn.session_id,
+        on_main,
+        preserve_holder,
+    )
+    .await
+    {
         tracing::warn!(
             workspace = session_key.as_str(),
             "could not preserve worktree aside for recreate: {error}",
@@ -2965,10 +3007,25 @@ async fn provision_worktree(
                     // and hard-fail `BranchMismatch` against the branch the
                     // first attempt left on disk — thrashing on a workspace's
                     // own leftover. The derive is only for the very first
-                    // provision, when nothing is on disk yet.
+                    // provision, when nothing is on disk yet; a probe that
+                    // errors is surfaced rather than papered over with a
+                    // derive that would then mismatch the branch on disk.
                     let new_branch = match mgr.existing_worktree_branch(owner, name, target).await {
-                        Ok(Some(branch)) => branch,
-                        _ => isolated_branch_for_workspace(workspace, &cfg, Some(&repo_key)),
+                        Ok(Some(branch)) => {
+                            tracing::info!(
+                                workspace = workspace.key.as_str(),
+                                %branch,
+                                "reusing the branch already checked out at the target worktree",
+                            );
+                            branch
+                        }
+                        Ok(None) => isolated_branch_for_workspace(workspace, &cfg, Some(&repo_key)),
+                        Err(e) => {
+                            return Err(ServerError::Worktree(format!(
+                                "could not read the existing worktree branch at {}: {e}",
+                                target.display()
+                            )));
+                        }
                     };
                     let base = mgr.default_branch(owner, name).await.map_err(|e| {
                         ServerError::Worktree(format!("default_branch lookup: {e}"))
@@ -13171,6 +13228,8 @@ mod tests {
         let backup = preserve_stuck_worktree(
             &config,
             &session_key,
+            None,
+            false,
             Some(holder.to_string_lossy().into_owned()),
         )
         .await
@@ -13188,6 +13247,108 @@ mod tests {
         mgr.checkout_new_branch_at(&fresh, "acme", "core", "feat", "main")
             .await
             .expect("branch freed for a fresh provision");
+    }
+
+    /// Issue #787 review #1: a `None` (own-worktree) recreate must preserve
+    /// the checkout the spawn actually resolves to — the workspace's
+    /// default (most-recent) session — not always session index 0. A
+    /// multi-session workspace would otherwise have an unrelated (possibly
+    /// live) worktree moved aside while the stuck one stayed put.
+    #[tokio::test]
+    async fn preserve_stuck_worktree_targets_the_default_session_not_index_zero() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let mgr = config.worktree_manager();
+        let bare = mgr.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+
+        // Two managed worktrees for one workspace: an earlier index-0
+        // session and a later (default) session — the one a bare recreate
+        // must preserve.
+        let wt_first = root.path().join("first");
+        let wt_default = root.path().join("default");
+        mgr.checkout_new_branch_at(&wt_first, "acme", "core", "sess-first", "main")
+            .await
+            .expect("provision first");
+        mgr.checkout_new_branch_at(&wt_default, "acme", "core", "sess-default", "main")
+            .await
+            .expect("provision default");
+        std::fs::write(wt_default.join("wip.txt"), "unsaved\n").unwrap();
+
+        let mut task = titled_task("github", "acme/core#271", "the stuck issue");
+        task.repo = Some("acme/core".into());
+        let mut ws = Workspace::from_task(task, Utc::now());
+        let t0 = Utc::now();
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Shell,
+            wt_first.clone(),
+            t0,
+        ));
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Shell,
+            wt_default.clone(),
+            t0 + chrono::Duration::seconds(60),
+        ));
+        let session_key = SessionKey::new(ws.key.as_str());
+        persist_and_broadcast(&config, &ws).await.unwrap();
+
+        let backup = preserve_stuck_worktree(&config, &session_key, None, false, None)
+            .await
+            .expect("preserve runs")
+            .expect("the default session's worktree was preserved");
+        assert!(
+            !wt_default.exists(),
+            "the spawn's target (default session) moved aside",
+        );
+        assert!(
+            wt_first.exists(),
+            "the unrelated index-0 session must be left untouched",
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("wip.txt")).unwrap(),
+            "unsaved\n",
+        );
     }
 
     #[tokio::test]

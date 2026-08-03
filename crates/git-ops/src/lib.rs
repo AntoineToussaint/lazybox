@@ -5240,6 +5240,19 @@ mod track_main_tests {
                 .expect("missing path is not an error"),
             None,
         );
+
+        // A directory that exists and is a git repo but is NOT a worktree
+        // of this bare clone must report `None` — the provisioner then
+        // derives a fresh branch rather than adopting a foreign checkout's.
+        let foreign = tmp.path().join("foreign");
+        std::fs::create_dir(&foreign).expect("mkdir foreign");
+        git(&foreign, &["init", "-q"]);
+        assert_eq!(
+            mgr.existing_worktree_branch("acme", "widgets", &foreign)
+                .await
+                .expect("foreign checkout is not an error"),
+            None,
+        );
     }
 
     /// Issue #787: preserving a conflicting worktree aside keeps its

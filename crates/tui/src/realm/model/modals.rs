@@ -2236,7 +2236,12 @@ impl<T: TerminalAdapter> Model<T> {
                 self.worktree_progress_dismissed = None;
                 self.jump_to_workspace_key(&key);
             }
-            None => self.flash_info("couldn't find the session holding this branch"),
+            // No managed session owns the checkout — it's an external
+            // worktree (the hint's "or free the external checkout" case).
+            // Name it and leave the modal up so the user can act on it.
+            None => self.flash_info(format!(
+                "no lazybox session holds {holder} — free that external checkout, then retry"
+            )),
         }
     }
 

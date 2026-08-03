@@ -12061,6 +12061,43 @@ mod worktree_progress_recovery_tests {
             "jump reveals the workspace holding the branch",
         );
     }
+
+    /// Issue #787 review #4: when the branch is held by an *external*
+    /// checkout no lazybox session owns, jump can't navigate anywhere — it
+    /// must name the checkout and leave the recovery modal open rather than
+    /// silently dismissing into a dead end.
+    #[test]
+    fn jump_to_external_holder_names_it_and_keeps_the_modal() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+
+        let stuck_key = WorkspaceKey::new("github:acme/widget#42");
+        let stuck_session_key: lazybox_core::SessionKey = (&stuck_key).into();
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: stuck_session_key,
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(
+                "checkout_at: branch 'feat' is already checked out at \
+                 /home/dev/manual-clone — refusing to take it from another live worktree"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+
+        m.jump_to_worktree_holder();
+
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "an unresolvable jump must not dismiss the recovery modal",
+        );
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
+        assert!(
+            notice.message.contains("/home/dev/manual-clone"),
+            "the notice names the external checkout: {}",
+            notice.message,
+        );
+    }
 }
 
 #[cfg(test)]

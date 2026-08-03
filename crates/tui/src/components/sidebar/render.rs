@@ -822,6 +822,9 @@ impl Sidebar {
                 agent_number: agent_numbers.get(key).copied(),
                 ascii_glyphs: self.ascii_glyphs,
                 auto_merge_armed: workspace.is_some_and(|w| w.auto_merge_on_green),
+                auto_merge_enabled: workspace
+                    .and_then(|w| w.primary_task())
+                    .is_some_and(|t| t.auto_merge_enabled),
                 auto_fix_ci_armed: workspace.is_some_and(|w| {
                     w.policies.arm(lazybox_core::AutoFixKind::CiFailure)
                         == lazybox_core::PolicyArm::Arm

@@ -476,6 +476,8 @@ mod tests {
             deletions: 0,
             kind: Some(lazybox_core::TaskKind::Pr),
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 

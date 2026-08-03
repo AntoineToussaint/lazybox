@@ -498,6 +498,8 @@ mod engagement_tier_tests {
             deletions: 0,
             closes_issues: vec![],
             kind: Some(TaskKind::Pr),
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -3780,6 +3782,8 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        priority: None,
+        state_label: None,
     };
     WorkspaceKey::new(lazybox_core::workspace_key_for(&stub))
 }
@@ -3955,6 +3959,8 @@ mod workspace_lock_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -4176,6 +4182,8 @@ mod merge_detection_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -4483,6 +4491,8 @@ mod rescope_collapse_tests {
             deletions: 0,
             kind: None,
             closes_issues: closes,
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -5295,6 +5305,8 @@ mod unreadable_row_preservation_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -5603,6 +5615,8 @@ mod tick_noop_skip_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 

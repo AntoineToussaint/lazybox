@@ -5639,6 +5639,8 @@ mod merge_focus_follow_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -9265,6 +9267,8 @@ mod destructive_confirm_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         Workspace::from_task(task, Utc::now())
     }
@@ -10642,6 +10646,8 @@ mod focus_mode_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
         let wk = ws.key.clone();
@@ -10900,6 +10906,8 @@ mod jump_to_workspace_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -12416,6 +12424,8 @@ mod merge_latch_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         Workspace::from_task(task, Utc::now())
     }
@@ -15206,6 +15216,8 @@ mod spawn_focus_steal_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
     }
@@ -15328,6 +15340,8 @@ mod repo_labels_failure_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -15703,6 +15717,8 @@ mod keybinding_audit_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
         for i in 0..activity_rows {
@@ -16806,6 +16822,8 @@ mod optimistic_mutation_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 

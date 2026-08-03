@@ -417,6 +417,8 @@ mod tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = Workspace::from_task(task, fixed_time());
         ws.key = WorkspaceKey(key_str.into());

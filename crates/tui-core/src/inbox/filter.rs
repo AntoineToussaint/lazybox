@@ -379,6 +379,8 @@ mod tests {
             deletions: 0,
             kind: Some(kind),
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = Workspace::from_task(task, now());
         ws.key = WorkspaceKey(key.into());
@@ -423,6 +425,8 @@ mod tests {
             deletions: 0,
             kind: Some(TaskKind::Pr),
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         tweak(&mut task);
         let mut ws = Workspace::from_task(task, now());

@@ -137,6 +137,8 @@ fn github_task(
         deletions: 0,
         kind: None,
         closes_issues,
+        priority: None,
+        state_label: None,
     }
 }
 

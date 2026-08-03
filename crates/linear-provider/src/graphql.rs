@@ -247,6 +247,11 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         deletions: 0,
         closes_issues: vec![],
         kind: Some(TaskKind::Issue),
+        // Linear's numeric issue priority (0 = none → `None`).
+        priority: issue.priority.and_then(lazybox_core::Priority::from_linear),
+        // Preserve Linear's exact workflow-state name ("In Review",
+        // "Todo", …), which `state` above collapses to a canonical set.
+        state_label: Some(issue.state.name.clone()),
     }
 }
 

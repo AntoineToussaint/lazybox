@@ -61,6 +61,8 @@ fn sample_workspace() -> lazybox_core::Workspace {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        priority: None,
+        state_label: None,
     };
     lazybox_core::Workspace::from_task(task, sample_time())
 }

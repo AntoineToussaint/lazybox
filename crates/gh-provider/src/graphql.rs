@@ -2201,6 +2201,8 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         deletions: pr.deletions,
         closes_issues: extract_closes_issues(pr, &repo),
         kind: Some(lazybox_core::TaskKind::Pr),
+        priority: None,
+        state_label: None,
     }
 }
 
@@ -3096,6 +3098,8 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         deletions: 0,
         closes_issues: vec![],
         kind: Some(lazybox_core::TaskKind::Issue),
+        priority: None,
+        state_label: None,
     }
 }
 

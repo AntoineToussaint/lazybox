@@ -13,6 +13,11 @@ the system is useful before you create anything: review (`rev`,
 (`test`, `tdd`, `repro`), debugging (`bug`, `bisect`, `trace`),
 security (`sec`, `deps`, `leaks`), and more.
 
+Snippets are the *human-triggered* half of a pair: agents lazybox
+spawns also load their own model-triggered **Skills**
+(`SKILL.md`). For which one to reach for, see
+[Snippets vs Agent Skills](snippets-vs-skills.md).
+
 ## Send and repeat a workflow
 
 1. Focus an agent terminal and type `]]s`. The categorized picker opens

@@ -4890,6 +4890,10 @@ async fn classify_quiet_screen(
     if detect_window.is_empty() {
         return;
     }
+    // The composer footer is stable while the screen rests, so scrape the
+    // live model + effort here (once per settle) rather than on every
+    // streaming chunk. A no-op for agents without a PTY model reading.
+    detect_and_broadcast_model(agent, detect_window, terminals, bus, id, session_key).await;
     let last_chunk_start = detect_window.len().saturating_sub(last_chunk_len);
     let new_state = match agent.detect_observation_chunked(detect_window, last_chunk_start) {
         Some(observation) => {
@@ -5076,6 +5080,53 @@ async fn watchdog_escape_working(
 /// closure so the emitted-on-change sequence is unit-testable (the
 /// #167/#161 bugs were about the transition stream, not single-frame
 /// classification).
+/// Screen-scrape the agent's live model + reasoning effort from the detect
+/// window and, when it differs from the terminal's cached label, update the
+/// cache and broadcast [`Event::TerminalModelChanged`].
+///
+/// It writes the same `terminal_models` entry the spawn-time tier label uses,
+/// so the live reading (Codex's `<model> <effort>` footer) supersedes the tier
+/// for BOTH the sidebar model badge and the terminal tab badge, and flows into
+/// the reconnect snapshot's `model_label` unchanged. Agents with no PTY model
+/// reading (`detect_model_effort` → `None`, e.g. Claude — its pinned `--model`
+/// tier label already names the model) are a cheap no-op. Broadcast only on a
+/// change, so a resting Codex composer doesn't re-emit every settle.
+async fn detect_and_broadcast_model(
+    agent: &std::sync::Arc<dyn lazybox_agents::Agent>,
+    detect_window: &[u8],
+    terminals: &TerminalRegistry,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    id: TerminalId,
+    // Fallback session key; the live key is re-resolved from `terminal_meta`
+    // so a terminal rebadged onto a PR broadcasts under the live session.
+    captured: &SessionKey,
+) {
+    let Some(model_label) = agent.detect_model_effort(detect_window) else {
+        return;
+    };
+    let session_key = terminals
+        .terminal_meta
+        .lock()
+        .await
+        .get(&id)
+        .map(|(sk, _)| sk.clone())
+        .unwrap_or_else(|| captured.clone());
+    let mut models = terminals.terminal_models.lock().await;
+    if models
+        .get(&id)
+        .is_some_and(|current| *current == model_label)
+    {
+        return;
+    }
+    models.insert(id, model_label.clone());
+    drop(models);
+    let _ = bus.send(Event::TerminalModelChanged {
+        session_key,
+        terminal_id: id,
+        model_label,
+    });
+}
+
 async fn commit_pty_reading(
     agent: &std::sync::Arc<dyn lazybox_agents::Agent>,
     detect_window: &[u8],
@@ -14597,6 +14648,116 @@ mod tests {
             recv_state_for(&mut rx, id),
             Some((pr_key.clone(), AgentState::Working)),
             "hook emitter must broadcast under the rebadged PR key",
+        );
+    }
+
+    /// #779: `detect_and_broadcast_model` scrapes the live model off the
+    /// PTY window, caches it in `terminal_models`, and broadcasts under the
+    /// terminal's *live* session (resolved from `terminal_meta`, not the
+    /// captured spawn key) so a rebadged terminal reports on the PR.
+    #[tokio::test]
+    async fn detect_and_broadcast_model_emits_under_the_live_session() {
+        let id = TerminalId(779);
+        let captured: SessionKey = "github-o-r-778".into(); // captured at spawn
+        let live: SessionKey = "github-o-r-779".into(); // where rebadge moved it
+        let footer = include_bytes!("../../agents/tests/fixtures/codex_real_idle.bin");
+        let terminals = TerminalRegistry::default();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent");
+        terminals.terminal_meta.lock().await.insert(
+            id,
+            (
+                live.clone(),
+                lazybox_ipc::TerminalKind::Agent("codex".into()),
+            ),
+        );
+
+        detect_and_broadcast_model(&agent, footer, &terminals, &bus, id, &captured).await;
+
+        let Event::TerminalModelChanged {
+            session_key,
+            terminal_id,
+            model_label,
+        } = rx.recv().await.expect("model event")
+        else {
+            panic!("expected TerminalModelChanged")
+        };
+        assert_eq!(terminal_id, id);
+        assert_eq!(model_label, "gpt-5.5 · xhigh");
+        assert_eq!(
+            session_key, live,
+            "the live model must broadcast under the rebadged session, not the spawn key",
+        );
+        assert_eq!(
+            terminals.terminal_models.lock().await.get(&id),
+            Some(&"gpt-5.5 · xhigh".to_string()),
+            "the reading must be cached so it folds into the reconnect snapshot",
+        );
+    }
+
+    /// #779: a resting composer re-reads the same footer every settle —
+    /// re-broadcasting each time would spam the bus, so an unchanged model
+    /// is a silent no-op.
+    #[tokio::test]
+    async fn detect_and_broadcast_model_is_a_no_op_when_unchanged() {
+        let id = TerminalId(780);
+        let key: SessionKey = "github-o-r-780".into();
+        let footer = include_bytes!("../../agents/tests/fixtures/codex_real_idle.bin");
+        let terminals = TerminalRegistry::default();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let agent = lazybox_agents::registry()
+            .get("codex")
+            .expect("codex agent");
+        terminals.terminal_meta.lock().await.insert(
+            id,
+            (
+                key.clone(),
+                lazybox_ipc::TerminalKind::Agent("codex".into()),
+            ),
+        );
+        terminals
+            .terminal_models
+            .lock()
+            .await
+            .insert(id, "gpt-5.5 · xhigh".to_string());
+
+        detect_and_broadcast_model(&agent, footer, &terminals, &bus, id, &key).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an unchanged model must not re-broadcast",
+        );
+    }
+
+    /// #779: agents with no PTY model reading (Claude names its model via
+    /// the pinned `--model` tier, so `detect_model_effort` → `None`) are a
+    /// cheap no-op — no cache write, no broadcast.
+    #[tokio::test]
+    async fn detect_and_broadcast_model_skips_agents_without_a_reading() {
+        let id = TerminalId(781);
+        let key: SessionKey = "github-o-r-781".into();
+        let footer = include_bytes!("../../agents/tests/fixtures/codex_real_idle.bin");
+        let terminals = TerminalRegistry::default();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let agent = lazybox_agents::registry()
+            .get("claude")
+            .expect("claude agent");
+        terminals.terminal_meta.lock().await.insert(
+            id,
+            (
+                key.clone(),
+                lazybox_ipc::TerminalKind::Agent("claude".into()),
+            ),
+        );
+
+        detect_and_broadcast_model(&agent, footer, &terminals, &bus, id, &key).await;
+
+        assert!(rx.try_recv().is_err(), "Claude never broadcasts a reading");
+        assert!(
+            terminals.terminal_models.lock().await.get(&id).is_none(),
+            "no reading means no cache write",
         );
     }
 }

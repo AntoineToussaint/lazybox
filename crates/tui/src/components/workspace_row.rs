@@ -67,6 +67,11 @@ pub struct WorkspaceRowCtx<'a> {
     pub working_glyph: &'static str,
     /// `Sidebar::runner_badges(key)` — `[('C', n), ('S', m)]` etc.
     pub badges: Vec<(char, usize)>,
+    /// `Sidebar::agent_models(key)` — the model + effort label to show
+    /// beside a single agent badge (`[('C', "Opus")]`,
+    /// `[('X', "gpt-5.5 · xhigh")]`). Empty when `ui.show_agent_model` is
+    /// off, when no model is known, or when a badge collapses two agents.
+    pub agent_models: Vec<(char, String)>,
     /// This workspace's 1-based jump number — its slot in the
     /// sidebar-order agent roster (`Sidebar::agent_workspace_keys`).
     /// `Some` only for workspaces with a coding agent; rendered as a
@@ -666,6 +671,30 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 Span::styled(label, badge_pill_style(ctx.theme, letter))
             }),
     );
+    // A single agent shows its model + effort right after the badge
+    // (`C Opus`, `X gpt-5.5 · xhigh`). Multiple agents collapse to the
+    // compact `C×2X` group with no room for labels, so it's suppressed
+    // there. The label sits in its own span, dimmer than the pill, and
+    // leans on the pill's trailing space for the gap.
+    if agent_count == 1
+        && let Some(model) = ctx
+            .badges
+            .iter()
+            .find(|(letter, _)| *letter != 'S')
+            .and_then(|(letter, _)| {
+                ctx.agent_models
+                    .iter()
+                    .find(|(l, _)| l == letter)
+                    .map(|(_, model)| model)
+            })
+    {
+        let style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(format!("{model} "), style));
+    }
     Cell::new(spans)
 }
 
@@ -964,6 +993,7 @@ mod tests {
             exited: false,
             working_glyph: working_glyph(0),
             badges: vec![],
+            agent_models: vec![],
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
@@ -1314,6 +1344,7 @@ mod tests {
             exited: false,
             working_glyph: working_glyph(0),
             badges: vec![],
+            agent_models: vec![],
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
@@ -1517,6 +1548,56 @@ mod tests {
         assert_eq!(cell_badge_agent(&ctx).width(), 3);
     }
 
+    /// #779: a single agent appends its model label after the pill
+    /// (` C Opus `), matched to the badge letter and leaning on the pill's
+    /// trailing space for the gap.
+    #[test]
+    fn cell_badge_agent_appends_model_for_single_agent() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 1)];
+        ctx.agent_models = vec![('C', "Opus".to_string())];
+        let cell = cell_badge_agent(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " C Opus ", "the model rides after the pill");
+    }
+
+    /// #779: the label is matched to its own agent letter — a model
+    /// recorded for a letter that isn't present must not leak onto the row.
+    #[test]
+    fn cell_badge_agent_model_matches_its_own_letter() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 1)];
+        // A stale label keyed to a codex badge that isn't on this row.
+        ctx.agent_models = vec![('X', "gpt-5.5 · xhigh".to_string())];
+        let cell = cell_badge_agent(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " C ", "an unmatched label must not render");
+    }
+
+    /// #779: two distinct agents collapse to the compact ` CX ` group with
+    /// no room for labels, so the model is suppressed even when known.
+    #[test]
+    fn cell_badge_agent_suppresses_model_for_multiple_agents() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 1), ('X', 1)];
+        ctx.agent_models = vec![
+            ('C', "Opus".to_string()),
+            ('X', "gpt-5.5 · xhigh".to_string()),
+        ];
+        let cell = cell_badge_agent(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " CX ", "multi-agent rows drop the models");
+    }
+
     /// Empty workspace (no task): title falls back to workspace name.
     #[test]
     fn cell_title_falls_back_to_workspace_name_when_no_task() {
@@ -1541,6 +1622,7 @@ mod tests {
             exited: false,
             working_glyph: working_glyph(0),
             badges: vec![],
+            agent_models: vec![],
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,
@@ -2566,6 +2648,7 @@ mod tests {
             exited: false,
             working_glyph: working_glyph(0),
             badges: vec![],
+            agent_models: vec![],
             agent_number: None,
             ascii_glyphs: false,
             auto_merge_armed: false,

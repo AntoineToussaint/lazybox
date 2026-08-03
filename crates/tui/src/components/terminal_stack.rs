@@ -3226,6 +3226,18 @@ impl TerminalStack {
                     }
                 }
             }
+            Event::TerminalModelChanged {
+                terminal_id,
+                model_label,
+                ..
+            } => {
+                // The tab badge is per-terminal; the daemon's live model
+                // reading (Codex's `<model> <effort>` footer) supersedes
+                // the spawn-time tier label on the same slot field.
+                if let Some(slot) = self.terminals.get_mut(terminal_id) {
+                    slot.model_label = Some(model_label.clone());
+                }
+            }
             Event::TerminalExited {
                 terminal_id,
                 exit_code,
@@ -7198,6 +7210,43 @@ mod footer_scroll_independence {
         assert!(
             rows.iter().any(|r| r.contains("◆ Opus")),
             "tab strip should show the tier badge; got {rows:?}",
+        );
+    }
+
+    #[test]
+    fn model_changed_supersedes_the_spawn_tier_in_the_tab() {
+        // #779: a spawn tier can go stale once the user switches model
+        // inside the agent. The daemon's live reading arrives as
+        // `TerminalModelChanged` and must replace the tab's tier label.
+        let sk = SessionKey::new("s");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let slot = TerminalStack::make_slot(
+            sk.clone(),
+            TerminalKind::Agent("codex".into()),
+            0,
+            false,
+            false,
+            Some("Opus".into()),
+            Vec::new(),
+            String::new(),
+        );
+        stack.terminals.insert(TerminalId(1), slot);
+        stack.set_active_session(Some(sk.clone()));
+
+        stack.on_event(&Event::TerminalModelChanged {
+            session_key: sk,
+            terminal_id: TerminalId(1),
+            model_label: "gpt-5.5 · xhigh".into(),
+        });
+
+        let rows = render_rows(&mut stack);
+        assert!(
+            rows.iter().any(|r| r.contains("◆ gpt-5.5 · xhigh")),
+            "the live model must replace the spawn tier; got {rows:?}",
+        );
+        assert!(
+            !rows.iter().any(|r| r.contains("Opus")),
+            "the stale spawn tier must be gone; got {rows:?}",
         );
     }
 }

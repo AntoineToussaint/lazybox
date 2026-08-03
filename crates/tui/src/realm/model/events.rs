@@ -862,6 +862,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentAuthProgress { .. }
                 | IpcEvent::AgentAuthFinished { .. }
                 | IpcEvent::AgentResumeFallback { .. }
+                | IpcEvent::TerminalModelChanged { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }
@@ -1603,6 +1604,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentAuthProgress { .. }
             | IpcEvent::AgentAuthFinished { .. }
             | IpcEvent::AgentResumeFallback { .. }
+            | IpcEvent::TerminalModelChanged { .. }
             | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -1854,6 +1856,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentAuthProgress { .. }
                 | IpcEvent::AgentAuthFinished { .. }
                 | IpcEvent::AgentResumeFallback { .. }
+                | IpcEvent::TerminalModelChanged { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
             }
         }

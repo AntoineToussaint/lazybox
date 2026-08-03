@@ -18,8 +18,8 @@
 //! finished-turn idle screen that must evict a now-stale `esc to interrupt`.
 
 use lazybox_agents::detect::{
-    codex_input_needed_in_current_chunk, codex_ready_for_prompt, codex_ready_for_prompt_chunked,
-    codex_state, codex_state_chunked,
+    codex_input_needed_in_current_chunk, codex_model_effort, codex_ready_for_prompt,
+    codex_ready_for_prompt_chunked, codex_state, codex_state_chunked,
 };
 use lazybox_agents::{AgentState, PromptShape};
 
@@ -334,6 +334,17 @@ fn codex_chunked_readiness_never_fires_off_modal_frames() {
     let ticks_start = buf.len();
     buf.extend_from_slice(ticks);
     assert!(!codex_ready_for_prompt_chunked(&buf, ticks_start));
+}
+
+/// The `<model> <effort>` footer parses off the real wire shape, through the
+/// ANSI churn and the rotating placeholder glued onto the model name. The
+/// idle capture's most recent footer is `gpt-5.5 xhigh`.
+#[test]
+fn codex_model_effort_reads_the_footer_off_real_bytes() {
+    assert_eq!(
+        codex_model_effort(include_bytes!("fixtures/codex_real_idle.bin")),
+        Some("gpt-5.5 · xhigh".to_string()),
+    );
 }
 
 /// The fixtures must actually carry ANSI escape bytes — otherwise this suite

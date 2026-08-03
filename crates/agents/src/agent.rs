@@ -326,6 +326,22 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// The model + reasoning effort the agent is currently running,
+    /// screen-scraped from its composer footer / status line as a compact
+    /// display string (`"gpt-5.5 · xhigh"`). Drives the sidebar model badge
+    /// and keeps it accurate when the user switches model *inside* the agent
+    /// (the spawn tier can go stale). `None` — the default — means "no live
+    /// reading"; the caller then falls back to the spawn-time tier label.
+    ///
+    /// Only agents that print their model in the PTY implement this: Codex
+    /// draws `<model> <effort> · <cwd>`, so it reads its live value here;
+    /// Claude is always spawned with an explicit `--model`, so its tier
+    /// label already names the model and it keeps the default `None`.
+    fn detect_model_effort(&self, recent_output: &[u8]) -> Option<String> {
+        let _ = recent_output;
+        None
+    }
+
     /// Chunk-aware variant of [`Agent::detect_state`]. `last_chunk_start`
     /// is the byte offset within `recent_output` where the most recent
     /// PTY chunk begins. Agents whose detector reasons about marker
@@ -938,6 +954,13 @@ pub mod builtins {
             last_chunk_start: usize,
         ) -> Option<AgentState> {
             detect::codex_state_chunked(recent_output, last_chunk_start)
+        }
+
+        /// Codex prints `<model> <effort> · <cwd>` in its composer footer,
+        /// so its live model reading is the parsed footer (Codex ships no
+        /// built-in tier menu, making this the only model signal it has).
+        fn detect_model_effort(&self, recent_output: &[u8]) -> Option<String> {
+            detect::codex_model_effort(recent_output)
         }
 
         /// Surface Codex approval and directory-trust dialogs as soon as

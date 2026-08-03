@@ -2155,6 +2155,20 @@ pub enum Event {
         replay: Vec<u8>,
         seq: u64,
     },
+    /// The model + reasoning effort a live agent terminal is running has
+    /// changed. Sourced from the daemon's PTY detection (Codex prints
+    /// `<model> <effort>` in its composer footer), so it stays accurate
+    /// when the user switches model *inside* the agent — the spawn-time
+    /// tier label can't. `model_label` is the same compact display string
+    /// (`"gpt-5.5 · xhigh"`) the spawn tier uses, so the sidebar model
+    /// badge and the terminal tab badge share one field. Broadcast only on
+    /// a change, and folded back into the reconnect snapshot's
+    /// `model_label` so a re-subscribing client doesn't lose it.
+    TerminalModelChanged {
+        session_key: SessionKey,
+        terminal_id: TerminalId,
+        model_label: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

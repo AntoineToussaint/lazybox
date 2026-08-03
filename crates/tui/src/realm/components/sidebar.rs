@@ -169,6 +169,12 @@ impl Sidebar {
     pub fn set_keep_awake(&mut self, keep_awake: bool) {
         self.inner.set_keep_awake(keep_awake);
     }
+
+    /// Record whether `ui.show_agent_model` is on — gates the per-agent
+    /// model + effort label beside each runner badge.
+    pub fn set_show_agent_model(&mut self, show: bool) {
+        self.inner.set_show_agent_model(show);
+    }
     /// True while the `/` search bar is capturing keystrokes. The
     /// orchestrator checks this before its normal key routing so a
     /// query can swallow keys that would otherwise fire shortcuts.

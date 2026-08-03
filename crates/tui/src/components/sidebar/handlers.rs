@@ -215,9 +215,13 @@ impl Sidebar {
                 self.agents.clear();
                 self.agent_terminal_states.clear();
                 self.running_terminals.clear();
+                self.terminal_models.clear();
                 for t in terminals {
                     self.running_terminals
                         .insert(t.terminal_id, (t.session_key.clone(), t.kind.clone()));
+                    if let Some(model) = &t.model_label {
+                        self.terminal_models.insert(t.terminal_id, model.clone());
+                    }
                     if let Some(state) = t.agent_state {
                         self.agent_terminal_states
                             .insert(t.terminal_id, (t.session_key.clone(), state));
@@ -232,12 +236,25 @@ impl Sidebar {
                 terminal_id,
                 session_key,
                 kind,
+                model_label,
                 ..
             } => {
                 self.running_terminals
                     .insert(*terminal_id, (session_key.clone(), kind.clone()));
+                if let Some(model) = model_label {
+                    self.terminal_models.insert(*terminal_id, model.clone());
+                }
+            }
+            Event::TerminalModelChanged {
+                terminal_id,
+                model_label,
+                ..
+            } => {
+                self.terminal_models
+                    .insert(*terminal_id, model_label.clone());
             }
             Event::TerminalExited { terminal_id, .. } => {
+                self.terminal_models.remove(terminal_id);
                 let session_key = self
                     .running_terminals
                     .remove(terminal_id)

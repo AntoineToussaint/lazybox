@@ -149,6 +149,14 @@ pub struct Sidebar {
     /// one Claude + two shells running). Populated from `Event::Snapshot`
     /// and kept in sync via `TerminalSpawned` / `TerminalExited`.
     running_terminals: HashMap<TerminalId, (SessionKey, TerminalKind)>,
+    /// Model + reasoning-effort label per live agent terminal, shown next
+    /// to its runner badge when `ui.show_agent_model` is on. Seeded from a
+    /// spawn's tier label (`TerminalSpawned.model_label` / the snapshot)
+    /// and superseded by the daemon's live PTY reading
+    /// (`Event::TerminalModelChanged`, e.g. Codex's `<model> <effort>`
+    /// footer). Keyed by terminal so two agents in one workspace keep
+    /// distinct labels; pruned on `TerminalExited`.
+    terminal_models: HashMap<TerminalId, String>,
     /// Built-in agent registry, consulted so an agent's display badge
     /// (`C` / `X` / `U`) comes from the agent itself rather than a
     /// hardcoded match here — a new agent declares its own letter and
@@ -266,6 +274,11 @@ pub struct Sidebar {
     /// being kept awake and why. The daemon re-reads the flag live;
     /// this client-side mirror refreshes on restart.
     keep_awake: bool,
+    /// Mirror of `ui.show_agent_model` (default on). When set, each agent
+    /// runner badge is followed by its model + effort label
+    /// ([`terminal_models`](Self::terminal_models)); off keeps the sidebar
+    /// compact. Refreshes on restart.
+    show_agent_model: bool,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -296,6 +309,7 @@ impl Sidebar {
             filters: FilterSet::default(),
             sort_mode: SortMode::default(),
             running_terminals: HashMap::new(),
+            terminal_models: HashMap::new(),
             agent_registry: lazybox_tui_core::agents::registry(),
             attention: lazybox_config::AttentionConfig::default(),
             projects: BTreeMap::new(),
@@ -317,6 +331,7 @@ impl Sidebar {
             search: None,
             broadcast_selected: std::collections::HashSet::new(),
             keep_awake: false,
+            show_agent_model: true,
         }
     }
 
@@ -345,6 +360,12 @@ impl Sidebar {
     /// actual inhibitor.
     pub fn set_keep_awake(&mut self, keep_awake: bool) {
         self.keep_awake = keep_awake;
+    }
+
+    /// Record whether `ui.show_agent_model` is on — gates the per-agent
+    /// model + effort label rendered beside each runner badge.
+    pub fn set_show_agent_model(&mut self, show: bool) {
+        self.show_agent_model = show;
     }
 
     /// True while ≥1 agent in the sidebar is `Working` — the same
@@ -1666,6 +1687,37 @@ impl Sidebar {
             other => (0, other),
         });
         entries
+    }
+
+    /// The model + effort label to show beside each agent runner badge on
+    /// `key`, as `(badge_letter, label)` pairs. A label is surfaced only
+    /// when a single terminal carries that letter — with two same-kind
+    /// agents in one workspace their models are ambiguous against the
+    /// collapsed `C×2` badge, so it's dropped rather than guessed. Empty
+    /// when `ui.show_agent_model` is off or nothing has a known model.
+    fn agent_models(&self, key: &SessionKey) -> Vec<(char, String)> {
+        if !self.show_agent_model {
+            return Vec::new();
+        }
+        // letter → (count, one candidate label)
+        let mut per_letter: HashMap<char, (usize, Option<String>)> = HashMap::new();
+        for (tid, (sk, kind)) in &self.running_terminals {
+            if sk != key || !matches!(kind, TerminalKind::Agent(_)) {
+                continue;
+            }
+            let entry = per_letter.entry(self.badge_letter(kind)).or_default();
+            entry.0 += 1;
+            if let Some(model) = self.terminal_models.get(tid) {
+                entry.1 = Some(model.clone());
+            }
+        }
+        per_letter
+            .into_iter()
+            .filter_map(|(letter, (count, model))| match model {
+                Some(model) if count == 1 => Some((letter, model)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The repo group the cursor's row belongs to, if any. Resolution:

@@ -509,6 +509,15 @@ pub struct UiSection {
     /// opted in.
     #[serde(default)]
     pub keep_awake: bool,
+    /// Show each running agent's model + reasoning effort next to its
+    /// sidebar badge (`C Opus`, `X gpt-5.5 · xhigh`) and on its
+    /// terminal tab (where it rides the `◆` tier badge). The value is the
+    /// spawn-time model tier, superseded by
+    /// the live model the daemon scrapes from the agent's status line when
+    /// available. Opt-out — set `false` to keep the sidebar compact.
+    /// Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub show_agent_model: bool,
 }
 
 fn default_true() -> bool {
@@ -541,6 +550,7 @@ impl Default for UiSection {
             activity_pane_default: ActivityPaneMode::default(),
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
+            show_agent_model: true,
         }
     }
 }
@@ -581,6 +591,9 @@ pub struct UiDefaults {
     /// Hold an OS sleep inhibitor while agents work. See
     /// [`UiSection::keep_awake`].
     pub keep_awake: bool,
+    /// Show each agent's model + effort by its badge. See
+    /// [`UiSection::show_agent_model`].
+    pub show_agent_model: bool,
 }
 
 impl Default for UiDefaults {
@@ -601,6 +614,7 @@ impl Default for UiDefaults {
             activity_pane_default: ActivityPaneMode::default(),
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
+            show_agent_model: true,
         }
     }
 }
@@ -636,6 +650,7 @@ impl UiSection {
             activity_pane_default: self.activity_pane_default,
             confirm_default: self.confirm_default,
             keep_awake: self.keep_awake,
+            show_agent_model: self.show_agent_model,
         }
     }
 }

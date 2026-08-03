@@ -15,11 +15,15 @@
 //! free — "needs attention" is just several State filters, and OR
 //! within the axis is exactly the union the preset wants.
 
-use lazybox_core::{CiStatus, ReviewStatus, SessionKey, TaskRole, Workspace};
+use lazybox_core::{CiStatus, ReviewStatus, SessionKey, TaskRole, TaskState, Workspace};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use super::WorkspaceKind;
+
+/// Threshold (additions + deletions) at or above which a PR counts as a
+/// "big diff" for the [`Filter::BigDiff`] predicate.
+pub const BIG_DIFF_LINES: u32 = 500;
 
 /// The axis a [`Filter`] lives on. Drives the OR-within / AND-across
 /// combination in [`FilterSet::accepts`] and groups the filter menu.
@@ -71,6 +75,16 @@ pub enum Filter {
     ReviewRequested,
     /// Auto-merge is armed on the PR.
     AutoMerge,
+    /// Primary task is a draft PR (or a Linear issue in a draft state).
+    Draft,
+    /// Primary task is actively being worked (in-progress / in-review).
+    InProgress,
+    /// The primary task is waiting on a reply from me (`needs_reply`).
+    NeedsReply,
+    /// The PR's head branch is behind its base and can be updated.
+    BehindBase,
+    /// A large diff — at least [`BIG_DIFF_LINES`] lines changed.
+    BigDiff,
     // ── Role ───────────────────────────────────────────────────────
     Author,
     Reviewer,
@@ -83,7 +97,7 @@ pub enum Filter {
 
 impl Filter {
     /// Every filter, in menu order (State, then Role, then Kind).
-    pub const ALL: [Filter; 14] = [
+    pub const ALL: [Filter; 19] = [
         Filter::WithAgent,
         Filter::CiFailing,
         Filter::CiRunning,
@@ -92,6 +106,11 @@ impl Filter {
         Filter::Asking,
         Filter::ReviewRequested,
         Filter::AutoMerge,
+        Filter::Draft,
+        Filter::InProgress,
+        Filter::NeedsReply,
+        Filter::BehindBase,
+        Filter::BigDiff,
         Filter::Author,
         Filter::Reviewer,
         Filter::Assignee,
@@ -109,7 +128,12 @@ impl Filter {
             | Filter::Unread
             | Filter::Asking
             | Filter::ReviewRequested
-            | Filter::AutoMerge => FilterAxis::State,
+            | Filter::AutoMerge
+            | Filter::Draft
+            | Filter::InProgress
+            | Filter::NeedsReply
+            | Filter::BehindBase
+            | Filter::BigDiff => FilterAxis::State,
             Filter::Author | Filter::Reviewer | Filter::Assignee | Filter::Mentioned => {
                 FilterAxis::Role
             }
@@ -128,6 +152,11 @@ impl Filter {
             Filter::Asking => "asking",
             Filter::ReviewRequested => "review-requested",
             Filter::AutoMerge => "auto-merge",
+            Filter::Draft => "draft",
+            Filter::InProgress => "in-progress",
+            Filter::NeedsReply => "needs-reply",
+            Filter::BehindBase => "behind-base",
+            Filter::BigDiff => "big-diff",
             Filter::Author => "author",
             Filter::Reviewer => "reviewer",
             Filter::Assignee => "assignee",
@@ -162,6 +191,13 @@ impl Filter {
                 ) || !t.reviewers.is_empty()
             }),
             Filter::AutoMerge => task.is_some_and(|t| t.auto_merge_enabled),
+            Filter::Draft => task.is_some_and(|t| t.state == TaskState::Draft),
+            Filter::InProgress => {
+                task.is_some_and(|t| matches!(t.state, TaskState::InProgress | TaskState::InReview))
+            }
+            Filter::NeedsReply => task.is_some_and(|t| t.needs_reply),
+            Filter::BehindBase => task.is_some_and(|t| t.is_behind_base),
+            Filter::BigDiff => task.is_some_and(|t| t.additions + t.deletions >= BIG_DIFF_LINES),
             Filter::Author => task.is_some_and(|t| t.role == TaskRole::Author),
             Filter::Reviewer => task.is_some_and(|t| t.role == TaskRole::Reviewer),
             Filter::Assignee => task.is_some_and(|t| t.role == TaskRole::Assignee),
@@ -347,6 +383,94 @@ mod tests {
         let mut ws = Workspace::from_task(task, now());
         ws.key = WorkspaceKey(key.into());
         ws
+    }
+
+    /// Build a workspace from a task the caller tweaks — lets the new
+    /// State predicates be exercised without a fixed fixture per field.
+    fn workspace_with(key: &str, tweak: impl FnOnce(&mut Task)) -> Workspace {
+        let mut task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("owner/r#{key}"),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "x".into(),
+            repo: Some("owner/r".into()),
+            branch: Some("feature".into()),
+            base_branch: Some("main".into()),
+            updated_at: now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: Some(TaskKind::Pr),
+            closes_issues: vec![],
+        };
+        tweak(&mut task);
+        let mut ws = Workspace::from_task(task, now());
+        ws.key = WorkspaceKey(key.into());
+        ws
+    }
+
+    #[test]
+    fn new_state_predicates_match_their_field() {
+        let agents = HashMap::new();
+        let matches = |ws: &Workspace, f: Filter| {
+            f.matches(&FilterCtx {
+                w: ws,
+                agents: &agents,
+            })
+        };
+
+        let draft = workspace_with("a", |t| t.state = TaskState::Draft);
+        assert!(matches(&draft, Filter::Draft));
+        assert!(!matches(&draft, Filter::InProgress));
+
+        let in_review = workspace_with("b", |t| t.state = TaskState::InReview);
+        assert!(matches(&in_review, Filter::InProgress));
+
+        let needs_reply = workspace_with("c", |t| t.needs_reply = true);
+        assert!(matches(&needs_reply, Filter::NeedsReply));
+
+        let behind = workspace_with("d", |t| t.is_behind_base = true);
+        assert!(matches(&behind, Filter::BehindBase));
+
+        let big = workspace_with("e", |t| {
+            t.additions = BIG_DIFF_LINES;
+            t.deletions = 0;
+        });
+        assert!(matches(&big, Filter::BigDiff));
+        let small = workspace_with("f", |t| t.additions = BIG_DIFF_LINES - 1);
+        assert!(!matches(&small, Filter::BigDiff));
+
+        // All new predicates live on the State axis.
+        for f in [
+            Filter::Draft,
+            Filter::InProgress,
+            Filter::NeedsReply,
+            Filter::BehindBase,
+            Filter::BigDiff,
+        ] {
+            assert_eq!(f.axis(), FilterAxis::State);
+        }
     }
 
     #[test]

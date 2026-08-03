@@ -52,6 +52,13 @@ pub enum GhError {
     RateLimited {
         retry_after_secs: u64,
         reason: String,
+        /// `true` when lazybox's OWN governor blocked the request (local
+        /// bucket / per-tick background allowance / soft reserve) rather
+        /// than GitHub imposing a real rate limit. Carried so the
+        /// `From<GhError>` mapping can flag the resulting
+        /// [`lazybox_core::ProviderError`] as a self-throttle — an honest,
+        /// non-escalating backoff, never "check your token" (#782).
+        self_throttle: bool,
     },
 }
 
@@ -75,6 +82,9 @@ impl GhError {
             Some(retry_after_secs) => Self::RateLimited {
                 retry_after_secs,
                 reason,
+                // An aggregate of failed sub-requests is a GitHub/transport
+                // failure, not the governor's own pacing.
+                self_throttle: false,
             },
             None => Self::Graphql(reason),
         }
@@ -495,6 +505,7 @@ fn detail_of(err: &GhError) -> String {
         GhError::RateLimited {
             retry_after_secs,
             reason,
+            ..
         } => format!("{reason} (retry after {retry_after_secs}s)"),
         GhError::Truncated { count, pages } => format!(
             "GitHub returned {count} PRs across {pages} pages and we hit the safety cap. \
@@ -551,9 +562,23 @@ impl From<GhError> for lazybox_core::ProviderError {
         // instead of retrying on its normal cadence and burning the
         // same error repeatedly.
         if let GhError::RateLimited {
-            retry_after_secs, ..
+            retry_after_secs,
+            self_throttle,
+            ..
         } = &err
         {
+            // A governor self-throttle (local bucket / background allowance /
+            // soft reserve) is lazybox deliberately pacing its own sync
+            // under shared-token contention — honest backoff, not a fault,
+            // so flag it so polling never escalates it to "check your token"
+            // (#782). A real GitHub rate limit stays a plain retryable.
+            if *self_throttle {
+                return lazybox_core::ProviderError::self_throttle(
+                    SOURCE,
+                    detail,
+                    *retry_after_secs,
+                );
+            }
             return lazybox_core::ProviderError::retryable_after(SOURCE, detail, *retry_after_secs);
         }
 
@@ -1251,6 +1276,8 @@ impl GhClient {
                         "github answered HTTP {status} ({})",
                         body_excerpt(&raw_body)
                     ),
+                    // GitHub imposed this limit, not lazybox's governor.
+                    self_throttle: false,
                 });
             }
             self.budget.lock().observe_failed_response(
@@ -1343,9 +1370,11 @@ impl GhClient {
         if let Err(reason) = self.budget.lock().admit(resource, op, priority, 1) {
             tracing::warn!("{op} blocked by rate budget: {reason}");
             let retry_after_secs = reason.retry_after_secs(chrono::Utc::now());
+            let self_throttle = reason.is_self_imposed();
             return Err(GhError::RateLimited {
                 retry_after_secs,
                 reason: reason.to_string(),
+                self_throttle,
             });
         }
         Ok(())
@@ -2109,6 +2138,8 @@ impl GhClient {
                         .as_secs()
                         .max(1),
                     reason: format!("notifications HTTP {}", status.as_u16()),
+                    // GitHub imposed this limit, not lazybox's governor.
+                    self_throttle: false,
                 });
             }
             return Err(GhError::Graphql(format!(
@@ -2732,6 +2763,9 @@ impl GhClient {
                 Some(retry_after_secs) => GhError::RateLimited {
                     retry_after_secs,
                     reason,
+                    // Every round-robin sub-query failed — a GitHub/transport
+                    // failure, not the governor's own pacing.
+                    self_throttle: false,
                 },
                 None => GhError::Graphql(reason),
             });
@@ -4473,10 +4507,12 @@ mod tests {
             Err(GhError::RateLimited {
                 retry_after_secs: 1,
                 reason: "PR budget blocked".into(),
+                self_throttle: false,
             }),
             Err(GhError::RateLimited {
                 retry_after_secs: 414,
                 reason: "issue budget blocked".into(),
+                self_throttle: false,
             }),
         )
         .expect_err("both requested sides failed");
@@ -4495,6 +4531,7 @@ mod tests {
             Err(GhError::RateLimited {
                 retry_after_secs: 414,
                 reason: "issue budget blocked".into(),
+                self_throttle: false,
             }),
         )
         .expect("successful PR side keeps the partial result");
@@ -4509,6 +4546,7 @@ mod tests {
         let rate_limited = GhError::RateLimited {
             retry_after_secs: 414,
             reason: "budget blocked".into(),
+            self_throttle: false,
         };
         let graphql = GhError::Graphql("query shape rejected".into());
         let error = GhError::aggregate(
@@ -4857,9 +4895,14 @@ mod tests {
             GhError::RateLimited {
                 retry_after_secs,
                 reason,
+                self_throttle,
             } => {
                 assert_eq!(*retry_after_secs, 7, "Retry-After header must be honored");
                 assert!(reason.contains("429"), "reason names the status: {reason}");
+                assert!(
+                    !*self_throttle,
+                    "a 429 is a GitHub-imposed limit, not a governor self-throttle"
+                );
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }

@@ -19,6 +19,19 @@ pub const LOW_THRESHOLD: u32 = 100;
 pub const DEFAULT_CAPACITY: u32 = 30;
 pub const DEFAULT_REFILL_PER_MIN: f64 = 30.0;
 pub const DEFAULT_BACKGROUND_SHARE: f64 = 0.55;
+
+/// Guaranteed per-tick background allowance while external usage
+/// contends for the shared token. GitHub's token is also spent by
+/// interactive `gh` and spawned agents; when that external burn is high
+/// the sustainable-rate and headroom math can drive the daemon's own
+/// tick allowance to zero, stalling sync indefinitely even while the
+/// primary budget is perfectly healthy (#782). This floor keeps sync
+/// *slowing* under contention instead of stopping — enough to admit a
+/// complete background sweep unit each tick. It only relaxes the soft
+/// per-tick throttle: the hard `RemoteLow` / `ReserveProtected` guards in
+/// [`RateBudget::admit`] still protect the real reserve, so the floor can
+/// never push actual spend past the reserve.
+pub const MIN_BACKGROUND_TICK_ALLOWANCE: u32 = 30;
 pub const DEFAULT_SECONDARY_PAUSE: Duration = Duration::from_secs(60);
 const MAX_SECONDARY_PAUSE: Duration = Duration::from_secs(15 * 60);
 const LATENCY_SAMPLE_CAPACITY: usize = 1024;
@@ -158,6 +171,21 @@ pub enum AcquireError {
 }
 
 impl AcquireError {
+    /// True when this refusal is lazybox's OWN governor pacing itself
+    /// (local bucket empty, per-tick background allowance spent, or the
+    /// soft reserve protecting a healthy budget) rather than a limit
+    /// GitHub imposed (`RemoteLow`, `CircuitOpen`). A voluntary backoff
+    /// under shared-token contention must never be reported to the user
+    /// as a connection/token failure (#782).
+    pub fn is_self_imposed(&self) -> bool {
+        matches!(
+            self,
+            Self::LocalBudgetExhausted { .. }
+                | Self::TickAllowanceExhausted { .. }
+                | Self::ReserveProtected { .. }
+        )
+    }
+
     pub fn retry_after_secs(&self, now: DateTime<Utc>) -> u64 {
         match self {
             Self::LocalBudgetExhausted { wait_secs }
@@ -597,6 +625,25 @@ impl RateBudget {
                 let cap = f64::from(background_headroom(state, self.background_share, wall_now));
                 let credit = self.background_credit.entry(resource.clone()).or_default();
                 *credit = (*credit + grant).min(cap);
+                // Guaranteed minimum (#782): a high external burn on the
+                // shared token makes `background_headroom` (and thus the
+                // sustainable rate above) collapse toward zero, which would
+                // leave a tick allowance too small to admit even one
+                // complete sweep — sync would make no progress at all for as
+                // long as the contention lasts, despite a healthy primary
+                // budget. When external burn is present, hold the credit at a
+                // floor so sync only slows, never stalls. The floor is
+                // bounded by the room genuinely available above the protected
+                // reserve, so a truly scarce budget still degrades to slow
+                // accumulation rather than a false floor; the hard
+                // `RemoteLow` / `ReserveProtected` guards in `admit` remain
+                // the real reserve protection.
+                if state.external_burn_per_sec > 0.0 {
+                    let reserve = reserve_for(state.limit, self.background_share);
+                    let capacity = state.remaining.saturating_sub(reserve);
+                    let floor = f64::from(MIN_BACKGROUND_TICK_ALLOWANCE.min(capacity));
+                    *credit = credit.max(floor);
+                }
                 credit.floor() as u32
             };
             self.tick_allowance.insert(resource.clone(), allowance);
@@ -1670,6 +1717,89 @@ mod tests {
             mono_now + Duration::from_secs(60),
         );
         assert!(after.graphql_points < before.graphql_points);
+    }
+
+    #[test]
+    fn external_contention_never_starves_the_daemon_to_zero() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let reset = wall_now + chrono::Duration::hours(1);
+        let mut budget = RateBudget::new(100, 6000.0);
+        // Healthy graphql budget: far above the 45% reserve (2250).
+        budget.observe_primary("graphql", 5000, 5000, 0, reset, mono_now);
+        budget.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
+        // A burst of heavy EXTERNAL usage on the shared token (interactive
+        // `gh` / spawned agents) — the daemon itself completed nothing, so
+        // all 1000 points are attributed to external burn.
+        budget.observe_primary(
+            "graphql",
+            5000,
+            4000,
+            1000,
+            reset,
+            mono_now + Duration::from_secs(60),
+        );
+        let plan = budget.begin_background_tick(
+            Duration::from_secs(60),
+            wall_now + chrono::Duration::seconds(60),
+            mono_now + Duration::from_secs(60),
+        );
+        // The projected external burn would zero the sustainable rate, but
+        // the guaranteed minimum keeps the daemon admitting a complete sweep
+        // unit — sync slows under contention, it does not stall (#782).
+        assert!(
+            plan.graphql_points >= MIN_BACKGROUND_TICK_ALLOWANCE,
+            "governor starved the daemon to {} points under external contention",
+            plan.graphql_points
+        );
+        // And the floored allowance is genuinely spendable.
+        for index in 0..plan.graphql_points {
+            budget
+                .admit_at(
+                    ApiResource::Graphql,
+                    &format!("contended-{index}"),
+                    RequestPriority::Recent,
+                    1,
+                    wall_now + chrono::Duration::seconds(60),
+                    mono_now + Duration::from_secs(60),
+                )
+                .expect("the floored allowance must actually admit requests");
+        }
+    }
+
+    #[test]
+    fn self_imposed_governor_blocks_are_distinguished_from_github_limits() {
+        let self_imposed = [
+            AcquireError::LocalBudgetExhausted { wait_secs: 5 },
+            AcquireError::TickAllowanceExhausted {
+                resource: "graphql".into(),
+                allowance: 3,
+                spent: 0,
+                wait_secs: 15,
+            },
+            AcquireError::ReserveProtected {
+                resource: "graphql".into(),
+                remaining: 3000,
+                reserve: 2250,
+                reset_at: Utc::now(),
+            },
+        ];
+        for error in &self_imposed {
+            assert!(error.is_self_imposed(), "{error} must be self-imposed");
+        }
+        let github_imposed = [
+            AcquireError::RemoteLow {
+                remaining: 5,
+                reset_at: Utc::now(),
+            },
+            AcquireError::CircuitOpen {
+                reason: "secondary rate limit".into(),
+                retry_at: Utc::now(),
+            },
+        ];
+        for error in &github_imposed {
+            assert!(!error.is_self_imposed(), "{error} is GitHub-imposed");
+        }
     }
 
     #[test]

@@ -106,12 +106,14 @@
               "mergeable": "Mergeable",
               "needs_reply": false,
               "node_id": null,
+              "priority": null,
               "recent_activity": [],
               "repo": "o/r",
               "review": "Pending",
               "reviewers": [],
               "role": "Reviewer",
               "state": "Open",
+              "state_label": null,
               "title": "PR o/r#42",
               "unread_count": 0,
               "updated_at": "2023-11-14T22:13:20Z",
@@ -175,12 +177,14 @@
           "mergeable": "Mergeable",
           "needs_reply": false,
           "node_id": null,
+          "priority": null,
           "recent_activity": [],
           "repo": "o/r",
           "review": "Pending",
           "reviewers": [],
           "role": "Reviewer",
           "state": "Open",
+          "state_label": null,
           "title": "PR o/r#42",
           "unread_count": 0,
           "updated_at": "2023-11-14T22:13:20Z",
@@ -267,6 +271,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 3780886522,
+  "protocol_fingerprint": 3961273884,
   "protocol_version": 1
 }

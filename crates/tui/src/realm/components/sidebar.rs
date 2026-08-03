@@ -536,14 +536,24 @@ impl Sidebar {
         self.inner.set_filters(filters);
     }
 
+    /// Replace the active filter set from picker entries (fixed
+    /// predicates plus the label / Linear-state value axes).
+    pub fn set_filter_entries(
+        &mut self,
+        entries: impl IntoIterator<Item = crate::components::sidebar::FilterEntry>,
+    ) {
+        self.inner.set_filter_entries(entries);
+    }
+
     /// The active filter set — read to pre-check the filter menu.
     pub fn filters(&self) -> &crate::components::sidebar::FilterSet {
         self.inner.filters()
     }
 
-    /// Per-filter match counts for the current mailbox, in menu order.
-    pub fn filter_counts(&self) -> Vec<(crate::components::sidebar::Filter, usize)> {
-        self.inner.filter_counts()
+    /// Every `f`-menu row (fixed predicates + discovered label /
+    /// Linear-state values) with its match count.
+    pub fn filter_menu_entries(&self) -> Vec<(crate::components::sidebar::FilterEntry, usize)> {
+        self.inner.filter_menu_entries()
     }
 
     /// Cycle the sort order (catalog `CycleSort`, default `o`).

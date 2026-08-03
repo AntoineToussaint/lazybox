@@ -24,7 +24,7 @@ pub use attention::{
     AttentionSignal, INACTIVE_GRACE, attention_gate, mailbox_membership,
     workspace_attention_signals, workspace_needs_attention,
 };
-pub use filter::{Filter, FilterAxis, FilterCtx, FilterMenuItem, FilterSet};
+pub use filter::{Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet};
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind, role_rank,
 };

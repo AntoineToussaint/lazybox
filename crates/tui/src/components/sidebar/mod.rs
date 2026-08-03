@@ -1236,6 +1236,71 @@ impl Sidebar {
         self.reset_cursor_and_recompute();
     }
 
+    /// Replace the active filters from picker entries (fixed predicates
+    /// plus the value-driven label / Linear-state axes).
+    pub fn set_filter_entries(&mut self, entries: impl IntoIterator<Item = FilterEntry>) {
+        self.filters.replace_entries(entries);
+        self.reset_cursor_and_recompute();
+    }
+
+    /// Every row the `f` filter menu offers, with its match count: the
+    /// fixed predicates ([`Filter::ALL`]) followed by the label and
+    /// Linear-state values discovered in the current mailbox. Both value
+    /// axes are omitted when no candidate carries them, so the menu only
+    /// grows the sections that apply.
+    pub fn filter_menu_entries(&self) -> Vec<(FilterEntry, usize)> {
+        use std::collections::BTreeMap;
+        let now = self.now();
+        let candidates: Vec<&Workspace> = self
+            .workspaces
+            .values()
+            .filter(|w| mailbox_membership(w, self.mailbox, now, self.show_inactive_in_inbox))
+            .collect();
+
+        let mut out: Vec<(FilterEntry, usize)> = Filter::ALL
+            .into_iter()
+            .map(|f| {
+                let n = candidates
+                    .iter()
+                    .filter(|w| {
+                        f.matches(&FilterCtx {
+                            w,
+                            agents: &self.agents,
+                        })
+                    })
+                    .count();
+                (FilterEntry::Predicate(f), n)
+            })
+            .collect();
+
+        // Distinct label names across candidates' primary tasks, counted
+        // per workspace (a workspace with the label once, not per label
+        // instance). BTreeMap keeps the rows in a stable alpha order.
+        let mut labels: BTreeMap<String, usize> = BTreeMap::new();
+        let mut states: BTreeMap<String, usize> = BTreeMap::new();
+        for w in &candidates {
+            let Some(task) = w.primary_task() else {
+                continue;
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for l in &task.labels {
+                if seen.insert(l.name.as_str()) {
+                    *labels.entry(l.name.clone()).or_default() += 1;
+                }
+            }
+            if let Some(state) = &task.state_label {
+                *states.entry(state.clone()).or_default() += 1;
+            }
+        }
+        out.extend(labels.into_iter().map(|(n, c)| (FilterEntry::Label(n), c)));
+        out.extend(
+            states
+                .into_iter()
+                .map(|(n, c)| (FilterEntry::LinearState(n), c)),
+        );
+        out
+    }
+
     /// Per-filter match counts over the workspaces the current mailbox
     /// admits (before the active filters narrow further). Drives the
     /// `(N)` counts in the filter menu so the user can see what each
@@ -2267,7 +2332,7 @@ pub(crate) use lazybox_tui_core::inbox::{
 /// ```compile_fail
 /// use lazybox_tui::components::sidebar::attention_gate;
 /// ```
-pub use lazybox_tui_core::inbox::{Filter, FilterAxis, FilterCtx, FilterSet};
+pub use lazybox_tui_core::inbox::{Filter, FilterAxis, FilterCtx, FilterEntry, FilterSet};
 // `workspace_needs_attention`'s production caller moved into
 // `inbox::compute_visible` with the grouping logic (#731); inside `tui`
 // only the attention-signal unit tests still exercise it, so the

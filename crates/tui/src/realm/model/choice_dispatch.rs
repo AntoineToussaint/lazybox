@@ -178,7 +178,7 @@ impl<T: TerminalAdapter> Model<T> {
     fn consume_pick_state(
         &mut self,
         top: &Id,
-        outcome: &lazybox_tui_core::choice::PickOutcome<crate::components::sidebar::Filter>,
+        outcome: &lazybox_tui_core::choice::PickOutcome<crate::components::sidebar::FilterEntry>,
     ) {
         use lazybox_tui_core::choice::PickOutcome;
 
@@ -227,7 +227,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     fn apply_pick_outcome(
         &mut self,
-        outcome: lazybox_tui_core::choice::PickOutcome<crate::components::sidebar::Filter>,
+        outcome: lazybox_tui_core::choice::PickOutcome<crate::components::sidebar::FilterEntry>,
     ) -> Vec<IpcCommand> {
         use lazybox_tui_core::choice::PickOutcome;
 
@@ -474,9 +474,9 @@ impl<T: TerminalAdapter> Model<T> {
             PickOutcome::MountImportConfirm(target) => {
                 self.mount_import_checkout_confirm(target);
             }
-            PickOutcome::SetFilters(filters) => {
-                let count = filters.len();
-                self.sidebar.set_filters(filters);
+            PickOutcome::SetFilters(entries) => {
+                let count = entries.len();
+                self.sidebar.set_filter_entries(entries);
                 if count == 0 {
                     self.flash_info("filters cleared");
                 } else {

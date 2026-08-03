@@ -1117,9 +1117,10 @@ mod effects_tests {
         m.dispatch_action(&Action::OpenFilterMenu);
         assert_eq!(m.modal_stack.last(), Some(&Id::FilterMenu));
 
+        use crate::components::sidebar::FilterEntry;
         let cmds = m.handle_choice_picked(vec![
-            ChoicePayload::Filter(Filter::Author),
-            ChoicePayload::Filter(Filter::Pr),
+            ChoicePayload::Filter(FilterEntry::Predicate(Filter::Author)),
+            ChoicePayload::Filter(FilterEntry::Predicate(Filter::Pr)),
         ]);
         assert!(cmds.is_empty(), "filtering sends no IPC");
         assert!(m.modal_stack.is_empty(), "menu closes on pick");
@@ -1151,9 +1152,11 @@ mod effects_tests {
         use crate::components::sidebar::Filter;
         let mut m = build_model();
         m.mount_filter_menu();
+        use crate::components::sidebar::FilterEntry;
         let last = *Filter::ALL.last().expect("at least one filter");
         assert_ne!(last, Filter::ALL[0], "test needs a non-first filter");
-        let cmds = m.handle_choice_picked(vec![ChoicePayload::Filter(last)]);
+        let cmds =
+            m.handle_choice_picked(vec![ChoicePayload::Filter(FilterEntry::Predicate(last))]);
         assert!(cmds.is_empty());
         let active: Vec<Filter> = m.sidebar.filters().iter().collect();
         assert_eq!(

@@ -823,8 +823,9 @@ pub enum ChoicePayload {
     OptText(Option<String>),
     /// A snooze duration (the `z` duration picker).
     Duration(std::time::Duration),
-    /// A sidebar filter predicate (the `f` filter menu).
-    Filter(crate::components::sidebar::Filter),
+    /// A sidebar filter entry (the `f` filter menu) — a fixed predicate
+    /// or a value-driven label / Linear-state row.
+    Filter(crate::components::sidebar::FilterEntry),
     /// An automation-policy toggle (the `g p` policies menu).
     Policy(crate::realm::model::modals::PolicyToggle),
     /// A workspace key (the `x a` adopt-target picker).
@@ -842,7 +843,7 @@ pub enum ChoicePayload {
 }
 
 impl lazybox_tui_core::choice::PickPayload for ChoicePayload {
-    type Filter = crate::components::sidebar::Filter;
+    type Filter = crate::components::sidebar::FilterEntry;
 
     fn as_index(&self) -> Option<usize> {
         match self {
@@ -881,7 +882,7 @@ impl lazybox_tui_core::choice::PickPayload for ChoicePayload {
 
     fn filter(&self) -> Option<<Self as lazybox_tui_core::choice::PickPayload>::Filter> {
         match self {
-            Self::Filter(filter) => Some(*filter),
+            Self::Filter(entry) => Some(entry.clone()),
             _ => None,
         }
     }

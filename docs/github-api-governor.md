@@ -26,6 +26,16 @@ concurrency gate, and mutation mutex. Parallel search, notification,
 detail, and mutation branches therefore cannot each spend the full
 observed budget.
 
+GitHub's secondary (abuse) limit keys on burst rate and concurrency
+rather than the primary budget, so a sweep with plenty of primary
+headroom can still trip it. Beyond the concurrency gate, request
+*starts* are spaced by a minimum gap (200 ms baseline) so a sweep
+cannot fire its whole allowance at once. The gap adapts: it widens
+while a secondary limit is recent, and widens with the measured
+external burn on the shared token so the daemon leaves inter-request
+headroom when interactive `gh`/agents are busy. An idle period never
+banks burst credit, and the gap is clamped to a five-second ceiling.
+
 Primary budgets are tracked independently:
 
 - GraphQL is admitted and reconciled in reported `rateLimit.cost`

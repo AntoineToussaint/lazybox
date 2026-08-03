@@ -214,6 +214,15 @@ fn is_rate_limit_response(status: u16, body: &str, has_retry_after: bool) -> boo
         || lower.contains("abuse detection")
 }
 
+/// Does this GraphQL request body carry a mutation? Mutations take the
+/// shared serial lane so GitHub never sees two concurrent writes on the
+/// token.
+fn is_graphql_mutation(body: &serde_json::Value) -> bool {
+    body.get("query")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|query| query.trim_start().starts_with("mutation"))
+}
+
 /// `true` when the content-type header looks like JSON. GitHub uses
 /// `application/json; charset=utf-8` so we substring-match rather
 /// than equality-check. Empty / missing content-type counts as
@@ -1040,12 +1049,26 @@ impl GhClient {
             if attempt > 0 {
                 self.acquire_or_block(operation)?;
             }
-            let outcome = match tokio::time::timeout(
-                REQUEST_TIMEOUT,
-                self.post_graphql_once::<T>(operation, body),
-            )
-            .await
-            {
+            // Pace + take the concurrency slot (and the serial mutation
+            // lane) OUTSIDE the network timeout: waiting on our own
+            // governor is not the hung request the timeout guards
+            // against, so it must not consume that budget. The guards
+            // are scoped to this block so they release before any
+            // backoff sleep — a retry wait never holds a slot (#745).
+            let timed = {
+                let _permit = self.request_permit().await?;
+                let _mutation_guard = if is_graphql_mutation(body) {
+                    Some(self.mutation_gate.lock().await)
+                } else {
+                    None
+                };
+                tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    self.post_graphql_once::<T>(operation, body),
+                )
+                .await
+            };
+            let outcome = match timed {
                 Ok(r) => r,
                 Err(_elapsed) => {
                     self.budget.lock().observe_failed_response(
@@ -1140,21 +1163,12 @@ impl GhClient {
     where
         T: serde::de::DeserializeOwned,
     {
+        // The caller (`post_graphql_with_retry_measured`) has already
+        // paced, taken the concurrency slot, and — for mutations — the
+        // serial lane. Timing starts here, at the network call, so the
+        // recorded request latency measures GitHub's round-trip and not
+        // the self-imposed governor waits (#745).
         let started = std::time::Instant::now();
-        let _permit = self
-            .request_gate
-            .acquire()
-            .await
-            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))?;
-        let query = body
-            .get("query")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let _mutation_guard = if query.trim_start().starts_with("mutation") {
-            Some(self.mutation_gate.lock().await)
-        } else {
-            None
-        };
         let response = match self.inner._post("/graphql", Some(body)).await {
             Ok(response) => response,
             Err(error) => {
@@ -1338,10 +1352,29 @@ impl GhClient {
     }
 
     async fn request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
+        // Pace BEFORE taking a concurrency slot: a request that is only
+        // waiting out its governor gap is not doing work, so it must not
+        // occupy a permit (that would shrink effective concurrency and
+        // let a background sleeper delay an interactive request).
+        self.pace().await;
         self.request_gate
             .acquire()
             .await
             .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))
+    }
+
+    /// Sleep out the governor-computed inter-request gap so request
+    /// starts stay spaced (secondary-limit protection). Called before a
+    /// concurrency slot is taken so the sleep never holds one, and never
+    /// holds the (parking_lot) budget lock across the await.
+    async fn pace(&self) {
+        let wait = self
+            .budget
+            .lock()
+            .reserve_request_slot(std::time::Instant::now());
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
     }
 
     fn observe_unreported_response(
@@ -1443,8 +1476,8 @@ impl GhClient {
         // so its steady-state poll cost is zero, but it still enters
         // the shared governor and concurrency gate.
         self.acquire_or_block("list org memberships")?;
-        let started = std::time::Instant::now();
         let _permit = self.request_permit().await?;
+        let started = std::time::Instant::now();
         let result = self
             .inner
             .current()
@@ -1499,9 +1532,9 @@ impl GhClient {
         // hourly quota — gate every page, not just the first.
         if owner == self.user {
             self.acquire_or_block("list own repos page 1")?;
-            let started = std::time::Instant::now();
             let mut page = {
                 let _permit = self.request_permit().await?;
+                let started = std::time::Instant::now();
                 let result = self
                     .inner
                     .current()
@@ -1536,9 +1569,9 @@ impl GhClient {
                     break;
                 }
                 self.acquire_or_block("list own repos next page")?;
-                let started = std::time::Instant::now();
                 let next = {
                     let _permit = self.request_permit().await?;
+                    let started = std::time::Instant::now();
                     let result = self
                         .inner
                         .get_page::<octocrab::models::Repository>(&page.next)
@@ -1558,9 +1591,9 @@ impl GhClient {
             }
         } else {
             self.acquire_or_block("list org repos page 1")?;
-            let started = std::time::Instant::now();
             let mut page = {
                 let _permit = self.request_permit().await?;
+                let started = std::time::Instant::now();
                 let result = self
                     .inner
                     .orgs(owner)
@@ -1594,9 +1627,9 @@ impl GhClient {
                     break;
                 }
                 self.acquire_or_block("list org repos next page")?;
-                let started = std::time::Instant::now();
                 let next = {
                     let _permit = self.request_permit().await?;
+                    let started = std::time::Instant::now();
                     let result = self
                         .inner
                         .get_page::<octocrab::models::Repository>(&page.next)
@@ -1915,12 +1948,7 @@ impl GhClient {
         use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, LAST_MODIFIED};
 
         self.acquire_or_block("notifications heartbeat")?;
-        let started = std::time::Instant::now();
-        let _permit = self
-            .request_gate
-            .acquire()
-            .await
-            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))?;
+        let _permit = self.request_permit().await?;
         self.notifications_state.lock().last_poll_at = Some(std::time::Instant::now());
 
         // Capture the saved header BEFORE the request, so the lock is
@@ -1955,6 +1983,10 @@ impl GhClient {
         // `all=false` (default) — only unread items. Read notifications
         // wouldn't add information since we already saw them.
         let uri = "/notifications?participating=false";
+        // Time only the network round-trip — the pacing/permit waits
+        // above are self-imposed and must not inflate request latency
+        // metrics (#745).
+        let started = std::time::Instant::now();
         let response = match self.inner._get_with_headers(uri, Some(headers)).await {
             Ok(response) => response,
             Err(error) => {
@@ -3321,9 +3353,9 @@ impl GhClient {
         // but it still enters the shared admission and concurrency
         // gate.
         self.acquire_or_block("post issue comment")?;
-        let started = std::time::Instant::now();
         let _permit = self.request_permit().await?;
         let _mutation_guard = self.mutation_gate.lock().await;
+        let started = std::time::Instant::now();
         let result = self
             .inner
             .issues(owner, name)
@@ -4846,6 +4878,40 @@ mod tests {
             Err(crate::rate_budget::AcquireError::CircuitOpen { .. }) => {}
             other => panic!("budget must refuse admission after a 429, got {other:?}"),
         }
+    }
+
+    /// Recorded request latency must measure only GitHub's round-trip,
+    /// never the governor's inter-request pacing sleep. The second
+    /// request waits one baseline gap before firing, but that
+    /// self-imposed wait must not inflate the latency percentiles an
+    /// operator reads via `Shift-D` / `/v1/metrics` (#745). Fails if
+    /// the timing clock starts before pacing/admission instead of at
+    /// the network call.
+    #[tokio::test(flavor = "current_thread")]
+    async fn recorded_request_latency_excludes_the_pacing_wait() {
+        const BODY: &str = r#"{"data":{"rateLimit":{"limit":5000,"remaining":4999,"used":1,"cost":1,"resetAt":"2999-01-01T00:00:00Z"}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let body = serde_json::json!({"query": "{ viewer { login } }"});
+
+        // First request has no pacing debt; the second must wait one
+        // baseline gap before it may fire.
+        for _ in 0..2 {
+            client
+                .post_graphql_with_retry::<serde_json::Value>("test", &body)
+                .await
+                .expect("canned 200 must parse");
+        }
+
+        let gap_ms = crate::rate_budget::DEFAULT_MIN_REQUEST_GAP.as_millis() as u64;
+        let p95 = client
+            .rate_snapshot()
+            .request_p95_ms
+            .expect("two requests recorded latency");
+        assert!(
+            p95 < gap_ms,
+            "recorded p95 latency {p95}ms must exclude the {gap_ms}ms pacing wait"
+        );
     }
 
     /// GitHub signals secondary (abuse) limits as a 403 with a

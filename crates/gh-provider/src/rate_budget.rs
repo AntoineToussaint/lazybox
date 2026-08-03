@@ -23,6 +23,24 @@ pub const DEFAULT_SECONDARY_PAUSE: Duration = Duration::from_secs(60);
 const MAX_SECONDARY_PAUSE: Duration = Duration::from_secs(15 * 60);
 const LATENCY_SAMPLE_CAPACITY: usize = 1024;
 
+/// Baseline spacing between the *start* of consecutive GitHub
+/// requests. GitHub's secondary (abuse) limit keys on burst rate and
+/// concurrency, not the primary 5000/h budget, so a sweep that fires
+/// its whole allowance back-to-back trips it with thousands of primary
+/// points still unspent. The concurrency gate bounds in-flight
+/// requests; this bounds how fast new ones may launch.
+pub(crate) const DEFAULT_MIN_REQUEST_GAP: Duration = Duration::from_millis(200);
+/// Ceiling on the adaptive gap so a hot token never stalls a request
+/// for longer than the poll cadence would tolerate.
+const MAX_REQUEST_GAP: Duration = Duration::from_secs(5);
+/// External requests/sec on the shared token at which spacing doubles.
+/// Feeds the measured `ext/h` burn back into daemon pacing: heavy
+/// interactive/agent `gh` usage widens the daemon's own gaps so its
+/// requests don't stack on top of an already-bursting token.
+const EXTERNAL_CONTENTION_REF: f64 = 1.0;
+/// Cap on the external-contention widening factor.
+const MAX_CONTENTION_MULT: f64 = 4.0;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ApiResource {
     Graphql,
@@ -414,6 +432,8 @@ pub struct RateBudget {
     secondary_circuit: Option<CircuitState>,
     primary_circuits: HashMap<String, CircuitState>,
     secondary_failures: u32,
+    min_request_gap: Duration,
+    next_request_slot: Option<Instant>,
     #[cfg(test)]
     force_fail: Option<AcquireError>,
 }
@@ -441,6 +461,8 @@ impl RateBudget {
             secondary_circuit: None,
             primary_circuits: HashMap::new(),
             secondary_failures: 0,
+            min_request_gap: DEFAULT_MIN_REQUEST_GAP,
+            next_request_slot: None,
             #[cfg(test)]
             force_fail: None,
         }
@@ -456,6 +478,40 @@ impl RateBudget {
         } else {
             DEFAULT_BACKGROUND_SHARE
         };
+    }
+
+    /// Reserve the next paced request slot and return how long the
+    /// caller must sleep before firing. Serializes request *starts* to
+    /// at least [`Self::request_gap`] apart so a burst (a sweep firing
+    /// its whole allowance, or retries stacking) can't trip GitHub's
+    /// secondary limit while primary budget is still healthy (#745).
+    ///
+    /// An idle gap never banks burst credit: a slot in the past
+    /// collapses to `now`, so the first request after a quiet period
+    /// fires immediately.
+    pub(crate) fn reserve_request_slot(&mut self, now: Instant) -> Duration {
+        let gap = self.request_gap();
+        let start = self.next_request_slot.map_or(now, |slot| slot.max(now));
+        self.next_request_slot = Some(start + gap);
+        start.checked_duration_since(now).unwrap_or_default()
+    }
+
+    /// Current inter-request spacing. Widens beyond the baseline while a
+    /// secondary limit is recent (GitHub is signalling the token is hot)
+    /// and while external `gh`/agent traffic on the shared token is
+    /// heavy, then relaxes back as those pressures subside.
+    fn request_gap(&self) -> Duration {
+        let secondary = 1u32 << self.secondary_failures.min(4);
+        let external_per_sec: f64 = self
+            .resources
+            .values()
+            .map(|state| state.external_burn_per_sec)
+            .sum();
+        let contention =
+            1.0 + (external_per_sec / EXTERNAL_CONTENTION_REF).clamp(0.0, MAX_CONTENTION_MULT);
+        self.min_request_gap
+            .mul_f64(f64::from(secondary) * contention)
+            .min(MAX_REQUEST_GAP)
     }
 
     fn refill(&mut self) {
@@ -1307,6 +1363,8 @@ impl RateBudget {
             secondary_circuit: self.secondary_circuit.clone(),
             primary_circuits: self.primary_circuits.clone(),
             secondary_failures: self.secondary_failures,
+            min_request_gap: self.min_request_gap,
+            next_request_slot: self.next_request_slot,
             #[cfg(test)]
             force_fail: None,
         }
@@ -2112,5 +2170,84 @@ mod tests {
         let idle = without_burn.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
 
         assert!(contended.graphql_points < idle.graphql_points);
+    }
+
+    #[test]
+    fn request_starts_are_spaced_by_the_baseline_gap() {
+        let now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        assert_eq!(budget.reserve_request_slot(now), Duration::ZERO);
+        assert_eq!(budget.reserve_request_slot(now), DEFAULT_MIN_REQUEST_GAP);
+        assert_eq!(
+            budget.reserve_request_slot(now),
+            DEFAULT_MIN_REQUEST_GAP * 2
+        );
+    }
+
+    #[test]
+    fn idle_period_does_not_bank_burst_credit() {
+        let now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        assert_eq!(budget.reserve_request_slot(now), Duration::ZERO);
+        let later = now + DEFAULT_MIN_REQUEST_GAP * 10;
+        assert_eq!(budget.reserve_request_slot(later), Duration::ZERO);
+    }
+
+    #[test]
+    fn secondary_failures_widen_the_gap() {
+        let now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        budget.observe_secondary_limit(None, Utc::now());
+        assert_eq!(budget.reserve_request_slot(now), Duration::ZERO);
+        assert_eq!(
+            budget.reserve_request_slot(now),
+            DEFAULT_MIN_REQUEST_GAP * 2
+        );
+    }
+
+    #[test]
+    fn external_contention_widens_the_gap() {
+        let now = Instant::now();
+        let mono = Instant::now();
+        let reset = Utc::now() + chrono::Duration::hours(1);
+        let mut budget = RateBudget::new(100, 6000.0);
+        budget.observe_primary("graphql", 5000, 5000, 0, reset, mono);
+        // 3600 external points over 3600s ⇒ 1 req/s on the shared token.
+        budget.observe_primary(
+            "graphql",
+            5000,
+            1400,
+            3600,
+            reset,
+            mono + Duration::from_secs(3600),
+        );
+        assert_eq!(budget.reserve_request_slot(now), Duration::ZERO);
+        assert_eq!(
+            budget.reserve_request_slot(now),
+            DEFAULT_MIN_REQUEST_GAP * 2
+        );
+    }
+
+    #[test]
+    fn the_gap_is_clamped_to_a_ceiling() {
+        let now = Instant::now();
+        let mono = Instant::now();
+        let reset = Utc::now() + chrono::Duration::hours(1);
+        let mut budget = RateBudget::new(100, 6000.0);
+        budget.observe_primary("graphql", 100_000, 100_000, 0, reset, mono);
+        // 4 req/s external ⇒ 5× contention multiplier.
+        budget.observe_primary(
+            "graphql",
+            100_000,
+            96_400,
+            3600,
+            reset,
+            mono + Duration::from_secs(900),
+        );
+        for _ in 0..8 {
+            budget.observe_secondary_limit(None, Utc::now());
+        }
+        assert_eq!(budget.reserve_request_slot(now), Duration::ZERO);
+        assert_eq!(budget.reserve_request_slot(now), MAX_REQUEST_GAP);
     }
 }

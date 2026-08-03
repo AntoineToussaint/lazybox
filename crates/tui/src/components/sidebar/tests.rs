@@ -2202,6 +2202,146 @@ mod broadcast_select_tests {
         assert_eq!(sb.broadcast_selected_count(), 1);
     }
 
+    /// Issue #786: pressing `v` marks the *current* row visibly and
+    /// immediately — the cursor row shows its `✓` (not just the caret) —
+    /// and the header carries a persistent `N selected` count.
+    #[test]
+    fn selection_shows_on_cursor_row_and_header_count() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
+        // Mark the row the cursor is already on — the repro case.
+        assert_eq!(sb.toggle_broadcast_select(), Some(true));
+
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+
+        let header: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect();
+        assert!(header.contains("1 selected"), "header count: {header:?}");
+
+        // The cursor row itself carries the `✓` gutter mark, so `v` gives
+        // feedback without moving off the row.
+        let marked_rows = (0..buffer.area.height)
+            .filter(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains('✓')
+            })
+            .count();
+        // One `✓` in the header, one in the cursor row's gutter.
+        assert_eq!(marked_rows, 2, "expected header + cursor-row check marks");
+    }
+
+    /// Render `row 0` of the header at a given width.
+    fn header_row(sb: &mut Sidebar, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(width, 12)).expect("terminal");
+        term.draw(|f| sb.render(f.area(), f, true)).expect("draw");
+        let buf = term.backend().buffer();
+        (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+    }
+
+    /// Whether any cell in the rendered screen shows a `✓`.
+    fn screen_has_check(sb: &mut Sidebar, width: u16) -> bool {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(width, 12)).expect("terminal");
+        term.draw(|f| sb.render(f.area(), f, true)).expect("draw");
+        let buf = term.backend().buffer();
+        (0..12).any(|y| (0..width).any(|x| buf[(x, y)].symbol() == "✓"))
+    }
+
+    /// Issue #786: the header count reflects only the *visible* marks —
+    /// it stays in lockstep with the on-screen `✓` gutter and with what a
+    /// broadcast targets. Marks on rows a filter later hides don't inflate
+    /// the count (they'd otherwise claim rows that aren't there and won't
+    /// broadcast).
+    #[test]
+    fn header_count_tracks_visible_marks_not_hidden_ones() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
+        sb.toggle_broadcast_select();
+        sb.handle_key(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut Vec::new(),
+        );
+        sb.toggle_broadcast_select();
+        assert_eq!(sb.broadcast_selected_count(), 2, "both rows marked");
+
+        assert!(
+            header_row(&mut sb, 60).contains("2 selected"),
+            "both visible → header counts 2",
+        );
+        assert!(screen_has_check(&mut sb, 60), "gutter marks visible");
+
+        // Hide every issue behind a PR-only filter. The marks persist in
+        // the set, but nothing is visible — the header must not claim a
+        // stale count and no gutter `✓` should paint.
+        sb.set_filters([Filter::Pr]);
+        assert_eq!(sb.broadcast_selected_count(), 2, "set retains the marks");
+        assert_eq!(
+            sb.visible_broadcast_selected_count(),
+            0,
+            "none of the marked rows are visible",
+        );
+        assert!(
+            !header_row(&mut sb, 60).contains("selected"),
+            "no stale count when the marked rows are hidden",
+        );
+        assert!(
+            !screen_has_check(&mut sb, 60),
+            "no gutter marks when the marked rows are hidden",
+        );
+    }
+
+    /// Issue #786: the live selection count is the highest-priority
+    /// header signal. On a narrow sidebar it outranks the passive badges
+    /// (here `☼ awake`) instead of the whole strip dropping as an
+    /// all-or-nothing block — so there is a width band where the count
+    /// shows but the passive badge is dropped, and never the reverse.
+    #[test]
+    fn selection_count_outranks_passive_badges_when_space_is_tight() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.toggle_broadcast_select();
+        sb.set_keep_awake(true);
+        let key = sb.selected_session_key().expect("cursor row").clone();
+        sb.agents.insert(key, lazybox_ipc::AgentState::Working);
+
+        let mut saw_count_without_badge = false;
+        for width in 24..=110u16 {
+            let header = header_row(&mut sb, width);
+            let has_count = header.contains("selected");
+            let has_badge = header.contains("awake");
+            assert!(
+                !(has_badge && !has_count),
+                "passive badge shown without the selection count at width {width}: {header:?}",
+            );
+            if has_count && !has_badge {
+                saw_count_without_badge = true;
+            }
+        }
+        assert!(
+            saw_count_without_badge,
+            "expected a width where the count survives but the passive badge is dropped",
+        );
+
+        // Given enough room, both coexist — the count doesn't suppress
+        // the passive badge, it just wins when space is scarce.
+        let wide = header_row(&mut sb, 110);
+        assert!(
+            wide.contains("selected") && wide.contains("awake"),
+            "{wide:?}"
+        );
+    }
+
     /// The broadcast target list comes out in visible (sidebar) order
     /// regardless of the order rows were marked in.
     #[test]

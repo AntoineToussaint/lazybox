@@ -696,6 +696,22 @@ impl Sidebar {
         self.broadcast_selected.len()
     }
 
+    /// How many marked workspaces are currently *visible* — the count
+    /// the header surfaces and the number a broadcast / bulk-update
+    /// actually targets (`selected_broadcast_keys`). Marks on rows
+    /// hidden by the active mailbox / filter / search are excluded, so
+    /// the count stays in lockstep with the on-screen `✓` gutter marks
+    /// rather than overstating what's actionable (issue #786).
+    pub fn visible_broadcast_selected_count(&self) -> usize {
+        self.visible
+            .iter()
+            .filter(|row| match row {
+                VisibleRow::Workspace(k) => self.broadcast_selected.contains(k),
+                _ => false,
+            })
+            .count()
+    }
+
     /// Drop the whole multi-select set. Bound to Esc and called after
     /// a successful broadcast so the marks don't outlive the send.
     /// Returns whether anything was cleared (so Esc can fall through

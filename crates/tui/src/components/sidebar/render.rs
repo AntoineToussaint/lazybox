@@ -79,6 +79,12 @@ impl Sidebar {
                 header_left.push(Span::styled(" (dev)", Style::default().fg(theme.text_dim)));
             }
         }
+        // Broadcast multi-select count — only the *visible* marks, so the
+        // header agrees with the on-screen `✓` gutter and with what a
+        // broadcast will target (issue #786). Placed ahead of the passive
+        // badges below and fitted on its own (see the header assembly), so
+        // the live mode indicator survives a narrow sidebar.
+        let selected = self.visible_broadcast_selected_count();
         let mut signal_spans: Vec<Span> = Vec::with_capacity(8);
         if unread > 0 {
             signal_spans.push(Span::styled(
@@ -137,9 +143,39 @@ impl Sidebar {
 
         let mut header_spans = header_left;
         let summary_width = spans_visual_width(&summary_spans);
+
+        // The live multi-select count is the highest-priority signal —
+        // it's the mode you're actively in — so it's placed first and
+        // fitted on its own budget. That way it survives even when the
+        // passive badges below don't, instead of the whole signal strip
+        // dropping as an all-or-nothing block (issue #786).
+        let mut chip_placed = false;
+        if selected > 0 {
+            let chip = Span::styled(
+                format!("✓ {selected} selected"),
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            );
+            let chip_width = spans_visual_width(std::slice::from_ref(&chip));
+            let left_width = spans_visual_width(&header_spans);
+            if inner_width as usize >= left_width + 2 + chip_width + 2 + summary_width {
+                header_spans.push(Span::raw("  "));
+                header_spans.push(chip);
+                chip_placed = true;
+            }
+        }
+
+        // Passive badges (`● new`, `? input`, `☼ awake`) are lower
+        // priority than the selection count. When a selection is active
+        // but its count didn't fit, suppress them too: a shorter badge
+        // must never take the count's place, which would read as "nothing
+        // selected" while marks are live (issue #786).
+        let show_passive = selected == 0 || chip_placed;
         let signal_width = spans_visual_width(&signal_spans);
         let current_width = spans_visual_width(&header_spans);
-        if !signal_spans.is_empty()
+        if show_passive
+            && !signal_spans.is_empty()
             && inner_width as usize >= current_width + 2 + signal_width + 2 + summary_width
         {
             header_spans.push(Span::raw("  "));

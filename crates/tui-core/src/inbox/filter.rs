@@ -15,7 +15,7 @@
 //! free — "needs attention" is just several State filters, and OR
 //! within the axis is exactly the union the preset wants.
 
-use lazybox_core::{CiStatus, ReviewStatus, SessionKey, TaskRole, TaskState, Workspace};
+use lazybox_core::{CiStatus, Priority, ReviewStatus, SessionKey, TaskRole, TaskState, Workspace};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
@@ -35,6 +35,9 @@ pub enum FilterAxis {
     State,
     Role,
     Kind,
+    Priority,
+    Label,
+    LinearState,
 }
 
 impl FilterAxis {
@@ -44,6 +47,9 @@ impl FilterAxis {
             FilterAxis::State => "State",
             FilterAxis::Role => "Role",
             FilterAxis::Kind => "Kind",
+            FilterAxis::Priority => "Priority",
+            FilterAxis::Label => "Label",
+            FilterAxis::LinearState => "Linear state",
         }
     }
 }
@@ -93,11 +99,18 @@ pub enum Filter {
     // ── Kind ───────────────────────────────────────────────────────
     Pr,
     Issue,
+    // ── Priority (Linear) ──────────────────────────────────────────
+    PriorityUrgent,
+    PriorityHigh,
+    PriorityMedium,
+    PriorityLow,
 }
 
 impl Filter {
-    /// Every filter, in menu order (State, then Role, then Kind).
-    pub const ALL: [Filter; 19] = [
+    /// Every fixed filter, in menu order (State, Role, Kind, Priority).
+    /// Value-driven axes (Label, Linear state) are enumerated separately
+    /// from the candidate set — see [`FilterSet`] and `Sidebar`.
+    pub const ALL: [Filter; 23] = [
         Filter::WithAgent,
         Filter::CiFailing,
         Filter::CiRunning,
@@ -117,6 +130,10 @@ impl Filter {
         Filter::Mentioned,
         Filter::Pr,
         Filter::Issue,
+        Filter::PriorityUrgent,
+        Filter::PriorityHigh,
+        Filter::PriorityMedium,
+        Filter::PriorityLow,
     ];
 
     pub fn axis(self) -> FilterAxis {
@@ -138,6 +155,21 @@ impl Filter {
                 FilterAxis::Role
             }
             Filter::Pr | Filter::Issue => FilterAxis::Kind,
+            Filter::PriorityUrgent
+            | Filter::PriorityHigh
+            | Filter::PriorityMedium
+            | Filter::PriorityLow => FilterAxis::Priority,
+        }
+    }
+
+    /// The priority tier this predicate matches, if it is one.
+    fn priority(self) -> Option<Priority> {
+        match self {
+            Filter::PriorityUrgent => Some(Priority::Urgent),
+            Filter::PriorityHigh => Some(Priority::High),
+            Filter::PriorityMedium => Some(Priority::Medium),
+            Filter::PriorityLow => Some(Priority::Low),
+            _ => None,
         }
     }
 
@@ -163,6 +195,10 @@ impl Filter {
             Filter::Mentioned => "mentioned",
             Filter::Pr => "PR",
             Filter::Issue => "issue",
+            Filter::PriorityUrgent => "urgent",
+            Filter::PriorityHigh => "high",
+            Filter::PriorityMedium => "medium",
+            Filter::PriorityLow => "low",
         }
     }
 
@@ -204,6 +240,10 @@ impl Filter {
             Filter::Mentioned => task.is_some_and(|t| t.role == TaskRole::Mentioned),
             Filter::Pr => WorkspaceKind::classify(w) == WorkspaceKind::Pr,
             Filter::Issue => WorkspaceKind::classify(w) == WorkspaceKind::Issue,
+            Filter::PriorityUrgent
+            | Filter::PriorityHigh
+            | Filter::PriorityMedium
+            | Filter::PriorityLow => task.is_some_and(|t| t.priority == self.priority()),
         }
     }
 }
@@ -474,6 +514,36 @@ mod tests {
             Filter::BigDiff,
         ] {
             assert_eq!(f.axis(), FilterAxis::State);
+        }
+    }
+
+    #[test]
+    fn priority_predicates_match_the_task_priority() {
+        let agents = HashMap::new();
+        let matches = |ws: &Workspace, f: Filter| {
+            f.matches(&FilterCtx {
+                w: ws,
+                agents: &agents,
+            })
+        };
+
+        let urgent = workspace_with("a", |t| t.priority = Some(Priority::Urgent));
+        assert!(matches(&urgent, Filter::PriorityUrgent));
+        assert!(!matches(&urgent, Filter::PriorityLow));
+
+        let low = workspace_with("b", |t| t.priority = Some(Priority::Low));
+        assert!(matches(&low, Filter::PriorityLow));
+
+        // No priority (e.g. a GitHub task) matches no priority predicate.
+        let none = workspace_with("c", |t| t.priority = None);
+        for f in [
+            Filter::PriorityUrgent,
+            Filter::PriorityHigh,
+            Filter::PriorityMedium,
+            Filter::PriorityLow,
+        ] {
+            assert_eq!(f.axis(), FilterAxis::Priority);
+            assert!(!matches(&none, f));
         }
     }
 

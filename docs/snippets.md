@@ -13,6 +13,11 @@ the system is useful before you create anything: review (`rev`,
 (`test`, `tdd`, `repro`), debugging (`bug`, `bisect`, `trace`),
 security (`sec`, `deps`, `leaks`), and more.
 
+Snippets are the *human-only* half of a pair: Claude Code — one of the
+agents lazybox spawns — also loads its own **Skills** (`SKILL.md`),
+which it can invoke autonomously as well as on request. For which one
+to reach for, see [Snippets vs Agent Skills](snippets-vs-skills.md).
+
 ## Send and repeat a workflow
 
 1. Focus an agent terminal and type `]]s`. The categorized picker opens

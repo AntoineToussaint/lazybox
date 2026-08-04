@@ -748,7 +748,6 @@ mutation($id: ID!) {
   updatePullRequestBranch(input: { pullRequestId: $id }) {
     pullRequest { id }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -822,7 +821,6 @@ mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObject
   mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $expectedHeadOid }) {
     pullRequest { id state merged }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -872,7 +870,6 @@ mutation($id: ID!, $userIds: [ID!]) {
   requestReviews(input: { pullRequestId: $id, userIds: $userIds, union: true }) {
     pullRequest { id }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -896,7 +893,6 @@ mutation($id: ID!, $userIds: [ID!]!) {
   addAssigneesToAssignable(input: { assignableId: $id, assigneeIds: $userIds }) {
     assignable { __typename }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -919,7 +915,6 @@ mutation($id: ID!, $userIds: [ID!]!) {
   removeAssigneesFromAssignable(input: { assignableId: $id, assigneeIds: $userIds }) {
     assignable { __typename }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -964,7 +959,6 @@ mutation($id: ID!) {
   closeIssue(input: { issueId: $id, stateReason: NOT_PLANNED }) {
     issue { id state stateReason }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -982,7 +976,6 @@ mutation($id: ID!) {
   closePullRequest(input: { pullRequestId: $id }) {
     pullRequest { id state }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -1001,7 +994,6 @@ mutation($id: ID!) {
   deleteIssue(input: { issueId: $id }) {
     clientMutationId
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -1023,7 +1015,6 @@ mutation($id: ID!) {
   addReaction(input: { subjectId: $id, content: EYES }) {
     reaction { content }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -1043,7 +1034,6 @@ mutation($id: ID!, $labelIds: [ID!]!) {
   addLabelsToLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
     labelable { __typename }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -1062,7 +1052,6 @@ mutation($id: ID!, $labelIds: [ID!]!) {
   removeLabelsFromLabelable(input: { labelableId: $id, labelIds: $labelIds }) {
     labelable { __typename }
   }
-  rateLimit { cost limit remaining resetAt used }
 }
 "#;
 
@@ -3139,6 +3128,39 @@ mod tests {
         assert_eq!(body["variables"]["id"], "PR_kwDOabc123");
         let query = body["query"].as_str().unwrap();
         assert!(query.contains("closePullRequest"));
+    }
+
+    /// Issue #822: `rateLimit` lives on the `Query` root, never on
+    /// `Mutation`. Selecting it inside a `mutation { … }` document makes
+    /// GitHub reject the whole thing at schema validation
+    /// (`undefinedField`), so every write fails before it runs. Guard
+    /// every mutation constant against a regression that re-adds it.
+    #[test]
+    fn no_mutation_selects_ratelimit() {
+        let mutations: &[(&str, &str)] = &[
+            ("UPDATE_BRANCH_MUTATION", UPDATE_BRANCH_MUTATION),
+            ("MERGE_PR_MUTATION", MERGE_PR_MUTATION),
+            ("REQUEST_REVIEWS_MUTATION", REQUEST_REVIEWS_MUTATION),
+            ("ADD_ASSIGNEES_MUTATION", ADD_ASSIGNEES_MUTATION),
+            ("REMOVE_ASSIGNEES_MUTATION", REMOVE_ASSIGNEES_MUTATION),
+            ("CLOSE_ISSUE_MUTATION", CLOSE_ISSUE_MUTATION),
+            ("CLOSE_PR_MUTATION", CLOSE_PR_MUTATION),
+            ("DELETE_ISSUE_MUTATION", DELETE_ISSUE_MUTATION),
+            ("ADD_REACTION_MUTATION", ADD_REACTION_MUTATION),
+            ("ADD_LABELS_MUTATION", ADD_LABELS_MUTATION),
+            ("REMOVE_LABELS_MUTATION", REMOVE_LABELS_MUTATION),
+        ];
+        for (name, doc) in mutations {
+            assert!(
+                doc.trim_start().starts_with("mutation"),
+                "{name} is not a mutation document"
+            );
+            assert!(
+                !doc.contains("rateLimit"),
+                "{name} selects `rateLimit`, which is a Query-root field — \
+                 GitHub rejects the mutation as an undefinedField (issue #822)"
+            );
+        }
     }
 
     /// The merge mutation must carry `expectedHeadOid` — GitHub's

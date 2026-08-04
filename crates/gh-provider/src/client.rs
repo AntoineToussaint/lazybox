@@ -186,6 +186,31 @@ impl RateLimitHeaders {
         }
     }
 
+    /// Remote GraphQL budget derived from the `x-ratelimit-*` response
+    /// headers GitHub attaches to every GraphQL call, mutations included.
+    /// Mutations cannot select the GraphQL `rateLimit` field — it lives on
+    /// the `Query` root, not `Mutation` (issue #822) — so their budget
+    /// refresh comes from these headers instead of the response body.
+    /// Returns `None` unless the headers bill the `graphql` resource and
+    /// carry a full remaining/limit/reset triple, alongside the reported
+    /// cumulative `used` count.
+    fn graphql_budget(&self) -> Option<(crate::rate_budget::RemoteRateLimit, u32)> {
+        if self.resource.as_deref() != Some("graphql") {
+            return None;
+        }
+        let reset_at =
+            chrono::DateTime::from_timestamp(i64::try_from(self.reset_epoch_secs?).ok()?, 0)?;
+        Some((
+            crate::rate_budget::RemoteRateLimit {
+                remaining: self.remaining?,
+                limit: self.limit?,
+                reset_at,
+                observed_at: std::time::Instant::now(),
+            },
+            self.used.unwrap_or(0),
+        ))
+    }
+
     /// Seconds to wait before the next request, preferring the
     /// explicit `Retry-After`, falling back to the reset timestamp,
     /// then to a conservative 60s default. Clamped to >= 1 so a
@@ -1323,6 +1348,13 @@ impl GhClient {
                         status,
                         byte_len,
                         elapsed,
+                    );
+                } else if let Some((remote, used)) = rate_headers.graphql_budget() {
+                    // Mutations can't carry a body `rateLimit` block, so
+                    // their budget comes from the response headers instead
+                    // (issue #822). Each GraphQL mutation bills one point.
+                    self.budget.lock().observe_graphql_response(
+                        operation, remote, used, 1, status, byte_len, elapsed,
                     );
                 } else {
                     self.budget.lock().observe_failed_response(
@@ -5266,6 +5298,48 @@ mod tests {
             1,
             "reset in the past clamps to 1s"
         );
+    }
+
+    #[test]
+    fn graphql_budget_reads_headers_only_for_the_graphql_resource() {
+        // Mutations can't carry a body `rateLimit` block (issue #822), so
+        // their budget refresh rides the `x-ratelimit-*` response headers.
+        let graphql = RateLimitHeaders::parse(
+            None,
+            Some("4990"),
+            Some("1750000000"),
+            Some("graphql"),
+            Some("5000"),
+            Some("10"),
+        );
+        let (remote, used) = graphql
+            .graphql_budget()
+            .expect("graphql headers yield a remote budget");
+        assert_eq!(remote.remaining, 4990);
+        assert_eq!(remote.limit, 5000);
+        assert_eq!(used, 10);
+        assert_eq!(remote.reset_at.timestamp(), 1750000000);
+
+        // A core/search-billed response must not be read as the graphql
+        // budget, and a graphql response missing any field yields nothing.
+        let core = RateLimitHeaders::parse(
+            None,
+            Some("59"),
+            Some("1750000000"),
+            Some("core"),
+            Some("60"),
+            Some("1"),
+        );
+        assert!(core.graphql_budget().is_none());
+        let partial = RateLimitHeaders::parse(
+            None,
+            Some("4990"),
+            None,
+            Some("graphql"),
+            Some("5000"),
+            None,
+        );
+        assert!(partial.graphql_budget().is_none());
     }
 
     #[test]

@@ -60,6 +60,7 @@ import {
   type TerminalBinaryFrame,
   type TerminalInputIntent,
   type TerminalReplayState,
+  closeTerminalFrame,
   decodeTerminalStreamItem,
   discardTerminalView,
   resizeTerminalFrame,
@@ -80,6 +81,12 @@ interface ActiveTerminal {
   id: number;
   terminal: Terminal;
   fit: FitAddon;
+  /** Tile in the tiles container that hosts this terminal's xterm. */
+  tile: HTMLDivElement;
+  /** Tab-strip chip for this terminal. */
+  tab: HTMLButtonElement;
+  /** The tab's live-state pill, updated as the runner's state changes. */
+  stateEl: HTMLSpanElement;
   disposeInput: () => void;
   disposeResize: () => void;
   resyncing: boolean;
@@ -215,10 +222,12 @@ const replyBody = element<HTMLTextAreaElement>("reply-body");
 const replyButton = element<HTMLButtonElement>("reply-button");
 const refreshButton = element<HTMLButtonElement>("refresh-button");
 const settingsButton = element<HTMLButtonElement>("settings-button");
-const terminalHost = element<HTMLDivElement>("terminal");
+const terminalTiles = element<HTMLDivElement>("terminal");
+const terminalTabs = element<HTMLDivElement>("terminal-tabs");
 const terminalEmpty = element<HTMLDivElement>("terminal-empty");
 const terminalTitle = element<HTMLHeadingElement>("terminal-title");
 const terminalState = element<HTMLSpanElement>("terminal-state");
+const workspaceGrid = document.querySelector<HTMLElement>(".workspace-grid")!;
 const connectionDot = element<HTMLSpanElement>("connection-dot");
 const connectionLabel = element<HTMLSpanElement>("connection-label");
 const statusMessage = element<HTMLSpanElement>("status-message");
@@ -315,7 +324,17 @@ let creatingWorkspace = false;
 const replyDrafts = new ReplyDrafts();
 const pendingLaunches = new Set<string>();
 let focusRequestedSession: string | null = null;
-let activeTerminal: ActiveTerminal | null = null;
+// Every terminal of the selected workspace is mounted concurrently as a
+// tile (mirrors the TUI's `TerminalStack`), keyed by terminal id. Switching
+// workspace swaps the whole set; within a workspace an agent + a shell (or
+// several agents) stay live side by side without teardown.
+const liveTerminals = new Map<number, ActiveTerminal>();
+// The tile that owns keyboard focus and is the target for snippets. In
+// focus mode it is the only tile shown.
+let focusedTerminalId: number | null = null;
+// Focus mode expands the focused tile across the workspace, hiding the
+// inbox and activity panels (the `.` chord; TUI focus mode parity).
+let focusMode = false;
 let resizeTimer: number | undefined;
 let snippetViewState: SnippetPickerView | null = null;
 let snippetCursor = 0;
@@ -555,7 +574,7 @@ function handleStreamMessage(message: DesktopStreamMessage): void {
     chooseInitialWorkspace();
     render();
     if (!hadSelection && selectedKey !== null) {
-      attachSelectedTerminal();
+      syncWorkspaceTerminals();
     }
     return;
   }
@@ -576,11 +595,14 @@ function handleEvent(event: LazyboxEvent): void {
     workspaces = applyWorkspaceEvent(workspaces, event);
     if (selectedKey !== null && !workspaces.has(selectedKey)) {
       changeSelectedWorkspace(null);
+      // Drop the removed workspace's tiles now; the following Inbox push
+      // (or a later selection) mounts the replacement.
+      syncWorkspaceTerminals();
     }
   }
 
   if ("Snapshot" in event) {
-    detachTerminal();
+    unmountAllTerminals();
     terminals = new Map(
       event.Snapshot.terminals.map((snapshot) => [
         snapshot.terminal_id,
@@ -591,7 +613,7 @@ function handleEvent(event: LazyboxEvent): void {
       applyPendingTerminalFrames(terminalId);
     }
     chooseInitialWorkspace();
-    attachSelectedTerminal();
+    syncWorkspaceTerminals();
     setStatus("Inbox and terminal replay are synchronized.");
   } else if ("TerminalSpawned" in event) {
     const payload = event.TerminalSpawned;
@@ -606,9 +628,10 @@ function handleEvent(event: LazyboxEvent): void {
       state: "running",
     });
     if (payload.session_key === selectedKey) {
-      attachTerminal(payload.terminal_id);
-      if (focusRequestedSession === payload.session_key) {
-        activeTerminal?.terminal.focus();
+      const focusNew = focusRequestedSession === payload.session_key;
+      syncWorkspaceTerminals();
+      if (focusNew) {
+        focusTerminal(payload.terminal_id);
         focusRequestedSession = null;
       }
     }
@@ -618,21 +641,23 @@ function handleEvent(event: LazyboxEvent): void {
     if (record !== undefined) {
       record.state = `exited ${event.TerminalExited.exit_code ?? ""}`.trim();
     }
-    if (activeTerminal?.id === event.TerminalExited.terminal_id) {
-      setTerminalState(record?.state ?? "exited");
+    const live = liveTerminals.get(event.TerminalExited.terminal_id);
+    if (live !== undefined && record !== undefined) {
+      setLiveState(live, record.state);
       if (event.TerminalExited.last_output !== null) {
-        activeTerminal.terminal.write(`\r\n${event.TerminalExited.last_output}`);
+        live.terminal.write(`\r\n${event.TerminalExited.last_output}`);
       }
     }
   } else if ("TerminalFocusRequested" in event) {
-    attachTerminal(event.TerminalFocusRequested.terminal_id);
+    focusTerminalById(event.TerminalFocusRequested.terminal_id);
   } else if ("AgentState" in event) {
     const record = terminals.get(event.AgentState.terminal_id);
     if (record !== undefined) {
       record.state = formatAgentState(event.AgentState.state);
     }
-    if (activeTerminal?.id === event.AgentState.terminal_id) {
-      setTerminalState(record?.state ?? "running");
+    const live = liveTerminals.get(event.AgentState.terminal_id);
+    if (live !== undefined) {
+      setLiveState(live, record?.state ?? "running");
     }
   } else if ("ProviderError" in event) {
     setStatus(`${event.ProviderError.source}: ${event.ProviderError.message}`);
@@ -1157,7 +1182,7 @@ function renderTaskBadges(container: HTMLElement, signals: TaskSignal[]): void {
 function selectWorkspace(key: string): void {
   const changed = changeSelectedWorkspace(key);
   render();
-  attachSelectedTerminal();
+  syncWorkspaceTerminals();
   void sendCommand({ FocusWorkspace: { session_key: key } });
   if (changed) {
     const workspace = workspaces.get(key);
@@ -1224,27 +1249,43 @@ function nextSortMode(mode: SortMode): SortMode {
       : "Recent";
 }
 
-function attachSelectedTerminal(): void {
+/** The selected workspace's terminals, in stable id order. */
+function workspaceTerminalRecords(): TerminalRecord[] {
   if (selectedKey === null) {
-    detachTerminal();
-    return;
+    return [];
   }
-  const record =
-    terminalForWorkspace(selectedKey, "agent") ??
-    terminalForWorkspace(selectedKey, "shell");
-  if (record === undefined) {
-    detachTerminal();
-    return;
-  }
-  attachTerminal(record.id);
+  return [...terminals.values()]
+    .filter((record) => record.sessionKey === selectedKey)
+    .sort((left, right) => left.id - right.id);
 }
 
-function attachTerminal(id: number): void {
-  const record = terminals.get(id);
-  if (record === undefined || activeTerminal?.id === id) {
-    return;
+/**
+ * Reconcile the mounted tiles with the selected workspace's terminals:
+ * unmount anything that left (workspace switch, exit + removal), mount
+ * anything new, and keep the focus on a still-present tile. Every
+ * terminal of the workspace stays live at once — no teardown on switch.
+ */
+function syncWorkspaceTerminals(): void {
+  const wanted = workspaceTerminalRecords();
+  const wantedIds = new Set(wanted.map((record) => record.id));
+  for (const id of [...liveTerminals.keys()]) {
+    if (!wantedIds.has(id)) {
+      unmountTerminal(id);
+    }
   }
-  detachTerminal();
+  for (const record of wanted) {
+    if (!liveTerminals.has(record.id)) {
+      mountTerminal(record);
+    }
+  }
+  if (focusedTerminalId === null || !liveTerminals.has(focusedTerminalId)) {
+    focusedTerminalId = wanted[0]?.id ?? null;
+  }
+  layoutTiles();
+}
+
+function mountTerminal(record: TerminalRecord): void {
+  const id = record.id;
   const terminal = new Terminal({
     convertEol: false,
     cursorBlink: true,
@@ -1276,18 +1317,54 @@ function attachTerminal(id: number): void {
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
-  // Intercept the snippet shortcut before xterm forwards it to the PTY,
-  // so ⌘/Ctrl-J opens the picker instead of reaching the agent.
+  // Intercept the chord shortcuts before xterm forwards them to the PTY,
+  // so ⌘/Ctrl-J opens the picker and ⌘/Ctrl-. toggles focus mode instead
+  // of reaching the agent.
   terminal.attachCustomKeyEventHandler((event) => {
     if (event.type === "keydown" && isSnippetShortcut(event)) {
       void openSnippetPicker();
       return false;
     }
+    if (event.type === "keydown" && isFocusModeShortcut(event)) {
+      toggleFocusMode();
+      return false;
+    }
     return true;
   });
-  terminalHost.classList.remove("hidden");
-  terminalEmpty.classList.add("hidden");
-  terminal.open(terminalHost);
+
+  const host = document.createElement("div");
+  host.className = "terminal-tile-host";
+  const tile = document.createElement("div");
+  tile.className = "terminal-tile";
+  tile.dataset.terminalId = String(id);
+  tile.append(host);
+  tile.addEventListener("mousedown", () => focusTerminal(id));
+  terminalTiles.append(tile);
+
+  const tabLabel = document.createElement("span");
+  tabLabel.className = "terminal-tab-label";
+  tabLabel.textContent = terminalKindLabel(record.kind);
+  const stateEl = document.createElement("span");
+  stateEl.className = "terminal-tab-state";
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "terminal-tab-close";
+  close.textContent = "×";
+  close.setAttribute("aria-label", "Close terminal");
+  close.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void sendTerminalFrame(closeTerminalFrame(id));
+  });
+  const tab = document.createElement("button");
+  tab.type = "button";
+  tab.className = "terminal-tab";
+  tab.dataset.terminalId = String(id);
+  tab.setAttribute("role", "tab");
+  tab.append(tabLabel, stateEl, close);
+  tab.addEventListener("click", () => focusTerminal(id));
+  terminalTabs.append(tab);
+
+  terminal.open(host);
   fit.fit();
 
   if (record.replayAvailable && record.replay.length > 0) {
@@ -1301,21 +1378,142 @@ function attachTerminal(id: number): void {
   const resizeDisposable = terminal.onResize(({ cols, rows }) => {
     void sendTerminalFrame(resizeTerminalFrame(id, cols, rows));
   });
-  activeTerminal = {
+  const live: ActiveTerminal = {
     id,
     terminal,
     fit,
+    tile,
+    tab,
+    stateEl,
     disposeInput: () => inputDisposable.dispose(),
     disposeResize: () => resizeDisposable.dispose(),
     resyncing: false,
   };
-  terminalTitle.textContent = `${terminalKindLabel(record.kind)} · ${record.sessionKey}`;
-  setTerminalState(record.state);
-  snippetButton.disabled = false;
-  scheduleResize();
+  liveTerminals.set(id, live);
+  setLiveState(live, record.state);
   if (record.dirty || !record.replayAvailable) {
     requestTerminalResync(record);
   }
+}
+
+function unmountTerminal(id: number): void {
+  const live = liveTerminals.get(id);
+  if (live === undefined) {
+    return;
+  }
+  const record = terminals.get(id);
+  if (record !== undefined) {
+    discardTerminalView(record);
+  }
+  live.disposeInput();
+  live.disposeResize();
+  live.terminal.dispose();
+  live.tile.remove();
+  live.tab.remove();
+  liveTerminals.delete(id);
+}
+
+function unmountAllTerminals(): void {
+  for (const id of [...liveTerminals.keys()]) {
+    unmountTerminal(id);
+  }
+  focusedTerminalId = null;
+}
+
+/** Reflect a runner's display state on its tab (and the panel header if
+ * it is the focused terminal). Transient states like "resyncing" live
+ * here only until the next replay resets them to the record state. */
+function setLiveState(live: ActiveTerminal, state: string): void {
+  live.stateEl.textContent = state;
+  live.stateEl.dataset.state = state;
+  if (focusedTerminalId === live.id) {
+    setTerminalState(state);
+  }
+}
+
+/** Move keyboard focus to a mounted tile and, in focus mode, make it the
+ * single visible one. */
+function focusTerminal(id: number): void {
+  if (!liveTerminals.has(id)) {
+    return;
+  }
+  focusedTerminalId = id;
+  layoutTiles();
+  liveTerminals.get(id)?.terminal.focus();
+}
+
+/** Focus a terminal that may belong to another workspace (daemon-driven
+ * `TerminalFocusRequested`): switch workspace first if needed. */
+function focusTerminalById(id: number): void {
+  const record = terminals.get(id);
+  if (record === undefined) {
+    return;
+  }
+  if (record.sessionKey !== selectedKey) {
+    changeSelectedWorkspace(record.sessionKey);
+    render();
+  }
+  focusedTerminalId = id;
+  syncWorkspaceTerminals();
+  focusTerminal(id);
+}
+
+function toggleFocusMode(): void {
+  focusMode = !focusMode;
+  layoutTiles();
+  if (focusMode && focusedTerminalId !== null) {
+    liveTerminals.get(focusedTerminalId)?.terminal.focus();
+  }
+}
+
+/**
+ * Apply the current tile set to the DOM: order tabs/tiles by id, mark the
+ * focused one, toggle focus-mode (single tile, panels hidden), update the
+ * panel header, and refit. Pure projection of `liveTerminals` +
+ * `focusedTerminalId` + `focusMode` — safe to call after any change.
+ */
+function layoutTiles(): void {
+  const wanted = workspaceTerminalRecords();
+  const hasTerminals = wanted.length > 0;
+  for (const record of wanted) {
+    const live = liveTerminals.get(record.id);
+    if (live !== undefined) {
+      terminalTabs.append(live.tab);
+      terminalTiles.append(live.tile);
+    }
+  }
+  terminalEmpty.classList.toggle("hidden", hasTerminals);
+  terminalTabs.classList.toggle("hidden", !hasTerminals);
+  terminalTiles.classList.toggle("hidden", !hasTerminals);
+  const focusActive = focusMode && hasTerminals;
+  workspaceGrid.classList.toggle("focus-mode", focusActive);
+  terminalTiles.classList.toggle("focus-only", focusActive);
+  for (const live of liveTerminals.values()) {
+    const focused = live.id === focusedTerminalId;
+    live.tile.classList.toggle("focused", focused);
+    live.tab.classList.toggle("active", focused);
+    live.tab.setAttribute("aria-selected", String(focused));
+  }
+  const focusedRecord =
+    focusedTerminalId === null ? undefined : terminals.get(focusedTerminalId);
+  if (focusedRecord !== undefined) {
+    terminalTitle.textContent = `${terminalKindLabel(focusedRecord.kind)} · ${focusedRecord.sessionKey}`;
+    const live = liveTerminals.get(focusedRecord.id);
+    setTerminalState(live?.stateEl.textContent ?? focusedRecord.state);
+  } else {
+    terminalTitle.textContent = "No terminal attached";
+    setTerminalState("idle");
+  }
+  snippetButton.disabled = !hasTerminals;
+  if (!hasTerminals && snippetDialog.open) {
+    closeSnippetPicker();
+  }
+  scheduleResize();
+}
+
+/** A tile is laid out (and worth fitting) unless focus mode hid it. */
+function isTileVisible(live: ActiveTerminal): boolean {
+  return !terminalTiles.classList.contains("focus-only") || live.id === focusedTerminalId;
 }
 
 function terminalForWorkspace(
@@ -1326,39 +1524,18 @@ function terminalForWorkspace(
   return preferredTerminal(terminals.values(), sessionKey, kind, agentId);
 }
 
-function detachTerminal(): void {
-  if (activeTerminal !== null) {
-    const record = terminals.get(activeTerminal.id);
-    if (record !== undefined) {
-      discardTerminalView(record);
-    }
-    activeTerminal.disposeInput();
-    activeTerminal.disposeResize();
-    activeTerminal.terminal.dispose();
-    activeTerminal = null;
-  }
-  terminalHost.replaceChildren();
-  terminalHost.classList.add("hidden");
-  terminalEmpty.classList.remove("hidden");
-  terminalTitle.textContent = "No terminal attached";
-  setTerminalState("idle");
-  snippetButton.disabled = true;
-  if (snippetDialog.open) {
-    closeSnippetPicker();
-  }
-}
-
 function handleTerminalOutput(frame: TerminalBinaryFrame): void {
   const record = terminals.get(frame.terminalId);
   if (record === undefined) {
     queuePendingTerminalFrame(frame);
     return;
   }
-  if (activeTerminal?.id !== frame.terminalId) {
+  const live = liveTerminals.get(frame.terminalId);
+  if (live === undefined) {
     record.dirty = true;
     return;
   }
-  if (activeTerminal.resyncing || frame.seq <= record.lastSeq) {
+  if (live.resyncing || frame.seq <= record.lastSeq) {
     return;
   }
   if (
@@ -1371,7 +1548,7 @@ function handleTerminalOutput(frame: TerminalBinaryFrame): void {
     );
     return;
   }
-  activeTerminal.terminal.write(frame.payload);
+  live.terminal.write(frame.payload);
   record.lastSeq = frame.seq;
   record.dirty = false;
 }
@@ -1386,18 +1563,20 @@ function handleTerminalReplay(frame: TerminalBinaryFrame): void {
   record.lastSeq = frame.seq;
   record.replayAvailable = true;
   record.dirty = false;
-  if (activeTerminal?.id === frame.terminalId) {
-    activeTerminal.terminal.reset();
-    activeTerminal.terminal.write(frame.payload);
-    activeTerminal.resyncing = false;
-    setTerminalState(record.state);
+  const live = liveTerminals.get(frame.terminalId);
+  if (live !== undefined) {
+    live.terminal.reset();
+    live.terminal.write(frame.payload);
+    live.resyncing = false;
+    setLiveState(live, record.state);
   }
 }
 
 function handleTerminalResyncUnavailable(terminalId: number): void {
-  if (activeTerminal?.id === terminalId) {
-    activeTerminal.resyncing = false;
-    setTerminalState("waiting for replay");
+  const live = liveTerminals.get(terminalId);
+  if (live !== undefined) {
+    live.resyncing = false;
+    setLiveState(live, "waiting for replay");
   }
 }
 
@@ -1408,9 +1587,10 @@ function requestTerminalResync(
     record.replayAvailable,
   ),
 ): void {
-  if (activeTerminal?.id === record.id && !activeTerminal.resyncing) {
-    activeTerminal.resyncing = true;
-    setTerminalState("resyncing");
+  const live = liveTerminals.get(record.id);
+  if (live !== undefined && !live.resyncing) {
+    live.resyncing = true;
+    setLiveState(live, "resyncing");
     void sendTerminalFrame(resyncTerminalFrame(record.id, requiredSeq));
   }
 }
@@ -1480,18 +1660,25 @@ function terminalInputIntent(data: string): TerminalInputIntent {
 function scheduleResize(): void {
   window.clearTimeout(resizeTimer);
   resizeTimer = window.setTimeout(() => {
-    if (activeTerminal === null) {
-      return;
+    for (const live of liveTerminals.values()) {
+      if (!isTileVisible(live)) {
+        continue;
+      }
+      live.fit.fit();
+      void sendTerminalFrame(
+        resizeTerminalFrame(live.id, live.terminal.cols, live.terminal.rows),
+      );
     }
-    activeTerminal.fit.fit();
-    void sendTerminalFrame(
-      resizeTerminalFrame(
-        activeTerminal.id,
-        activeTerminal.terminal.cols,
-        activeTerminal.terminal.rows,
-      ),
-    );
   }, 80);
+}
+
+function isFocusModeShortcut(event: KeyboardEvent): boolean {
+  return (
+    (event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    !event.shiftKey &&
+    event.key === "."
+  );
 }
 
 function isSnippetShortcut(event: KeyboardEvent): boolean {
@@ -1507,11 +1694,11 @@ async function openSnippetPicker(): Promise<void> {
   if (snippetDialog.open) {
     return;
   }
-  if (activeTerminal === null) {
+  if (focusedTerminalId === null) {
     setStatus("Open an agent or shell to send a snippet.");
     return;
   }
-  snippetTargetTerminal = activeTerminal.id;
+  snippetTargetTerminal = focusedTerminalId;
   snippetQuery = "";
   snippetFilter.value = "";
   const view = await fetchSnippetView("");
@@ -1530,7 +1717,9 @@ async function openSnippetPicker(): Promise<void> {
 function onSnippetDialogClose(): void {
   snippetViewState = null;
   snippetTargetTerminal = null;
-  activeTerminal?.terminal.focus();
+  if (focusedTerminalId !== null) {
+    liveTerminals.get(focusedTerminalId)?.terminal.focus();
+  }
 }
 
 function closeSnippetPicker(): void {
@@ -1668,8 +1857,7 @@ async function startAgent(): Promise<void> {
   }
   const existing = terminalForWorkspace(selectedKey, "agent", defaultAgent);
   if (existing !== undefined && !existing.state.startsWith("exited")) {
-    attachTerminal(existing.id);
-    activeTerminal?.terminal.focus();
+    focusTerminal(existing.id);
     setStatus(`Opened ${defaultAgent}.`);
     return;
   }
@@ -1709,8 +1897,7 @@ async function startShell(): Promise<void> {
   }
   const existing = terminalForWorkspace(selectedKey, "shell");
   if (existing !== undefined && !existing.state.startsWith("exited")) {
-    attachTerminal(existing.id);
-    activeTerminal?.terminal.focus();
+    focusTerminal(existing.id);
     setStatus("Opened shell.");
     return;
   }
@@ -2087,8 +2274,8 @@ function applyThemeColors(colors: DesktopThemeColors): void {
   root.style.setProperty("--theme-chrome", colors.chrome);
   root.style.setProperty("--theme-fill", colors.fill);
   root.style.setProperty("--theme-surface", colors.surface);
-  if (activeTerminal) {
-    activeTerminal.terminal.options.theme = terminalTheme(colors);
+  for (const live of liveTerminals.values()) {
+    live.terminal.options.theme = terminalTheme(colors);
   }
 }
 
@@ -2472,6 +2659,9 @@ function handleKeyboard(event: KeyboardEvent): void {
   } else if (event.key === "/") {
     event.preventDefault();
     inboxSearch.focus();
+  } else if (event.key === ".") {
+    event.preventDefault();
+    toggleFocusMode();
   } else if (event.key === "R") {
     event.preventDefault();
     void refreshInbox(true);

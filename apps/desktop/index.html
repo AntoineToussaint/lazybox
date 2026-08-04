@@ -213,9 +213,15 @@
               <p>Start the configured agent or a shell in this workspace.</p>
             </div>
             <div
+              id="terminal-tabs"
+              class="terminal-tabs hidden"
+              role="tablist"
+              aria-label="Workspace terminals"
+            ></div>
+            <div
               id="terminal"
-              class="terminal-host hidden"
-              aria-label="Interactive workspace terminal"
+              class="terminal-tiles hidden"
+              aria-label="Interactive workspace terminals"
             ></div>
           </div>
         </section>
@@ -226,7 +232,7 @@
           Loading persisted workspaces…
         </span>
         <span id="protocol-notice" class="protocol-notice" role="status" aria-live="polite" hidden></span>
-        <span>↑↓ navigate · ↵ open · o sort · r reply · a agent · s shell · ⌘/Ctrl-J snippets</span>
+        <span>↑↓ navigate · ↵ open · o sort · r reply · a agent · s shell · . focus · ⌘/Ctrl-J snippets</span>
       </footer>
     </div>
 

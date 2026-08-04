@@ -1070,7 +1070,136 @@ describe("credential-free desktop workflow", () => {
 
     expect(element("protocol-notice").hidden).toBe(true);
   });
+
+  it("mounts a tile per workspace terminal and moves focus on tab click", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    // One workspace with two live terminals — an agent and a shell — so
+    // both are visible at once without teardown (TerminalStack parity).
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+            {
+              terminal_id: 8,
+              session_key: "github-o-r-42",
+              kind: "Shell",
+              last_seq: 0,
+              agent_state: null,
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".terminal-tile")).toHaveLength(2),
+    );
+    expect(document.querySelectorAll(".terminal-tab")).toHaveLength(2);
+    // The lowest-id terminal (the agent) is focused first.
+    expect(element("terminal-title").textContent).toContain("codex");
+    expect(tiles()[0]?.classList.contains("focused")).toBe(true);
+
+    // Clicking the shell tab moves focus to its tile.
+    const shellTab = [...document.querySelectorAll<HTMLButtonElement>(".terminal-tab")].find(
+      (tab) => tab.textContent?.includes("shell"),
+    );
+    shellTab?.click();
+    expect(element("terminal-title").textContent).toContain("shell");
+    expect(tiles()[1]?.classList.contains("focused")).toBe(true);
+    expect(tiles()[0]?.classList.contains("focused")).toBe(false);
+  });
+
+  it("toggles focus mode with `.` and back off again", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".terminal-tile")).toHaveLength(1),
+    );
+
+    const grid = document.querySelector(".workspace-grid")!;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "." }));
+    expect(grid.classList.contains("focus-mode")).toBe(true);
+    expect(element("terminal").classList.contains("focus-only")).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "." }));
+    expect(grid.classList.contains("focus-mode")).toBe(false);
+    expect(element("terminal").classList.contains("focus-only")).toBe(false);
+  });
 });
+
+// A minimal live daemon: authenticated, one repo scope, empty inbox until
+// the test pushes a Snapshot.
+function mockDaemon(): void {
+  harness.invoke.mockImplementation((command: string) => {
+    if (command === "desktop_setup_state") {
+      return Promise.resolve(
+        settingsStateFixture({ selected_scopes: ["github:o"] }),
+      );
+    }
+    if (command === "desktop_info") {
+      return Promise.resolve({
+        protocol_version: 1,
+        max_terminal_frame_bytes: 2048,
+        max_terminal_write_bytes: 1024,
+        agents: ["codex"],
+        default_agent: "codex",
+        repositories: [],
+      });
+    }
+    if (command === "list_workspaces") {
+      return Promise.resolve({ workspaces: [], warnings: [] });
+    }
+    if (command === "read_terminal_data") {
+      return new Promise<Uint8Array>(() => {});
+    }
+    return Promise.resolve();
+  });
+}
+
+function tiles(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(".terminal-tile")];
+}
 
 // Stand-in for the grouped view `src-tauri` computes and pushes. In
 // production the shared tui-core logic orders these rows; the test only

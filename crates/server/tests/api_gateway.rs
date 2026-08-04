@@ -183,6 +183,13 @@ fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
         DesktopCommand::CloseIssue { .. } => "CloseIssue",
         DesktopCommand::DeleteOrClose { .. } => "DeleteOrClose",
         DesktopCommand::DeliverSnippet { .. } => "DeliverSnippet",
+        DesktopCommand::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
+        DesktopCommand::SetTrackMain { .. } => "SetTrackMain",
+        DesktopCommand::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
+        DesktopCommand::Snooze { .. } => "Snooze",
+        DesktopCommand::Unsnooze { .. } => "Unsnooze",
+        DesktopCommand::SyncWorkspace { .. } => "SyncWorkspace",
+        DesktopCommand::SetNotes { .. } => "SetNotes",
         DesktopCommand::Refresh => "Refresh",
     }
 }
@@ -296,6 +303,33 @@ fn desktop_compatibility_fixture_is_current() {
             category: "Review".into(),
             body: "Review the current diff.".into(),
         },
+        DesktopCommand::SetAutoMergeOnGreen {
+            session_key: session_key.clone(),
+            enabled: true,
+        },
+        DesktopCommand::SetTrackMain {
+            session_key: session_key.clone(),
+            enabled: false,
+        },
+        DesktopCommand::SetAutoFixPolicies {
+            session_key: session_key.clone(),
+            ci: lazybox_core::PolicyArm::Arm,
+            conflict: lazybox_core::PolicyArm::Disarm,
+        },
+        DesktopCommand::Snooze {
+            session_key: session_key.clone(),
+            until: Utc.with_ymd_and_hms(2026, 8, 5, 9, 0, 0).unwrap(),
+        },
+        DesktopCommand::Unsnooze {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::SyncWorkspace {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::SetNotes {
+            session_key: session_key.clone(),
+            notes: "Waiting on the flaky integration job.".into(),
+        },
         DesktopCommand::Refresh,
     ];
     let events = vec![
@@ -370,7 +404,7 @@ fn desktop_compatibility_fixture_is_current() {
         .iter()
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(command_tags.len(), 14);
+    assert_eq!(command_tags.len(), 21);
     assert_eq!(event_tags.len(), 14);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,

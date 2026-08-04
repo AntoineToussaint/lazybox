@@ -16,6 +16,7 @@ import {
   projectKeyLabel,
   reviewSignal,
   rowSignals,
+  SNOOZE_PRESETS,
   shouldHandleWorkspaceEnter,
   sortModeLabel,
   unreadCount,
@@ -360,5 +361,31 @@ describe("workspace model", () => {
     expect(projectKeyLabel("local-scratch")).toBe("scratch");
     expect(projectKeyLabel("linear-team123")).toBe("team123");
     expect(projectKeyLabel("standalone")).toBe("standalone");
+  });
+
+  it("resolves snooze presets to absolute deadlines from a fixed now", () => {
+    const now = new Date("2026-08-04T12:00:00.000Z");
+    const byLabel = new Map(
+      SNOOZE_PRESETS.map((preset) => [preset.label, preset.until(now)]),
+    );
+
+    expect(byLabel.get("1 hour")).toEqual(
+      new Date("2026-08-04T13:00:00.000Z"),
+    );
+    expect(byLabel.get("4 hours")).toEqual(
+      new Date("2026-08-04T16:00:00.000Z"),
+    );
+    expect(byLabel.get("1 week")).toEqual(
+      new Date("2026-08-11T12:00:00.000Z"),
+    );
+    // "Tomorrow 9am" is anchored to the viewer's local wall clock; assert
+    // it lands at 09:00 local and is within the next two days regardless
+    // of the test's timezone.
+    const tomorrow = byLabel.get("Tomorrow 9am");
+    expect(tomorrow?.getHours()).toBe(9);
+    expect(tomorrow?.getMinutes()).toBe(0);
+    const deltaMs = (tomorrow?.getTime() ?? 0) - now.getTime();
+    expect(deltaMs).toBeGreaterThan(0);
+    expect(deltaMs).toBeLessThanOrEqual(2 * 24 * 3600 * 1000);
   });
 });

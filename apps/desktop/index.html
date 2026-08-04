@@ -194,6 +194,84 @@
             </div>
             <div id="task-signals" class="task-signals" aria-label="Task metadata"></div>
             <div id="task-description" class="task-description"></div>
+            <section
+              id="automation-panel"
+              class="automation-panel"
+              aria-label="Automation and workspace management"
+            >
+              <div class="activity-heading">
+                <h3>Automation</h3>
+                <button
+                  id="sync-button"
+                  class="quiet-button"
+                  type="button"
+                  title="Re-poll just this workspace"
+                >
+                  Sync
+                </button>
+              </div>
+              <div class="automation-policies">
+                <label class="policy-toggle">
+                  <input id="auto-merge-toggle" type="checkbox" />
+                  <span>Auto-merge on green</span>
+                </label>
+                <label class="policy-toggle">
+                  <input id="track-main-toggle" type="checkbox" />
+                  <span>Track main</span>
+                </label>
+                <label class="policy-select">
+                  <span>Auto-fix CI</span>
+                  <select id="auto-fix-ci-select">
+                    <option value="Default">Follow config</option>
+                    <option value="Arm">Armed</option>
+                    <option value="Disarm">Disarmed</option>
+                  </select>
+                </label>
+                <label class="policy-select">
+                  <span>Auto-fix conflicts</span>
+                  <select id="auto-fix-conflict-select">
+                    <option value="Default">Follow config</option>
+                    <option value="Arm">Armed</option>
+                    <option value="Disarm">Disarmed</option>
+                  </select>
+                </label>
+              </div>
+              <div class="automation-snooze">
+                <span id="snooze-status" class="automation-status"></span>
+                <div class="automation-snooze-controls">
+                  <select id="snooze-select" aria-label="Snooze duration"></select>
+                  <button id="snooze-button" class="quiet-button" type="button">
+                    Snooze
+                  </button>
+                  <button
+                    id="unsnooze-button"
+                    class="quiet-button hidden"
+                    type="button"
+                  >
+                    Unsnooze
+                  </button>
+                </div>
+              </div>
+              <form id="notes-form" class="reply-form automation-notes">
+                <label for="notes-body">Notes</label>
+                <textarea
+                  id="notes-body"
+                  rows="2"
+                  maxlength="10000"
+                  placeholder="Local scratchpad — never synced to GitHub…"
+                ></textarea>
+                <div>
+                  <span id="notes-status"></span>
+                  <button
+                    id="notes-save-button"
+                    class="primary-button"
+                    type="submit"
+                  >
+                    Save notes
+                  </button>
+                </div>
+              </form>
+            </section>
             <div class="activity-heading">
               <h3>Activity</h3>
               <span id="activity-count"></span>

@@ -449,6 +449,104 @@ describe("credential-free desktop workflow", () => {
     );
   });
 
+  it("sends automation, snooze, sync, and notes commands from the detail pane", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { Snapshot: { workspaces: [pr(42)], terminals: [] } },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+
+    // Controls reflect the workspace's persisted automation state.
+    expect(input("#auto-merge-toggle").checked).toBe(false);
+    expect(select("auto-fix-ci-select").value).toBe("Default");
+    expect(button("unsnooze-button").classList.contains("hidden")).toBe(true);
+    expect(button("sync-button").disabled).toBe(false);
+
+    const autoMerge = input("#auto-merge-toggle");
+    autoMerge.checked = true;
+    autoMerge.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const trackMain = input("#track-main-toggle");
+    trackMain.checked = true;
+    trackMain.dispatchEvent(new Event("change", { bubbles: true }));
+
+    const ci = select("auto-fix-ci-select");
+    ci.value = "Arm";
+    ci.dispatchEvent(new Event("change", { bubbles: true }));
+
+    select("snooze-select").value = "0";
+    button("snooze-button").click();
+    button("sync-button").click();
+
+    input("#notes-body").value = "flaky job";
+    form("notes-form").dispatchEvent(submitEvent());
+
+    await vi.waitFor(() => {
+      expect(commandCalls()).toContainEqual({
+        SetAutoMergeOnGreen: { session_key: "github-o-r-42", enabled: true },
+      });
+      expect(commandCalls()).toContainEqual({
+        SetTrackMain: { session_key: "github-o-r-42", enabled: true },
+      });
+      expect(commandCalls()).toContainEqual({
+        SetAutoFixPolicies: {
+          session_key: "github-o-r-42",
+          ci: "Arm",
+          conflict: "Default",
+        },
+      });
+      expect(commandCalls()).toContainEqual({
+        SyncWorkspace: { session_key: "github-o-r-42" },
+      });
+      expect(commandCalls()).toContainEqual({
+        SetNotes: { session_key: "github-o-r-42", notes: "flaky job" },
+      });
+    });
+
+    const snooze = commandCalls().find(
+      (command): command is { Snooze: { session_key: string; until: string } } =>
+        typeof command === "object" &&
+        command !== null &&
+        "Snooze" in command,
+    );
+    expect(snooze?.Snooze.session_key).toBe("github-o-r-42");
+    expect(Number.isNaN(Date.parse(snooze?.Snooze.until ?? ""))).toBe(false);
+  });
+
   it("attaches the replacement terminal when the selected workspace is removed", async () => {
     harness.invoke.mockImplementation((command: string) => {
       if (command === "desktop_setup_state") {

@@ -37,7 +37,7 @@ pub type Body = UnsyncBoxBody<Bytes, Infallible>;
 /// layout, so a real wire change can't ride an unchanged version across a
 /// remote hop. Non-wire churn (a `Cargo.lock` bump, a comment) must not
 /// bump it; that is exactly the skew the advisory fingerprint tolerates.
-pub const DESKTOP_PROTOCOL_VERSION: u32 = 1;
+pub const DESKTOP_PROTOCOL_VERSION: u32 = 2;
 pub const PROTOCOL_VERSION_HEADER: &str = "x-lazybox-protocol-version";
 pub const TERMINAL_BINARY_CONTENT_TYPE: &str = "application/vnd.lazybox.terminal.v1";
 pub const TERMINAL_FRAME_LENGTH_OFFSET: usize = 0;
@@ -480,6 +480,48 @@ pub enum DesktopCommand {
         category: String,
         body: String,
     },
+    /// Arm/disarm lazybox's "auto-merge on green" for the workspace
+    /// (the `ARM` pill / `g g` chord). Persisted on the `Workspace`;
+    /// the daemon fires the merge once the PR is merge-ready.
+    SetAutoMergeOnGreen {
+        session_key: lazybox_core::SessionKey,
+        enabled: bool,
+    },
+    /// Arm/disarm "track main" for the workspace (`g p` policies /
+    /// issue #535) — keep the worktree fast-forwarded to the base
+    /// branch while the tree is clean.
+    SetTrackMain {
+        session_key: lazybox_core::SessionKey,
+        enabled: bool,
+    },
+    /// Set both per-session auto-fix arms atomically (the `FIX` pills /
+    /// `g p` policies, issue #363). One command so a bounded transport
+    /// cannot admit only half of the requested change.
+    SetAutoFixPolicies {
+        session_key: lazybox_core::SessionKey,
+        ci: lazybox_core::PolicyArm,
+        conflict: lazybox_core::PolicyArm,
+    },
+    /// Snooze the workspace until `until` (the `z` / `x z` chords).
+    Snooze {
+        session_key: lazybox_core::SessionKey,
+        until: chrono::DateTime<chrono::Utc>,
+    },
+    /// Clear a workspace's snooze.
+    Unsnooze {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Re-poll just this workspace's own PR/issue (`g s`) instead of the
+    /// global refresh sweep.
+    SyncWorkspace {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Replace the workspace's free-form local notes (`x` notes editor,
+    /// issue #458). Never synced to any provider.
+    SetNotes {
+        session_key: lazybox_core::SessionKey,
+        notes: String,
+    },
     Refresh,
 }
 
@@ -573,6 +615,37 @@ impl DesktopCommand {
                 body,
                 submit: true,
             },
+            DesktopCommand::SetAutoMergeOnGreen {
+                session_key,
+                enabled,
+            } => Command::SetAutoMergeOnGreen {
+                session_key,
+                enabled,
+            },
+            DesktopCommand::SetTrackMain {
+                session_key,
+                enabled,
+            } => Command::SetTrackMain {
+                session_key,
+                enabled,
+            },
+            DesktopCommand::SetAutoFixPolicies {
+                session_key,
+                ci,
+                conflict,
+            } => Command::SetAutoFixPolicies {
+                session_key,
+                ci,
+                conflict,
+            },
+            DesktopCommand::Snooze { session_key, until } => Command::Snooze { session_key, until },
+            DesktopCommand::Unsnooze { session_key } => Command::Unsnooze { session_key },
+            DesktopCommand::SyncWorkspace { session_key } => Command::SyncWorkspace {
+                workspace_key: lazybox_core::WorkspaceKey::new(session_key.as_str()),
+            },
+            DesktopCommand::SetNotes { session_key, notes } => {
+                Command::SetNotes { session_key, notes }
+            }
             DesktopCommand::Refresh => Command::Refresh,
         }
     }

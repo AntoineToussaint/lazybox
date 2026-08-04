@@ -76,6 +76,47 @@
         "terminal_id": 7
       }
     },
+    {
+      "SetAutoMergeOnGreen": {
+        "enabled": true,
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "SetTrackMain": {
+        "enabled": false,
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "SetAutoFixPolicies": {
+        "ci": "Arm",
+        "conflict": "Disarm",
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "Snooze": {
+        "session_key": "github:o/r#42",
+        "until": "2026-08-05T09:00:00Z"
+      }
+    },
+    {
+      "Unsnooze": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "SyncWorkspace": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "SetNotes": {
+        "notes": "Waiting on the flaky integration job.",
+        "session_key": "github:o/r#42"
+      }
+    },
     "Refresh"
   ],
   "events": [
@@ -312,6 +353,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 3965296171,
-  "protocol_version": 1
+  "protocol_fingerprint": 1350375007,
+  "protocol_version": 2
 }

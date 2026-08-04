@@ -21,6 +21,7 @@ import {
   primaryTask,
   projectKeyLabel,
   rowSignals,
+  SNOOZE_PRESETS,
   shouldHandleWorkspaceEnter,
   sortModeLabel,
   taskReference,
@@ -44,6 +45,7 @@ import {
   type Task,
   type TerminalKind,
   type TerminalSnapshot,
+  type PolicyArm,
   type Workspace,
   type WorkspacesResponse,
   archiveCommand,
@@ -54,8 +56,15 @@ import {
   deliverSnippetCommand,
   mergePrCommand,
   renameWorkspaceCommand,
+  setAutoFixPoliciesCommand,
+  setAutoMergeOnGreenCommand,
+  setNotesCommand,
+  setTrackMainCommand,
+  snoozeCommand,
   spawnAgentCommand,
+  syncWorkspaceCommand,
   terminalKindLabel,
+  unsnoozeCommand,
   updateBranchCommand,
 } from "./protocol";
 import {
@@ -240,6 +249,20 @@ const renameCancel = element<HTMLButtonElement>("rename-cancel");
 const replyForm = element<HTMLFormElement>("reply-form");
 const replyBody = element<HTMLTextAreaElement>("reply-body");
 const replyButton = element<HTMLButtonElement>("reply-button");
+const autoMergeToggle = element<HTMLInputElement>("auto-merge-toggle");
+const trackMainToggle = element<HTMLInputElement>("track-main-toggle");
+const autoFixCiSelect = element<HTMLSelectElement>("auto-fix-ci-select");
+const autoFixConflictSelect = element<HTMLSelectElement>(
+  "auto-fix-conflict-select",
+);
+const snoozeSelect = element<HTMLSelectElement>("snooze-select");
+const snoozeButton = element<HTMLButtonElement>("snooze-button");
+const unsnoozeButton = element<HTMLButtonElement>("unsnooze-button");
+const snoozeStatus = element<HTMLSpanElement>("snooze-status");
+const syncButton = element<HTMLButtonElement>("sync-button");
+const notesForm = element<HTMLFormElement>("notes-form");
+const notesBody = element<HTMLTextAreaElement>("notes-body");
+const notesSaveButton = element<HTMLButtonElement>("notes-save-button");
 const refreshButton = element<HTMLButtonElement>("refresh-button");
 const settingsButton = element<HTMLButtonElement>("settings-button");
 const terminalTiles = element<HTMLDivElement>("terminal");
@@ -344,6 +367,13 @@ let setupRequired = false;
 const replySubmitting = new Set<string>();
 let creatingWorkspace = false;
 const replyDrafts = new ReplyDrafts();
+/**
+ * Unsaved notes edits, keyed by workspace. Distinct from `ReplyDrafts`
+ * because an empty string is a valid saved state for notes, so absence
+ * (fall back to `Workspace.notes`) must be distinguishable from a
+ * deliberately-cleared draft.
+ */
+const notesDrafts = new Map<string, string>();
 const pendingLaunches = new Set<string>();
 let focusRequestedSession: string | null = null;
 // Every terminal of the selected workspace is mounted concurrently as a
@@ -428,6 +458,29 @@ renameForm.addEventListener("submit", (event) => {
 replyForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void reviewReply();
+});
+
+for (const [index, preset] of SNOOZE_PRESETS.entries()) {
+  snoozeSelect.append(new Option(preset.label, String(index)));
+}
+
+autoMergeToggle.addEventListener("change", () => {
+  void setAutoMerge(autoMergeToggle.checked);
+});
+trackMainToggle.addEventListener("change", () => {
+  void setTrackMain(trackMainToggle.checked);
+});
+autoFixCiSelect.addEventListener("change", () => void applyAutoFixPolicies());
+autoFixConflictSelect.addEventListener(
+  "change",
+  () => void applyAutoFixPolicies(),
+);
+snoozeButton.addEventListener("click", () => void snoozeSelected());
+unsnoozeButton.addEventListener("click", () => void unsnoozeSelected());
+syncButton.addEventListener("click", () => void syncSelected());
+notesForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void saveNotes();
 });
 
 sortButton.addEventListener("click", () => void cycleSortMode());
@@ -1141,6 +1194,7 @@ function renderWorkspace(): void {
   replyButton.disabled =
     replySubmitting.has(workspace.key) || !canReplyToTask(task);
   replyForm.classList.toggle("hidden", !canReplyToTask(task));
+  renderAutomation(workspace, task);
 
   const agentTerminal = terminalForWorkspace(
     workspace.key,
@@ -1200,6 +1254,41 @@ function renderWorkspace(): void {
   }
 }
 
+/**
+ * Reflect the workspace's persisted automation state onto the detail
+ * pane's controls. Reads only the fields the daemon already broadcasts
+ * on `Workspace` — the controls send commands back through the handlers
+ * below. Notes are handled separately (draft-aware) in
+ * `changeSelectedWorkspace`, so this never touches `notesBody`.
+ */
+function renderAutomation(workspace: Workspace, task: Task | null): void {
+  autoMergeToggle.checked = workspace.auto_merge_on_green;
+  autoMergeToggle.disabled = workspace.pr === null;
+  trackMainToggle.checked = workspace.track_main;
+  autoFixCiSelect.value = workspace.policies.auto_fix_ci;
+  autoFixConflictSelect.value = workspace.policies.auto_fix_conflict;
+
+  const snoozed = workspace.snoozed_until !== null;
+  unsnoozeButton.classList.toggle("hidden", !snoozed);
+  snoozeStatus.textContent = snoozed
+    ? `Snoozed until ${formatSnoozeUntil(workspace.snoozed_until as string)}`
+    : "";
+
+  syncButton.disabled = task === null;
+}
+
+function formatSnoozeUntil(iso: string): string {
+  const when = new Date(iso);
+  return Number.isNaN(when.getTime())
+    ? iso
+    : when.toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+}
+
 function renderInboxMessage(message: string, error = false): void {
   const empty = document.createElement("p");
   empty.className = `inbox-empty${error ? " error" : ""}`;
@@ -1245,11 +1334,18 @@ function changeSelectedWorkspace(key: string | null): boolean {
   }
   if (selectedKey !== null) {
     replyDrafts.save(selectedKey, replyBody.value);
+    notesDrafts.set(selectedKey, notesBody.value);
   }
   closeActionsMenu();
   selectedKey = key;
   replyBody.value = key === null ? "" : replyDrafts.get(key);
+  notesBody.value = key === null ? "" : notesValueFor(key);
   return true;
+}
+
+/** The notes text to show: an unsaved draft if present, else the saved value. */
+function notesValueFor(key: string): string {
+  return notesDrafts.get(key) ?? workspaces.get(key)?.notes ?? "";
 }
 
 /** True when the current selection still points at a present workspace. */
@@ -2364,6 +2460,110 @@ async function markSelectedRead(): Promise<void> {
     "Marking workspace read…",
     "Workspace marked read.",
   );
+}
+
+async function setAutoMerge(enabled: boolean): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const ok = await runCommands(
+    [setAutoMergeOnGreenCommand(selectedKey, enabled)],
+    enabled ? "Arming auto-merge on green…" : "Disarming auto-merge…",
+    enabled ? "Auto-merge on green armed." : "Auto-merge on green disarmed.",
+  );
+  if (!ok) {
+    renderWorkspace();
+  }
+}
+
+async function setTrackMain(enabled: boolean): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const ok = await runCommands(
+    [setTrackMainCommand(selectedKey, enabled)],
+    enabled ? "Arming track main…" : "Disarming track main…",
+    enabled ? "Track main armed." : "Track main disarmed.",
+  );
+  if (!ok) {
+    renderWorkspace();
+  }
+}
+
+async function applyAutoFixPolicies(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const ok = await runCommands(
+    [
+      setAutoFixPoliciesCommand(
+        selectedKey,
+        autoFixCiSelect.value as PolicyArm,
+        autoFixConflictSelect.value as PolicyArm,
+      ),
+    ],
+    "Updating auto-fix policies…",
+    "Auto-fix policies updated.",
+  );
+  if (!ok) {
+    renderWorkspace();
+  }
+}
+
+async function snoozeSelected(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const preset =
+    SNOOZE_PRESETS[Number(snoozeSelect.value)] ?? SNOOZE_PRESETS[1]!;
+  await runCommands(
+    [snoozeCommand(selectedKey, preset.until(new Date()))],
+    "Snoozing workspace…",
+    `Snoozed for ${preset.label.toLowerCase()}.`,
+  );
+}
+
+async function unsnoozeSelected(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  await runCommands(
+    [unsnoozeCommand(selectedKey)],
+    "Waking workspace…",
+    "Workspace unsnoozed.",
+  );
+}
+
+async function syncSelected(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  await runCommands(
+    [syncWorkspaceCommand(selectedKey)],
+    "Syncing workspace…",
+    "Workspace sync requested.",
+  );
+}
+
+async function saveNotes(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const workspaceKey = selectedKey;
+  const notes = notesBody.value;
+  notesSaveButton.disabled = true;
+  try {
+    const ok = await runCommands(
+      [setNotesCommand(workspaceKey, notes)],
+      "Saving notes…",
+      "Notes saved.",
+    );
+    if (ok) {
+      notesDrafts.set(workspaceKey, notes);
+    }
+  } finally {
+    notesSaveButton.disabled = false;
+  }
 }
 
 async function reviewReply(): Promise<void> {

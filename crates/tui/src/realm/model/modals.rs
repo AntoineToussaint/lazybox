@@ -295,6 +295,29 @@ fn terminal_removal_copy(prompt: &super::RemovalPrompt, verb: &str) -> String {
 /// Trim a snippet body for the confirm preview: keep the first 12
 /// lines, marking with an ellipsis when more was dropped, so a long
 /// body can't push the Y/N buttons past the modal.
+/// The confirm-preview text for a `scaffold_skill` proposal (#799).
+/// Names the destination *and* how it was resolved (`root.describe()`),
+/// so a launch-directory fallback reads plainly and is never mistaken
+/// for the focused workspace's own repo. `name`/`description` are
+/// expected pre-trimmed by the caller.
+pub(super) fn skill_scaffold_preview(
+    root: &super::inputs::SkillScaffoldRoot,
+    name: &str,
+    description: &str,
+    body: &str,
+) -> String {
+    let path = lazybox_config::skill_md_path(root.path(), name);
+    let mut preview = format!(
+        "Scaffold skill `{name}` in {} —\n{}?\n\n",
+        root.describe(),
+        path.display(),
+    );
+    preview.push_str(&format!("description: {description}\n\n"));
+    preview.push_str(&snippet_body_preview(body));
+    preview.push_str("\n\nWrites a new SKILL.md the focused agent can load on its own.");
+    preview
+}
+
 fn snippet_body_preview(body: &str) -> String {
     const MAX_LINES: usize = 12;
     let lines: Vec<&str> = body.lines().collect();
@@ -1259,7 +1282,10 @@ impl<T: TerminalAdapter> Model<T> {
         if self.modal_stack.last() != Some(&Id::HelpAsk) {
             return;
         }
-        let (preview, default_yes) = match &intent {
+        // `skill_root` is the resolved destination for a `scaffold_skill`
+        // proposal; it rides into `ModalFlow` so apply writes exactly
+        // where this preview said, regardless of later selection changes.
+        let (preview, default_yes, skill_root) = match &intent {
             HelpActionIntent::AddSnippet {
                 key,
                 category,
@@ -1295,7 +1321,7 @@ impl<T: TerminalAdapter> Model<T> {
                 ));
                 // Default Yes for a brand-new key (the user asked for it);
                 // No when it would overwrite an existing snippet.
-                (preview, !replaces)
+                (preview, !replaces, None)
             }
             HelpActionIntent::EditConfig { key, value } => {
                 match self.validate_config_edit(key, value) {
@@ -1312,7 +1338,7 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             "\n\nApplied live — no restart."
                         });
-                        (preview, true)
+                        (preview, true, None)
                     }
                     Err(msg) => {
                         self.reject_help_action(msg);
@@ -1320,8 +1346,38 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            HelpActionIntent::ScaffoldSkill {
+                name,
+                description,
+                body,
+            } => {
+                if let Err(msg) = self.validate_skill_scaffold(name, description, body) {
+                    self.reject_help_action(msg);
+                    return;
+                }
+                let Some(root) = self.skill_scaffold_root() else {
+                    self.reject_help_action(
+                        "a skill is scaffolded into a repo on your machine — unavailable for a \
+                         remote daemon",
+                    );
+                    return;
+                };
+                let name = name.trim();
+                let path = lazybox_config::skill_md_path(root.path(), name);
+                if path.exists() {
+                    self.reject_help_action(format!(
+                        "a skill named `{name}` already exists at {} — nothing was written",
+                        path.display(),
+                    ));
+                    return;
+                }
+                let preview = skill_scaffold_preview(&root, name, description.trim(), body);
+                // Default Yes — the user asked for it, and the scaffold
+                // refuses (never overwrites) if the skill already exists.
+                (preview, true, Some(root.path().to_path_buf()))
+            }
         };
-        self.set_modal_flow(ModalFlow::HelpAction { intent });
+        self.set_modal_flow(ModalFlow::HelpAction { intent, skill_root });
         let modal = Confirm::new(preview);
         let modal = if default_yes {
             modal.default_yes()

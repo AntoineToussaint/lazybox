@@ -48,7 +48,7 @@ pub const ACTION_FENCE: &str = "lazybox-action";
 /// natively after a confirm-with-preview (#353). The set is a strict
 /// allowlist: an intent whose `action` isn't a known variant fails to
 /// deserialize and is ignored, so the agent can never drive an
-/// un-vetted mutation. Phase 1 ships only `add_snippet`.
+/// un-vetted mutation.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum HelpActionIntent {
@@ -67,6 +67,19 @@ pub enum HelpActionIntent {
     /// the scalar to store. The client validates both against the
     /// allowlist before doing anything.
     EditConfig { key: String, value: String },
+    /// Scaffold a `.claude/skills/<name>/SKILL.md` folder in the
+    /// current repo (#799). Chosen over `add_snippet` when the request
+    /// is genuinely multi-step or wants bundled scripts/reference
+    /// files — a model-triggered skill, not a single human-fired
+    /// prompt. `name` is the skill/folder id (kebab-case); `description`
+    /// is what the agent matches on to decide when to use it; `body` is
+    /// the SKILL.md instruction markdown (no frontmatter — lazybox
+    /// writes it from `name` + `description`).
+    ScaffoldSkill {
+        name: String,
+        description: String,
+        body: String,
+    },
 }
 
 /// The config keys the `edit_config` action may set, each with a
@@ -338,6 +351,22 @@ review feedback and commit\", \"body\": \"Address every review comment on this P
 See the Snippets doc below for how snippet bodies should read.\n"
     ));
 
+    out.push_str(&format!(
+        "- **scaffold_skill** — create a `.claude/skills/<name>/SKILL.md` folder in the current repo. \
+Fields: `name` (kebab-case id, e.g. `code-review`), `description` (one line the agent matches on to decide \
+when to use the skill — required), `body` (the SKILL.md instructions in markdown, without frontmatter — required). \
+Example:\n\n\
+```{ACTION_FENCE}\n\
+{{\"action\": \"scaffold_skill\", \"name\": \"release-notes\", \"description\": \"Draft release notes from the \
+merged PRs since the last tag\", \"body\": \"1. Find the last tag with git.\\n2. List merged PRs since it.\\n3. \
+Group them by type and write the notes.\"}}\n\
+```\n\n\
+**Choosing snippet vs skill:** a snippet is a single prompt the user fires deliberately with `]]s<key>` — pick it \
+for a one-shot instruction. A skill is model-triggered and progressively disclosed: pick `scaffold_skill` when the \
+ask is genuinely multi-step, or would benefit from bundled scripts/reference files the agent loads on demand. When \
+in doubt, prefer a snippet — it's simpler and deterministic.\n"
+    ));
+
     out.push_str(
         "- **edit_config** — set one allowlisted key in the user's config. Fields: `key` (one of the paths \
 below, exactly) and `value` (the new value). You can ONLY set these keys — refuse anything else and never \
@@ -557,10 +586,33 @@ fallback shouldn't resurrect it)",
         assert!(ctx.contains("# Performing actions"));
         assert!(ctx.contains("add_snippet"));
         assert!(ctx.contains("edit_config"));
+        assert!(ctx.contains("scaffold_skill"));
+        // The classification guidance the agent uses to pick the artifact.
+        assert!(ctx.contains(".claude/skills/"));
+        assert!(ctx.contains("Choosing snippet vs skill"));
         assert!(ctx.contains(&format!("```{ACTION_FENCE}")));
         for (key, _) in EDITABLE_CONFIG_KEYS {
             assert!(ctx.contains(key), "prompt must list editable key {key}");
         }
+    }
+
+    /// A `scaffold_skill` block parses into the intent verbatim; the
+    /// client validates the name and writes the folder.
+    #[test]
+    fn parses_scaffold_skill_intent() {
+        let answer = "Sure — I'll scaffold that skill.\n\n\
+```lazybox-action\n\
+{\"action\":\"scaffold_skill\",\"name\":\"release-notes\",\
+\"description\":\"Draft release notes\",\"body\":\"Do the steps.\"}\n\
+```\n";
+        assert_eq!(
+            parse_action_intent(answer),
+            Some(HelpActionIntent::ScaffoldSkill {
+                name: "release-notes".into(),
+                description: "Draft release notes".into(),
+                body: "Do the steps.".into(),
+            })
+        );
     }
 
     /// An `edit_config` block parses into the intent verbatim; the

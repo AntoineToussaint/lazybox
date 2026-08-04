@@ -3,8 +3,10 @@
 //! YAML-based configuration for lazybox. Loads from `~/.lazybox/config.yaml`
 //! with sensible defaults if the file is missing.
 
+mod skills;
 mod snippets;
 
+pub use skills::{SkillError, scaffold_skill, skill_md_path, validate_skill_name};
 pub use snippets::{Snippet, SnippetOrigin, Snippets, SnippetsError};
 
 use serde::{Deserialize, Serialize};

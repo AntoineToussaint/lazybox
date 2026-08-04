@@ -106,6 +106,15 @@ Ask Lazybox creates and updates the **global** layer; edit the
 launch-directory file directly when that client should use an override. See
 [TUI & UX → Ask Lazybox](features/tui-and-ux.md#ask-lazybox--shortcut-index).
 
+When the request is genuinely multi-step — or would benefit from bundled
+scripts and reference files the agent loads on demand — a single snippet body
+is the wrong shape. There Ask Lazybox instead offers to scaffold a
+`.claude/skills/<name>/SKILL.md` folder in the focused workspace's repo,
+again as a confirm-with-preview (name, description, body, and destination
+folder). A snippet stays the deterministic prompt *you* fire with `]]s<key>`;
+a skill is the model-triggered capability the agent picks up on its own. The
+scaffold never overwrites an existing skill.
+
 ## Create a workflow in YAML
 
 Add an entry under `snippets:` in the global or launch-directory file:

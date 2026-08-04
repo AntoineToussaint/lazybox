@@ -83,8 +83,8 @@ interface ActiveTerminal {
   fit: FitAddon;
   /** Tile in the tiles container that hosts this terminal's xterm. */
   tile: HTMLDivElement;
-  /** Tab-strip chip for this terminal. */
-  tab: HTMLButtonElement;
+  /** Tab-strip chip (`role="tab"`) for this terminal. */
+  tab: HTMLDivElement;
   /** The tab's live-state pill, updated as the runner's state changes. */
   stateEl: HTMLSpanElement;
   disposeInput: () => void;
@@ -1279,9 +1279,25 @@ function syncWorkspaceTerminals(): void {
     }
   }
   if (focusedTerminalId === null || !liveTerminals.has(focusedTerminalId)) {
-    focusedTerminalId = wanted[0]?.id ?? null;
+    focusedTerminalId = defaultFocusTerminalId() ?? wanted[0]?.id ?? null;
   }
   layoutTiles();
+}
+
+/**
+ * The terminal to focus by default: the same preference the pane used
+ * before tiling — a non-exited agent, else a non-exited shell, else the
+ * newest of its kind — so a reconnect never lands focus on a stale
+ * exited terminal when a live one exists.
+ */
+function defaultFocusTerminalId(): number | undefined {
+  if (selectedKey === null) {
+    return undefined;
+  }
+  const preferred =
+    terminalForWorkspace(selectedKey, "agent") ??
+    terminalForWorkspace(selectedKey, "shell");
+  return preferred?.id;
 }
 
 function mountTerminal(record: TerminalRecord): void {
@@ -1355,8 +1371,9 @@ function mountTerminal(record: TerminalRecord): void {
     event.stopPropagation();
     void sendTerminalFrame(closeTerminalFrame(id));
   });
-  const tab = document.createElement("button");
-  tab.type = "button";
+  // A `role="tab"` div, not a <button>, so the close <button> can nest
+  // inside it without producing invalid button-in-button markup.
+  const tab = document.createElement("div");
   tab.className = "terminal-tab";
   tab.dataset.terminalId = String(id);
   tab.setAttribute("role", "tab");
@@ -1365,7 +1382,9 @@ function mountTerminal(record: TerminalRecord): void {
   terminalTabs.append(tab);
 
   terminal.open(host);
-  fit.fit();
+  // Sizing is left to `layoutTiles` → `scheduleResize`, which fits only
+  // visible tiles: fitting here would measure a still-hidden container
+  // (empty-state class, or a focus-mode `display:none` tile) as zero.
 
   if (record.replayAvailable && record.replay.length > 0) {
     terminal.write(record.replay);
@@ -1432,29 +1451,33 @@ function setLiveState(live: ActiveTerminal, state: string): void {
 }
 
 /** Move keyboard focus to a mounted tile and, in focus mode, make it the
- * single visible one. */
+ * single visible one. Re-lays-out only when the focused tile actually
+ * changes — a repeated focus (e.g. a mousedown inside the already-focused
+ * tile to select text) must not reflow the DOM and drop the selection. */
 function focusTerminal(id: number): void {
-  if (!liveTerminals.has(id)) {
+  const live = liveTerminals.get(id);
+  if (live === undefined) {
     return;
   }
-  focusedTerminalId = id;
-  layoutTiles();
-  liveTerminals.get(id)?.terminal.focus();
+  if (focusedTerminalId !== id) {
+    focusedTerminalId = id;
+    layoutTiles();
+  }
+  live.terminal.focus();
 }
 
 /** Focus a terminal that may belong to another workspace (daemon-driven
- * `TerminalFocusRequested`): switch workspace first if needed. */
+ * `TerminalFocusRequested`): switch to its workspace the same way a click
+ * would — through `selectWorkspace`, so the sidebar, draft, and daemon
+ * `FocusWorkspace` all stay consistent — then focus the tile. */
 function focusTerminalById(id: number): void {
   const record = terminals.get(id);
   if (record === undefined) {
     return;
   }
   if (record.sessionKey !== selectedKey) {
-    changeSelectedWorkspace(record.sessionKey);
-    render();
+    selectWorkspace(record.sessionKey);
   }
-  focusedTerminalId = id;
-  syncWorkspaceTerminals();
   focusTerminal(id);
 }
 
@@ -1475,13 +1498,21 @@ function toggleFocusMode(): void {
 function layoutTiles(): void {
   const wanted = workspaceTerminalRecords();
   const hasTerminals = wanted.length > 0;
-  for (const record of wanted) {
+  // Reconcile tab/tile order to id order, moving only nodes that are out
+  // of place. Re-appending an in-place node detaches and re-inserts it,
+  // which would collapse an in-progress text selection in that terminal.
+  wanted.forEach((record, index) => {
     const live = liveTerminals.get(record.id);
-    if (live !== undefined) {
-      terminalTabs.append(live.tab);
-      terminalTiles.append(live.tile);
+    if (live === undefined) {
+      return;
     }
-  }
+    if (terminalTabs.children[index] !== live.tab) {
+      terminalTabs.insertBefore(live.tab, terminalTabs.children[index] ?? null);
+    }
+    if (terminalTiles.children[index] !== live.tile) {
+      terminalTiles.insertBefore(live.tile, terminalTiles.children[index] ?? null);
+    }
+  });
   terminalEmpty.classList.toggle("hidden", hasTerminals);
   terminalTabs.classList.toggle("hidden", !hasTerminals);
   terminalTiles.classList.toggle("hidden", !hasTerminals);

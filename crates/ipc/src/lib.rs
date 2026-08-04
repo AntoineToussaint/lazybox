@@ -1313,6 +1313,25 @@ pub enum Command {
         session_key: SessionKey,
         name: String,
     },
+    /// Recover a workspace stuck on a non-retryable worktree conflict by
+    /// preserving the blocking checkout aside (`*.bak-<n>`) and
+    /// re-provisioning a fresh worktree, then spawning the same terminal
+    /// (issue #787). The `spawn` payload mirrors the failed
+    /// [`Command::Spawn`] so the recreate lands the exact same agent /
+    /// shell the user asked for; `preserve_holder` is the absolute path
+    /// of a `BranchHeldManaged` holder to move aside instead of the
+    /// workspace's own target worktree (`None` moves the target — the
+    /// `BranchMismatch` / `DirtyLeftover` case). Appended last (bincode
+    /// is ordinal-sensitive).
+    RecreateWorktree {
+        spawn: Box<SpawnFallback>,
+        #[serde(default)]
+        initial_prompt: Option<String>,
+        #[serde(default)]
+        on_main: bool,
+        #[serde(default)]
+        preserve_holder: Option<String>,
+    },
 }
 
 impl Command {
@@ -2554,6 +2573,54 @@ impl WorktreeRecovery {
         )
     }
 
+    /// Whether the modal can offer a one-keypress **recreate**: the
+    /// conflicting checkout is the workspace's own stale/leftover state
+    /// (a wrong-branch worktree, a dirty leftover, or a non-live managed
+    /// holder), so lazybox can preserve it aside (`*.bak-<n>`) and
+    /// re-provision a fresh worktree without a human running `git`
+    /// (issue #787). `BranchHeldLive` is excluded — its holder is a
+    /// genuinely *live* session that must not be moved; use
+    /// [`Self::jump_to_holder`] for that one instead.
+    pub fn recreatable(&self) -> bool {
+        matches!(
+            self,
+            Self::BranchMismatch | Self::DirtyLeftover | Self::BranchHeldManaged
+        )
+    }
+
+    /// Whether the modal can offer a one-keypress **jump** to the live
+    /// session already holding the branch. Only `BranchHeldLive`, where
+    /// the classifier knows another live worktree owns the checkout, so
+    /// the fix is to go work in that session rather than fight for the
+    /// branch (issue #787).
+    pub fn jump_to_holder(&self) -> bool {
+        matches!(self, Self::BranchHeldLive)
+    }
+
+    /// The absolute path of the checkout holding the branch, parsed out
+    /// of a `BranchHeldLive` / `BranchHeldManaged` message. The daemon's
+    /// error names it verbatim (`… checked out at <path> —` /
+    /// `… managed worktree at <path> —`); the recovery actions need it to
+    /// jump to the holder (`BranchHeldLive`) or preserve it aside before
+    /// re-provisioning (`BranchHeldManaged`). `None` for every other
+    /// class and for a message whose shape the daemon no longer emits.
+    pub fn holder_path(message: &str) -> Option<String> {
+        for marker in ["checked out at ", "managed worktree at "] {
+            if let Some(start) = message.find(marker) {
+                let rest = &message[start + marker.len()..];
+                // The path runs up to the ` — ` that introduces the
+                // refusal reason; a message without it is malformed, so
+                // don't guess a path out of the whole tail.
+                let end = rest.find(" —")?;
+                let path = rest[..end].trim();
+                if !path.is_empty() {
+                    return Some(path.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// One-line, imperative recovery guidance shown under the error in
     /// the modal. Always names a concrete next step; the modal separately
     /// renders only the affordances valid for this class.
@@ -3192,6 +3259,65 @@ mod worktree_recovery_tests {
         assert!(
             !WorktreeRecovery::BranchHeldLive.hint().contains("x a"),
             "session adoption cannot release a branch checkout"
+        );
+    }
+
+    /// Issue #787: the non-retryable classes split into ones lazybox can
+    /// recreate (its own stale/leftover state) and the one it can only
+    /// jump to (a live holder). Recreate and jump are mutually exclusive,
+    /// and neither overlaps `retryable`.
+    #[test]
+    fn recovery_actions_partition_the_non_retryable_classes() {
+        for c in [
+            WorktreeRecovery::BranchMismatch,
+            WorktreeRecovery::DirtyLeftover,
+            WorktreeRecovery::BranchHeldManaged,
+        ] {
+            assert!(c.recreatable(), "{c:?} should offer recreate");
+            assert!(!c.jump_to_holder(), "{c:?} is not a jump case");
+        }
+        assert!(WorktreeRecovery::BranchHeldLive.jump_to_holder());
+        assert!(
+            !WorktreeRecovery::BranchHeldLive.recreatable(),
+            "a live holder must never be moved aside"
+        );
+        for c in [
+            WorktreeRecovery::Transient,
+            WorktreeRecovery::Offline,
+            WorktreeRecovery::Disk,
+            WorktreeRecovery::Unknown,
+        ] {
+            assert!(c.retryable() && !c.recreatable() && !c.jump_to_holder());
+        }
+    }
+
+    /// The holder path is parsed out of the daemon's actual `BranchHeldLive`
+    /// / `BranchHeldManaged` phrasing — including the `checkout_at:` prefix
+    /// the modal path prepends — so jump / preserve-aside can target it.
+    #[test]
+    fn holder_path_parses_the_live_and_managed_messages() {
+        assert_eq!(
+            WorktreeRecovery::holder_path(
+                "checkout_at: branch 'feat' is already checked out at /tmp/other \
+                 — refusing to take it from another live worktree"
+            )
+            .as_deref(),
+            Some("/tmp/other"),
+        );
+        assert_eq!(
+            WorktreeRecovery::holder_path(
+                "branch 'feat' is held by the non-live managed worktree at \
+                 /home/u/.lazybox/v2/worktrees/scope/slug — automatic reclaim blocked"
+            )
+            .as_deref(),
+            Some("/home/u/.lazybox/v2/worktrees/scope/slug"),
+        );
+        // A branch-mismatch message names no holder.
+        assert_eq!(
+            WorktreeRecovery::holder_path(
+                "worktree /tmp/wt is checked out on branch 'a', not the requested branch 'b'"
+            ),
+            None,
         );
     }
 }

@@ -2151,6 +2151,100 @@ impl<T: TerminalAdapter> Model<T> {
         self.flush_dispatched_cmds(vec![spawn]);
     }
 
+    /// `r` on a non-retryable but recoverable `WorktreeProgress` modal
+    /// (issue #787): preserve the conflicting checkout aside and
+    /// re-provision, then re-run the original spawn. Reuses the remembered
+    /// spawn so the recreate lands the exact agent/shell the user asked
+    /// for. `BranchHeldManaged` names a different-path holder to move; the
+    /// other recoverable classes move the workspace's own target worktree.
+    pub(super) fn recreate_worktree_provision(&mut self) {
+        let is_failed = self.worktree_progress.as_ref().is_some_and(|s| s.failed());
+        if !is_failed {
+            return;
+        }
+        let Some(lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id,
+            client_request_id,
+            kind,
+            cwd,
+            initial_prompt,
+            on_main,
+            model_alias,
+            access,
+        }) = self.last_spawn.clone()
+        else {
+            self.flash_hint("nothing to recreate");
+            return;
+        };
+        let preserve_holder = self.worktree_progress.as_ref().and_then(|state| {
+            matches!(
+                state.recovery(),
+                Some(lazybox_ipc::WorktreeRecovery::BranchHeldManaged)
+            )
+            .then(|| {
+                state
+                    .error()
+                    .and_then(lazybox_ipc::WorktreeRecovery::holder_path)
+            })
+            .flatten()
+        });
+        self.force_dismiss_worktree_progress();
+        self.worktree_progress_dismissed = None;
+        let cmd = lazybox_ipc::Command::RecreateWorktree {
+            spawn: Box::new(lazybox_ipc::SpawnFallback {
+                session_key,
+                session_id,
+                client_request_id,
+                kind,
+                cwd,
+                model_alias,
+                access,
+            }),
+            initial_prompt,
+            on_main,
+            preserve_holder,
+        };
+        self.flush_dispatched_cmds(vec![cmd]);
+    }
+
+    /// `g` on a `BranchHeldLive` `WorktreeProgress` modal (issue #787):
+    /// jump to the live session already holding the branch instead of
+    /// dead-ending. The holder path is named verbatim in the failure text;
+    /// match it against each workspace's session worktree paths (the client
+    /// holds the full workspace snapshot) and reveal that workspace.
+    pub(super) fn jump_to_worktree_holder(&mut self) {
+        let Some(holder) = self
+            .worktree_progress
+            .as_ref()
+            .and_then(|state| state.error())
+            .and_then(lazybox_ipc::WorktreeRecovery::holder_path)
+        else {
+            self.flash_hint("no holder to jump to");
+            return;
+        };
+        let holder_path = std::path::PathBuf::from(&holder);
+        let target = self.sidebar.workspaces_iter().find_map(|ws| {
+            ws.sessions
+                .iter()
+                .any(|session| session.worktree_path == holder_path)
+                .then(|| lazybox_core::SessionKey::new(ws.key.as_str()))
+        });
+        match target {
+            Some(key) => {
+                self.force_dismiss_worktree_progress();
+                self.worktree_progress_dismissed = None;
+                self.jump_to_workspace_key(&key);
+            }
+            // No managed session owns the checkout — it's an external
+            // worktree (the hint's "or free the external checkout" case).
+            // Name it and leave the modal up so the user can act on it.
+            None => self.flash_info(format!(
+                "no lazybox session holds {holder} — free that external checkout, then retry"
+            )),
+        }
+    }
+
     /// Push a modal.
     pub fn push_modal(&mut self, id: Id) {
         self.modal_stack.push(id.clone());

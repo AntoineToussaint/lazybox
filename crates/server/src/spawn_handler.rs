@@ -752,6 +752,141 @@ pub async fn handle_spawn(
     handle_spawn_inner(config, session_key, session_id, kind, options).await
 }
 
+/// The worktree path a spawn for this workspace resolves to, mirroring
+/// the resolution order in [`resolve_or_create_session`] so the recreate
+/// preserves the checkout that actually blocked *this* spawn rather than
+/// always session index 0. `None` for a linked (no-worktree) workspace,
+/// whose sessions run in the user's real checkout and must never be moved
+/// aside, and for an `on_main` spawn on a repo-less workspace (no shared
+/// checkout to resolve).
+fn spawn_target_worktree_path(
+    workspace: &Workspace,
+    session_id: Option<SessionId>,
+    on_main: bool,
+) -> Option<PathBuf> {
+    if workspace.is_linked() {
+        return None;
+    }
+    if on_main {
+        return main_worktree_path(workspace);
+    }
+    if let Some(id) = session_id {
+        return workspace.find_session(id).map(|s| s.worktree_path.clone());
+    }
+    if let Some(session) = workspace.default_session() {
+        return Some(session.worktree_path.clone());
+    }
+    Some(worktree_path_for_session(workspace, 0))
+}
+
+/// Move the checkout blocking a stuck spawn aside so its branch is freed
+/// and a fresh worktree can be provisioned (issue #787's recreate). The
+/// backup path (or `None` when nothing needed moving) is returned; the
+/// branch-conflict classes only arise on repo-backed worktrees, so a
+/// repo-less workspace is a no-op. `preserve_holder` is a
+/// `BranchHeldManaged` holder at a different path; `None` moves the exact
+/// worktree the recreate's spawn (`session_id` / `on_main`) will target.
+async fn preserve_stuck_worktree(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    session_id: Option<SessionId>,
+    on_main: bool,
+    preserve_holder: Option<String>,
+) -> Result<Option<PathBuf>, lazybox_git_ops::GitError> {
+    let workspace_key = WorkspaceKey::new(session_key.as_str());
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    let Ok(workspace) = load_workspace(config, &workspace_key) else {
+        return Ok(None);
+    };
+    let Ok(Some(repo)) = repo_for_workspace_provision(config, &workspace, &cfg) else {
+        return Ok(None);
+    };
+    let Some((owner, name)) = repo.split_once('/') else {
+        return Ok(None);
+    };
+    let preserve_path = match preserve_holder {
+        Some(holder) => PathBuf::from(holder),
+        None => match spawn_target_worktree_path(&workspace, session_id, on_main) {
+            Some(path) => path,
+            // Linked / unresolvable target: never move the user's real
+            // checkout — leave the spawn to surface its own error.
+            None => return Ok(None),
+        },
+    };
+    let mgr = config.worktree_manager();
+    let bare_path = mgr.bare_path(owner, name);
+    let backup = mgr
+        .preserve_worktree_aside(&bare_path, &preserve_path)
+        .await?;
+    if let Some(backup) = &backup {
+        tracing::info!(
+            workspace = workspace_key.as_str(),
+            preserved = %backup.display(),
+            "preserved conflicting worktree aside before recreate",
+        );
+    }
+    Ok(backup)
+}
+
+/// Recover a workspace wedged on a non-retryable worktree conflict
+/// (issue #787): preserve the blocking checkout aside (`*.bak-<n>`),
+/// freeing its branch, then re-run the original spawn so a fresh worktree
+/// is provisioned. `preserve_holder` names the `BranchHeldManaged` holder
+/// to move (a different-path non-live worktree); `None` moves the
+/// workspace's own target worktree (the `BranchMismatch` / `DirtyLeftover`
+/// case). The move + prune runs to completion before the spawn, so the
+/// re-provision sees a clean slate — unlike two separate client commands,
+/// which race on the detached mutation lanes.
+pub async fn handle_recreate_worktree(
+    config: &ServerConfig,
+    spawn: lazybox_ipc::SpawnFallback,
+    initial_prompt: Option<String>,
+    on_main: bool,
+    preserve_holder: Option<String>,
+) {
+    let session_key = spawn.session_key.clone();
+    if let Err(error) = preserve_stuck_worktree(
+        config,
+        &session_key,
+        spawn.session_id,
+        on_main,
+        preserve_holder,
+    )
+    .await
+    {
+        tracing::warn!(
+            workspace = session_key.as_str(),
+            "could not preserve worktree aside for recreate: {error}",
+        );
+        let _ = config.bus.send(Event::provider_error(
+            "spawn:recreate",
+            format!("could not free the stuck worktree: {error}"),
+            lazybox_ipc::ProviderErrorKind::Permanent,
+        ));
+        return;
+    }
+
+    let autonomous = spawn_is_autonomous(&initial_prompt);
+    handle_spawn(
+        config,
+        session_key,
+        spawn.session_id,
+        spawn.kind,
+        SpawnOptions {
+            cwd: spawn.cwd,
+            initial_prompt,
+            autonomous,
+            on_main,
+            model_alias: spawn.model_alias,
+            access: spawn.access,
+            client_request_id: spawn.client_request_id,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+            ..Default::default()
+        },
+    )
+    .await;
+}
+
 async fn handle_spawn_inner(
     config: &ServerConfig,
     session_key: SessionKey,
@@ -2864,8 +2999,34 @@ async fn provision_worktree(
                     // `issue-42-…` and `issue-42-…-2`, neither of which
                     // corresponds to a PR the user can push.
                     let repo_key = format!("{owner}/{name}");
-                    let new_branch =
-                        isolated_branch_for_workspace(workspace, &cfg, Some(&repo_key));
+                    // Reuse this workspace's *own* prior worktree branch
+                    // when one is already checked out at the target path,
+                    // instead of re-deriving from the (mutable) issue title
+                    // (issue #787). A retitled issue would otherwise derive
+                    // a different `issue-N-<new-slug>` on the second attempt
+                    // and hard-fail `BranchMismatch` against the branch the
+                    // first attempt left on disk — thrashing on a workspace's
+                    // own leftover. The derive is only for the very first
+                    // provision, when nothing is on disk yet; a probe that
+                    // errors is surfaced rather than papered over with a
+                    // derive that would then mismatch the branch on disk.
+                    let new_branch = match mgr.existing_worktree_branch(owner, name, target).await {
+                        Ok(Some(branch)) => {
+                            tracing::info!(
+                                workspace = workspace.key.as_str(),
+                                %branch,
+                                "reusing the branch already checked out at the target worktree",
+                            );
+                            branch
+                        }
+                        Ok(None) => isolated_branch_for_workspace(workspace, &cfg, Some(&repo_key)),
+                        Err(e) => {
+                            return Err(ServerError::Worktree(format!(
+                                "could not read the existing worktree branch at {}: {e}",
+                                target.display()
+                            )));
+                        }
+                    };
                     let base = mgr.default_branch(owner, name).await.map_err(|e| {
                         ServerError::Worktree(format!("default_branch lookup: {e}"))
                     })?;
@@ -12900,6 +13061,293 @@ mod tests {
             String::from_utf8_lossy(&head.stdout).trim(),
             "scratch",
             "standalone worktree is on the workspace branch",
+        );
+    }
+
+    /// Issue #787: a second attempt on the same issue after its title
+    /// drifted must reuse the branch already checked out at the target
+    /// worktree, not derive a colliding `issue-N-<new-slug>` and hard-fail
+    /// `BranchMismatch` against a workspace's own prior attempt.
+    #[tokio::test]
+    async fn reprovision_reuses_own_worktree_branch_across_title_drift() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let bare = config.worktree_manager().bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+
+        let session_key = SessionKey::new("github:acme/core#271");
+        let target = root.path().join("wt");
+
+        // First attempt: the issue is titled "large sample rung".
+        let mut task = titled_task("github", "acme/core#271", "large sample rung");
+        task.repo = Some("acme/core".into());
+        let ws1 = Workspace::from_task(task, Utc::now());
+        let branch1 = provision_worktree(
+            &config,
+            &ws1,
+            &target,
+            &session_key,
+            false,
+            None,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("first provision");
+        assert_eq!(branch1, "issue-271-large-sample-rung");
+
+        // The issue is retitled before a second attempt. Re-deriving from
+        // the new title would collide with the branch already on disk.
+        let mut task2 = titled_task(
+            "github",
+            "acme/core#271",
+            "sample repos are not independent",
+        );
+        task2.repo = Some("acme/core".into());
+        let ws2 = Workspace::from_task(task2, Utc::now());
+        let branch2 = provision_worktree(
+            &config,
+            &ws2,
+            &target,
+            &session_key,
+            false,
+            None,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("second provision must not BranchMismatch against its own worktree");
+        assert_eq!(
+            branch2, "issue-271-large-sample-rung",
+            "the workspace reuses its own on-disk branch instead of thrashing",
+        );
+    }
+
+    /// Issue #787: recovering a `BranchHeldManaged` conflict preserves the
+    /// named holder aside (keeping its files) and frees its branch, so a
+    /// fresh provision on that branch then succeeds — the server half of
+    /// the in-modal recreate.
+    #[tokio::test]
+    async fn preserve_stuck_worktree_moves_the_named_holder_and_frees_its_branch() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let mgr = config.worktree_manager();
+        let bare = mgr.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+
+        // A non-live managed worktree holds branch `feat`.
+        let holder = root.path().join("holder");
+        mgr.checkout_new_branch_at(&holder, "acme", "core", "feat", "main")
+            .await
+            .expect("provision holder");
+        std::fs::write(holder.join("wip.txt"), "unsaved\n").unwrap();
+
+        // Persist the stuck workspace so its repo resolves for the recovery.
+        let mut task = titled_task("github", "acme/core#271", "the stuck issue");
+        task.repo = Some("acme/core".into());
+        let ws = Workspace::from_task(task, Utc::now());
+        let session_key: SessionKey = SessionKey::new(ws.key.as_str());
+        persist_and_broadcast(&config, &ws).await.unwrap();
+
+        let backup = preserve_stuck_worktree(
+            &config,
+            &session_key,
+            None,
+            false,
+            Some(holder.to_string_lossy().into_owned()),
+        )
+        .await
+        .expect("preserve runs")
+        .expect("the holder was preserved");
+        assert!(!holder.exists(), "holder moved aside");
+        assert_eq!(
+            std::fs::read_to_string(backup.join("wip.txt")).unwrap(),
+            "unsaved\n",
+            "the holder's uncommitted work is preserved",
+        );
+
+        // The branch is now free: a fresh worktree add on `feat` succeeds.
+        let fresh = root.path().join("fresh");
+        mgr.checkout_new_branch_at(&fresh, "acme", "core", "feat", "main")
+            .await
+            .expect("branch freed for a fresh provision");
+    }
+
+    /// Issue #787 review #1: a `None` (own-worktree) recreate must preserve
+    /// the checkout the spawn actually resolves to — the workspace's
+    /// default (most-recent) session — not always session index 0. A
+    /// multi-session workspace would otherwise have an unrelated (possibly
+    /// live) worktree moved aside while the stuck one stayed put.
+    #[tokio::test]
+    async fn preserve_stuck_worktree_targets_the_default_session_not_index_zero() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let mgr = config.worktree_manager();
+        let bare = mgr.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+
+        // Two managed worktrees for one workspace: an earlier index-0
+        // session and a later (default) session — the one a bare recreate
+        // must preserve.
+        let wt_first = root.path().join("first");
+        let wt_default = root.path().join("default");
+        mgr.checkout_new_branch_at(&wt_first, "acme", "core", "sess-first", "main")
+            .await
+            .expect("provision first");
+        mgr.checkout_new_branch_at(&wt_default, "acme", "core", "sess-default", "main")
+            .await
+            .expect("provision default");
+        std::fs::write(wt_default.join("wip.txt"), "unsaved\n").unwrap();
+
+        let mut task = titled_task("github", "acme/core#271", "the stuck issue");
+        task.repo = Some("acme/core".into());
+        let mut ws = Workspace::from_task(task, Utc::now());
+        let t0 = Utc::now();
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Shell,
+            wt_first.clone(),
+            t0,
+        ));
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Shell,
+            wt_default.clone(),
+            t0 + chrono::Duration::seconds(60),
+        ));
+        let session_key = SessionKey::new(ws.key.as_str());
+        persist_and_broadcast(&config, &ws).await.unwrap();
+
+        let backup = preserve_stuck_worktree(&config, &session_key, None, false, None)
+            .await
+            .expect("preserve runs")
+            .expect("the default session's worktree was preserved");
+        assert!(
+            !wt_default.exists(),
+            "the spawn's target (default session) moved aside",
+        );
+        assert!(
+            wt_first.exists(),
+            "the unrelated index-0 session must be left untouched",
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("wip.txt")).unwrap(),
+            "unsaved\n",
         );
     }
 

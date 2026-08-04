@@ -729,6 +729,16 @@ pub enum Msg {
     /// after fixing the cause (issue #557), rather than dismissing and
     /// re-navigating.
     WorktreeRetry,
+    /// `r` pressed on a non-retryable but recoverable `WorktreeProgress`
+    /// modal (issue #787) — preserve the conflicting checkout aside and
+    /// re-provision a fresh worktree, then re-spawn, so a wrong-branch /
+    /// dirty-leftover / non-live-managed conflict is one keypress from
+    /// unstuck instead of an Esc-only dead end.
+    WorktreeRecreate,
+    /// `g` pressed on a `BranchHeldLive` `WorktreeProgress` modal — jump
+    /// to the live session already holding the branch instead of fighting
+    /// for it (issue #787).
+    WorktreeJumpToHolder,
     PollingError((String, String, String, String)),
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
@@ -4460,6 +4470,8 @@ impl<T: TerminalAdapter> Model<T> {
             // message is also what flips `redraw` in the run loop.
             Msg::WorktreeProgressTick => self.advance_worktree_progress(),
             Msg::WorktreeRetry => self.retry_worktree_provision(),
+            Msg::WorktreeRecreate => self.recreate_worktree_provision(),
+            Msg::WorktreeJumpToHolder => self.jump_to_worktree_holder(),
             Msg::Confirmed(yes) => {
                 let cmds = self.handle_confirmed(yes);
                 self.dispatch_cmds(cmds);

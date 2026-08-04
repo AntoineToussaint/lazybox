@@ -2432,6 +2432,22 @@ pub(super) async fn sources_for_with_engagement(
                             .cloned()
                             .unwrap_or_default();
                         scopes.extend(config_scopes);
+                        // Once the user has narrowed at all, also admit every
+                        // repo they can actually access (owned / org-member /
+                        // direct-collaborator) — otherwise an involved PR in,
+                        // say, an org repo or a collaborator repo they didn't
+                        // tick is fetched by `involves:me` and then silently
+                        // dropped by the allowlist. Fetched once and memoized
+                        // on the tick state. An empty selection still means
+                        // "see everything" and skips this.
+                        if !scopes.is_empty() {
+                            if state.implicit_gh_scopes.is_none() {
+                                state.implicit_gh_scopes = Some(client.accessible_scopes().await);
+                            }
+                            if let Some(implicit) = &state.implicit_gh_scopes {
+                                scopes.extend(implicit.iter().cloned());
+                            }
+                        }
                         let pr_qualifiers =
                             build_pr_search_qualifiers(&filter, &scopes, client.username());
                         let issue_qualifiers =

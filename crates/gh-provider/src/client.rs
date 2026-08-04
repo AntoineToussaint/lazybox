@@ -1544,6 +1544,102 @@ impl GhClient {
         Ok(scopes)
     }
 
+    /// Every repo the authenticated user can access — owned,
+    /// org-member, or direct outside-collaborator — as
+    /// `github:<owner>/<repo>` scopes, plus their own `github:<login>`.
+    ///
+    /// The poller unions these into its scope allowlist so an involved
+    /// PR/issue in any repo you're a member or collaborator of surfaces
+    /// without being ticked in setup (a repo under another *user's*
+    /// account, e.g. a collaborator repo, can't be covered by an `org:`
+    /// scope, which is why this lists individual repos). A non-member
+    /// public repo you merely commented on is not in this set, so it
+    /// stays filtered out.
+    ///
+    /// Best-effort and meant to be cached by the caller (it paginates the
+    /// REST API): any page failing returns whatever resolved so a
+    /// transient error can't blank the inbox. `affiliation` unions the
+    /// three access kinds in one query.
+    pub async fn accessible_scopes(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        if !self.user.is_empty() {
+            out.push(format!("github:{}", self.user));
+        }
+
+        if self
+            .acquire_or_block("list accessible repos page 1")
+            .is_err()
+        {
+            return out;
+        }
+        let mut page = {
+            let Ok(_permit) = self.request_permit().await else {
+                return out;
+            };
+            let started = std::time::Instant::now();
+            let result = self
+                .inner
+                .current()
+                .list_repos_for_authenticated_user()
+                .affiliation("owner,collaborator,organization_member")
+                .per_page(100)
+                .send()
+                .await;
+            self.observe_unreported_response(
+                "list accessible repos page 1",
+                crate::rate_budget::ApiResource::rest("core"),
+                started,
+                result.is_ok(),
+            );
+            match result {
+                Ok(page) => page,
+                Err(_) => return out,
+            }
+        };
+        loop {
+            for repo in &page.items {
+                let full = repo
+                    .full_name
+                    .clone()
+                    .unwrap_or_else(|| format!("{}/{}", self.user, repo.name));
+                out.push(format!("github:{full}"));
+            }
+            if page.next.is_none() {
+                break;
+            }
+            if self
+                .acquire_or_block("list accessible repos next page")
+                .is_err()
+            {
+                break;
+            }
+            let next = {
+                let Ok(_permit) = self.request_permit().await else {
+                    break;
+                };
+                let started = std::time::Instant::now();
+                let result = self
+                    .inner
+                    .get_page::<octocrab::models::Repository>(&page.next)
+                    .await;
+                self.observe_unreported_response(
+                    "list accessible repos next page",
+                    crate::rate_budget::ApiResource::rest("core"),
+                    started,
+                    result.is_ok(),
+                );
+                result
+            };
+            page = match next {
+                Ok(Some(next)) => next,
+                _ => break,
+            };
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// List repositories under `parent_id` (e.g. `"github:acme"`).
     /// Called lazily by the picker once the user has drilled into
     /// an org. Returns `Scope`s of kind `Repo` parented at the org.
@@ -4381,6 +4477,35 @@ mod tests {
 
     fn graphql_error(message: &str) -> GhError {
         GhError::Graphql(message.to_string())
+    }
+
+    /// End-to-end: `accessible_scopes` returns the caller's own
+    /// `github:<login>` plus a `github:<owner>/<repo>` for every repo
+    /// they can access (owned / org-member / collaborator) — the set the
+    /// poller unions into its scope allowlist. Ignored by default (needs
+    /// a real `gh`-auth'd token); run with
+    /// `cargo test -p lazybox-gh -- --ignored accessible_scopes`.
+    #[tokio::test]
+    #[ignore = "requires a real GitHub token (gh auth)"]
+    async fn accessible_scopes_lists_owned_member_and_collaborator_repos() {
+        let cred = crate::credential_chain()
+            .resolve(crate::SOURCE)
+            .await
+            .expect("a GitHub token must resolve");
+        let client = GhClient::from_credential(cred)
+            .await
+            .expect("client builds");
+        let scopes = client.accessible_scopes().await;
+        assert!(
+            scopes
+                .iter()
+                .any(|s| s == &format!("github:{}", client.username())),
+            "own login scope must be present; got {scopes:?}"
+        );
+        assert!(
+            scopes.iter().any(|s| s.contains('/')),
+            "at least one owner/repo scope expected for an authenticated user"
+        );
     }
 
     #[tokio::test]

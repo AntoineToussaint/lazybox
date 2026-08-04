@@ -1017,6 +1017,13 @@ pub struct TickState {
     /// never escalates however high the streak climbs (#772). Reset by
     /// [`Self::clear_error`] on any successful fetch or rate-limit wait.
     retryable_streak: std::collections::HashMap<String, u32>,
+    /// Repos the authenticated user can access (owned / org-member /
+    /// direct-collaborator), fetched once via `GhClient::accessible_scopes`
+    /// and unioned into the poll scope allowlist so involved PRs/issues in
+    /// any of them surface without a manual setup tick. Memoized here (not
+    /// re-fetched each tick) since it only changes when the user's org /
+    /// collaborator memberships change; a daemon restart refreshes it.
+    pub(crate) implicit_gh_scopes: Option<Vec<String>>,
 }
 
 impl TickState {

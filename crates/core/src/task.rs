@@ -58,6 +58,47 @@ pub enum TaskKind {
     Issue,
 }
 
+/// Priority a task carries from its source. Today only Linear supplies
+/// one (its issue priority); GitHub PRs/issues have none, so the field
+/// is `Option`. Ordered most-urgent → least so filters and sorts can
+/// compare tiers directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum Priority {
+    Urgent,
+    High,
+    Medium,
+    Low,
+}
+
+impl Priority {
+    /// Map Linear's numeric issue priority onto the enum. Linear uses
+    /// `1 = urgent, 2 = high, 3 = medium, 4 = low`, and `0` for "no
+    /// priority" — which becomes `None`.
+    pub fn from_linear(n: f64) -> Option<Self> {
+        match n.round() as i64 {
+            1 => Some(Self::Urgent),
+            2 => Some(Self::High),
+            3 => Some(Self::Medium),
+            4 => Some(Self::Low),
+            _ => None,
+        }
+    }
+
+    /// Lowercase token used as the filter label / header chip.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Urgent => "urgent",
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+
+    /// Every tier, most-urgent first — the filter menu order.
+    pub const ALL: [Priority; 4] = [Self::Urgent, Self::High, Self::Medium, Self::Low];
+}
+
 /// A label/tag on a task. Mostly transparent to lazybox — providers
 /// give us the name + color (hex like `"d73a4a"` for GitHub) and
 /// the sidebar renders the name with the color as foreground. Color
@@ -410,6 +451,17 @@ pub struct Task {
     /// in that case. Prefer this over any URL sniffing.
     #[serde(default)]
     pub kind: Option<TaskKind>,
+    /// Priority the source assigns (Linear issue priority). `None` for
+    /// GitHub and for snapshots predating the field.
+    #[serde(default)]
+    pub priority: Option<Priority>,
+    /// The source's native workflow-state name — Linear's `In Review` /
+    /// `Todo` / `Blocked`. Distinct from [`Task::state`], which collapses
+    /// every source into a small canonical set; this preserves the exact
+    /// column for filtering/display. `None` for providers without named
+    /// states (GitHub) and for older snapshots.
+    #[serde(default)]
+    pub state_label: Option<String>,
 }
 
 impl Task {
@@ -759,6 +811,8 @@ mod status_tag_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 

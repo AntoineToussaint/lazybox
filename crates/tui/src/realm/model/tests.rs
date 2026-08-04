@@ -1117,9 +1117,10 @@ mod effects_tests {
         m.dispatch_action(&Action::OpenFilterMenu);
         assert_eq!(m.modal_stack.last(), Some(&Id::FilterMenu));
 
+        use crate::components::sidebar::FilterEntry;
         let cmds = m.handle_choice_picked(vec![
-            ChoicePayload::Filter(Filter::Author),
-            ChoicePayload::Filter(Filter::Pr),
+            ChoicePayload::Filter(FilterEntry::Predicate(Filter::Author)),
+            ChoicePayload::Filter(FilterEntry::Predicate(Filter::Pr)),
         ]);
         assert!(cmds.is_empty(), "filtering sends no IPC");
         assert!(m.modal_stack.is_empty(), "menu closes on pick");
@@ -1151,9 +1152,11 @@ mod effects_tests {
         use crate::components::sidebar::Filter;
         let mut m = build_model();
         m.mount_filter_menu();
+        use crate::components::sidebar::FilterEntry;
         let last = *Filter::ALL.last().expect("at least one filter");
         assert_ne!(last, Filter::ALL[0], "test needs a non-first filter");
-        let cmds = m.handle_choice_picked(vec![ChoicePayload::Filter(last)]);
+        let cmds =
+            m.handle_choice_picked(vec![ChoicePayload::Filter(FilterEntry::Predicate(last))]);
         assert!(cmds.is_empty());
         let active: Vec<Filter> = m.sidebar.filters().iter().collect();
         assert_eq!(
@@ -5676,6 +5679,8 @@ mod merge_focus_follow_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -9302,6 +9307,8 @@ mod destructive_confirm_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         Workspace::from_task(task, Utc::now())
     }
@@ -10679,6 +10686,8 @@ mod focus_mode_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
         let wk = ws.key.clone();
@@ -10937,6 +10946,8 @@ mod jump_to_workspace_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -12453,6 +12464,8 @@ mod merge_latch_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         Workspace::from_task(task, Utc::now())
     }
@@ -15243,6 +15256,8 @@ mod spawn_focus_steal_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
     }
@@ -15365,6 +15380,8 @@ mod repo_labels_failure_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -15740,6 +15757,8 @@ mod keybinding_audit_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
         for i in 0..activity_rows {
@@ -16843,6 +16862,8 @@ mod optimistic_mutation_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 

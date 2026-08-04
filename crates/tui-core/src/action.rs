@@ -3250,6 +3250,8 @@ mod tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
 
         // No workspace → not offered.
@@ -3330,6 +3332,8 @@ mod tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
 
         // No workspace → not offered.
@@ -3416,6 +3420,8 @@ mod tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
 
         // Up-to-date PR → not offered.

@@ -109,6 +109,8 @@ fn maximal_pr_task() -> Task {
             source: "github".into(),
             key: "acme/widget#3".into(),
         }],
+        priority: None,
+        state_label: None,
     }
 }
 

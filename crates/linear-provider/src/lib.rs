@@ -13,13 +13,14 @@
 //!
 //! ## Scope
 //!
-//! Fetches issues the authenticated user is assigned to or created.
+//! Fetches issues the authenticated user is assigned to, created, or
+//! subscribes to (subscription covers @-mentions / commented issues).
 //! States `completed` / `canceled` are filtered out server-side.
 //! Pagination support: up to 50 issues per page, up to 20 pages.
 
 pub mod graphql;
 
-use lazybox_auth::{CredentialChain, EnvProvider};
+use lazybox_auth::{CommandProvider, CredentialChain, EnvProvider};
 use lazybox_core::{
     DEFAULT_MAX_PAGES, FetchOutcome, FetchPage, FetchPageInfo, ProviderError, Task, TaskProvider,
     paginate,
@@ -33,11 +34,17 @@ const LINEAR_GRAPHQL: &str = "https://api.linear.app/graphql";
 /// router splits on `'-'` and matches the first segment.
 pub const SOURCE: &str = "linear";
 
-/// Credential chain Linear uses. Today: just `LINEAR_API_KEY`.
-/// Wrapped in a chain so future Keychain / Vault providers slot in
-/// transparently — same shape as the GitHub provider.
+/// Credential chain Linear uses: the `LINEAR_API_KEY` env var, then a
+/// fallback to `linear auth token` (the `schpet/linear-cli` binary,
+/// which stores its token in the system keyring). This mirrors the
+/// GitHub provider, where `gh auth token` backstops the env vars — so
+/// a user who authenticated through the Linear CLI is detected without
+/// having to also export the key by hand. Future Keychain / Vault
+/// providers slot in the same way.
 pub fn credential_chain() -> CredentialChain {
-    CredentialChain::new().with(EnvProvider::new("LINEAR_API_KEY"))
+    CredentialChain::new()
+        .with(EnvProvider::new("LINEAR_API_KEY"))
+        .with(CommandProvider::new("linear", &["auth", "token"]))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -355,6 +362,32 @@ impl TaskProvider for LinearClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// End-to-end: with no `LINEAR_API_KEY` in the environment, the
+    /// credential chain must still resolve a token by shelling out to
+    /// `linear auth token` (the `schpet/linear-cli` keyring). This is
+    /// what makes a CLI-only Linear login show up as authenticated in
+    /// setup detection and poll. Ignored by default because it needs a
+    /// real `linear` login on the machine; run with
+    /// `cargo test -p lazybox-linear -- --ignored linear_cli_auth`.
+    #[tokio::test]
+    #[ignore = "requires a local `linear auth login`"]
+    async fn linear_cli_auth_resolves_through_credential_chain() {
+        // SAFETY: single-threaded ignored test; no other thread reads
+        // this var concurrently.
+        unsafe {
+            std::env::remove_var("LINEAR_API_KEY");
+        }
+        let cred = credential_chain()
+            .resolve(SOURCE)
+            .await
+            .expect("linear CLI token should resolve via `linear auth token`");
+        assert!(
+            cred.token().starts_with("lin_"),
+            "expected a Linear API token, got source {}",
+            cred.source
+        );
+    }
 
     /// `&text[..200]` panicked when byte 200 fell inside a multi-byte
     /// char. The boundary-safe truncation must back off to the

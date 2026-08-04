@@ -1236,18 +1236,29 @@ impl Sidebar {
         self.reset_cursor_and_recompute();
     }
 
-    /// Per-filter match counts over the workspaces the current mailbox
-    /// admits (before the active filters narrow further). Drives the
-    /// `(N)` counts in the filter menu so the user can see what each
-    /// toggle would surface. Order matches [`Filter::ALL`].
-    pub fn filter_counts(&self) -> Vec<(Filter, usize)> {
+    /// Replace the active filters from picker entries (fixed predicates
+    /// plus the value-driven label / Linear-state axes).
+    pub fn set_filter_entries(&mut self, entries: impl IntoIterator<Item = FilterEntry>) {
+        self.filters.replace_entries(entries);
+        self.reset_cursor_and_recompute();
+    }
+
+    /// Every row the `f` filter menu offers, with its match count: the
+    /// fixed predicates ([`Filter::ALL`]) followed by the label and
+    /// Linear-state values discovered in the current mailbox, plus any
+    /// currently-active value (count 0 when nothing in the mailbox
+    /// carries it) so an active filter always has a re-checkable row. A
+    /// value axis with no discovered and no active values adds no rows.
+    pub fn filter_menu_entries(&self) -> Vec<(FilterEntry, usize)> {
+        use std::collections::BTreeMap;
         let now = self.now();
         let candidates: Vec<&Workspace> = self
             .workspaces
             .values()
             .filter(|w| mailbox_membership(w, self.mailbox, now, self.show_inactive_in_inbox))
             .collect();
-        Filter::ALL
+
+        let mut out: Vec<(FilterEntry, usize)> = Filter::ALL
             .into_iter()
             .map(|f| {
                 let n = candidates
@@ -1259,9 +1270,49 @@ impl Sidebar {
                         })
                     })
                     .count();
-                (f, n)
+                (FilterEntry::Predicate(f), n)
             })
-            .collect()
+            .collect();
+
+        // Distinct label names across candidates' primary tasks, counted
+        // per workspace (a workspace with the label once, not per label
+        // instance). BTreeMap keeps the rows in a stable alpha order.
+        let mut labels: BTreeMap<String, usize> = BTreeMap::new();
+        let mut states: BTreeMap<String, usize> = BTreeMap::new();
+        for w in &candidates {
+            let Some(task) = w.primary_task() else {
+                continue;
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for l in &task.labels {
+                if seen.insert(l.name.as_str()) {
+                    *labels.entry(l.name.clone()).or_default() += 1;
+                }
+            }
+            if let Some(state) = &task.state_label {
+                *states.entry(state.clone()).or_default() += 1;
+            }
+        }
+        // Always surface currently-active values, even when no candidate
+        // carries them right now (count 0). Otherwise an active
+        // `Label`/`LinearState` filter whose matching workspaces have all
+        // left the mailbox would have no row to pre-check, and the next
+        // apply — which rebuilds the set from the checked rows — would
+        // silently drop it (review finding). Fixed predicates can't hit
+        // this because they're always in `Filter::ALL`.
+        for name in self.filters.labels() {
+            labels.entry(name.clone()).or_insert(0);
+        }
+        for name in self.filters.linear_states() {
+            states.entry(name.clone()).or_insert(0);
+        }
+        out.extend(labels.into_iter().map(|(n, c)| (FilterEntry::Label(n), c)));
+        out.extend(
+            states
+                .into_iter()
+                .map(|(n, c)| (FilterEntry::LinearState(n), c)),
+        );
+        out
     }
 
     pub fn mailbox(&self) -> Mailbox {
@@ -2267,7 +2318,7 @@ pub(crate) use lazybox_tui_core::inbox::{
 /// ```compile_fail
 /// use lazybox_tui::components::sidebar::attention_gate;
 /// ```
-pub use lazybox_tui_core::inbox::{Filter, FilterAxis, FilterCtx, FilterSet};
+pub use lazybox_tui_core::inbox::{Filter, FilterAxis, FilterCtx, FilterEntry, FilterSet};
 // `workspace_needs_attention`'s production caller moved into
 // `inbox::compute_visible` with the grouping logic (#731); inside `tui`
 // only the attention-signal unit tests still exercise it, so the

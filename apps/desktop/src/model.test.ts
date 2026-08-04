@@ -53,6 +53,8 @@ function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
     deletions: 0,
     closes_issues: [],
     kind: "Pr",
+    priority: null,
+    state_label: null,
   };
 }
 

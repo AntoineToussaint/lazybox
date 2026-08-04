@@ -579,28 +579,32 @@ impl<T: TerminalAdapter> Model<T> {
     /// pre-checked when already active. Space toggles, Enter replaces
     /// the sidebar's active set (an empty submit clears all filters).
     pub(crate) fn mount_filter_menu(&mut self) {
-        use crate::components::sidebar::Filter;
+        use crate::components::sidebar::FilterEntry;
         use crate::realm::components::choice::Choice;
         use std::collections::HashMap;
 
         if matches!(self.modal_stack.last(), Some(Id::FilterMenu)) {
             return;
         }
-        let counts: HashMap<Filter, usize> = self.sidebar.filter_counts().into_iter().collect();
-        let active: std::collections::HashSet<Filter> = self.sidebar.filters().iter().collect();
-        let items: Vec<Filter> = Filter::ALL.to_vec();
-        let active_for_check = active.clone();
+        // Fixed predicates + the label / Linear-state values present in
+        // the current mailbox, each with its match count.
+        let entries = self.sidebar.filter_menu_entries();
+        let counts: HashMap<FilterEntry, usize> = entries.iter().cloned().collect();
+        let items: Vec<FilterEntry> = entries.into_iter().map(|(e, _)| e).collect();
+        let active = self.sidebar.filters().clone();
         let modal = Choice::multi(
             "Space toggles · Enter applies · same section = any (OR), across sections = all (AND)",
             items,
         )
         .title("Filters")
-        .section_for(|f: &Filter| f.axis().label())
-        .label(move |f: &Filter| format!("{} ({})", f.label(), counts.get(f).copied().unwrap_or(0)))
-        // Each row carries its own filter, so the grouped display can't
+        .section_for(|e: &FilterEntry| e.axis().label())
+        .label(move |e: &FilterEntry| {
+            format!("{} ({})", e.label(), counts.get(e).copied().unwrap_or(0))
+        })
+        // Each row carries its own entry, so the grouped display can't
         // resolve to the wrong predicate (#512).
-        .payload_for(|f: &Filter| ChoicePayload::Filter(*f))
-        .with_selected_by(move |f: &Filter| active_for_check.contains(f))
+        .payload_for(|e: &FilterEntry| ChoicePayload::Filter(e.clone()))
+        .with_selected_by(move |e: &FilterEntry| active.contains_entry(e))
         .allow_empty(true);
         self.mount_modal(Id::FilterMenu, modal);
     }
@@ -2312,6 +2316,8 @@ mod tests {
             deletions: 0,
             kind: Some(lazybox_core::TaskKind::Pr),
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = lazybox_core::Workspace::from_task(
             task,

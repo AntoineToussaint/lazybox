@@ -64,6 +64,8 @@ fn make_task(key: &str, minutes_old: i64) -> Task {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        priority: None,
+        state_label: None,
     }
 }
 

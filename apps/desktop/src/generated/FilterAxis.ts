@@ -4,4 +4,4 @@
  * The axis a [`Filter`] lives on. Drives the OR-within / AND-across
  * combination in [`FilterSet::accepts`] and groups the filter menu.
  */
-export type FilterAxis = "State" | "Role" | "Kind";
+export type FilterAxis = "State" | "Role" | "Kind" | "Priority" | "Label" | "LinearState";

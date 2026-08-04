@@ -341,18 +341,30 @@ fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(glyph) = ctx
-        .workspace
-        .and_then(|w| workspace_type_label(w, ctx.ascii_glyphs))
-    else {
+    let Some(workspace) = ctx.workspace else {
+        return Cell::empty();
+    };
+    let Some(glyph) = workspace_type_label(workspace, ctx.ascii_glyphs) else {
         return Cell::empty();
     };
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
-        Style::default()
-            .fg(ctx.theme.text_dim)
-            .add_modifier(Modifier::BOLD)
+        // Color the glyph by source so PR / GitHub issue / Linear are
+        // distinguishable at a glance — they used to share one dim grey,
+        // which hid the Linear `◆` entirely. Mirrors the section-header
+        // markers (PR → success, issue → hover) and gives Linear the
+        // accent tone. The branch order matches `workspace_type_label`,
+        // so if a glyph rendered, exactly one arm matches; the final
+        // arm is Linear (the only other glyph-bearing kind).
+        let color = if workspace.pr.is_some() {
+            ctx.theme.success
+        } else if !workspace.gh_issues.is_empty() {
+            ctx.theme.hover
+        } else {
+            ctx.theme.accent
+        };
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
     };
     // Glyph + a single trailing space so the row reads `⇄ 312`
     // instead of the cramped `⇄312` (issue #94); the space separator
@@ -975,6 +987,8 @@ mod tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 

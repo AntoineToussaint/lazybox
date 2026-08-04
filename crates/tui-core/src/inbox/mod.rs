@@ -24,7 +24,7 @@ pub use attention::{
     AttentionSignal, INACTIVE_GRACE, attention_gate, mailbox_membership,
     workspace_attention_signals, workspace_needs_attention,
 };
-pub use filter::{Filter, FilterAxis, FilterCtx, FilterMenuItem, FilterSet};
+pub use filter::{Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet};
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind, role_rank,
 };
@@ -417,6 +417,8 @@ mod tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = Workspace::from_task(task, fixed_time());
         ws.key = WorkspaceKey(key_str.into());

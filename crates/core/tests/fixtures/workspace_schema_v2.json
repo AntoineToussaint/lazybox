@@ -134,7 +134,9 @@
         "key": "acme/widget#3"
       }
     ],
-    "kind": "Pr"
+    "kind": "Pr",
+    "priority": null,
+    "state_label": null
   },
   "gh_issues": [
     {
@@ -192,7 +194,9 @@
       "additions": 120,
       "deletions": 45,
       "closes_issues": [],
-      "kind": "Issue"
+      "kind": "Issue",
+      "priority": null,
+      "state_label": null
     }
   ],
   "linear_issues": [
@@ -251,7 +255,9 @@
       "additions": 120,
       "deletions": 45,
       "closes_issues": [],
-      "kind": "Issue"
+      "kind": "Issue",
+      "priority": null,
+      "state_label": null
     }
   ],
   "activity": [

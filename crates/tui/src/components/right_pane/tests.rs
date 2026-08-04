@@ -775,6 +775,8 @@ mod has_visible_content_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -867,6 +869,8 @@ mod summary_render_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -986,6 +990,8 @@ mod mark_workspace_merged_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -1076,6 +1082,8 @@ mod description_expand_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -1334,6 +1342,8 @@ mod linked_issue_modal_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         }
     }
 
@@ -1451,6 +1461,8 @@ mod originating_issue_header_tests {
             deletions: 0,
             kind: None,
             closes_issues: closes,
+            priority: None,
+            state_label: None,
         }
     }
 

@@ -143,6 +143,8 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        priority: None,
+        state_label: None,
     };
     let mut workspace = Workspace::from_task(task, Utc::now());
     // Seed a Session so `--test` boots with a usable folder under

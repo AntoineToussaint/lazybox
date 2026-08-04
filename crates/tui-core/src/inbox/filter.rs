@@ -15,11 +15,15 @@
 //! free — "needs attention" is just several State filters, and OR
 //! within the axis is exactly the union the preset wants.
 
-use lazybox_core::{CiStatus, ReviewStatus, SessionKey, TaskRole, Workspace};
+use lazybox_core::{CiStatus, Priority, ReviewStatus, SessionKey, TaskRole, TaskState, Workspace};
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use super::WorkspaceKind;
+
+/// Threshold (additions + deletions) at or above which a PR counts as a
+/// "big diff" for the [`Filter::BigDiff`] predicate.
+pub const BIG_DIFF_LINES: u32 = 500;
 
 /// The axis a [`Filter`] lives on. Drives the OR-within / AND-across
 /// combination in [`FilterSet::accepts`] and groups the filter menu.
@@ -31,6 +35,9 @@ pub enum FilterAxis {
     State,
     Role,
     Kind,
+    Priority,
+    Label,
+    LinearState,
 }
 
 impl FilterAxis {
@@ -40,6 +47,9 @@ impl FilterAxis {
             FilterAxis::State => "State",
             FilterAxis::Role => "Role",
             FilterAxis::Kind => "Kind",
+            FilterAxis::Priority => "Priority",
+            FilterAxis::Label => "Label",
+            FilterAxis::LinearState => "Linear state",
         }
     }
 }
@@ -71,6 +81,16 @@ pub enum Filter {
     ReviewRequested,
     /// Auto-merge is armed on the PR.
     AutoMerge,
+    /// Primary task is a draft PR (or a Linear issue in a draft state).
+    Draft,
+    /// Primary task is actively being worked (in-progress / in-review).
+    InProgress,
+    /// The primary task is waiting on a reply from me (`needs_reply`).
+    NeedsReply,
+    /// The PR's head branch is behind its base and can be updated.
+    BehindBase,
+    /// A large diff — at least `BIG_DIFF_LINES` lines changed.
+    BigDiff,
     // ── Role ───────────────────────────────────────────────────────
     Author,
     Reviewer,
@@ -79,11 +99,18 @@ pub enum Filter {
     // ── Kind ───────────────────────────────────────────────────────
     Pr,
     Issue,
+    // ── Priority (Linear) ──────────────────────────────────────────
+    PriorityUrgent,
+    PriorityHigh,
+    PriorityMedium,
+    PriorityLow,
 }
 
 impl Filter {
-    /// Every filter, in menu order (State, then Role, then Kind).
-    pub const ALL: [Filter; 14] = [
+    /// Every fixed filter, in menu order (State, Role, Kind, Priority).
+    /// Value-driven axes (Label, Linear state) are enumerated separately
+    /// from the candidate set — see [`FilterSet`] and `Sidebar`.
+    pub const ALL: [Filter; 23] = [
         Filter::WithAgent,
         Filter::CiFailing,
         Filter::CiRunning,
@@ -92,12 +119,21 @@ impl Filter {
         Filter::Asking,
         Filter::ReviewRequested,
         Filter::AutoMerge,
+        Filter::Draft,
+        Filter::InProgress,
+        Filter::NeedsReply,
+        Filter::BehindBase,
+        Filter::BigDiff,
         Filter::Author,
         Filter::Reviewer,
         Filter::Assignee,
         Filter::Mentioned,
         Filter::Pr,
         Filter::Issue,
+        Filter::PriorityUrgent,
+        Filter::PriorityHigh,
+        Filter::PriorityMedium,
+        Filter::PriorityLow,
     ];
 
     pub fn axis(self) -> FilterAxis {
@@ -109,11 +145,31 @@ impl Filter {
             | Filter::Unread
             | Filter::Asking
             | Filter::ReviewRequested
-            | Filter::AutoMerge => FilterAxis::State,
+            | Filter::AutoMerge
+            | Filter::Draft
+            | Filter::InProgress
+            | Filter::NeedsReply
+            | Filter::BehindBase
+            | Filter::BigDiff => FilterAxis::State,
             Filter::Author | Filter::Reviewer | Filter::Assignee | Filter::Mentioned => {
                 FilterAxis::Role
             }
             Filter::Pr | Filter::Issue => FilterAxis::Kind,
+            Filter::PriorityUrgent
+            | Filter::PriorityHigh
+            | Filter::PriorityMedium
+            | Filter::PriorityLow => FilterAxis::Priority,
+        }
+    }
+
+    /// The priority tier this predicate matches, if it is one.
+    fn priority(self) -> Option<Priority> {
+        match self {
+            Filter::PriorityUrgent => Some(Priority::Urgent),
+            Filter::PriorityHigh => Some(Priority::High),
+            Filter::PriorityMedium => Some(Priority::Medium),
+            Filter::PriorityLow => Some(Priority::Low),
+            _ => None,
         }
     }
 
@@ -128,12 +184,21 @@ impl Filter {
             Filter::Asking => "asking",
             Filter::ReviewRequested => "review-requested",
             Filter::AutoMerge => "auto-merge",
+            Filter::Draft => "draft",
+            Filter::InProgress => "in-progress",
+            Filter::NeedsReply => "needs-reply",
+            Filter::BehindBase => "behind-base",
+            Filter::BigDiff => "big-diff",
             Filter::Author => "author",
             Filter::Reviewer => "reviewer",
             Filter::Assignee => "assignee",
             Filter::Mentioned => "mentioned",
             Filter::Pr => "PR",
             Filter::Issue => "issue",
+            Filter::PriorityUrgent => "urgent",
+            Filter::PriorityHigh => "high",
+            Filter::PriorityMedium => "medium",
+            Filter::PriorityLow => "low",
         }
     }
 
@@ -162,12 +227,23 @@ impl Filter {
                 ) || !t.reviewers.is_empty()
             }),
             Filter::AutoMerge => task.is_some_and(|t| t.auto_merge_enabled),
+            Filter::Draft => task.is_some_and(|t| t.state == TaskState::Draft),
+            Filter::InProgress => {
+                task.is_some_and(|t| matches!(t.state, TaskState::InProgress | TaskState::InReview))
+            }
+            Filter::NeedsReply => task.is_some_and(|t| t.needs_reply),
+            Filter::BehindBase => task.is_some_and(|t| t.is_behind_base),
+            Filter::BigDiff => task.is_some_and(|t| t.additions + t.deletions >= BIG_DIFF_LINES),
             Filter::Author => task.is_some_and(|t| t.role == TaskRole::Author),
             Filter::Reviewer => task.is_some_and(|t| t.role == TaskRole::Reviewer),
             Filter::Assignee => task.is_some_and(|t| t.role == TaskRole::Assignee),
             Filter::Mentioned => task.is_some_and(|t| t.role == TaskRole::Mentioned),
             Filter::Pr => WorkspaceKind::classify(w) == WorkspaceKind::Pr,
             Filter::Issue => WorkspaceKind::classify(w) == WorkspaceKind::Issue,
+            Filter::PriorityUrgent
+            | Filter::PriorityHigh
+            | Filter::PriorityMedium
+            | Filter::PriorityLow => task.is_some_and(|t| t.priority == self.priority()),
         }
     }
 }
@@ -229,11 +305,47 @@ impl Filter {
     }
 }
 
+/// One selectable row in the `f` filter menu. A fixed predicate, or a
+/// value-driven label / Linear-state row whose set of values is
+/// discovered from the current inbox rather than hard-coded. Used as the
+/// picker's item type so all axes live in one multi-select.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FilterEntry {
+    Predicate(Filter),
+    Label(String),
+    LinearState(String),
+}
+
+impl FilterEntry {
+    pub fn axis(&self) -> FilterAxis {
+        match self {
+            FilterEntry::Predicate(f) => f.axis(),
+            FilterEntry::Label(_) => FilterAxis::Label,
+            FilterEntry::LinearState(_) => FilterAxis::LinearState,
+        }
+    }
+
+    /// Row label shown in the menu / header chip.
+    pub fn label(&self) -> String {
+        match self {
+            FilterEntry::Predicate(f) => f.label().to_string(),
+            FilterEntry::Label(name) => name.clone(),
+            FilterEntry::LinearState(name) => name.clone(),
+        }
+    }
+}
+
 /// The active set of filters. Empty (the default) is a no-op that
-/// accepts every workspace.
+/// accepts every workspace. Fixed predicates live in `active`; the
+/// value-driven axes carry the selected label names and Linear-state
+/// names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FilterSet {
     active: BTreeSet<Filter>,
+    #[serde(default)]
+    labels: BTreeSet<String>,
+    #[serde(default)]
+    linear_states: BTreeSet<String>,
 }
 
 impl FilterSet {
@@ -242,11 +354,13 @@ impl FilterSet {
     pub const fn new() -> Self {
         Self {
             active: BTreeSet::new(),
+            labels: BTreeSet::new(),
+            linear_states: BTreeSet::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.active.is_empty()
+        self.active.is_empty() && self.labels.is_empty() && self.linear_states.is_empty()
     }
 
     pub fn toggle(&mut self, f: Filter) {
@@ -255,28 +369,86 @@ impl FilterSet {
         }
     }
 
-    /// Replace the whole set with `filters` (an empty iterator clears).
+    /// Replace the whole set with fixed `filters` (an empty iterator
+    /// clears everything, including the value axes).
     pub fn replace(&mut self, filters: impl IntoIterator<Item = Filter>) {
         self.active = filters.into_iter().collect();
+        self.labels.clear();
+        self.linear_states.clear();
     }
 
-    /// Active filters in [`Filter::ALL`] (menu) order.
+    /// Replace the whole set from menu entries (fixed predicates + label
+    /// / Linear-state values). An empty iterator clears all axes.
+    pub fn replace_entries(&mut self, entries: impl IntoIterator<Item = FilterEntry>) {
+        self.active.clear();
+        self.labels.clear();
+        self.linear_states.clear();
+        for entry in entries {
+            match entry {
+                FilterEntry::Predicate(f) => {
+                    self.active.insert(f);
+                }
+                FilterEntry::Label(name) => {
+                    self.labels.insert(name);
+                }
+                FilterEntry::LinearState(name) => {
+                    self.linear_states.insert(name);
+                }
+            }
+        }
+    }
+
+    /// Number of active filters across every axis.
+    pub fn len(&self) -> usize {
+        self.active.len() + self.labels.len() + self.linear_states.len()
+    }
+
+    /// Active fixed filters in [`Filter::ALL`] (menu) order.
     pub fn iter(&self) -> impl Iterator<Item = Filter> + '_ {
         Filter::ALL.into_iter().filter(|f| self.active.contains(f))
     }
 
-    /// The header chips for the active filters, in menu order.
-    pub fn chips(&self) -> Vec<&'static str> {
-        self.iter().map(|f| f.label()).collect()
+    /// Selected label names (Label axis).
+    pub fn labels(&self) -> &BTreeSet<String> {
+        &self.labels
+    }
+
+    /// Selected Linear-state names (Linear-state axis).
+    pub fn linear_states(&self) -> &BTreeSet<String> {
+        &self.linear_states
+    }
+
+    /// Whether `entry` is currently active — drives the menu's
+    /// pre-checked rows.
+    pub fn contains_entry(&self, entry: &FilterEntry) -> bool {
+        match entry {
+            FilterEntry::Predicate(f) => self.active.contains(f),
+            FilterEntry::Label(name) => self.labels.contains(name),
+            FilterEntry::LinearState(name) => self.linear_states.contains(name),
+        }
+    }
+
+    /// The header chips for the active filters, in menu order (fixed
+    /// predicates first, then label then Linear-state values).
+    pub fn chips(&self) -> Vec<String> {
+        let mut chips: Vec<String> = self.iter().map(|f| f.label().to_string()).collect();
+        chips.extend(self.labels.iter().cloned());
+        chips.extend(self.linear_states.iter().cloned());
+        chips
     }
 
     /// Does `ctx`'s workspace pass the active set? Empty = accept all.
     /// Within an axis the active filters OR; across axes they AND.
     pub fn accepts(&self, ctx: &FilterCtx<'_>) -> bool {
-        if self.active.is_empty() {
+        if self.is_empty() {
             return true;
         }
-        for axis in [FilterAxis::State, FilterAxis::Role, FilterAxis::Kind] {
+        for axis in [
+            FilterAxis::State,
+            FilterAxis::Role,
+            FilterAxis::Kind,
+            FilterAxis::Priority,
+        ] {
             let mut present = false;
             let mut matched = false;
             for f in self.active.iter().filter(|f| f.axis() == axis) {
@@ -287,6 +459,29 @@ impl FilterSet {
                 }
             }
             if present && !matched {
+                return false;
+            }
+        }
+        // Label axis: OR within — the primary task must carry at least
+        // one of the selected labels.
+        if !self.labels.is_empty() {
+            let matched = ctx
+                .w
+                .primary_task()
+                .is_some_and(|t| t.labels.iter().any(|l| self.labels.contains(&l.name)));
+            if !matched {
+                return false;
+            }
+        }
+        // Linear-state axis: the primary task's native state name must be
+        // one of the selected states.
+        if !self.linear_states.is_empty() {
+            let matched = ctx
+                .w
+                .primary_task()
+                .and_then(|t| t.state_label.as_deref())
+                .is_some_and(|s| self.linear_states.contains(s));
+            if !matched {
                 return false;
             }
         }
@@ -343,10 +538,180 @@ mod tests {
             deletions: 0,
             kind: Some(kind),
             closes_issues: vec![],
+            priority: None,
+            state_label: None,
         };
         let mut ws = Workspace::from_task(task, now());
         ws.key = WorkspaceKey(key.into());
         ws
+    }
+
+    /// Build a workspace from a task the caller tweaks — lets the new
+    /// State predicates be exercised without a fixed fixture per field.
+    fn workspace_with(key: &str, tweak: impl FnOnce(&mut Task)) -> Workspace {
+        let mut task = Task {
+            id: TaskId {
+                source: "github".into(),
+                key: format!("owner/r#{key}"),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "x".into(),
+            repo: Some("owner/r".into()),
+            branch: Some("feature".into()),
+            base_branch: Some("main".into()),
+            updated_at: now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: Some(TaskKind::Pr),
+            closes_issues: vec![],
+            priority: None,
+            state_label: None,
+        };
+        tweak(&mut task);
+        let mut ws = Workspace::from_task(task, now());
+        ws.key = WorkspaceKey(key.into());
+        ws
+    }
+
+    #[test]
+    fn new_state_predicates_match_their_field() {
+        let agents = HashMap::new();
+        let matches = |ws: &Workspace, f: Filter| {
+            f.matches(&FilterCtx {
+                w: ws,
+                agents: &agents,
+            })
+        };
+
+        let draft = workspace_with("a", |t| t.state = TaskState::Draft);
+        assert!(matches(&draft, Filter::Draft));
+        assert!(!matches(&draft, Filter::InProgress));
+
+        let in_review = workspace_with("b", |t| t.state = TaskState::InReview);
+        assert!(matches(&in_review, Filter::InProgress));
+
+        let needs_reply = workspace_with("c", |t| t.needs_reply = true);
+        assert!(matches(&needs_reply, Filter::NeedsReply));
+
+        let behind = workspace_with("d", |t| t.is_behind_base = true);
+        assert!(matches(&behind, Filter::BehindBase));
+
+        let big = workspace_with("e", |t| {
+            t.additions = BIG_DIFF_LINES;
+            t.deletions = 0;
+        });
+        assert!(matches(&big, Filter::BigDiff));
+        let small = workspace_with("f", |t| t.additions = BIG_DIFF_LINES - 1);
+        assert!(!matches(&small, Filter::BigDiff));
+
+        // All new predicates live on the State axis.
+        for f in [
+            Filter::Draft,
+            Filter::InProgress,
+            Filter::NeedsReply,
+            Filter::BehindBase,
+            Filter::BigDiff,
+        ] {
+            assert_eq!(f.axis(), FilterAxis::State);
+        }
+    }
+
+    #[test]
+    fn label_and_linear_state_axes_filter_by_value() {
+        use lazybox_core::Label;
+        let agents = HashMap::new();
+        let accepts = |set: &FilterSet, ws: &Workspace| {
+            set.accepts(&FilterCtx {
+                w: ws,
+                agents: &agents,
+            })
+        };
+
+        let bug = workspace_with("a", |t| {
+            t.labels = vec![Label::new("bug"), Label::new("p1")];
+            t.state_label = Some("In Review".into());
+        });
+        let chore = workspace_with("b", |t| {
+            t.labels = vec![Label::new("chore")];
+            t.state_label = Some("Todo".into());
+        });
+
+        // Label axis: OR within.
+        let mut set = FilterSet::new();
+        set.replace_entries([FilterEntry::Label("bug".into())]);
+        assert!(accepts(&set, &bug));
+        assert!(!accepts(&set, &chore));
+
+        // Linear-state axis, AND-across with the label axis.
+        set.replace_entries([
+            FilterEntry::Label("bug".into()),
+            FilterEntry::LinearState("Todo".into()),
+        ]);
+        // `bug` has label bug but state In Review (not Todo) → rejected.
+        assert!(!accepts(&set, &bug));
+        // `chore` has state Todo but not label bug → rejected.
+        assert!(!accepts(&set, &chore));
+
+        // chips reflect every axis; clearing resets all.
+        set.replace_entries([
+            FilterEntry::Predicate(Filter::Unread),
+            FilterEntry::Label("bug".into()),
+            FilterEntry::LinearState("In Review".into()),
+        ]);
+        assert_eq!(set.chips(), vec!["unread", "bug", "In Review"]);
+        assert_eq!(set.len(), 3);
+        set.replace_entries(std::iter::empty());
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn priority_predicates_match_the_task_priority() {
+        let agents = HashMap::new();
+        let matches = |ws: &Workspace, f: Filter| {
+            f.matches(&FilterCtx {
+                w: ws,
+                agents: &agents,
+            })
+        };
+
+        let urgent = workspace_with("a", |t| t.priority = Some(Priority::Urgent));
+        assert!(matches(&urgent, Filter::PriorityUrgent));
+        assert!(!matches(&urgent, Filter::PriorityLow));
+
+        let low = workspace_with("b", |t| t.priority = Some(Priority::Low));
+        assert!(matches(&low, Filter::PriorityLow));
+
+        // No priority (e.g. a GitHub task) matches no priority predicate.
+        let none = workspace_with("c", |t| t.priority = None);
+        for f in [
+            Filter::PriorityUrgent,
+            Filter::PriorityHigh,
+            Filter::PriorityMedium,
+            Filter::PriorityLow,
+        ] {
+            assert_eq!(f.axis(), FilterAxis::Priority);
+            assert!(!matches(&none, f));
+        }
     }
 
     #[test]
@@ -427,6 +792,9 @@ mod tests {
         set.toggle(Filter::Issue);
         set.toggle(Filter::CiFailing);
         // Insertion order was Issue then CiFailing, but chips follow ALL order.
-        assert_eq!(set.chips(), vec!["ci-failing", "issue"]);
+        assert_eq!(
+            set.chips(),
+            vec!["ci-failing".to_string(), "issue".to_string()]
+        );
     }
 }

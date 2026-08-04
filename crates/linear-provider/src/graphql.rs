@@ -12,12 +12,27 @@ pub const VIEWER_QUERY: &str = r#"
 query { viewer { id name } }
 "#;
 
+// Scope: open issues (`state.type` not completed/canceled) that are
+// mine — assigned to me, created by me, OR that I subscribe to (Linear
+// auto-subscribes you when you're @-mentioned or comment, so this also
+// covers involvement). Without the `or` clause the `issues` connection
+// returns EVERY open issue in every team the token can see (the whole
+// workspace), which floods the inbox and the renderer. `isMe` is
+// evaluated server-side against the token's viewer, so no viewer id
+// needs threading into the query.
 const ISSUES_QUERY: &str = r#"
 query($after: String) {
   issues(
     first: 50,
     after: $after,
-    filter: { state: { type: { nin: ["completed", "canceled"] } } }
+    filter: {
+      state: { type: { nin: ["completed", "canceled"] } },
+      or: [
+        { assignee: { isMe: { eq: true } } },
+        { creator: { isMe: { eq: true } } },
+        { subscribers: { some: { isMe: { eq: true } } } }
+      ]
+    }
   ) {
     pageInfo { hasNextPage endCursor }
     nodes {
@@ -235,6 +250,11 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         deletions: 0,
         closes_issues: vec![],
         kind: Some(TaskKind::Issue),
+        // Linear's numeric issue priority (0 = none → `None`).
+        priority: issue.priority.and_then(lazybox_core::Priority::from_linear),
+        // Preserve Linear's exact workflow-state name ("In Review",
+        // "Todo", …), which `state` above collapses to a canonical set.
+        state_label: Some(issue.state.name.clone()),
     }
 }
 

@@ -5316,6 +5316,8 @@ mod tests {
             deletions: 0,
             closes_issues: vec![],
             kind: Some(kind),
+            priority: None,
+            state_label: None,
         }
     }
 

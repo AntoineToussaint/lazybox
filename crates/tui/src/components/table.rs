@@ -50,9 +50,9 @@ pub enum ColumnWidth {
 /// padding-spaces sit: to the *right* of the content (Left — default),
 /// to the *left* (Right), or split evenly on both sides (Center, with
 /// any odd cell going to the right). Sidebar's trailer columns (unread,
-/// status pill, relative time) are Right; the title column is Left; the
-/// passive badge slots (`✎` / `]N` / `⎇` / `ARM`) are Center so a
-/// glyph sits mid-slot and short counts don't cling to one edge.
+/// status pill, packed badge cluster, relative time) are Right; the title
+/// column is Left. Center splits padding on both sides so a lone glyph
+/// sits mid-slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {
     #[default]

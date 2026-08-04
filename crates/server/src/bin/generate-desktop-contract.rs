@@ -18,8 +18,8 @@ use lazybox_server::api_gateway::{
     TERMINAL_SERVER_FRAME_RESYNC_UNAVAILABLE, TERMINAL_SERVER_FRAME_SCROLLBACK,
     TERMINAL_SERVER_FRAME_SNAPSHOT, TERMINAL_SERVER_FRAME_TERMINAL_ID_OFFSET,
     TERMINAL_WRITE_BYTES_OFFSET, TERMINAL_WRITE_INTENT_COMPOSE, TERMINAL_WRITE_INTENT_OFFSET,
-    TERMINAL_WRITE_INTENT_SUBMIT, TERMINAL_WRITE_INTENT_VIEW, UnsupportedFingerprintResponse,
-    UnsupportedProtocolResponse, WorkspacesResponse,
+    TERMINAL_WRITE_INTENT_SUBMIT, TERMINAL_WRITE_INTENT_VIEW, UnsupportedProtocolResponse,
+    WorkspacesResponse,
 };
 use lazybox_tui_core::inbox::{Filter, FilterAxis, FilterMenuItem};
 use lazybox_tui_core::snippets::{PickerRow, SnippetGroup, SnippetPickerView};
@@ -42,7 +42,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     HealthResponse::export_all(&config)?;
     ProtocolResponse::export_all(&config)?;
     UnsupportedProtocolResponse::export_all(&config)?;
-    UnsupportedFingerprintResponse::export_all(&config)?;
     WorkspacesResponse::export_all(&config)?;
     DesktopCommand::export_all(&config)?;
     DesktopEvent::export_all(&config)?;

@@ -477,6 +477,9 @@ async function initializeDesktopMetadata(): Promise<void> {
     defaultAgent = info.default_agent;
     configuredRepositories = info.repositories;
     agentLabel.textContent = defaultAgent;
+    if (info.protocol_notice) {
+      setStatus(info.protocol_notice);
+    }
     desktopMetadataLoaded = true;
   } catch (error) {
     desktopMetadataLoaded = false;

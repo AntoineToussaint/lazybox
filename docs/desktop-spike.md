@@ -28,9 +28,16 @@ the foreground API request restore.
 
 `GET /v1/protocol` reports the desktop protocol version, Rust wire fingerprint,
 daemon build, binary terminal media type, and frame/write limits. Desktop
-requests send `x-lazybox-protocol-version` and
-`x-lazybox-protocol-fingerprint`; an unsupported value receives HTTP 426 with
-the requested and supported values.
+requests send `x-lazybox-protocol-version`; an unsupported version receives
+HTTP 426 with the requested and supported values.
+
+The version is the compatibility gate. The fingerprint over-approximates the
+wire contract — a `Cargo.lock` bump or a comment edit flips it — so across a
+remote-daemon hop (#815) two independently-built binaries routinely disagree on
+it while speaking the same wire. It is therefore advisory: the client compares
+the daemon's `/v1/protocol` fingerprint with its own and, on a mismatch under a
+compatible version, surfaces a "these builds differ, update one" notice instead
+of aborting the connection.
 
 TypeScript definitions under `apps/desktop/src/generated/` are generated from
 the Rust desktop command/event DTOs, core model, and gateway DTOs:

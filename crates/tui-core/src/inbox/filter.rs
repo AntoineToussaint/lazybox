@@ -89,7 +89,7 @@ pub enum Filter {
     NeedsReply,
     /// The PR's head branch is behind its base and can be updated.
     BehindBase,
-    /// A large diff — at least [`BIG_DIFF_LINES`] lines changed.
+    /// A large diff — at least `BIG_DIFF_LINES` lines changed.
     BigDiff,
     // ── Role ───────────────────────────────────────────────────────
     Author,

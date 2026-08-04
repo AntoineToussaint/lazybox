@@ -4,6 +4,7 @@ import type { CheckRun } from "./CheckRun";
 import type { CiStatus } from "./CiStatus";
 import type { Label } from "./Label";
 import type { Mergeable } from "./Mergeable";
+import type { Priority } from "./Priority";
 import type { ReviewStatus } from "./ReviewStatus";
 import type { TaskId } from "./TaskId";
 import type { TaskKind } from "./TaskKind";
@@ -117,4 +118,17 @@ closes_issues: Array<TaskId>,
  * predate the field; [`Task::is_pr`] falls back to the URL heuristic
  * in that case. Prefer this over any URL sniffing.
  */
-kind: TaskKind | null, };
+kind: TaskKind | null,
+/**
+ * Priority the source assigns (Linear issue priority). `None` for
+ * GitHub and for snapshots predating the field.
+ */
+priority: Priority | null,
+/**
+ * The source's native workflow-state name — Linear's `In Review` /
+ * `Todo` / `Blocked`. Distinct from [`Task::state`], which collapses
+ * every source into a small canonical set; this preserves the exact
+ * column for filtering/display. `None` for providers without named
+ * states (GitHub) and for older snapshots.
+ */
+state_label: string | null, };

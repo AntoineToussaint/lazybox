@@ -73,23 +73,30 @@ pub(crate) fn build_policy_rows(
     match ws.pr.as_ref() {
         Some(pr) => {
             // 1. merge-on-green (client-side). Superseded by native
-            //    auto-merge when that's on (precedence, issue #363).
+            //    auto-merge when that's on (precedence, issue #363). The
+            //    detail spells out the durability difference the ` ARM `
+            //    pill can't (#794): lazybox merges it, but only while
+            //    lazybox is running.
             let on = ws.auto_merge_on_green;
             let detail = if pr.auto_merge_enabled {
-                "  (GitHub auto-merge takes over)"
+                "  (lazybox · GitHub auto-merge takes over)"
             } else {
-                ""
+                "  (lazybox · merges only while lazybox runs)"
             };
             labels.push(format!("{} merge on green{detail}", glyph(on)));
             toggles.push(PolicyToggle::MergeOnGreen);
 
-            // 2. GitHub-native auto-merge — read-only status.
+            // 2. GitHub-native auto-merge — read-only status. Named as the
+            //    durable counterpart (#794): GitHub lands the PR server-side,
+            //    so it works even with lazybox closed.
             labels.push(format!(
-                "{} GitHub auto-merge  (managed on github.com)",
+                "{} GitHub auto-merge  (GitHub · merges even when lazybox is closed)",
                 glyph(pr.auto_merge_enabled)
             ));
             toggles.push(PolicyToggle::Info(
-                "GitHub-native auto-merge is set on github.com, not in lazybox".into(),
+                "GitHub-native auto-merge is set on github.com, not in lazybox — it merges \
+                 server-side even while lazybox is closed"
+                    .into(),
             ));
 
             // 3 + 4. per-session auto-fix arms.
@@ -2368,6 +2375,33 @@ mod tests {
             ci_auto_fix_row(&["no-auto-fix"], lazybox_core::PolicyArm::Arm, true).starts_with('●')
         );
         assert!(ci_auto_fix_row(&[], lazybox_core::PolicyArm::Disarm, true).starts_with('○'));
+    }
+
+    /// #794: the two merge-on-green rows must state, in words, *who*
+    /// merges and whether it survives closing lazybox — the ` ARM ` /
+    /// ` AUTO ` pills look alike, so the decision surface has to spell out
+    /// the durability difference.
+    #[test]
+    fn merge_rows_spell_out_durability() {
+        let (rows, _) = build_policy_rows(
+            &pr_workspace(&[], lazybox_core::PolicyArm::Default),
+            true,
+            &["no-auto-fix".into()],
+        );
+        // Row 0: lazybox client-side merge-on-green.
+        assert!(rows[0].contains("merge on green"), "{:?}", rows[0]);
+        assert!(
+            rows[0].contains("lazybox") && rows[0].contains("only while lazybox runs"),
+            "merge-on-green row must name lazybox and its while-running limit: {:?}",
+            rows[0]
+        );
+        // Row 1: GitHub-native, durable.
+        assert!(rows[1].contains("GitHub auto-merge"), "{:?}", rows[1]);
+        assert!(
+            rows[1].contains("even when lazybox is closed"),
+            "GitHub auto-merge row must name its offline durability: {:?}",
+            rows[1]
+        );
     }
 
     fn dto_with(

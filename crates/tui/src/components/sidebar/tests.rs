@@ -2190,6 +2190,156 @@ mod broadcast_select_tests {
         assert!(screen.contains("FIX"), "compact row pill is still visible");
     }
 
+    /// #794: the focused row's merge automation is spelled out in the
+    /// header so the durability difference the ` ARM ` / ` AUTO ` pills
+    /// can't show is legible. lazybox's client-side arm names its
+    /// while-running limit; GitHub-native auto-merge names that it works
+    /// offline, and wins the header when both are set.
+    #[test]
+    fn focused_merge_automation_is_explained_in_the_sidebar_header() {
+        // lazybox client-side arm.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut armed = pr_ws("https://github.com/o/r/pull/1");
+        armed.auto_merge_on_green = true;
+        sb.workspaces.insert(SessionKey::from(&armed.key), armed);
+        sb.recompute_visible();
+        let header = header_at(&mut sb, 60);
+        assert!(header.contains("MERGE ON GREEN"), "{header:?}");
+        assert!(header.contains("lazybox only"), "{header:?}");
+
+        // GitHub-native auto-merge takes precedence in the label.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut both = pr_ws("https://github.com/o/r/pull/1");
+        both.auto_merge_on_green = true;
+        both.pr.as_mut().expect("pr").auto_merge_enabled = true;
+        sb.workspaces.insert(SessionKey::from(&both.key), both);
+        sb.recompute_visible();
+        let header = header_at(&mut sb, 60);
+        assert!(header.contains("AUTO-MERGE · GitHub"), "{header:?}");
+        assert!(header.contains("works offline"), "{header:?}");
+    }
+
+    /// Render the header (row 2) at an arbitrary width.
+    fn header_at(sb: &mut Sidebar, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(width, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, 2)].symbol())
+            .collect()
+    }
+
+    fn pr_ws(url: &str) -> Workspace {
+        let mut t = base_task();
+        t.url = url.into();
+        let mut w = Workspace::from_task(t, chrono::Utc::now());
+        w.name = "Alpha".into();
+        w
+    }
+
+    /// #794 regression: the merge-automation label must never render as a
+    /// mid-word fragment. The old row-2 code pushed the full label and let
+    /// the `Paragraph` hard-clip it, so at ~37 cells the durability word
+    /// truncated to `works offli…` — dropping the exact signal the label
+    /// exists to convey. The label now drops whole when it doesn't fit.
+    #[test]
+    fn focused_merge_label_is_shown_whole_or_not_at_all() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut both = pr_ws("https://github.com/o/r/pull/1");
+        both.auto_merge_on_green = true;
+        both.pr.as_mut().expect("pr").auto_merge_enabled = true;
+        sb.workspaces.insert(SessionKey::from(&both.key), both);
+        sb.recompute_visible();
+
+        for width in [22u16, 26, 30, 34, 37, 38, 40, 50, 60] {
+            let header = header_at(&mut sb, width);
+            // If any of the label shows, the whole durable phrase shows —
+            // never a fragment missing "works offline".
+            if header.contains("AUTO-MERGE") {
+                assert!(
+                    header.contains("works offline"),
+                    "width {width} rendered a truncated fragment: {header:?}"
+                );
+            }
+        }
+        // Too narrow to fit the label at all → it is fully absent, not a stub.
+        assert!(
+            !header_at(&mut sb, 22).contains("AUTO-MERGE"),
+            "a label that can't fit must drop whole"
+        );
+        // Generous width → present whole.
+        let wide = header_at(&mut sb, 60);
+        assert!(wide.contains("AUTO-MERGE · GitHub"), "{wide:?}");
+        assert!(wide.contains("works offline"), "{wide:?}");
+    }
+
+    /// #794 regression: dropping the (higher-priority) merge label under
+    /// width pressure must leave the lower-priority global tally intact and
+    /// whole — a group yields cleanly instead of a clip mangling the line.
+    #[test]
+    fn narrow_header_drops_merge_label_but_keeps_ci_tally() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut ws = pr_ws("https://github.com/o/r/pull/1");
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().expect("pr").ci = lazybox_core::CiStatus::Failure;
+        sb.workspaces.insert(SessionKey::from(&ws.key), ws);
+        sb.recompute_visible();
+        assert_eq!(sb.ci_failing_count(), 1, "the failing PR is counted");
+
+        // 24 cells (inner 22) can't hold the 31-cell " MERGE ON GREEN ·
+        // lazybox only " label, but easily holds the "1 CI" tally.
+        let header = header_at(&mut sb, 24);
+        assert!(
+            !header.contains("MERGE ON GREEN"),
+            "merge label must drop whole when it can't fit: {header:?}"
+        );
+        assert!(
+            header.contains("CI"),
+            "the global CI tally survives the merge label being dropped: {header:?}"
+        );
+    }
+
+    /// #794: the width-gating applies to the pre-existing global tally
+    /// too, not just the merge label — a tally that can't fit whole behind
+    /// a higher-priority group drops entirely rather than clipping to a
+    /// fragment like `1 C`. The old row-2 code pushed every group and let
+    /// the `Paragraph` hard-clip, so this is the regression guard for the
+    /// generalized behavior.
+    #[test]
+    fn global_tally_drops_whole_behind_a_wider_merge_label() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut ws = pr_ws("https://github.com/o/r/pull/1");
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().expect("pr").ci = lazybox_core::CiStatus::Failure;
+        sb.workspaces.insert(SessionKey::from(&ws.key), ws);
+        sb.recompute_visible();
+        assert_eq!(sb.ci_failing_count(), 1, "the failing PR is counted");
+
+        // Wide: the 31-cell " MERGE ON GREEN · lazybox only " label and the
+        // "1 CI" tally both render.
+        let wide = header_at(&mut sb, 60);
+        assert!(wide.contains("lazybox only"), "{wide:?}");
+        assert!(wide.contains("1 CI"), "{wide:?}");
+
+        // width 38 → inner 36: the label fits, but label + 2-cell separator
+        // + 4-cell tally (37) does not. The tally drops whole; the old clip
+        // would have sliced it to "1 C" trailing the label.
+        let tight = header_at(&mut sb, 38);
+        assert!(
+            tight.contains("lazybox only"),
+            "label still whole: {tight:?}"
+        );
+        assert!(
+            tight.trim_end().ends_with("only"),
+            "the tally must drop whole, not clip to a fragment: {tight:?}"
+        );
+    }
+
     /// `v` marks the cursor row and the mark survives navigating away
     /// — the selection is keyed by workspace, not row index.
     #[test]

@@ -33,7 +33,8 @@ impl Sidebar {
         // V1-style header strip:
         //   row 0: LAZYBOX vX.Y.Z  ● N new  ? N input        N items  7d
         //   row 1: s  filter (needs:reply ci:failed ...)
-        //   row 2: N CI  N review               (omitted when both 0)
+        //   row 2: <focused merge/auto-fix automation>  N CI  N review
+        //          (each group width-gated; omitted when it can't fit)
         //   row 3: ── divider ────────────────
         //   row 4: blank
         //   row 5+: content
@@ -336,61 +337,142 @@ impl Sidebar {
             self.search_chip_rect = None;
         }
 
-        // Row 2 — focused automation plus stats summary.
+        // Row 2 — focused automation plus stats summary. Assembled
+        // width-aware (like the row-0 summary): each group is appended only
+        // if it fits whole in the header, so a lower-priority group drops
+        // cleanly rather than a hard clip slicing a label mid-word. That
+        // matters most for the merge-automation phrase (#794) — a truncated
+        // " AUTO-MERGE · GitHub, works offli…" would drop exactly the
+        // durability word that is the point of the label. Priority, highest
+        // first: focused merge automation, then armed auto-fix, then the
+        // global CI / review tallies. The focused row's own automation
+        // outranks the global tallies deliberately — it is the context for
+        // the row under the cursor, not an inbox-wide count.
+        let focused_workspace = self.visible.get(self.cursor).and_then(|row| match row {
+            VisibleRow::Workspace(key) => self.workspaces.get(key),
+            _ => None,
+        });
+        // Spell out the focused row's merge automation in words — the
+        // compact ` ARM ` / ` AUTO ` pills look alike but guarantee
+        // different things (#794). GitHub-native auto-merge wins when both
+        // are set (it merges server-side, even with lazybox closed), so it
+        // takes the label; otherwise the lazybox arm names its while-running
+        // limit. Colored to match each pill: accent for GitHub, green for
+        // the lazybox arm.
+        let focused_merge = focused_workspace.and_then(|workspace| {
+            if workspace
+                .pr
+                .as_ref()
+                .is_some_and(|pr| pr.auto_merge_enabled)
+            {
+                Some((" AUTO-MERGE · GitHub, works offline ", theme.accent))
+            } else if workspace.auto_merge_on_green {
+                Some((" MERGE ON GREEN · lazybox only ", theme.success))
+            } else {
+                None
+            }
+        });
+        let focused_auto_fix = focused_workspace.and_then(|workspace| {
+            let ci = workspace.policies.arm(lazybox_core::AutoFixKind::CiFailure)
+                == lazybox_core::PolicyArm::Arm;
+            let conflict = workspace
+                .policies
+                .arm(lazybox_core::AutoFixKind::MergeConflict)
+                == lazybox_core::PolicyArm::Arm;
+            match (ci, conflict) {
+                (true, true) => Some(" AUTO-FIX ON · CI+CONFLICT "),
+                (true, false) => Some(" AUTO-FIX ON · CI FAIL "),
+                (false, true) => Some(" AUTO-FIX ON · CONFLICT "),
+                (false, false) => None,
+            }
+        });
+
+        // Append `group` (with a 2-cell separator once the line is
+        // non-empty) only when the whole group still fits `budget`, so a
+        // group never renders as a mid-content fragment.
+        fn try_append<'a>(
+            dst: &mut Vec<Span<'a>>,
+            used: &mut usize,
+            budget: usize,
+            group: Vec<Span<'a>>,
+        ) {
+            let sep = if dst.is_empty() { 0 } else { 2 };
+            let width: usize = group
+                .iter()
+                .map(|span| visual_width(span.content.as_ref()))
+                .sum();
+            if *used + sep + width > budget {
+                return;
+            }
+            if sep > 0 {
+                dst.push(Span::raw("  "));
+            }
+            dst.extend(group);
+            *used += sep + width;
+        }
+
         let mut stats_spans: Vec<Span> = Vec::new();
-        let focused_auto_fix = self
-            .visible
-            .get(self.cursor)
-            .and_then(|row| match row {
-                VisibleRow::Workspace(key) => self.workspaces.get(key),
-                _ => None,
-            })
-            .and_then(|workspace| {
-                let ci = workspace.policies.arm(lazybox_core::AutoFixKind::CiFailure)
-                    == lazybox_core::PolicyArm::Arm;
-                let conflict = workspace
-                    .policies
-                    .arm(lazybox_core::AutoFixKind::MergeConflict)
-                    == lazybox_core::PolicyArm::Arm;
-                match (ci, conflict) {
-                    (true, true) => Some(" AUTO-FIX ON · CI+CONFLICT "),
-                    (true, false) => Some(" AUTO-FIX ON · CI FAIL "),
-                    (false, true) => Some(" AUTO-FIX ON · CONFLICT "),
-                    (false, false) => None,
-                }
-            });
+        let mut used = 0usize;
+        let budget = inner_width as usize;
+        if let Some((label, bg)) = focused_merge {
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![Span::styled(
+                    label,
+                    Style::default()
+                        .bg(bg)
+                        .fg(ratatui::style::Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+        }
         if let Some(label) = focused_auto_fix {
-            stats_spans.push(Span::styled(
-                label,
-                Style::default()
-                    .bg(theme.warn)
-                    .fg(ratatui::style::Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            ));
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![Span::styled(
+                    label,
+                    Style::default()
+                        .bg(theme.warn)
+                        .fg(ratatui::style::Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
         }
         if ci_failing > 0 {
-            if !stats_spans.is_empty() {
-                stats_spans.push(Span::raw("  "));
-            }
-            stats_spans.push(Span::styled(
-                ci_failing.to_string(),
-                Style::default()
-                    .fg(theme.error)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            stats_spans.push(Span::styled(" CI", Style::default().fg(theme.text_dim)));
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![
+                    Span::styled(
+                        ci_failing.to_string(),
+                        Style::default()
+                            .fg(theme.error)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" CI", Style::default().fg(theme.text_dim)),
+                ],
+            );
         }
         if review_pending > 0 {
-            if !stats_spans.is_empty() {
-                stats_spans.push(Span::raw("  "));
-            }
-            stats_spans.push(Span::styled(
-                review_pending.to_string(),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            stats_spans.push(Span::styled(" review", Style::default().fg(theme.text_dim)));
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![
+                    Span::styled(
+                        review_pending.to_string(),
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" review", Style::default().fg(theme.text_dim)),
+                ],
+            );
         }
         if !stats_spans.is_empty() && area.height >= 3 {
             let row2 = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);

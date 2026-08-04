@@ -282,6 +282,101 @@ mod provider_resolution_tests {
     }
 }
 
+/// A user-initiated mutation that trips GitHub's secondary rate limit
+/// should not hard-fail — GitHub resets the limit within a window and the
+/// write can simply be retried. These bounds keep that retry queue honest:
+/// it gives up after `MUTATION_MAX_ATTEMPTS` tries or `MUTATION_MAX_WAIT_SECS`
+/// of total waiting, whichever comes first, and only then surfaces a real
+/// (humanized) failure.
+const MUTATION_MAX_ATTEMPTS: u32 = 5;
+const MUTATION_MAX_WAIT_SECS: u64 = 600;
+/// GraphQL mutation rate-limit errors carry no `resetAt` (that only rides
+/// the header path), so fall back to a modest wait the loop then backs off.
+const MUTATION_RETRY_FALLBACK_SECS: u64 = 60;
+
+/// Bounded retry queue for a user-initiated GitHub mutation (merge,
+/// update-branch, …) that hits GitHub's secondary rate limit.
+///
+/// A rate-limited write comes back as a `Retryable` [`ProviderError`]
+/// carrying the reset hint (`crate`-side, `mutation_provider_error` in the
+/// GitHub client lifts a secondary-limit GraphQL error to that). Rather
+/// than hard-fail with a raw red `×` the user must clear and re-press, we
+/// surface a live, non-scary "queued — retrying at HH:MM" notice, wait out
+/// the window (honoring the hint, with per-attempt backoff + jitter so
+/// lazybox doesn't re-collide with `gh`/agents on the shared token), and
+/// retry. Only once the bounds above are exhausted does the final error
+/// reach the caller.
+///
+/// Every non-retryable failure (a genuine GitHub rejection: conflict,
+/// blocked checks, permission) returns immediately — those are not rate
+/// limits and must surface at once.
+async fn run_mutation_with_retry<F, Fut>(
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    op: &str,
+    mut attempt: F,
+) -> Result<(), lazybox_core::ProviderError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), lazybox_core::ProviderError>>,
+{
+    let mut attempt_num = 0u32;
+    let mut waited = 0u64;
+    loop {
+        attempt_num += 1;
+        let err = match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        let base = err
+            .retry_after_secs()
+            .unwrap_or(MUTATION_RETRY_FALLBACK_SECS);
+        let wait = mutation_retry_wait(base, attempt_num);
+        if !err.is_retryable()
+            || attempt_num >= MUTATION_MAX_ATTEMPTS
+            || waited.saturating_add(wait) > MUTATION_MAX_WAIT_SECS
+        {
+            return Err(err);
+        }
+        let retry_at = (chrono::Local::now() + chrono::Duration::seconds(wait as i64))
+            .format("%H:%M")
+            .to_string();
+        let _ = bus.send(Event::provider_error_retryable(
+            op,
+            format!("{op} queued — GitHub rate-limited, retrying at {retry_at}"),
+        ));
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        waited = waited.saturating_add(wait);
+    }
+}
+
+/// Wait before the next mutation attempt: honor the reset hint as the
+/// floor, back off across attempts, and add ≤20% jitter so lazybox doesn't
+/// re-collide with `gh`/agents on the shared token's secondary-limit
+/// bucket. Capped at [`MUTATION_MAX_WAIT_SECS`].
+fn mutation_retry_wait(base_secs: u64, attempt: u32) -> u64 {
+    let base = base_secs.clamp(1, MUTATION_MAX_WAIT_SECS);
+    let scaled = base
+        .saturating_mul(u64::from(attempt))
+        .min(MUTATION_MAX_WAIT_SECS);
+    let span = (base / 5).max(1);
+    let jitter = u64::from(chrono::Utc::now().timestamp_subsec_nanos()) % (span + 1);
+    scaled.saturating_add(jitter).min(MUTATION_MAX_WAIT_SECS)
+}
+
+/// Humanize a mutation's final failure for the footer — one clean
+/// sentence, never a raw GraphQL/JSON blob. An exhausted rate-limit retry
+/// says so plainly; every other failure is the provider's own
+/// (already-humanized) user message.
+fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderError) -> String {
+    if err.is_retryable() {
+        format!(
+            "GitHub is rate-limiting {op} right now — gave up after retrying; try again shortly"
+        )
+    } else {
+        err.user_message()
+    }
+}
+
 /// Handle `Command::MergePr` — the MANUAL merge path (`g m`): load the
 /// workspace, recover the PR's GraphQL node id from its primary task,
 /// and ship a `mergePullRequest` mutation. On success the next poll
@@ -323,19 +418,24 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
             return;
         }
     };
-    if let Err(e) = provider.merge(&ws, None).await {
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "merge", || provider.merge(&ws, None)).await
+    {
         tracing::warn!("merge {workspace_key}: {e:?}");
         // A user-initiated merge that GitHub rejected is not a
         // transient blip — surface it as a distinct, persistent error
         // (with the reason) so the user can't mistake it for "the
-        // keypress did nothing." The PR stays Open/actionable.
+        // keypress did nothing." The PR stays Open/actionable. A
+        // secondary rate limit never lands here unless the retry queue
+        // exhausted its window; then the reason is a humanized sentence,
+        // not a raw GraphQL blob.
         let label = pr_label
             .clone()
             .unwrap_or_else(|| workspace_key.as_str().to_string());
         let _ = config.bus.send(Event::PrMergeFailed {
             workspace_key: workspace_key.clone(),
             pr_label: label,
-            reason: e.to_string(),
+            reason: humanize_mutation_failure("merge", &e),
         });
         return;
     }
@@ -404,12 +504,14 @@ pub async fn handle_update_branch(config: &ServerConfig, workspace_key: Workspac
             return;
         }
     };
-    if let Err(e) = provider.update_branch(&ws).await {
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "update-branch", || provider.update_branch(&ws)).await
+    {
         tracing::warn!("update-branch {workspace_key}: {e:?}");
         let _ = config.bus.send(Event::BranchUpdateFailed {
             workspace_key: workspace_key.clone(),
             pr_label,
-            reason: e.to_string(),
+            reason: humanize_mutation_failure("update-branch", &e),
         });
         return;
     }
@@ -4409,5 +4511,125 @@ mod fetch_repo_labels_tests {
             }
             other => panic!("expected a repo-labels ProviderError, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod mutation_retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// The #804 core fix: a secondary-rate-limited mutation is queued and
+    /// retried against the reset window, succeeding without a manual
+    /// re-press — and a live, non-scary "queued — retrying at HH:MM" notice
+    /// shows in place of a red `×`.
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_mutation_retries_then_succeeds() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(16);
+        let calls = AtomicU32::new(0);
+        let result = run_mutation_with_retry(&bus, "merge", || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(lazybox_core::ProviderError::retryable_after(
+                        "github",
+                        "You have exceeded a secondary rate limit",
+                        1,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "queued retry must succeed: {result:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "one failure, then one retry"
+        );
+
+        let ev = rx.try_recv().expect("a queued notice must be broadcast");
+        match ev {
+            Event::ProviderError {
+                source,
+                message,
+                kind,
+                ..
+            } => {
+                assert_eq!(source, "merge");
+                assert!(
+                    message.contains("queued"),
+                    "live status names the queue: {message}"
+                );
+                assert!(
+                    message.contains("retrying at"),
+                    "status shows the retry time: {message}"
+                );
+                assert!(!message.contains('{'), "status is JSON-free: {message}");
+                assert_eq!(
+                    kind, "retryable",
+                    "a queued notice must be non-scary / auto-fading"
+                );
+            }
+            other => panic!("expected a queued ProviderError notice, got {other:?}"),
+        }
+    }
+
+    /// A genuine rejection (conflict, blocked checks) is not a rate limit:
+    /// it must surface at once, with no retry and no queued notice, and its
+    /// footer reason stays a clean human sentence.
+    #[tokio::test(start_paused = true)]
+    async fn non_retryable_mutation_fails_immediately() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(16);
+        let calls = AtomicU32::new(0);
+        let result = run_mutation_with_retry(&bus, "merge", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Err(lazybox_core::ProviderError::permanent(
+                    "github",
+                    "GraphQL error: Pull request is not mergeable",
+                ))
+            }
+        })
+        .await;
+
+        let err = result.expect_err("a real rejection must fail");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no retry on a permanent error"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no queued notice for a permanent error"
+        );
+
+        let reason = humanize_mutation_failure("merge", &err);
+        assert!(
+            reason.contains("Pull request is not mergeable"),
+            "got {reason}"
+        );
+        assert!(
+            !reason.contains('{'),
+            "footer reason stays JSON-free: {reason}"
+        );
+    }
+
+    #[test]
+    fn retry_wait_honors_hint_floor_and_caps() {
+        assert!(
+            mutation_retry_wait(1, 1) >= 1,
+            "never zero (would hot-loop)"
+        );
+        assert!(
+            mutation_retry_wait(60, 3) >= 60,
+            "the reset hint is the floor, never undercut"
+        );
+        assert!(
+            mutation_retry_wait(MUTATION_MAX_WAIT_SECS + 1_000, 5) <= MUTATION_MAX_WAIT_SECS,
+            "a huge hint is capped so the queue stays bounded"
+        );
     }
 }

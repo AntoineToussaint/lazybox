@@ -234,6 +234,32 @@ impl GqlError {
             .contains("could not resolve to")
     }
 
+    /// True when GitHub is rate-limiting this mutation. GitHub signals it
+    /// inside the GraphQL `errors` array (HTTP 200) either with a
+    /// top-level `type: "RATE_LIMITED"` or a message naming the
+    /// secondary / abuse limit. Distinct from [`is_not_visible`] so the
+    /// mutation path can queue + retry against the reset window instead of
+    /// hard-failing with the raw error.
+    pub fn is_rate_limited(&self) -> bool {
+        if let Some(t) = &self.error_type
+            && t.eq_ignore_ascii_case("RATE_LIMITED")
+        {
+            return true;
+        }
+        let m = self.message.to_ascii_lowercase();
+        m.contains("secondary rate limit")
+            || m.contains("rate limit exceeded")
+            || m.contains("abuse detection")
+    }
+
+    /// The human-readable message alone — no `path` / `extensions` debug
+    /// text. `full()` is for the log file; `human()` is what reaches the
+    /// footer, so a rate-limit error never dumps its serialized
+    /// `{…,"typeName":"Mutation"}` extensions blob at the user.
+    pub fn human(&self) -> String {
+        self.message.trim().to_string()
+    }
+
     /// Human-readable debug line including path + extensions, not just the message.
     pub fn full(&self) -> String {
         let mut s = self.message.clone();
@@ -3102,6 +3128,50 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gql_error(message: &str, error_type: Option<&str>, extensions: Option<&str>) -> GqlError {
+        GqlError {
+            message: message.to_string(),
+            error_type: error_type.map(str::to_string),
+            path: None,
+            extensions: extensions.map(|e| serde_json::from_str(e).unwrap()),
+            locations: None,
+        }
+    }
+
+    #[test]
+    fn rate_limited_detects_type_and_message() {
+        assert!(gql_error("boom", Some("RATE_LIMITED"), None).is_rate_limited());
+        assert!(
+            gql_error(
+                "You have exceeded a secondary rate limit. Please wait a few minutes.",
+                None,
+                None,
+            )
+            .is_rate_limited()
+        );
+        assert!(gql_error("API rate limit exceeded for user", None, None).is_rate_limited());
+        assert!(
+            !gql_error("Pull request is not mergeable", Some("UNPROCESSABLE"), None)
+                .is_rate_limited()
+        );
+    }
+
+    #[test]
+    fn human_strips_extensions_and_path() {
+        // The exact shape from #804: a rate-limit error whose extensions
+        // carry `typeName`. `full()` dumps that JSON; `human()` must not.
+        let err = gql_error(
+            "You have exceeded a secondary rate limit.",
+            Some("RATE_LIMITED"),
+            Some(r#"{"field":"rateLimit","typeName":"Mutation"}"#),
+        );
+        assert_eq!(err.human(), "You have exceeded a secondary rate limit.");
+        assert!(!err.human().contains("typeName"));
+        assert!(!err.human().contains('{'));
+        // `full()` keeps the diagnostic detail for the log file.
+        assert!(err.full().contains("typeName"));
+    }
 
     #[test]
     fn test_extract_repo_from_url() {

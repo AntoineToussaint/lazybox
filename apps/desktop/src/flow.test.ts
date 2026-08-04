@@ -210,10 +210,15 @@ describe("credential-free desktop workflow", () => {
     button("shell-button").click();
     await vi.waitFor(() => {
       expect(commandCalls()).toContainEqual({
-        SpawnAgent: { session_key: "github-o-r-42", agent: "codex" },
+        SpawnAgent: {
+          session_key: "github-o-r-42",
+          agent: "codex",
+          model_alias: null,
+          on_main: false,
+        },
       });
       expect(commandCalls()).toContainEqual({
-        SpawnShell: { session_key: "github-o-r-42" },
+        SpawnShell: { session_key: "github-o-r-42", on_main: false },
       });
     });
 

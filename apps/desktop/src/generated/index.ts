@@ -14,6 +14,7 @@ export type { Filter } from "./Filter";
 export type { FilterAxis } from "./FilterAxis";
 export type { FilterMenuItem } from "./FilterMenuItem";
 export type { SortMode } from "./SortMode";
+export type { Mailbox } from "./Mailbox";
 export type { RepoSummary } from "./RepoSummary";
 export type { TerminalKind } from "./TerminalKind";
 export type { DesktopTerminalSnapshot as TerminalSnapshot } from "./DesktopTerminalSnapshot";

@@ -3,6 +3,7 @@ import type {
   FilterAxis,
   FilterMenuItem,
   LazyboxEvent,
+  Mailbox,
   SortMode,
   Task,
   TerminalKind,
@@ -146,6 +147,27 @@ export function sortModeLabel(mode: SortMode): string {
     case "ByRoleSplit":
       return "split";
   }
+}
+
+/** Short label for the mailbox control, matching `Mailbox::chip_label`. */
+export function mailboxLabel(mailbox: Mailbox): string {
+  switch (mailbox) {
+    case "Inbox":
+      return "inbox";
+    case "Inactive":
+      return "inactive";
+    case "Snoozed":
+      return "snoozed";
+  }
+}
+
+/** Next mailbox in the cycle, matching `Mailbox::next`. */
+export function nextMailbox(mailbox: Mailbox): Mailbox {
+  return mailbox === "Inbox"
+    ? "Inactive"
+    : mailbox === "Inactive"
+      ? "Snoozed"
+      : "Inbox";
 }
 
 /** Header label for a PR/Issue/Other section, matching the TUI. */

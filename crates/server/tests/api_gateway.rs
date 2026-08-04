@@ -175,7 +175,13 @@ fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
         DesktopCommand::CreateWorkspace { .. } => "CreateWorkspace",
         DesktopCommand::FocusWorkspace { .. } => "FocusWorkspace",
         DesktopCommand::MarkRead { .. } => "MarkRead",
+        DesktopCommand::RenameWorkspace { .. } => "RenameWorkspace",
         DesktopCommand::PostReply { .. } => "PostReply",
+        DesktopCommand::MergePr { .. } => "MergePr",
+        DesktopCommand::UpdateBranch { .. } => "UpdateBranch",
+        DesktopCommand::Archive { .. } => "Archive",
+        DesktopCommand::CloseIssue { .. } => "CloseIssue",
+        DesktopCommand::DeleteOrClose { .. } => "DeleteOrClose",
         DesktopCommand::DeliverSnippet { .. } => "DeliverSnippet",
         DesktopCommand::Refresh => "Refresh",
     }
@@ -242,9 +248,12 @@ fn desktop_compatibility_fixture_is_current() {
         DesktopCommand::SpawnAgent {
             session_key: session_key.clone(),
             agent: "codex".into(),
+            model_alias: Some("L".into()),
+            on_main: true,
         },
         DesktopCommand::SpawnShell {
             session_key: session_key.clone(),
+            on_main: false,
         },
         DesktopCommand::CreateWorkspace {
             name: "first workspace".into(),
@@ -257,9 +266,28 @@ fn desktop_compatibility_fixture_is_current() {
         DesktopCommand::MarkRead {
             session_key: session_key.clone(),
         },
+        DesktopCommand::RenameWorkspace {
+            session_key: session_key.clone(),
+            name: "renamed".into(),
+        },
         DesktopCommand::PostReply {
             session_key: session_key.clone(),
             body: "Ready for another look.".into(),
+        },
+        DesktopCommand::MergePr {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::UpdateBranch {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::Archive {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::CloseIssue {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::DeleteOrClose {
+            session_key: session_key.clone(),
         },
         DesktopCommand::DeliverSnippet {
             terminal_id: TerminalId(7),
@@ -336,7 +364,7 @@ fn desktop_compatibility_fixture_is_current() {
         .iter()
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(command_tags.len(), 8);
+    assert_eq!(command_tags.len(), 14);
     assert_eq!(event_tags.len(), 13);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,

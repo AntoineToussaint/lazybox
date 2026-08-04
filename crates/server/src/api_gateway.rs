@@ -403,9 +403,24 @@ pub enum DesktopCommand {
     SpawnAgent {
         session_key: lazybox_core::SessionKey,
         agent: String,
+        /// Model-tier alias (`"S"`/`"M"`/`"L"`) from the agent's tier
+        /// menu, mirroring the TUI's `a S`/`w M` chords. `None` spawns
+        /// the agent's default tier. The daemon resolves it per agent and
+        /// falls back to the default model when the alias is undefined.
+        #[serde(default)]
+        model_alias: Option<String>,
+        /// Spawn on the repo's shared main checkout instead of an isolated
+        /// worktree (the TUI's `b`-leader on-main group). The desktop
+        /// confirms this before sending, since edits land on main.
+        #[serde(default)]
+        on_main: bool,
     },
     SpawnShell {
         session_key: lazybox_core::SessionKey,
+        /// Spawn the shell on the repo's shared main checkout instead of an
+        /// isolated worktree. See [`DesktopCommand::SpawnAgent::on_main`].
+        #[serde(default)]
+        on_main: bool,
     },
     CreateWorkspace {
         name: String,
@@ -418,9 +433,41 @@ pub enum DesktopCommand {
     MarkRead {
         session_key: lazybox_core::SessionKey,
     },
+    /// Rename the workspace's display name (the TUI's `x R`). Only the
+    /// label changes — the workspace key and any worktrees are untouched.
+    RenameWorkspace {
+        session_key: lazybox_core::SessionKey,
+        name: String,
+    },
     PostReply {
         session_key: lazybox_core::SessionKey,
         body: String,
+    },
+    /// Merge the workspace's PR (the TUI's `g m`). Fire-and-forget: the
+    /// merge outcome arrives asynchronously as a provider poll updates the
+    /// row, exactly as it does for the TUI.
+    MergePr {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Update the workspace's PR branch against its base (the TUI's `g u`).
+    UpdateBranch {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Archive the workspace: kill its sessions and drop the row (the TUI's
+    /// `x x` on a workspace). Maps to [`Command::Kill`].
+    Archive {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Close the workspace's GitHub issue upstream as not-planned (the
+    /// TUI's `x c`). Issue workspaces only.
+    CloseIssue {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Delete-or-close the workspace's primary upstream item (the TUI's
+    /// `g d`): a PR is closed without merging, an issue is hard-deleted
+    /// when the token has admin rights and closed as not-planned otherwise.
+    DeleteOrClose {
+        session_key: lazybox_core::SessionKey,
     },
     /// Deliver a snippet to a live terminal (the `]]s` picker's send).
     /// The daemon derives the workspace from `terminal_id`, does the
@@ -442,28 +489,43 @@ impl From<DesktopCommand> for Command {
     }
 }
 
+/// A desktop workspace key travels on the wire as a [`SessionKey`]
+/// string (they share the same value); the workspace-scoped mutations
+/// take a [`lazybox_core::WorkspaceKey`], so bridge the two here.
+fn workspace_key_of(session_key: &lazybox_core::SessionKey) -> lazybox_core::WorkspaceKey {
+    lazybox_core::WorkspaceKey::new(session_key.as_str().to_string())
+}
+
 impl DesktopCommand {
     pub fn into_correlated(self, client_request_id: Option<String>) -> Command {
         match self {
-            DesktopCommand::SpawnAgent { session_key, agent } => Command::Spawn {
+            DesktopCommand::SpawnAgent {
+                session_key,
+                agent,
+                model_alias,
+                on_main,
+            } => Command::Spawn {
                 session_key,
                 session_id: None,
                 client_request_id,
                 kind: lazybox_ipc::TerminalKind::Agent(agent),
                 cwd: None,
                 initial_prompt: None,
-                on_main: false,
-                model_alias: None,
+                on_main,
+                model_alias,
                 access: lazybox_ipc::AgentRunAccess::Default,
             },
-            DesktopCommand::SpawnShell { session_key } => Command::Spawn {
+            DesktopCommand::SpawnShell {
+                session_key,
+                on_main,
+            } => Command::Spawn {
                 session_key,
                 session_id: None,
                 client_request_id,
                 kind: lazybox_ipc::TerminalKind::Shell,
                 cwd: None,
                 initial_prompt: None,
-                on_main: false,
+                on_main,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
             },
@@ -480,9 +542,25 @@ impl DesktopCommand {
                 Command::FocusWorkspace { session_key }
             }
             DesktopCommand::MarkRead { session_key } => Command::MarkRead { session_key },
+            DesktopCommand::RenameWorkspace { session_key, name } => {
+                Command::RenameWorkspace { session_key, name }
+            }
             DesktopCommand::PostReply { session_key, body } => {
                 Command::PostReply { session_key, body }
             }
+            DesktopCommand::MergePr { session_key } => Command::MergePr {
+                workspace_key: workspace_key_of(&session_key),
+            },
+            DesktopCommand::UpdateBranch { session_key } => Command::UpdateBranch {
+                workspace_key: workspace_key_of(&session_key),
+            },
+            DesktopCommand::Archive { session_key } => Command::Kill { session_key },
+            DesktopCommand::CloseIssue { session_key } => Command::CloseIssue {
+                workspace_key: workspace_key_of(&session_key),
+            },
+            DesktopCommand::DeleteOrClose { session_key } => Command::DeleteOrClose {
+                workspace_key: workspace_key_of(&session_key),
+            },
             DesktopCommand::DeliverSnippet {
                 terminal_id,
                 snippet_key,
@@ -593,6 +671,9 @@ pub struct DesktopInboxView {
     /// The sort mode this view was computed with, so the frontend can
     /// label its sort control (`recent` / `by-role` / `split`).
     pub sort_mode: lazybox_tui_core::inbox::SortMode,
+    /// The mailbox this view was computed with, so the frontend can label
+    /// its mailbox control (`inbox` / `inactive` / `snoozed`, #816).
+    pub mailbox: lazybox_tui_core::inbox::Mailbox,
     /// The filter menu the desktop draws (#733): every predicate in axis
     /// order with its live match count and active flag. Built by
     /// `Filter::menu` so the desktop never hardcodes the predicate list.

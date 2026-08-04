@@ -3,4 +3,22 @@ import type { ProjectKey } from "./ProjectKey";
 import type { SessionKey } from "./SessionKey";
 import type { TerminalId } from "./TerminalId";
 
-export type DesktopCommand = { "SpawnAgent": { session_key: SessionKey, agent: string, } } | { "SpawnShell": { session_key: SessionKey, } } | { "CreateWorkspace": { name: string, project_key: ProjectKey, agent: string | null, } } | { "FocusWorkspace": { session_key: SessionKey, } } | { "MarkRead": { session_key: SessionKey, } } | { "PostReply": { session_key: SessionKey, body: string, } } | { "DeliverSnippet": { terminal_id: TerminalId, snippet_key: string, category: string, body: string, } } | "Refresh";
+export type DesktopCommand = { "SpawnAgent": { session_key: SessionKey, agent: string,
+/**
+ * Model-tier alias (`"S"`/`"M"`/`"L"`) from the agent's tier
+ * menu, mirroring the TUI's `a S`/`w M` chords. `None` spawns
+ * the agent's default tier. The daemon resolves it per agent and
+ * falls back to the default model when the alias is undefined.
+ */
+model_alias: string | null,
+/**
+ * Spawn on the repo's shared main checkout instead of an isolated
+ * worktree (the TUI's `b`-leader on-main group). The desktop
+ * confirms this before sending, since edits land on main.
+ */
+on_main: boolean, } } | { "SpawnShell": { session_key: SessionKey,
+/**
+ * Spawn the shell on the repo's shared main checkout instead of an
+ * isolated worktree. See [`DesktopCommand::SpawnAgent::on_main`].
+ */
+on_main: boolean, } } | { "CreateWorkspace": { name: string, project_key: ProjectKey, agent: string | null, } } | { "FocusWorkspace": { session_key: SessionKey, } } | { "MarkRead": { session_key: SessionKey, } } | { "RenameWorkspace": { session_key: SessionKey, name: string, } } | { "PostReply": { session_key: SessionKey, body: string, } } | { "MergePr": { session_key: SessionKey, } } | { "UpdateBranch": { session_key: SessionKey, } } | { "Archive": { session_key: SessionKey, } } | { "CloseIssue": { session_key: SessionKey, } } | { "DeleteOrClose": { session_key: SessionKey, } } | { "DeliverSnippet": { terminal_id: TerminalId, snippet_key: string, category: string, body: string, } } | "Refresh";

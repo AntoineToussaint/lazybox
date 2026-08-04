@@ -96,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          export type { FilterAxis } from \"./FilterAxis\";\n\
          export type { FilterMenuItem } from \"./FilterMenuItem\";\n\
          export type { SortMode } from \"./SortMode\";\n\
+         export type { Mailbox } from \"./Mailbox\";\n\
          export type { RepoSummary } from \"./RepoSummary\";\n\
          export type { TerminalKind } from \"./TerminalKind\";\n\
          export type { DesktopTerminalSnapshot as TerminalSnapshot } from \"./DesktopTerminalSnapshot\";\n\

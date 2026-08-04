@@ -120,11 +120,18 @@ action catalog has ~80 actions (`crates/tui-core/src/action.rs:402-487`).
 sort, navigate + open, read/unread + reply (GitHub-only), spawn agent/shell, live
 terminal, snippets picker, filter/search, new workspace, refresh.
 
-**Missing — Tier A (hard daily-driver blockers):** agent + model-tier choice per
-spawn (`SpawnAgent` hardcodes the default agent, `model_alias: None`, `on_main: false`,
-`api_gateway.rs:436-446`); view diff (`action.rs:412`); merge PR / update branch
-(`:423-424`); archive / close / delete (`:421-422, :438`); open in browser (`:437`);
-cycle mailbox (`:443`); rename workspace (`:414`); open in editor (`:411`).
+**Tier A — landed (#816):** agent + model-tier + on-main choice per spawn
+(`SpawnAgent` now carries `model_alias` / `on_main`, plus `SpawnShell { on_main }`);
+merge PR / update branch (`MergePr` / `UpdateBranch`); archive / close issue /
+delete-or-close (`Archive` → `Kill`, `CloseIssue`, `DeleteOrClose`); open in
+browser (`open_url`, shared launcher); cycle mailbox (`set_mailbox` over the
+shared `Mailbox`); rename workspace (`RenameWorkspace`). Exposed through the
+workspace actions menu + a mailbox control.
+
+**Tier A — still missing:** view diff (`action.rs:412`) — needs the
+`InspectWorkspaceDiff` → `WorkspaceDiffInspected` request/response plus a diff
+reader, tracked separately; open in editor (`:411`) — needs terminal-spawn-with-
+command semantics the one-shot command path doesn't model.
 
 **Missing — Tier B/C (hands-off + batch + navigation):** automation policies
 (merge-on-green / auto-fix / track-main, `:425-428`); reviewers/assignees/labels

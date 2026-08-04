@@ -1517,6 +1517,14 @@ pub struct GithubConfig {
     /// scheduled polling may consume. The remainder stays available
     /// to interactive `gh`, agents, and bursts.
     pub background_budget_share: f64,
+    /// When set, the inbox scope is widened to every repo you can
+    /// reach — owned, org-member, and direct-collaborator — not just the
+    /// scopes you ticked in setup. Involved PRs/issues in any of those
+    /// surface without a manual tick; repos you can't access stay
+    /// hidden. Off by default so an explicit scope selection keeps
+    /// narrowing; on = "show my involvement everywhere I'm a member".
+    #[serde(default)]
+    pub include_accessible_repos: bool,
 }
 
 impl Default for GithubConfig {
@@ -1532,6 +1540,7 @@ impl Default for GithubConfig {
             filters: vec![],
             detect_needs_reply: true,
             background_budget_share: 0.55,
+            include_accessible_repos: false,
         }
     }
 }

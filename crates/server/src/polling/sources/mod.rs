@@ -2432,17 +2432,34 @@ pub(super) async fn sources_for_with_engagement(
                             .cloned()
                             .unwrap_or_default();
                         scopes.extend(config_scopes);
-                        // Once the user has narrowed at all, also admit every
-                        // repo they can actually access (owned / org-member /
-                        // direct-collaborator) — otherwise an involved PR in,
-                        // say, an org repo or a collaborator repo they didn't
-                        // tick is fetched by `involves:me` and then silently
-                        // dropped by the allowlist. Fetched once and memoized
-                        // on the tick state. An empty selection still means
-                        // "see everything" and skips this.
-                        if !scopes.is_empty() {
+                        // Opt-in (`providers.github.include_accessible_repos`):
+                        // widen the allowlist to every repo the user can reach
+                        // (owned / org-member / direct-collaborator), so an
+                        // involved PR fetched by `involves:me` in a repo they
+                        // didn't tick isn't silently dropped by the post-fetch
+                        // filter. Off by default so an explicit selection still
+                        // narrows.
+                        let include_accessible = github_cfg
+                            .map(|g| g.include_accessible_repos)
+                            .unwrap_or(false);
+                        if include_accessible {
+                            // A rebuilt client (cold cache / token rotation)
+                            // may be a different account — drop the memo so its
+                            // memberships are refetched, not the old account's.
+                            if restore_sync_cursors {
+                                state.implicit_gh_scopes = None;
+                            }
                             if state.implicit_gh_scopes.is_none() {
-                                state.implicit_gh_scopes = Some(client.accessible_scopes().await);
+                                // Cache only a COMPLETE fetch; on failure leave
+                                // it `None` so the next tick retries rather than
+                                // pinning a truncated allowlist that would hide
+                                // repos until restart.
+                                match client.accessible_scopes().await {
+                                    Ok(accessible) => state.implicit_gh_scopes = Some(accessible),
+                                    Err(e) => tracing::info!(
+                                        "github accessible-scopes fetch failed, retrying next tick: {e}"
+                                    ),
+                                }
                             }
                             if let Some(implicit) = &state.implicit_gh_scopes {
                                 scopes.extend(implicit.iter().cloned());

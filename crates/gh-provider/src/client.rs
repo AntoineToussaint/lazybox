@@ -1556,26 +1556,23 @@ impl GhClient {
     /// public repo you merely commented on is not in this set, so it
     /// stays filtered out.
     ///
-    /// Best-effort and meant to be cached by the caller (it paginates the
-    /// REST API): any page failing returns whatever resolved so a
-    /// transient error can't blank the inbox. `affiliation` unions the
-    /// three access kinds in one query.
-    pub async fn accessible_scopes(&self) -> Vec<String> {
+    /// All-or-nothing: returns `Err` if the token is rate-blocked or any
+    /// page fails, so the caller can retry next tick rather than caching
+    /// a truncated allowlist that would silently hide repos for the
+    /// daemon's lifetime. Every owner comes from the repo's real owner
+    /// (never assumed to be the caller — collaborator repos live under
+    /// other accounts). The result is unioned into a `BTreeSet`, so no
+    /// sort/dedup here. `affiliation` unions the three access kinds in
+    /// one query.
+    pub async fn accessible_scopes(&self) -> Result<Vec<String>, GhError> {
         let mut out: Vec<String> = Vec::new();
         if !self.user.is_empty() {
             out.push(format!("github:{}", self.user));
         }
 
-        if self
-            .acquire_or_block("list accessible repos page 1")
-            .is_err()
-        {
-            return out;
-        }
+        self.acquire_or_block("list accessible repos page 1")?;
         let mut page = {
-            let Ok(_permit) = self.request_permit().await else {
-                return out;
-            };
+            let _permit = self.request_permit().await?;
             let started = std::time::Instant::now();
             let result = self
                 .inner
@@ -1591,32 +1588,28 @@ impl GhClient {
                 started,
                 result.is_ok(),
             );
-            match result {
-                Ok(page) => page,
-                Err(_) => return out,
-            }
+            result.map_err(GhError::Api)?
         };
         loop {
             for repo in &page.items {
-                let full = repo
-                    .full_name
-                    .clone()
-                    .unwrap_or_else(|| format!("{}/{}", self.user, repo.name));
+                // Use the repo's actual owner — a collaborator/org repo is
+                // owned by someone else, so assuming `self.user` would mint
+                // a scope that never matches the task's real repo.
+                let full = match repo.full_name.clone() {
+                    Some(full) => full,
+                    None => match repo.owner.as_ref() {
+                        Some(owner) => format!("{}/{}", owner.login, repo.name),
+                        None => continue,
+                    },
+                };
                 out.push(format!("github:{full}"));
             }
             if page.next.is_none() {
                 break;
             }
-            if self
-                .acquire_or_block("list accessible repos next page")
-                .is_err()
-            {
-                break;
-            }
+            self.acquire_or_block("list accessible repos next page")?;
             let next = {
-                let Ok(_permit) = self.request_permit().await else {
-                    break;
-                };
+                let _permit = self.request_permit().await?;
                 let started = std::time::Instant::now();
                 let result = self
                     .inner
@@ -1628,16 +1621,14 @@ impl GhClient {
                     started,
                     result.is_ok(),
                 );
-                result
+                result.map_err(GhError::Api)?
             };
             page = match next {
-                Ok(Some(next)) => next,
-                _ => break,
+                Some(next) => next,
+                None => break,
             };
         }
-        out.sort();
-        out.dedup();
-        out
+        Ok(out)
     }
 
     /// List repositories under `parent_id` (e.g. `"github:acme"`).
@@ -4479,6 +4470,75 @@ mod tests {
         GhError::Graphql(message.to_string())
     }
 
+    /// Pagination + owner handling for `accessible_scopes`, against a
+    /// mock server: page 1 carries a `Link: … rel="next"` header, so the
+    /// loop must thread to page 2, and every scope must use the repo's
+    /// real owner (a collaborator/org repo owned by someone other than
+    /// the caller), not `test-user`.
+    #[tokio::test]
+    async fn accessible_scopes_threads_pages_and_keeps_real_owner() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let base = format!("http://{addr}");
+        let link_next = format!("<{base}/user/repos?page=2>; rel=\"next\"");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let link = link_next.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    // One read is enough for a bodyless GET on localhost.
+                    if let Ok(read) = sock.read(&mut chunk).await {
+                        request.extend_from_slice(&chunk[..read]);
+                    }
+                    let is_page2 = String::from_utf8_lossy(&request).contains("page=2");
+                    let (body, link_header) = if is_page2 {
+                        (
+                            r#"[{"id":2,"name":"collab","url":"https://api.github.com/repos/someone-else/collab","full_name":"someone-else/collab"},{"id":3,"name":"widget","url":"https://api.github.com/repos/acme/widget","full_name":"acme/widget"}]"#.to_string(),
+                            String::new(),
+                        )
+                    } else {
+                        (
+                            r#"[{"id":1,"name":"own","url":"https://api.github.com/repos/test-user/own","full_name":"test-user/own"}]"#.to_string(),
+                            format!("Link: {link}\r\n"),
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\n\
+                         Content-Type: application/json\r\n\
+                         {link_header}Content-Length: {}\r\n\
+                         Connection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+
+        let client = make_client(&base);
+        let scopes: std::collections::BTreeSet<String> = client
+            .accessible_scopes()
+            .await
+            .expect("mock returns a complete result")
+            .into_iter()
+            .collect();
+
+        assert!(scopes.contains("github:test-user"), "own login: {scopes:?}");
+        assert!(scopes.contains("github:test-user/own"), "page 1 repo");
+        assert!(
+            scopes.contains("github:someone-else/collab"),
+            "collaborator repo keeps its real owner, not test-user: {scopes:?}"
+        );
+        assert!(
+            scopes.contains("github:acme/widget"),
+            "second page was threaded via the Link header: {scopes:?}"
+        );
+    }
+
     /// End-to-end: `accessible_scopes` returns the caller's own
     /// `github:<login>` plus a `github:<owner>/<repo>` for every repo
     /// they can access (owned / org-member / collaborator) — the set the
@@ -4495,7 +4555,10 @@ mod tests {
         let client = GhClient::from_credential(cred)
             .await
             .expect("client builds");
-        let scopes = client.accessible_scopes().await;
+        let scopes = client
+            .accessible_scopes()
+            .await
+            .expect("accessible scopes resolve");
         assert!(
             scopes
                 .iter()

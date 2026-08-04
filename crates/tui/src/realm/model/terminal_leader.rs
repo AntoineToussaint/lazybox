@@ -20,6 +20,11 @@ pub(super) enum LeaderCmd {
     JumpAgent(usize),
     /// `]]s` — open the snippet picker.
     Snippets,
+    /// `]]k` — open the skills picker: the focused agent's available
+    /// Claude Code skills (`.claude/skills/` + `~/.claude/skills/`),
+    /// triggered explicitly instead of waiting on the model to self-select
+    /// one (issue #797).
+    Skills,
     /// `]]r` — recall the last prompt (the in-flight draft, else the
     /// last submitted message) back into the agent's composer, without
     /// submitting it, so a restart doesn't lose what you'd typed.
@@ -70,6 +75,12 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         command: LeaderCmd::Snippets,
         menu_label: "snippets",
         reference: "Open the snippet picker (typing a full key auto-submits — `]]srev`)",
+    },
+    FixedCommandSpec {
+        key: 'k',
+        command: LeaderCmd::Skills,
+        menu_label: "skills",
+        reference: "Open the skills picker — trigger one of the focused agent's Claude Code skills explicitly (typing a full name auto-submits)",
     },
     FixedCommandSpec {
         key: 'r',

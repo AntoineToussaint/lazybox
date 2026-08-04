@@ -700,6 +700,7 @@ impl<T: TerminalAdapter> Model<T> {
         match cmd {
             LeaderCmd::JumpAgent(n) => self.jump_to_agent_workspace(n),
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
+            LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
             LeaderCmd::PromptHistory => self.mount_prompt_history_picker(),
             LeaderCmd::OpenUrls => self.open_terminal_urls(),

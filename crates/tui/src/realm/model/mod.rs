@@ -250,6 +250,12 @@ pub enum Id {
     /// dispatcher writes to the active terminal followed by `\r`
     /// (auto-submit). See `realm::components::snippet_picker`.
     SnippetPicker,
+    /// Skills picker mounted from the terminal pane on `]]k` (issue
+    /// #797). Same `SnippetPicker` component as `Id::SnippetPicker`, fed
+    /// the focused agent's discovered Claude Code skills; the pick
+    /// injects an explicit "Use the `<skill>` skill." instruction through
+    /// the same settle-gated path snippets use. See `mount_skill_picker`.
+    SkillPicker,
     /// In-app feature tour (issue #146). Stepped walkthrough card,
     /// launched on first run (gated by `ui.tour_seen`) and on demand
     /// via the tour shortcut. `Msg::TourFinished` marks it seen +
@@ -386,6 +392,7 @@ impl Id {
                 | Id::Messages
                 | Id::Error
                 | Id::SnippetPicker
+                | Id::SkillPicker
                 | Id::SnippetBrowser
         )
     }
@@ -1425,6 +1432,12 @@ pub struct Model<T: TerminalAdapter> {
     /// AND is shared across in-process and `--connect` clients. This local
     /// copy is the pruned-against-catalog view the pickers render.
     pub(crate) recent_snippets: Vec<String>,
+    /// Skill names triggered this session, most-recent first (capped at
+    /// `RECENT_SNIPPETS_MAX`). Feeds the skills picker's "Recent" group so
+    /// a repeated skill is one `]]k` + `Enter` away, mirroring
+    /// `recent_snippets` (#797). Session-local: skill triggers reuse the
+    /// snippet inject path but are not persisted daemon-side.
+    pub(crate) recent_skills: Vec<String>,
     /// Update targets the daemon reports as already dismissed, seeded from
     /// `Event::Snapshot` (#548). `show_update_if_new` checks membership so
     /// a dismissed target never re-mounts the startup modal.
@@ -1775,6 +1788,7 @@ impl<T: TerminalAdapter> Model<T> {
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
+            recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
             pending_update: None,
             snapshot_seen: false,
@@ -2193,6 +2207,63 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SnippetPicker, picker);
     }
 
+    /// Mount the skills picker (`]]k`, issue #797): the Claude Code skills
+    /// available to the focused agent, discovered from `.claude/skills/`
+    /// in its worktree plus `~/.claude/skills/`. Reuses the `SnippetPicker`
+    /// component — rows carry the skill *name* as a
+    /// [`ChoicePayload::Text`], grouped by scope (Repo/User) and previewed
+    /// by their `description`. Picking injects an explicit "Use the
+    /// `<skill>` skill." instruction through the same settle-gated path
+    /// snippets use, so a model-side capability gains a deterministic
+    /// trigger. Skills only apply to an agent conversation, so a
+    /// non-agent (shell/log) terminal gets a nudge instead of the picker.
+    pub(crate) fn mount_skill_picker(&mut self, initial_filter: String) {
+        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
+        if matches!(self.modal_stack.last(), Some(Id::SkillPicker)) {
+            return;
+        }
+        let Some(terminal_id) = self.terminals.active_terminal_id() else {
+            self.flash_info("no active terminal — open an agent session first");
+            return;
+        };
+        if !self.terminals.terminal_is_agent(terminal_id) {
+            self.flash_info("skills apply to agent sessions — focus one first");
+            return;
+        }
+        let skills = lazybox_config::discover_skills(self.active_terminal_worktree().as_deref());
+        if skills.is_empty() {
+            self.flash_info("no skills found — add SKILL.md folders under .claude/skills/");
+            return;
+        }
+        let rows: Vec<PickerRow> = skills
+            .into_iter()
+            .map(|skill| PickerRow {
+                key: skill.name,
+                description: skill.description.clone(),
+                category: skill.scope.label().to_string(),
+                body: skill.description,
+                origin: String::new(),
+            })
+            .collect();
+        let picker = SnippetPicker::new(rows, initial_filter)
+            .with_recent(self.recent_skills.clone())
+            .with_title("Skills");
+        self.mount_modal(Id::SkillPicker, picker);
+    }
+
+    /// The worktree of the focused terminal's session, resolved through
+    /// its session key — the repo root under which `.claude/skills/` is
+    /// scanned. `None` when the terminal has no session or the workspace
+    /// carries no session yet.
+    fn active_terminal_worktree(&self) -> Option<std::path::PathBuf> {
+        let session_key = self.terminals.active_session()?;
+        self.sidebar
+            .workspace_by_key(session_key)?
+            .sessions
+            .first()
+            .map(|session| session.worktree_path.clone())
+    }
+
     /// Kick off the broadcast flow (`Shift-B`): resolve the sidebar's
     /// multi-selected workspaces into a target list and mount the
     /// snippet-pick step (skipped straight to compose when the snippet
@@ -2274,6 +2345,14 @@ impl<T: TerminalAdapter> Model<T> {
         self.recent_snippets.retain(|k| k != &key);
         self.recent_snippets.insert(0, key);
         self.recent_snippets.truncate(RECENT_SNIPPETS_MAX);
+    }
+
+    /// Float a just-triggered skill to the front of the session-local
+    /// skills MRU (#797), mirroring [`Self::apply_recent_snippet`].
+    pub(crate) fn apply_recent_skill(&mut self, name: String) {
+        self.recent_skills.retain(|k| k != &name);
+        self.recent_skills.insert(0, name);
+        self.recent_skills.truncate(RECENT_SNIPPETS_MAX);
     }
 
     /// Seed `recent_snippets` from the daemon's persisted MRU, delivered

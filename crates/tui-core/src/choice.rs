@@ -78,6 +78,9 @@ pub enum PickFlow {
         /// sending (issue #791).
         submit: bool,
     },
+    Skill {
+        terminal_id: Option<TerminalId>,
+    },
     PromptHistory {
         terminal_id: Option<TerminalId>,
         terminal_is_agent: bool,
@@ -172,6 +175,14 @@ pub enum PickOutcome<F> {
         terminal_id: TerminalId,
         text: String,
     },
+    /// Trigger a skill explicitly: inject `text` (the "Use the `<name>`
+    /// skill." instruction) through the settle-gated agent inject path and
+    /// float `skill_name` to the front of the skills MRU (#797).
+    TriggerSkill {
+        terminal_id: TerminalId,
+        skill_name: String,
+        text: String,
+    },
     Jump(SessionKey),
     OpenUrl(String),
     SaveTheme(String),
@@ -226,6 +237,14 @@ pub enum PickOutcome<F> {
     Runner(Vec<usize>),
 }
 
+/// The explicit-trigger instruction injected when a skill is picked from
+/// the `]]k` picker (#797). A skill is normally model-selected; this makes
+/// the agent invoke `name` deterministically, the way the user fires a
+/// snippet.
+pub fn skill_trigger_prompt(name: &str) -> String {
+    format!("Use the `{name}` skill.")
+}
+
 /// Decode picker payloads against the flow state that produced them.
 pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<P::Filter> {
     match flow {
@@ -276,6 +295,22 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     category: snippet.category.clone(),
                     body: snippet.body.clone(),
                 }
+            }
+        }
+        PickFlow::Skill { terminal_id } => {
+            let Some(name) = picks.first().and_then(P::as_text) else {
+                return PickOutcome::NoOp;
+            };
+            let Some(terminal_id) = terminal_id else {
+                return PickOutcome::Commands {
+                    commands: Vec::new(),
+                    notice: Some("no active terminal — open a session first".to_string()),
+                };
+            };
+            PickOutcome::TriggerSkill {
+                terminal_id,
+                text: skill_trigger_prompt(name),
+                skill_name: name.to_string(),
             }
         }
         PickFlow::PromptHistory {
@@ -823,6 +858,56 @@ mod tests {
             resolve_pick(&picked, PickFlow::Url),
             PickOutcome::OpenUrl(url) if url == "review"
         ));
+    }
+
+    #[test]
+    fn skill_pick_triggers_explicit_invocation() {
+        let picked = [Payload::Text("code-review".into())];
+        match resolve_pick(
+            &picked,
+            PickFlow::Skill {
+                terminal_id: Some(TerminalId(7)),
+            },
+        ) {
+            PickOutcome::TriggerSkill {
+                terminal_id,
+                skill_name,
+                text,
+            } => {
+                assert_eq!(terminal_id, TerminalId(7));
+                assert_eq!(skill_name, "code-review");
+                assert_eq!(text, "Use the `code-review` skill.");
+            }
+            other => panic!("skill pick must trigger, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skill_pick_without_terminal_notices() {
+        let picked = [Payload::Text("code-review".into())];
+        assert!(matches!(
+            resolve_pick(&picked, PickFlow::Skill { terminal_id: None }),
+            PickOutcome::Commands { commands, notice }
+                if commands.is_empty() && notice.is_some()
+        ));
+    }
+
+    #[test]
+    fn skill_pick_without_selection_is_noop() {
+        assert!(matches!(
+            resolve_pick(
+                &[] as &[Payload],
+                PickFlow::Skill {
+                    terminal_id: Some(TerminalId(7)),
+                },
+            ),
+            PickOutcome::NoOp
+        ));
+    }
+
+    #[test]
+    fn skill_trigger_prompt_names_the_skill() {
+        assert_eq!(skill_trigger_prompt("deploy"), "Use the `deploy` skill.");
     }
 
     #[test]

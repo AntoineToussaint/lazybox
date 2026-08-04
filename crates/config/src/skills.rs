@@ -1,19 +1,170 @@
-//! Agent-skill scaffolding: write a `.claude/skills/<name>/SKILL.md`
-//! folder into a repo from a plain-language request.
+//! Agent **Skills** — discovery and scaffolding.
 //!
-//! A snippet is a single human-triggered prompt; a skill is a
-//! model-triggered, progressively-disclosed capability the agent picks
-//! itself off its `description`. When an "Ask Lazybox" request is
-//! genuinely multi-step (or wants bundled scripts/reference files), a
-//! `SKILL.md` folder is the right artifact, not a snippet body (#799;
-//! see `docs/snippets-vs-skills.md`).
+//! A snippet is human-triggered; a skill is model-triggered — the agent
+//! reads each skill's `description` and decides *itself* whether to
+//! invoke it, progressively loading the `SKILL.md` body and any bundled
+//! files. This module owns two filesystem-facing halves of lazybox's
+//! skill support (see `docs/snippets-vs-skills.md`):
 //!
-//! This module owns only the safe write: name validation, the
-//! frontmatter render, and a refuse-don't-clobber scaffold. Whether a
-//! request should become a skill vs a snippet is decided upstream (the
-//! help agent classifies it and proposes the matching action).
+//! - **Discovery** (#797): scan the two Claude Code skill roots so the
+//!   `]]` skills picker can surface them and let the user trigger one
+//!   *explicitly*, gaining the deterministic-invocation + preview +
+//!   Recent UX snippets enjoy.
+//! - **Scaffolding** (#799): write a `.claude/skills/<name>/SKILL.md`
+//!   folder from an "Ask Lazybox" request when the ask is genuinely
+//!   multi-step (or wants bundled scripts/reference files).
+//!
+//! Layout (Claude Code's `.claude/skills` convention): each skill is a
+//! folder holding a `SKILL.md` whose YAML frontmatter carries `name` and
+//! `description`.
 
 use std::path::{Path, PathBuf};
+
+// ── Discovery (#797) ────────────────────────────────────────────────
+
+/// Where a discovered skill lives. Doubles as the picker's category so
+/// repo skills group above user skills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillScope {
+    Repo,
+    User,
+}
+
+impl SkillScope {
+    /// Category / group label shown in the picker.
+    pub fn label(self) -> &'static str {
+        match self {
+            SkillScope::Repo => "Repo",
+            SkillScope::User => "User",
+        }
+    }
+}
+
+/// One skill available to the focused agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    /// The skill's invocation name — its frontmatter `name`, falling back
+    /// to the folder name. This is what an explicit trigger names.
+    pub name: String,
+    /// The frontmatter `description` (empty when absent). This is the
+    /// text the model matches on, and what the picker previews.
+    pub description: String,
+    pub scope: SkillScope,
+}
+
+/// The frontmatter fields we read; every other key is ignored.
+#[derive(serde::Deserialize)]
+struct SkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+}
+
+/// Discover the skills available to an agent rooted at `repo_root`,
+/// scanning `<repo_root>/.claude/skills/` and `~/.claude/skills/`.
+///
+/// Repo skills shadow user skills of the same name. The result is sorted
+/// by name so the picker's key-sorted-rows invariant holds.
+pub fn discover_skills(repo_root: Option<&Path>) -> Vec<Skill> {
+    let repo_dir = repo_root.map(|root| root.join(".claude").join("skills"));
+    discover_skills_in(repo_dir.as_deref(), user_skills_dir().as_deref())
+}
+
+/// `~/.claude/skills` from `$HOME` — the user-level skill root, which is
+/// the OS home (Claude Code's convention), not `LAZYBOX_HOME`.
+fn user_skills_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".claude").join("skills"))
+}
+
+/// Core scan, taking the two skill directories directly so tests can
+/// drive it with temp dirs. Repo is scanned first and wins name ties.
+fn discover_skills_in(repo_dir: Option<&Path>, user_dir: Option<&Path>) -> Vec<Skill> {
+    let mut skills: Vec<Skill> = Vec::new();
+    if let Some(dir) = repo_dir {
+        scan_dir(dir, SkillScope::Repo, &mut skills);
+    }
+    if let Some(dir) = user_dir {
+        let mut user_skills = Vec::new();
+        scan_dir(dir, SkillScope::User, &mut user_skills);
+        for skill in user_skills {
+            if !skills.iter().any(|existing| existing.name == skill.name) {
+                skills.push(skill);
+            }
+        }
+    }
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+/// Append every `<dir>/<skill>/SKILL.md` folder as a [`Skill`]. A missing
+/// or unreadable directory yields nothing.
+fn scan_dir(dir: &Path, scope: SkillScope, out: &mut Vec<Skill>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let folder = entry.path();
+        if !folder.is_dir() {
+            continue;
+        }
+        let manifest = folder.join("SKILL.md");
+        if !manifest.is_file() {
+            continue;
+        }
+        let folder_name = match folder.file_name().and_then(|name| name.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        out.push(read_skill(&manifest, folder_name, scope));
+    }
+}
+
+/// Build a [`Skill`] from one `SKILL.md`. The frontmatter `name` /
+/// `description` win when present; a folder without parseable
+/// frontmatter still lists (folder name, empty description) rather than
+/// silently vanishing.
+fn read_skill(manifest: &Path, folder_name: String, scope: SkillScope) -> Skill {
+    let front = std::fs::read_to_string(manifest)
+        .ok()
+        .and_then(|content| parse_frontmatter(&content));
+    let (name, description) = match front {
+        Some(front) => (
+            front
+                .name
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(folder_name),
+            front.description.unwrap_or_default(),
+        ),
+        None => (folder_name, String::new()),
+    };
+    Skill {
+        name: name.trim().to_string(),
+        description: description.trim().to_string(),
+        scope,
+    }
+}
+
+/// Extract and parse the leading `---`-fenced YAML frontmatter block.
+/// Returns `None` when the file doesn't open with a `---` fence, the
+/// fence is unterminated, or the block isn't valid YAML.
+fn parse_frontmatter(content: &str) -> Option<SkillFrontmatter> {
+    let mut lines = content.lines();
+    if lines.next()?.trim_end() != "---" {
+        return None;
+    }
+    let mut yaml = String::new();
+    for line in lines {
+        if line.trim_end() == "---" {
+            return serde_yaml::from_str(&yaml).ok();
+        }
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+    None
+}
+
+// ── Scaffolding / authoring (#799) ──────────────────────────────────
 
 #[derive(Debug, thiserror::Error)]
 pub enum SkillError {
@@ -125,7 +276,118 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), SkillError> {
 }
 
 #[cfg(test)]
-mod tests {
+mod discovery_tests {
+    use super::*;
+
+    fn write_skill(root: &Path, folder: &str, manifest: &str) {
+        let dir = root.join(folder);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), manifest).unwrap();
+    }
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        // A unique-enough dir without pulling in a temp-dir crate; the
+        // pid + tag keeps parallel test cases from colliding.
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-skills-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn reads_name_and_description_from_frontmatter() {
+        let repo = tmp_root("front");
+        write_skill(
+            &repo,
+            "code-review",
+            "---\nname: code-review\ndescription: Review a diff for bugs.\n---\nBody prose here.\n",
+        );
+        let skills = discover_skills_in(Some(&repo), None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "code-review");
+        assert_eq!(skills[0].description, "Review a diff for bugs.");
+        assert_eq!(skills[0].scope, SkillScope::Repo);
+    }
+
+    #[test]
+    fn falls_back_to_folder_name_without_frontmatter() {
+        let repo = tmp_root("nofront");
+        write_skill(&repo, "deploy", "no frontmatter here, just prose\n");
+        let skills = discover_skills_in(Some(&repo), None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "deploy");
+        assert_eq!(skills[0].description, "");
+    }
+
+    #[test]
+    fn skips_folders_without_a_manifest() {
+        let repo = tmp_root("nomanifest");
+        std::fs::create_dir_all(repo.join("not-a-skill")).unwrap();
+        write_skill(&repo, "real", "---\nname: real\ndescription: d\n---\n");
+        let skills = discover_skills_in(Some(&repo), None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "real");
+    }
+
+    #[test]
+    fn repo_skill_shadows_user_skill_of_same_name() {
+        let repo = tmp_root("shadow-repo");
+        let user = tmp_root("shadow-user");
+        write_skill(
+            &repo,
+            "review",
+            "---\nname: review\ndescription: repo version\n---\n",
+        );
+        write_skill(
+            &user,
+            "review",
+            "---\nname: review\ndescription: user version\n---\n",
+        );
+        write_skill(
+            &user,
+            "notes",
+            "---\nname: notes\ndescription: user only\n---\n",
+        );
+        let skills = discover_skills_in(Some(&repo), Some(&user));
+        // review (repo, wins), notes (user) — sorted by name.
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0].name, "notes");
+        assert_eq!(skills[0].scope, SkillScope::User);
+        assert_eq!(skills[1].name, "review");
+        assert_eq!(skills[1].scope, SkillScope::Repo);
+        assert_eq!(skills[1].description, "repo version");
+    }
+
+    #[test]
+    fn results_are_sorted_by_name() {
+        let repo = tmp_root("sorted");
+        for folder in ["zebra", "alpha", "mango"] {
+            write_skill(
+                &repo,
+                folder,
+                &format!("---\nname: {folder}\ndescription: d\n---\n"),
+            );
+        }
+        let names: Vec<_> = discover_skills_in(Some(&repo), None)
+            .into_iter()
+            .map(|skill| skill.name)
+            .collect();
+        assert_eq!(names, vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn missing_directories_yield_nothing() {
+        let skills = discover_skills_in(
+            Some(Path::new("/nonexistent/repo/.claude/skills")),
+            Some(Path::new("/nonexistent/user/.claude/skills")),
+        );
+        assert!(skills.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod scaffold_tests {
     use super::*;
 
     /// A unique tmp repo root per call. Mirrors the snippets tests —

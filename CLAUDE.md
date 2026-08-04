@@ -323,7 +323,13 @@ click a link to open it, `Esc` to close; the header hint reads
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
 escape sequence) is a *non-timed* leader (#252) that opens a small
-command menu (which-key popup): `]]s` opens the snippet picker, `]]r`
+command menu (which-key popup): `]]s` opens the snippet picker, `]]k`
+opens the skills picker (#797 — the focused agent's Claude Code skills
+discovered from `.claude/skills/` + `~/.claude/skills/`, previewed by
+their description and grouped by Repo/User scope; picking one injects an
+explicit "Use the `<skill>` skill." instruction through the same
+settle-gated path snippets use, so a model-selected capability gains a
+deterministic trigger + Recent), `]]r`
 recalls the last prompt (in-flight draft, else last submitted message)
 back into the agent composer without submitting it — both survive a
 restart (persisted per terminal in the store, #373), `]]h` opens the

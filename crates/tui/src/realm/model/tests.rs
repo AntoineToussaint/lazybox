@@ -16210,6 +16210,148 @@ mod settings_window_tests {
 }
 
 #[cfg(test)]
+mod remote_agent_availability_tests {
+    //! `Event::AgentAvailabilityConfig` (#742): the daemon reports the
+    //! agents it is configured to run, and a remote (`--connect`) client
+    //! adopts that set so it offers the agents the *box* runs — not the
+    //! hardcoded trio it defaults to when its own local config never
+    //! applies over the socket. An embedded client ignores it.
+    use super::super::keys::action_from_entry;
+    use super::super::*;
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use lazybox_tui_core::action::Action;
+    use tuirealm::ratatui::layout::Size;
+
+    fn spawnable_agent_ids(m: &Model<tuirealm::terminal::TestTerminalAdapter>) -> Vec<String> {
+        m.catalog()
+            .iter()
+            .filter_map(|entry| match action_from_entry(entry) {
+                Some(Action::SpawnAgent(id)) => Some(id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn remote_client_adopts_the_daemons_agent_set() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40))
+            .expect("model init")
+            .with_remote();
+        // Before the daemon reports, a remote client only knows the
+        // hardcoded trio (its own local config never applied).
+        assert_eq!(spawnable_agent_ids(&m), vec!["claude", "codex", "cursor"]);
+
+        m.handle_daemon_event(IpcEvent::AgentAvailabilityConfig {
+            agents: vec!["claude".into(), "codex".into()],
+            default_agent: None,
+        });
+
+        assert_eq!(
+            spawnable_agent_ids(&m),
+            vec!["claude".to_string(), "codex".to_string()],
+            "a remote client offers exactly the agents the box reports — no phantom cursor",
+        );
+    }
+
+    #[test]
+    fn remote_client_adopts_the_daemons_default_agent() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40))
+            .expect("model init")
+            .with_remote();
+        // The client default is `claude`; the box's configured default is
+        // `codex`, and both are offered. The remote client must honor the
+        // box's choice so `w` works in the box's default agent.
+        assert_eq!(m.sidebar.default_agent(), "claude");
+
+        m.handle_daemon_event(IpcEvent::AgentAvailabilityConfig {
+            agents: vec!["claude".into(), "codex".into()],
+            default_agent: Some("codex".into()),
+        });
+
+        assert_eq!(
+            m.sidebar.default_agent(),
+            "codex",
+            "a remote client defaults `w` to the agent the box is configured to prefer",
+        );
+    }
+
+    #[test]
+    fn remote_client_reconciles_a_default_the_box_set_excludes() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40))
+            .expect("model init")
+            .with_remote();
+        // Client default is `claude`, but the box runs only codex and set
+        // no explicit default. Without reconciliation `w` would spawn
+        // claude — an agent the box doesn't offer.
+        m.handle_daemon_event(IpcEvent::AgentAvailabilityConfig {
+            agents: vec!["codex".into()],
+            default_agent: None,
+        });
+
+        assert_eq!(spawnable_agent_ids(&m), vec!["codex".to_string()]);
+        assert_eq!(
+            m.sidebar.default_agent(),
+            "codex",
+            "the default work agent must stay inside the offered set",
+        );
+    }
+
+    #[test]
+    fn embedded_client_ignores_the_daemons_agent_set() {
+        let (client, _server) = channel::pair();
+        // No `with_remote()`: the embedded client already applied its
+        // authoritative local config (the same file the daemon reads).
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let before = spawnable_agent_ids(&m);
+        let default_before = m.sidebar.default_agent().to_string();
+
+        m.handle_daemon_event(IpcEvent::AgentAvailabilityConfig {
+            agents: vec!["only-on-the-box".into()],
+            default_agent: Some("only-on-the-box".into()),
+        });
+
+        assert_eq!(
+            spawnable_agent_ids(&m),
+            before,
+            "an embedded client must not adopt a remote agent set over its own config",
+        );
+        assert_eq!(
+            m.sidebar.default_agent(),
+            default_before,
+            "an embedded client must not adopt a remote default agent",
+        );
+    }
+
+    #[test]
+    fn set_agents_keeps_the_default_inside_the_enabled_set() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        // Default is `claude`; enable a set that omits it (a codex-only
+        // box, or a codex-only local config). The default must move to a
+        // spawnable agent rather than stay at the un-offered `claude`.
+        assert_eq!(m.sidebar.default_agent(), "claude");
+        m.set_agents(vec!["codex".into()]);
+        assert_eq!(
+            m.sidebar.default_agent(),
+            "codex",
+            "set_agents must reconcile a default the enabled set excludes",
+        );
+
+        // A default already inside the set is left untouched.
+        m.set_default_agent("codex");
+        m.set_agents(vec!["claude".into(), "codex".into()]);
+        assert_eq!(
+            m.sidebar.default_agent(),
+            "codex",
+            "set_agents must not disturb a default that is still enabled",
+        );
+    }
+}
+
+#[cfg(test)]
 mod agent_cli_update_tests {
     //! Lazybox-managed agent-CLI updates (#400): the daemon's check /
     //! update-finished events become footer notices, and the Settings

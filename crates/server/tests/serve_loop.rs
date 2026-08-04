@@ -279,9 +279,13 @@ async fn subscribe_is_admitted_only_once_per_connection() {
             configured: _,
         }) if !command.is_empty()
     ));
-    // The first subscribe also pushes the auto-fix policy config after
-    // the shell config; drain it so the next event is the
-    // duplicate-subscribe rejection.
+    // The first subscribe also pushes the spawnable-agent config and then
+    // the auto-fix policy config after the shell config; drain both so the
+    // next event is the duplicate-subscribe rejection.
+    assert!(matches!(
+        client.recv().await,
+        Some(Event::AgentAvailabilityConfig { .. })
+    ));
     assert!(matches!(
         client.recv().await,
         Some(Event::AutoFixPolicyConfig { .. })

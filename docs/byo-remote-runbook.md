@@ -69,6 +69,15 @@ box's paths, not your laptop's:
 - **Browser/URL open** and **OS notifications** still fire on your laptop —
   the daemon just sends the trigger.
 
+The agents you can spawn (`a c`, `a x`, `w w`, …) reflect the **box's**
+configured agents (its `setup.agents`), not your laptop's, and `w` defaults
+to the box's configured default agent. The daemon reports both on connect, so
+a remote client offers exactly what machine B is set up to run — you won't be
+missing an agent the box runs, or offered one it isn't configured for, just
+because your laptop's own config differs. (Availability follows the box's
+configuration; an agent enabled in config but not actually installed on the
+box still fails at spawn, same as it would locally.)
+
 ## Build parity
 
 Daemon and client must be built from the same commit — the wire handshake

@@ -1631,6 +1631,34 @@ async fn subscribe_surfaces_unreadable_records_after_the_snapshot() {
     }
 }
 
+/// A subscribing client — notably a remote `--connect` one — must be
+/// told which agents the daemon can spawn, so it offers the box's
+/// agents rather than the hardcoded trio it falls back to. See #742.
+#[tokio::test]
+async fn subscribe_reports_the_daemons_spawnable_agents() {
+    let config = ServerConfig::in_memory();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let tx = lazybox_ipc::EventSender::from_unbounded(tx);
+
+    dispatch_command(&config, &tx, Command::Subscribe).await;
+
+    let mut agents = None;
+    while let Ok(event) = rx.try_recv() {
+        if let Event::AgentAvailabilityConfig {
+            agents: reported, ..
+        } = event
+        {
+            agents = Some(reported);
+            break;
+        }
+    }
+    let agents = agents.expect("subscribe emits AgentAvailabilityConfig");
+    assert!(
+        !agents.is_empty(),
+        "the daemon always reports a spawnable set (its config, or the trio fallback)",
+    );
+}
+
 #[tokio::test]
 async fn stream_route_accepts_ndjson_commands_and_streams_events() {
     let mut line = serde_json::to_vec(&JsonClientFrame::Command(Command::Subscribe)).unwrap();

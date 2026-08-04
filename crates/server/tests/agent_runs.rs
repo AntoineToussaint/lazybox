@@ -274,6 +274,7 @@ async fn wait_for_started(
             // policy config lands after the snapshot, before the run.
             Event::AutoFixPolicyConfig { .. } => {}
             Event::ShellCommandConfig { .. } => {}
+            Event::AgentAvailabilityConfig { .. } => {}
             other => panic!("expected AgentRunStarted, got {other:?}"),
         }
     }
@@ -633,7 +634,9 @@ async fn source_terminal_ownership_selects_the_exact_session_worktree() {
                 assert_eq!(resolved_session_key, session_key);
                 break;
             }
-            Event::AutoFixPolicyConfig { .. } | Event::ShellCommandConfig { .. } => {}
+            Event::AutoFixPolicyConfig { .. }
+            | Event::ShellCommandConfig { .. }
+            | Event::AgentAvailabilityConfig { .. } => {}
             other => panic!("expected AgentRunStarted, got {other:?}"),
         }
     }

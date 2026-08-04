@@ -106,6 +106,14 @@ async fn drain_auto_fix_config(client: &mut lazybox_ipc::Client) {
         matches!(shell, Event::ShellCommandConfig { .. }),
         "expected ShellCommandConfig, got {shell:?}"
     );
+    let agents = timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("agent availability config deadline")
+        .expect("agent availability config event");
+    assert!(
+        matches!(agents, Event::AgentAvailabilityConfig { .. }),
+        "expected AgentAvailabilityConfig, got {agents:?}"
+    );
     let cfg = timeout(Duration::from_secs(1), client.recv())
         .await
         .expect("auto-fix policy config deadline")

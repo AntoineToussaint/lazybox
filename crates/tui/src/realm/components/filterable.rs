@@ -70,6 +70,15 @@ pub trait FilterableList {
     /// display can't submit the wrong row (issue #512).
     fn pick(&self, item_idx: usize) -> Option<Msg>;
 
+    /// Resolve a `Shift-Enter` pick: insert the row *without* submitting
+    /// it, so the user can edit before sending (issue #791). Only the
+    /// snippet picker distinguishes the two; the default is a plain
+    /// [`FilterableList::pick`], so every other picker treats `Shift-Enter`
+    /// exactly like `Enter`.
+    fn pick_no_submit(&self, item_idx: usize) -> Option<Msg> {
+        self.pick(item_idx)
+    }
+
     // ── state accessors (the picker owns the fields) ──────────────────
     fn filter(&self) -> &str;
     fn filter_mut(&mut self) -> &mut String;
@@ -145,6 +154,14 @@ pub trait FilterableList {
                     self.set_cursor(Some(self.visible().len() - 1));
                 }
                 None
+            }
+            // Shift-Enter commits the highlighted row without submitting
+            // (the snippet picker inserts the body into the composer for
+            // editing, #791); plain Enter submits. The terminal reports
+            // Shift-Enter distinctly under the pushed keyboard-enhancement
+            // flags, the same signal the terminal composer reads.
+            Key::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.selected().and_then(|idx| self.pick_no_submit(idx))
             }
             Key::Enter => self.selected().and_then(|idx| self.pick(idx)),
             Key::Backspace => {
@@ -323,6 +340,13 @@ mod tests {
                 .get(item_idx)
                 .map(|l| Msg::ChoicePicked(vec![ChoicePayload::Text(l.clone())]))
         }
+        // Route Shift-Enter to the no-submit variant so the protocol test
+        // can tell the two commit keys apart.
+        fn pick_no_submit(&self, item_idx: usize) -> Option<Msg> {
+            self.labels
+                .get(item_idx)
+                .map(|l| Msg::ChoicePickedNoSubmit(vec![ChoicePayload::Text(l.clone())]))
+        }
         fn filter(&self) -> &str {
             &self.filter
         }
@@ -405,6 +429,70 @@ mod tests {
             }
             other => panic!("expected pick of item 2, got {other:?}"),
         }
+    }
+
+    /// Shift-Enter routes through `pick_no_submit` while plain Enter goes
+    /// through `pick` — the two commit keys the snippet picker distinguishes
+    /// (issue #791).
+    #[test]
+    fn shift_enter_routes_to_pick_no_submit() {
+        let mut f = Fake::new(&["alpha", "beta"]);
+        let shift_enter = KeyEvent::new(Key::Enter, KeyModifiers::SHIFT);
+        match f.dispatch_key(&shift_enter) {
+            Some(Msg::ChoicePickedNoSubmit(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("alpha".into())])
+            }
+            other => panic!("Shift-Enter must pick without submit, got {other:?}"),
+        }
+        // Plain Enter still submits.
+        match f.dispatch_key(&key(Key::Enter)) {
+            Some(Msg::ChoicePicked(v)) => {
+                assert_eq!(v, vec![ChoicePayload::Text("alpha".into())])
+            }
+            other => panic!("Enter must submit, got {other:?}"),
+        }
+    }
+
+    /// The default `pick_no_submit` falls back to `pick`, so a picker that
+    /// doesn't override it treats Shift-Enter exactly like Enter.
+    #[test]
+    fn pick_no_submit_defaults_to_pick() {
+        struct Plain(Vec<String>, Option<usize>, Vec<usize>, String);
+        impl FilterableList for Plain {
+            fn compute_visible(&mut self) -> Vec<usize> {
+                (0..self.0.len()).collect()
+            }
+            fn pick(&self, i: usize) -> Option<Msg> {
+                self.0
+                    .get(i)
+                    .map(|l| Msg::ChoicePicked(vec![ChoicePayload::Text(l.clone())]))
+            }
+            fn filter(&self) -> &str {
+                &self.3
+            }
+            fn filter_mut(&mut self) -> &mut String {
+                &mut self.3
+            }
+            fn cursor(&self) -> Option<usize> {
+                self.1
+            }
+            fn set_cursor(&mut self, c: Option<usize>) {
+                self.1 = c;
+            }
+            fn visible(&self) -> &[usize] {
+                &self.2
+            }
+            fn set_visible(&mut self, v: Vec<usize>) {
+                self.2 = v;
+            }
+        }
+        let mut p = Plain(vec!["only".into()], None, Vec::new(), String::new());
+        p.refilter();
+        let shift_enter = KeyEvent::new(Key::Enter, KeyModifiers::SHIFT);
+        assert!(
+            matches!(p.dispatch_key(&shift_enter), Some(Msg::ChoicePicked(_))),
+            "no override → Shift-Enter behaves like Enter",
+        );
     }
 
     #[test]

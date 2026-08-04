@@ -248,6 +248,7 @@ async fn run_io_lane(
                 snippet_key,
                 category,
                 body,
+                submit,
                 ..
             } => {
                 spawn_handler::handle_deliver_snippet(
@@ -256,6 +257,7 @@ async fn run_io_lane(
                     snippet_key,
                     category,
                     body,
+                    submit,
                 )
                 .await;
             }

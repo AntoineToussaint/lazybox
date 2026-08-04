@@ -343,7 +343,9 @@ the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that
-auto-submits when the typed key uniquely matches (`]]srev`); snippets
+auto-submits when the typed key uniquely matches (`]]srev`); `Enter`
+sends the highlighted snippet, `Shift-Enter` inserts its body into the
+composer without submitting so you can edit first (#791); snippets
 you've sent float into a "Recent" group at the top (MRU,
 `recent_snippets`, persisted in the state DB across restarts) so a
 repeat is `]]s`+Enter. The leader

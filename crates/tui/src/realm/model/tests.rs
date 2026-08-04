@@ -2231,12 +2231,14 @@ snippets:
                     snippet_key,
                     category,
                     body,
+                    submit,
                 },
             ] => {
                 assert_eq!(body, "review the diff", "body delivered verbatim");
                 assert_eq!(*terminal_id, lazybox_ipc::TerminalId(1));
                 assert_eq!(snippet_key, "rev");
                 assert!(category.is_empty());
+                assert!(*submit, "Enter picks submit");
             }
             _ => panic!("agent snippet must use DeliverSnippet, got {cmds:?}"),
         }
@@ -2244,6 +2246,41 @@ snippets:
             m.recent_snippets.is_empty(),
             "the client must wait for confirmed delivery",
         );
+    }
+
+    /// Shift-Enter (`handle_choice_picked_no_submit`) delivers the snippet
+    /// with `submit: false` AND mirrors the body into the client's composing
+    /// buffer, persisting the merged draft — so the recap reflects it on a
+    /// later manual submit and the draft survives a restart (issue #791).
+    #[test]
+    fn snippet_shift_enter_inserts_without_submit_and_tracks_the_draft() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "agent-nosubmit",
+            r#"
+snippets:
+  rev:
+    description: Review
+    body: review the diff
+"#,
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        );
+        let cmds = m.handle_choice_picked_no_submit(vec![ChoicePayload::Text("rev".into())]);
+        match cmds.as_slice() {
+            [
+                IpcCommand::DeliverSnippet { body, submit, .. },
+                IpcCommand::RecordComposingBuffer { buffer, .. },
+            ] => {
+                assert_eq!(body, "review the diff", "body delivered verbatim");
+                assert!(!*submit, "Shift-Enter inserts without submitting");
+                assert_eq!(
+                    buffer, "review the diff",
+                    "the persisted draft carries the inserted body",
+                );
+            }
+            _ => panic!(
+                "Shift-Enter must deliver without submit and persist the draft, got {cmds:?}"
+            ),
+        }
     }
 
     /// A multi-line body preserves its content and trailing newline;

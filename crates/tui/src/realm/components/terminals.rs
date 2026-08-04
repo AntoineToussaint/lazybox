@@ -427,6 +427,18 @@ impl Terminals {
         self.inner.record_paste(text)
     }
 
+    /// Append a compose-only insert (the `Shift-Enter` snippet body, #791)
+    /// into a specific terminal's composing buffer, returning the target id
+    /// and updated draft for `Command::RecordComposingBuffer`. No-op for
+    /// non-Agent terminals.
+    pub fn record_compose_insert(
+        &mut self,
+        id: lazybox_ipc::TerminalId,
+        text: &str,
+    ) -> Option<(lazybox_ipc::TerminalId, String)> {
+        self.inner.record_compose_insert(id, text)
+    }
+
     /// The text a `]]r` recall should drop back into the focused agent
     /// composer (in-flight draft, else last submitted message), with the
     /// target terminal id. `None` when there's nothing to recall.

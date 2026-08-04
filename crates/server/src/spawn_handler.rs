@@ -6433,6 +6433,7 @@ pub async fn handle_deliver_snippet(
     snippet_key: String,
     category: String,
     body: String,
+    submit: bool,
 ) {
     let Some((session_key, kind)) = config.terminal.terminal_meta_for(terminal_id).await else {
         let _ = config.bus.send(Event::TerminalInputRejected {
@@ -6443,23 +6444,31 @@ pub async fn handle_deliver_snippet(
     };
     match kind {
         TerminalKind::Agent(_) => {
-            let delivery = SnippetDelivery {
+            // A no-submit insert (`Shift-Enter`) drops the snippet into the
+            // composer for editing — it is not sent, so it records no
+            // history/MRU (the `delivery` is passed only when submitting).
+            let delivery = submit.then(|| SnippetDelivery {
                 session_key,
                 snippet_key,
                 category,
                 body: body.clone(),
-            };
-            handle_inject_prompt_inner(config, terminal_id, &body, None, true, Some(delivery))
-                .await;
+            });
+            handle_inject_prompt_inner(config, terminal_id, &body, None, submit, delivery).await;
         }
         TerminalKind::Shell => {
+            let intent = if submit {
+                TerminalInputIntent::Submit
+            } else {
+                TerminalInputIntent::Compose
+            };
             if handle_write(
                 config,
                 terminal_id,
-                &encode_shell_snippet(&body),
-                TerminalInputIntent::Submit,
+                &encode_shell_snippet(&body, submit),
+                intent,
             )
             .await
+                && submit
             {
                 record_confirmed_snippet(config, terminal_id, session_key, snippet_key, None).await;
             }
@@ -6494,12 +6503,18 @@ async fn record_confirmed_snippet(
     });
 }
 
-fn encode_shell_snippet(body: &str) -> Vec<u8> {
+/// Encode a snippet body for a shell command line. `submit` appends the
+/// trailing CR that runs the command (`Enter`); when `false` the body is
+/// left on the command line unsubmitted so the user can edit it before
+/// pressing Enter themselves (`Shift-Enter`, issue #791).
+fn encode_shell_snippet(body: &str, submit: bool) -> Vec<u8> {
     let body = lazybox_agents::trim_leading_blank_lines(body);
     if !body.contains('\n') {
         let mut bytes = Vec::with_capacity(body.len() + 1);
         bytes.extend_from_slice(body.as_bytes());
-        bytes.push(b'\r');
+        if submit {
+            bytes.push(b'\r');
+        }
         return bytes;
     }
     let mut bytes = Vec::with_capacity(body.len() + 16);
@@ -6510,7 +6525,10 @@ fn encode_shell_snippet(body: &str) -> Vec<u8> {
         }
         bytes.extend_from_slice(line.as_bytes());
     }
-    bytes.extend_from_slice(b"\x1b[201~\r");
+    bytes.extend_from_slice(b"\x1b[201~");
+    if submit {
+        bytes.push(b'\r');
+    }
     bytes
 }
 
@@ -8587,6 +8605,29 @@ mod tests {
         argv_for as build_argv, gateway_env_for_agent, skip_permissions_for,
         with_agent_pty_spawn_env, with_agent_spawn_defaults, with_worktree_cargo_target,
     };
+
+    /// Shell snippet encoding submits with a trailing CR on `Enter`, but a
+    /// `Shift-Enter` insert leaves the command line unsubmitted — no CR —
+    /// for both single- and multi-line bodies (issue #791).
+    #[test]
+    fn encode_shell_snippet_omits_the_trailing_cr_when_not_submitting() {
+        // Single line.
+        assert_eq!(encode_shell_snippet("ls -la", true), b"ls -la\r");
+        assert_eq!(encode_shell_snippet("ls -la", false), b"ls -la");
+
+        // Multi-line: bracketed paste either way; only the trailing CR
+        // after the paste-end marker differs.
+        let submitted = encode_shell_snippet("a\nb", true);
+        assert!(
+            submitted.ends_with(b"\x1b[201~\r"),
+            "submit ends with paste-close + CR: {submitted:?}",
+        );
+        let inserted = encode_shell_snippet("a\nb", false);
+        assert!(
+            inserted.ends_with(b"\x1b[201~") && !inserted.ends_with(b"\r"),
+            "no-submit ends with paste-close and no CR: {inserted:?}",
+        );
+    }
 
     #[test]
     fn route_declared_priority_distinguishes_unmapped_from_absent() {

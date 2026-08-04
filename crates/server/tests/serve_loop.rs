@@ -142,6 +142,7 @@ async fn client_kv_recorded_by_one_connection_replays_to_another() {
             snippet_key: "rev".into(),
             category: "Review".into(),
             body: "review the diff".into(),
+            submit: true,
         })
         .unwrap();
     loop {
@@ -229,6 +230,7 @@ async fn rejected_snippet_delivery_does_not_update_recent_history() {
             snippet_key: "rev".into(),
             category: "Review".into(),
             body: "review the diff".into(),
+            submit: true,
         })
         .unwrap();
     loop {

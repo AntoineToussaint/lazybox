@@ -2294,6 +2294,42 @@ mod broadcast_select_tests {
         );
     }
 
+    /// #794: the width-gating applies to the pre-existing global tally
+    /// too, not just the merge label — a tally that can't fit whole behind
+    /// a higher-priority group drops entirely rather than clipping to a
+    /// fragment like `1 C`. The old row-2 code pushed every group and let
+    /// the `Paragraph` hard-clip, so this is the regression guard for the
+    /// generalized behavior.
+    #[test]
+    fn global_tally_drops_whole_behind_a_wider_merge_label() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut ws = pr_ws("https://github.com/o/r/pull/1");
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().expect("pr").ci = lazybox_core::CiStatus::Failure;
+        sb.workspaces.insert(SessionKey::from(&ws.key), ws);
+        sb.recompute_visible();
+        assert_eq!(sb.ci_failing_count(), 1, "the failing PR is counted");
+
+        // Wide: the 31-cell " MERGE ON GREEN · lazybox only " label and the
+        // "1 CI" tally both render.
+        let wide = header_at(&mut sb, 60);
+        assert!(wide.contains("lazybox only"), "{wide:?}");
+        assert!(wide.contains("1 CI"), "{wide:?}");
+
+        // width 38 → inner 36: the label fits, but label + 2-cell separator
+        // + 4-cell tally (37) does not. The tally drops whole; the old clip
+        // would have sliced it to "1 C" trailing the label.
+        let tight = header_at(&mut sb, 38);
+        assert!(
+            tight.contains("lazybox only"),
+            "label still whole: {tight:?}"
+        );
+        assert!(
+            tight.trim_end().ends_with("only"),
+            "the tally must drop whole, not clip to a fragment: {tight:?}"
+        );
+    }
+
     /// `v` marks the cursor row and the mark survives navigating away
     /// — the selection is keyed by workspace, not row index.
     #[test]

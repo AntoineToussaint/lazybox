@@ -33,7 +33,8 @@ impl Sidebar {
         // V1-style header strip:
         //   row 0: LAZYBOX vX.Y.Z  ● N new  ? N input        N items  7d
         //   row 1: s  filter (needs:reply ci:failed ...)
-        //   row 2: N CI  N review               (omitted when both 0)
+        //   row 2: <focused merge/auto-fix automation>  N CI  N review
+        //          (each group width-gated; omitted when it can't fit)
         //   row 3: ── divider ────────────────
         //   row 4: blank
         //   row 5+: content

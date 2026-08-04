@@ -13400,6 +13400,170 @@ mod help_ask_tests {
         );
     }
 
+    // ── Ask Lazybox: scaffold a skill (#799) ────────────────────────
+
+    /// A finished answer carrying a `scaffold_skill` block.
+    fn scaffold_skill_answer(name: &str) -> String {
+        format!(
+            "I'll scaffold that skill.\n\n```lazybox-action\n\
+{{\"action\":\"scaffold_skill\",\"name\":\"{name}\",\
+\"description\":\"Draft release notes from merged PRs\",\
+\"body\":\"1. Find the last tag.\\n2. List the merged PRs since it.\"}}\n\
+```\n\nThe agent can pick it up on its own.",
+        )
+    }
+
+    /// Seed a focused workspace whose one session's worktree is
+    /// `worktree`, so `skill_scaffold_root` resolves there instead of
+    /// the process cwd (which would pollute the real repo).
+    fn model_with_worktree(
+        worktree: &std::path::Path,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let mut m = build_model();
+        let ws_key = lazybox_core::WorkspaceKey::new("github:o/r#1");
+        let mut ws = lazybox_core::Workspace::empty(ws_key.clone(), "main", chrono::Utc::now());
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            ws_key.clone(),
+            lazybox_core::SessionKind::Shell,
+            worktree.to_path_buf(),
+            chrono::Utc::now(),
+        ));
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        let session_key: lazybox_core::SessionKey = (&ws_key).into();
+        assert!(
+            m.sidebar.focus_workspace_key(&session_key),
+            "seeded workspace should be selectable",
+        );
+        m
+    }
+
+    /// Asking for a multi-step capability scaffolds a skill: a
+    /// confirm-with-preview naming the destination folder, the intent
+    /// stashed, and the raw action JSON stripped from the transcript.
+    #[test]
+    fn scaffold_skill_action_proposes_a_confirm_and_strips_the_block() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = ask_new(&mut m, "make a skill for release notes");
+        finish_help_turn(&mut m, scaffold_skill_answer("lazybox-799-release-notes"));
+
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        let Some(super::super::ModalFlow::HelpAction { intent }) = m.modal_flow.clone() else {
+            panic!("intent stashed");
+        };
+        match intent {
+            lazybox_tui_core::help::HelpActionIntent::ScaffoldSkill {
+                name,
+                description,
+                body,
+            } => {
+                assert_eq!(name, "lazybox-799-release-notes");
+                assert_eq!(description, "Draft release notes from merged PRs");
+                assert!(body.contains("Find the last tag"));
+            }
+            other => panic!("expected ScaffoldSkill, got {other:?}"),
+        }
+        assert!(
+            !m.help_convo_mut().turns[0]
+                .answer
+                .contains("lazybox-action"),
+            "raw action block must not show in the transcript",
+        );
+    }
+
+    /// Accepting writes `.claude/skills/<name>/SKILL.md` into the
+    /// focused workspace's worktree, with frontmatter built from the
+    /// name + description.
+    #[test]
+    fn confirming_scaffolds_the_skill_folder() {
+        let root = std::env::temp_dir().join(format!("lazybox-help-skill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut m = model_with_worktree(&root);
+        m.update(Msg::HelpAskOpen);
+        let _ = ask_new(&mut m, "make a skill for release notes");
+        finish_help_turn(&mut m, scaffold_skill_answer("release-notes"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+
+        let _ = m.handle_confirmed(true);
+
+        let skill_md = root.join(".claude/skills/release-notes/SKILL.md");
+        let written = std::fs::read_to_string(&skill_md).expect("SKILL.md written");
+        assert!(written.contains("name: release-notes"));
+        assert!(written.contains("description: Draft release notes from merged PRs"));
+        assert!(written.contains("Find the last tag"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpAsk), "confirm popped");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An already-scaffolded skill is never clobbered: the proposal is
+    /// rejected with a notice instead of a confirm, and the existing
+    /// SKILL.md is left untouched.
+    #[test]
+    fn scaffold_skill_refuses_to_overwrite_and_notices_it() {
+        let root =
+            std::env::temp_dir().join(format!("lazybox-help-skill-dup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        lazybox_config::scaffold_skill(&root, "release-notes", "old", "old body").unwrap();
+
+        let mut m = model_with_worktree(&root);
+        m.update(Msg::HelpAskOpen);
+        let _ = ask_new(&mut m, "make a skill for release notes");
+        finish_help_turn(&mut m, scaffold_skill_answer("release-notes"));
+
+        assert!(m.modal_flow.is_none());
+        assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        assert!(
+            m.help_convo_mut()
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("already exists"),
+            "notice: {:?}",
+            m.help_convo_mut().notice,
+        );
+        let written =
+            std::fs::read_to_string(root.join(".claude/skills/release-notes/SKILL.md")).unwrap();
+        assert!(written.contains("old body"), "existing skill untouched");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A skill name that isn't a clean folder id is rejected at the
+    /// boundary: no confirm, a notice, and nothing on disk.
+    #[test]
+    fn invalid_skill_name_sets_a_notice_and_no_confirm() {
+        let mut m = build_model();
+        m.update(Msg::HelpAskOpen);
+        let _ = ask_new(&mut m, "make a skill");
+        finish_help_turn(
+            &mut m,
+            "```lazybox-action\n{\"action\":\"scaffold_skill\",\"name\":\"Bad Name\",\
+\"description\":\"d\",\"body\":\"b\"}\n```"
+                .into(),
+        );
+
+        assert!(m.modal_flow.is_none());
+        assert_ne!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+        assert!(
+            m.help_convo_mut()
+                .notice
+                .as_deref()
+                .unwrap_or("")
+                .contains("invalid skill name"),
+            "notice: {:?}",
+            m.help_convo_mut().notice,
+        );
+    }
+
     /// A malformed intent (whitespace key) is rejected at the boundary:
     /// no confirm, and a notice explains why nothing happened.
     #[test]

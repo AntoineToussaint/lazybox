@@ -1309,6 +1309,44 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            HelpActionIntent::ScaffoldSkill {
+                name,
+                description,
+                body,
+            } => {
+                if let Err(msg) = self.validate_skill_scaffold(name, description, body) {
+                    self.reject_help_action(msg);
+                    return;
+                }
+                let Some(root) = self.skill_scaffold_root() else {
+                    self.reject_help_action(
+                        "a skill is scaffolded into a repo on your machine — unavailable for a \
+                         remote daemon",
+                    );
+                    return;
+                };
+                let path = lazybox_config::skill_md_path(&root, name.trim());
+                if path.exists() {
+                    self.reject_help_action(format!(
+                        "a skill named `{}` already exists at {} — nothing was written",
+                        name.trim(),
+                        path.display(),
+                    ));
+                    return;
+                }
+                let mut preview = format!(
+                    "Scaffold skill `{}` in {}?\n\n",
+                    name.trim(),
+                    path.display(),
+                );
+                preview.push_str(&format!("description: {}\n\n", description.trim()));
+                preview.push_str(&snippet_body_preview(body));
+                preview
+                    .push_str("\n\nWrites a new SKILL.md the focused agent can load on its own.");
+                // Default Yes — the user asked for it, and the scaffold
+                // refuses (never overwrites) if the skill already exists.
+                (preview, true)
+            }
         };
         self.set_modal_flow(ModalFlow::HelpAction { intent });
         let modal = Confirm::new(preview);

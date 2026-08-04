@@ -933,7 +933,67 @@ showing keybinding search only",
                     Err(msg) => self.flash_error(msg),
                 }
             }
+            HelpActionIntent::ScaffoldSkill {
+                name,
+                description,
+                body,
+            } => {
+                if let Err(msg) = self.validate_skill_scaffold(&name, &description, &body) {
+                    self.flash_error(msg);
+                    return;
+                }
+                let Some(root) = self.skill_scaffold_root() else {
+                    self.flash_error(
+                        "a skill scaffolds into a repo on your machine — unavailable for a remote daemon",
+                    );
+                    return;
+                };
+                match lazybox_config::scaffold_skill(&root, name.trim(), &description, &body) {
+                    Ok(path) => self.flash_info(format!("skill scaffolded — {}", path.display())),
+                    Err(e) => self.flash_error(format!("failed to scaffold skill: {e}")),
+                }
+            }
         }
+    }
+
+    /// The repo the `scaffold_skill` action writes into: the focused
+    /// workspace's live worktree when it has one, else the directory
+    /// lazybox was launched from. `None` when attached to a remote
+    /// daemon — the worktree path is server-side, so there's nothing
+    /// local to scaffold into.
+    pub(super) fn skill_scaffold_root(&self) -> Option<std::path::PathBuf> {
+        if self.remote {
+            return None;
+        }
+        self.sidebar
+            .selected_workspace()
+            .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()))
+            .filter(|p| p.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+    }
+
+    /// Boundary validation for a proposed `scaffold_skill` (#799): the
+    /// name must be a clean folder id and both description and body must
+    /// be present. Re-run at apply so a payload that went stale between
+    /// propose and confirm can't slip a bad write through.
+    pub(super) fn validate_skill_scaffold(
+        &self,
+        name: &str,
+        description: &str,
+        body: &str,
+    ) -> Result<(), String> {
+        lazybox_config::validate_skill_name(name.trim()).map_err(|e| e.to_string())?;
+        if description.trim().is_empty() {
+            return Err(
+                "the assistant proposed a skill with no description — nothing was written".into(),
+            );
+        }
+        if body.trim().is_empty() {
+            return Err(
+                "the assistant proposed a skill with an empty body — nothing was written".into(),
+            );
+        }
+        Ok(())
     }
 
     /// Validate an `edit_config` intent against the allowlist and live

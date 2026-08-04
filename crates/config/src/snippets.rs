@@ -90,6 +90,11 @@ pub struct Snippet {
     /// else — picker, Recent, `]N`, broadcast — is unchanged, since the
     /// skill-invocation text flows through the same delivery path as a plain
     /// body (see [`Snippet::dispatch_body`]).
+    ///
+    /// Invariant: `Some` always names a real, trimmed, non-empty skill. A
+    /// blank `skill:` in a user file is normalized to `None` at load
+    /// ([`Snippet::normalize_skill`]), so consumers never have to guard
+    /// against an empty dispatch target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
     /// Provenance — which file the entry came from. Hand-set by the
@@ -127,6 +132,18 @@ impl SnippetOrigin {
 }
 
 impl Snippet {
+    /// Normalize `skill` to uphold its invariant: trim surrounding
+    /// whitespace, and collapse a blank value to `None`. A user file with
+    /// `skill: ""` (or `skill: "  "`) names no real dispatch target, so it
+    /// must not survive as `Some("")` and produce an empty `` Use the ``
+    /// `` `` skill.`` invocation. Applied at every load boundary.
+    pub fn normalize_skill(&mut self) {
+        self.skill = self.skill.take().and_then(|name| {
+            let trimmed = name.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+    }
+
     /// The text actually delivered to the focused agent.
     ///
     /// For a plain snippet this is just `body`. For a *skill-dispatching*
@@ -201,6 +218,7 @@ impl Snippets {
             .into_iter()
             .map(|(k, mut s)| {
                 s.origin = origin;
+                s.normalize_skill();
                 (k, s)
             })
             .collect();
@@ -1502,6 +1520,45 @@ snippets:
         assert_eq!(
             loaded.get("bridge").expect("bridge").skill.as_deref(),
             Some("code-review")
+        );
+    }
+
+    /// A blank `skill:` names no real dispatch target, so loading collapses
+    /// it to `None` — the snippet stays a plain text snippet instead of
+    /// delivering a degenerate empty-backtick invocation. Surrounding
+    /// whitespace on a real name is trimmed. Verified through the delivered
+    /// text (`dispatch_body`), the observable behavior.
+    #[test]
+    fn blank_skill_normalizes_to_none_and_names_are_trimmed() {
+        let path = write_tmp(
+            "skill-normalize",
+            "snippets:\n  \
+             empty:\n    skill: \"\"\n    body: just text\n  \
+             spaces:\n    skill: \"   \"\n    body: more text\n  \
+             padded:\n    skill: \"  code-review  \"\n    body: review the diff\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+
+        let empty = loaded.get("empty").expect("empty");
+        assert_eq!(empty.skill, None, "blank skill collapses to None");
+        assert_eq!(
+            empty.dispatch_body(),
+            "just text",
+            "delivered as plain text"
+        );
+
+        let spaces = loaded.get("spaces").expect("spaces");
+        assert_eq!(
+            spaces.skill, None,
+            "whitespace-only skill collapses to None"
+        );
+        assert_eq!(spaces.dispatch_body(), "more text");
+
+        let padded = loaded.get("padded").expect("padded");
+        assert_eq!(padded.skill.as_deref(), Some("code-review"), "name trimmed");
+        assert_eq!(
+            padded.dispatch_body(),
+            "Use the `code-review` skill to complete this task:\n\nreview the diff"
         );
     }
 }

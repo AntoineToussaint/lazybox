@@ -2182,6 +2182,28 @@ mod popup_nav_tests {
         assert_eq!(advance_highlight(Some(9), 1, 4), 2);
     }
 
+    /// The popup-nav letters (`j`/`k`) must never also name a `]]` leader
+    /// command. The armed leader routes them to highlight navigation
+    /// BEFORE command dispatch (`handle_pane_key`), so any command bound to
+    /// `j`/`k` would be unreachable via its direct chord. Binding Skills to
+    /// `k` (#797) tripped exactly this — guard the invariant the nav path
+    /// relies on so a future letter command can't silently be shadowed.
+    #[test]
+    fn popup_nav_letters_never_name_a_leader_command() {
+        use crate::realm::model::terminal_leader::LeaderCmd;
+        for c in ['j', 'k'] {
+            assert!(
+                popup_letter_nav_delta(&key(Key::Char(c), KeyModifiers::NONE)).is_some(),
+                "`{c}` is expected to navigate the popup",
+            );
+            assert!(
+                LeaderCmd::from_key(Key::Char(c), KeyModifiers::empty()).is_none(),
+                "`{c}` navigates the popup, so it must not bind a leader command \
+                 (it would be shadowed and unreachable via its direct chord)",
+            );
+        }
+    }
+
     /// Arrows and `j`/`k` navigate only unmodified; a `Shift-arrow` is
     /// left for the splitter-resize arm (#343).
     #[test]

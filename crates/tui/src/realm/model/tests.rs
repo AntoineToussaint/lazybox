@@ -3866,6 +3866,120 @@ snippets:
         assert_eq!(m.recent_skills, vec!["code-review".to_string()]);
     }
 
+    /// A temp worktree carrying one repo skill under `.claude/skills/`,
+    /// plus a model whose focused agent terminal is rooted there — the
+    /// fixture for the end-to-end `]]l` chord tests.
+    fn tmp_worktree_with_skill(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-skilltest-{}-{}", std::process::id(), tag));
+        let skill_dir = dir.join(".claude").join("skills").join("code-review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: code-review\ndescription: Review a diff.\n---\nbody\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn model_with_agent_at_worktree(
+        worktree: std::path::PathBuf,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        let mut ws = lazybox_core::Workspace::empty(ws_key.clone(), "main", chrono::Utc::now());
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            ws_key,
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            worktree,
+            chrono::Utc::now(),
+        ));
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key,
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m
+    }
+
+    /// End-to-end: arming the leader and pressing `l` opens the skills
+    /// picker. Exercises the real key routing (`handle_pane_key`), which is
+    /// where the original #797 defect lived — `k` was shadowed by the
+    /// popup-navigation letters, so the direct chord silently did nothing.
+    #[test]
+    fn leader_l_opens_skill_picker_end_to_end() {
+        let worktree = tmp_worktree_with_skill("e2e");
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(RealmKey::new(Key::Char('l'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "`]]l` consumed the leader");
+        assert!(
+            matches!(m.top_modal(), Some(Id::SkillPicker)),
+            "`]]l` opens the skills picker",
+        );
+    }
+
+    /// `k` stays popup-highlight navigation inside the armed leader — it
+    /// must NOT resolve to the skills command (the shadowing that made the
+    /// original `]]k` binding dead). The leader stays armed and no picker
+    /// opens.
+    #[test]
+    fn leader_k_navigates_and_never_opens_skill_picker() {
+        let worktree = tmp_worktree_with_skill("k-nav");
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
+        assert!(
+            m.terminal_leader_pending(),
+            "`k` navigates the popup and keeps the leader armed",
+        );
+        assert!(
+            m.top_modal().is_none(),
+            "`]]k` must not open the skills picker",
+        );
+    }
+
+    /// Over `--connect` the agent's worktree and `~/.claude/skills` live on
+    /// the daemon host, so a local scan would surface the wrong machine's
+    /// skills. The picker refuses to mount and names the reason, even
+    /// though a scannable skill exists locally.
+    #[test]
+    fn skill_picker_is_unavailable_over_remote() {
+        let worktree = tmp_worktree_with_skill("remote");
+        let mut m = model_with_agent_at_worktree(worktree).with_remote();
+        m.mount_skill_picker(String::new());
+        assert!(
+            !matches!(m.modal_stack.last(), Some(Id::SkillPicker)),
+            "a remote client shouldn't scan the local filesystem for skills",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("--connect")),
+        );
+    }
+
     // ── `]]` leader chord (issue #205) ──────────────────────────────
 
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
@@ -8320,7 +8434,7 @@ mod leader_tile_tests {
         assert_eq!(m.terminal_leader_highlight(), Some(1));
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(m.terminal_leader_highlight(), Some(0));
-        // Menu order: s,k,r,h,u,f,… — step to `focus mode` at index 5.
+        // Menu order: s,l,r,h,u,f,… — step to `focus mode` at index 5.
         for _ in 0..5 {
             m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         }
@@ -8373,7 +8487,7 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         arm_leader(&mut m);
 
-        // Splits menu order: s,k,r,h,u,f,q,`,|,- then the `move tile`
+        // Splits menu order: s,l,r,h,u,f,q,`,|,- then the `move tile`
         // aggregate at index 10, then `x` at index 11. Ten `j` presses
         // reach index 9.
         for _ in 0..10 {

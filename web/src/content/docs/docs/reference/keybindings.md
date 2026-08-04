@@ -118,7 +118,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | Chord | Action |
 | --- | --- |
 | `]]s` | Open the snippet picker (typing a full key auto-submits — `]]srev`) |
-| `]]k` | Open the skills picker — trigger one of the focused agent's Claude Code skills explicitly (typing a full name auto-submits) |
+| `]]l` | Open the skills picker — trigger one of the focused agent's Claude Code skills explicitly (typing a full name auto-submits) |
 | `]]r` | Restore the in-flight draft, or the last submitted agent prompt, without sending it |
 | `]]h` | Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one |
 | `]]u` | Scan the visible terminal for URLs and open the picked one in the browser (a lone URL opens straight away) |

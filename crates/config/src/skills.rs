@@ -18,6 +18,7 @@
 //! folder holding a `SKILL.md` whose YAML frontmatter carries `name` and
 //! `description`.
 
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 // ── Discovery (#797) ────────────────────────────────────────────────
@@ -125,9 +126,7 @@ fn scan_dir(dir: &Path, scope: SkillScope, out: &mut Vec<Skill>) {
 /// frontmatter still lists (folder name, empty description) rather than
 /// silently vanishing.
 fn read_skill(manifest: &Path, folder_name: String, scope: SkillScope) -> Skill {
-    let front = std::fs::read_to_string(manifest)
-        .ok()
-        .and_then(|content| parse_frontmatter(&content));
+    let front = read_frontmatter(manifest);
     let (name, description) = match front {
         Some(front) => (
             front
@@ -145,20 +144,24 @@ fn read_skill(manifest: &Path, folder_name: String, scope: SkillScope) -> Skill 
     }
 }
 
-/// Extract and parse the leading `---`-fenced YAML frontmatter block.
-/// Returns `None` when the file doesn't open with a `---` fence, the
-/// fence is unterminated, or the block isn't valid YAML.
-fn parse_frontmatter(content: &str) -> Option<SkillFrontmatter> {
-    let mut lines = content.lines();
-    if lines.next()?.trim_end() != "---" {
+/// Read and parse a `SKILL.md`'s leading frontmatter, stopping at the
+/// closing `---` fence so a large skill body is never loaded just to
+/// read two header fields. Returns `None` when the file is unreadable,
+/// doesn't open with a `---` fence, the fence is unterminated, or the
+/// block isn't valid YAML.
+fn read_frontmatter(manifest: &Path) -> Option<SkillFrontmatter> {
+    let file = std::fs::File::open(manifest).ok()?;
+    let mut lines = std::io::BufReader::new(file).lines();
+    if lines.next()?.ok()?.trim_end() != "---" {
         return None;
     }
     let mut yaml = String::new();
     for line in lines {
+        let line = line.ok()?;
         if line.trim_end() == "---" {
             return serde_yaml::from_str(&yaml).ok();
         }
-        yaml.push_str(line);
+        yaml.push_str(&line);
         yaml.push('\n');
     }
     None
@@ -308,6 +311,24 @@ mod discovery_tests {
         assert_eq!(skills[0].name, "code-review");
         assert_eq!(skills[0].description, "Review a diff for bugs.");
         assert_eq!(skills[0].scope, SkillScope::Repo);
+    }
+
+    #[test]
+    fn frontmatter_read_stops_at_the_first_closing_fence() {
+        // The body is long and itself contains a `---` line (a markdown
+        // horizontal rule / a second YAML doc). Parsing must read only the
+        // header block — bounded at the first closing fence — and ignore
+        // the rest, so `description` is the header's, not the body's.
+        let repo = tmp_root("bounded");
+        let body = format!(
+            "---\nname: writer\ndescription: header desc\n---\n{}\n---\ndescription: body desc\n",
+            "x".repeat(200_000),
+        );
+        write_skill(&repo, "writer", &body);
+        let skills = discover_skills_in(Some(&repo), None);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "writer");
+        assert_eq!(skills[0].description, "header desc");
     }
 
     #[test]

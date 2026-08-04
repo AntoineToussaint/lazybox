@@ -323,7 +323,7 @@ click a link to open it, `Esc` to close; the header hint reads
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
 escape sequence) is a *non-timed* leader (#252) that opens a small
-command menu (which-key popup): `]]s` opens the snippet picker, `]]k`
+command menu (which-key popup): `]]s` opens the snippet picker, `]]l`
 opens the skills picker (#797 — the focused agent's Claude Code skills
 discovered from `.claude/skills/` + `~/.claude/skills/`, previewed by
 their description and grouped by Repo/User scope; picking one injects an

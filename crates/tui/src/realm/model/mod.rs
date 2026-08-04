@@ -2207,7 +2207,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SnippetPicker, picker);
     }
 
-    /// Mount the skills picker (`]]k`, issue #797): the Claude Code skills
+    /// Mount the skills picker (`]]l`, issue #797): the Claude Code skills
     /// available to the focused agent, discovered from `.claude/skills/`
     /// in its worktree plus `~/.claude/skills/`. Reuses the `SnippetPicker`
     /// component — rows carry the skill *name* as a
@@ -2228,6 +2228,15 @@ impl<T: TerminalAdapter> Model<T> {
         };
         if !self.terminals.terminal_is_agent(terminal_id) {
             self.flash_info("skills apply to agent sessions — focus one first");
+            return;
+        }
+        // Discovery reads the *local* filesystem. Over `--connect` the
+        // agent's worktree and `~/.claude/skills` live on the daemon host,
+        // not here, so a scan would silently surface the wrong machine's
+        // skills. Gate on `remote` — the same flag the local-editor path
+        // uses for server-side `worktree_path` actions (#742).
+        if self.remote {
+            self.flash_info("skills discovery needs a local daemon — unavailable over --connect");
             return;
         }
         let skills = lazybox_config::discover_skills(self.active_terminal_worktree().as_deref());
@@ -2251,10 +2260,18 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SkillPicker, picker);
     }
 
-    /// The worktree of the focused terminal's session, resolved through
-    /// its session key — the repo root under which `.claude/skills/` is
-    /// scanned. `None` when the terminal has no session or the workspace
-    /// carries no session yet.
+    /// The worktree of the focused terminal's workspace — the repo root
+    /// under which `.claude/skills/` is scanned. `None` when the terminal
+    /// has no session or the workspace carries no session yet.
+    ///
+    /// Resolution is workspace-grained on purpose: a terminal slot carries
+    /// only its `session_key` (the workspace identity), not a per-session
+    /// id, so there is no finer "this terminal's session" to key off. That
+    /// is sound for skills — every session in a workspace is a checkout of
+    /// the *same* repo (a managed worktree, or the shared main checkout for
+    /// on-main/linked sessions), so each carries the same `.claude/skills/`.
+    /// `first()` therefore yields a valid repo root regardless of which
+    /// session the focused terminal belongs to (mirrors the editor flow).
     fn active_terminal_worktree(&self) -> Option<std::path::PathBuf> {
         let session_key = self.terminals.active_session()?;
         self.sidebar

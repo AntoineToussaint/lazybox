@@ -29,6 +29,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc};
 
 pub type Body = UnsyncBoxBody<Bytes, Infallible>;
+/// The desktop wire compatibility gate. A client and daemon that agree on
+/// this integer are treated as compatible; a mismatch is fatal (startup
+/// abort / HTTP 426). Since the fingerprint is now advisory (#815), this is
+/// the *sole* guard against genuine wire incompatibility — bump it on any
+/// change to the desktop `Command`/`Event`/DTO shapes or the terminal frame
+/// layout, so a real wire change can't ride an unchanged version across a
+/// remote hop. Non-wire churn (a `Cargo.lock` bump, a comment) must not
+/// bump it; that is exactly the skew the advisory fingerprint tolerates.
 pub const DESKTOP_PROTOCOL_VERSION: u32 = 1;
 pub const PROTOCOL_VERSION_HEADER: &str = "x-lazybox-protocol-version";
 pub const TERMINAL_BINARY_CONTENT_TYPE: &str = "application/vnd.lazybox.terminal.v1";
@@ -379,7 +387,6 @@ pub struct DesktopInfo {
     /// client share a compatible protocol version but differ in build
     /// fingerprint (#815). The link works; the UI shows it so the user can
     /// update one side if something misbehaves.
-    #[serde(default)]
     pub protocol_notice: Option<String>,
 }
 

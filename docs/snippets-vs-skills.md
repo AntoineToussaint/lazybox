@@ -1,11 +1,16 @@
 # Snippets vs Agent Skills: when to use which
 
 lazybox [snippets](snippets.md) and Agent **Skills** (the `SKILL.md`
-skills that Claude Code and Codex load natively) look almost identical
-from a distance — both are named, described, reusable bundles of agent
+skills that Claude Code loads natively) look almost identical from a
+distance — both are named, described, reusable bundles of agent
 instruction. They are **complementary layers, not competitors.** One
 axis separates them cleanly, and it should drive which one you reach
 for.
+
+(Skills are a Claude Code feature. Of the agents lazybox spawns —
+Claude, Codex, Cursor — only Claude Code loads `SKILL.md` today; where
+this page says "skill" it means that capability, and the bridging work
+below starts there.)
 
 ## The axis that matters: who decides when it runs
 
@@ -33,7 +38,7 @@ opposite, and that is the useful distinction.
 | Scope / layering | built-in → global → launch-dir (`~/.lazybox/snippets.yaml`) | `.claude/skills/` per-repo + `~/.claude/skills/` user-level |
 | Authoring | YAML + "Ask Lazybox" confirm-and-write | Author a `SKILL.md` folder by hand or via the agent |
 | lazybox memory | MRU **Recent**, per-workspace `]N` badge, broadcast rollout | None — skill invocation is agent-internal |
-| Portability | lazybox-only | Runs in Claude Code / Codex / API with or without lazybox |
+| Portability | lazybox-only | Runs in Claude Code / API with or without lazybox |
 | Determinism | High — you know exactly what fires | Lower — depends on the model's read of `description` |
 
 ## When to use which

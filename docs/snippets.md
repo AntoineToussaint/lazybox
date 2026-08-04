@@ -13,9 +13,9 @@ the system is useful before you create anything: review (`rev`,
 (`test`, `tdd`, `repro`), debugging (`bug`, `bisect`, `trace`),
 security (`sec`, `deps`, `leaks`), and more.
 
-Snippets are the *human-triggered* half of a pair: agents lazybox
-spawns also load their own model-triggered **Skills**
-(`SKILL.md`). For which one to reach for, see
+Snippets are the *human-triggered* half of a pair: Claude Code — one of
+the agents lazybox spawns — also loads its own model-triggered
+**Skills** (`SKILL.md`). For which one to reach for, see
 [Snippets vs Agent Skills](snippets-vs-skills.md).
 
 ## Send and repeat a workflow

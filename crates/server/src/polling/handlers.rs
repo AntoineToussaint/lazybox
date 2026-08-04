@@ -308,7 +308,7 @@ const MUTATION_RETRY_FALLBACK_SECS: u64 = 60;
 /// carrying the reset hint (`crate`-side, `mutation_provider_error` in the
 /// GitHub client lifts a secondary-limit GraphQL error to that). Rather
 /// than hard-fail with a raw red `×` the user must clear and re-press, we
-/// surface a live, non-scary "queued — retrying at HH:MM" notice, wait out
+/// surface a live, non-scary "queued — retrying in ~2m" notice, wait out
 /// the window (honoring the hint, with per-attempt backoff + jitter so
 /// lazybox doesn't re-collide with `gh`/agents on the shared token), and
 /// retry. Only once the bounds above are exhausted does the final error
@@ -413,6 +413,36 @@ pub(super) fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderEr
     }
 }
 
+/// Run a user-initiated mutation as a **daemon-owned** task, detached from
+/// the per-connection command pool.
+///
+/// [`run_mutation_with_retry`] can hold its caller for minutes while it
+/// waits out a rate-limit window. A mutation command runs on the serve
+/// loop's per-connection `mutations` pool, bounded by `MAX_CONNECTION_MUTATIONS`;
+/// left there, a bulk flow under a rate limit (e.g. `Shift-U` on many
+/// behind PRs — exactly the burst that trips the secondary limit) would pin
+/// slots for the whole window, starving the pool so later commands are
+/// rejected, and a client disconnect would drop the still-queued write. As a
+/// detached daemon task it does neither: the retry outlives the connection
+/// and the outcome reaches every client over the event bus. Same dispatch
+/// shape as [`auto_merge::on_workspace_committed`].
+fn detach_mutation<Fut>(fut: Fut)
+where
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(fut);
+}
+
+/// After a `deleteIssue` fails, should the daemon fall back to a
+/// NOT_PLANNED close? Only for a genuine "delete not permitted" — GitHub's
+/// FORBIDDEN when the token lacks admin. A *retryable* rate-limit that only
+/// exhausted its retry window is not a permission problem, so downgrading a
+/// delete to a close on it would silently do the wrong thing; that surfaces
+/// as a failure instead.
+fn delete_should_fall_back_to_close(delete_err: &lazybox_core::ProviderError) -> bool {
+    !delete_err.is_retryable()
+}
+
 /// Handle `Command::MergePr` — the MANUAL merge path (`g m`): load the
 /// workspace, recover the PR's GraphQL node id from its primary task,
 /// and ship a `mergePullRequest` mutation. On success the next poll
@@ -431,6 +461,11 @@ pub(super) fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderEr
 /// Errors surface as `Event::ProviderError` so the TUI can flash the
 /// reason without us inventing a bespoke event variant.
 pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { merge_pr_task(&config, workspace_key).await });
+}
+
+async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -515,6 +550,11 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
 /// (mirroring the merge path) so a rejected update can't be mistaken for
 /// "the keypress did nothing." The PR stays actionable.
 pub async fn handle_update_branch(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { update_branch_task(&config, workspace_key).await });
+}
+
+async fn update_branch_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -577,6 +617,11 @@ pub async fn handle_update_branch(config: &ServerConfig, workspace_key: Workspac
 /// the user can't mistake it for "the keypress did nothing" — the
 /// issue stays Open/actionable.
 pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { close_issue_task(&config, workspace_key).await });
+}
+
+async fn close_issue_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -689,6 +734,11 @@ fn closed_issue_cleanup(config: &ServerConfig, ws: &Workspace) -> Option<super::
 /// Failure surfaces as a persistent `Event::DeleteOrCloseFailed`,
 /// mirroring the merge/close paths.
 pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { delete_or_close_task(&config, workspace_key).await });
+}
+
+async fn delete_or_close_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -735,8 +785,10 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
     } else {
         // Retry a rate-limited *delete* against the reset window rather than
         // letting it fall through to the close path — a transient limit must
-        // not silently downgrade a delete into a NOT_PLANNED close. Only a
-        // genuine delete failure (FORBIDDEN for a non-admin) falls back.
+        // not silently downgrade a delete into a NOT_PLANNED close. The
+        // fallback is only for a genuine "delete not permitted" (a non-admin's
+        // FORBIDDEN); a rate-limit that merely exhausted its window is not a
+        // permission problem and surfaces as a failure instead.
         let fell_back_to_close =
             match run_mutation_with_retry(&config.bus, "delete-or-close", || {
                 provider.delete_issue(&ws)
@@ -744,6 +796,18 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
             .await
             {
                 Ok(()) => false,
+                Err(delete_err) if !delete_should_fall_back_to_close(&delete_err) => {
+                    tracing::warn!(
+                        "delete-issue {workspace_key}: {delete_err:?} — rate-limited, not \
+                         downgrading to close"
+                    );
+                    let _ = config.bus.send(Event::DeleteOrCloseFailed {
+                        workspace_key: workspace_key.clone(),
+                        label,
+                        reason: humanize_mutation_failure("delete-issue", &delete_err),
+                    });
+                    return;
+                }
                 Err(delete_err) => {
                     tracing::warn!(
                         "delete-issue {workspace_key}: {delete_err:?} — falling back to close"
@@ -789,6 +853,15 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
 /// reviewer set without waiting for the next 60s poll. Errors
 /// surface as a `ProviderError` so the TUI footer flags it.
 pub async fn handle_request_reviewers(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
+    let config = config.clone();
+    detach_mutation(async move { request_reviewers_task(&config, workspace_key, logins).await });
+}
+
+async fn request_reviewers_task(
     config: &ServerConfig,
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
@@ -842,6 +915,15 @@ pub async fn handle_add_assignees(
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
 ) {
+    let config = config.clone();
+    detach_mutation(async move { add_assignees_task(&config, workspace_key, logins).await });
+}
+
+async fn add_assignees_task(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -886,6 +968,15 @@ pub async fn handle_add_assignees(
 /// style poll afterwards so the sidebar / right pane reflect the
 /// new set without waiting for the regular tick.
 pub async fn handle_set_assignees(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
+    let config = config.clone();
+    detach_mutation(async move { set_assignees_task(&config, workspace_key, logins).await });
+}
+
+async fn set_assignees_task(
     config: &ServerConfig,
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
@@ -938,6 +1029,11 @@ pub async fn handle_set_labels(
     workspace_key: WorkspaceKey,
     names: Vec<String>,
 ) {
+    let config = config.clone();
+    detach_mutation(async move { set_labels_task(&config, workspace_key, names).await });
+}
+
+async fn set_labels_task(config: &ServerConfig, workspace_key: WorkspaceKey, names: Vec<String>) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -4762,6 +4858,60 @@ mod mutation_retry_tests {
         assert!(
             mutation_retry_wait(MUTATION_MAX_WAIT_SECS + 1_000, 5) <= MUTATION_MAX_WAIT_SECS,
             "a huge hint is capped so the queue stays bounded"
+        );
+    }
+
+    /// The retry queue must run detached from its caller: a mutation that
+    /// sits in the queue for minutes cannot hold the caller (a per-connection
+    /// command slot) for the whole window, and it must outlive the caller so
+    /// a disconnect doesn't drop the queued write. `detach_mutation` returns
+    /// before its (slow) work finishes, and that work completes on its own.
+    #[tokio::test(start_paused = true)]
+    async fn detached_mutation_runs_independently_of_its_caller() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let bus2 = bus.clone();
+        detach_mutation(async move {
+            // Stand in for a queued retry that waits out a rate-limit window.
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let _ = bus2.send(Event::provider_error_retryable("merge", "done"));
+        });
+
+        // The caller did NOT await the work — nothing has been emitted yet.
+        assert!(
+            rx.try_recv().is_err(),
+            "detach_mutation must return before the queued work finishes"
+        );
+
+        // The detached task completes on its own, after the caller moved on.
+        tokio::time::sleep(std::time::Duration::from_secs(301)).await;
+        assert!(
+            matches!(rx.recv().await, Ok(Event::ProviderError { .. })),
+            "the detached work still runs to completion / outlives the caller"
+        );
+    }
+
+    /// A `deleteIssue` falls back to a NOT_PLANNED close only for a genuine
+    /// permission failure — never for a rate-limit that merely exhausted its
+    /// retry window (which would silently downgrade a delete into a close).
+    #[test]
+    fn delete_falls_back_to_close_only_on_a_genuine_permission_failure() {
+        let forbidden = lazybox_core::ProviderError::permanent(
+            "github",
+            "Must have admin rights to Repository.",
+        );
+        assert!(
+            delete_should_fall_back_to_close(&forbidden),
+            "FORBIDDEN → fall back to close"
+        );
+
+        let rate_limited = lazybox_core::ProviderError::retryable_after(
+            "github",
+            "You have exceeded a secondary rate limit",
+            60,
+        );
+        assert!(
+            !delete_should_fall_back_to_close(&rate_limited),
+            "an exhausted rate limit must not downgrade a delete into a close"
         );
     }
 }

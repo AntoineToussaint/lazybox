@@ -418,18 +418,21 @@ pub async fn run_attempt<B: MergeBackend>(config: &ServerConfig, ticket: Attempt
             // window and the PR is still green. Don't `Blocked`-latch (that
             // stands the head down until a new commit and would strand a
             // rate-limited auto-merge forever) — release the latch so the
-            // next green poll re-attempts, and surface a quiet, non-scary
-            // notice instead of a red `PrMergeFailed`.
+            // next green poll re-attempts.
+            //
+            // Deliberately no bus notice: this is a *background* retry that
+            // re-fires every poll until the window clears, so a per-poll
+            // "rate-limited — will retry" would just repeat. The user-facing
+            // signal is the terminal outcome — `PrMerged` once it lands, or a
+            // real `PrMergeFailed` if it turns out non-transient — not the
+            // daemon's internal waiting. Manual merges (`handle_merge_pr`) do
+            // surface a live queued status; auto-merge stays quiet.
             tracing::warn!(
                 workspace = %key,
                 "auto-merge rate-limited; will re-attempt next poll: {}",
                 e.diagnostic()
             );
             settle(None);
-            let _ = config.bus.send(Event::provider_error_retryable(
-                "auto-merge",
-                format!("auto-merge on {pr_label} rate-limited — will retry"),
-            ));
             commit_fresh_task(config, key, fresh).await;
         }
         Err(e) => {
@@ -849,10 +852,12 @@ mod tests {
 
     /// A secondary rate limit during an auto-merge is transient: the attempt
     /// must NOT `Blocked`-latch the head (which would strand it until a new
-    /// commit) — it releases the latch so the next green poll re-attempts,
-    /// and surfaces a quiet retryable notice, not a red `PrMergeFailed`.
+    /// commit) — it releases the latch so the next green poll re-attempts.
+    /// And because that re-attempt fires every poll until the window clears,
+    /// the background path stays quiet: no red `PrMergeFailed`, and no
+    /// per-poll "will retry" notice that would just repeat.
     #[tokio::test(flavor = "current_thread")]
-    async fn attempt_rate_limited_releases_latch_and_does_not_block() {
+    async fn attempt_rate_limited_releases_latch_and_stays_quiet() {
         let ws = armed_ws("o/r#1");
         let config = config_with(&ws);
         let mut rx = config.bus.subscribe();
@@ -874,16 +879,21 @@ mod tests {
             None,
             "a transient rate limit must not permanently block the head"
         );
-        let evt = rx.try_recv().expect("a notice must be broadcast");
-        match evt {
-            Event::ProviderError { source, kind, .. } => {
-                assert_eq!(source, "auto-merge");
-                assert_eq!(kind, "retryable", "quiet, auto-fading — not a red failure");
+        // No PrMergeFailed and no per-poll retry notice — the background
+        // retry is silent until it resolves to a terminal outcome.
+        loop {
+            match rx.try_recv() {
+                Ok(Event::PrMergeFailed { .. }) => {
+                    panic!("a rate limit must not surface as a red PrMergeFailed")
+                }
+                Ok(Event::ProviderError { source, .. }) if source == "auto-merge" => {
+                    panic!("a background auto-merge retry must not emit a per-poll notice")
+                }
+                // Unrelated commit/broadcast events (e.g. the fresh-task
+                // commit) are fine; keep draining until the bus is empty.
+                Ok(_) => continue,
+                Err(_) => break,
             }
-            Event::PrMergeFailed { .. } => {
-                panic!("a rate limit must not surface as a red PrMergeFailed")
-            }
-            other => panic!("expected a retryable ProviderError notice, got {other:?}"),
         }
     }
 

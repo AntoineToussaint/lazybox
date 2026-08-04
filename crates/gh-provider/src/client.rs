@@ -3599,7 +3599,8 @@ impl GhClient {
             .post_graphql_with_retry("addReaction(EYES) mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            tracing::error!("addReaction(EYES) failed for {reactable_node_id}");
+            // `mutation_error_response` logs the operation + full error tail
+            // (at warn! for a rate limit, error! otherwise) — don't log again.
             return Err(mutation_error_response(
                 "addReaction(EYES) mutation",
                 &errors,

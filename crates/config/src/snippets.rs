@@ -83,6 +83,15 @@ pub struct Snippet {
     /// preserves that indentation. Submission follows the target terminal's
     /// PTY protocol.
     pub body: String,
+    /// Optional native agent skill this snippet dispatches. When set, the
+    /// snippet is a *bridge* (#798): instead of pasting `body` verbatim, the
+    /// delivered instruction explicitly tells the agent to invoke the named
+    /// `SKILL.md` skill, with `body` supplying the task context. Everything
+    /// else — picker, Recent, `]N`, broadcast — is unchanged, since the
+    /// skill-invocation text flows through the same delivery path as a plain
+    /// body (see [`Snippet::dispatch_body`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
     /// Provenance — which file the entry came from. Hand-set by the
     /// loader; serde ignores it on the way in / out. Used by the
     /// picker to show "global" vs "repo" hints alongside each row,
@@ -113,6 +122,31 @@ impl SnippetOrigin {
             SnippetOrigin::Global => "global",
             SnippetOrigin::Repo => "repo",
             SnippetOrigin::Unknown => "",
+        }
+    }
+}
+
+impl Snippet {
+    /// The text actually delivered to the focused agent.
+    ///
+    /// For a plain snippet this is just `body`. For a *skill-dispatching*
+    /// snippet (`skill:` set, #798) it is an explicit instruction to invoke
+    /// the named native skill, with `body` — when present — appended as the
+    /// task context. The invocation is a self-contained sentence so it lands
+    /// cleanly no matter how `body` is phrased (or if it is empty), and it
+    /// flows through the same delivery path as any other body, so Recent,
+    /// `]N`, and `Shift-B` broadcast track it unchanged.
+    pub fn dispatch_body(&self) -> String {
+        match &self.skill {
+            None => self.body.clone(),
+            Some(skill) => {
+                let body = self.body.trim();
+                if body.is_empty() {
+                    format!("Use the `{skill}` skill.")
+                } else {
+                    format!("Use the `{skill}` skill to complete this task:\n\n{body}")
+                }
+            }
         }
     }
 }
@@ -183,6 +217,7 @@ impl Snippets {
             description: description.to_string(),
             category: category.to_string(),
             body: body.to_string(),
+            skill: None,
             origin: SnippetOrigin::BuiltIn,
         };
         let by_key = BTreeMap::from([
@@ -1299,6 +1334,7 @@ snippets:
             description: description.to_string(),
             category: category.to_string(),
             body: body.to_string(),
+            skill: None,
             origin: SnippetOrigin::Unknown,
         }
     }
@@ -1420,6 +1456,52 @@ snippets:
         assert!(
             leftovers.is_empty(),
             "tmp siblings left behind: {leftovers:?}"
+        );
+    }
+
+    /// A plain snippet dispatches its body verbatim — no `skill:` wrapping.
+    #[test]
+    fn plain_snippet_dispatch_body_is_the_raw_body() {
+        let s = snippet("Review", "Review", "review the diff");
+        assert_eq!(s.dispatch_body(), "review the diff");
+    }
+
+    /// A `skill:` snippet resolves to an explicit skill invocation with the
+    /// body supplied as the task context (#798).
+    #[test]
+    fn skill_snippet_dispatch_body_invokes_the_skill_with_context() {
+        let mut s = snippet("Review", "Deep review", "review the diff for correctness");
+        s.skill = Some("code-review".into());
+        assert_eq!(
+            s.dispatch_body(),
+            "Use the `code-review` skill to complete this task:\n\nreview the diff for correctness"
+        );
+    }
+
+    /// A `skill:` snippet with an empty body still dispatches the skill —
+    /// the invocation alone is the instruction.
+    #[test]
+    fn skill_snippet_with_empty_body_just_invokes_the_skill() {
+        let mut s = snippet("Review", "Review", "   \n  ");
+        s.skill = Some("code-review".into());
+        assert_eq!(s.dispatch_body(), "Use the `code-review` skill.");
+    }
+
+    /// The `skill:` field parses from YAML and defaults to `None` when
+    /// absent, so existing snippet files are unaffected.
+    #[test]
+    fn skill_field_parses_and_defaults_to_none() {
+        let path = write_tmp(
+            "skill-parse",
+            "snippets:\n  \
+             plain:\n    body: just text\n  \
+             bridge:\n    skill: code-review\n    body: review the diff\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+        assert_eq!(loaded.get("plain").expect("plain").skill, None);
+        assert_eq!(
+            loaded.get("bridge").expect("bridge").skill.as_deref(),
+            Some("code-review")
         );
     }
 }

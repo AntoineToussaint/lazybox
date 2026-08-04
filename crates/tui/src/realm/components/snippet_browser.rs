@@ -50,7 +50,7 @@ impl BrowserRow {
         Self {
             key: key.to_string(),
             description: snippet.description.clone(),
-            body: snippet.body.clone(),
+            body: snippet.dispatch_body(),
             origin: snippet.origin,
         }
     }
@@ -236,6 +236,7 @@ mod tests {
                     description: "Open a PR".into(),
                     category: "Git & PR".into(),
                     body: "Please open a PR for the current branch.".into(),
+                    skill: None,
                     origin: SnippetOrigin::BuiltIn,
                 },
             ),
@@ -245,6 +246,7 @@ mod tests {
                     description: "Review diff".into(),
                     category: "Review".into(),
                     body: "Review the current diff\nfor correctness bugs.".into(),
+                    skill: None,
                     origin: SnippetOrigin::Global,
                 },
             ),
@@ -311,6 +313,7 @@ mod tests {
                     description: "Review".into(),
                     category: "Review".into(),
                     body: long.into(),
+                    skill: None,
                     origin: SnippetOrigin::Global,
                 },
             )],

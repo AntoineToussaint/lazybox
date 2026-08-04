@@ -35,7 +35,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .map(|(key, snippet)| SnippetPick {
                     key: key.to_string(),
                     category: snippet.category.clone(),
-                    body: snippet.body.clone(),
+                    body: snippet.dispatch_body(),
                 })
                 .collect()
         };

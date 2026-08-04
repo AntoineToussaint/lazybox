@@ -2274,6 +2274,34 @@ snippets:
         }
     }
 
+    /// A skill-dispatching snippet (#798) resolves to an explicit skill
+    /// invocation on the way to the agent, through the same `DeliverSnippet`
+    /// path a text snippet uses — so Recent / `]N` / broadcast are unchanged.
+    #[test]
+    fn skill_snippet_delivers_resolved_invocation() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "agent-skill",
+            "\nsnippets:\n  review:\n    description: Review\n    skill: code-review\n    body: review the current diff\n",
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        );
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("review".into())]);
+        match cmds
+            .iter()
+            .find(|c| matches!(c, IpcCommand::DeliverSnippet { .. }))
+        {
+            Some(IpcCommand::DeliverSnippet {
+                snippet_key, body, ..
+            }) => {
+                assert_eq!(snippet_key, "review");
+                assert_eq!(
+                    body,
+                    "Use the `code-review` skill to complete this task:\n\nreview the current diff"
+                );
+            }
+            _ => panic!("skill snippet must inject a resolved invocation, got {cmds:?}"),
+        }
+    }
+
     /// The client sends the same delivery command for every terminal kind;
     /// the daemon owns kind-specific encoding and confirmation.
     #[test]

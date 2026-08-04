@@ -671,6 +671,14 @@ fn mutation_errors_to_gherror(operation: &str, errors: &[graphql::GqlError]) -> 
             self_throttle: false,
         };
     }
+    // A GitHub error with no message text at all (`human()` empty) would
+    // otherwise render as an empty footer reason ("merge failed: github:").
+    // Name the operation so the failure is never blank.
+    if joined.is_empty() {
+        return GhError::Graphql(format!(
+            "{operation} failed (GitHub returned an error with no message)"
+        ));
+    }
     GhError::Graphql(joined)
 }
 
@@ -684,8 +692,17 @@ fn mutation_error_response(operation: &str, errors: &[graphql::GqlError]) -> GhE
         .map(graphql::GqlError::full)
         .collect::<Vec<_>>()
         .join("; ");
-    tracing::error!("{operation} errors: {full}");
-    mutation_errors_to_gherror(operation, errors)
+    let classified = mutation_errors_to_gherror(operation, errors);
+    // A rate limit is a handled, transient condition the daemon queues +
+    // retries — log it as a warning, not an error, so a merge that later
+    // succeeds doesn't leave an ERROR line behind. A genuine rejection stays
+    // an error.
+    if matches!(classified, GhError::RateLimited { .. }) {
+        tracing::warn!("{operation} rate-limited (queued for retry): {full}");
+    } else {
+        tracing::error!("{operation} errors: {full}");
+    }
+    classified
 }
 
 /// Map a mutation's [`GhError`] to a [`ProviderError`] preserving the
@@ -4299,10 +4316,14 @@ impl lazybox_core::TaskProvider for GhClient {
                 format!("can't parse owner/name from `{repo}`"),
             ));
         };
+        // A read that feeds the label picker (not a mutation): the client
+        // falls back to the task's own labels the instant this fails, so a
+        // rate limit here must surface at once — never a `Retryable` whose
+        // "retrying" message the picker path never honors.
         let nodes = self
             .list_labels_for_repo(owner, name)
             .await
-            .map_err(mutation_provider_error)?;
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
         Ok(nodes
             .into_iter()
             .map(|n| lazybox_core::Label {
@@ -4667,6 +4688,25 @@ mod tests {
             "footer message stays JSON-free: {msg}"
         );
         assert!(!msg.contains("(ext:"));
+    }
+
+    /// A GitHub error carrying no message text (`human()` empty) must still
+    /// produce a non-blank reason — otherwise the footer reads
+    /// "merge failed: github:" with nothing after it.
+    #[test]
+    fn empty_message_error_still_names_the_operation() {
+        let errors = vec![gql_err("", None, Some(r#"{"typeName":"Mutation"}"#))];
+        match mutation_errors_to_gherror("mergePullRequest", &errors) {
+            GhError::Graphql(reason) => {
+                assert!(!reason.trim().is_empty(), "reason must not be blank");
+                assert!(
+                    reason.contains("mergePullRequest"),
+                    "names the op: {reason}"
+                );
+                assert!(!reason.contains("typeName"), "still JSON-free: {reason}");
+            }
+            other => panic!("expected Graphql, got {other:?}"),
+        }
     }
 
     #[tokio::test]

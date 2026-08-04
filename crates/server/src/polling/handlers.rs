@@ -59,9 +59,16 @@ pub async fn post_reply(
             return Err(emit_reply_error(config, &e));
         }
     };
-    if let Err(e) = provider.post_reply(&workspace, trimmed).await {
+    if let Err(e) = run_mutation_with_retry(&config.bus, "reply", || {
+        provider.post_reply(&workspace, trimmed)
+    })
+    .await
+    {
         tracing::warn!("post_reply {workspace_key}: {e:?}");
-        return Err(emit_reply_error(config, &format!("post failed: {e}")));
+        return Err(emit_reply_error(
+            config,
+            &format!("post failed: {}", humanize_mutation_failure("reply", &e)),
+        ));
     }
     tracing::info!(
         "posted reply to {} ({} chars)",
@@ -310,7 +317,7 @@ const MUTATION_RETRY_FALLBACK_SECS: u64 = 60;
 /// Every non-retryable failure (a genuine GitHub rejection: conflict,
 /// blocked checks, permission) returns immediately — those are not rate
 /// limits and must surface at once.
-async fn run_mutation_with_retry<F, Fut>(
+pub(super) async fn run_mutation_with_retry<F, Fut>(
     bus: &tokio::sync::broadcast::Sender<Event>,
     op: &str,
     mut attempt: F,
@@ -331,18 +338,26 @@ where
             .retry_after_secs()
             .unwrap_or(MUTATION_RETRY_FALLBACK_SECS);
         let wait = mutation_retry_wait(base, attempt_num);
+        // Give up — surface the error — when: the failure isn't retryable
+        // (a genuine rejection); we've spent our attempt budget; the whole
+        // queue window is exhausted; or the reset window itself is longer
+        // than we'll ever hold the queue. That last case is the honest exit
+        // for a *primary* quota exhaustion (resets an hour out, not a
+        // minute): queuing 10 min then failing is worse than telling the
+        // user now to come back when it resets — so we don't pretend.
         if !err.is_retryable()
             || attempt_num >= MUTATION_MAX_ATTEMPTS
+            || base > MUTATION_MAX_WAIT_SECS
             || waited.saturating_add(wait) > MUTATION_MAX_WAIT_SECS
         {
             return Err(err);
         }
-        let retry_at = (chrono::Local::now() + chrono::Duration::seconds(wait as i64))
-            .format("%H:%M")
-            .to_string();
         let _ = bus.send(Event::provider_error_retryable(
             op,
-            format!("{op} queued — GitHub rate-limited, retrying at {retry_at}"),
+            format!(
+                "{op} queued — GitHub rate-limited, retrying in {}",
+                humanize_wait(wait)
+            ),
         ));
         tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
         waited = waited.saturating_add(wait);
@@ -363,15 +378,36 @@ fn mutation_retry_wait(base_secs: u64, attempt: u32) -> u64 {
     scaled.saturating_add(jitter).min(MUTATION_MAX_WAIT_SECS)
 }
 
+/// Render a wait as a short relative duration ("45s", "~2m"). Relative,
+/// not an absolute clock time, so the notice reads the same regardless of
+/// the daemon's timezone (it may be a headless / remote host whose local
+/// time isn't the user's).
+fn humanize_wait(secs: u64) -> String {
+    if secs < 90 {
+        format!("{secs}s")
+    } else {
+        format!("~{}m", secs.div_ceil(60))
+    }
+}
+
 /// Humanize a mutation's final failure for the footer — one clean
-/// sentence, never a raw GraphQL/JSON blob. An exhausted rate-limit retry
-/// says so plainly; every other failure is the provider's own
+/// sentence, never a raw GraphQL/JSON blob and never a false "retrying"
+/// claim once the retry queue has stopped. A still-rate-limited error names
+/// the window when it's known; every other failure is the provider's own
 /// (already-humanized) user message.
-fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderError) -> String {
+pub(super) fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderError) -> String {
     if err.is_retryable() {
-        format!(
-            "GitHub is rate-limiting {op} right now — gave up after retrying; try again shortly"
-        )
+        match err.retry_after_secs() {
+            // A window measured in minutes (a primary quota reset) — name it
+            // so "try again" has a concrete when.
+            Some(secs) if secs >= 120 => {
+                format!(
+                    "GitHub is rate-limiting {op} — try again in about {}m",
+                    secs.div_ceil(60)
+                )
+            }
+            _ => format!("GitHub is rate-limiting {op} — try again shortly"),
+        }
     } else {
         err.user_message()
     }
@@ -564,12 +600,14 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
             return;
         }
     };
-    if let Err(e) = provider.close_issue(&ws).await {
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "close-issue", || provider.close_issue(&ws)).await
+    {
         tracing::warn!("close-issue {workspace_key}: {e:?}");
         let _ = config.bus.send(Event::IssueCloseFailed {
             workspace_key: workspace_key.clone(),
             issue_label,
-            reason: e.to_string(),
+            reason: humanize_mutation_failure("close-issue", &e),
         });
         return;
     }
@@ -678,12 +716,14 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
     };
 
     if ws.pr.is_some() {
-        if let Err(e) = provider.close_pr(&ws).await {
+        if let Err(e) =
+            run_mutation_with_retry(&config.bus, "delete-or-close", || provider.close_pr(&ws)).await
+        {
             tracing::warn!("close-pr {workspace_key}: {e:?}");
             let _ = config.bus.send(Event::DeleteOrCloseFailed {
                 workspace_key: workspace_key.clone(),
                 label,
-                reason: e.to_string(),
+                reason: humanize_mutation_failure("close-pr", &e),
             });
             return;
         }
@@ -693,24 +733,38 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
             pr_label: label,
         });
     } else {
-        let fell_back_to_close = match provider.delete_issue(&ws).await {
-            Ok(()) => false,
-            Err(delete_err) => {
-                tracing::warn!(
-                    "delete-issue {workspace_key}: {delete_err:?} — falling back to close"
-                );
-                if let Err(close_err) = provider.close_issue(&ws).await {
-                    tracing::warn!("close-issue fallback {workspace_key}: {close_err:?}");
-                    let _ = config.bus.send(Event::DeleteOrCloseFailed {
-                        workspace_key: workspace_key.clone(),
-                        label,
-                        reason: close_err.to_string(),
-                    });
-                    return;
+        // Retry a rate-limited *delete* against the reset window rather than
+        // letting it fall through to the close path — a transient limit must
+        // not silently downgrade a delete into a NOT_PLANNED close. Only a
+        // genuine delete failure (FORBIDDEN for a non-admin) falls back.
+        let fell_back_to_close =
+            match run_mutation_with_retry(&config.bus, "delete-or-close", || {
+                provider.delete_issue(&ws)
+            })
+            .await
+            {
+                Ok(()) => false,
+                Err(delete_err) => {
+                    tracing::warn!(
+                        "delete-issue {workspace_key}: {delete_err:?} — falling back to close"
+                    );
+                    if let Err(close_err) =
+                        run_mutation_with_retry(&config.bus, "delete-or-close", || {
+                            provider.close_issue(&ws)
+                        })
+                        .await
+                    {
+                        tracing::warn!("close-issue fallback {workspace_key}: {close_err:?}");
+                        let _ = config.bus.send(Event::DeleteOrCloseFailed {
+                            workspace_key: workspace_key.clone(),
+                            label,
+                            reason: humanize_mutation_failure("close-issue", &close_err),
+                        });
+                        return;
+                    }
+                    true
                 }
-                true
-            }
-        };
+            };
         tracing::info!(
             "deleted issue for workspace {workspace_key} (fell_back_to_close: {fell_back_to_close})"
         );
@@ -760,9 +814,16 @@ pub async fn handle_request_reviewers(
             return;
         }
     };
-    if let Err(e) = provider.request_reviewers(&ws, &logins).await {
+    if let Err(e) = run_mutation_with_retry(&config.bus, "reviewers", || {
+        provider.request_reviewers(&ws, &logins)
+    })
+    .await
+    {
         tracing::warn!("request_reviewers {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!("request reviewers failed: {e}"));
+        emit_err(&format!(
+            "request reviewers failed: {}",
+            humanize_mutation_failure("reviewers", &e)
+        ));
     } else {
         tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
         // Wake the poll loop so the reviewer chip on the row
@@ -802,9 +863,16 @@ pub async fn handle_add_assignees(
             return;
         }
     };
-    if let Err(e) = provider.add_assignees(&ws, &logins).await {
+    if let Err(e) = run_mutation_with_retry(&config.bus, "assignees", || {
+        provider.add_assignees(&ws, &logins)
+    })
+    .await
+    {
         tracing::warn!("add_assignees {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!("add assignees failed: {e}"));
+        emit_err(&format!(
+            "add assignees failed: {}",
+            humanize_mutation_failure("assignees", &e)
+        ));
     } else {
         tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
         config.poll.wake(true);
@@ -840,9 +908,16 @@ pub async fn handle_set_assignees(
             return;
         }
     };
-    if let Err(e) = provider.set_assignees(&ws, &logins).await {
+    if let Err(e) = run_mutation_with_retry(&config.bus, "assignees", || {
+        provider.set_assignees(&ws, &logins)
+    })
+    .await
+    {
         tracing::warn!("set_assignees {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!("update assignees failed: {e}"));
+        emit_err(&format!(
+            "update assignees failed: {}",
+            humanize_mutation_failure("assignees", &e)
+        ));
         return;
     }
     tracing::info!("set assignees to {logins:?} on workspace {workspace_key}");
@@ -879,9 +954,14 @@ pub async fn handle_set_labels(
             return;
         }
     };
-    if let Err(e) = provider.set_labels(&ws, &names).await {
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "labels", || provider.set_labels(&ws, &names)).await
+    {
         tracing::warn!("set_labels {workspace_key} {names:?}: {e:?}");
-        emit_err(&format!("update labels failed: {e}"));
+        emit_err(&format!(
+            "update labels failed: {}",
+            humanize_mutation_failure("labels", &e)
+        ));
         return;
     }
     tracing::info!("set labels to {names:?} on workspace {workspace_key}");
@@ -4521,7 +4601,7 @@ mod mutation_retry_tests {
 
     /// The #804 core fix: a secondary-rate-limited mutation is queued and
     /// retried against the reset window, succeeding without a manual
-    /// re-press — and a live, non-scary "queued — retrying at HH:MM" notice
+    /// re-press — and a live, non-scary "queued — retrying in …" notice
     /// shows in place of a red `×`.
     #[tokio::test(start_paused = true)]
     async fn rate_limited_mutation_retries_then_succeeds() {
@@ -4563,9 +4643,15 @@ mod mutation_retry_tests {
                     message.contains("queued"),
                     "live status names the queue: {message}"
                 );
+                // Relative duration, not an absolute clock time — so the
+                // notice reads correctly regardless of the daemon's timezone.
                 assert!(
-                    message.contains("retrying at"),
-                    "status shows the retry time: {message}"
+                    message.contains("retrying in"),
+                    "status shows a relative retry time: {message}"
+                );
+                assert!(
+                    !message.contains(" at "),
+                    "no absolute (timezone-dependent) clock time: {message}"
                 );
                 assert!(!message.contains('{'), "status is JSON-free: {message}");
                 assert_eq!(
@@ -4575,6 +4661,52 @@ mod mutation_retry_tests {
             }
             other => panic!("expected a queued ProviderError notice, got {other:?}"),
         }
+    }
+
+    /// A rate-limit whose reset window is longer than the whole queue budget
+    /// (a *primary* quota exhaustion, resets ~an hour out) must surface at
+    /// once — never spin ~10 min of doomed retries — and name the window so
+    /// "try again" has a concrete when.
+    #[tokio::test(start_paused = true)]
+    async fn long_reset_window_surfaces_immediately_without_spinning() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(16);
+        let calls = AtomicU32::new(0);
+        let result = run_mutation_with_retry(&bus, "merge", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Err(lazybox_core::ProviderError::retryable_after(
+                    "github",
+                    "API rate limit exceeded",
+                    4_000, // > MUTATION_MAX_WAIT_SECS
+                ))
+            }
+        })
+        .await;
+
+        let err = result.expect_err("a window we won't hold must surface");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no queuing/spinning on a window longer than the budget"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no 'queued, retrying' notice we can't honor"
+        );
+        let reason = humanize_mutation_failure("merge", &err);
+        assert!(
+            reason.contains("try again in about"),
+            "names the reset window: {reason}"
+        );
+        assert!(!reason.contains('{'), "JSON-free: {reason}");
+    }
+
+    #[test]
+    fn humanize_wait_is_relative_and_compact() {
+        assert_eq!(humanize_wait(45), "45s");
+        assert_eq!(humanize_wait(60), "60s");
+        assert_eq!(humanize_wait(120), "~2m");
+        assert_eq!(humanize_wait(121), "~3m");
     }
 
     /// A genuine rejection (conflict, blocked checks) is not a rate limit:

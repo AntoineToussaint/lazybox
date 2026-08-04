@@ -2432,6 +2432,39 @@ pub(super) async fn sources_for_with_engagement(
                             .cloned()
                             .unwrap_or_default();
                         scopes.extend(config_scopes);
+                        // Opt-in (`providers.github.include_accessible_repos`):
+                        // widen the allowlist to every repo the user can reach
+                        // (owned / org-member / direct-collaborator), so an
+                        // involved PR fetched by `involves:me` in a repo they
+                        // didn't tick isn't silently dropped by the post-fetch
+                        // filter. Off by default so an explicit selection still
+                        // narrows.
+                        let include_accessible = github_cfg
+                            .map(|g| g.include_accessible_repos)
+                            .unwrap_or(false);
+                        if include_accessible {
+                            // A rebuilt client (cold cache / token rotation)
+                            // may be a different account — drop the memo so its
+                            // memberships are refetched, not the old account's.
+                            if restore_sync_cursors {
+                                state.implicit_gh_scopes = None;
+                            }
+                            if state.implicit_gh_scopes.is_none() {
+                                // Cache only a COMPLETE fetch; on failure leave
+                                // it `None` so the next tick retries rather than
+                                // pinning a truncated allowlist that would hide
+                                // repos until restart.
+                                match client.accessible_scopes().await {
+                                    Ok(accessible) => state.implicit_gh_scopes = Some(accessible),
+                                    Err(e) => tracing::info!(
+                                        "github accessible-scopes fetch failed, retrying next tick: {e}"
+                                    ),
+                                }
+                            }
+                            if let Some(implicit) = &state.implicit_gh_scopes {
+                                scopes.extend(implicit.iter().cloned());
+                            }
+                        }
                         let pr_qualifiers =
                             build_pr_search_qualifiers(&filter, &scopes, client.username());
                         let issue_qualifiers =

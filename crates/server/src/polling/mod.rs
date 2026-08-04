@@ -1017,6 +1017,17 @@ pub struct TickState {
     /// never escalates however high the streak climbs (#772). Reset by
     /// [`Self::clear_error`] on any successful fetch or rate-limit wait.
     retryable_streak: std::collections::HashMap<String, u32>,
+    /// Repos the authenticated user can access (owned / org-member /
+    /// direct-collaborator), fetched via `GhClient::accessible_scopes`
+    /// and unioned into the poll scope allowlist (only when
+    /// `providers.github.include_accessible_repos` is set) so involved
+    /// PRs/issues in any of them surface without a manual setup tick.
+    /// Memoized rather than refetched each tick — it only changes with
+    /// the user's memberships. Populated solely from a *complete* fetch
+    /// (a failed fetch leaves it `None` to retry next tick, never caching
+    /// a truncated allowlist), and reset when the GitHub client is
+    /// rebuilt so a token rotation to another account refetches.
+    pub(crate) implicit_gh_scopes: Option<Vec<String>>,
 }
 
 impl TickState {

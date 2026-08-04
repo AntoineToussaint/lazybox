@@ -12,25 +12,32 @@ Claude, Codex, Cursor — only Claude Code loads `SKILL.md` today; where
 this page says "skill" it means that capability, and the bridging work
 below starts there.)
 
-## The axis that matters: who decides when it runs
+## The axis that matters: who *can* trigger it
 
-- **A snippet is a human-triggered prompt macro.** *You* open `]]s`,
-  pick `rev`, and lazybox pastes and submits the body to the focused
-  agent. It is deterministic and in-the-loop — you choose the exact
-  moment and see the body in the preview before it fires.
-- **A skill is a model-triggered capability.** The agent reads each
-  skill's `description` and decides *itself* whether to invoke it
-  mid-task, then progressively loads the `SKILL.md` body and any
-  bundled scripts on demand. It is autonomous and out-of-the-loop.
+Not "human vs model" — you can invoke either by hand. The real
+difference is that a skill *adds* autonomous triggering on top of manual
+invocation, while a snippet is human-only:
 
-Everything else is surface similarity. The invocation model is
-opposite, and that is the useful distinction.
+- **A snippet is human-only.** *You* open `]]s`, pick `rev`, and lazybox
+  pastes and submits the body to the focused agent. There is no path by
+  which it fires on its own — it is deterministic and in-the-loop, and
+  you see the body in the preview before it goes.
+- **A skill can also fire itself.** You can still invoke one by hand
+  ("use the `code-review` skill", or a `/`-command if it's exposed as
+  one), but its distinguishing power is that the agent reads each skill's
+  `description` and can decide *itself* to invoke it mid-task, then
+  progressively loads the `SKILL.md` body and bundled scripts on demand.
+
+So the useful distinction is the *ceiling*, not the only mode: a snippet
+can only ever be your deliberate act; a skill can be that **or**
+autonomous. (Giving skills a first-class, previewable hand-trigger
+inside lazybox is exactly the follow-up in the recommendation below.)
 
 ## Side by side
 
 | Dimension | lazybox snippet | Agent skill (`SKILL.md`) |
 | --- | --- | --- |
-| Trigger | Human, explicit (`]]s<key>`, `Shift-B` broadcast) | Model, autonomous (matched on `description`) |
+| Trigger | Human-only (`]]s<key>`, `Shift-B` broadcast) | Human **or** model — by hand, or autonomously on `description` |
 | Payload | Single verbatim `body` (text only) | `SKILL.md` **plus** bundled scripts / files / resources |
 | Progressive disclosure | No — the whole body is sent at once | Yes — name + description first, body then files on demand |
 | Parameters / variables | No ([not yet supported](snippets.md#house-style-for-bodies)) | Effectively yes — the agent fills context from the task |

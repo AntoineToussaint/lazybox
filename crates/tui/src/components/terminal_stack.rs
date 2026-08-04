@@ -2693,6 +2693,26 @@ impl TerminalStack {
     /// didn't land on an agent.
     pub fn record_paste(&mut self, text: &str) -> Option<(TerminalId, String)> {
         let id = self.focused_terminal_id()?;
+        self.record_compose_insert(id, text)
+    }
+
+    /// Append `text` to a specific terminal's composing buffer without
+    /// submitting — the recap counterpart of a daemon-side compose insert
+    /// (the `Shift-Enter` snippet insert, #791). Unlike [`Self::record_paste`]
+    /// this targets `id` explicitly rather than the focused tile, so it
+    /// tracks the terminal the snippet is actually delivered to (which may
+    /// not be the focused split). Keeping the client's live composing buffer
+    /// in step is what lets a later manual submit recap the full prompt and
+    /// what makes the persisted draft (`RecordComposingBuffer`) survive the
+    /// next keystroke instead of being clobbered by a body-less buffer.
+    /// No-op (returns `None`) for non-Agent terminals — a shell has no
+    /// composer recap. Returns the terminal id and its updated draft so the
+    /// caller can persist it.
+    pub fn record_compose_insert(
+        &mut self,
+        id: TerminalId,
+        text: &str,
+    ) -> Option<(TerminalId, String)> {
         let slot = self.terminals.get_mut(&id)?;
         if !matches!(slot.kind, TerminalKind::Agent(_)) {
             return None;

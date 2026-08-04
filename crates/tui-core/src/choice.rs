@@ -73,6 +73,10 @@ pub enum PickFlow {
     Snippet {
         terminal_id: Option<TerminalId>,
         snippets: Vec<SnippetPick>,
+        /// `Enter` picks submit (`true`); `Shift-Enter` inserts the body
+        /// without submitting (`false`), so the user can edit it before
+        /// sending (issue #791).
+        submit: bool,
     },
     PromptHistory {
         terminal_id: Option<TerminalId>,
@@ -152,6 +156,18 @@ pub enum PickOutcome<F> {
         commands: Vec<Command>,
         notice: Option<String>,
     },
+    /// A `Shift-Enter` snippet pick: deliver the body to `terminal_id`
+    /// without submitting (compose only) AND mirror it into the client's
+    /// composing buffer so the recap + persisted draft stay in step (#791).
+    /// Split out from [`PickOutcome::Commands`] because the renderer must
+    /// touch its own terminal state — the pure resolver can only name the
+    /// intent.
+    InsertSnippetDraft {
+        terminal_id: TerminalId,
+        snippet_key: String,
+        category: String,
+        body: String,
+    },
     DeliverPrompt {
         terminal_id: TerminalId,
         text: String,
@@ -228,6 +244,7 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
         PickFlow::Snippet {
             terminal_id,
             snippets,
+            submit,
         } => {
             let Some(key) = picks.first().and_then(P::as_text) else {
                 return PickOutcome::NoOp;
@@ -241,14 +258,24 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     notice: Some("no active terminal — open a session first".to_string()),
                 };
             };
-            PickOutcome::Commands {
-                commands: vec![Command::DeliverSnippet {
+            if submit {
+                PickOutcome::Commands {
+                    commands: vec![Command::DeliverSnippet {
+                        terminal_id,
+                        snippet_key: snippet.key.clone(),
+                        category: snippet.category.clone(),
+                        body: snippet.body.clone(),
+                        submit: true,
+                    }],
+                    notice: None,
+                }
+            } else {
+                PickOutcome::InsertSnippetDraft {
                     terminal_id,
                     snippet_key: snippet.key.clone(),
                     category: snippet.category.clone(),
                     body: snippet.body.clone(),
-                }],
-                notice: None,
+                }
             }
         }
         PickFlow::PromptHistory {
@@ -755,14 +782,34 @@ mod tests {
                 &picked,
                 PickFlow::Snippet {
                     terminal_id: Some(TerminalId(4)),
-                    snippets,
+                    snippets: snippets.clone(),
+                    submit: true,
                 },
             ),
             PickOutcome::Commands { commands, .. }
                 if matches!(commands.as_slice(), [Command::DeliverSnippet {
                     terminal_id: TerminalId(4),
+                    submit: true,
                     ..
                 }])
+        ));
+        // Shift-Enter resolves the same snippet to an insert-without-submit
+        // outcome the renderer expands into a compose-only delivery plus a
+        // composing-buffer update (issue #791).
+        assert!(matches!(
+            resolve_pick(
+                &picked,
+                PickFlow::Snippet {
+                    terminal_id: Some(TerminalId(4)),
+                    snippets: snippets.clone(),
+                    submit: false,
+                },
+            ),
+            PickOutcome::InsertSnippetDraft {
+                terminal_id: TerminalId(4),
+                body,
+                ..
+            } if body == "Review this"
         ));
         assert!(matches!(
             resolve_pick(&picked, PickFlow::Theme),

@@ -31,7 +31,9 @@ to reach for, see [Snippets vs Agent Skills](snippets-vs-skills.md).
 
 The picker stays open until you send or cancel; there is no timer.
 `↑`/`↓` moves the selection, `Enter` sends the highlighted workflow,
-and `Esc` or `Ctrl-C` cancels. Typing filters case-insensitively across
+and `Shift-Enter` inserts the body into the composer **without**
+submitting — so you can edit or add context before sending it yourself.
+`Esc` or `Ctrl-C` cancels. Typing filters case-insensitively across
 the key, description, and category. An exact key auto-submits only when
 it is the sole key with that prefix, so ambiguous shortcuts remain in
 the picker for you to resolve.

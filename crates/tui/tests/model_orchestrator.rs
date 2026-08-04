@@ -1482,6 +1482,75 @@ fn leader_g_then_m_mounts_merge_confirm() {
     assert_eq!(m.top_modal(), Some(&Id::ActionConfirm));
 }
 
+/// Arrow-navigating a which-key leader popup and pressing Enter fires the
+/// highlighted action, with the direct command key still working (#343,
+/// #791). `g` arms the github group, `Down` highlights the first row
+/// (MergePr, first in the github DISPLAY_ORDER), and `Enter` fires it —
+/// mounting the same merge-confirm modal `g m` does.
+#[test]
+fn leader_g_arrow_down_enter_fires_highlighted_action() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let pr_ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let pr_key: SessionKey = (&pr_ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(m.__test_sidebar_mut().focus_workspace_key(&pr_key));
+
+    m.dispatch_key(key(Key::Char('g')));
+    assert!(m.leader_pending().is_some(), "g arms the github group");
+    // Down seeds the highlight onto the first continuation and keeps the
+    // leader armed (no action fires yet).
+    m.dispatch_key(key(Key::Down));
+    assert_eq!(
+        m.leader_highlight(),
+        Some(0),
+        "Down highlights the first row"
+    );
+    assert!(
+        m.leader_pending().is_some(),
+        "highlighting keeps the leader armed"
+    );
+    assert_eq!(m.top_modal(), None, "no action fires until Enter");
+    // Enter fires the highlighted row, clearing the leader + highlight.
+    m.dispatch_key(key(Key::Enter));
+    assert_eq!(m.leader_pending(), None, "Enter consumes the leader");
+    assert_eq!(m.leader_highlight(), None, "Enter clears the highlight");
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::ActionConfirm),
+        "Enter fired MergePr, mounting the merge confirm",
+    );
+
+    // Robustness: it's the *highlight* that arms Enter, not Enter alone.
+    // Without a Down first, Enter after `g` must NOT fire the action — it
+    // cancels the leader and falls through to its own pane meaning. This
+    // keeps the test honest even if the github group's first row changes.
+    let mut m2 = Model::new_for_test(channel::pair().0, Size::new(120, 40)).unwrap();
+    let pr_ws2 = Workspace::from_task(task_with_pr("o/r#2"), Utc::now());
+    let pr_key2: SessionKey = (&pr_ws2.key).into();
+    m2.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![pr_ws2],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(m2.__test_sidebar_mut().focus_workspace_key(&pr_key2));
+    m2.dispatch_key(key(Key::Char('g')));
+    m2.dispatch_key(key(Key::Enter)); // no Down → no highlight
+    assert_ne!(
+        m2.top_modal(),
+        Some(&Id::ActionConfirm),
+        "Enter with no highlight must not fire the leader action",
+    );
+}
+
 /// Esc after the leader cancels the chord cleanly — no action fires,
 /// no modal mounts.
 #[test]

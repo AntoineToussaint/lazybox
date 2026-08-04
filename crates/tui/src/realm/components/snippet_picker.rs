@@ -121,6 +121,12 @@ pub struct SnippetPicker {
     /// resolves as an empty pick (`Msg::ChoicePicked(vec![])`). Set by
     /// the broadcast flow, whose compose step follows either way.
     offer_free_text: bool,
+    /// Whether `Shift-Enter` should insert the snippet into the composer
+    /// without submitting (#791). Only the terminal `]]s` picker sets this;
+    /// the broadcast flow always routes through a compose step, so there
+    /// `Shift-Enter` would be indistinguishable from `Enter` and the footer
+    /// must not advertise it.
+    insert_without_submit: bool,
 }
 
 impl SnippetPicker {
@@ -139,6 +145,7 @@ impl SnippetPicker {
             list_scroll: 0,
             title: None,
             offer_free_text: false,
+            insert_without_submit: false,
         };
         picker.refilter();
         picker
@@ -147,6 +154,15 @@ impl SnippetPicker {
     /// Override the modal-border title (default " Snippets ").
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// Enable the `Shift-Enter` "insert into the composer without submitting"
+    /// commit key (#791). Off by default: only the terminal `]]s` picker,
+    /// which delivers into a live composer, turns it on — the broadcast flow
+    /// has no distinct no-submit meaning.
+    pub fn with_insert_without_submit(mut self) -> Self {
+        self.insert_without_submit = true;
         self
     }
 
@@ -390,9 +406,13 @@ impl FilterableList for SnippetPicker {
 
     /// `Shift-Enter`: insert the snippet body into the composer without
     /// submitting, so the user can edit it before sending (issue #791).
-    /// Resolution is otherwise identical to [`SnippetPicker::pick`] — the
-    /// same key travels; only the submit intent differs.
+    /// Only the terminal `]]s` picker opts in (`with_insert_without_submit`);
+    /// elsewhere (the broadcast flow) this falls back to a plain submit-pick,
+    /// so `Shift-Enter` is never a silent no-op.
     fn pick_no_submit(&self, item_idx: usize) -> Option<Msg> {
+        if !self.insert_without_submit {
+            return self.pick(item_idx);
+        }
         let key = self.rows.get(item_idx)?.key.clone();
         Some(Msg::ChoicePickedNoSubmit(vec![ChoicePayload::Text(key)]))
     }
@@ -558,11 +578,19 @@ impl Component for SnippetPicker {
             Span::raw(" navigate  "),
             Span::styled("Enter", Style::default().fg(theme.success).bold()),
             Span::raw(" send  "),
-            Span::styled("Shift-Enter", Style::default().fg(theme.accent).bold()),
-            Span::raw(" edit first  "),
-            Span::styled("Type", Style::default().fg(theme.accent).bold()),
-            Span::raw(" filter  "),
         ];
+        if self.insert_without_submit {
+            help.push(Span::styled(
+                "Shift-Enter",
+                Style::default().fg(theme.accent).bold(),
+            ));
+            help.push(Span::raw(" edit first  "));
+        }
+        help.push(Span::styled(
+            "Type",
+            Style::default().fg(theme.accent).bold(),
+        ));
+        help.push(Span::raw(" filter  "));
         if self.offer_free_text {
             help.push(Span::styled(
                 "Ctrl-F",
@@ -896,13 +924,15 @@ mod tests {
         }
     }
 
+    /// With the insert-without-submit key enabled (the `]]s` picker),
     /// Shift-Enter on the cursor row picks the snippet *without* submit —
-    /// the daemon inserts the body for editing rather than sending it
+    /// the composer receives the body for editing rather than sending it
     /// (issue #791). Enter still submits (covered by
     /// `enter_submits_cursor_selection`).
     #[test]
-    fn shift_enter_picks_without_submit() {
-        let mut picker = SnippetPicker::new(make_rows(), String::new());
+    fn shift_enter_picks_without_submit_when_enabled() {
+        let mut picker =
+            SnippetPicker::new(make_rows(), String::new()).with_insert_without_submit();
         let shift_enter = KeyEvent::new(Key::Enter, KeyModifiers::SHIFT);
         match picker.on_key(&shift_enter) {
             Some(Msg::ChoicePickedNoSubmit(v)) => {
@@ -913,11 +943,31 @@ mod tests {
         }
     }
 
-    /// The footer names both commit keys so the insert-without-send path is
-    /// discoverable (issue #791).
+    /// Without the opt-in (the broadcast flow), Shift-Enter is a plain
+    /// submit-pick — never a silent no-op — and the footer does not
+    /// advertise the insert-without-submit path (issue #791, finding #2).
     #[test]
-    fn help_line_names_both_commit_keys() {
+    fn shift_enter_is_a_plain_pick_when_insert_is_not_offered() {
         let mut picker = SnippetPicker::new(make_rows(), String::new());
+        let shift_enter = KeyEvent::new(Key::Enter, KeyModifiers::SHIFT);
+        match picker.on_key(&shift_enter) {
+            Some(Msg::ChoicePicked(v)) => assert_eq!(v, vec![ChoicePayload::Text("rev".into())]),
+            other => panic!("expected a plain submit-pick, got {other:?}"),
+        }
+        let screen = render(&mut SnippetPicker::new(make_rows(), String::new()), 92, 26);
+        assert!(
+            !screen.contains("Shift-Enter"),
+            "footer must not advertise Shift-Enter here: {screen}"
+        );
+    }
+
+    /// The footer names both commit keys (only) when the insert path is
+    /// enabled, so it's discoverable without misleading the broadcast
+    /// picker (issue #791).
+    #[test]
+    fn help_line_names_both_commit_keys_when_enabled() {
+        let mut picker =
+            SnippetPicker::new(make_rows(), String::new()).with_insert_without_submit();
         let screen = render(&mut picker, 92, 26);
         assert!(screen.contains("Enter"), "names Enter: {screen}");
         assert!(

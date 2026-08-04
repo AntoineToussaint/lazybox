@@ -2180,8 +2180,9 @@ impl<T: TerminalAdapter> Model<T> {
         for (k, v) in self.snippets.all() {
             rows.push(PickerRow::new(k, v));
         }
-        let picker =
-            SnippetPicker::new(rows, initial_filter).with_recent(self.recent_snippets.clone());
+        let picker = SnippetPicker::new(rows, initial_filter)
+            .with_recent(self.recent_snippets.clone())
+            .with_insert_without_submit();
         self.mount_modal(Id::SnippetPicker, picker);
     }
 

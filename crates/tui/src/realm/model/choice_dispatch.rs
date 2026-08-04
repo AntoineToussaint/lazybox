@@ -256,6 +256,33 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_info(notice);
                 }
             }
+            PickOutcome::InsertSnippetDraft {
+                terminal_id,
+                snippet_key,
+                category,
+                body,
+            } => {
+                // Deliver the body to the composer without submitting …
+                cmds.push(IpcCommand::DeliverSnippet {
+                    terminal_id,
+                    snippet_key,
+                    category,
+                    body: body.clone(),
+                    submit: false,
+                });
+                // … and mirror it into the client's composing buffer so the
+                // recap reflects it on a later manual submit and the
+                // persisted draft (below) isn't clobbered by the next
+                // body-less keystroke (#791). No-op for shells, which have no
+                // composer recap.
+                if let Some((id, draft)) = self.terminals.record_compose_insert(terminal_id, &body)
+                {
+                    cmds.push(IpcCommand::RecordComposingBuffer {
+                        terminal_id: id,
+                        buffer: draft,
+                    });
+                }
+            }
             PickOutcome::DeliverPrompt { terminal_id, text } => {
                 self.deliver_prompt(
                     terminal_id,

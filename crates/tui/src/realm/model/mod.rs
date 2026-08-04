@@ -601,9 +601,15 @@ pub(crate) enum ModalFlow {
         action: lazybox_tui_core::action::Action,
         target: ActionConfirmTarget,
     },
-    /// Action proposed by the Ask Lazybox help agent (#353).
+    /// Action proposed by the Ask Lazybox help agent (#353). For
+    /// `scaffold_skill`, `skill_root` is the destination repo resolved
+    /// and shown to the user at propose time; apply writes there rather
+    /// than re-resolving, so a sidebar-selection change under the open
+    /// confirm can't redirect the write away from the previewed path
+    /// (#799). `None` for actions that need no such target.
     HelpAction {
         intent: lazybox_tui_core::help::HelpActionIntent,
+        skill_root: Option<std::path::PathBuf>,
     },
     /// Worktree inspector list picker → per-row confirm or bulk delete.
     InspectList {

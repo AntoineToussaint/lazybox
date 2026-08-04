@@ -13288,7 +13288,7 @@ mod help_ask_tests {
         finish_help_turn(&mut m, add_snippet_answer("integrate"));
 
         assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
-        let Some(super::super::ModalFlow::HelpAction { intent }) = m.modal_flow.clone() else {
+        let Some(super::super::ModalFlow::HelpAction { intent, .. }) = m.modal_flow.clone() else {
             panic!("intent stashed");
         };
         match intent {
@@ -13454,7 +13454,7 @@ mod help_ask_tests {
         finish_help_turn(&mut m, scaffold_skill_answer("lazybox-799-release-notes"));
 
         assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
-        let Some(super::super::ModalFlow::HelpAction { intent }) = m.modal_flow.clone() else {
+        let Some(super::super::ModalFlow::HelpAction { intent, .. }) = m.modal_flow.clone() else {
             panic!("intent stashed");
         };
         match intent {
@@ -13502,6 +13502,94 @@ mod help_ask_tests {
         assert_eq!(m.modal_stack.last(), Some(&Id::HelpAsk), "confirm popped");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The skill is written to the destination the confirm previewed,
+    /// even if the sidebar selection moves to a different workspace
+    /// while the confirm is open (a daemon snapshot can do that). The
+    /// root is captured at propose time; apply must not re-resolve it
+    /// against the now-focused workspace (#799).
+    #[test]
+    fn scaffold_writes_to_the_previewed_root_after_selection_moves() {
+        let base =
+            std::env::temp_dir().join(format!("lazybox-help-skill-move-{}", std::process::id()));
+        let root_a = base.join("a");
+        let root_b = base.join("b");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+
+        let mut m = build_model();
+        let a_key = lazybox_core::WorkspaceKey::new("github:o/r#1");
+        let b_key = lazybox_core::WorkspaceKey::new("github:o/r#2");
+        let mk = |key: &lazybox_core::WorkspaceKey, wt: &std::path::Path| {
+            let mut ws = lazybox_core::Workspace::empty(key.clone(), "main", chrono::Utc::now());
+            ws.add_session(lazybox_core::WorkspaceSession::new(
+                key.clone(),
+                lazybox_core::SessionKind::Shell,
+                wt.to_path_buf(),
+                chrono::Utc::now(),
+            ));
+            ws
+        };
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![mk(&a_key, &root_a), mk(&b_key, &root_b)],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        let a_sk: lazybox_core::SessionKey = (&a_key).into();
+        assert!(m.sidebar.focus_workspace_key(&a_sk), "workspace A focused");
+
+        m.update(Msg::HelpAskOpen);
+        let _ = ask_new(&mut m, "make a skill for release notes");
+        finish_help_turn(&mut m, scaffold_skill_answer("release-notes"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::HelpActionConfirm));
+
+        // Selection drifts to workspace B under the open confirm.
+        let b_sk: lazybox_core::SessionKey = (&b_key).into();
+        assert!(m.sidebar.focus_workspace_key(&b_sk), "selection moved to B");
+
+        let _ = m.handle_confirmed(true);
+
+        assert!(
+            root_a
+                .join(".claude/skills/release-notes/SKILL.md")
+                .exists(),
+            "written to the previewed root (A)",
+        );
+        assert!(
+            !root_b
+                .join(".claude/skills/release-notes/SKILL.md")
+                .exists(),
+            "must not follow the drifted selection to B",
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The confirm preview names *how* the destination was resolved, so
+    /// a launch-directory fallback is never silently mistaken for the
+    /// focused workspace's own repo (#799).
+    #[test]
+    fn skill_scaffold_preview_names_its_source() {
+        use super::super::inputs::SkillScaffoldRoot;
+        use super::super::modals::skill_scaffold_preview;
+
+        let wt = SkillScaffoldRoot::Worktree(std::path::PathBuf::from("/repo/wt"));
+        let p = skill_scaffold_preview(&wt, "release-notes", "Draft notes", "steps");
+        assert!(
+            p.contains("the focused workspace's worktree"),
+            "preview: {p}"
+        );
+        assert!(p.contains("release-notes"));
+        assert!(p.contains("SKILL.md"));
+        assert!(!p.contains("launch directory"));
+
+        let ld = SkillScaffoldRoot::LaunchDir(std::path::PathBuf::from("/launch/dir"));
+        let p = skill_scaffold_preview(&ld, "release-notes", "Draft notes", "steps");
+        assert!(p.contains("your launch directory"), "preview: {p}");
     }
 
     /// An already-scaffolded skill is never clobbered: the proposal is

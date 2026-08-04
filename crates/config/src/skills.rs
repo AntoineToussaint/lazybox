@@ -34,7 +34,7 @@ pub enum SkillError {
 }
 
 /// A skill's home directory: `<repo_root>/.claude/skills/<name>`.
-pub fn skill_dir(repo_root: &Path, name: &str) -> PathBuf {
+fn skill_dir(repo_root: &Path, name: &str) -> PathBuf {
     repo_root.join(".claude").join("skills").join(name)
 }
 
@@ -66,7 +66,7 @@ pub fn validate_skill_name(name: &str) -> Result<(), SkillError> {
 /// Render a `SKILL.md`: YAML frontmatter (`name` + `description`,
 /// serialized so any punctuation in the description is escaped
 /// correctly) followed by the markdown instruction body.
-pub fn render_skill_md(name: &str, description: &str, body: &str) -> Result<String, SkillError> {
+fn render_skill_md(name: &str, description: &str, body: &str) -> Result<String, SkillError> {
     let mut front = serde_yaml::Mapping::new();
     front.insert("name".into(), name.into());
     front.insert("description".into(), description.into());
@@ -75,12 +75,12 @@ pub fn render_skill_md(name: &str, description: &str, body: &str) -> Result<Stri
 }
 
 /// Scaffold a `.claude/skills/<name>/SKILL.md` folder under `repo_root`
-/// and return the `SKILL.md` path written. Validates the name,
-/// requires a non-empty description and body, and refuses to overwrite
-/// an existing skill (a scaffold must never clobber hand-authored
-/// bundled scripts sitting beside a `SKILL.md`). The write is atomic
-/// (sibling tmp + rename) so a crash mid-write can't leave a truncated
-/// `SKILL.md` behind.
+/// and return the `SKILL.md` path written. The `name` is trimmed, then
+/// validated; description and body must be non-empty. Refuses to
+/// overwrite an existing skill (a scaffold must never clobber
+/// hand-authored bundled scripts sitting beside a `SKILL.md`). The
+/// write is atomic (sibling tmp + rename) so a crash mid-write can't
+/// leave a truncated `SKILL.md` behind.
 ///
 /// Used by the Ask Lazybox help agent's `scaffold_skill` action (#799):
 /// the agent proposes a skill, the TUI confirms it with a preview, and
@@ -91,6 +91,7 @@ pub fn scaffold_skill(
     description: &str,
     body: &str,
 ) -> Result<PathBuf, SkillError> {
+    let name = name.trim();
     validate_skill_name(name)?;
     if description.trim().is_empty() {
         return Err(SkillError::MissingDescription);
@@ -184,6 +185,19 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("name: code-review"));
         assert!(written.contains("Review it."));
+    }
+
+    /// A name with surrounding whitespace is trimmed rather than
+    /// rejected, and lands at the trimmed path — the frontmatter and
+    /// folder both use the clean id.
+    #[test]
+    fn scaffold_trims_the_name() {
+        let root = tmp_root("x");
+        let path = scaffold_skill(&root, "  code-review \n", "Review the diff", "Go.").unwrap();
+        assert_eq!(path, skill_md_path(&root, "code-review"));
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("name: code-review"));
+        assert!(!written.contains("name: '  code-review"));
     }
 
     #[test]

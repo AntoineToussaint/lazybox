@@ -17,7 +17,37 @@
 use super::{ChoicePayload, HelpQuestionKind, Id, ModalFlow, Model, Msg};
 use crate::realm::UserEvent;
 use lazybox_ipc::{Command as IpcCommand, TerminalId};
+use std::path::{Path, PathBuf};
 use tuirealm::terminal::TerminalAdapter;
+
+/// The destination a `scaffold_skill` action resolves to, tagged with
+/// how it was found so the confirm preview can say so plainly (#799):
+/// writing to a fallback launch directory reads very differently from
+/// writing into the focused workspace's repo.
+pub(super) enum SkillScaffoldRoot {
+    /// The focused workspace's live worktree.
+    Worktree(PathBuf),
+    /// Fallback: the directory lazybox was launched from, used when no
+    /// focused workspace has an on-disk worktree.
+    LaunchDir(PathBuf),
+}
+
+impl SkillScaffoldRoot {
+    pub(super) fn path(&self) -> &Path {
+        match self {
+            Self::Worktree(p) | Self::LaunchDir(p) => p,
+        }
+    }
+
+    /// One-line source phrase for the confirm preview, so a launch-dir
+    /// fallback is never mistaken for the workspace's own repo.
+    pub(super) fn describe(&self) -> &'static str {
+        match self {
+            Self::Worktree(_) => "the focused workspace's worktree",
+            Self::LaunchDir(_) => "your launch directory (no workspace worktree is on disk)",
+        }
+    }
+}
 
 impl<T: TerminalAdapter> Model<T> {
     pub(super) fn dispatch_diff_review(
@@ -885,8 +915,8 @@ showing keybinding search only",
                 // Yes → apply it; No / Esc → drop the stash, nothing
                 // changes.
                 let pending = self.modal_flow.take();
-                if yes && let Some(ModalFlow::HelpAction { intent }) = pending {
-                    self.apply_help_action(intent);
+                if yes && let Some(ModalFlow::HelpAction { intent, skill_root }) = pending {
+                    self.apply_help_action(intent, skill_root);
                 }
             }
             _ => {}
@@ -901,7 +931,11 @@ showing keybinding search only",
     /// uses, then live-applied where possible. Re-validates config edits
     /// so a value that went stale between propose and confirm can't slip
     /// through. All local — no IPC.
-    fn apply_help_action(&mut self, intent: lazybox_tui_core::help::HelpActionIntent) {
+    fn apply_help_action(
+        &mut self,
+        intent: lazybox_tui_core::help::HelpActionIntent,
+        skill_root: Option<std::path::PathBuf>,
+    ) {
         use lazybox_tui_core::help::HelpActionIntent;
         match intent {
             HelpActionIntent::AddSnippet {
@@ -942,7 +976,10 @@ showing keybinding search only",
                     self.flash_error(msg);
                     return;
                 }
-                let Some(root) = self.skill_scaffold_root() else {
+                // Write to the exact root resolved and previewed at
+                // propose time, not a freshly-resolved one — the
+                // sidebar selection may have moved under the confirm.
+                let Some(root) = skill_root else {
                     self.flash_error(
                         "a skill scaffolds into a repo on your machine — unavailable for a remote daemon",
                     );
@@ -956,20 +993,28 @@ showing keybinding search only",
         }
     }
 
-    /// The repo the `scaffold_skill` action writes into: the focused
-    /// workspace's live worktree when it has one, else the directory
-    /// lazybox was launched from. `None` when attached to a remote
-    /// daemon — the worktree path is server-side, so there's nothing
-    /// local to scaffold into.
-    pub(super) fn skill_scaffold_root(&self) -> Option<std::path::PathBuf> {
+    /// The repo the `scaffold_skill` action writes into, carrying its
+    /// provenance so the confirm preview can name it honestly. The
+    /// focused workspace's live worktree is preferred; the directory
+    /// lazybox was launched from is the fallback when no focused
+    /// workspace has an on-disk worktree. `None` when attached to a
+    /// remote daemon — the worktree path is server-side, so there's
+    /// nothing local to scaffold into.
+    pub(super) fn skill_scaffold_root(&self) -> Option<SkillScaffoldRoot> {
         if self.remote {
             return None;
         }
-        self.sidebar
+        if let Some(worktree) = self
+            .sidebar
             .selected_workspace()
             .and_then(|w| w.sessions.first().map(|s| s.worktree_path.clone()))
             .filter(|p| p.is_dir())
-            .or_else(|| std::env::current_dir().ok())
+        {
+            return Some(SkillScaffoldRoot::Worktree(worktree));
+        }
+        std::env::current_dir()
+            .ok()
+            .map(SkillScaffoldRoot::LaunchDir)
     }
 
     /// Boundary validation for a proposed `scaffold_skill` (#799): the

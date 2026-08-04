@@ -64,6 +64,8 @@ export function loadPreview(): PreviewState {
       deletions: 0,
       closes_issues: [],
       kind: "Pr",
+      priority: null,
+      state_label: null,
     },
     gh_issues: [],
     linear_issues: [],

@@ -1245,9 +1245,10 @@ impl Sidebar {
 
     /// Every row the `f` filter menu offers, with its match count: the
     /// fixed predicates ([`Filter::ALL`]) followed by the label and
-    /// Linear-state values discovered in the current mailbox. Both value
-    /// axes are omitted when no candidate carries them, so the menu only
-    /// grows the sections that apply.
+    /// Linear-state values discovered in the current mailbox, plus any
+    /// currently-active value (count 0 when nothing in the mailbox
+    /// carries it) so an active filter always has a re-checkable row. A
+    /// value axis with no discovered and no active values adds no rows.
     pub fn filter_menu_entries(&self) -> Vec<(FilterEntry, usize)> {
         use std::collections::BTreeMap;
         let now = self.now();
@@ -1292,6 +1293,19 @@ impl Sidebar {
                 *states.entry(state.clone()).or_default() += 1;
             }
         }
+        // Always surface currently-active values, even when no candidate
+        // carries them right now (count 0). Otherwise an active
+        // `Label`/`LinearState` filter whose matching workspaces have all
+        // left the mailbox would have no row to pre-check, and the next
+        // apply — which rebuilds the set from the checked rows — would
+        // silently drop it (review finding). Fixed predicates can't hit
+        // this because they're always in `Filter::ALL`.
+        for name in self.filters.labels() {
+            labels.entry(name.clone()).or_insert(0);
+        }
+        for name in self.filters.linear_states() {
+            states.entry(name.clone()).or_insert(0);
+        }
         out.extend(labels.into_iter().map(|(n, c)| (FilterEntry::Label(n), c)));
         out.extend(
             states
@@ -1299,34 +1313,6 @@ impl Sidebar {
                 .map(|(n, c)| (FilterEntry::LinearState(n), c)),
         );
         out
-    }
-
-    /// Per-filter match counts over the workspaces the current mailbox
-    /// admits (before the active filters narrow further). Drives the
-    /// `(N)` counts in the filter menu so the user can see what each
-    /// toggle would surface. Order matches [`Filter::ALL`].
-    pub fn filter_counts(&self) -> Vec<(Filter, usize)> {
-        let now = self.now();
-        let candidates: Vec<&Workspace> = self
-            .workspaces
-            .values()
-            .filter(|w| mailbox_membership(w, self.mailbox, now, self.show_inactive_in_inbox))
-            .collect();
-        Filter::ALL
-            .into_iter()
-            .map(|f| {
-                let n = candidates
-                    .iter()
-                    .filter(|w| {
-                        f.matches(&FilterCtx {
-                            w,
-                            agents: &self.agents,
-                        })
-                    })
-                    .count();
-                (f, n)
-            })
-            .collect()
     }
 
     pub fn mailbox(&self) -> Mailbox {

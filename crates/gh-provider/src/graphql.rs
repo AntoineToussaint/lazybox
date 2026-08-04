@@ -1427,7 +1427,6 @@ pub fn pr_details_to_details(node: &GqlPrDetailsNode, my_username: &str) -> PrDe
         review: derive_review_status_inner(&node.reviews.nodes, node.review_decision.as_deref()),
         role: derive_role_inner(
             &node.reviews.nodes,
-            node.review_decision.as_deref(),
             my_username,
             is_author,
             &requested_reviewer_logins(&node.review_requests),
@@ -2604,7 +2603,6 @@ fn extract_ci_status_inner(commits: &GqlCommits) -> CiStatus {
 fn derive_role(pr: &GqlPr, my_username: &str, is_author: bool) -> TaskRole {
     derive_role_inner(
         &pr.reviews.nodes,
-        pr.review_decision.as_deref(),
         my_username,
         is_author,
         &requested_reviewer_logins(&pr.review_requests),
@@ -2662,34 +2660,35 @@ fn my_latest_review_state<'a>(reviews: &'a [GqlReview], my_username: &str) -> Op
 /// 2. A review is currently requested from me → [`TaskRole::Reviewer`].
 ///    This outranks a prior approval: a re-request after I approved
 ///    means GitHub wants my eyes again.
-/// 3. My latest decisive review (lazy path): `APPROVED` clears my
-///    obligation → [`TaskRole::Mentioned`]; `CHANGES_REQUESTED` keeps
-///    me a [`TaskRole::Reviewer`].
-/// 4. I'm assigned → [`TaskRole::Assignee`].
-/// 5. Inbox-scan fallback: once I review, GitHub drops me from
-///    `reviewRequests`, and the scan omits the reviews list — so an
-///    already-reviewed PR is indistinguishable from a never-involved
-///    one *except* that an outstanding `reviewDecision: CHANGES_REQUESTED`
-///    signals a reviewer is blocking. On a PR I'm involved in that's
-///    usually me, so surface it as [`TaskRole::Reviewer`]; lazy-fetch
-///    refines to my exact state on open. `REVIEW_REQUIRED`/`APPROVED`
-///    are NOT used here — they'd re-admit the commenter noise.
-/// 6. Otherwise I'm only involved via a comment or @-mention →
+/// 3. I'm assigned → [`TaskRole::Assignee`]. Checked *before* the
+///    reviews list because assignment is visible on both the inbox scan
+///    and lazy-fetch, whereas the reviews list is lazy-only — putting it
+///    first keeps an assigned-and-approved PR reading `Assignee` on both
+///    paths instead of flipping to `Mentioned` when the workspace opens
+///    and `merge_pr_details` overwrites the role.
+/// 4. My latest decisive review (lazy path only): `APPROVED` clears my
+///    obligation → [`TaskRole::Mentioned`]; anything else (changes
+///    requested / a review comment) keeps me a [`TaskRole::Reviewer`].
+/// 5. Otherwise I'm only involved via a comment or @-mention →
 ///    [`TaskRole::Mentioned`].
 ///
-/// Because both paths key off requests/assignees and (2) precedes the
-/// review-state check, the open-time re-derivation
-/// (`handlers.rs`, `pr.role = details.role`) can't downgrade a
-/// still-requested reviewer.
+/// Because the scan-visible signals (author / requested / assignee) are
+/// all resolved before the lazy-only reviews list, the open-time
+/// re-derivation (`handlers.rs`, `pr.role = details.role`) can only ever
+/// *refine* the role, never flip one scan-visible relationship to
+/// another.
 ///
-/// Known scan-path approximations, corrected on workspace open: a
-/// review requested only from my *team* (not me personally), and a
-/// requested reviewer / assignee beyond the query's `first:` cap, both
-/// read as `Mentioned` until lazy-fetch (team membership isn't in the
-/// poll payload).
+/// Known scan-path approximations, corrected on workspace open: (a) a
+/// PR I've already reviewed reads `Mentioned` on the scan — GitHub drops
+/// me from `reviewRequests` once I review and the scan omits the reviews
+/// list, so it's indistinguishable from a never-involved PR until
+/// lazy-fetch; (b) a review requested only from my *team*, or a reviewer
+/// / assignee beyond the query's `first:` cap, also reads `Mentioned`
+/// (team membership isn't in the poll payload). Both err toward
+/// `Mentioned` rather than a false `Reviewer`, keeping the `reviewer`
+/// filter free of the commenter noise this rework removed.
 fn derive_role_inner(
     reviews: &[GqlReview],
-    review_decision: Option<&str>,
     my_username: &str,
     is_author: bool,
     requested_reviewers: &[&str],
@@ -2701,18 +2700,15 @@ fn derive_role_inner(
     if requested_reviewers.contains(&my_username) {
         return TaskRole::Reviewer;
     }
+    if assignees.contains(&my_username) {
+        return TaskRole::Assignee;
+    }
     if let Some(latest) = my_latest_review_state(reviews, my_username) {
         return if latest == "APPROVED" {
             TaskRole::Mentioned
         } else {
             TaskRole::Reviewer
         };
-    }
-    if assignees.contains(&my_username) {
-        return TaskRole::Assignee;
-    }
-    if matches!(review_decision, Some("CHANGES_REQUESTED")) {
-        return TaskRole::Reviewer;
     }
     TaskRole::Mentioned
 }
@@ -4481,6 +4477,48 @@ mod tests {
         assert_eq!(task.role, TaskRole::Assignee);
     }
 
+    /// Regression (#800, review finding): assignment outranks my own
+    /// review, so an assigned PR I've *approved* stays `Assignee` on both
+    /// the inbox scan (reviews empty) AND the lazy-fetch (reviews carry my
+    /// approval). Before the fix the review-state check ran first, so the
+    /// role flipped Assignee → Mentioned the moment the workspace opened
+    /// (`merge_pr_details` overwrites it), silently dropping the PR from
+    /// the `assignee` filter.
+    #[test]
+    fn pr_to_task_assigned_and_approved_stays_assignee_on_both_paths() {
+        let assigned = GqlAssignees {
+            nodes: vec![GqlAuthor {
+                login: "alice".into(),
+            }],
+        };
+        let my_approval = GqlReviews {
+            nodes: vec![GqlReview {
+                author: Some(GqlAuthor {
+                    login: "alice".into(),
+                }),
+                body: None,
+                state: "APPROVED".into(),
+                submitted_at: Some(ts(0)),
+                id: None,
+                created_at: None,
+            }],
+        };
+        // Inbox-scan shape: assignee present, reviews list empty (lazy).
+        let mut scan = make_pr(11, "bob");
+        scan.assignees = assigned;
+        scan.reviews = GqlReviews::default();
+        assert_eq!(pr_to_task(&scan, "alice").role, TaskRole::Assignee);
+        // Lazy-fetch shape: assignee present AND my approval in the list.
+        let mut lazy = make_pr(12, "bob");
+        lazy.assignees = GqlAssignees {
+            nodes: vec![GqlAuthor {
+                login: "alice".into(),
+            }],
+        };
+        lazy.reviews = my_approval;
+        assert_eq!(pr_to_task(&lazy, "alice").role, TaskRole::Assignee);
+    }
+
     /// A team review request carries no login, so it must not match me;
     /// with no personal signal the PR stays `Mentioned`.
     #[test]
@@ -4593,19 +4631,20 @@ mod tests {
         assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Reviewer);
     }
 
-    /// Regression (#800, finding 0): on the inbox scan (reviews list is
-    /// lazy/empty), a PR I'm involved in with an outstanding
-    /// `CHANGES_REQUESTED` decision surfaces as Reviewer — GitHub has
-    /// already cleared me from reviewRequests once I reviewed, so this is
-    /// the only scan-path signal that I'm the blocking reviewer.
-    /// `REVIEW_REQUIRED` / `APPROVED` deliberately do NOT (that would
-    /// re-admit the commenter noise the role rework removed).
+    /// The PR-global `reviewDecision` must NOT drive *my* role: a PR
+    /// where someone else requested changes (`CHANGES_REQUESTED`) but I
+    /// only commented — not requested, not assigned, no review of my own
+    /// — stays `Mentioned` on the inbox scan. An earlier revision used
+    /// `reviewDecision` as a scan fallback, which re-admitted exactly the
+    /// commenter noise this rework removed (review finding); role is now
+    /// keyed only on per-me signals, so an already-reviewed PR simply
+    /// reads `Mentioned` until lazy-fetch refines it on open.
     #[test]
-    fn pr_to_task_changes_requested_decision_is_reviewer_on_scan() {
+    fn pr_to_task_changes_requested_by_others_is_mentioned_on_scan() {
         let mut pr = make_pr(9, "bob");
-        pr.reviews = GqlReviews::default(); // inbox scan
+        pr.reviews = GqlReviews::default(); // inbox scan, I'm just a commenter
         pr.review_decision = Some("CHANGES_REQUESTED".into());
-        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Reviewer);
+        assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
     }
 
     /// Regression (#800, finding 1): a bot / mannequin / app requested

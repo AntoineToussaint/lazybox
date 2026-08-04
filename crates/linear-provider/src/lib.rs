@@ -13,7 +13,8 @@
 //!
 //! ## Scope
 //!
-//! Fetches issues the authenticated user is assigned to or created.
+//! Fetches issues the authenticated user is assigned to, created, or
+//! subscribes to (subscription covers @-mentions / commented issues).
 //! States `completed` / `canceled` are filtered out server-side.
 //! Pagination support: up to 50 issues per page, up to 20 pages.
 

@@ -13,11 +13,13 @@ query { viewer { id name } }
 "#;
 
 // Scope: open issues (`state.type` not completed/canceled) that are
-// mine — assigned to me OR created by me. Without the `or` clause the
-// `issues` connection returns EVERY open issue in every team the token
-// can see (the whole workspace), which floods the inbox and the
-// renderer. `isMe` is evaluated server-side against the token's viewer,
-// so no viewer id needs threading into the query.
+// mine — assigned to me, created by me, OR that I subscribe to (Linear
+// auto-subscribes you when you're @-mentioned or comment, so this also
+// covers involvement). Without the `or` clause the `issues` connection
+// returns EVERY open issue in every team the token can see (the whole
+// workspace), which floods the inbox and the renderer. `isMe` is
+// evaluated server-side against the token's viewer, so no viewer id
+// needs threading into the query.
 const ISSUES_QUERY: &str = r#"
 query($after: String) {
   issues(
@@ -27,7 +29,8 @@ query($after: String) {
       state: { type: { nin: ["completed", "canceled"] } },
       or: [
         { assignee: { isMe: { eq: true } } },
-        { creator: { isMe: { eq: true } } }
+        { creator: { isMe: { eq: true } } },
+        { subscribers: { some: { isMe: { eq: true } } } }
       ]
     }
   ) {

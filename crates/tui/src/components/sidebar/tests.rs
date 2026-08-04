@@ -1258,15 +1258,23 @@ mod filter_tests {
     }
 
     #[test]
-    fn filter_counts_cover_every_filter_in_menu_order() {
+    fn filter_menu_entries_cover_every_fixed_filter_with_counts() {
+        use crate::components::sidebar::FilterEntry;
         let mut sb = Sidebar::new(PaneId::new(1));
         let w = ws_with_role("1", TaskRole::Author);
         sb.workspaces.insert(SessionKey::from(&w.key), w);
         sb.recompute_visible();
-        let counts = sb.filter_counts();
-        assert_eq!(counts.len(), Filter::ALL.len());
+        let entries = sb.filter_menu_entries();
+        // Every fixed predicate appears (value axes add rows on top).
+        let by: std::collections::HashMap<Filter, usize> = entries
+            .iter()
+            .filter_map(|(e, c)| match e {
+                FilterEntry::Predicate(f) => Some((*f, *c)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(by.len(), Filter::ALL.len());
         // The single authored PR is counted under Author and PR.
-        let by: std::collections::HashMap<Filter, usize> = counts.into_iter().collect();
         assert_eq!(by[&Filter::Author], 1);
         assert_eq!(by[&Filter::Pr], 1);
         assert_eq!(by[&Filter::Reviewer], 0);

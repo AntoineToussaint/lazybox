@@ -78,8 +78,10 @@ const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 /// than by genuine new content, and older lines are evicted for good
 /// once it fills. 50k (up from the original 10k) buys a much longer
 /// window before that eviction bites; heavy users raise it further via
-/// YAML, trading per-pane tmux-server RAM for depth.
-pub const DEFAULT_HISTORY_LIMIT: u32 = 50_000;
+/// YAML, trading per-pane tmux-server RAM for depth. Shares
+/// [`lazybox_config::DEFAULT_SCROLLBACK_LINES`] so the daemon fallback and
+/// the config default can't drift.
+pub const DEFAULT_HISTORY_LIMIT: u32 = lazybox_config::DEFAULT_SCROLLBACK_LINES;
 
 /// Minimum tmux version the backend's conf requires, enforced by
 /// [`TmuxBackend::detect`] (older tmux → raw-PTY fallback, same as no

@@ -16,6 +16,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Default per-pane scrollback depth, in lines (`terminal.scrollback_lines`).
+/// The single source of truth for this default: the tmux backend's
+/// `history-limit`, the deep-scrollback capture depth, and the client VT's
+/// scrollback budget all resolve to it so the three can never silently
+/// diverge (#857). See [`TerminalSection::scrollback_lines`].
+pub const DEFAULT_SCROLLBACK_LINES: u32 = 50_000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to read config: {0}")]
@@ -651,7 +658,7 @@ impl Default for UiDefaults {
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
             show_agent_model: true,
-            scrollback_lines: 50_000,
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
     }
 }
@@ -1189,7 +1196,7 @@ impl Default for TerminalSection {
             escape_char: ']',
             escape_window_ms: 600,
             agent_dead_on_arrival_ms: 10_000,
-            scrollback_lines: 50_000,
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
     }
 }

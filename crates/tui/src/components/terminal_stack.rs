@@ -56,20 +56,27 @@ const DEFAULT_ROWS: u16 = 32;
 /// window before `apply_ui_defaults`). Process-wide because the VTs that
 /// read it are built in static contexts (`TerminalVt::new`, `reset`, the
 /// `apply_scrollback` scratch parser) with no handle to per-stack config.
-static CLIENT_SCROLLBACK_LINES: AtomicUsize = AtomicUsize::new(DEFAULT_SCROLLBACK_LINES);
-const DEFAULT_SCROLLBACK_LINES: usize = 50_000;
+/// Shares [`lazybox_config::DEFAULT_SCROLLBACK_LINES`] so the client
+/// fallback and the config default can't drift.
+static CLIENT_SCROLLBACK_LINES: AtomicUsize =
+    AtomicUsize::new(lazybox_config::DEFAULT_SCROLLBACK_LINES as usize);
 
 /// libghostty's `max_scrollback` bounds the scrollback by **bytes** of
 /// page memory, not line count (the C header's "number of lines" wording
 /// is misleading — memory is what it actually caps). ghostty stores each
-/// scrollback row as full-width cells plus page overhead, so a row costs
-/// on the order of ~1.8 KB at a typical agent width; this per-line budget
-/// carries margin over that so the client holds the configured line count
-/// even for wide, styled output. ghostty grows the page list lazily, so
-/// an idle terminal pays ~nothing — the budget is a ceiling, not an
-/// upfront allocation. The old flat `10_000` was ~10 KB total, a few
-/// hundred rows, far below the tmux history it was meant to mirror (#857).
-const CLIENT_SCROLLBACK_BYTES_PER_LINE: usize = 2048;
+/// scrollback row as full-width cells plus page overhead, and that cost
+/// grows with the terminal's *width* — measured ~1.8 KB/row at 120 cols.
+/// Since the VT's `max_scrollback` is fixed at creation (before the real
+/// width is known) and libghostty can't resize it afterward, this per-line
+/// budget can't track width exactly; it is instead sized to cover a *wide*
+/// agent pane (up to ~275 cols) so the client still holds the configured
+/// line count there rather than silently retaining a fraction of it. A
+/// pane wider than that retains proportionally fewer lines — still far
+/// above the old flat `10_000` (~10 KB total, a few hundred rows). ghostty
+/// grows the page list lazily, so the larger ceiling costs an idle or
+/// narrow terminal ~nothing; a wide terminal that genuinely accrues deep
+/// history pays for holding exactly what it was asked to.
+const CLIENT_SCROLLBACK_BYTES_PER_LINE: usize = 4096;
 
 /// The client VT's `max_scrollback` byte budget for the current
 /// configured line depth.
@@ -2593,10 +2600,12 @@ impl TerminalStack {
             .ok()
             .map(|b| b.total.saturating_sub(b.offset + b.len))
             .unwrap_or(0);
-        if !slot.vt.reset() {
-            return;
-        }
-        slot.vt.feed(replay);
+        // Adopt the scratch parser we already built and fed instead of
+        // resetting `slot.vt` and re-parsing the capture a second time — a
+        // deep capture is multiple megabytes and the pre-flight already did
+        // the full parse. Dropping the old parser here is the same grid
+        // replacement `reset()` performed, minus the wasted second pass.
+        slot.vt = scratch;
         let mut modes = Vec::with_capacity(preserved.len() * 8);
         for (value, on) in preserved {
             let flag = if on { 'h' } else { 'l' };
@@ -6520,6 +6529,50 @@ mod deep_scrollback_tests {
             after.total > 12_000,
             "client VT must retain the deep capture in full, not clip it \
              to the old 10k cap: {after:?}"
+        );
+    }
+
+    /// libghostty caps scrollback by BYTES and a row's cost grows with the
+    /// terminal's width, so a too-small per-line byte budget clips a WIDE
+    /// pane to a fraction of the configured line depth (#857). A pane far
+    /// wider than the default must still hold ~all of the configured lines.
+    #[test]
+    fn wide_pane_retains_the_configured_line_depth() {
+        let sk = SessionKey::new("s");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.apply_ui_defaults(&lazybox_config::UiDefaults {
+            scrollback_lines: 8_000,
+            ..Default::default()
+        });
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        stack.set_active_session(Some(sk.clone()));
+        // Widen the pane well past the default 120 cols; the deep-scrollback
+        // rebuild sizes its parser to the slot's current width.
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .expect("slot")
+            .vt
+            .ensure_size(220, 24);
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(8_000),
+            seq: 9,
+        });
+
+        let after = scrollbar(&stack, TerminalId(1));
+        assert!(
+            after.total >= 7_900,
+            "a wide pane must still hold ~all configured lines, not a \
+             width-clipped fraction: {after:?}"
         );
     }
 

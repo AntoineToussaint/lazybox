@@ -347,7 +347,14 @@ the browser (#596 — a single on-screen URL opens straight away, else a
 picker lists them newest-first so `]]u`+Enter opens the last; an
 emulator-independent path that sidesteps right-click / mouse-capture
 quirks, and `target_at` now stitches soft-wrapped URLs so a right-click
-on any row of a wrapped link resolves the whole URL), `]]f`
+on any row of a wrapped link resolves the whole URL). A link under the
+cursor also opens on **right-click** or an **Alt/Ctrl + left-click**
+(#842) — the modifier-click is forwarded far more consistently than a
+bare right button (many emulators bind right-click to their own context
+menu), so it's the reliable mouse path (Alt/Ctrl ride the SGR mouse
+report; Cmd isn't encoded and most emulators eat it, so don't rely on
+it); both need capture on, while `]]u` works even with capture off.
+`]]f`
 toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
 the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see

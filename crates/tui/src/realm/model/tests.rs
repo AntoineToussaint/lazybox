@@ -9286,6 +9286,15 @@ mod terminal_url_mouse_tests {
         });
     }
 
+    fn modifier_left_click(model: &mut TestModel, col: u16, row: u16, modifiers: KeyModifiers) {
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers,
+        });
+    }
+
     fn opened_urls(opened: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
         opened.lock().expect("opened URL mutex").clone()
     }
@@ -9356,6 +9365,81 @@ mod terminal_url_mouse_tests {
         right_click(&mut model, x + 2, y);
 
         assert_eq!(opened_urls(&opened), vec![url]);
+    }
+
+    #[test]
+    fn alt_left_click_opens_url_like_right_click() {
+        let (mut model, _server, opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = "https://plain.example.com/path";
+        feed(&mut model, 1, format!("see {url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        modifier_left_click(&mut model, x + 4, y, KeyModifiers::ALT);
+
+        assert_eq!(opened_urls(&opened), vec![url]);
+    }
+
+    #[test]
+    fn ctrl_and_super_left_click_also_open_urls() {
+        for modifier in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
+            let (mut model, _server, opened) = build_model(1);
+            model
+                .terminals
+                .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+            render(&mut model);
+            let url = "https://plain.example.com/path";
+            feed(&mut model, 1, format!("see {url}\r\n").into_bytes());
+            let pane = render(&mut model);
+            let (x, y) = body_origin(&model, pane, 1);
+
+            modifier_left_click(&mut model, x + 4, y, modifier);
+
+            assert_eq!(opened_urls(&opened), vec![url], "modifier {modifier:?}");
+        }
+    }
+
+    #[test]
+    fn plain_left_click_does_not_open_url() {
+        let (mut model, _server, opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = "https://plain.example.com/path";
+        feed(&mut model, 1, format!("see {url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        modifier_left_click(&mut model, x + 4, y, KeyModifiers::empty());
+
+        assert!(
+            opened_urls(&opened).is_empty(),
+            "a plain left-click starts selection, it must not open the link"
+        );
+    }
+
+    #[test]
+    fn modifier_left_click_miss_does_not_open() {
+        let (mut model, _server, opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"no link here\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        modifier_left_click(&mut model, x + 4, y, KeyModifiers::ALT);
+
+        assert!(
+            opened_urls(&opened).is_empty(),
+            "a modifier-click that misses a link opens nothing"
+        );
     }
 
     fn assert_split_opens_each_unfocused_tile(vertical: bool) {
@@ -9523,7 +9607,8 @@ mod terminal_url_mouse_tests {
 
         assert!(opened_urls(&opened).is_empty());
         let notice = model.status.notice.as_ref().expect("mouse-mode notice");
-        assert!(notice.message.contains("right-click links are off"));
+        assert!(notice.message.contains("right-click links off"));
+        assert!(notice.message.contains("]]u"));
         assert!(notice.message.contains("F8"));
     }
 

@@ -1258,7 +1258,7 @@ impl<T: TerminalAdapter> Model<T> {
                             "terminal right-click missed"
                         );
                         self.flash_info(
-                            "mouse: host selection — right-click links are off; press F8 or Alt-s to enable",
+                            "mouse: host selection — right-click links off; use ]]u to open a link, or F8 / Alt-s to enable",
                         );
                         return;
                     }
@@ -1401,6 +1401,22 @@ impl<T: TerminalAdapter> Model<T> {
                             }
                         }
                     }
+                }
+                // Modifier + left-click on a link inside the terminal
+                // pane → open it, mirroring right-click (#842). Right
+                // button is the least reliably forwarded across
+                // emulators — many bind it to a native context menu and
+                // never hand it to the running app — so a modifier-held
+                // left-click (Alt / Ctrl / Cmd) is an emulator-
+                // independent path to the same open-URL behavior. A
+                // modifier-click that misses a link falls through to
+                // ordinary left-click handling below.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && link_open_modifier(m.modifiers)
+                    && rect_contains(right_bottom_rect, m.column, m.row)
+                    && self.try_open_terminal_click_target(m.column, m.row)
+                {
+                    return;
                 }
                 // Splitter drag wins over both focus changes and
                 // terminal interaction — clicking a splitter resizes,
@@ -1781,6 +1797,24 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Resolve a click target (URL / path / issue ref) at screen cell
+    /// `(col, row)` in the terminal pane and open it, returning `true`
+    /// when something was opened. The modifier + left-click path (#842)
+    /// uses this and falls through to ordinary left-click routing on
+    /// `false`; the right-click path resolves inline instead, because it
+    /// also has to forward a miss to the PTY as a mouse report.
+    fn try_open_terminal_click_target(&mut self, col: u16, row: u16) -> bool {
+        let Some(target) = self
+            .terminals
+            .rendered_target_at(col, row)
+            .and_then(|resolved| resolved.target)
+        else {
+            return false;
+        };
+        self.open_click_target(target);
+        true
+    }
+
     /// Advance the active terminal drag-selection to crossterm cell
     /// `(col, row)`: auto-scroll the viewport when the pointer is parked
     /// against the top/bottom edge, then re-derive the screen-absolute
@@ -1859,6 +1893,21 @@ fn edge_scroll_delta(rect: Rect, row: u16) -> isize {
     } else {
         0
     }
+}
+
+/// Does this mouse event carry a modifier that means "open the link
+/// under the cursor" (#842)? Alt and Ctrl are the practical ones: an SGR
+/// mouse report encodes only shift/alt/ctrl, and both are forwarded far
+/// more reliably than a bare right button (which many emulators bind to a
+/// native context menu). Super (Cmd) is accepted too so the handler
+/// honors it if a protocol ever reports it, but standard mouse reports
+/// don't carry it — don't rely on Cmd-click. Shift is excluded:
+/// emulators commonly reserve it to force host-native selection, so it
+/// rarely reaches the app and would clash with selection-extend
+/// conventions.
+fn link_open_modifier(mods: crossterm::event::KeyModifiers) -> bool {
+    use crossterm::event::KeyModifiers;
+    mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER)
 }
 
 /// Highlight-navigation delta for a which-key popup: `Up`/`k` → −1,

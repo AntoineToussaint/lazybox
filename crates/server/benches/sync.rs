@@ -41,6 +41,7 @@ impl TaskSource for FixtureSource {
 
 fn synthetic_issue(i: usize) -> Task {
     Task {
+        author: String::new(),
         id: TaskId {
             source: "github".into(),
             key: format!("o/r#{i}"),

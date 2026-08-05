@@ -1750,6 +1750,7 @@ mod tests {
 
     fn pr(key: &str) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),

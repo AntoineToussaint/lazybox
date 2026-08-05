@@ -1362,6 +1362,7 @@ mod merge_pr_details_tests {
 
     fn pr_task(closes: Vec<TaskId>) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "o/r#1".into(),
@@ -2563,6 +2564,7 @@ mod github_target_tests {
 
     fn task(repo: Option<&str>, key: &str) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -2634,6 +2636,7 @@ mod prefetch_score_tests {
 
     fn pr() -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "octo/widgets#42".into(),
@@ -2900,6 +2903,7 @@ mod inspect_tests {
         let session_key: SessionKey = "github:o/r#1".into();
         let workspace_key: WorkspaceKey = WorkspaceKey::new(session_key.as_str().to_string());
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "o/r#1".into(),
@@ -3343,6 +3347,7 @@ mod inspect_tests {
     ) -> (WorkspaceKey, SessionId) {
         use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace};
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("o/r#{number}"),
@@ -3403,6 +3408,7 @@ mod inspect_tests {
     fn seed_merged_workspace_no_session(store: &MemoryStore, number: u64) -> WorkspaceKey {
         use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace};
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("o/r#{number}"),
@@ -3458,6 +3464,7 @@ mod inspect_tests {
     fn closed_issue_task(number: u64, branch: &str) -> lazybox_core::Task {
         use lazybox_core::{Task, TaskId, TaskKind, TaskRole, TaskState};
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("o/r#{number}"),
@@ -4338,6 +4345,7 @@ mod inspect_tests {
         let fx = setup_fixture().await;
         let store = Arc::new(MemoryStore::new());
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "o/r#9".into(),

@@ -504,6 +504,7 @@ mod tests {
 
     fn workspace(key: &str, role: TaskRole, ci: CiStatus, kind: TaskKind) -> Workspace {
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("owner/r#{key}"),
@@ -550,6 +551,7 @@ mod tests {
     /// State predicates be exercised without a fixed fixture per field.
     fn workspace_with(key: &str, tweak: impl FnOnce(&mut Task)) -> Workspace {
         let mut task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("owner/r#{key}"),

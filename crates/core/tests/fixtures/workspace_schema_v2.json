@@ -118,6 +118,7 @@
     "assignees": [
       "alice"
     ],
+    "author": "dave",
     "auto_merge_enabled": true,
     "is_in_merge_queue": true,
     "mergeable": "Conflicting",
@@ -183,6 +184,7 @@
       "assignees": [
         "alice"
       ],
+      "author": "dave",
       "auto_merge_enabled": true,
       "is_in_merge_queue": true,
       "mergeable": "Conflicting",
@@ -244,6 +246,7 @@
       "assignees": [
         "alice"
       ],
+      "author": "dave",
       "auto_merge_enabled": true,
       "is_in_merge_queue": true,
       "mergeable": "Conflicting",
@@ -308,8 +311,8 @@
   ],
   "seen_count": 1,
   "read_indices": [
-    2,
-    0
+    0,
+    2
   ],
   "snoozed_until": "2026-03-14T18:00:00Z",
   "auto_merge_on_green": true,

@@ -3499,6 +3499,7 @@ async fn queued_meaningful_output_at_the_watchdog_deadline_prevents_a_stale_done
 /// Minimal GitHub `Task` for the collapse test.
 fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> lazybox_core::Task {
     lazybox_core::Task {
+        author: String::new(),
         id: lazybox_core::TaskId {
             source: "github".into(),
             key: key.into(),

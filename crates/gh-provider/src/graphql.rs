@@ -2183,6 +2183,11 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             })
             .collect(),
         assignees: pr.assignees.nodes.iter().map(|a| a.login.clone()).collect(),
+        author: pr
+            .author
+            .as_ref()
+            .map(|a| a.login.clone())
+            .unwrap_or_default(),
         auto_merge_enabled: pr.auto_merge_request.is_some(),
         is_in_merge_queue: pr.is_in_merge_queue,
         mergeable: match pr.mergeable.as_deref() {
@@ -3097,6 +3102,11 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
             .iter()
             .map(|a| a.login.clone())
             .collect(),
+        author: issue
+            .author
+            .as_ref()
+            .map(|a| a.login.clone())
+            .unwrap_or_default(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,
         mergeable: lazybox_core::Mergeable::Mergeable,
@@ -3425,6 +3435,27 @@ mod tests {
         assert_eq!(task.review, ReviewStatus::None);
         assert_eq!(task.id.key, "o/r#1");
         assert_eq!(task.id.source, "github");
+    }
+
+    #[test]
+    fn issue_to_task_maps_author() {
+        let issue = make_issue(1, "t", Some("alice"), &[]);
+        let task = issue_to_task(&issue, "bob");
+        assert_eq!(task.author, "alice");
+    }
+
+    #[test]
+    fn issue_to_task_author_empty_when_absent() {
+        let issue = make_issue(1, "t", None, &[]);
+        let task = issue_to_task(&issue, "bob");
+        assert_eq!(task.author, "");
+    }
+
+    #[test]
+    fn pr_to_task_maps_author() {
+        let pr = make_pr(1, "carol");
+        let task = pr_to_task(&pr, "bob");
+        assert_eq!(task.author, "carol");
     }
 
     #[test]

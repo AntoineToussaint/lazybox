@@ -3253,6 +3253,7 @@ mod tests {
             CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
         };
         let task = |key: &str| Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -3335,6 +3336,7 @@ mod tests {
             CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey,
         };
         let task = |key: &str| Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -3423,6 +3425,7 @@ mod tests {
             Utc::now(),
         );
         let mut pr = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "acme/widget#8".into(),

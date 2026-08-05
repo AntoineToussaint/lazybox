@@ -1101,6 +1101,7 @@ mod tests {
 
     fn make_task(key: &str, title: &str) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),

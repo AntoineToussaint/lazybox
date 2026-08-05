@@ -2620,6 +2620,7 @@ mod tests {
     /// glyph/detail logic.
     fn pr_workspace(labels: &[&str], ci_arm: lazybox_core::PolicyArm) -> lazybox_core::Workspace {
         let task = lazybox_core::Task {
+            author: String::new(),
             id: lazybox_core::TaskId {
                 source: "github".into(),
                 key: "owner/repo#1".into(),

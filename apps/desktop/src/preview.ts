@@ -52,6 +52,7 @@ export function loadPreview(): PreviewState {
       labels: [],
       reviewers: [],
       assignees: [],
+      author: "mira",
       auto_merge_enabled: false,
       is_in_merge_queue: false,
       mergeable: "Mergeable",

@@ -58,6 +58,7 @@ fn activity(kind: ActivityKind, author: &str, body: &str, h: u32) -> Activity {
 /// shortcuts except where semantically required).
 fn maximal_pr_task() -> Task {
     Task {
+        author: "dave".into(),
         id: TaskId {
             source: "github".into(),
             key: "acme/widget#7".into(),

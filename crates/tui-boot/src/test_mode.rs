@@ -104,6 +104,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
     // `primary_task()`, and the right pane renders the empty-header
     // placeholder. We want `--test` to look like a real workspace.
     let task = Task {
+        author: String::new(),
         id: TaskId {
             source: "github".into(),
             key: "test/repo#1".into(),

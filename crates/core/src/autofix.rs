@@ -278,6 +278,7 @@ mod tests {
 
     fn pr() -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "acme/widget#7".into(),

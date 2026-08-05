@@ -1256,12 +1256,28 @@ impl RightPane {
         ));
 
         // Branch line — confirms which worktree lazybox will spawn an
-        // agent into. Cyan accent on a "Branch:" dim label.
+        // agent into. Cyan accent on a "Branch:" dim label. The item's
+        // creator rides the right edge of this row (`opened by @author`)
+        // so "who opened this" reads as primary top-right context for
+        // PRs, issues, and Linear alike.
         let branch = task.branch.as_deref().unwrap_or("-");
-        lines.push(Line::from(vec![
+        let mut branch_spans = vec![
             Span::styled("Branch: ", Style::default().fg(theme.text_dim)),
             Span::styled(branch, Style::default().fg(theme.accent)),
-        ]));
+        ];
+        if !task.author.is_empty() {
+            let opened_by = "opened by ";
+            let handle = format!("@{}", task.author);
+            let left = crate::util::visual_width("Branch: ") + crate::util::visual_width(branch);
+            let right = crate::util::visual_width(opened_by) + crate::util::visual_width(&handle);
+            // Only right-align when the row has slack; otherwise a single
+            // space keeps it on-row rather than overflowing the width.
+            let gap = (area.width as usize).saturating_sub(left + right).max(1);
+            branch_spans.push(Span::raw(" ".repeat(gap)));
+            branch_spans.push(Span::styled(opened_by, Style::default().fg(theme.text_dim)));
+            branch_spans.push(Span::styled(handle, Style::default().fg(theme.hover)));
+        }
+        lines.push(Line::from(branch_spans));
 
         // Originating issue — the Issue this PR was created from /
         // closes. An explicit, clickable path to it so the user doesn't

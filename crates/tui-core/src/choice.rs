@@ -735,6 +735,7 @@ mod tests {
 
     fn workspace() -> Workspace {
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "owner/repo#1".into(),

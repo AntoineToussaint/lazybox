@@ -964,6 +964,7 @@ fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> lazybox_core::
     use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
     Task {
+        author: String::new(),
         id: TaskId {
             source: "github".into(),
             key: key.into(),
@@ -1227,6 +1228,7 @@ fn task_with_pr(key: &str) -> lazybox_core::Task {
     use lazybox_core::{CiStatus, ReviewStatus, Task, TaskId, TaskRole, TaskState};
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
     Task {
+        author: String::new(),
         id: TaskId {
             source: "github".into(),
             key: key.into(),

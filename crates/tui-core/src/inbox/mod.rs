@@ -438,6 +438,7 @@ mod tests {
 
     fn workspace_with_task(key_str: &str, repo: Option<&str>, minutes_old: i64) -> Workspace {
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("owner/{}#1", repo.unwrap_or("repo")),

@@ -741,6 +741,7 @@ mod has_visible_content_tests {
 
     fn issue_task_with_body(body: Option<&str>) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "github:o/r#1".into(),
@@ -835,6 +836,7 @@ mod summary_render_tests {
 
     fn task(ci: CiStatus, updated: chrono::DateTime<chrono::Utc>) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "github:o/r#1".into(),
@@ -956,6 +958,7 @@ mod mark_workspace_merged_tests {
 
     fn open_pr_task() -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "o/r#1".into(),
@@ -1048,6 +1051,7 @@ mod description_expand_tests {
 
     fn task_with_body(body: &str) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "github:o/r#1".into(),
@@ -1208,6 +1212,42 @@ mod description_expand_tests {
             .unwrap_or_default()
     }
 
+    fn full_buffer_text(pane: &mut RightPane, w: u16, h: u16) -> String {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn header_shows_creator_top_right() {
+        let mut task = task_with_body("body");
+        task.author = "alice".into();
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            text.contains("opened by @alice"),
+            "header should surface the creator: {text}",
+        );
+    }
+
+    #[test]
+    fn header_omits_creator_when_author_empty() {
+        // task_with_body leaves author empty — no `opened by` row.
+        let mut pane = pane_showing("body");
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            !text.contains("opened by"),
+            "no creator row when author is unset: {text}",
+        );
+    }
+
     #[test]
     fn preview_header_hint_matches_what_d_does() {
         // Plain short body: `d` collapses, so the hint must say collapse.
@@ -1308,6 +1348,7 @@ mod linked_issue_modal_tests {
 
     fn task(kind: &str, number: u64, body: &str) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("github:o/r#{number}"),
@@ -1427,6 +1468,7 @@ mod originating_issue_header_tests {
 
     fn task(kind: &str, number: u64, closes: Vec<TaskId>) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("o/r#{number}"),

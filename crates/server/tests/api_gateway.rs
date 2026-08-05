@@ -119,6 +119,7 @@ const FAKE_API_STREAM_SCRIPT: &str = concat!(
 fn make_task(key: &str) -> Task {
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
     Task {
+        author: String::new(),
         id: TaskId {
             source: "github".into(),
             key: key.into(),

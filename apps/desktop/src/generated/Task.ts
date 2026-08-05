@@ -54,6 +54,13 @@ reviewers: Array<string>,
  */
 assignees: Array<string>,
 /**
+ * Login of whoever opened this task — the PR/issue author or the
+ * Linear issue creator. Empty when the provider didn't supply one
+ * (older snapshots, providers without an author concept).
+ * `#[serde(default)]` so older persisted snapshots deserialize.
+ */
+author: string,
+/**
  * Auto-merge is enabled ("merge when ready" armed by someone).
  * NOTE: this does NOT mean the PR is approved or that anything will
  * merge right now — only that it will merge once CI + reviews pass.

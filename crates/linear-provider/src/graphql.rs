@@ -238,6 +238,11 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         labels,
         reviewers: vec![],
         assignees,
+        author: issue
+            .creator
+            .as_ref()
+            .and_then(|c| c.name.clone())
+            .unwrap_or_default(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,
         mergeable: lazybox_core::Mergeable::Mergeable,

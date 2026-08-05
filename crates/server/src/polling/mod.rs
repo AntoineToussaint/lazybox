@@ -464,6 +464,7 @@ mod engagement_tier_tests {
 
     fn task(number: u64, role: TaskRole) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("o/r#{number}"),
@@ -3846,6 +3847,7 @@ fn absorb_issue_workspace(
 /// when first upserted as a standalone workspace.
 fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
     let stub = Task {
+        author: String::new(),
         id: issue_id.clone(),
         title: String::new(),
         body: None,
@@ -4020,6 +4022,7 @@ mod workspace_lock_tests {
 
     fn open_pr_task() -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "o/r#1".into(),
@@ -4243,6 +4246,7 @@ mod merge_detection_tests {
 
     fn task(source: &str, key: &str, url: &str, state: TaskState) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: source.into(),
                 key: key.into(),
@@ -4552,6 +4556,7 @@ mod rescope_collapse_tests {
 
     fn gh_task(key: &str, url: &str, state: TaskState, closes: Vec<TaskId>) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -5366,6 +5371,7 @@ mod unreadable_row_preservation_tests {
 
     fn gh_pr_task(key: &str) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -5676,6 +5682,7 @@ mod tick_noop_skip_tests {
 
     fn issue(key: &str, title: &str) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),

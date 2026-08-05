@@ -225,6 +225,11 @@ impl<T: TerminalAdapter> Model<T> {
             && self.matches_dismiss_notice(&key)
             && !(self.focus == PaneFocus::Sidebar && self.sidebar.broadcast_selected_count() > 0)
         {
+            // Esc acknowledges an action-error toast: record it so the
+            // same failure re-firing on the next poll/attempt stays
+            // dismissed until its reason changes or the condition clears
+            // (#832). No-op for plain system banners.
+            self.status.remember_dismissed_action_error();
             self.status.notice = None;
             self.sync_error_source = None;
             self.redraw = true;

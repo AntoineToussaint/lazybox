@@ -3084,9 +3084,24 @@ impl<T: TerminalAdapter> Model<T> {
         workspace: &lazybox_core::WorkspaceKey,
         msg: impl Into<String>,
     ) {
+        let msg = msg.into();
+        let ws = workspace.as_str();
+        // The user already dismissed this exact failure for this
+        // workspace, so a re-fire on the next poll / auto-merge attempt
+        // stays quiet — the first occurrence is already in the messages
+        // log (Shift-M) and re-shouting an acknowledged error is the
+        // never-disappearing footer bug (#832). A changed reason or a
+        // resolving success re-arms the surface (see below and
+        // `clear_action_error`).
+        if self.status.action_error_dismissed(ws, &msg) {
+            return;
+        }
+        // A fresh (or changed-reason) failure supersedes any prior
+        // dismissal for this workspace.
+        self.status.forget_dismissed_action_error(ws);
         self.flash_error(msg);
         if let Some(n) = self.status.notice.as_mut() {
-            n.workspace = Some(workspace.as_str().to_string());
+            n.workspace = Some(ws.to_string());
         }
     }
 
@@ -3098,6 +3113,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspace's banner is left alone. Returns true if one cleared.
     pub fn clear_action_error(&mut self, workspace: &lazybox_core::WorkspaceKey) -> bool {
         use crate::realm::components::footer::NoticeSeverity;
+        // The condition resolved, so drop any dismiss-suppression for
+        // this workspace — a genuinely new failure later must surface
+        // even if it repeats an earlier, already-dismissed message
+        // (#832). Runs even when the banner already faded / was
+        // dismissed (notice is `None`), which the visible-notice clear
+        // below can't reach.
+        self.status
+            .forget_dismissed_action_error(workspace.as_str());
         if let Some(n) = self.status.notice.as_ref()
             && n.severity == NoticeSeverity::Permanent
             && n.workspace.as_deref() == Some(workspace.as_str())

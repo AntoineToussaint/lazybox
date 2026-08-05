@@ -9,7 +9,7 @@ use crate::realm::model::Msg;
 use chrono::{DateTime, Utc};
 use lazybox_core::SessionKey;
 use lazybox_ipc::TerminalKind;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 /// Cap on retained sync-attempt records. Old entries roll off the
@@ -414,6 +414,14 @@ pub(crate) struct StatusCtx {
     /// that faded (or that the user missed) is still readable in the
     /// messages window (#309).
     pub messages: MessageLog,
+    /// Action-error toasts (merge/close/update/delete failures) the user
+    /// dismissed with Esc, keyed by workspace → the exact message. While
+    /// an entry stands, an identical re-fire for that workspace stays
+    /// quiet instead of re-shouting on the next poll/attempt — Esc means
+    /// "I've seen this," not "show it again in 5s" (#832). Cleared when
+    /// the reason changes or a superseding success resolves the
+    /// condition ([`Self::forget_dismissed_action_error`]).
+    dismissed_action_errors: HashMap<String, String>,
 }
 
 impl StatusCtx {
@@ -428,7 +436,38 @@ impl StatusCtx {
             spawning: None,
             sync: SyncLog::default(),
             messages: MessageLog::default(),
+            dismissed_action_errors: HashMap::new(),
         }
+    }
+
+    /// Remember the currently-displayed action-error toast as dismissed,
+    /// so an identical re-fire for its workspace stays suppressed (#832).
+    /// No-op unless the live notice is a workspace-tagged action toast —
+    /// dismissing a plain system banner (daemon disconnected, sync
+    /// failed) records nothing, since those have their own recovery.
+    pub fn remember_dismissed_action_error(&mut self) {
+        if let Some(n) = self.notice.as_ref()
+            && n.is_action_toast()
+            && let Some(ws) = n.workspace.clone()
+        {
+            self.dismissed_action_errors.insert(ws, n.message.clone());
+        }
+    }
+
+    /// Whether an action error for `workspace` carrying this exact
+    /// `message` was already dismissed and not since superseded (#832).
+    pub fn action_error_dismissed(&self, workspace: &str, message: &str) -> bool {
+        self.dismissed_action_errors
+            .get(workspace)
+            .map(String::as_str)
+            == Some(message)
+    }
+
+    /// Forget a workspace's dismissed action error — its reason changed
+    /// or a success resolved it, so the next failure surfaces afresh
+    /// (#832).
+    pub fn forget_dismissed_action_error(&mut self, workspace: &str) {
+        self.dismissed_action_errors.remove(workspace);
     }
 
     /// Light up the animated spawn indicator. `label` is the agent /

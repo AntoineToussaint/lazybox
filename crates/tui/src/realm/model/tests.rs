@@ -862,6 +862,139 @@ mod effects_tests {
         );
     }
 
+    /// Issue #832: dismissing (Esc) a merge-failure toast means "I've
+    /// seen this." An identical `PrMergeFailed` re-emitted on the next
+    /// poll / auto-merge attempt must stay dismissed — not resurrect the
+    /// same red banner every cycle (the never-disappearing footer bug).
+    #[test]
+    fn dismissed_merge_failure_stays_dismissed_on_identical_refire() {
+        use lazybox_ipc::Event as IpcEvent;
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let fail = || IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "Required status check \"ci\" is expected".into(),
+        };
+
+        m.handle_daemon_event(fail());
+        assert!(m.status.notice.is_some(), "the first failure surfaces");
+
+        // Esc — the user acknowledges it.
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.notice.is_none(), "Esc clears the banner");
+
+        // The auto-merge retries and fails identically next poll.
+        m.handle_daemon_event(fail());
+        assert!(
+            m.status.notice.is_none(),
+            "an identical dismissed failure must not re-surface (#832)",
+        );
+    }
+
+    /// A *changed* reason for the same workspace is a new condition, so
+    /// it re-surfaces even after the prior reason was dismissed (#832) —
+    /// suppression keys on the exact message, never blanket-muting a
+    /// workspace.
+    #[test]
+    fn dismissed_merge_failure_resurfaces_on_changed_reason() {
+        use lazybox_ipc::Event as IpcEvent;
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let ws = lazybox_core::WorkspaceKey::new("github:o/r#1");
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: ws.clone(),
+            pr_label: "o/r#1".into(),
+            reason: "Required status check \"ci\" is expected".into(),
+        });
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.notice.is_none(), "first reason dismissed");
+
+        // A different rejection reason arrives.
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: ws,
+            pr_label: "o/r#1".into(),
+            reason: "base branch was modified".into(),
+        });
+        let n = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a changed reason must re-surface");
+        assert!(
+            n.message.contains("base branch was modified"),
+            "the new reason shows: {}",
+            n.message,
+        );
+    }
+
+    /// A superseding success re-arms the surface: after dismissing a
+    /// failure and then the PR merging, a *later* failure with the same
+    /// message must show again — the condition genuinely recurred (#832).
+    #[test]
+    fn success_re_arms_a_dismissed_merge_failure() {
+        use lazybox_ipc::Event as IpcEvent;
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let ws = lazybox_core::WorkspaceKey::new("github:o/r#1");
+        let fail = || IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "not mergeable".into(),
+        };
+
+        m.handle_daemon_event(fail());
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+
+        // The PR later merges — the condition cleared.
+        m.handle_daemon_event(IpcEvent::PrMerged {
+            workspace_key: ws,
+            pr_label: "o/r#1".into(),
+        });
+
+        // A brand-new failure with the same wording must not be
+        // swallowed by the stale dismissal.
+        m.handle_daemon_event(fail());
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("not mergeable")),
+            "a recurrence after a success must surface again (#832)",
+        );
+    }
+
+    /// Suppression is Esc-scoped: without a dismiss, an identical
+    /// re-fire still refreshes the live banner (it must not vanish just
+    /// because it repeated). Guards against over-suppressing the
+    /// still-visible case (#832 / #588).
+    #[test]
+    fn undismissed_identical_merge_failure_keeps_the_banner() {
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let fail = || IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "not mergeable".into(),
+        };
+
+        m.handle_daemon_event(fail());
+        m.handle_daemon_event(fail());
+        assert!(
+            m.status.notice.is_some(),
+            "an undismissed repeat keeps the banner up",
+        );
+    }
+
     /// A manual-refresh sync failure paints a sticky "✗ sync failed"
     /// banner; the next successful poll (auto-cycle) from the *same*
     /// provider must clear it so a recovered sync doesn't leave the

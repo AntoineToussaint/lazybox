@@ -156,6 +156,32 @@ pub fn hooks_dir() -> PathBuf {
     home().join("hooks")
 }
 
+/// Directory holding lazybox's own stable launcher. `<home>/bin/`.
+pub fn bin_dir() -> PathBuf {
+    home().join("bin")
+}
+
+/// A build-independent path to the lazybox binary that agent lifecycle
+/// hooks reference. `<home>/bin/lazybox`.
+///
+/// The daemon copies its running executable here (see the server's
+/// hook wiring) so the path baked into an agent's hook command survives
+/// a `cargo clean`, a rebuild, worktree removal, and session transfer —
+/// none of which can touch a file under `<home>/bin`. A per-worktree
+/// `target/debug/lazybox` path had none of that stability.
+pub fn stable_exe_path() -> PathBuf {
+    bin_dir().join("lazybox")
+}
+
+/// Append-only log an agent's hook command writes to when it finds its
+/// lazybox binary missing. `<home>/v2/hook.log`. Lives next to the state
+/// DB (a directory guaranteed to exist), so the hook's `>>` append needs
+/// no `mkdir`. A missing binary degrades to a line here plus a skipped
+/// state signal, never a user-facing hook error.
+pub fn hook_log_path() -> PathBuf {
+    state_root().join("hook.log")
+}
+
 /// Tmux socket label for this profile. Derives a stable name from
 /// the home dir's last component so two profiles don't collide
 /// on a shared tmux server.
@@ -286,6 +312,27 @@ mod tests {
             agent_home_dir("codex", "github-acme-widget-657"),
             PathBuf::from("/tmp/lazybox-x/v2/agent-homes/codex/github-acme-widget-657")
         );
+    }
+
+    #[test]
+    fn stable_exe_lives_under_bin_at_profile_root() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The stable launcher lives at `<home>/bin/lazybox`, not under
+        // the versioned state root — a build-independent path an agent's
+        // hook command can reference without a worktree in it.
+        let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
+        assert_eq!(bin_dir(), PathBuf::from("/tmp/lazybox-x/bin"));
+        assert_eq!(
+            stable_exe_path(),
+            PathBuf::from("/tmp/lazybox-x/bin/lazybox")
+        );
+    }
+
+    #[test]
+    fn hook_log_lives_under_state_root() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
+        assert_eq!(hook_log_path(), PathBuf::from("/tmp/lazybox-x/v2/hook.log"));
     }
 
     #[test]

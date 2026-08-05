@@ -262,6 +262,7 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
     guarded_hook_command(
         exe,
         &format!(" --backend-key-file \"{}\"", key_path.display()),
+        &lazybox_core::paths::hook_log_path(),
     )
 }
 
@@ -275,7 +276,11 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
 fn hook_command(exe: &Path, backend_key: &str) -> String {
-    guarded_hook_command(exe, &format!(" --backend-key \"{backend_key}\""))
+    guarded_hook_command(
+        exe,
+        &format!(" --backend-key \"{backend_key}\""),
+        &lazybox_core::paths::hook_log_path(),
+    )
 }
 
 /// Hook command with no correlation flag — what the pre-spawn
@@ -285,28 +290,88 @@ fn hook_command(exe: &Path, backend_key: &str) -> String {
 /// reads the placeholder, its hooks are harmless no-ops and the
 /// session just keeps PTY detection.
 fn hook_command_placeholder(exe: &Path) -> String {
-    guarded_hook_command(exe, "")
+    guarded_hook_command(exe, "", &lazybox_core::paths::hook_log_path())
 }
 
-/// Absolute path of the running lazybox binary, verified to still exist
-/// on disk. The path can be dead even while the daemon is running: a
-/// `cargo run` daemon execs from `target/debug/lazybox`, and a later
-/// `cargo clean` unlinks that file while the process keeps running off
-/// the deleted inode. `None` → the caller skips hook settings and the
-/// spawn falls back to PTY state detection.
+/// A build-independent path to the lazybox binary to bake into an agent's
+/// hook command. The daemon's own `current_exe()` for a dev build is
+/// `<worktree>/target/debug/lazybox` — a path a `cargo clean`, a rebuild,
+/// worktree removal, or session transfer (PR #717) invalidates, after
+/// which every hook fires against a dead reference. So [`refresh_stable_exe`]
+/// copies that binary to the stable `<home>/bin/lazybox` (see
+/// [`lazybox_core::paths::stable_exe_path`]) and this bakes *that*: nothing
+/// under `<home>/bin` moves when a worktree does, and the copy keeps working
+/// even after the original `target/debug` artifact is cleaned.
+///
+/// This is a pure read — the copy lives in [`refresh_stable_exe`], which
+/// `handle_spawn` calls first — so it never writes to `<home>/bin` merely by
+/// resolving a path. Returns the stable copy when present; otherwise the
+/// raw `current_exe()` (still absolute, just less durable); or `None` when
+/// no executable resolves at all, and the spawn falls back to PTY detection.
 fn hook_exe() -> Option<PathBuf> {
+    let stable = lazybox_core::paths::stable_exe_path();
+    if stable.is_file() {
+        return Some(stable);
+    }
     std::env::current_exe().ok().filter(|p| p.is_file())
 }
 
+/// Refresh the stable `<home>/bin/lazybox` copy from the running binary,
+/// best-effort. Called at the top of a spawn (real daemon work), never from
+/// [`hook_exe`], so path resolution stays side-effect-free for callers that
+/// only need to *read* the baked path (and for tests).
+fn refresh_stable_exe() {
+    if let Ok(current) = std::env::current_exe() {
+        let _ = stabilize_exe(&current, &lazybox_core::paths::stable_exe_path());
+    }
+}
+
+/// Copy `current` to the stable `stable` path when the copy is missing or
+/// stale, returning `stable`. Freshness is length + mtime: a re-copy only
+/// happens after a rebuild (which bumps both), so a repeat call is a cheap
+/// stat. `None` on any IO failure, leaving the caller to fall back to the
+/// raw `current` path.
+fn stabilize_exe(current: &Path, stable: &Path) -> Option<PathBuf> {
+    if current == stable {
+        return Some(stable.to_path_buf());
+    }
+    let src = std::fs::metadata(current).ok()?;
+    let fresh =
+        std::fs::metadata(stable)
+            .ok()
+            .is_some_and(|dst| match (dst.modified(), src.modified()) {
+                // A newer-or-equal copy of the same size is up to date: our
+                // own copy stamps a copy-time mtime ≥ the build's, and a
+                // rebuild makes the source newer than any prior copy.
+                (Ok(dst_m), Ok(src_m)) => dst.len() == src.len() && dst_m >= src_m,
+                _ => false,
+            });
+    if fresh {
+        return Some(stable.to_path_buf());
+    }
+    std::fs::create_dir_all(stable.parent()?).ok()?;
+    // Copy to a temp sibling then rename: a hook mid-exec of the old copy
+    // keeps its inode (rename only swaps the directory entry, so no
+    // ETXTBSY and no torn read). `fs::copy` carries the exec bit over.
+    let tmp = stable.with_extension("tmp");
+    std::fs::copy(current, &tmp).ok()?;
+    std::fs::rename(&tmp, stable).ok()?;
+    Some(stable.to_path_buf())
+}
+
 /// The exec is guarded: the binary verified at spawn time can still be
-/// deleted mid-session (`cargo clean`), and without the guard every hook
+/// deleted mid-session (`cargo clean` of the stable copy's source, or the
+/// copy's own directory being removed), and without the guard every hook
 /// fails with a raw `/bin/sh: <path>: No such file or directory`. The
-/// guard names the problem on stderr instead, so Claude's hook-failure
-/// report points at the actual cause.
-fn guarded_hook_command(exe: &Path, args: &str) -> String {
+/// guard degrades gracefully instead — it appends a note to
+/// [`lazybox_core::paths::hook_log_path`] and exits 0, so a stale reference
+/// costs a single missed state signal, never a red `PostToolUse:Bash hook
+/// error` on every command the agent runs.
+fn guarded_hook_command(exe: &Path, args: &str, log: &Path) -> String {
     let exe = exe.to_string_lossy();
+    let log = log.display();
     format!(
-        "[ -x \"{exe}\" ] || {{ echo \"lazybox hook: binary missing at {exe} (removed by cargo clean or a rebuild?)\" >&2; exit 1; }}; \"{exe}\" hook-ingest{args}"
+        "[ -x \"{exe}\" ] || {{ echo \"lazybox hook: binary missing at {exe} (rebuild, cargo clean, or worktree removed) — state signal skipped\" >> \"{log}\" 2>/dev/null; exit 0; }}; \"{exe}\" hook-ingest{args}"
     )
 }
 
@@ -1173,6 +1238,11 @@ async fn handle_spawn_inner(
     // is no longer on disk (`cargo clean` under a `cargo run` daemon):
     // hooks would be guaranteed to fail, so the session keeps PTY
     // detection instead.
+    //
+    // Keep the stable `<home>/bin/lazybox` copy current before baking its
+    // path into the hook command, so a rebuilt/cleaned/removed worktree
+    // can't invalidate the reference (#856).
+    refresh_stable_exe();
     let exe = hook_exe();
     if exe.is_none() {
         tracing::warn!(
@@ -12743,12 +12813,99 @@ mod tests {
         assert_eq!(priority_alias_for(&config, &key, &no_map), None);
     }
 
-    /// The running test binary exists on disk, so resolution succeeds;
-    /// the verified path is what gets baked into hook commands.
+    #[cfg(unix)]
+    fn write_fake_exe(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).expect("write fake exe");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake exe");
+    }
+
+    /// The stable copy is a real, executable duplicate of the source that
+    /// keeps working after the source (a per-worktree `target/debug`
+    /// artifact) is removed — the whole point of not baking the source path.
+    #[cfg(unix)]
     #[test]
-    fn hook_exe_resolves_to_existing_file() {
-        let exe = hook_exe().expect("running test binary must resolve");
-        assert!(exe.is_file());
+    fn stabilize_exe_copies_and_survives_source_removal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lazybox-stabilize-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("target-debug-lazybox");
+        let stable = dir.join("bin").join("lazybox");
+        write_fake_exe(&src, "#!/bin/sh\necho hi\n");
+
+        let got = stabilize_exe(&src, &stable).expect("copy succeeds");
+        assert_eq!(got, stable);
+        assert_eq!(
+            std::fs::read_to_string(&stable).unwrap(),
+            "#!/bin/sh\necho hi\n"
+        );
+        assert!(
+            std::fs::metadata(&stable).unwrap().permissions().mode() & 0o111 != 0,
+            "exec bit must survive the copy"
+        );
+
+        std::fs::remove_file(&src).unwrap();
+        assert!(stable.is_file(), "stable copy outlives its source");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fresh copy is not re-written on every spawn: the second call is a
+    /// no-op, so the steady-state cost is a stat, not a binary copy.
+    #[cfg(unix)]
+    #[test]
+    fn stabilize_exe_skips_recopy_when_fresh() {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-stabilize-fresh-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("src");
+        let stable = dir.join("bin").join("lazybox");
+        write_fake_exe(&src, "one");
+
+        stabilize_exe(&src, &stable).expect("first copy");
+        let first = std::fs::metadata(&stable).unwrap().modified().unwrap();
+        stabilize_exe(&src, &stable).expect("second call");
+        let second = std::fs::metadata(&stable).unwrap().modified().unwrap();
+        assert_eq!(first, second, "a fresh copy must not be re-written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rebuild (source bytes change) re-copies so the stable path tracks
+    /// the live binary rather than pinning the first build seen. A differing
+    /// length trips the freshness check regardless of mtime granularity.
+    #[cfg(unix)]
+    #[test]
+    fn stabilize_exe_recopies_when_source_changes() {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-stabilize-rebuild-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("src");
+        let stable = dir.join("bin").join("lazybox");
+        write_fake_exe(&src, "old-build");
+        stabilize_exe(&src, &stable).expect("first copy");
+
+        write_fake_exe(&src, "a-longer-new-build-payload");
+        stabilize_exe(&src, &stable).expect("re-copy");
+        assert_eq!(
+            std::fs::read_to_string(&stable).unwrap(),
+            "a-longer-new-build-payload"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Running already from the stable path is a no-op — never a self-copy
+    /// (which would risk `ETXTBSY` writing over the live binary).
+    #[cfg(unix)]
+    #[test]
+    fn stabilize_exe_noop_when_current_is_stable() {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-stabilize-self-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let stable = dir.join("lazybox");
+        write_fake_exe(&stable, "self");
+        let got = stabilize_exe(&stable, &stable).expect("no-op returns the path");
+        assert_eq!(got, stable);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The injected hook command pins the *running* binary by absolute
@@ -12823,7 +12980,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hook_command_execs_existing_binary_via_sh() {
-        let cmd = hook_command(Path::new("/bin/echo"), "lzb-sess-7");
+        let cmd = guarded_hook_command(
+            Path::new("/bin/echo"),
+            " --backend-key lzb-sess-7",
+            &std::env::temp_dir().join("lazybox-unused-hook.log"),
+        );
         let out = std::process::Command::new("/bin/sh")
             .args(["-c", &cmd])
             .output()
@@ -12835,28 +12996,38 @@ mod tests {
         );
     }
 
-    /// Through a real `/bin/sh`: a binary deleted after spawn produces a
-    /// named lazybox error on stderr, not the shell's raw
-    /// "No such file or directory".
+    /// Through a real `/bin/sh`: a binary deleted after spawn must NOT hard
+    /// error the lifecycle hook. It exits 0 (no `PostToolUse:Bash hook
+    /// error`), writes nothing to the agent's stderr, and records the cause
+    /// in the hook log instead — a missed state signal, not a failure.
     #[cfg(unix)]
     #[test]
-    fn hook_command_missing_binary_reports_named_error() {
+    fn hook_command_missing_binary_degrades_silently() {
+        let dir = std::env::temp_dir().join(format!("lazybox-hook-missing-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("hook.log");
         let gone = "/nonexistent/target/debug/lazybox";
-        let cmd = hook_command(Path::new(gone), "lzb-sess-9");
+        let cmd = guarded_hook_command(Path::new(gone), " --backend-key \"lzb-sess-9\"", &log);
         let out = std::process::Command::new("/bin/sh")
             .args(["-c", &cmd])
             .output()
             .expect("sh runs");
-        assert_eq!(out.status.code(), Some(1));
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("lazybox hook: binary missing at /nonexistent/target/debug/lazybox"),
-            "stderr should name the cause: {stderr}"
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "a lifecycle hook must not hard-error"
         );
         assert!(
-            !stderr.contains("No such file or directory"),
-            "raw shell error leaked: {stderr}"
+            out.stderr.is_empty(),
+            "nothing on the agent-facing stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
         );
+        let logged = std::fs::read_to_string(&log).expect("hook log written");
+        assert!(
+            logged.contains("lazybox hook: binary missing at /nonexistent/target/debug/lazybox"),
+            "log should name the cause: {logged}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

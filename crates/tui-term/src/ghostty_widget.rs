@@ -1160,7 +1160,8 @@ mod tests {
         let area = Rect::new(0, 0, 24, 4);
         // Blinking block cursor (DECSCUSR 1). Draw the composer prompt +
         // typed text on row 0 and show the cursor at the caret after it.
-        h.terminal.vt_write("\x1b[1 q> apply the drawer\x1b[?25h".as_bytes());
+        h.terminal
+            .vt_write("\x1b[1 q> apply the drawer\x1b[?25h".as_bytes());
         let caret = (18u16, 0u16); // right after "> apply the drawer"
         let shown = h.render(area);
         assert!(

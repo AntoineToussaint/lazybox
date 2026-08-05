@@ -654,7 +654,9 @@ impl Sidebar {
         match self.visible.get(self.cursor)? {
             VisibleRow::Workspace(k) => Some(k),
             VisibleRow::Session { workspace, .. } => Some(workspace),
-            VisibleRow::FocusedHeader | VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => None,
+            VisibleRow::FocusedHeader | VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => {
+                None
+            }
         }
     }
 
@@ -1936,7 +1938,8 @@ impl Sidebar {
     pub fn toggle_focus_at_cursor(&mut self) -> Option<(String, bool)> {
         let key = self.selected_session_key()?.clone();
         let label = self.workspace_label(&key);
-        let now_focused = if let Some(idx) = self.focused_workspaces.iter().position(|k| *k == key) {
+        let now_focused = if let Some(idx) = self.focused_workspaces.iter().position(|k| *k == key)
+        {
             self.focused_workspaces.remove(idx);
             false
         } else {

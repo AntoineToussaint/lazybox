@@ -135,7 +135,11 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // the current mailbox/filter this pass is simply skipped, exactly
     // as a pin naming an absent repo is (Step 4b). Focus is the manual,
     // per-workspace counterpart to the repo pin.
-    let focused_set: BTreeSet<&str> = input.focused_workspaces.iter().map(|k| k.as_str()).collect();
+    let focused_set: BTreeSet<&str> = input
+        .focused_workspaces
+        .iter()
+        .map(|k| k.as_str())
+        .collect();
     let filtered_by_key: BTreeMap<&str, (&SessionKey, &Workspace)> = filtered
         .iter()
         .map(|(k, w)| (k.as_str(), (*k, *w)))
@@ -247,7 +251,8 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         for (k, w) in &focused_rows {
             visible.push(VisibleRow::Workspace((*k).clone()));
             if w.session_count() >= 2 {
-                let mut sessions: Vec<&lazybox_core::WorkspaceSession> = w.sessions.iter().collect();
+                let mut sessions: Vec<&lazybox_core::WorkspaceSession> =
+                    w.sessions.iter().collect();
                 sessions.sort_by_key(|s| s.created_at);
                 for s in sessions {
                     visible.push(VisibleRow::Session {

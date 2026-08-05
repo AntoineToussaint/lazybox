@@ -331,6 +331,16 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // A lifecycle hook must never hard-error: Claude renders any non-zero
+    // exit as a red "Stop hook error" and drops the state transition the
+    // hook was meant to signal. Dispatch it *before* the fatal
+    // `init_tracing()?` so an unwritable log file (disk full, tightened
+    // perms) can't abort the hook — tracing is best-effort here.
+    if matches!(args.first().map(String::as_str), Some("hook-ingest")) {
+        let _ = init_tracing();
+        return hook_ingest_subcommand(&args[1..]).await;
+    }
+
     init_tracing()?;
 
     if matches!(args.first().map(String::as_str), Some("notification-click")) {
@@ -356,7 +366,6 @@ async fn main() -> anyhow::Result<()> {
         Some("slack") => slack_subcommand(&args[1..]).await,
         Some("scan") => scan_subcommand(&args[1..]).await,
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
-        Some("hook-ingest") => hook_ingest_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)
@@ -492,18 +501,7 @@ fn terminal_selection_script(bundle_id: &str, terminal_tty: &str) -> Option<Stri
 /// command that errored or hung would stall Claude's turn.
 async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
-    // `--backend-key <key>` (Claude, key rewritten into its settings file)
-    // or `--backend-key-file <path>` (Codex, whose baked spawn argv can't
-    // embed the key, so the daemon drops it in a file the command reads).
-    // Both resolve to the same correlation handle.
-    let backend_key = take_value(&mut args, "--backend-key")
-        .or_else(|| {
-            take_value(&mut args, "--backend-key-file")
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|s| s.trim().to_string())
-        })
-        .filter(|k| !k.is_empty());
-    let terminal_id = take_value(&mut args, "--terminal").and_then(|s| s.parse::<u64>().ok());
+    let (backend_key, terminal_id) = parse_hook_correlation(&mut args);
     if backend_key.is_none() && terminal_id.is_none() {
         // Nothing to correlate by. Drain stdin so Claude's write
         // doesn't block on a full pipe, then exit cleanly.
@@ -533,6 +531,35 @@ async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
         tracing::warn!("hook-ingest IPC send failed: {error}");
     }
     Ok(())
+}
+
+/// Pull `hook-ingest`'s correlation flags out of `args`, ignoring every
+/// option it doesn't recognize.
+///
+/// `--backend-key <key>` (Claude, key rewritten into its settings file) or
+/// `--backend-key-file <path>` (Codex, whose baked spawn argv can't embed
+/// the key, so the daemon drops it in a file the command reads); `--terminal
+/// <id>` is the legacy handle. All resolve to the same correlation.
+///
+/// Unrecognized flags are *dropped, never rejected* — this is load-bearing.
+/// A lifecycle hook that exits non-zero surfaces as a red "Stop hook error"
+/// in the agent and drops the state transition it was meant to signal. The
+/// `lazybox` that runs the hook resolves at hook-run time and can be a
+/// different build than the daemon that wrote the settings (PATH skew, or a
+/// daemon restarted onto a newer binary): if that build predates a flag the
+/// settings carry, ingest must degrade to "state signal missed", not fail.
+/// So it keeps what it knows and walks past the rest. Do not tighten this
+/// into a strict parser.
+fn parse_hook_correlation(args: &mut Vec<String>) -> (Option<String>, Option<u64>) {
+    let backend_key = take_value(args, "--backend-key")
+        .or_else(|| {
+            take_value(args, "--backend-key-file")
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|k| !k.is_empty());
+    let terminal_id = take_value(args, "--terminal").and_then(|s| s.parse::<u64>().ok());
+    (backend_key, terminal_id)
 }
 
 /// Read all of stdin into a string (best-effort; an IO error yields what
@@ -1627,6 +1654,32 @@ mod argv_tests {
         assert!(wants_version(&args(&["--version"])));
         assert!(wants_version(&args(&["-V"])));
         assert!(!wants_version(&args(&["-v"]))); // lowercase -v is not the version flag
+    }
+
+    #[test]
+    fn hook_correlation_ignores_unknown_flags() {
+        // A build-skewed daemon can inject a flag this binary predates. The
+        // hook must keep parsing what it knows and drop the rest — a strict
+        // parser that rejected the unknown flag would exit non-zero and
+        // surface a red "Stop hook error" in the agent (#848).
+        let mut a = args(&[
+            "--backend-key",
+            "lzb-sess-7",
+            "--some-future-flag",
+            "whatever",
+            "--another-unknown",
+        ]);
+        let (key, terminal) = parse_hook_correlation(&mut a);
+        assert_eq!(key.as_deref(), Some("lzb-sess-7"));
+        assert_eq!(terminal, None);
+    }
+
+    #[test]
+    fn hook_correlation_ignores_empty_backend_key() {
+        let mut a = args(&["--backend-key", ""]);
+        let (key, terminal) = parse_hook_correlation(&mut a);
+        assert_eq!(key, None);
+        assert_eq!(terminal, None);
     }
 
     #[test]

@@ -6997,7 +6997,7 @@ mod footer_scroll_independence {
             let pane = Rect::new(0, 0, W, H - 1);
             let footer = Rect::new(0, H - 1, W, 1);
             stack.render(pane, f, true);
-            crate::realm::components::footer::render(f, footer, &binds, &[], &[], None, None);
+            crate::realm::components::footer::render(f, footer, &binds, &[], &[], "?", None, None);
         })
         .unwrap();
         let buf = term.backend().buffer().clone();

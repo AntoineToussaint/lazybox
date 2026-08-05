@@ -4126,6 +4126,13 @@ impl<T: TerminalAdapter> Model<T> {
                 .into_iter()
                 .collect()
         };
+        // Effective help key for the overflow cell's "press <key> for
+        // all" label — resolved here so a remap of `OpenHelp` is honored
+        // (#805).
+        let help_key = lazybox_tui_core::action::ActionDef::for_kind(
+            lazybox_tui_core::action::ActionKind::OpenHelp,
+        )
+        .effective_keys_display(&self.action_key_overrides);
         // While a sticky error is pinned, advertise how to inspect its
         // full text and dismiss it right in the hint bar (#453). Inserted
         // just before `quit` so #100's quit guarantee survives narrow
@@ -4296,6 +4303,7 @@ impl<T: TerminalAdapter> Model<T> {
                 &keymap,
                 &globals,
                 &evergreen,
+                help_key.as_ref(),
                 polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
                 notice.as_ref(),
             );

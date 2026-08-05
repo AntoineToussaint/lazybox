@@ -331,6 +331,16 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // A lifecycle hook must never hard-error: Claude renders any non-zero
+    // exit as a red "Stop hook error" and drops the state transition the
+    // hook was meant to signal. Dispatch it *before* the fatal
+    // `init_tracing()?` so an unwritable log file (disk full, tightened
+    // perms) can't abort the hook — tracing is best-effort here.
+    if matches!(args.first().map(String::as_str), Some("hook-ingest")) {
+        let _ = init_tracing();
+        return hook_ingest_subcommand(&args[1..]).await;
+    }
+
     init_tracing()?;
 
     if matches!(args.first().map(String::as_str), Some("notification-click")) {
@@ -356,7 +366,6 @@ async fn main() -> anyhow::Result<()> {
         Some("slack") => slack_subcommand(&args[1..]).await,
         Some("scan") => scan_subcommand(&args[1..]).await,
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
-        Some("hook-ingest") => hook_ingest_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)

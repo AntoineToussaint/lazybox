@@ -12257,7 +12257,7 @@ mod tests {
         let claude = hook_command(&exe, "lzb-sess-7");
         assert!(claude.contains(&quoted), "bare/relative exe in: {claude}");
 
-        let codex = hook_command_keyfile(&exe, &hook_backend_key_path(TerminalId(7)));
+        let codex = hook_command_keyfile(&exe, Path::new("/run/lzb/backend-key-7"));
         assert!(codex.contains(&quoted), "bare/relative exe in: {codex}");
     }
 

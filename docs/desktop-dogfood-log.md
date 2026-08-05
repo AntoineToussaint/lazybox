@@ -37,45 +37,48 @@ credential: persisted setup, the authenticated gateway, an inbox mutation, and
 a live shell PTY.
 
 **Status as of this commit:** all three headless checks pass on a clean
-checkout (`npm test` 67 passing, `npm run build` clean, the Rust shell test
-green). Phase 1 is "it launches and drives a local agent"; the fallbacks below
-are what still send me back to the TUI.
+checkout (`npm test` 74 passing, `npm run build` clean, `cargo test` on the
+shell 42 passing). That establishes the build is runnable; the empirical
+dogfooding — launching the GUI and driving the day-to-day loop — is ongoing,
+and its findings land in the ledger below as they happen.
 
 ## Fallback-to-TUI ledger
 
 Every time the desktop can't finish something and I switch to the TUI, it gets
 a row here. New rows are empirical — log them as they happen during real use,
 newest first. The seed rows below are the known parity gaps from the readiness
-assessment, each mapped to where the fix is tracked; they graduate to
-_resolved_ (or get deleted) as those land.
+assessment; the "Tracked in" column is the source of truth for each, and a row
+is deleted (not marked done) once its issue closes — so the ledger only ever
+lists live gaps.
 
 | Gap | What I was trying to do | Tracked in |
 | --- | --- | --- |
-| View diff | Review a PR's changes before merging | Tier A leftover — `InspectWorkspaceDiff` + a diff reader ([readiness §4][readiness]) |
-| Open in editor | Open a worktree in `$EDITOR` (`e`) | Tier A leftover — needs terminal-spawn-with-command semantics ([readiness §4][readiness]) |
-| Automation policies | Arm merge-on-green / auto-fix / auto-merge (`g p`, `g g`) | [#817][issue-817] |
-| Reviewers / assignees / labels | Edit PR metadata (`g r` / `g a` / `g l`) | [#817][issue-817] |
-| Snooze | Snooze a row out of the inbox (`z`, `x z`) | [#817][issue-817] |
-| Multi-select + broadcast | Act on several workspaces at once (`v`, `Shift-B`, `Shift-U`) | [#817][issue-817] |
-| Repo pin | Pin a repo group to the top of the sidebar (`p`) | [#817][issue-817] |
-| Session adopt / send / convert | Agent-to-agent handoff and adoption (`x a` / `x s` / `x j`) | [#817][issue-817] |
-| Quick-jump navigation | Jump to asking / failing-CI / by-digit workspace (`!`, `Shift-F`, `]]<n>`) | [#817][issue-817] |
-| Theme picker | Switch theme live (`t`) | [#817][issue-817] |
-| Activity-pane row interactions | Expand/collapse rows, description reader, per-row mark-read | [#817][issue-817] |
+| View diff | Review a PR's changes before merging | [#843][issue-843] (Tier-A leftover — `InspectWorkspaceDiff` + a diff reader; [readiness §4][readiness]) |
+| Open in editor | Open a worktree in `$EDITOR` (`e`) | [#843][issue-843] (Tier-A leftover — terminal-spawn-with-command semantics; [readiness §4][readiness]) |
+| Reviewers / assignees / labels | Edit PR metadata (`g r` / `g a` / `g l`) | [#843][issue-843] |
+| Multi-select + broadcast | Act on several workspaces at once (`v`, `Shift-B`, `Shift-U`) | [#843][issue-843] |
+| Repo pin | Pin a repo group to the top of the sidebar (`p`) | [#843][issue-843] |
+| Session adopt / send / convert | Agent-to-agent handoff and adoption (`x a` / `x s` / `x j`) | [#843][issue-843] |
+| Quick-jump navigation | Jump to asking / failing-CI / by-digit workspace (`!`, `Shift-F`, `]]<n>`) | [#843][issue-843] |
+| Theme picker | Switch theme live (`t`) | [#843][issue-843] |
+| Activity-pane row interactions | Expand/collapse rows, description reader, per-row mark-read | [#843][issue-843] |
 
 **Landed, no longer a fallback:** connect-to-remote gateway + reconnect/resync
 ([#814][issue-814]); protocol version-skew tolerance ([#815][issue-815]); Tier-A
 act-on-work — agent + model-tier + on-main spawn, merge, update branch, archive,
-close/delete, browser, mailbox, rename ([#816][issue-816]); concurrent terminals
-(tiles/tabs) + focus mode ([#818][issue-818]).
+close/delete, browser, mailbox, rename ([#816][issue-816]); the Tier-B/C
+automation & workspace-management slice — merge-on-green / auto-fix / track-main
+policies, snooze/unsnooze, targeted sync, notes ([#817][issue-817], via #826);
+concurrent terminals (tiles/tabs) + focus mode ([#818][issue-818]).
 
 ## Phase tracking
 
-- [x] **Phase 1** — run the desktop locally against its own in-process daemon;
-  start dogfooding the triage + drive-an-agent loop; log fallbacks-to-TUI in the
-  ledger above.
-- [ ] **Phase 2** — close the daily-driver gaps: [#817][issue-817] (Tier B/C)
-  plus the Tier-A leftovers (view diff, open in editor). Track the burn-down by
+- [ ] **Phase 1** — run the desktop locally against its own in-process daemon
+  and dogfood the triage + drive-an-agent loop, logging fallbacks-to-TUI in the
+  ledger above. _In progress:_ the build is verified runnable (headless checks
+  green); empirical day-to-day dogfooding is still accruing ledger rows.
+- [ ] **Phase 2** — close the daily-driver gaps: [#843][issue-843] (the deferred
+  Tier-B/C slice + the diff/editor Tier-A leftovers). Track the burn-down by
   deleting resolved ledger rows.
 - [ ] **Phase 3** — dogfood against a remote box per
   [`byo-remote-runbook.md`][runbook]: daemon (`lazybox server api`) on the box,
@@ -97,5 +100,6 @@ holds up over a real link).
 [issue-816]: https://github.com/AntoineToussaint/lazybox/issues/816
 [issue-817]: https://github.com/AntoineToussaint/lazybox/issues/817
 [issue-818]: https://github.com/AntoineToussaint/lazybox/issues/818
+[issue-843]: https://github.com/AntoineToussaint/lazybox/issues/843
 [readiness]: desktop-remote-readiness.md
 [runbook]: byo-remote-runbook.md

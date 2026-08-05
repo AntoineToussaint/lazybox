@@ -582,6 +582,24 @@
       </p>
     </dialog>
 
+    <dialog id="diff-dialog" class="diff-dialog" aria-labelledby="diff-title">
+      <div class="diff-heading">
+        <h2 id="diff-title" class="diff-title">Worktree diff</h2>
+        <button
+          type="button"
+          id="diff-close"
+          class="diff-close"
+          aria-label="Close diff"
+        >
+          ✕
+        </button>
+      </div>
+      <div id="diff-body" class="diff-body"></div>
+      <p class="diff-help">
+        <span><kbd>Esc</kbd> close</span>
+      </p>
+    </dialog>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

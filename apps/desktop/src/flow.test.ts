@@ -449,6 +449,122 @@ describe("credential-free desktop workflow", () => {
     );
   });
 
+  it("requests and renders a worktree diff (#843)", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o/r"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    // A linked-checkout workspace has an on-disk tree to review, so the
+    // target resolves to `LinkedCheckout`.
+    const linked = pr(42);
+    linked.linked_checkout = "/home/dev/o-r";
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { Snapshot: { workspaces: [linked], terminals: [] } },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row").length).toBe(1),
+    );
+
+    selectWorkspaceRow("PR o/r#42");
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+
+    expect(openActionsMenuLabels()).toContain("View diff");
+
+    const viewDiff = [
+      ...element("actions-menu").querySelectorAll<HTMLButtonElement>(
+        ".actions-menu-item",
+      ),
+    ].find((item) => item.textContent === "View diff");
+    viewDiff?.click();
+
+    await vi.waitFor(() =>
+      expect(commandCalls()).toContainEqual({
+        InspectWorkspaceDiff: {
+          session_key: "github-o-r-42",
+          target: "LinkedCheckout",
+        },
+      }),
+    );
+
+    // The daemon replies asynchronously; the reader opens with the diff.
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        WorkspaceDiffInspected: {
+          workspace_key: "github-o-r-42",
+          diff: {
+            status: [" M src/main.rs"],
+            stat: [" src/main.rs | 1 +"],
+            files: [
+              {
+                old_path: null,
+                path: "src/main.rs",
+                headers: [],
+                hunks: [
+                  {
+                    header: "@@ -1 +1 @@",
+                    old_start: 1,
+                    new_start: 1,
+                    lines: [
+                      {
+                        kind: "Addition",
+                        text: "+let x = 1;",
+                        old_line: null,
+                        new_line: 1,
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+            truncated: false,
+          },
+          error: null,
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(dialog("diff-dialog").open).toBe(true));
+    expect(element("diff-body").textContent).toContain("src/main.rs");
+    expect(element("diff-body").textContent).toContain("+let x = 1;");
+
+    // While the reader is up it is a modal: global shortcuts must not
+    // leak to the inbox behind it. `f` (open filter menu) stays inert.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "f" }));
+    expect(element("filter-menu").classList.contains("hidden")).toBe(true);
+  });
+
   it("sends automation, snooze, sync, and notes commands from the detail pane", async () => {
     mockAutomationHarness();
 

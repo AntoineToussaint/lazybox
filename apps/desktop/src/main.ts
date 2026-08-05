@@ -29,6 +29,7 @@ import {
   type TaskSignal,
   unreadCount,
   visibleUnreadCount,
+  workspaceDiffTarget,
 } from "./model";
 import {
   type ComputeOutcome,
@@ -49,12 +50,14 @@ import {
   type PolicyArm,
   type Workspace,
   type WorkspacesResponse,
+  type WorkspaceDiffDto,
   archiveCommand,
   closeIssueCommand,
   commandsForWorkspaceIntent,
   createWorkspaceCommand,
   deleteOrCloseCommand,
   deliverSnippetCommand,
+  inspectWorkspaceDiffCommand,
   mergePrCommand,
   renameWorkspaceCommand,
   setAutoFixPoliciesCommand,
@@ -75,6 +78,7 @@ import {
   renderSnippetList,
   renderSnippetPreview,
 } from "./snippet_picker";
+import { buildDiffView } from "./diff_view";
 import { terminalTheme } from "./theme";
 import {
   TerminalFrameDecoder,
@@ -329,6 +333,10 @@ const snippetFilter = element<HTMLInputElement>("snippet-filter");
 const snippetList = element<HTMLDivElement>("snippet-list");
 const snippetPreview = element<HTMLDivElement>("snippet-preview");
 const snippetCount = element<HTMLSpanElement>("snippet-count");
+const diffDialog = element<HTMLDialogElement>("diff-dialog");
+const diffBody = element<HTMLDivElement>("diff-body");
+const diffTitle = element<HTMLHeadingElement>("diff-title");
+const diffClose = element<HTMLButtonElement>("diff-close");
 
 let workspaces = new Map<string, Workspace>();
 let terminals = new Map<number, TerminalRecord>();
@@ -352,6 +360,10 @@ let inboxLoading = true;
 let inboxError: string | null = null;
 let filterMenuOpen = false;
 let actionsMenuOpen = false;
+// The workspace whose diff the user is currently waiting on (#843). The
+// `WorkspaceDiffInspected` reply is only shown while it still matches, so
+// a diff for a since-reselected workspace is dropped.
+let pendingDiffKey: string | null = null;
 let searchTimer: number | undefined;
 // Optimistic active-filter set: updated synchronously on each toggle so
 // rapid clicks compose instead of racing the server round-trip. The
@@ -537,6 +549,7 @@ snippetButton.addEventListener("click", () => void openSnippetPicker());
 snippetFilter.addEventListener("input", () => void onSnippetFilterInput());
 snippetDialog.addEventListener("keydown", handleSnippetKey);
 snippetDialog.addEventListener("close", onSnippetDialogClose);
+diffClose.addEventListener("click", () => diffDialog.close());
 setupClose.addEventListener("click", closeSettings);
 githubCheckButton.addEventListener("click", () => void refreshGithubAuth());
 githubLoginButton.addEventListener("click", () => void startGithubLogin());
@@ -793,6 +806,16 @@ function handleEvent(event: LazyboxEvent): void {
     }
   } else if ("WorkspaceActionOutcome" in event) {
     setStatus(event.WorkspaceActionOutcome.message);
+  } else if ("WorkspaceDiffInspected" in event) {
+    const payload = event.WorkspaceDiffInspected;
+    if (pendingDiffKey === payload.workspace_key) {
+      pendingDiffKey = null;
+      if (payload.diff !== null) {
+        showWorkspaceDiff(payload.workspace_key, payload.diff);
+      } else {
+        setStatus(`Couldn't read diff: ${payload.error ?? "unknown error"}`);
+      }
+    }
   }
 
   if (workspaceChanged || terminalChanged) {
@@ -2305,6 +2328,9 @@ function renderActionsMenu(): void {
     const url = task.url;
     items.push({ label: "Open in browser", run: () => void openTaskUrl(url) });
   }
+  if (workspace !== undefined && workspaceDiffTarget(workspace) !== null) {
+    items.push({ label: "View diff", run: () => void requestWorkspaceDiff(key) });
+  }
   if (canMerge) {
     items.push({
       label: "Merge PR",
@@ -2478,6 +2504,46 @@ async function runWorkspaceMutation(
   successMessage: string,
 ): Promise<void> {
   await runCommands([command], pendingMessage, successMessage);
+}
+
+/**
+ * Ask the daemon for the workspace's worktree diff (#843). Read-only: the
+ * diff arrives asynchronously as `WorkspaceDiffInspected`, which opens the
+ * reader. Records the pending workspace so a reply for a since-reselected
+ * one is dropped.
+ */
+async function requestWorkspaceDiff(workspaceKey: string): Promise<void> {
+  const workspace = workspaces.get(workspaceKey);
+  if (workspace === undefined) {
+    return;
+  }
+  const target = workspaceDiffTarget(workspace);
+  if (target === null) {
+    setStatus("This workspace has no worktree to review.");
+    return;
+  }
+  if (previewMode) {
+    setStatus("Would read the worktree diff.");
+    return;
+  }
+  pendingDiffKey = workspaceKey;
+  setStatus("Reading worktree diff…");
+  if (!(await sendCommand(inspectWorkspaceDiffCommand(workspaceKey, target)))) {
+    pendingDiffKey = null;
+  }
+}
+
+/** Render the received diff into the modal and show it. */
+function showWorkspaceDiff(workspaceKey: string, diff: WorkspaceDiffDto): void {
+  diffBody.replaceChildren(buildDiffView(diff));
+  diffBody.scrollTop = 0;
+  const workspace = workspaces.get(workspaceKey);
+  const task = workspace === undefined ? null : primaryTask(workspace);
+  diffTitle.textContent =
+    task !== null ? `Worktree diff · ${taskReference(task)}` : "Worktree diff";
+  if (!diffDialog.open) {
+    diffDialog.showModal();
+  }
 }
 
 async function confirmedMutation(
@@ -3360,7 +3426,8 @@ function handleKeyboard(event: KeyboardEvent): void {
     setupDialog.open ||
     confirmDialog.open ||
     newWorkspaceDialog.open ||
-    snippetDialog.open
+    snippetDialog.open ||
+    diffDialog.open
   ) {
     return;
   }

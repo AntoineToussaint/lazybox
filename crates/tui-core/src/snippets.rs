@@ -40,7 +40,10 @@ impl PickerRow {
             key: key.to_string(),
             description: snippet.description.clone(),
             category: snippet.category.clone(),
-            body: snippet.body.clone(),
+            // The preview must show exactly what gets sent, so a
+            // skill-dispatching snippet (#798) previews its resolved skill
+            // invocation, not the raw authored body.
+            body: snippet.dispatch_body(),
             origin: snippet.origin.label().to_string(),
         }
     }
@@ -299,6 +302,7 @@ mod tests {
             description: description.into(),
             category: category.into(),
             body: body.into(),
+            skill: None,
             origin,
         }
     }

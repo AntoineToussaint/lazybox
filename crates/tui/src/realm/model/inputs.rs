@@ -968,6 +968,7 @@ showing keybinding search only",
                     description: description.trim().to_string(),
                     category: category.trim().to_string(),
                     body,
+                    skill: None,
                     origin: Default::default(),
                 };
                 match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {

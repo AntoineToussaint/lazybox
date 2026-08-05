@@ -642,6 +642,7 @@ mod tests {
             description: description.into(),
             category: category.into(),
             body: body.into(),
+            skill: None,
             origin,
         }
     }

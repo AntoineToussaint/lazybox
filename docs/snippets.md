@@ -135,6 +135,50 @@ The outer key (`feedback`) is what you type after `]]s`.
 `body` is the complete instruction sent to the agent. Hand-edited files
 are loaded at startup, so restart lazybox after changing them.
 
+## Dispatch a native skill
+
+A snippet is a *human-triggered* prompt macro; an agent **skill** (a
+`SKILL.md` under `.claude/skills/`) is a *model-triggered*, multi-step
+capability the agent normally decides to invoke on its own. A
+skill-dispatching snippet bridges the two: you keep lazybox's
+picker / Recent / `Shift-B` broadcast UX on the outside while a real
+skill does the heavy lifting on the inside.
+
+Add a `skill:` field naming the skill:
+
+```yaml
+snippets:
+  review:
+    description: Deep review via the code-review skill
+    category: Review
+    skill: code-review
+    body: |
+      Review the current branch against main and rank findings by
+      severity with file:line anchors.
+```
+
+On send, lazybox does **not** paste the raw `body`. It resolves the
+snippet to an explicit invocation and submits that instead:
+
+```
+Use the `code-review` skill to complete this task:
+
+Review the current branch against main and rank findings by
+severity with file:line anchors.
+```
+
+The agent reads the invocation, loads the named skill, and runs it
+with your `body` as the task context. If you omit `body`, the
+invocation alone is sent (`Use the `code-review` skill.`).
+
+Everything else is unchanged: the picker preview shows exactly what
+will be sent (the resolved invocation), delivery uses the same
+settle-gated inject path as any snippet, and Recent, the `]N`
+per-workspace badge, and `Shift-B` broadcast all track a
+skill-dispatching snippet like any other. The skill must already exist
+for the focused agent — lazybox constructs the invocation but does not
+create the skill.
+
 ## Choose the right scope
 
 The three layers merge from least to most specific:
@@ -247,6 +291,7 @@ snippets:
   <key>:
     description: <optional one-line label>
     category: <optional grouping label>
+    skill: <optional native skill name>
     body: |
       <text sent to the agent>
 ```
@@ -256,7 +301,8 @@ snippets:
 | `<key>`       | yes      | The shortcut typed in the picker after `]]s`. Matching (filter + auto-submit) is case-insensitive. |
 | `description` | no       | One-line label shown in the picker. Defaults to empty.         |
 | `category`    | no       | Group header + colored tag in the picker (e.g. `Review`, `Git & PR`). Free-form; defaults to empty, which files under a trailing **Other** group. |
-| `body`        | yes      | Sent verbatim to the agent. May span multiple lines.           |
+| `skill`       | no       | Name of a native agent skill this snippet dispatches. When set, the delivered instruction tells the agent to invoke that `SKILL.md` skill; `body` becomes the task context. See [Dispatch a native skill](#dispatch-a-native-skill). |
+| `body`        | yes\*    | Sent to the agent. May span multiple lines. \*Optional when `skill` is set — the skill invocation is then the whole instruction. |
 
 ## Behaviour & gotchas
 

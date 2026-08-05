@@ -64,6 +64,7 @@ mod tests {
                 description: format!("{key} desc"),
                 category: category.into(),
                 body: format!("{key} body"),
+                skill: None,
                 origin: SnippetOrigin::Global,
             },
         )

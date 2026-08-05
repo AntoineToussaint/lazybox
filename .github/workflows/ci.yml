@@ -265,7 +265,7 @@ jobs:
           tar -xzf target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz \
             -C target/debug/bundle/macos/archive-check
           test -x target/debug/bundle/macos/archive-check/lazybox.app/Contents/MacOS/lazybox-desktop
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: lazybox-macos-dogfood
           path: apps/desktop/src-tauri/target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz

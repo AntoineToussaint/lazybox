@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use lazybox_ipc::{Command, socket, transport};
+use lazybox_ipc::{Command, Event, socket, transport};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -24,26 +24,72 @@ fn init_checkout(dir: &std::path::Path, origin: &str) {
     git(&["remote", "add", "origin", origin]);
 }
 
-/// Accept one client, complete the handshake, and return the single command
-/// it wrote — the same shape `notification_click` uses to observe the CLI.
-fn accept_one_command(listener: transport::Listener) -> tokio::task::JoinHandle<Command> {
+/// A minimal daemon speaking the real client protocol: handshake, reply to
+/// `Subscribe` with an (empty) snapshot, then acknowledge the `CreateWorkspace`
+/// by broadcasting a `WorkspaceUpserted` stamped with `assigned_key` — which
+/// deliberately differs from the name's slug so the test proves the CLI reports
+/// the daemon's key, not one it guessed. Returns the received `CreateWorkspace`
+/// command for assertions.
+fn fake_daemon(
+    listener: transport::Listener,
+    assigned_key: &str,
+) -> tokio::task::JoinHandle<Command> {
+    let assigned_key = assigned_key.to_string();
     tokio::spawn(async move {
         let (mut rd, mut wr) = listener.accept().await.expect("accept client");
         socket::server_handshake(&mut rd, &mut wr)
             .await
             .expect("handshake");
-        socket::read_frame::<_, Command>(&mut rd)
-            .await
-            .expect("read command")
-            .expect("one command")
+        loop {
+            let cmd = socket::read_frame::<_, Command>(&mut rd)
+                .await
+                .expect("read command")
+                .expect("a command");
+            match cmd {
+                Command::Subscribe => {
+                    socket::write_frame(
+                        &mut wr,
+                        &Event::Snapshot {
+                            workspaces: vec![],
+                            terminals: vec![],
+                            projects: vec![],
+                            recent_snippets: vec![],
+                            dismissed_updates: vec![],
+                        },
+                    )
+                    .await
+                    .expect("send snapshot");
+                }
+                Command::CreateWorkspace {
+                    ref name,
+                    ref project_key,
+                    ..
+                } => {
+                    let mut ws = lazybox_core::Workspace::empty(
+                        lazybox_core::WorkspaceKey::new(assigned_key.clone()),
+                        "main",
+                        chrono::Utc::now(),
+                    );
+                    ws.name = name.clone();
+                    ws.project_key = Some(project_key.clone());
+                    ws.local = true;
+                    socket::write_frame(&mut wr, &Event::WorkspaceUpserted(Box::new(ws)))
+                        .await
+                        .expect("send upsert");
+                    return cmd;
+                }
+                other => panic!("unexpected command {other:?}"),
+            }
+        }
     })
 }
 
+/// Run `lazybox workspace create <extra…>` and capture its output.
 fn run_workspace_create(
     binary: &str,
     extra: &[&str],
     home: std::path::PathBuf,
-) -> tokio::task::JoinHandle<std::process::ExitStatus> {
+) -> tokio::task::JoinHandle<std::process::Output> {
     let binary = binary.to_string();
     let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
     tokio::task::spawn_blocking(move || {
@@ -53,15 +99,15 @@ fn run_workspace_create(
             .args(&extra)
             .env("LAZYBOX_HOME", home)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .status()
+            .output()
             .expect("run workspace create")
     })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workspace_create_infers_project_from_cwd_and_sends_create_workspace() {
+async fn workspace_create_infers_project_from_cwd_and_reports_the_daemon_key() {
     let temp = tempfile::tempdir().expect("tempdir");
     let checkout = temp.path().join("acme-widget");
     std::fs::create_dir(&checkout).expect("checkout dir");
@@ -71,7 +117,8 @@ async fn workspace_create_infers_project_from_cwd_and_sends_create_workspace() {
     let listener = transport::Listener::bind(&socket_path)
         .await
         .expect("bind test socket");
-    let server = accept_one_command(listener);
+    // The daemon hands back a collision-suffixed key the CLI can't predict.
+    let server = fake_daemon(listener, "flaky-test-investigation-2");
 
     let binary = env!("CARGO_BIN_EXE_lazybox");
     let child = run_workspace_create(
@@ -89,11 +136,18 @@ async fn workspace_create_infers_project_from_cwd_and_sends_create_workspace() {
         temp.path().join("home"),
     );
 
-    let status = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(Duration::from_secs(10), child)
         .await
         .expect("cli exits")
         .expect("cli task");
-    assert!(status.success(), "workspace create exited non-zero");
+    assert!(output.status.success(), "workspace create exited non-zero");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Reports the daemon's actual key, and says "Created" (confirmed), not
+    // the "Requested" fallback.
+    assert!(
+        stdout.contains("flaky-test-investigation-2") && stdout.contains("Created"),
+        "stdout should confirm the daemon's key, got: {stdout:?}"
+    );
 
     let command = tokio::time::timeout(Duration::from_secs(1), server)
         .await
@@ -123,7 +177,7 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
     let listener = transport::Listener::bind(&socket_path)
         .await
         .expect("bind test socket");
-    let server = accept_one_command(listener);
+    let server = fake_daemon(listener, "scratch");
 
     let binary = env!("CARGO_BIN_EXE_lazybox");
     // A non-git --cwd proves resolution came from --project, not inference.
@@ -142,11 +196,11 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
         temp.path().join("home"),
     );
 
-    let status = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(Duration::from_secs(10), child)
         .await
         .expect("cli exits")
         .expect("cli task");
-    assert!(status.success(), "workspace create exited non-zero");
+    assert!(output.status.success(), "workspace create exited non-zero");
 
     let command = tokio::time::timeout(Duration::from_secs(1), server)
         .await
@@ -167,25 +221,15 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn workspace_create_rejects_an_unknown_agent_without_sending() {
+async fn workspace_create_rejects_an_unknown_agent_without_connecting() {
     let temp = tempfile::tempdir().expect("tempdir");
     let socket_path = temp.path().join("daemon.sock");
     let listener = transport::Listener::bind(&socket_path)
         .await
         .expect("bind test socket");
-    // The daemon creates the workspace before spawning, so a bad --agent
-    // must be caught here — before any frame is sent. This listener should
-    // never see a connection.
-    let server = tokio::spawn(async move {
-        let (mut rd, mut wr) = listener.accept().await.expect("accept client");
-        socket::server_handshake(&mut rd, &mut wr)
-            .await
-            .expect("handshake");
-        socket::read_frame::<_, Command>(&mut rd)
-            .await
-            .ok()
-            .flatten()
-    });
+    // A bad --agent must be caught before any connection: this daemon should
+    // never accept a client.
+    let server = tokio::spawn(async move { listener.accept().await.map(|_| ()) });
 
     let binary = env!("CARGO_BIN_EXE_lazybox");
     let child = run_workspace_create(
@@ -203,17 +247,19 @@ async fn workspace_create_rejects_an_unknown_agent_without_sending() {
         temp.path().join("home"),
     );
 
-    let status = tokio::time::timeout(Duration::from_secs(10), child)
+    let output = tokio::time::timeout(Duration::from_secs(10), child)
         .await
         .expect("cli exits")
         .expect("cli task");
-    assert!(!status.success(), "unknown --agent must fail the command");
-
-    // Nothing should have reached the socket: the CLI bailed at validation,
-    // so the accept never completes and this times out.
-    let sent = tokio::time::timeout(Duration::from_millis(500), server).await;
     assert!(
-        sent.is_err(),
-        "unknown --agent must not send a CreateWorkspace, but the daemon received one",
+        !output.status.success(),
+        "unknown --agent must fail the command"
+    );
+
+    // The CLI bailed at validation, so the accept never completes.
+    let connected = tokio::time::timeout(Duration::from_millis(500), server).await;
+    assert!(
+        connected.is_err(),
+        "unknown --agent must not connect to the daemon"
     );
 }

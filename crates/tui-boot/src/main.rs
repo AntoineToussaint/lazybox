@@ -297,7 +297,8 @@ Remote & services:
   lazybox worktree gc         reclaim safe orphaned worktrees (--force / --dry-run)
   lazybox workspace create    create a taskless pre-PR workspace via the daemon
     --name <name>             (--project <key> / --repo <owner/repo>, or inferred
-                              from cwd; --agent <id> spawns an agent into it)
+                              from cwd; --agent <id> spawns an agent into it;
+                              --socket <path> targets a non-default daemon)
 
 Advanced:
   lazybox --fresh             wipe ~/.lazybox/v2/state.db and re-run setup (destructive)
@@ -625,31 +626,93 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
         );
     };
 
-    let command = lazybox_ipc::Command::CreateWorkspace {
-        name: name.clone(),
-        project_key: project_key.clone(),
-        spawn_agent: agent.clone(),
-    };
-    socket::send_command(&socket_path, &command)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "send CreateWorkspace to daemon at {}: {e} (is lazybox running?)",
-                socket_path.display(),
-            )
-        })?;
+    // Use a full subscribing client, not fire-and-forget: the daemon
+    // allocates the final `WorkspaceKey` (which may carry a `-2` collision
+    // suffix), and the caller — often an agent that wants to hand off to
+    // the new workspace next — needs it back. `CreateWorkspace` has no
+    // request/response, so we recover the key by diffing: snapshot the
+    // existing keys, create, then take the one new `WorkspaceUpserted` that
+    // matches our name + project.
+    let (mut client, _peer) = socket::connect(&socket_path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "connect to daemon at {}: {e} (is lazybox running?)",
+            socket_path.display(),
+        )
+    })?;
+    client
+        .send(lazybox_ipc::Command::Subscribe)
+        .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
+    let existing = snapshot_workspace_keys(&mut client).await?;
 
-    // The daemon hasn't confirmed anything yet — `send_command` only
-    // guarantees the frame was delivered. Report a request, not a fait
-    // accompli: the final key can carry a collision suffix and creation
-    // could still fail store-side.
-    match &agent {
-        Some(agent) => {
+    client
+        .send(lazybox_ipc::Command::CreateWorkspace {
+            name: name.clone(),
+            project_key: project_key.clone(),
+            spawn_agent: agent.clone(),
+        })
+        .map_err(|e| anyhow::anyhow!("send CreateWorkspace: {e}"))?;
+
+    let created = await_created_workspace(&mut client, &existing, &name, &project_key).await;
+    match (created, &agent) {
+        (Some(key), Some(agent)) => {
+            println!("Created workspace {key} \"{name}\" in {project_key} (spawning {agent})")
+        }
+        (Some(key), None) => println!("Created workspace {key} \"{name}\" in {project_key}"),
+        // The create was delivered but no confirming broadcast arrived in
+        // time. The workspace is very likely created; we just can't name its
+        // final key, so report honestly rather than invent one.
+        (None, Some(agent)) => {
             println!("Requested workspace \"{name}\" in {project_key} (spawning {agent})")
         }
-        None => println!("Requested workspace \"{name}\" in {project_key}"),
+        (None, None) => println!("Requested workspace \"{name}\" in {project_key}"),
     }
     Ok(())
+}
+
+/// Read the post-`Subscribe` snapshot and return the workspace keys already
+/// present — the baseline a freshly created key is diffed against. The
+/// daemon's contract is snapshot-before-live-events, so at most a few frames
+/// are consumed before it arrives.
+async fn snapshot_workspace_keys(
+    client: &mut lazybox_ipc::Client,
+) -> anyhow::Result<std::collections::HashSet<lazybox_core::WorkspaceKey>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::Snapshot { workspaces, .. })) => {
+                return Ok(workspaces.into_iter().map(|w| w.key).collect());
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before sending a snapshot"),
+            Err(_) => anyhow::bail!("timed out waiting for the daemon snapshot"),
+        }
+    }
+}
+
+/// Wait for the `WorkspaceUpserted` carrying the workspace we just created:
+/// the first whose key wasn't in `existing` and whose name + project match
+/// the request. Returns its final key, or `None` if no such broadcast arrives
+/// before the deadline (the create still likely succeeded — see the caller).
+async fn await_created_workspace(
+    client: &mut lazybox_ipc::Client,
+    existing: &std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    name: &str,
+    project_key: &lazybox_core::ProjectKey,
+) -> Option<lazybox_core::WorkspaceKey> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::WorkspaceUpserted(ws)))
+                if !existing.contains(&ws.key)
+                    && ws.name == name
+                    && ws.project_key.as_ref() == Some(project_key) =>
+            {
+                return Some(ws.key.clone());
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => return None,
+        }
+    }
 }
 
 /// Reject an unknown `--agent` id before sending anything. The daemon

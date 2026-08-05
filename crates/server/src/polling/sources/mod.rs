@@ -10,7 +10,7 @@ use super::{
 };
 use crate::ServerConfig;
 use chrono::Utc;
-use lazybox_core::{AutoFixKind, FetchCoverage, ProviderConfig, Task, WorkspaceKey};
+use lazybox_core::{AutoFixKind, FetchCoverage, LinearScope, ProviderConfig, Task, WorkspaceKey};
 use lazybox_gh::GhClient;
 use lazybox_ipc::{Event, ProviderErrorKind};
 use lazybox_linear::LinearClient;
@@ -1943,6 +1943,21 @@ pub fn filter_linear_tasks(tasks: Vec<Task>, filter: &ProviderConfig) -> Vec<Tas
         .collect()
 }
 
+/// Reconcile the Linear post-fetch role filter with the fetch scope so an
+/// opt-in never fetches issues it then silently drops. A `Subscribed`
+/// scope maps to [`lazybox_core::TaskRole::Mentioned`] at ingest
+/// (`issue_to_task`), which the role gate hides unless `role.mentioned`
+/// is set — so requesting the scope implies enabling its display role.
+/// Without this, `providers.linear.scope: [.., subscribed]` fetches
+/// subscribed issues that the default filter then discards, making the
+/// opt-in appear inert.
+fn linear_filter_for_scope(mut filter: ProviderConfig, scope: &[LinearScope]) -> ProviderConfig {
+    if scope.contains(&LinearScope::Subscribed) {
+        filter.enabled_keys.insert("role.mentioned".to_string());
+    }
+    filter
+}
+
 /// Pure reuse decision for the cached GitHub client: reuse only when
 /// BOTH the credential source label and the token fingerprint match
 /// the freshly-resolved credential.
@@ -1988,6 +2003,38 @@ pub async fn sources_for(
         None,
     )
     .await
+}
+
+#[cfg(test)]
+mod linear_scope_filter_tests {
+    use super::*;
+    use lazybox_core::TaskRole;
+
+    #[test]
+    fn subscribed_scope_enables_mentioned_display_role() {
+        // Regression for the #862 review: opting into `subscribed` fetch
+        // scope must actually surface the fetched issues, which ingest
+        // maps to `Mentioned`. Without the bridge the default filter
+        // ({assignee, author}) drops them and the opt-in is inert.
+        let base = ProviderConfig::default_for("linear");
+        assert!(!base.allows_linear_role(TaskRole::Mentioned));
+        let bridged =
+            linear_filter_for_scope(base, &[LinearScope::Assigned, LinearScope::Subscribed]);
+        assert!(
+            bridged.allows_linear_role(TaskRole::Mentioned),
+            "subscribed scope surfaces subscribed (Mentioned) issues"
+        );
+    }
+
+    #[test]
+    fn default_scope_leaves_filter_untouched() {
+        let base = ProviderConfig::default_for("linear");
+        let bridged = linear_filter_for_scope(base.clone(), &LinearScope::default_scopes());
+        assert_eq!(
+            bridged, base,
+            "no subscribed scope → role filter is unchanged"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2708,10 +2755,11 @@ pub(super) async fn sources_for_with_engagement(
             Ok(cred) => {
                 let scope = lazybox_config::Config::load()
                     .map(|c| c.providers.linear.scope)
-                    .unwrap_or_else(|_| lazybox_core::LinearScope::default_scopes());
+                    .unwrap_or_else(|_| LinearScope::default_scopes());
+                let filter = linear_filter_for_scope(setup.provider_config("linear"), &scope);
                 sources.push(Box::new(LinearSource::new(
                     LinearClient::from_credential(cred).with_scope(scope),
-                    setup.provider_config("linear"),
+                    filter,
                     bus.clone(),
                 )))
             }

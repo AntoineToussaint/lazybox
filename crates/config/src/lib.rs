@@ -1628,6 +1628,7 @@ pub struct LinearConfig {
     ///   linear:
     ///     scope: [assigned, created, subscribed]
     /// ```
+    #[serde(deserialize_with = "de_lenient_linear_scope")]
     pub scope: Vec<lazybox_core::LinearScope>,
 }
 
@@ -1637,6 +1638,39 @@ impl Default for LinearConfig {
             scope: lazybox_core::LinearScope::default_scopes(),
         }
     }
+}
+
+/// Lenient deserializer for `providers.linear.scope`: an unrecognized
+/// entry warns and is dropped rather than failing the *entire* config
+/// load — same policy as [`de_lenient_new_terminal_layout`]. A single
+/// typo in a provider scope must never be the reason lazybox can't start
+/// and read the repos / Slack tokens alongside it. A resulting empty list
+/// falls back to the default scope downstream (`issues_query`), so it
+/// still never becomes a whole-workspace sweep. Absent keys never reach
+/// here — the container's `#[serde(default)]` supplies the default.
+fn de_lenient_linear_scope<'de, D>(de: D) -> Result<Vec<lazybox_core::LinearScope>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use lazybox_core::LinearScope;
+    let raw = Vec::<serde_yaml::Value>::deserialize(de)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for value in raw {
+        match value
+            .as_str()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("assigned") => out.push(LinearScope::Assigned),
+            Some("created") => out.push(LinearScope::Created),
+            Some("subscribed") => out.push(LinearScope::Subscribed),
+            _ => tracing::warn!(
+                "ignoring unrecognized providers.linear.scope entry {value:?}; \
+                 expected `assigned`, `created`, or `subscribed`"
+            ),
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2125,6 +2159,54 @@ repos:
         let serialized = serde_yaml::to_string(&configured).expect("serialize desktop");
         let round_tripped = Config::parse(&serialized).expect("parse serialized desktop");
         assert!(round_tripped.desktop.analytics_enabled);
+    }
+
+    #[test]
+    fn linear_scope_defaults_and_parses() {
+        use lazybox_core::LinearScope;
+        // Unset → assigned + created, no subscriber flood.
+        let default_config = Config::parse("").expect("parse defaults");
+        assert_eq!(
+            default_config.providers.linear.scope,
+            vec![LinearScope::Assigned, LinearScope::Created]
+        );
+
+        // An explicit opt-in parses and round-trips.
+        let configured =
+            Config::parse("providers:\n  linear:\n    scope: [assigned, subscribed]\n")
+                .expect("parse linear scope");
+        assert_eq!(
+            configured.providers.linear.scope,
+            vec![LinearScope::Assigned, LinearScope::Subscribed]
+        );
+        let serialized = serde_yaml::to_string(&configured).expect("serialize");
+        let round_tripped = Config::parse(&serialized).expect("parse serialized");
+        assert_eq!(
+            round_tripped.providers.linear.scope,
+            vec![LinearScope::Assigned, LinearScope::Subscribed]
+        );
+    }
+
+    #[test]
+    fn linear_scope_typo_does_not_brick_the_whole_config() {
+        use lazybox_core::LinearScope;
+        // A single bad scope token must NOT fail the entire config load
+        // (which would silently drop repos / Slack tokens / theme). The
+        // unknown entry is dropped; the valid one survives.
+        let config = Config::parse(
+            "providers:\n  linear:\n    scope: [assigned, bogus]\nshell:\n  command: /bin/zsh\n",
+        )
+        .expect("a typo'd scope must not fail the whole parse");
+        assert_eq!(
+            config.providers.linear.scope,
+            vec![LinearScope::Assigned],
+            "unknown scope entry dropped, known one kept"
+        );
+        assert_eq!(
+            config.shell.configured_command(),
+            Some("/bin/zsh"),
+            "sibling config survives a bad scope entry"
+        );
     }
 
     #[test]

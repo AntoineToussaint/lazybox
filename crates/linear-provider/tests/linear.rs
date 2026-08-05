@@ -326,8 +326,17 @@ async fn default_client_query_excludes_subscribers() {
         .into_iter()
         .find(|b| b.contains("issues("))
         .expect("an issues query was sent");
-    assert!(issues_body.contains("assignee"), "keeps assigned-to-me");
-    assert!(issues_body.contains("creator"), "keeps created-by-me");
+    // Match the filter clauses (`assignee: {`), not the bare words —
+    // `assignee`/`creator` also appear in the node selection, so a plain
+    // `contains` would pass even if the clause were dropped.
+    assert!(
+        issues_body.contains("assignee: {"),
+        "keeps the assigned-to-me clause: {issues_body}"
+    );
+    assert!(
+        issues_body.contains("creator: {"),
+        "keeps the created-by-me clause: {issues_body}"
+    );
     assert!(
         !issues_body.contains("subscribers"),
         "default must not request the subscriber flood: {issues_body}"

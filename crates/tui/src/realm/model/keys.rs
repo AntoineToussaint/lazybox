@@ -1557,11 +1557,14 @@ impl<T: TerminalAdapter> Model<T> {
                                             && t.elapsed() <= crate::realm::DOUBLE_CLICK_WINDOW
                                     })
                                     .unwrap_or(false);
-                            let double_on_workspace =
-                                is_double && !self.sidebar.cursor_on_repo_header();
+                            let on_header = self.sidebar.cursor_on_repo_header()
+                                || self.sidebar.cursor_on_space_header();
+                            let double_on_workspace = is_double && !on_header;
                             if is_double {
                                 self.last_click = None; // consume the pair
-                                if self.sidebar.cursor_on_repo_header() {
+                                if self.sidebar.cursor_on_space_header() {
+                                    self.sidebar.toggle_space_at_cursor();
+                                } else if self.sidebar.cursor_on_repo_header() {
                                     self.sidebar.toggle_repo_at_cursor();
                                 }
                             } else {
@@ -2019,6 +2022,7 @@ pub(super) fn action_from_kind(
         ActionKind::ViewDiff => Action::ViewDiff,
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::RenameWorkspace => Action::RenameWorkspace,
+        ActionKind::MoveToSpace => Action::MoveToSpace,
         ActionKind::NewProject => Action::NewProject,
         ActionKind::ImportCheckout => Action::ImportCheckout,
         ActionKind::AddScanRoot => Action::AddScanRoot,

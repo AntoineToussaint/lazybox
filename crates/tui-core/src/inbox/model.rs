@@ -189,6 +189,14 @@ pub enum VisibleRow {
     /// their repo groups regardless of which repo they belong to.
     /// Non-selectable like the other headers; j/k skips it.
     FocusedHeader,
+    /// Space group header — the higher-level grouping tier (#860),
+    /// emitted above the `RepoHeader`s it contains. The string is the
+    /// Space name (a user-defined bucket, an owner auto-seed, or
+    /// `"Ungrouped"`). Only present when the Space tier is active (≥2
+    /// distinct Spaces this pass); otherwise the tree stays flat at the
+    /// repo level. Non-selectable like `RepoHeader` — navigation skips
+    /// it, the cursor parks on it only for collapse / click.
+    SpaceHeader(String),
     /// Repo group header. The string is the repo display name
     /// (`"owner/name"` for GitHub, the project key for Linear, or
     /// `"(no repo)"` for unattached workspaces).

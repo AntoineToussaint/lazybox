@@ -469,6 +469,30 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::RenameWorkspace, modal);
     }
 
+    /// Mount the "Move to Space" name prompt (#860). Submit →
+    /// `Msg::InputSubmitted(space)` while `Id::MoveToSpace` is on top →
+    /// `Sidebar::assign_source_to_space`. The source label is
+    /// stashed on the `ModalFlow::MoveToSpace` flow; the input is
+    /// prefilled with the source's current Space so a bare Enter is a
+    /// no-op and clearing it unassigns.
+    pub(super) fn mount_move_to_space_input(&mut self, source: String) {
+        use crate::realm::components::input::Input;
+
+        if matches!(self.modal_stack.last(), Some(Id::MoveToSpace)) {
+            return;
+        }
+
+        let current = self.sidebar.space_of_source(&source);
+        self.set_modal_flow(ModalFlow::MoveToSpace {
+            source: source.clone(),
+        });
+
+        let modal = Input::new(format!("Move {source} to which Space? (blank = default)"))
+            .title("Move to Space")
+            .with_input(current);
+        self.mount_modal(Id::MoveToSpace, modal);
+    }
+
     /// Mount the "New project" name prompt. Submit →
     /// `Msg::InputSubmitted(name)` while `Id::NewProject` is on top
     /// → `Command::CreateProject { name }`. Daemon creates a local

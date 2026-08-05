@@ -242,6 +242,9 @@ impl InboxModel {
         let filter_menu = Filter::menu(&candidates, &self.agents, &self.filters);
         let filter_chips: Vec<String> =
             self.filters.chips().iter().map(|c| c.to_string()).collect();
+        // No Spaces collapse UI on the desktop yet; an empty set keeps
+        // every Space expanded (#860).
+        let collapsed_spaces = BTreeSet::new();
         let outcome = inbox::compute_visible(ComputeInputs {
             workspaces: &self.workspaces,
             mailbox: self.mailbox,
@@ -257,6 +260,10 @@ impl InboxModel {
             // starred workspaces into the `★ Focused` section when a
             // caller supplies them (#846).
             focused_workspaces: &[],
+            // No Spaces UI yet; the shared builder renders the grouping
+            // tier only when a caller supplies ≥2 distinct Spaces (#860).
+            spaces: &[],
+            collapsed_spaces: &collapsed_spaces,
             attention: &self.attention,
             agents: &self.agents,
             now,

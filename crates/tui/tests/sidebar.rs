@@ -1579,6 +1579,8 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
         BTreeSet::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        BTreeSet::new(),
         None,
         &display,
     );
@@ -1934,6 +1936,8 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
         BTreeSet::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2035,6 +2039,8 @@ fn ci_failure_transition_respects_desktop_notify_off() {
         BTreeSet::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2200,6 +2206,8 @@ fn pinned_repo_config_floats_group_to_top() {
         BTreeSet::new(),
         vec!["owner/charlie".to_string()],
         Vec::new(),
+        Vec::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2441,6 +2449,8 @@ fn apply_config_dedups_focused_workspaces() {
         BTreeSet::new(),
         Vec::new(),
         vec![key.clone(), key.clone()],
+        Vec::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2490,6 +2500,8 @@ fn focused_header_honors_ascii_glyphs() {
         BTreeSet::new(),
         Vec::new(),
         Vec::new(),
+        Vec::new(),
+        BTreeSet::new(),
         None,
         &ascii,
     );

@@ -1240,6 +1240,8 @@ async fn run_embedded_realm(
                 .iter()
                 .map(|s| lazybox_core::SessionKey::from(s.as_str()))
                 .collect(),
+            user_config.ui.spaces.clone(),
+            user_config.ui.collapsed_spaces.clone(),
             user_config.setup.default_agent.clone(),
             &user_config.display,
             &ui_defaults,

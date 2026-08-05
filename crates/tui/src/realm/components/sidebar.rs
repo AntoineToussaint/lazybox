@@ -338,12 +338,15 @@ impl Sidebar {
 
     /// Apply `~/.lazybox/config.yaml` overrides to the inner pane in
     /// place. Used by `Model::apply_sidebar_config` once at startup.
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_inner_config(
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
         pinned_repos: Vec<String>,
         focused_workspaces: Vec<lazybox_core::SessionKey>,
+        spaces: Vec<lazybox_config::SpaceConfig>,
+        collapsed_spaces: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -352,6 +355,8 @@ impl Sidebar {
             collapsed_repos,
             pinned_repos,
             focused_workspaces,
+            spaces,
+            collapsed_spaces,
             default_agent,
             display,
         );
@@ -534,6 +539,35 @@ impl Sidebar {
     /// key. Returns `(label, now_focused)` for the footer notice.
     pub fn toggle_focus_at_cursor(&mut self) -> Option<(String, bool)> {
         self.inner.toggle_focus_at_cursor()
+    }
+
+    /// The repo group (source label) at or above the cursor, if any.
+    pub fn cursor_repo(&self) -> Option<String> {
+        self.inner.cursor_repo()
+    }
+
+    /// True iff the cursor sits on a Space header row (#860). Drives the
+    /// tier-aware branch of the `Space` collapse + double-click.
+    pub fn cursor_on_space_header(&self) -> bool {
+        self.inner.cursor_on_space_header()
+    }
+
+    /// Toggle the Space header under the cursor. Same effect as `Space`
+    /// on a Space header row (#860).
+    pub fn toggle_space_at_cursor(&mut self) -> bool {
+        self.inner.toggle_space_at_cursor()
+    }
+
+    /// The Space a source currently resolves to — prefills the
+    /// move-to-Space prompt.
+    pub fn space_of_source(&self, source: &str) -> String {
+        self.inner.space_of_source(source)
+    }
+
+    /// Assign a source group to a Space (#860), persisting to
+    /// `ui.spaces`. Returns the resolved Space name for a footer notice.
+    pub fn assign_source_to_space(&mut self, source: &str, space: &str) -> String {
+        self.inner.assign_source_to_space(source, space)
     }
 
     /// Replace the active filter set from the filter menu's picks.

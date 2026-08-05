@@ -91,6 +91,10 @@ pub enum Action {
     /// changes; the workspace key and worktree path stay stable so
     /// sessions/terminals/worktrees aren't orphaned.
     RenameWorkspace,
+    /// Assign the source group (repo / Linear team) at the cursor to a
+    /// Space — the higher-level grouping tier (#860). Opens an input to
+    /// name the Space; a blank name unassigns (back to owner auto-seed).
+    MoveToSpace,
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under. Asks for a name. Idempotent
     /// on collision (re-opens the existing local project).
@@ -423,6 +427,7 @@ pub enum ActionKind {
     ViewDiff,
     NewWorkspace,
     RenameWorkspace,
+    MoveToSpace,
     NewProject,
     ImportCheckout,
     AddScanRoot,
@@ -552,6 +557,7 @@ impl ActionKind {
         // inherits this order directly.
         Self::NewWorkspace,
         Self::RenameWorkspace,
+        Self::MoveToSpace,
         Self::NewProject,
         Self::ImportCheckout,
         Self::AddScanRoot,
@@ -664,6 +670,7 @@ impl Action {
             Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::RenameWorkspace => ActionKind::RenameWorkspace,
+            Action::MoveToSpace => ActionKind::MoveToSpace,
             Action::NewProject => ActionKind::NewProject,
             Action::ImportCheckout => ActionKind::ImportCheckout,
             Action::AddScanRoot => ActionKind::AddScanRoot,
@@ -1012,6 +1019,13 @@ impl ActionDef {
                 default_keys: "x R",
                 label: "rename",
                 describe: "Rename this workspace's display name (opens an input prefilled with the current name). Only the label changes — the worktree and any sessions stay put.",
+                section: Section::Workspace,
+            },
+            ActionKind::MoveToSpace => &Self {
+                kind: ActionKind::MoveToSpace,
+                default_keys: "x m",
+                label: "move to space",
+                describe: "Assign this repo / Linear source to a Space (the grouping tier above repos). Opens an input to name the Space; a blank name unassigns it back to the owner default.",
                 section: Section::Workspace,
             },
             ActionKind::NewProject => &Self {
@@ -1820,6 +1834,7 @@ impl ActionKind {
             ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::RenameWorkspace => "rename_workspace",
+            ActionKind::MoveToSpace => "move_to_space",
             ActionKind::NewProject => "new_project",
             ActionKind::ImportCheckout => "import_checkout",
             ActionKind::AddScanRoot => "add_scan_root",
@@ -2082,6 +2097,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
         ActionKind::NewWorkspace
         | ActionKind::RenameWorkspace
+        | ActionKind::MoveToSpace
         | ActionKind::NewProject
         | ActionKind::ImportCheckout
         | ActionKind::AddScanRoot
@@ -2586,7 +2602,12 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSearch
         | ActionKind::OpenGlobalSearch
         | ActionKind::ToggleRepoGroup
-        | ActionKind::ToggleRepoPin => true,
+        | ActionKind::ToggleRepoPin
+        // Acts on the repo group at/above the cursor (a header row has
+        // no workspace, so `has_ws` would wrongly hide it there); the
+        // dispatcher no-ops with a notice when the cursor isn't in a
+        // group.
+        | ActionKind::MoveToSpace => true,
         // Starring acts on the workspace under the cursor, so it needs
         // one there — same gate as the per-workspace `v` select.
         ActionKind::ToggleFocusWorkspace => has_ws,

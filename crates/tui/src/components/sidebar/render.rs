@@ -601,6 +601,41 @@ impl Sidebar {
                     }
                     Line::from(spans)
                 }
+                VisibleRow::SpaceHeader(name) => {
+                    // Top tier of the tree (#860): sits above the repo
+                    // headers it contains, styled with the accent colour
+                    // and the folder glyph so the eye reads it as a level
+                    // higher than the warn-coloured repo rows beneath.
+                    use crate::components::icons;
+                    let collapsed = self.collapsed_spaces.contains(name);
+                    let glyph = if collapsed { "▸" } else { "▾" };
+                    let is_cursor = i == self.cursor;
+                    let row_bg = if is_cursor && focused {
+                        Some(theme.row_focused())
+                    } else if is_cursor {
+                        Some(theme.row_unfocused())
+                    } else {
+                        None
+                    };
+                    let glyph_style = match row_bg {
+                        Some(bg) => bg,
+                        None => Style::default().fg(theme.text_dim),
+                    };
+                    let mut spans: Vec<Span> = vec![
+                        Span::styled(format!("{glyph} "), glyph_style),
+                        Span::styled(
+                            format!("{} {}", icons::SPACE, name),
+                            row_bg
+                                .unwrap_or_default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ];
+                    if let Some(bg) = row_bg {
+                        extend_cursor_fill(&mut spans, row_budget, bg);
+                    }
+                    Line::from(spans)
+                }
                 VisibleRow::RepoHeader(name) => {
                     use crate::components::icons;
                     let collapsed = self.collapsed_repos.contains(name);

@@ -2248,7 +2248,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// resolves the pick back to a snippet via `self.snippets.get(...)`
     /// regardless of the picker's row order.
     pub(crate) fn mount_snippet_picker(&mut self, initial_filter: String) {
-        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
+        use crate::realm::components::snippet_picker::SnippetPicker;
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
             return;
         }
@@ -2259,21 +2259,26 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no snippets configured — add some to ~/.lazybox/snippets.yaml");
             return;
         }
-        // Provider-scope the catalog (#868): a snippet tagged for a
-        // specific source (`github` / `linear`) only surfaces on a
-        // workspace of that source; generic snippets always show, and when
-        // the workspace has no task to key off, nothing is hidden.
-        let source = self.active_workspace_source();
-        let mut rows = Vec::with_capacity(self.snippets.len());
-        for (k, v) in self.snippets.all() {
-            if v.matches_source(source.as_deref()) {
-                rows.push(PickerRow::new(k, v));
-            }
-        }
-        let picker = SnippetPicker::new(rows, initial_filter)
+        let picker = SnippetPicker::new(self.scoped_picker_rows(), initial_filter)
             .with_recent(self.recent_snippets.clone())
             .with_insert_without_submit();
         self.mount_modal(Id::SnippetPicker, picker);
+    }
+
+    /// The snippet-picker rows for the focused workspace, provider-scoped
+    /// (#868): every generic snippet plus those whose `provider` matches
+    /// one of the workspace's task sources. `mount_snippet_picker` and its
+    /// test share this so the filter under test is the one the picker
+    /// actually shows.
+    fn scoped_picker_rows(&self) -> Vec<crate::realm::components::snippet_picker::PickerRow> {
+        use crate::realm::components::snippet_picker::PickerRow;
+        let sources = self.active_workspace_sources();
+        let source_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+        self.snippets
+            .all()
+            .filter(|(_, snippet)| snippet.matches_sources(&source_refs))
+            .map(|(key, snippet)| PickerRow::new(key, snippet))
+            .collect()
     }
 
     /// Mount the skills picker (`]]l`, issue #797): the Claude Code skills
@@ -2350,17 +2355,31 @@ impl<T: TerminalAdapter> Model<T> {
             .map(|session| session.worktree_path.clone())
     }
 
-    /// The task `source` (`"github"` / `"linear"`) of the focused
-    /// terminal's workspace, used to provider-scope the snippet picker
-    /// (#868). `None` when the terminal has no session or its workspace
-    /// carries no PR/issue to key off — the picker then shows every
-    /// snippet, generic and provider-scoped alike.
-    fn active_workspace_source(&self) -> Option<String> {
-        let session_key = self.terminals.active_session()?;
-        self.sidebar
-            .workspace_by_key(session_key)?
-            .primary_task()
+    /// The distinct task `sources` (`"github"` / `"linear"`) present on
+    /// the focused terminal's workspace, used to provider-scope the snippet
+    /// picker (#868). A workspace can span both — a Linear issue that
+    /// already has a GitHub PR yields `["github", "linear"]` — so scoping
+    /// keys off *every* task source, not just the primary task's, and the
+    /// other provider's snippets aren't hidden. Empty when the terminal has
+    /// no session or its workspace carries no PR/issue, which the picker
+    /// reads as "show every snippet".
+    fn active_workspace_sources(&self) -> Vec<String> {
+        let Some(session_key) = self.terminals.active_session() else {
+            return Vec::new();
+        };
+        let Some(workspace) = self.sidebar.workspace_by_key(session_key) else {
+            return Vec::new();
+        };
+        let mut sources: Vec<String> = workspace
+            .pr
+            .iter()
+            .chain(workspace.gh_issues.iter())
+            .chain(workspace.linear_issues.iter())
             .map(|task| task.id.source.clone())
+            .collect();
+        sources.sort();
+        sources.dedup();
+        sources
     }
 
     /// Kick off the broadcast flow (`Shift-B`): resolve the sidebar's

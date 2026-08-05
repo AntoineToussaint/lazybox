@@ -11578,29 +11578,61 @@ mod focus_mode_tests {
     }
 
     /// The snippet picker is provider-scoped by the focused workspace's
-    /// task source (#868): `active_workspace_source` reports the provider
-    /// so `mount_snippet_picker` can drop the wrong-provider snippets. A
-    /// GitHub workspace reports `"github"`; with no focused terminal there
-    /// is nothing to key off, so it reports `None` and the picker shows
-    /// every snippet.
+    /// task sources (#868). `scoped_picker_rows` is exactly what
+    /// `mount_snippet_picker` feeds the picker, so this exercises the real
+    /// filter: with no focused terminal every snippet shows; on a GitHub
+    /// workspace the Linear snippets drop out; and on a workspace that
+    /// spans both providers (a Linear issue with a GitHub PR) both sets
+    /// surface — the regression finding #1 guards against.
     #[test]
-    fn active_workspace_source_resolves_the_focused_workspace_provider() {
-        let mut m = build_model();
-        assert_eq!(
-            m.active_workspace_source(),
-            None,
-            "no focused terminal → unknown source → show everything",
-        );
+    fn snippet_picker_is_provider_scoped_by_workspace_sources() {
+        let keys = |m: &Model<tuirealm::terminal::TestTerminalAdapter>| -> Vec<String> {
+            m.scoped_picker_rows().into_iter().map(|r| r.key).collect()
+        };
 
+        let mut m = build_model();
+        m.apply_snippets(lazybox_config::Snippets::builtin());
+
+        // No focused terminal → unknown sources → every snippet shows.
+        assert!(m.active_workspace_sources().is_empty());
+        let unfocused = keys(&m);
+        assert!(unfocused.iter().any(|k| k == "triage"), "github shows");
+        assert!(unfocused.iter().any(|k| k == "wip"), "linear shows");
+        assert!(unfocused.iter().any(|k| k == "rev"), "generic shows");
+
+        // Focus a GitHub workspace → github + generic show, linear drops.
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
         spawn_terminal(&mut m, &key);
-        assert_eq!(
-            m.active_workspace_source().as_deref(),
-            Some("github"),
-            "the focused GitHub workspace scopes the picker to github",
+        assert_eq!(m.active_workspace_sources(), vec!["github".to_string()]);
+        let scoped = keys(&m);
+        assert!(scoped.iter().any(|k| k == "triage"), "github stays");
+        assert!(scoped.iter().any(|k| k == "rev"), "generic stays");
+        assert!(
+            !scoped.iter().any(|k| k == "wip"),
+            "linear snippet is scoped out on a github workspace",
         );
+
+        // Focus a cross-provider workspace (Linear issue + GitHub PR) →
+        // both providers' snippets surface (finding #1).
+        let mut cross = workspace_with_agent("owner/repo#2");
+        let mut linear = cross.primary_task().expect("has a task").clone();
+        linear.id.source = "linear".into();
+        cross.linear_issues.push(linear);
+        let cross_key = SessionKey::from(&cross.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(cross)));
+        spawn_terminal(&mut m, &cross_key);
+        assert_eq!(
+            m.active_workspace_sources(),
+            vec!["github".to_string(), "linear".to_string()],
+        );
+        let both = keys(&m);
+        assert!(
+            both.iter().any(|k| k == "triage"),
+            "github on cross-provider"
+        );
+        assert!(both.iter().any(|k| k == "wip"), "linear on cross-provider");
     }
 
     /// `]]q` exits the terminal to the sidebar — and in focus mode that

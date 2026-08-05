@@ -201,13 +201,14 @@ snippets:
       Address the unresolved review comments on this PR…
 ```
 
-The picker reads the focused workspace's source (the provider its PR or
-issue came from) and hides snippets scoped to a different one. A
-`provider: github` snippet shows only on GitHub workspaces; a
-`provider: linear` one only on Linear workspaces; a snippet with no
-`provider` shows everywhere. When the focused workspace has no task to
-key off — a scratch workspace, or browsing the catalog without a session
-— nothing is hidden, so you always see the full set.
+The picker reads the focused workspace's task sources and hides snippets
+scoped to a provider the workspace doesn't touch. A `provider: github`
+snippet shows only on GitHub workspaces; a `provider: linear` one only on
+Linear workspaces; a snippet with no `provider` shows everywhere. A
+workspace can span both — a Linear issue that already has a GitHub PR —
+and then both providers' snippets surface. When the focused workspace has
+no task to key off — a scratch workspace, or browsing the catalog without
+a session — nothing is hidden, so you always see the full set.
 
 lazybox ships two provider-scoped categories:
 

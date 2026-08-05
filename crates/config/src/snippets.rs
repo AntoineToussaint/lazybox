@@ -103,7 +103,7 @@ pub struct Snippet {
     /// that source, so provider-specific workflows (a GitHub PR-review
     /// reply, a Linear state transition) don't clutter the list on an
     /// unrelated workspace. When `None` the snippet is generic and shows
-    /// everywhere (see [`Snippet::matches_source`]).
+    /// everywhere (see [`Snippet::matches_sources`]).
     ///
     /// Invariant, like `skill:`: `Some` always names a real, trimmed,
     /// lowercased, non-empty source. A blank `provider:` in a user file is
@@ -168,18 +168,20 @@ impl Snippet {
         });
     }
 
-    /// Whether this snippet should surface on a workspace whose task
-    /// `source` is `source` (e.g. `"github"`, `"linear"`). A snippet with
-    /// no `provider` is generic and always applies. A provider-scoped one
-    /// applies only on a matching source — and, so nothing is silently
-    /// hidden when the context is unknown (the workspace carries no task,
-    /// or the catalog is browsed without a focused session), also when
-    /// `source` is `None`. Matching is case-insensitive.
-    pub fn matches_source(&self, source: Option<&str>) -> bool {
-        match (self.provider.as_deref(), source) {
-            (None, _) => true,
-            (Some(_), None) => true,
-            (Some(p), Some(s)) => p.eq_ignore_ascii_case(s),
+    /// Whether this snippet should surface on a workspace spanning the
+    /// given task `sources` (e.g. `["github"]`, or `["github", "linear"]`
+    /// for a Linear issue that already has a GitHub PR). A snippet with no
+    /// `provider` is generic and always applies. A provider-scoped one
+    /// applies when its provider is among `sources` — keying off *every*
+    /// source on the workspace, not just the primary task's, so the other
+    /// provider's snippets aren't hidden on a cross-provider workspace. So
+    /// nothing is hidden when the context is unknown (the workspace carries
+    /// no task, or the catalog is browsed without a focused session), an
+    /// empty `sources` also matches. Matching is case-insensitive.
+    pub fn matches_sources(&self, sources: &[&str]) -> bool {
+        match &self.provider {
+            None => true,
+            Some(p) => sources.is_empty() || sources.iter().any(|s| p.eq_ignore_ascii_case(s)),
         }
     }
 
@@ -281,7 +283,7 @@ impl Snippets {
         };
         // Provider-scoped built-in: only surfaces on a workspace whose task
         // source matches (`"github"` / `"linear"`). See
-        // [`Snippet::matches_source`].
+        // [`Snippet::matches_sources`].
         let scoped = |provider: &str, category: &str, description: &str, body: &str| Snippet {
             description: description.to_string(),
             category: category.to_string(),
@@ -1933,24 +1935,29 @@ snippets:
     }
 
     /// A generic snippet applies to every workspace; a provider-scoped one
-    /// only to a matching source, but also when the source is unknown so
-    /// nothing is silently hidden.
+    /// applies when its provider is among the workspace's sources —
+    /// including a cross-provider workspace that spans both — but also when
+    /// the sources are unknown, so nothing is silently hidden.
     #[test]
-    fn matches_source_scopes_by_provider() {
+    fn matches_sources_scopes_by_provider() {
         let mut generic = snippet("Review", "Review", "body");
         generic.provider = None;
-        assert!(generic.matches_source(Some("github")));
-        assert!(generic.matches_source(Some("linear")));
-        assert!(generic.matches_source(None));
+        assert!(generic.matches_sources(&["github"]));
+        assert!(generic.matches_sources(&["linear"]));
+        assert!(generic.matches_sources(&[]));
 
         let mut gh = snippet("GitHub", "Triage", "body");
         gh.provider = Some("github".into());
-        assert!(gh.matches_source(Some("github")));
-        assert!(gh.matches_source(Some("GitHub")), "case-insensitive");
-        assert!(!gh.matches_source(Some("linear")));
+        assert!(gh.matches_sources(&["github"]));
+        assert!(gh.matches_sources(&["GitHub"]), "case-insensitive");
+        assert!(!gh.matches_sources(&["linear"]));
         assert!(
-            gh.matches_source(None),
-            "unknown context surfaces the snippet rather than hiding it"
+            gh.matches_sources(&["github", "linear"]),
+            "a cross-provider workspace surfaces both providers' snippets",
+        );
+        assert!(
+            gh.matches_sources(&[]),
+            "unknown context surfaces the snippet rather than hiding it",
         );
     }
 

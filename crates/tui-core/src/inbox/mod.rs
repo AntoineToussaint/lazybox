@@ -913,7 +913,10 @@ mod tests {
 
         // A second Space is appended (its display order).
         assign_source(&mut spaces, "me/dotfiles", "Personal");
-        assert_eq!(spaces.iter().map(|s| &s.name).collect::<Vec<_>>(), ["Obin", "Personal"]);
+        assert_eq!(
+            spaces.iter().map(|s| &s.name).collect::<Vec<_>>(),
+            ["Obin", "Personal"]
+        );
 
         // Re-assigning within Obin moves the source to the end.
         assign_source(&mut spaces, "obin-ai/platform", "Obin");

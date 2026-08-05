@@ -681,9 +681,7 @@ impl Sidebar {
             VisibleRow::FocusedHeader
             | VisibleRow::SpaceHeader(_)
             | VisibleRow::RepoHeader(_)
-            | VisibleRow::KindHeader(_) => {
-                None
-            }
+            | VisibleRow::KindHeader(_) => None,
         }
     }
 

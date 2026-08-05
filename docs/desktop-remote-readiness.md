@@ -3,7 +3,9 @@
 _Readiness assessment for [#806][issue-806]. Follow-up to desktop v1 ([#648][issue-648])
 and the BYO-remote work ([#742][issue-742]). Sibling scoping notes:
 [remote-daemon-scoping.md][remote] (#728), [desktop-spike.md][spike] (the boundary),
-[byo-remote-runbook.md][runbook] (the TUI's SSH path)._
+[byo-remote-runbook.md][runbook] (the TUI's SSH path). The running dogfood log
+that this assessment kicks off lives in [desktop-dogfood-log.md][dogfood-log]
+(#837)._
 
 **Question:** run the daemon on a remote box (PTYs, worktrees, provider polling,
 long-running agents) and use the **desktop app** as the local UI over that link —
@@ -203,3 +205,4 @@ remote-box vision real.
 [remote]: remote-daemon-scoping.md
 [spike]: desktop-spike.md
 [runbook]: byo-remote-runbook.md
+[dogfood-log]: desktop-dogfood-log.md

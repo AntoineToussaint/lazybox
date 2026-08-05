@@ -886,17 +886,125 @@ h2 {
 .terminal-shell {
   min-width: 0;
   min-height: 0;
-  padding: 11px 7px 7px 11px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 9px 7px 7px 9px;
 }
 
-.terminal-host,
-.terminal-host .xterm {
+.terminal-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.terminal-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px 9px;
+  border: 1px solid #273039;
+  border-radius: 7px;
+  color: #8ea0a8;
+  background: #10151b;
+  font-family: "SFMono-Regular", "Cascadia Code", monospace;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.terminal-tab:hover {
+  border-color: #3a4650;
+}
+
+.terminal-tab.active {
+  color: #dce5e8;
+  border-color: var(--theme-accent, #82d8bd);
+  background: #15221f;
+}
+
+.terminal-tab .terminal-tab-state {
+  color: #78bba8;
+  font-size: 8px;
+  letter-spacing: 0.04em;
+}
+
+.terminal-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  color: #66757c;
+  background: transparent;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.terminal-tab-close:hover {
+  color: #e47e77;
+  background: #241417;
+}
+
+.terminal-tiles {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  gap: 8px;
+}
+
+.terminal-tile {
+  display: flex;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid #222a31;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.terminal-tile.focused {
+  border-color: var(--theme-accent, #82d8bd);
+}
+
+.terminal-tile-host,
+.terminal-tile-host .xterm {
   width: 100%;
   height: 100%;
 }
 
+.terminal-tile-host {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Focus mode: only the focused tile fills the panel. */
+.terminal-tiles.focus-only .terminal-tile {
+  display: none;
+}
+
+.terminal-tiles.focus-only .terminal-tile.focused {
+  display: flex;
+}
+
+/* Focus mode expands the terminal panel across the whole workspace. */
+.workspace-grid.focus-mode {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workspace-grid.focus-mode .inbox-panel,
+.workspace-grid.focus-mode .activity-panel {
+  display: none;
+}
+
 .terminal-empty {
   color: #526068;
+  grid-row: 1 / 3;
+  place-self: center;
+  text-align: center;
 }
 
 .terminal-empty span {

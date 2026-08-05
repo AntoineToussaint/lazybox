@@ -101,13 +101,12 @@ point that motivates #806 it is already **better** than the TUI:
   detection triggering a resync (`main.ts:1362-1414`). The ring is server-side
   (`crates/server/src/api_gateway.rs:48-49`).
 
-**The one gap:** the desktop renders **exactly one terminal**. It tracks a single
-`activeTerminal` and `attachTerminal` disposes the previous instance first
-(`main.ts:317, 1245, 1327-1337`), so switching workspace tears the terminal down.
-There is no `TerminalStack` equivalent — no tiling, tabs, or focus-mode split (a
-`TileTree` type is generated but unused).
-
-→ Tracked as **[#818][issue-818]**.
+**Closed in [#818][issue-818]:** the desktop now mounts every terminal of the
+selected workspace concurrently — a tile per runner with a tab strip — so an agent
+and a shell (or several agents) stay live side by side without teardown, keyed by
+terminal id in `liveTerminals` (`main.ts`). Focus mode (`.`, or ⌘/Ctrl-`.` from
+inside a terminal) expands the focused tile across the workspace, hiding the inbox
+and activity panels, mirroring the TUI's `TerminalStack` + focus mode.
 
 ## 4. Feature parity — the act-on-work half is missing
 
@@ -171,8 +170,8 @@ The "I hit this and went back to the TUI" list, most-blocking first:
    link bricks at startup. **[#815][issue-815]**
 4. **Automation policies missing** — no merge-on-green / auto-fix / auto-merge, the
    hands-off core of lazybox. **[#817][issue-817]**
-5. **Single terminal only** — no tiles/tabs/focus; switching workspace tears the
-   terminal down. **[#818][issue-818]**
+5. ~~**Single terminal only** — no tiles/tabs/focus; switching workspace tears the
+   terminal down.~~ Closed in **[#818][issue-818]**: concurrent tiles + tabs + focus mode.
 6. **Reconnect robustness** over the remote link (resync parity with the socket
    path). Folded into **[#814][issue-814]**.
 

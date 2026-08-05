@@ -1070,7 +1070,354 @@ describe("credential-free desktop workflow", () => {
 
     expect(element("protocol-notice").hidden).toBe(true);
   });
+
+  it("mounts a tile per workspace terminal and moves focus on tab click", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    // One workspace with two live terminals — an agent and a shell — so
+    // both are visible at once without teardown (TerminalStack parity).
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+            {
+              terminal_id: 8,
+              session_key: "github-o-r-42",
+              kind: "Shell",
+              last_seq: 0,
+              agent_state: null,
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".terminal-tile")).toHaveLength(2),
+    );
+    expect(document.querySelectorAll(".terminal-tab")).toHaveLength(2);
+    // The lowest-id terminal (the agent) is focused first.
+    expect(element("terminal-title").textContent).toContain("codex");
+    expect(tiles()[0]?.classList.contains("focused")).toBe(true);
+
+    // Clicking the shell tab moves focus to its tile.
+    const shellTab = [...document.querySelectorAll<HTMLElement>(".terminal-tab")].find(
+      (tab) => tab.textContent?.includes("shell"),
+    );
+    shellTab?.click();
+    expect(element("terminal-title").textContent).toContain("shell");
+    expect(tiles()[1]?.classList.contains("focused")).toBe(true);
+    expect(tiles()[0]?.classList.contains("focused")).toBe(false);
+  });
+
+  it("toggles focus mode with `.` and back off again", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".terminal-tile")).toHaveLength(1),
+    );
+
+    const grid = document.querySelector(".workspace-grid")!;
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "." }));
+    expect(grid.classList.contains("focus-mode")).toBe(true);
+    expect(element("terminal").classList.contains("focus-only")).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "." }));
+    expect(grid.classList.contains("focus-mode")).toBe(false);
+    expect(element("terminal").classList.contains("focus-only")).toBe(false);
+  });
+
+  it("re-focusing the already-focused tile does no layout/resize work", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+            {
+              terminal_id: 8,
+              session_key: "github-o-r-42",
+              kind: "Shell",
+              last_seq: 0,
+              agent_state: null,
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".terminal-tile")).toHaveLength(2),
+    );
+    // Let the initial layout's debounced resize settle.
+    await settle();
+    const before = terminalFrameCount();
+
+    // A mousedown inside the already-focused (agent) tile must not relayout —
+    // reflowing the DOM here would collapse an in-progress text selection.
+    tiles()[0]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await settle();
+    expect(terminalFrameCount()).toBe(before);
+
+    // Focusing a different tile is a real change, so it does lay out + resize.
+    tiles()[1]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await settle();
+    expect(terminalFrameCount()).toBeGreaterThan(before);
+  });
+
+  it("renders each tab as a role=tab div with a nested close button", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(document.querySelector(".terminal-tab")).not.toBeNull(),
+    );
+
+    const tab = document.querySelector<HTMLElement>(".terminal-tab")!;
+    // Not a <button>, so the close <button> can nest without invalid markup.
+    expect(tab.tagName).toBe("DIV");
+    expect(tab.getAttribute("role")).toBe("tab");
+    const close = tab.querySelector<HTMLElement>(".terminal-tab-close")!;
+    expect(close.tagName).toBe("BUTTON");
+
+    // Close still works: it sends a frame and does not bubble a tab focus.
+    const before = terminalFrameCount();
+    (close as HTMLButtonElement).click();
+    await settle();
+    expect(terminalFrameCount()).toBeGreaterThan(before);
+  });
+
+  it("defaults focus to a live terminal, not a lower-id exited one", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    // Lowest id (7) is an exited agent; the live agent is id 8.
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: { Exited: { code: 0 } },
+            },
+            {
+              terminal_id: 8,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".terminal-tile")).toHaveLength(2),
+    );
+
+    // Focus lands on the running terminal (id 8), not the exited id 7
+    // (which `wanted[0]` would have picked before the fix).
+    expect(
+      document
+        .querySelector<HTMLElement>(".terminal-tile.focused")
+        ?.dataset.terminalId,
+    ).toBe("8");
+  });
+
+  it("switches workspace (sending FocusWorkspace) on a cross-workspace focus request", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42), pr(43)],
+          terminals: [
+            {
+              terminal_id: 7,
+              session_key: "github-o-r-42",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+            {
+              terminal_id: 8,
+              session_key: "github-o-r-43",
+              kind: { Agent: "codex" },
+              last_seq: 0,
+              agent_state: "Working",
+            },
+          ],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42", "github-o-r-43"]));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+
+    // The daemon asks to focus #43's terminal (spawn-of-existing-singleton).
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { TerminalFocusRequested: { terminal_id: 8 } },
+    });
+
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#43"),
+    );
+    expect(
+      commandCalls().some(
+        (command) =>
+          typeof command === "object" &&
+          command !== null &&
+          "FocusWorkspace" in command &&
+          (command as { FocusWorkspace: { session_key: string } })
+            .FocusWorkspace.session_key === "github-o-r-43",
+      ),
+    ).toBe(true);
+  });
 });
+
+// Count the terminal frames the frontend has sent — resize frames land
+// here, so a spurious relayout shows up as extra `send_terminal_frame`s.
+function terminalFrameCount(): number {
+  return harness.invoke.mock.calls.filter(
+    ([command]) => command === "send_terminal_frame",
+  ).length;
+}
+
+// Wait out the 80ms debounced resize plus any queued microtasks.
+function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 120));
+}
+
+// A minimal live daemon: authenticated, one repo scope, empty inbox until
+// the test pushes a Snapshot.
+function mockDaemon(): void {
+  harness.invoke.mockImplementation((command: string) => {
+    if (command === "desktop_setup_state") {
+      return Promise.resolve(
+        settingsStateFixture({ selected_scopes: ["github:o"] }),
+      );
+    }
+    if (command === "desktop_info") {
+      return Promise.resolve({
+        protocol_version: 1,
+        max_terminal_frame_bytes: 2048,
+        max_terminal_write_bytes: 1024,
+        agents: ["codex"],
+        default_agent: "codex",
+        repositories: [],
+      });
+    }
+    if (command === "list_workspaces") {
+      return Promise.resolve({ workspaces: [], warnings: [] });
+    }
+    if (command === "read_terminal_data") {
+      return new Promise<Uint8Array>(() => {});
+    }
+    return Promise.resolve();
+  });
+}
+
+function tiles(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>(".terminal-tile")];
+}
 
 // Stand-in for the grouped view `src-tauri` computes and pushes. In
 // production the shared tui-core logic orders these rows; the test only

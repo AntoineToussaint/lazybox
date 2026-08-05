@@ -1794,9 +1794,10 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Resolve a click target (URL / path / issue ref) at screen cell
     /// `(col, row)` in the terminal pane and open it, returning `true`
-    /// when something was opened. Shared by the right-click path and the
-    /// modifier + left-click path (#842); the caller falls through to its
-    /// own routing when this returns `false`.
+    /// when something was opened. The modifier + left-click path (#842)
+    /// uses this and falls through to ordinary left-click routing on
+    /// `false`; the right-click path resolves inline instead, because it
+    /// also has to forward a miss to the PTY as a mouse report.
     fn try_open_terminal_click_target(&mut self, col: u16, row: u16) -> bool {
         let Some(target) = self
             .terminals
@@ -1890,11 +1891,15 @@ fn edge_scroll_delta(rect: Rect, row: u16) -> isize {
 }
 
 /// Does this mouse event carry a modifier that means "open the link
-/// under the cursor" (#842)? Alt / Ctrl / Cmd (Super) — the modifiers an
-/// emulator forwards in an SGR mouse report far more reliably than a bare
-/// right button. Shift is excluded: emulators commonly reserve it to
-/// force host-native selection, so it rarely reaches the app and would
-/// clash with selection-extend conventions.
+/// under the cursor" (#842)? Alt and Ctrl are the practical ones: an SGR
+/// mouse report encodes only shift/alt/ctrl, and both are forwarded far
+/// more reliably than a bare right button (which many emulators bind to a
+/// native context menu). Super (Cmd) is accepted too so the handler
+/// honors it if a protocol ever reports it, but standard mouse reports
+/// don't carry it — don't rely on Cmd-click. Shift is excluded:
+/// emulators commonly reserve it to force host-native selection, so it
+/// rarely reaches the app and would clash with selection-extend
+/// conventions.
 fn link_open_modifier(mods: crossterm::event::KeyModifiers) -> bool {
     use crossterm::event::KeyModifiers;
     mods.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER)

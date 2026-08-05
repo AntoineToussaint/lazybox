@@ -24,6 +24,7 @@ import {
   SNOOZE_PRESETS,
   shouldHandleWorkspaceEnter,
   sortModeLabel,
+  supportsTrackMain,
   taskReference,
   type TaskSignal,
   unreadCount,
@@ -371,9 +372,19 @@ const replyDrafts = new ReplyDrafts();
  * Unsaved notes edits, keyed by workspace. Distinct from `ReplyDrafts`
  * because an empty string is a valid saved state for notes, so absence
  * (fall back to `Workspace.notes`) must be distinguishable from a
- * deliberately-cleared draft.
+ * deliberately-cleared draft. Only *dirty* edits are stored (see
+ * `saveNotesDraft`), so an untouched workspace always reflects the latest
+ * broadcast `Workspace.notes` rather than a pinned stale copy.
  */
 const notesDrafts = new Map<string, string>();
+/**
+ * In-flight automation-policy mutations, keyed by
+ * `policyKey(workspaceKey, field)` → the serialized *requested* value.
+ * A control with a pending entry stays optimistic across renders (an
+ * unrelated `WorkspaceUpserted` echo can't revert it); `renderAutomation`
+ * clears the entry once the broadcast state matches the request.
+ */
+const pendingPolicies = new Map<string, string>();
 const pendingLaunches = new Set<string>();
 let focusRequestedSession: string | null = null;
 // Every terminal of the selected workspace is mounted concurrently as a
@@ -1254,6 +1265,36 @@ function renderWorkspace(): void {
   }
 }
 
+function policyKey(workspaceKey: string, field: string): string {
+  return `${workspaceKey}\0${field}`;
+}
+
+/**
+ * Set a checkbox from committed state, but keep the user's optimistic
+ * value while a mutation is in flight. Clears the pending marker once the
+ * broadcast state confirms the request, so an interleaving upsert can
+ * never revert the toggle mid-flight.
+ */
+function renderPolicyToggle(
+  toggle: HTMLInputElement,
+  workspaceKey: string,
+  field: string,
+  committed: boolean,
+): void {
+  const key = policyKey(workspaceKey, field);
+  const requested = pendingPolicies.get(key);
+  if (requested === undefined) {
+    toggle.checked = committed;
+    return;
+  }
+  if (requested === String(committed)) {
+    pendingPolicies.delete(key);
+    toggle.checked = committed;
+  } else {
+    toggle.checked = requested === "true";
+  }
+}
+
 /**
  * Reflect the workspace's persisted automation state onto the detail
  * pane's controls. Reads only the fields the daemon already broadcasts
@@ -1262,11 +1303,25 @@ function renderWorkspace(): void {
  * `changeSelectedWorkspace`, so this never touches `notesBody`.
  */
 function renderAutomation(workspace: Workspace, task: Task | null): void {
-  autoMergeToggle.checked = workspace.auto_merge_on_green;
-  autoMergeToggle.disabled = workspace.pr === null;
-  trackMainToggle.checked = workspace.track_main;
-  autoFixCiSelect.value = workspace.policies.auto_fix_ci;
-  autoFixConflictSelect.value = workspace.policies.auto_fix_conflict;
+  const hasPr = workspace.pr !== null;
+  renderPolicyToggle(
+    autoMergeToggle,
+    workspace.key,
+    "auto_merge",
+    workspace.auto_merge_on_green,
+  );
+  autoMergeToggle.disabled = !hasPr;
+  renderPolicyToggle(
+    trackMainToggle,
+    workspace.key,
+    "track_main",
+    workspace.track_main,
+  );
+  trackMainToggle.disabled = !supportsTrackMain(workspace);
+  renderAutoFixPolicies(workspace);
+  // Auto-fix targets a PR's CI failures and merge conflicts.
+  autoFixCiSelect.disabled = !hasPr;
+  autoFixConflictSelect.disabled = !hasPr;
 
   const snoozed = workspace.snoozed_until !== null;
   unsnoozeButton.classList.toggle("hidden", !snoozed);
@@ -1275,6 +1330,29 @@ function renderAutomation(workspace: Workspace, task: Task | null): void {
     : "";
 
   syncButton.disabled = task === null;
+}
+
+/**
+ * Render the atomic auto-fix pair, keeping both selects on the requested
+ * values while a `SetAutoFixPolicies` is in flight so an interleaving
+ * upsert can't revert one arm — which would otherwise let the next edit
+ * to the other arm clobber the in-flight change.
+ */
+function renderAutoFixPolicies(workspace: Workspace): void {
+  const key = policyKey(workspace.key, "auto_fix");
+  const requested = pendingPolicies.get(key);
+  const committed = `${workspace.policies.auto_fix_ci}\0${workspace.policies.auto_fix_conflict}`;
+  if (requested === undefined || requested === committed) {
+    if (requested === committed) {
+      pendingPolicies.delete(key);
+    }
+    autoFixCiSelect.value = workspace.policies.auto_fix_ci;
+    autoFixConflictSelect.value = workspace.policies.auto_fix_conflict;
+    return;
+  }
+  const [ci, conflict] = requested.split("\0");
+  autoFixCiSelect.value = ci as PolicyArm;
+  autoFixConflictSelect.value = conflict as PolicyArm;
 }
 
 function formatSnoozeUntil(iso: string): string {
@@ -1334,7 +1412,7 @@ function changeSelectedWorkspace(key: string | null): boolean {
   }
   if (selectedKey !== null) {
     replyDrafts.save(selectedKey, replyBody.value);
-    notesDrafts.set(selectedKey, notesBody.value);
+    saveNotesDraft(selectedKey, notesBody.value);
   }
   closeActionsMenu();
   selectedKey = key;
@@ -1343,9 +1421,26 @@ function changeSelectedWorkspace(key: string | null): boolean {
   return true;
 }
 
+/**
+ * Retain a notes draft only when it diverges from the saved value.
+ * Storing an untouched value would pin it and shadow later broadcast
+ * updates to `Workspace.notes` (e.g. an edit made from the TUI).
+ */
+function saveNotesDraft(key: string, value: string): void {
+  if (value === savedNotes(key)) {
+    notesDrafts.delete(key);
+  } else {
+    notesDrafts.set(key, value);
+  }
+}
+
+function savedNotes(key: string): string {
+  return workspaces.get(key)?.notes ?? "";
+}
+
 /** The notes text to show: an unsaved draft if present, else the saved value. */
 function notesValueFor(key: string): string {
-  return notesDrafts.get(key) ?? workspaces.get(key)?.notes ?? "";
+  return notesDrafts.get(key) ?? savedNotes(key);
 }
 
 /** True when the current selection still points at a present workspace. */
@@ -2462,52 +2557,72 @@ async function markSelectedRead(): Promise<void> {
   );
 }
 
+/**
+ * Send a policy mutation while marking the control pending so
+ * `renderAutomation` keeps it optimistic until the confirming broadcast.
+ * On failure the pending marker is dropped — but only if a later edit
+ * hasn't already superseded it — and the control reverts to committed
+ * state.
+ */
+async function runPolicyMutation(
+  workspaceKey: string,
+  field: string,
+  requested: string,
+  command: LazyboxCommand,
+  pendingMessage: string,
+  successMessage: string,
+): Promise<void> {
+  const key = policyKey(workspaceKey, field);
+  pendingPolicies.set(key, requested);
+  const ok = await runCommands([command], pendingMessage, successMessage);
+  if (!ok && pendingPolicies.get(key) === requested) {
+    pendingPolicies.delete(key);
+    renderWorkspace();
+  }
+}
+
 async function setAutoMerge(enabled: boolean): Promise<void> {
   if (selectedKey === null) {
     return;
   }
-  const ok = await runCommands(
-    [setAutoMergeOnGreenCommand(selectedKey, enabled)],
+  await runPolicyMutation(
+    selectedKey,
+    "auto_merge",
+    String(enabled),
+    setAutoMergeOnGreenCommand(selectedKey, enabled),
     enabled ? "Arming auto-merge on green…" : "Disarming auto-merge…",
     enabled ? "Auto-merge on green armed." : "Auto-merge on green disarmed.",
   );
-  if (!ok) {
-    renderWorkspace();
-  }
 }
 
 async function setTrackMain(enabled: boolean): Promise<void> {
   if (selectedKey === null) {
     return;
   }
-  const ok = await runCommands(
-    [setTrackMainCommand(selectedKey, enabled)],
+  await runPolicyMutation(
+    selectedKey,
+    "track_main",
+    String(enabled),
+    setTrackMainCommand(selectedKey, enabled),
     enabled ? "Arming track main…" : "Disarming track main…",
     enabled ? "Track main armed." : "Track main disarmed.",
   );
-  if (!ok) {
-    renderWorkspace();
-  }
 }
 
 async function applyAutoFixPolicies(): Promise<void> {
   if (selectedKey === null) {
     return;
   }
-  const ok = await runCommands(
-    [
-      setAutoFixPoliciesCommand(
-        selectedKey,
-        autoFixCiSelect.value as PolicyArm,
-        autoFixConflictSelect.value as PolicyArm,
-      ),
-    ],
+  const ci = autoFixCiSelect.value as PolicyArm;
+  const conflict = autoFixConflictSelect.value as PolicyArm;
+  await runPolicyMutation(
+    selectedKey,
+    "auto_fix",
+    `${ci}\0${conflict}`,
+    setAutoFixPoliciesCommand(selectedKey, ci, conflict),
     "Updating auto-fix policies…",
     "Auto-fix policies updated.",
   );
-  if (!ok) {
-    renderWorkspace();
-  }
 }
 
 async function snoozeSelected(): Promise<void> {
@@ -2559,7 +2674,9 @@ async function saveNotes(): Promise<void> {
       "Notes saved.",
     );
     if (ok) {
-      notesDrafts.set(workspaceKey, notes);
+      // Saved: drop the draft so the control follows the broadcast
+      // `Workspace.notes` once its echo lands, instead of pinning a copy.
+      notesDrafts.delete(workspaceKey);
     }
   } finally {
     notesSaveButton.disabled = false;

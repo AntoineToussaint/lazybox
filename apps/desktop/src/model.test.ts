@@ -19,6 +19,7 @@ import {
   SNOOZE_PRESETS,
   shouldHandleWorkspaceEnter,
   sortModeLabel,
+  supportsTrackMain,
   unreadCount,
   visibleUnreadCount,
 } from "./model";
@@ -361,6 +362,31 @@ describe("workspace model", () => {
     expect(projectKeyLabel("local-scratch")).toBe("scratch");
     expect(projectKeyLabel("linear-team123")).toBe("team123");
     expect(projectKeyLabel("standalone")).toBe("standalone");
+  });
+
+  it("allows track-main only for a repo-scoped GitHub worktree without a PR", () => {
+    const base = workspace("w", null);
+    base.project_key = "github-o-r";
+
+    // GitHub-scoped, no PR, provisioned worktree → supported.
+    expect(supportsTrackMain(base)).toBe(true);
+
+    // A PR branch can't fast-forward onto main.
+    expect(supportsTrackMain({ ...base, pr: task("PR") })).toBe(false);
+
+    // A linked checkout sits on the user's own clone/branch.
+    expect(
+      supportsTrackMain({ ...base, linked_checkout: "/home/me/o/r" }),
+    ).toBe(false);
+
+    // Non-GitHub / repo-less rows have no origin/<default> to track.
+    expect(supportsTrackMain({ ...base, project_key: "linear-team" })).toBe(
+      false,
+    );
+    expect(supportsTrackMain({ ...base, project_key: "local-scratch" })).toBe(
+      false,
+    );
+    expect(supportsTrackMain({ ...base, project_key: null })).toBe(false);
   });
 
   it("resolves snooze presets to absolute deadlines from a fixed now", () => {

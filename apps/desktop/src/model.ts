@@ -319,6 +319,35 @@ export function isTerminalTaskState(task: Task): boolean {
   return task.state === "Merged" || task.state === "Closed";
 }
 
+/**
+ * Whether "track main" (#535) can apply to this workspace, mirroring
+ * `Workspace::supports_track_main` on the daemon: a GitHub upstream and a
+ * lazybox-provisioned worktree, and **no PR** (a PR branch is
+ * simultaneously ahead of and behind `main`, so a fast-forward can never
+ * apply). Repo-less rows and linked checkouts have no `origin/<default>`
+ * to fast-forward against.
+ */
+export function supportsTrackMain(workspace: Workspace): boolean {
+  return (
+    workspace.pr === null &&
+    workspace.linked_checkout === null &&
+    projectKeySource(workspace.project_key) === "github"
+  );
+}
+
+/**
+ * The source prefix of a ProjectKey (`github` / `linear` / `local`, or
+ * `""` when unprefixed), matching `ProjectKey::source_prefix` — the
+ * substring before the first `-`.
+ */
+function projectKeySource(key: string | null): string {
+  if (key === null) {
+    return "";
+  }
+  const dash = key.indexOf("-");
+  return dash === -1 ? "" : key.slice(0, dash);
+}
+
 export function unreadCount(workspace: Workspace): number {
   const unseenCount = Math.max(
     0,

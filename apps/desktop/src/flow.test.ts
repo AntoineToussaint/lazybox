@@ -450,30 +450,7 @@ describe("credential-free desktop workflow", () => {
   });
 
   it("sends automation, snooze, sync, and notes commands from the detail pane", async () => {
-    harness.invoke.mockImplementation((command: string) => {
-      if (command === "desktop_setup_state") {
-        return Promise.resolve(
-          settingsStateFixture({ selected_scopes: ["github:o"] }),
-        );
-      }
-      if (command === "desktop_info") {
-        return Promise.resolve({
-          protocol_version: 1,
-          max_terminal_frame_bytes: 2048,
-          max_terminal_write_bytes: 1024,
-          agents: ["codex"],
-          default_agent: "codex",
-          repositories: [],
-        });
-      }
-      if (command === "list_workspaces") {
-        return Promise.resolve({ workspaces: [], warnings: [] });
-      }
-      if (command === "read_terminal_data") {
-        return new Promise<Uint8Array>(() => {});
-      }
-      return Promise.resolve();
-    });
+    mockAutomationHarness();
 
     vi.resetModules();
     await import("./main");
@@ -495,14 +472,12 @@ describe("credential-free desktop workflow", () => {
     expect(select("auto-fix-ci-select").value).toBe("Default");
     expect(button("unsnooze-button").classList.contains("hidden")).toBe(true);
     expect(button("sync-button").disabled).toBe(false);
+    // Track-main can't apply to a PR branch, so it's disabled here.
+    expect(input("#track-main-toggle").disabled).toBe(true);
 
     const autoMerge = input("#auto-merge-toggle");
     autoMerge.checked = true;
     autoMerge.dispatchEvent(new Event("change", { bubbles: true }));
-
-    const trackMain = input("#track-main-toggle");
-    trackMain.checked = true;
-    trackMain.dispatchEvent(new Event("change", { bubbles: true }));
 
     const ci = select("auto-fix-ci-select");
     ci.value = "Arm";
@@ -518,9 +493,6 @@ describe("credential-free desktop workflow", () => {
     await vi.waitFor(() => {
       expect(commandCalls()).toContainEqual({
         SetAutoMergeOnGreen: { session_key: "github-o-r-42", enabled: true },
-      });
-      expect(commandCalls()).toContainEqual({
-        SetTrackMain: { session_key: "github-o-r-42", enabled: true },
       });
       expect(commandCalls()).toContainEqual({
         SetAutoFixPolicies: {
@@ -545,6 +517,153 @@ describe("credential-free desktop workflow", () => {
     );
     expect(snooze?.Snooze.session_key).toBe("github-o-r-42");
     expect(Number.isNaN(Date.parse(snooze?.Snooze.until ?? ""))).toBe(false);
+  });
+
+  it("shows notes edited elsewhere instead of pinning an untouched draft", async () => {
+    mockAutomationHarness();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    const withNotes = pr(42);
+    withNotes.notes = "saved locally";
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { Snapshot: { workspaces: [withNotes, pr(43)], terminals: [] } },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42", "github-o-r-43"]));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+    expect(notesField().value).toBe("saved locally");
+
+    // Leave #42 WITHOUT editing its notes.
+    selectWorkspaceRow("PR o/r#43");
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#43"),
+    );
+
+    // Another client edits #42's notes; the daemon broadcasts the change.
+    const edited = pr(42);
+    edited.notes = "edited in the TUI";
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { WorkspaceUpserted: edited },
+    });
+
+    // Returning shows the upstream value, not a stale pinned draft.
+    selectWorkspaceRow("PR o/r#42");
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+    expect(notesField().value).toBe("edited in the TUI");
+  });
+
+  it("keeps a policy change optimistic when an unrelated upsert interleaves", async () => {
+    mockAutomationHarness();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { Snapshot: { workspaces: [pr(42)], terminals: [] } },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+
+    // Arm auto-merge and auto-fix CI (both in flight, no echo yet).
+    const autoMerge = input("#auto-merge-toggle");
+    autoMerge.checked = true;
+    autoMerge.dispatchEvent(new Event("change", { bubbles: true }));
+    const ci = select("auto-fix-ci-select");
+    ci.value = "Arm";
+    ci.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(
+        commandCalls().some(
+          (c) => typeof c === "object" && c !== null && "SetAutoFixPolicies" in c,
+        ),
+      ).toBe(true),
+    );
+
+    // An unrelated poll re-broadcasts the workspace with the OLD (unpersisted)
+    // automation state but a changed title, proving a render ran.
+    const stale = pr(42);
+    (stale.pr as { title: string }).title = "Poll refresh";
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { WorkspaceUpserted: stale },
+    });
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("Poll refresh"),
+    );
+
+    // The in-flight controls must NOT have been reverted to committed state.
+    expect(input("#auto-merge-toggle").checked).toBe(true);
+    expect(select("auto-fix-ci-select").value).toBe("Arm");
+
+    // Changing the other auto-fix arm must carry the still-optimistic CI arm,
+    // not a value the interleaving upsert clobbered back to Default.
+    const conflict = select("auto-fix-conflict-select");
+    conflict.value = "Arm";
+    conflict.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(lastAutoFixCommand()).toEqual({
+        SetAutoFixPolicies: {
+          session_key: "github-o-r-42",
+          ci: "Arm",
+          conflict: "Arm",
+        },
+      }),
+    );
+  });
+
+  it("gates PR-only automation controls and enables track-main on a scratch workspace", async () => {
+    mockAutomationHarness();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    // A GitHub, repo-scoped, no-PR workspace (issue tracked, scratch branch).
+    const scratch = pr(42);
+    scratch.gh_issues = [scratch.pr];
+    scratch.pr = null;
+    scratch.project_key = "github-o-r";
+    scratch.linked_checkout = null;
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { Snapshot: { workspaces: [scratch], terminals: [] } },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+
+    // Auto-merge / auto-fix target a PR — disabled here.
+    expect(input("#auto-merge-toggle").disabled).toBe(true);
+    expect(select("auto-fix-ci-select").disabled).toBe(true);
+    expect(select("auto-fix-conflict-select").disabled).toBe(true);
+    // Track-main applies to a no-PR GitHub worktree — enabled, and sends.
+    expect(input("#track-main-toggle").disabled).toBe(false);
+    const trackMain = input("#track-main-toggle");
+    trackMain.checked = true;
+    trackMain.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() =>
+      expect(commandCalls()).toContainEqual({
+        SetTrackMain: { session_key: "github-o-r-42", enabled: true },
+      }),
+    );
+    // Sync targets the upstream item (the issue) — enabled.
+    expect(button("sync-button").disabled).toBe(false);
   });
 
   it("attaches the replacement terminal when the selected workspace is removed", async () => {
@@ -1830,6 +1949,51 @@ function commandCalls(): unknown[] {
   return harness.invoke.mock.calls
     .filter(([command]) => command === "send_command")
     .map(([, args]) => (args as { command: unknown }).command);
+}
+
+// A configured, credential-satisfied daemon with an empty inbox — the
+// baseline for detail-pane automation tests, which drive state entirely
+// through pushed event Frames.
+function mockAutomationHarness(): void {
+  harness.invoke.mockImplementation((command: string) => {
+    if (command === "desktop_setup_state") {
+      return Promise.resolve(
+        settingsStateFixture({ selected_scopes: ["github:o"] }),
+      );
+    }
+    if (command === "desktop_info") {
+      return Promise.resolve({
+        protocol_version: 1,
+        max_terminal_frame_bytes: 2048,
+        max_terminal_write_bytes: 1024,
+        agents: ["codex"],
+        default_agent: "codex",
+        repositories: [],
+      });
+    }
+    if (command === "list_workspaces") {
+      return Promise.resolve({ workspaces: [], warnings: [] });
+    }
+    if (command === "read_terminal_data") {
+      return new Promise<Uint8Array>(() => {});
+    }
+    return Promise.resolve();
+  });
+}
+
+function notesField(): HTMLTextAreaElement {
+  return element("notes-body") as HTMLTextAreaElement;
+}
+
+function lastAutoFixCommand(): unknown {
+  return commandCalls()
+    .filter(
+      (command) =>
+        typeof command === "object" &&
+        command !== null &&
+        "SetAutoFixPolicies" in command,
+    )
+    .at(-1);
 }
 
 function replyCommands(): unknown[] {

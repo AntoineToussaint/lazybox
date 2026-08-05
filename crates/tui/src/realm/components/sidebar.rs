@@ -343,6 +343,7 @@ impl Sidebar {
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
         pinned_repos: Vec<String>,
+        focused_workspaces: Vec<lazybox_core::SessionKey>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -350,6 +351,7 @@ impl Sidebar {
             attention,
             collapsed_repos,
             pinned_repos,
+            focused_workspaces,
             default_agent,
             display,
         );
@@ -526,6 +528,12 @@ impl Sidebar {
     /// key. Returns `(repo, now_pinned)` for the footer notice.
     pub fn toggle_pin_at_cursor(&mut self) -> Option<(String, bool)> {
         self.inner.toggle_pin_at_cursor()
+    }
+
+    /// Star / unstar the cursor's workspace. Same effect as the `*`
+    /// key. Returns `(label, now_focused)` for the footer notice.
+    pub fn toggle_focus_at_cursor(&mut self) -> Option<(String, bool)> {
+        self.inner.toggle_focus_at_cursor()
     }
 
     /// Replace the active filter set from the filter menu's picks.

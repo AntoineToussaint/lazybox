@@ -192,7 +192,7 @@ export function kindHeaderLabel(kind: "Pr" | "Issue" | "Other"): string {
 export function orderedWorkspaceKeys(view: ComputeOutcome): string[] {
   const keys: string[] = [];
   for (const row of view.visible) {
-    if ("Workspace" in row) {
+    if (typeof row === "object" && "Workspace" in row) {
       keys.push(row.Workspace);
     }
   }
@@ -201,7 +201,9 @@ export function orderedWorkspaceKeys(view: ComputeOutcome): string[] {
 
 /** The repo label a `RepoHeader` row carries, else null. */
 export function repoHeaderLabel(row: VisibleRow): string | null {
-  return "RepoHeader" in row ? row.RepoHeader : null;
+  return typeof row === "object" && "RepoHeader" in row
+    ? row.RepoHeader
+    : null;
 }
 
 export class ReplyDrafts {

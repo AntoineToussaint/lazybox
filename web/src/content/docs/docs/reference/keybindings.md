@@ -79,6 +79,7 @@ Manage the sidebar list itself — only while the sidebar has focus.
 | `#` | find | Open the header search box — an incremental search across every repo group at once. |
 | `Space` | collapse group | Collapse or expand the repo group the cursor is in — fold a project's workspaces into a single header row, and unfold it again. |
 | `p` | pin group | Pin or unpin the cursor's repo group to the top of the sidebar. |
+| `*` | focus | Star or unstar the cursor's workspace, lifting it into a ★ Focused section at the very top of the sidebar — a hand-picked shortlist of PRs/issues across repos, kept together above the repo groups. |
 | `Right \| l` | focus right | Move focus one pane to the right — from the sidebar to the activity pane, or straight to the terminal when the activity pane is hidden. |
 | `v` | select | Toggle the focused workspace in/out of the multi-select set. |
 | `Shift-B` | broadcast | Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. |

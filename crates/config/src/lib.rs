@@ -414,6 +414,13 @@ pub struct UiSection {
     /// order the user pinned in *is* the display order.
     #[serde(default)]
     pub pinned_repos: Vec<String>,
+    /// Workspace keys the user has starred ("focused"), in focus order.
+    /// Starred workspaces are lifted into a synthetic `★ Focused`
+    /// section at the top of the sidebar, across repos. A `Vec` — not a
+    /// set — because the order the user starred in *is* the display
+    /// order, mirroring [`Self::pinned_repos`] at workspace granularity.
+    #[serde(default)]
+    pub focused_workspaces: Vec<String>,
     /// Sidebar column width as a percentage of total. None = use
     /// the default (40%).
     pub sidebar_pct: Option<u16>,
@@ -559,6 +566,7 @@ impl Default for UiSection {
         Self {
             collapsed_repos: std::collections::BTreeSet::new(),
             pinned_repos: Vec::new(),
+            focused_workspaces: Vec::new(),
             keymap_preset: None,
             theme: None,
             sidebar_pct: None,
@@ -2402,6 +2410,31 @@ repos:
             reparsed.ui.pinned_repos,
             vec!["owner/b".to_string(), "owner/a".to_string()],
             "pin order is preserved across a round-trip",
+        );
+    }
+
+    /// `ui.focused_workspaces` is empty on a fresh config and a starred
+    /// shortlist survives a save/load round-trip *in order* — the
+    /// persistence half of the sidebar star/focus shortcut (#846).
+    #[test]
+    fn focused_workspaces_default_empty_and_round_trip_preserves_order() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            cfg.ui.focused_workspaces.is_empty(),
+            "no starred workspaces on a fresh config"
+        );
+
+        let mut cfg = Config::default();
+        cfg.ui.focused_workspaces = vec!["github:owner/r#2".into(), "github:owner/r#1".into()];
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(
+            reparsed.ui.focused_workspaces,
+            vec![
+                "github:owner/r#2".to_string(),
+                "github:owner/r#1".to_string()
+            ],
+            "focus order is preserved across a round-trip",
         );
     }
 

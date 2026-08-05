@@ -1195,6 +1195,13 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                 }
             }
+            Action::ToggleFocusWorkspace => {
+                if let Some((label, focused)) = self.sidebar.toggle_focus_at_cursor() {
+                    let verb = if focused { "focused" } else { "unfocused" };
+                    self.flash_info(format!("{verb} {label}"));
+                    self.redraw = true;
+                }
+            }
             Action::SelectWorkspace => {
                 // Toggle the cursor row's broadcast mark. The notice
                 // names the running count + the broadcast key so the

@@ -40,7 +40,7 @@ use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // The inbox view-model types + grouping/sort/filter/search logic moved
 // to the client-free `lazybox_tui_core::inbox` module (#731) so the
@@ -102,6 +102,13 @@ pub struct Sidebar {
     /// algorithmic order. Persisted to `ui.pinned_repos`. A `Vec`, not
     /// a set — the order the user pinned in is the display order.
     pinned_repos: Vec<String>,
+    /// Workspace keys the user has starred ("focused"), in focus order.
+    /// Starred workspaces are lifted into the synthetic `★ Focused`
+    /// section at the top of the sidebar, across repos. Persisted to
+    /// `ui.focused_workspaces`. A `Vec`, not a set — the order the user
+    /// starred in is the display order, mirroring `pinned_repos` at
+    /// workspace granularity.
+    focused_workspaces: Vec<SessionKey>,
     /// Per-repo counters computed during `recompute_visible`. Keys
     /// are the same display strings used by `VisibleRow::RepoHeader`.
     repo_summaries: BTreeMap<String, RepoSummary>,
@@ -299,6 +306,7 @@ impl Sidebar {
             visible: Vec::new(),
             collapsed_repos: BTreeSet::new(),
             pinned_repos: Vec::new(),
+            focused_workspaces: Vec::new(),
             repo_summaries: BTreeMap::new(),
             cursor: 0,
             scroll: 0,
@@ -625,12 +633,23 @@ impl Sidebar {
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: BTreeSet<String>,
         pinned_repos: Vec<String>,
+        focused_workspaces: Vec<SessionKey>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
         self.pinned_repos = pinned_repos;
+        // `ui.focused_workspaces` is a user-editable file, so normalize
+        // it at this boundary: a duplicate key would otherwise render the
+        // same workspace twice in the section AND break unstar (which
+        // removes only the first occurrence, leaving the row starred).
+        // Dedup preserving first-seen (focus) order.
+        let mut seen = HashSet::new();
+        self.focused_workspaces = focused_workspaces
+            .into_iter()
+            .filter(|k| seen.insert(k.clone()))
+            .collect();
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
@@ -644,7 +663,9 @@ impl Sidebar {
         match self.visible.get(self.cursor)? {
             VisibleRow::Workspace(k) => Some(k),
             VisibleRow::Session { workspace, .. } => Some(workspace),
-            VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => None,
+            VisibleRow::FocusedHeader | VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => {
+                None
+            }
         }
     }
 
@@ -860,6 +881,7 @@ impl Sidebar {
             // through every workspace above it.
             Some(VisibleRow::Workspace(_))
             | Some(VisibleRow::Session { .. })
+            | Some(VisibleRow::FocusedHeader)
             | Some(VisibleRow::RepoHeader(_))
             | Some(VisibleRow::KindHeader(_)) => {
                 self.set_cursor(idx);
@@ -1425,6 +1447,9 @@ impl Sidebar {
                     crate::components::visible_rows::project_label(p, &self.workspaces) == *name
                 })
                 .map(|p| p.key.clone()),
+            // The `★ Focused` header isn't a project — starring is a
+            // cross-repo shortlist, not a group you create workspaces in.
+            VisibleRow::FocusedHeader => None,
             // Kind headers (PRs / Issues) don't belong to a single
             // project — they partition workspaces within a project,
             // so the parent project is whichever RepoHeader came
@@ -1810,7 +1835,9 @@ impl Sidebar {
                     VisibleRow::RepoHeader(name) => Some(name.clone()),
                     _ => None,
                 }),
-            None => None,
+            // The `★ Focused` header (and rows lifted under it) don't
+            // belong to a repo group — pin / collapse no-op there.
+            Some(VisibleRow::FocusedHeader) | None => None,
         }
     }
 
@@ -1904,6 +1931,84 @@ impl Sidebar {
     /// render to draw the pin marker).
     pub fn is_repo_pinned(&self, name: &str) -> bool {
         self.pinned_repos.iter().any(|r| r == name)
+    }
+
+    /// Star / unstar the workspace under the cursor (`*`), lifting it
+    /// into (or out of) the `★ Focused` section at the top. A fresh
+    /// star is appended so focus order tracks the order the user
+    /// starred in. Returns `(label, now_focused)` so the caller can
+    /// surface a footer notice, or `None` when the cursor isn't on a
+    /// workspace / session row.
+    ///
+    /// Like [`Self::toggle_pin_at_cursor`] this only reorders — no rows
+    /// are hidden — so `recompute_visible` keeps the cursor on the same
+    /// workspace by key even though its row physically moved into the
+    /// Focused section.
+    pub fn toggle_focus_at_cursor(&mut self) -> Option<(String, bool)> {
+        let key = self.selected_session_key()?.clone();
+        let label = self.workspace_label(&key);
+        let now_focused = if let Some(idx) = self.focused_workspaces.iter().position(|k| *k == key)
+        {
+            self.focused_workspaces.remove(idx);
+            false
+        } else {
+            self.focused_workspaces.push(key);
+            true
+        };
+        self.recompute_visible();
+        self.persist_focused_workspaces();
+        Some((label, now_focused))
+    }
+
+    /// Drop a workspace from the focus set when it's genuinely removed
+    /// (archived / deleted), so `ui.focused_workspaces` doesn't
+    /// accumulate keys for workspaces that no longer exist — the star
+    /// append is otherwise unbounded and, unlike a repo pin, workspaces
+    /// churn constantly. No-op (and no write) when the key wasn't
+    /// starred. Driven only by the authoritative `WorkspaceRemoved`
+    /// event, never the optimistic `take_workspace`, so a rolled-back
+    /// archive keeps the star.
+    pub fn forget_focused_workspace(&mut self, key: &SessionKey) {
+        if let Some(idx) = self.focused_workspaces.iter().position(|k| k == key) {
+            self.focused_workspaces.remove(idx);
+            self.persist_focused_workspaces();
+        }
+    }
+
+    /// Persist the current focus set to
+    /// `~/.lazybox/config.yaml::ui.focused_workspaces` so the shortlist
+    /// survives restart. Best-effort; a write error just means the focus
+    /// set resets next launch.
+    fn persist_focused_workspaces(&self) {
+        let snapshot: Vec<String> = self
+            .focused_workspaces
+            .iter()
+            .map(|k| k.as_str().to_string())
+            .collect();
+        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.focused_workspaces = snapshot) {
+            tracing::warn!("save focused_workspaces failed: {e}");
+        }
+    }
+
+    /// True when the workspace is currently starred (used by the row
+    /// render to draw the `★` marker).
+    pub fn is_focused(&self, key: &SessionKey) -> bool {
+        self.focused_workspaces.iter().any(|k| k == key)
+    }
+
+    /// A short display label for a workspace — its primary task title,
+    /// else the workspace name, else the raw key. Used for the
+    /// star/unstar footer notice.
+    fn workspace_label(&self, key: &SessionKey) -> String {
+        self.workspaces
+            .get(key)
+            .map(|w| {
+                w.primary_task()
+                    .map(|t| t.title.clone())
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| w.name.clone())
+            })
+            .unwrap_or_else(|| key.as_str().to_string())
     }
 
     /// Read-only view of the per-repo summary for render. Headers
@@ -2010,6 +2115,7 @@ impl Sidebar {
                 projects: &self.projects,
                 collapsed_repos: &self.collapsed_repos,
                 pinned_repos: &self.pinned_repos,
+                focused_workspaces: &self.focused_workspaces,
                 attention: &self.attention,
                 agents: &self.agents,
                 now: self.now(),
@@ -2044,7 +2150,9 @@ impl Sidebar {
                         workspace,
                         session_id,
                     } => *workspace == key && Some(*session_id) == prior_session,
-                    VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => false,
+                    VisibleRow::FocusedHeader
+                    | VisibleRow::RepoHeader(_)
+                    | VisibleRow::KindHeader(_) => false,
                 };
                 if matched {
                     self.cursor = i;
@@ -2184,6 +2292,7 @@ impl Sidebar {
             }
             actions.push(Action::ToggleSnooze);
             actions.push(Action::Archive);
+            actions.push(Action::ToggleFocusWorkspace);
         }
         // Repo-group collapse/expand (`Space`) — the "group the
         // sessions" shortcut users couldn't find (#338). Surfaces
@@ -2275,6 +2384,19 @@ impl Sidebar {
                                 "pin group"
                             })
                         }
+                        // The verb tracks the cursor workspace's star
+                        // state so the footer never says "focus" over an
+                        // already-starred row.
+                        Action::ToggleFocusWorkspace => std::borrow::Cow::Borrowed(
+                            if self
+                                .selected_session_key()
+                                .is_some_and(|k| self.is_focused(k))
+                            {
+                                "unfocus"
+                            } else {
+                                "focus"
+                            },
+                        ),
                         _ => std::borrow::Cow::Borrowed(contextual_label(&a, workspace)),
                     };
                     out.push(Binding {

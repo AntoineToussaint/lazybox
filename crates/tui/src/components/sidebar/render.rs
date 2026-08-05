@@ -566,6 +566,41 @@ impl Sidebar {
             .iter()
             .enumerate()
             .map(|(i, row)| match row {
+                VisibleRow::FocusedHeader => {
+                    use crate::components::icons;
+                    let is_cursor = i == self.cursor;
+                    let row_bg = if is_cursor && focused {
+                        Some(theme.row_focused())
+                    } else if is_cursor {
+                        Some(theme.row_unfocused())
+                    } else {
+                        None
+                    };
+                    // Synthetic top group. No disclosure glyph (it never
+                    // collapses) — a star in the gutter, then the label,
+                    // both in the accent tone so the shortlist reads as a
+                    // deliberate pin above the algorithmic repo groups.
+                    // Honor `display.ascii_glyphs` like every other row
+                    // glyph so a non-Nerd-Font terminal gets a plain `*`.
+                    let star = if self.ascii_glyphs { "*" } else { icons::STAR };
+                    let mut spans: Vec<Span> = vec![
+                        Span::styled(
+                            format!("{star} "),
+                            row_bg.unwrap_or_default().fg(theme.accent),
+                        ),
+                        Span::styled(
+                            "Focused",
+                            row_bg
+                                .unwrap_or_default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ];
+                    if let Some(bg) = row_bg {
+                        extend_cursor_fill(&mut spans, row_budget, bg);
+                    }
+                    Line::from(spans)
+                }
                 VisibleRow::RepoHeader(name) => {
                     use crate::components::icons;
                     let collapsed = self.collapsed_repos.contains(name);

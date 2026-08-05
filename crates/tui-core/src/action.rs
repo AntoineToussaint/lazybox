@@ -223,6 +223,12 @@ pub enum Action {
     /// algorithmic order. Acts on the list, not a single workspace, so
     /// it lives in the Sidebar section. The pin set persists.
     ToggleRepoPin,
+    /// Star / unstar the cursor's workspace, lifting it into (or out
+    /// of) the synthetic `★ Focused` section at the top of the sidebar.
+    /// The manual, per-workspace counterpart to [`Self::ToggleRepoPin`]:
+    /// hand-pick a shortlist of PRs/issues across repos and keep them
+    /// together at the top. The focus set persists across restarts.
+    ToggleFocusWorkspace,
     /// Toggle the focused workspace row in/out of the sidebar's
     /// multi-select set — the targets a broadcast
     /// ([`Action::BroadcastToSelected`]) fans out to. Selection
@@ -450,6 +456,7 @@ pub enum ActionKind {
     OpenGlobalSearch,
     ToggleRepoGroup,
     ToggleRepoPin,
+    ToggleFocusWorkspace,
     SelectWorkspace,
     BroadcastToSelected,
     UpdateBranchSelected,
@@ -578,6 +585,7 @@ impl ActionKind {
         Self::OpenGlobalSearch,
         Self::ToggleRepoGroup,
         Self::ToggleRepoPin,
+        Self::ToggleFocusWorkspace,
         Self::FocusPaneRight,
         Self::SelectWorkspace,
         Self::BroadcastToSelected,
@@ -687,6 +695,7 @@ impl Action {
             Action::OpenGlobalSearch => ActionKind::OpenGlobalSearch,
             Action::ToggleRepoGroup => ActionKind::ToggleRepoGroup,
             Action::ToggleRepoPin => ActionKind::ToggleRepoPin,
+            Action::ToggleFocusWorkspace => ActionKind::ToggleFocusWorkspace,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
             Action::UpdateBranchSelected => ActionKind::UpdateBranchSelected,
@@ -1224,6 +1233,13 @@ impl ActionDef {
                 default_keys: "p",
                 label: "pin group",
                 describe: "Pin or unpin the cursor's repo group to the top of the sidebar. Pinned repos render first, in the order you pinned them; everything else keeps its usual order. The pin set persists across restarts.",
+                section: Section::Sidebar,
+            },
+            ActionKind::ToggleFocusWorkspace => &Self {
+                kind: ActionKind::ToggleFocusWorkspace,
+                default_keys: "*",
+                label: "focus",
+                describe: "Star or unstar the cursor's workspace, lifting it into a ★ Focused section at the very top of the sidebar — a hand-picked shortlist of PRs/issues across repos, kept together above the repo groups. Press again to remove. The focus set persists across restarts.",
                 section: Section::Sidebar,
             },
             ActionKind::SelectWorkspace => &Self {
@@ -1835,6 +1851,7 @@ impl ActionKind {
             ActionKind::OpenGlobalSearch => "open_global_search",
             ActionKind::ToggleRepoGroup => "toggle_repo_group",
             ActionKind::ToggleRepoPin => "toggle_repo_pin",
+            ActionKind::ToggleFocusWorkspace => "toggle_focus_workspace",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
             ActionKind::UpdateBranchSelected => "update_branch_selected",
@@ -2570,6 +2587,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenGlobalSearch
         | ActionKind::ToggleRepoGroup
         | ActionKind::ToggleRepoPin => true,
+        // Starring acts on the workspace under the cursor, so it needs
+        // one there — same gate as the per-workspace `v` select.
+        ActionKind::ToggleFocusWorkspace => has_ws,
         // Toggling a selection mark needs a row under the cursor; the
         // broadcast itself acts on the selection set (which the catalog
         // can't see), so the dispatcher gates on it and surfaces a

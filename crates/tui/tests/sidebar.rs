@@ -1577,6 +1577,7 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
         lazybox_config::AttentionConfig::default(),
         BTreeSet::new(),
         Vec::new(),
+        Vec::new(),
         None,
         &display,
     );
@@ -1931,6 +1932,7 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
         attention,
         BTreeSet::new(),
         Vec::new(),
+        Vec::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2030,6 +2032,7 @@ fn ci_failure_transition_respects_desktop_notify_off() {
             ..lazybox_config::AttentionConfig::default()
         },
         BTreeSet::new(),
+        Vec::new(),
         Vec::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
@@ -2195,6 +2198,7 @@ fn pinned_repo_config_floats_group_to_top() {
         lazybox_config::AttentionConfig::default(),
         BTreeSet::new(),
         vec!["owner/charlie".to_string()],
+        Vec::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2296,6 +2300,220 @@ fn toggle_pin_at_cursor_reorders_and_reports() {
         })
         .collect();
     assert_eq!(headers, ["owner/alpha", "owner/beta"]);
+
+    unsafe {
+        std::env::remove_var("LAZYBOX_HOME");
+    }
+}
+
+/// `*` on a workspace stars it, reports `(label, true)`, and lifts the
+/// row into the `★ Focused` section at the very top — above every repo
+/// header — re-rendering immediately (parity with `p`). A second `*`
+/// unstars it back into its repo group. Sandboxes the config path so
+/// the persistence write hits a temp dir.
+#[test]
+fn toggle_focus_at_cursor_lifts_row_and_reports() {
+    let home = tempfile::tempdir().expect("tempdir");
+    // SAFETY: single-threaded test-time env mutation, scoped to a temp
+    // dir so the persistence write can't touch the real config.
+    unsafe {
+        std::env::set_var("LAZYBOX_HOME", home.path());
+    }
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    while s.sort_mode() != lazybox_tui::components::sidebar::SortMode::Recent {
+        s.cycle_sort_mode();
+    }
+    let now = Utc::now();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            make_workspace("owner/alpha", "alpha#1", now),
+            make_workspace("owner/beta", "beta#1", now),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    let beta_key = SessionKey::new(expected_session_key("beta#1").as_str());
+    assert!(s.focus_workspace_key(&beta_key), "beta workspace present");
+
+    let reported = s.toggle_focus_at_cursor();
+    let (_, focused) = reported.expect("reported a star toggle");
+    assert!(focused, "first press stars the workspace");
+    assert!(s.is_focused(&beta_key));
+
+    // Row 0 is the synthetic `★ Focused` header; row 1 is the lifted
+    // beta workspace — above both repo headers.
+    let rows = s.visible_rows();
+    assert!(matches!(rows[0], VisibleRow::FocusedHeader));
+    assert!(matches!(&rows[1], VisibleRow::Workspace(k) if *k == beta_key));
+    // The cursor follows the workspace it starred into the section.
+    assert_eq!(s.selected_session_key(), Some(&beta_key));
+    // beta appears exactly once — lifted, not duplicated.
+    let beta_rows = rows
+        .iter()
+        .filter(|r| matches!(r, VisibleRow::Workspace(k) if *k == beta_key))
+        .count();
+    assert_eq!(beta_rows, 1, "starred row is lifted, not duplicated");
+
+    // A second toggle unstars it — the section disappears (no other
+    // starred rows) and beta returns to its repo group.
+    let reported = s.toggle_focus_at_cursor();
+    let (_, focused) = reported.expect("reported a star toggle");
+    assert!(!focused, "second press unstars");
+    assert!(!s.is_focused(&beta_key));
+    assert!(
+        !s.visible_rows()
+            .iter()
+            .any(|r| matches!(r, VisibleRow::FocusedHeader)),
+        "focused section gone once nothing is starred",
+    );
+
+    unsafe {
+        std::env::remove_var("LAZYBOX_HOME");
+    }
+}
+
+/// Archiving / deleting a starred workspace drops its key from the
+/// focus set — otherwise `ui.focused_workspaces` (which is persisted
+/// verbatim from this set) accumulates keys for workspaces that no
+/// longer exist (#846 review). Asserts the in-memory set rather than the
+/// on-disk file: `LAZYBOX_HOME` is process-global, so reading it back
+/// races the other config-writing tests; the in-memory set is exactly
+/// what gets persisted, so it's the deterministic witness. Still
+/// sandboxes the write so `forget_focused_workspace`'s save can't touch
+/// the real config.
+#[test]
+fn workspace_removal_prunes_persisted_focus() {
+    let home = tempfile::tempdir().expect("tempdir");
+    // SAFETY: single-threaded test-time env mutation, scoped to a temp dir.
+    unsafe {
+        std::env::set_var("LAZYBOX_HOME", home.path());
+    }
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = make_workspace("owner/alpha", "alpha#1", now);
+    let removed_key = w.key.clone();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w.clone()],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    let key = ws_key(&w);
+    assert!(s.focus_workspace_key(&key), "workspace present");
+    s.toggle_focus_at_cursor();
+    assert!(s.is_focused(&key), "starred before removal");
+
+    // The daemon confirms the workspace is gone — the star must not
+    // linger in the set that gets persisted.
+    s.on_event(&Event::WorkspaceRemoved(removed_key));
+    assert!(
+        !s.is_focused(&key),
+        "the stale key was pruned from the focus set on removal",
+    );
+
+    unsafe {
+        std::env::remove_var("LAZYBOX_HOME");
+    }
+}
+
+/// A duplicate key in the persisted `ui.focused_workspaces` (a
+/// hand-editable file) is normalized at the `apply_config` boundary:
+/// without the dedup a single unstar removes only the first occurrence,
+/// leaving the row stuck starred (#846 review).
+#[test]
+fn apply_config_dedups_focused_workspaces() {
+    use std::collections::BTreeSet;
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let w = make_workspace("owner/alpha", "alpha#1", now);
+    let key = ws_key(&w);
+    // Config carries the same key twice.
+    s.apply_config(
+        lazybox_config::AttentionConfig::default(),
+        BTreeSet::new(),
+        Vec::new(),
+        vec![key.clone(), key.clone()],
+        None,
+        &lazybox_config::DisplayConfig::default(),
+    );
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w.clone()],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(s.focus_workspace_key(&key), "workspace present");
+    assert!(s.is_focused(&key));
+
+    // A single unstar fully clears it — proving no duplicate survives.
+    let home = tempfile::tempdir().expect("tempdir");
+    // SAFETY: single-threaded test-time env mutation, scoped to a temp dir.
+    unsafe {
+        std::env::set_var("LAZYBOX_HOME", home.path());
+    }
+    s.toggle_focus_at_cursor();
+    assert!(
+        !s.is_focused(&key),
+        "one unstar removes the only entry — the dup didn't survive load",
+    );
+    unsafe {
+        std::env::remove_var("LAZYBOX_HOME");
+    }
+}
+
+/// The `★ Focused` header honors `display.ascii_glyphs`: a plain `*` on a
+/// non-Nerd-Font terminal, the unicode star otherwise (#846 review).
+#[test]
+fn focused_header_honors_ascii_glyphs() {
+    use std::collections::BTreeSet;
+    let home = tempfile::tempdir().expect("tempdir");
+    // SAFETY: single-threaded test-time env mutation, scoped to a temp dir.
+    unsafe {
+        std::env::set_var("LAZYBOX_HOME", home.path());
+    }
+    let mut s = Sidebar::new(PaneId::new(1));
+    let ascii = lazybox_config::DisplayConfig {
+        ascii_glyphs: true,
+        ..lazybox_config::DisplayConfig::default()
+    };
+    s.apply_config(
+        lazybox_config::AttentionConfig::default(),
+        BTreeSet::new(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        &ascii,
+    );
+    let now = Utc::now();
+    let w = make_workspace("owner/alpha", "alpha#1", now);
+    let key = ws_key(&w);
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(s.focus_workspace_key(&key));
+    s.toggle_focus_at_cursor();
+
+    let rendered = render_to_string(&mut s, 40, 12, true);
+    assert!(
+        rendered.contains("* Focused"),
+        "ascii mode renders a plain star: {rendered:?}",
+    );
+    assert!(
+        !rendered.contains('★'),
+        "no unicode star under ascii_glyphs: {rendered:?}",
+    );
 
     unsafe {
         std::env::remove_var("LAZYBOX_HOME");

@@ -14,6 +14,7 @@ import {
   preferredTerminal,
   primaryTask,
   projectKeyLabel,
+  repoHeaderLabel,
   reviewSignal,
   rowSignals,
   SNOOZE_PRESETS,
@@ -340,6 +341,29 @@ describe("workspace model", () => {
       "octo/widget#2",
       "octo/widget#1",
     ]);
+  });
+
+  it("handles the synthetic `FocusedHeader` string row without treating it as a header object", () => {
+    const view: ComputeOutcome = {
+      visible: [
+        "FocusedHeader",
+        { Workspace: "octo/widget#2" },
+        { RepoHeader: "octo/widget" },
+        { Workspace: "octo/widget#1" },
+      ],
+      summaries: { "octo/widget": { active: 1, attention: 0 } },
+    };
+    // The starred workspace under the section is still projected in order.
+    expect(orderedWorkspaceKeys(view)).toEqual([
+      "octo/widget#2",
+      "octo/widget#1",
+    ]);
+    // `FocusedHeader` is not a repo header — the primitive doesn't crash
+    // the `in` narrowing and carries no label.
+    expect(repoHeaderLabel("FocusedHeader")).toBeNull();
+    expect(repoHeaderLabel({ RepoHeader: "octo/widget" })).toBe(
+      "octo/widget",
+    );
   });
 
   it("replaces the baseline and then applies live upserts and removals", () => {

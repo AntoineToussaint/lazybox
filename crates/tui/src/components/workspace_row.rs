@@ -198,9 +198,10 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    when no row has unread, and lines up at a consistent x when any
 ///    row does.
 /// 7. Badge: agent slot — ` C ` / ` C×2 ` / ` CX ` / blank. Same
-///    Max semantics. A single agent's model+effort label rides here,
-///    hard-capped (`compact_model_label`, #813) so one verbose
-///    `gpt-5.6-sol · xhigh` can't anchor this Max column table-wide.
+///    Max semantics. A single agent's model+effort rides here as a subtle
+///    `◆ Opus` tier badge (#803), hard-capped (`compact_model_label`,
+///    #813) so one verbose `gpt-5.6-sol · xhigh` can't anchor this Max
+///    column table-wide.
 /// 8. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
 /// 9. Passive-info badge cluster — one right-aligned, Max-collapsing
@@ -679,11 +680,14 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 Span::styled(label, badge_pill_style(ctx.theme, letter))
             }),
     );
-    // A single agent shows its model + effort right after the badge
-    // (`C Opus`, `X gpt-5.5 · xhigh`). Multiple agents collapse to the
-    // compact `C×2X` group with no room for labels, so it's suppressed
-    // there. The label sits in its own span, dimmer than the pill, and
-    // leans on the pill's trailing space for the gap.
+    // A single agent shows its model + effort right after the badge, as a
+    // subtle `◆ Opus` / `◆ gpt-5.5 ·xhi` tier badge — the same `◆ tier`
+    // language as the terminal tab (#803) — so "which model" reads above
+    // the agent letter, with the effort as a dimmer suffix so it's a glance
+    // not a word. Multiple agents collapse to the compact `C×2X` group with
+    // no room for a label, so it's suppressed there. The label is still
+    // capped / abbreviated (`compact_model_label`, #813) so it can't anchor
+    // this Max column table-wide; the `◆` glyph adds a constant two cells.
     if agent_count == 1
         && let Some(model) = ctx
             .badges
@@ -696,17 +700,39 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                     .map(|(_, model)| model)
             })
     {
-        let style = if ctx.is_cursor {
-            ctx.row_style()
-        } else {
-            Style::default().fg(ctx.theme.text_dim)
-        };
-        spans.push(Span::styled(
-            format!("{} ", compact_model_label(model)),
-            style,
-        ));
+        spans.extend(model_badge_spans(ctx, model));
     }
     Cell::new(spans)
+}
+
+/// Styled spans for a single agent's model + effort, rendered as a subtle
+/// `◆ <model>` tier badge (the `◆ tier` language of the terminal tab,
+/// #803) with the effort as a dimmer suffix so the hierarchy — which model
+/// above how hard it's thinking — reads at a glance. The text is the capped
+/// / abbreviated [`compact_model_label`] (#813), re-split on its ` ·`
+/// effort separator only to tone the two parts differently; the model
+/// keeps the accent badge tone, the effort drops to `text_dim`. Leads with
+/// the `◆` glyph (the agent pill's trailing space supplies the gap) and
+/// closes with a trailing space before the next column.
+fn model_badge_spans(ctx: &WorkspaceRowCtx<'_>, model: &str) -> Vec<Span<'static>> {
+    let (badge_style, effort_style) = if ctx.is_cursor {
+        (ctx.row_style(), ctx.row_style())
+    } else {
+        (
+            Style::default().fg(ctx.theme.accent),
+            Style::default().fg(ctx.theme.text_dim),
+        )
+    };
+    let compact = compact_model_label(model);
+    let mut spans = vec![Span::styled("◆ ", badge_style)];
+    match compact.split_once(" ·") {
+        Some((name, effort)) => {
+            spans.push(Span::styled(name.to_string(), badge_style));
+            spans.push(Span::styled(format!(" ·{effort} "), effort_style));
+        }
+        None => spans.push(Span::styled(format!("{compact} "), badge_style)),
+    }
+    spans
 }
 
 /// Hard cap on the model name shown beside an agent badge. The effort
@@ -1692,9 +1718,9 @@ mod tests {
         assert_eq!(cell_badge_agent(&ctx).width(), 3);
     }
 
-    /// #779: a single agent appends its model label after the pill
-    /// (` C Opus `), matched to the badge letter and leaning on the pill's
-    /// trailing space for the gap.
+    /// #779/#803: a single agent shows its model after the pill as a
+    /// subtle `◆ Opus` tier badge, matched to the badge letter and leaning
+    /// on the pill's trailing space for the gap.
     #[test]
     fn cell_badge_agent_appends_model_for_single_agent() {
         let task = make_task("owner/repo#1", "x");
@@ -1705,7 +1731,39 @@ mod tests {
         ctx.agent_models = vec![('C', "Opus".to_string())];
         let cell = cell_badge_agent(&ctx);
         let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, " C Opus ", "the model rides after the pill");
+        assert_eq!(
+            text, " C ◆ Opus ",
+            "the model rides after the pill as a ◆ badge"
+        );
+    }
+
+    /// #803: the model reads as an accent `◆` tier badge while the effort
+    /// suffix drops to a dimmer tone, so "which model" sits visually above
+    /// "how hard it's thinking". The text stays the #813-capped label.
+    #[test]
+    fn cell_badge_agent_model_is_diamond_badge_with_dim_effort() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('X', 1)];
+        ctx.agent_models = vec![('X', "gpt-5.5 · xhigh".to_string())];
+        let cell = cell_badge_agent(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " X ◆ gpt-5.5 ·xhi ");
+        // The `◆` + model span is accent; the ` ·xhi ` effort span is dim.
+        let diamond = cell
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == "◆ ")
+            .expect("a ◆ badge span");
+        assert_eq!(diamond.style.fg, Some(theme.accent));
+        let effort = cell
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref() == " ·xhi ")
+            .expect("a dim effort span");
+        assert_eq!(effort.style.fg, Some(theme.text_dim));
     }
 
     /// #813: a verbose model+effort label is compacted so it can't anchor
@@ -1773,10 +1831,11 @@ mod tests {
 
         // The verbose row's agent cell stays bounded — the raw
         // `gpt-5.6-sol · xhigh` (19) would have anchored the column that
-        // wide across the table; the capped label is well under it.
+        // wide across the table; the capped label is well under it, even
+        // with the constant two cells the `◆` tier badge (#803) adds.
         let verbose = cell_badge_agent(&ctx0);
         assert!(
-            verbose.width() <= 20,
+            verbose.width() <= 22,
             "capped agent cell should stay narrow: {} cells",
             verbose.width(),
         );

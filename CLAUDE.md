@@ -266,8 +266,12 @@ rows (marks survive j/k; `Esc` clears) and `Shift-B` broadcasts one
 instruction to every selected workspace: a snippet picker (`Ctrl-F`
 skips it for free text) feeds a compose textarea pre-filled with the
 snippet body, and submit delivers per target — running agents via the
-settle-gated inject, plain shells via a direct write, session-less
-workspaces skipped and named in the summary notice. `Shift-U`
+settle-gated inject, plain shells via a direct write, and session-less
+workspaces that still have a repo scope get the default agent spawned
+with the message as its initial prompt (#836 — behind a "start N
+agents?" confirm since spawning is heavy); only repo-less, project-less
+workspaces (nothing to spawn into) are skipped and named in the summary
+notice. `Shift-U`
 bulk-updates the branch (rebase/merge base into head) of every
 selected PR that's behind `main` — one `UpdateBranch` per behind PR,
 up-to-date and non-PR selections skipped and counted (#484). `a` is a leader

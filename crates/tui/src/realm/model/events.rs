@@ -1724,7 +1724,17 @@ impl<T: TerminalAdapter> Model<T> {
                                     self.worktree_progress_dismissed = None;
                                     self.force_dismiss_worktree_progress();
                                 }
-                                self.flash_error(format!("✗ spawn failed — {message}"));
+                                // A spawn failure is an action result, not
+                                // persistent system state. Keep the complete
+                                // text in Shift-M's messages log but let the
+                                // footer toast fade; otherwise one failed
+                                // attempt pins the footer forever even after
+                                // the user fixes the checkout or successfully
+                                // starts from another workspace.
+                                self.flash(
+                                    format!("✗ spawn failed — {message}"),
+                                    crate::realm::components::footer::NoticeSeverity::Retryable,
+                                );
                             }
                         }
                     } else if source == "repo-labels" {

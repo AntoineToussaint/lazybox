@@ -12470,6 +12470,15 @@ mod worktree_progress_recovery_tests {
                 .is_some_and(|n| n.message.contains("spawn failed")),
             "the footer notice still carries the backend failure",
         );
+        assert_eq!(
+            m.status.notice.as_ref().unwrap().severity,
+            crate::realm::components::footer::NoticeSeverity::Retryable,
+            "spawn failures must auto-fade instead of pinning the footer",
+        );
+        m.status.notice.as_mut().unwrap().set_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(6);
+        assert!(m.status.tick_notice(), "the spawn-error toast must fade");
+        assert!(m.status.notice.is_none());
     }
 
     /// A session/workspace race (`spawn:session`) is not a worktree failure

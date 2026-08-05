@@ -430,7 +430,7 @@ impl Component for WorktreeProgress {
             // names a concrete next step.
             let recovery = self.recovery.unwrap_or(WorktreeRecovery::Unknown);
             lines.push(Line::from(Span::styled(
-                format!("  {}", recovery.hint()),
+                format!("  {}", recovery.remediation(err)),
                 Style::default().fg(theme.warn),
             )));
             // Every recoverable class offers a one-keypress path back to a
@@ -882,10 +882,9 @@ mod tests {
         assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldLive));
         let out = render(&mut WorktreeProgress::from_state(&st), 70, 20);
         assert!(out.contains('✗'), "{out}");
-        assert!(
-            out.contains("join the live session"),
-            "join guidance: {out}"
-        );
+        assert!(out.contains("Shift-A"), "Lazybox transfer guidance: {out}");
+        assert!(out.contains("git -C '/tmp/other' status"), "{out}");
+        assert!(out.contains("switch --detach"), "{out}");
         assert!(!out.contains("x a"), "adopt cannot release a branch: {out}");
         assert!(!out.contains("r retry"), "invalid retry affordance: {out}");
         assert!(out.contains("Esc dismiss"), "{out}");
@@ -913,8 +912,9 @@ mod tests {
         assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldManaged));
         let out = render(&mut WorktreeProgress::from_state(&st), 70, 20);
         assert!(out.contains("ignored local files"), "{out}");
-        assert!(out.contains("managed holder has local state"), "{out}");
-        assert!(out.contains("or remove it"), "{out}");
+        assert!(out.contains("Managed checkout"), "{out}");
+        assert!(out.contains("git -C '/tmp/other' status"), "{out}");
+        assert!(out.contains("switch --detach"), "{out}");
         assert!(!out.contains("join the live session"), "{out}");
         assert!(!out.contains("r retry"), "{out}");
     }

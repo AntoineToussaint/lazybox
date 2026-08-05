@@ -16,7 +16,7 @@
 use chrono::{DateTime, Utc};
 use lazybox_core::{ProjectKey, WorkspaceKey};
 use lazybox_store::{
-    MemoryStore, ProjectRecord, SqliteStore, Store, StoreMutation, WorkspaceRecord,
+    ErrorOccurrence, MemoryStore, ProjectRecord, SqliteStore, Store, StoreMutation, WorkspaceRecord,
 };
 
 /// Unique on-disk db path per test, cleaned up on drop. Hand-rolled
@@ -406,6 +406,65 @@ fn batch_contract(store: &dyn Store) {
     assert!(store.get_project(&project_key).unwrap().is_none());
 }
 
+fn error_occurrence(dedupe_key: &str, message: &str, at: DateTime<Utc>) -> ErrorOccurrence {
+    ErrorOccurrence {
+        dedupe_key: dedupe_key.to_string(),
+        source: "github".into(),
+        severity: "retryable".into(),
+        operation: Some("merge".into()),
+        workspace_key: Some("github:o/r#1".into()),
+        message: message.to_string(),
+        raw: format!("raw:{message}"),
+        at,
+    }
+}
+
+/// Error Inbox contract: first record inserts at count 1; a repeat with
+/// the same dedupe key increments the count, preserves `first_seen`,
+/// advances `last_seen`, and replaces the stored sample; a distinct key
+/// is an independent row; delete/clear behave.
+fn error_contract(store: &dyn Store) {
+    let t0 = fixed_time();
+    let t1 = t0 + chrono::Duration::seconds(30);
+
+    let first = store
+        .record_error(&error_occurrence("throttle", "rate limited", t0))
+        .expect("record error");
+    assert_eq!(first.count, 1);
+    assert_eq!(first.first_seen, t0);
+    assert_eq!(first.last_seen, t0);
+    assert_eq!(first.message, "rate limited");
+
+    let second = store
+        .record_error(&error_occurrence("throttle", "still rate limited", t1))
+        .expect("record dup");
+    assert_eq!(second.count, 2, "same dedupe key collapses + counts");
+    assert_eq!(second.first_seen, t0, "first_seen is preserved");
+    assert_eq!(second.last_seen, t1, "last_seen advances");
+    assert_eq!(second.message, "still rate limited", "sample is the latest");
+    assert_eq!(second.raw, "raw:still rate limited");
+
+    store
+        .record_error(&error_occurrence("auth", "bad token", t1))
+        .expect("record distinct");
+
+    let listed = store.list_errors().expect("list");
+    assert_eq!(listed.len(), 2, "two distinct dedupe keys → two rows");
+    // Most-recently-seen first.
+    assert_eq!(listed[0].last_seen, t1);
+    let throttle = listed
+        .iter()
+        .find(|r| r.dedupe_key == "throttle")
+        .expect("throttle row present");
+    assert_eq!(throttle.count, 2);
+
+    store.delete_error("auth").expect("delete one");
+    assert_eq!(store.list_errors().unwrap().len(), 1, "one row deleted");
+
+    store.clear_errors().expect("clear");
+    assert!(store.list_errors().unwrap().is_empty(), "inbox wiped");
+}
+
 /// The whole suite against one backend. Sections run in a fixed order
 /// on one store instance so cross-namespace isolation (kv vs
 /// workspace vs project prefixes) is exercised too.
@@ -414,6 +473,7 @@ fn run_conformance(store: &dyn Store) {
     workspace_contract(store);
     project_contract(store);
     batch_contract(store);
+    error_contract(store);
 }
 
 #[test]

@@ -1,23 +1,29 @@
 //! In-memory Store implementation for tests.
 
-use crate::{Store, StoreError, StoreMutation};
+use crate::{ErrorOccurrence, ErrorRecord, Store, StoreError, StoreMutation};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// A simple in-memory store for unit tests.
 pub struct MemoryStore {
     kv: Mutex<HashMap<String, String>>,
+    errors: Mutex<HashMap<String, ErrorRecord>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self {
             kv: Mutex::new(HashMap::new()),
+            errors: Mutex::new(HashMap::new()),
         }
     }
 
     fn kv_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
         self.kv.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn errors_lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, ErrorRecord>> {
+        self.errors.lock().unwrap_or_else(|p| p.into_inner())
     }
 }
 
@@ -98,6 +104,52 @@ impl Store for MemoryStore {
             .collect();
         rows.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(rows)
+    }
+
+    fn record_error(&self, occ: &ErrorOccurrence) -> Result<ErrorRecord, StoreError> {
+        let mut errors = self.errors_lock();
+        let record = errors
+            .entry(occ.dedupe_key.clone())
+            .and_modify(|rec| {
+                rec.count += 1;
+                rec.last_seen = occ.at;
+                rec.source = occ.source.clone();
+                rec.severity = occ.severity.clone();
+                rec.operation = occ.operation.clone();
+                rec.workspace_key = occ.workspace_key.clone();
+                rec.message = occ.message.clone();
+                rec.raw = occ.raw.clone();
+            })
+            .or_insert_with(|| ErrorRecord {
+                dedupe_key: occ.dedupe_key.clone(),
+                source: occ.source.clone(),
+                severity: occ.severity.clone(),
+                operation: occ.operation.clone(),
+                workspace_key: occ.workspace_key.clone(),
+                message: occ.message.clone(),
+                raw: occ.raw.clone(),
+                count: 1,
+                first_seen: occ.at,
+                last_seen: occ.at,
+            });
+        Ok(record.clone())
+    }
+
+    fn list_errors(&self) -> Result<Vec<ErrorRecord>, StoreError> {
+        let mut out: Vec<ErrorRecord> = self.errors_lock().values().cloned().collect();
+        // Most-recently-seen first — matches `SqliteStore`'s ORDER BY.
+        out.sort_by_key(|r| std::cmp::Reverse(r.last_seen));
+        Ok(out)
+    }
+
+    fn delete_error(&self, dedupe_key: &str) -> Result<(), StoreError> {
+        self.errors_lock().remove(dedupe_key);
+        Ok(())
+    }
+
+    fn clear_errors(&self) -> Result<(), StoreError> {
+        self.errors_lock().clear();
+        Ok(())
     }
 
     /// In-memory prefix scan over the kv table. Mirrors what

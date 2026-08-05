@@ -864,7 +864,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentAuthFinished { .. }
                 | IpcEvent::AgentResumeFallback { .. }
                 | IpcEvent::TerminalModelChanged { .. }
-                | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
+                | IpcEvent::RecoveredTerminalsRequireRestart { .. }
+                | IpcEvent::ErrorInbox { .. } => {}
             }
         }
         // Agent-state pings repeat at the detector's cadence while an
@@ -1386,6 +1387,14 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Durable Error Inbox snapshot (#831) — repaint the open inbox.
+        // A snapshot that lands while the inbox is closed is dropped by
+        // `update_error_inbox`.
+        if let IpcEvent::ErrorInbox { errors } = &event {
+            self.update_error_inbox(errors.clone());
+            self.redraw = true;
+            return;
+        }
         // First-time worktree provisioning progress. A user-initiated
         // spawn drives the spinner + step checklist modal; an autonomous
         // (GitHub label / `@lazybox` mention) spawn is background work
@@ -1632,7 +1641,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentAuthFinished { .. }
             | IpcEvent::AgentResumeFallback { .. }
             | IpcEvent::TerminalModelChanged { .. }
-            | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
+            | IpcEvent::RecoveredTerminalsRequireRestart { .. }
+            | IpcEvent::ErrorInbox { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -1895,7 +1905,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentAuthFinished { .. }
                 | IpcEvent::AgentResumeFallback { .. }
                 | IpcEvent::TerminalModelChanged { .. }
-                | IpcEvent::RecoveredTerminalsRequireRestart { .. } => {}
+                | IpcEvent::RecoveredTerminalsRequireRestart { .. }
+                | IpcEvent::ErrorInbox { .. } => {}
             }
         }
         // CleanWorktrees finished — replace the "cleaning…" notice

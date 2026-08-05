@@ -37,6 +37,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `Shift-T` | tour | Launch the guided onboarding walkthrough (start from scratch, inbox, agents, snippet workflows + memory, juggling sessions, config). |
 | `Shift-D` | sync diagnostics | Show recent provider-sync outcomes, last poll times, and errors. |
 | `Shift-M` | messages | Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. |
+| `Shift-E` | errors | Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. |
 | `Esc` | dismiss | Clear the current footer notice, whatever its severity — retryable, info, permanent, or auth. |
 | `Enter` | detail | Open the current footer error in a full-text detail modal. |
 | `` ` `` | jump to workspace | Open a fuzzy picker over every workspace (across repos) and jump to the one you pick. |

@@ -9,6 +9,7 @@ pub mod choice;
 pub mod confirm;
 pub mod diff_review;
 pub mod error;
+pub mod error_inbox;
 pub mod filterable;
 pub mod focus_header;
 pub mod footer;

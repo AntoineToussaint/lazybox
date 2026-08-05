@@ -1085,6 +1085,127 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Messages, Messages::new(entries, chrono::Utc::now()));
     }
 
+    /// Open the durable Error Inbox (#831). Mounts immediately in a
+    /// loading state and asks the daemon for the persisted snapshot; the
+    /// answer (`Event::ErrorInbox`) repaints it via
+    /// [`Model::update_error_inbox`].
+    pub(super) fn mount_error_inbox(&mut self) {
+        use crate::realm::components::error_inbox::ErrorInbox;
+
+        if self.modal_stack.last() == Some(&Id::ErrorInbox) {
+            return;
+        }
+        self.mount_modal(
+            Id::ErrorInbox,
+            ErrorInbox::new(Vec::new(), chrono::Utc::now(), true),
+        );
+        self.send_cmd(lazybox_ipc::Command::ListErrors);
+    }
+
+    /// Repaint a live Error Inbox with a fresh daemon snapshot. A
+    /// snapshot that arrives after the window was closed is dropped.
+    pub(super) fn update_error_inbox(&mut self, errors: Vec<lazybox_ipc::ErrorInboxRecord>) {
+        use crate::realm::components::error_inbox::ErrorInbox;
+
+        if self.modal_stack.last() != Some(&Id::ErrorInbox) {
+            return;
+        }
+        self.mount_modal(
+            Id::ErrorInbox,
+            ErrorInbox::new(errors, chrono::Utc::now(), false),
+        );
+    }
+
+    /// `i` in the Error Inbox — open a pre-filled GitHub *new issue*
+    /// form in the browser, deriving the repo from the error's
+    /// workspace key. Pre-filling the form (rather than creating the
+    /// issue outright) keeps the user in the loop to edit before
+    /// submitting — the "confirm-with-preview" spirit, with GitHub's own
+    /// form as the preview.
+    pub(super) fn error_inbox_file_issue(&mut self, record: lazybox_ipc::ErrorInboxRecord) {
+        let Some(repo) = record
+            .workspace_key
+            .as_deref()
+            .and_then(repo_from_workspace_key)
+        else {
+            self.flash_info("no repo context on this error — can't draft an issue");
+            return;
+        };
+        let title = format!("Error: {}", truncate(&record.message, 80));
+        let body = error_issue_body(&record);
+        let url = format!(
+            "https://github.com/{repo}/issues/new?title={}&body={}",
+            percent_encode(&title),
+            percent_encode(&body),
+        );
+        let browser = self.ui_defaults.browser.clone();
+        match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
+            Ok(()) => self.flash_info(format!("drafting issue on {repo}…")),
+            Err(e) => self.flash_error(format!("open failed: {e}")),
+        }
+    }
+
+    /// `a` in the Error Inbox — spawn the default agent on the error's
+    /// workspace with the error class as its opening brief, dogfooding
+    /// lazybox on its own error stream (error → agent → PR). Closes the
+    /// inbox so focus follows the new terminal.
+    pub(super) fn error_inbox_route_to_agent(&mut self, record: lazybox_ipc::ErrorInboxRecord) {
+        let Some(ws) = record.workspace_key.as_deref() else {
+            self.flash_info("no workspace context on this error — can't route to an agent");
+            return;
+        };
+        let session_key: lazybox_core::SessionKey = ws.into();
+        let agent = self.sidebar.default_agent().to_string();
+        let prompt = error_agent_prompt(&record);
+        self.spawn_follow_to = Some(session_key.clone());
+        self.send_cmd(lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id: None,
+            client_request_id: None,
+            kind: lazybox_ipc::TerminalKind::Agent(agent.clone()),
+            cwd: None,
+            initial_prompt: Some(prompt),
+            on_main: false,
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+        });
+        if self.modal_stack.last() == Some(&Id::ErrorInbox) {
+            self.pop_modal();
+        }
+        self.flash_info(format!("routing to {agent} on {ws}…"));
+    }
+
+    /// `x` in the Error Inbox — dump the (filtered) error set as JSONL
+    /// to `~/.lazybox/v2/errors-export.jsonl` for external analysis.
+    pub(super) fn error_inbox_export(&mut self, records: Vec<lazybox_ipc::ErrorInboxRecord>) {
+        let Some(path) = super::home_dir().map(|h| h.join(".lazybox/v2/errors-export.jsonl"))
+        else {
+            self.flash_error("export failed: no home directory");
+            return;
+        };
+        let mut out = String::new();
+        for r in &records {
+            match serde_json::to_string(r) {
+                Ok(line) => {
+                    out.push_str(&line);
+                    out.push('\n');
+                }
+                Err(e) => {
+                    self.flash_error(format!("export failed: {e}"));
+                    return;
+                }
+            }
+        }
+        match std::fs::write(&path, out) {
+            Ok(()) => self.flash_info(format!(
+                "exported {} errors → {}",
+                records.len(),
+                path.display()
+            )),
+            Err(e) => self.flash_error(format!("export failed: {e}")),
+        }
+    }
+
     pub(super) fn queue_agent_auth_prompt(&mut self, prompt: super::AgentAuthPrompt) {
         let already_active = matches!(
             self.modal_flow,
@@ -2333,9 +2454,103 @@ impl<T: TerminalAdapter> Model<T> {
     }
 }
 
+/// `owner/repo` for a `github:owner/repo#N` workspace key, or `None`
+/// for a non-GitHub / malformed key (the browser new-issue form is
+/// GitHub-specific).
+pub(super) fn repo_from_workspace_key(key: &str) -> Option<String> {
+    let rest = key.strip_prefix("github:")?;
+    let repo = rest.split('#').next()?;
+    (repo.matches('/').count() == 1 && !repo.is_empty()).then(|| repo.to_string())
+}
+
+/// Truncate to `max` chars, appending `…` when clipped.
+pub(super) fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Minimal percent-encoding for a URL query value — encode everything
+/// outside the RFC-3986 unreserved set. Hand-rolled to avoid a new
+/// dependency for one call site.
+pub(super) fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
+}
+
+/// Pre-filled GitHub issue body for an error class.
+fn error_issue_body(r: &lazybox_ipc::ErrorInboxRecord) -> String {
+    let mut body = format!(
+        "Recurring error surfaced by the lazybox Error Inbox (#831).\n\n\
+         - **Class:** `{}`\n\
+         - **Source / severity:** {} / {}\n\
+         - **Count:** ×{}\n",
+        r.dedupe_key, r.source, r.severity, r.count,
+    );
+    if let Some(op) = &r.operation {
+        body.push_str(&format!("- **Operation:** {op}\n"));
+    }
+    if let Some(ws) = &r.workspace_key {
+        body.push_str(&format!("- **Workspace:** {ws}\n"));
+    }
+    body.push_str(&format!(
+        "\n**Sample message:**\n\n> {}\n\n**Raw:**\n\n```\n{}\n```\n",
+        r.message, r.raw,
+    ));
+    body
+}
+
+/// Opening brief handed to a routed agent for an error class.
+fn error_agent_prompt(r: &lazybox_ipc::ErrorInboxRecord) -> String {
+    format!(
+        "This error class has fired ×{} in lazybox and needs fixing.\n\
+         Class: {}\nSource/severity: {} / {}\nSample: {}\nRaw: {}\n\n\
+         Find the root cause and open a PR with the fix.",
+        r.count, r.dedupe_key, r.source, r.severity, r.message, r.raw,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_from_workspace_key_parses_github_only() {
+        assert_eq!(
+            repo_from_workspace_key("github:o/r#1").as_deref(),
+            Some("o/r")
+        );
+        assert_eq!(
+            repo_from_workspace_key("github:owner/repo#42").as_deref(),
+            Some("owner/repo")
+        );
+        // Non-GitHub or malformed keys have no derivable repo.
+        assert_eq!(repo_from_workspace_key("linear:TEAM-1"), None);
+        assert_eq!(repo_from_workspace_key("github:no-slash#1"), None);
+    }
+
+    #[test]
+    fn percent_encode_escapes_reserved_and_keeps_unreserved() {
+        assert_eq!(percent_encode("a b/c?d"), "a%20b%2Fc%3Fd");
+        assert_eq!(percent_encode("A-Z_0.9~"), "A-Z_0.9~");
+    }
+
+    #[test]
+    fn truncate_appends_ellipsis_only_when_clipped() {
+        assert_eq!(truncate("short", 10), "short");
+        assert_eq!(truncate("abcdef", 4), "abc…");
+    }
 
     /// A minimal open, author, CI-failing PR workspace with the given
     /// labels and CI-auto-fix arm — enough to exercise `build_policy_rows`

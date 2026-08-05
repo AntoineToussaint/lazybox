@@ -1338,6 +1338,17 @@ pub enum Command {
         #[serde(default)]
         preserve_holder: Option<String>,
     },
+    /// Request the durable Error Inbox snapshot. The daemon replies with
+    /// [`Event::ErrorInbox`]. Appended last (bincode is ordinal-sensitive).
+    ListErrors,
+    /// Wipe the durable Error Inbox, then broadcast a fresh (empty)
+    /// [`Event::ErrorInbox`].
+    ClearErrors,
+    /// Drop one deduplicated error row by its dedupe key, then broadcast
+    /// a refreshed [`Event::ErrorInbox`].
+    DeleteError {
+        dedupe_key: String,
+    },
 }
 
 impl Command {
@@ -1424,6 +1435,29 @@ pub enum TerminalInputIntent {
 pub enum RemovableTerminalState {
     Merged,
     Closed,
+}
+
+/// One deduplicated row of the durable Error Inbox, mirrored onto the
+/// wire from the store's `ErrorRecord` (the store crate is daemon-side
+/// — the TUI never links it). `severity` is the plain provider/error
+/// kind string (`"retryable"` / `"permanent"` / `"auth"` / …);
+/// `count` collapses N identical occurrences behind a
+/// `first_seen`/`last_seen` window, and `raw` carries the underlying
+/// diagnostic (GraphQL `code`/`typeName`, raw provider text) so a
+/// class of bug stays inspectable long after its footer notice faded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ErrorInboxRecord {
+    pub dedupe_key: String,
+    pub source: String,
+    pub severity: String,
+    pub operation: Option<String>,
+    pub workspace_key: Option<String>,
+    pub message: String,
+    pub raw: String,
+    pub count: u64,
+    pub first_seen: chrono::DateTime<chrono::Utc>,
+    pub last_seen: chrono::DateTime<chrono::Utc>,
 }
 
 /// Connection → TUI.
@@ -2208,6 +2242,14 @@ pub enum Event {
         session_key: SessionKey,
         terminal_id: TerminalId,
         model_label: String,
+    },
+    /// Durable Error Inbox snapshot — every deduplicated error record,
+    /// most-recently-seen first. Sent in reply to
+    /// [`Command::ListErrors`] and re-broadcast after a clear/delete so
+    /// an open inbox refreshes. Appended last (bincode is
+    /// ordinal-sensitive).
+    ErrorInbox {
+        errors: Vec<ErrorInboxRecord>,
     },
 }
 

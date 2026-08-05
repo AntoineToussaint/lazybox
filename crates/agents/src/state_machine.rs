@@ -26,6 +26,8 @@
 //! - `Idle` — freshly launched, no work run yet ("starting").
 //! - `Working` — actively producing output or running a tool ("running").
 //! - `InputNeeded` — parked on a structural prompt ("awaiting input").
+//! - `LimitReached` — parked on a provider usage-limit block (#847); a
+//!   blocked, sticky sibling of `InputNeeded` (see `is_blocked`).
 //! - `Done` — finished a turn ("done").
 //! - `Exited` — the process ended (clean or crash); terminal.
 //!
@@ -233,6 +235,19 @@ pub(crate) fn transition_allowed(from: AgentState, to: AgentState) -> bool {
         )
 }
 
+/// The two states in which the agent is parked waiting on the user with
+/// no output flowing: a structural prompt (`InputNeeded`) or a provider
+/// usage-limit block (`LimitReached`, #847). They share the same
+/// stickiness contract — a parked prompt emits nothing, so an ambiguous
+/// byte-flow reading is an incidental repaint, never evidence the block
+/// resolved — and both are PTY corrections a fresh lifecycle hook can't
+/// see (the block freezes the hook stream), so the gate lets either
+/// through. Grouping them here keeps every "blocked, sticky" rule in one
+/// predicate rather than duplicated per variant.
+pub(crate) fn is_blocked(state: AgentState) -> bool {
+    matches!(state, AgentState::InputNeeded | AgentState::LimitReached)
+}
+
 /// The result of folding a [`Reading`] into the machine via
 /// [`AgentStateMachine::on_reading`]. Distinguishes a committed move from
 /// the reasons a reading was held, so the caller can log the diagnostic
@@ -386,7 +401,7 @@ impl AgentStateMachine {
             // `?`s never reach here, so an incidental repaint still can't
             // clear them.
             if since >= HOOK_STALENESS
-                && current == Some(AgentState::InputNeeded)
+                && current.is_some_and(is_blocked)
                 && pty.state == AgentState::Working
             {
                 clear = true;
@@ -456,7 +471,7 @@ impl AgentStateMachine {
         // `Done` (#357, #225).
         let reading = if current == Some(AgentState::Working)
             && reading.clear
-            && reading.state != AgentState::InputNeeded
+            && !is_blocked(reading.state)
         {
             Reading {
                 state: AgentState::Done,
@@ -523,9 +538,7 @@ impl AgentStateMachine {
     /// time, exactly like `suppress_done_exit` — navigation can
     /// never clear a `?` (#374).
     fn suppress_input_needed_exit(current: Option<AgentState>, reading: Reading) -> bool {
-        current == Some(AgentState::InputNeeded)
-            && reading.state != AgentState::InputNeeded
-            && !reading.clear
+        current.is_some_and(is_blocked) && Some(reading.state) != current && !reading.clear
     }
 }
 
@@ -575,14 +588,14 @@ fn hooks_gate_allows(
         return true;
     }
     if since_last_hook >= HOOK_STALENESS {
-        let demotes_input_needed =
-            current == Some(AgentState::InputNeeded) && reading.state == AgentState::Working;
-        return !demotes_input_needed || supersedes_dialog();
+        let demotes_blocked =
+            current.is_some_and(is_blocked) && reading.state == AgentState::Working;
+        return !demotes_blocked || supersedes_dialog();
     }
-    reading.state == AgentState::InputNeeded
+    is_blocked(reading.state)
         || (reading.state == AgentState::Idle
             && reading.ready_for_prompt
-            && current != Some(AgentState::InputNeeded))
+            && !current.is_some_and(is_blocked))
 }
 
 #[cfg(test)]
@@ -952,6 +965,60 @@ mod tests {
         assert_eq!(
             m.on_reading(Some(Working), ambiguous(InputNeeded)),
             Outcome::Committed(InputNeeded)
+        );
+    }
+
+    // ── LimitReached: a blocked, sticky sibling of InputNeeded (#847) ─
+
+    #[test]
+    fn working_settles_to_limit_reached_not_done() {
+        // A usage-limit block reached mid-turn is a live prompt, not a
+        // finished turn: the settle promotion must exclude it exactly as
+        // it excludes InputNeeded, so a clear LimitReached from Working
+        // commits LimitReached rather than being rewritten to Done.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(Working), clear(AgentState::LimitReached)),
+            Outcome::Committed(AgentState::LimitReached),
+        );
+    }
+
+    #[test]
+    fn ambiguous_working_never_clears_limit_reached() {
+        // Like a parked `?`, a limit block emits no output, so an
+        // ambiguous byte-flow repaint must never clear it.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(Working), clear(AgentState::LimitReached)),
+            Outcome::Committed(AgentState::LimitReached),
+        );
+        assert_eq!(
+            m.on_reading(Some(AgentState::LimitReached), ambiguous(Working)),
+            Outcome::Damped,
+        );
+    }
+
+    #[test]
+    fn a_clear_reading_resolves_limit_reached() {
+        // Affirmative evidence the agent moved on (re-authed / limit reset
+        // and it resumed) leaves the block immediately.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(AgentState::LimitReached), clear(Working)),
+            Outcome::Committed(Working),
+        );
+    }
+
+    #[test]
+    fn a_limit_block_surfaces_under_a_fresh_hook() {
+        // The block freezes Claude's hook stream, so a byte-silent
+        // LimitReached reading must pass the hooks-primary gate exactly as
+        // an on-screen dialog does.
+        let mut m = machine();
+        let limit = pty(AgentState::LimitReached, true, Liveness::Silent, false);
+        assert_eq!(
+            m.on_pty_reading(Some(Working), limit, Some(FRESH), || false),
+            Outcome::Committed(AgentState::LimitReached),
         );
     }
 

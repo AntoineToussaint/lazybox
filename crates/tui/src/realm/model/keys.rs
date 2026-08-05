@@ -2096,6 +2096,8 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToWorkspace => Action::JumpToWorkspace,
         ActionKind::JumpToAsking => Action::JumpToAsking,
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
+        ActionKind::JumpToLimited => Action::JumpToLimited,
+        ActionKind::ResumeRateLimited => Action::ResumeRateLimited,
         ActionKind::StartAgent => Action::StartAgent,
         ActionKind::ToggleActivityPane => Action::ToggleActivityPane,
         ActionKind::ToggleFocusMode => Action::ToggleFocusMode,

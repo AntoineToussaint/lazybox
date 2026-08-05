@@ -60,6 +60,14 @@ pub struct StateChange {
     /// Rising edge into `Done` — fire the one-shot "finished" alert (#80),
     /// on the same terms as `now_asking`.
     pub now_done: bool,
+    /// The workspace's "rate-limited" membership flipped in either
+    /// direction (#847). Drives a `recompute_visible` for the same reason
+    /// `asking_changed` does — the rate-limited set is its own attention
+    /// axis (pill + `!`-style jump + filter).
+    pub limit_changed: bool,
+    /// Rising edge into `LimitReached` — fire the one-shot "rate-limited"
+    /// alert, on the same terms as `now_asking`.
+    pub now_limit_reached: bool,
 }
 
 /// Derive attention edges from a workspace projection changing.
@@ -77,6 +85,9 @@ pub fn state_change(previous: Option<AgentState>, incoming: Option<AgentState>) 
             != (incoming == Some(AgentState::InputNeeded)),
         now_asking: incoming == Some(AgentState::InputNeeded),
         now_done: incoming == Some(AgentState::Done),
+        limit_changed: (previous == Some(AgentState::LimitReached))
+            != (incoming == Some(AgentState::LimitReached)),
+        now_limit_reached: incoming == Some(AgentState::LimitReached),
     }
 }
 
@@ -163,6 +174,20 @@ pub fn workspace_is_asking(
     )
 }
 
+/// True iff the workspace's agent is blocked on a provider usage / rate
+/// limit (#847). Single source of truth for the workspace-level
+/// rate-limited check (sidebar row pill, the jump predicate, the
+/// "rate-limited" filter axis, and the bulk resume target set).
+pub fn workspace_is_limit_reached(
+    workspace: &Workspace,
+    states: &HashMap<SessionKey, AgentState>,
+) -> bool {
+    matches!(
+        workspace_agent_state(workspace, states),
+        Some(AgentState::LimitReached)
+    )
+}
+
 /// True iff the workspace's agent process has exited (clean or crash;
 /// drives the `✗` indicator). Kept distinct from a blank/`Idle` row so a
 /// dead agent reads as "the process ended, restart it" rather than
@@ -196,6 +221,20 @@ pub fn next_asking_workspace(
 ) -> Option<SessionKey> {
     next_matching_workspace(keys_order, current, |k| {
         matches!(states.get(k), Some(AgentState::InputNeeded))
+    })
+}
+
+/// Pick the next workspace whose agent is blocked on a usage / rate
+/// limit, starting after `current` in `keys_order` and wrapping (#847).
+/// The rate-limited analog of [`next_asking_workspace`], driving the
+/// dedicated jump action.
+pub fn next_limit_reached_workspace(
+    states: &HashMap<SessionKey, AgentState>,
+    keys_order: &[SessionKey],
+    current: Option<&SessionKey>,
+) -> Option<SessionKey> {
+    next_matching_workspace(keys_order, current, |k| {
+        matches!(states.get(k), Some(AgentState::LimitReached))
     })
 }
 
@@ -242,12 +281,12 @@ fn next_matching_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use AgentState::{Done, Idle, InputNeeded, Working};
+    use AgentState::{Done, Idle, InputNeeded, LimitReached, Working};
     use lazybox_core::WorkspaceKey;
     use std::collections::HashSet;
 
     const EXITED: AgentState = AgentState::Exited { code: Some(1) };
-    const ALL: [AgentState; 5] = [Working, InputNeeded, Idle, Done, EXITED];
+    const ALL: [AgentState; 6] = [Working, InputNeeded, Idle, Done, EXITED, LimitReached];
 
     fn ws_key(n: u32) -> SessionKey {
         SessionKey::from(&WorkspaceKey::new(format!("owner/repo#{n}")))
@@ -372,6 +411,7 @@ mod tests {
                     workspace_is_working(&ws, &states),
                     workspace_is_done(&ws, &states),
                     workspace_is_exited(&ws, &states),
+                    workspace_is_limit_reached(&ws, &states),
                 ]
                 .iter()
                 .filter(|p| **p)
@@ -379,6 +419,35 @@ mod tests {
                 assert!(lit <= 1, "{prior:?} → {incoming:?}: {lit} pills lit");
             }
         }
+    }
+
+    #[test]
+    fn limit_reached_edges_and_jump() {
+        // Entering the block reports the rising edge; leaving it flips
+        // `limit_changed` without re-alerting.
+        let mut states = HashMap::new();
+        let ch = apply_agent_state(&mut states, &ws_key(1), LimitReached);
+        assert!(ch.limit_changed && ch.now_limit_reached);
+        assert!(!ch.now_asking && !ch.now_done);
+        let ch = apply_agent_state(&mut states, &ws_key(1), Working);
+        assert!(ch.limit_changed && !ch.now_limit_reached);
+
+        // The `Shift-L` jump advances only across the limit-blocked rows,
+        // never a merely-asking or working one, and wraps.
+        let mut states = HashMap::new();
+        states.insert(ws_key(1), LimitReached);
+        states.insert(ws_key(2), InputNeeded);
+        states.insert(ws_key(3), LimitReached);
+        states.insert(ws_key(4), Working);
+        let order = [ws_key(1), ws_key(2), ws_key(3), ws_key(4)];
+        assert_eq!(
+            next_limit_reached_workspace(&states, &order, Some(&ws_key(1))),
+            Some(ws_key(3)),
+        );
+        assert_eq!(
+            next_limit_reached_workspace(&states, &order, Some(&ws_key(3))),
+            Some(ws_key(1)),
+        );
     }
 
     #[test]

@@ -315,6 +315,20 @@ pub enum AgentState {
     /// be read). Set by the PTY-exit teardown, cleared when a fresh
     /// agent is spawned into the same workspace.
     Exited { code: Option<i32> },
+    /// The agent is blocked on a provider usage / rate limit — Claude
+    /// Code hit its usage cap and paused on the "limit reached — Wait?"
+    /// prompt (issue #847). A specialization of `InputNeeded`: the agent
+    /// is parked waiting on the user, but the resolution is external (wait
+    /// for the reset, or re-auth with another account) rather than a
+    /// normal permission answer, so it gets its own pill, `!`-style jump,
+    /// filter axis, and the bulk "resume all rate-limited agents" action.
+    /// Sticky exactly like `InputNeeded` — a parked limit prompt emits no
+    /// output, so only affirmative evidence (the agent visibly working
+    /// again, a resting composer) leaves it. → alert.
+    ///
+    /// Appended last: the socket transport encodes this enum by bincode
+    /// ordinal, so it must never be reordered ahead of `Exited`.
+    LimitReached,
 }
 
 /// A normalized lifecycle hook fired by an agent, decoupled from the

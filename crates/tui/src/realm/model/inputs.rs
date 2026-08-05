@@ -20,6 +20,11 @@ use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use std::path::{Path, PathBuf};
 use tuirealm::terminal::TerminalAdapter;
 
+/// The prompt the bulk "resume all rate-limited agents" action (`Shift-K`,
+/// #847) injects into each limit-blocked agent to nudge it back to work
+/// after the user has re-authed with another account.
+const RESUME_PROMPT: &str = "continue";
+
 /// The destination a `scaffold_skill` action resolves to, tagged with
 /// how it was found so the confirm preview can say so plainly (#799):
 /// writing to a fallback launch directory reads very differently from
@@ -372,6 +377,43 @@ impl<T: TerminalAdapter> Model<T> {
             parts.join(" · ")
         };
         self.flash_info(summary);
+        self.redraw = true;
+        cmds
+    }
+
+    /// Resume every workspace currently blocked on a provider usage /
+    /// rate limit (`Shift-K`, #847). A one-shot settle-gated inject
+    /// fan-out of a "continue" prompt across exactly the limit-blocked set
+    /// — the bulk companion to re-authing with another account, so the
+    /// user doesn't visit each terminal. Reuses the broadcast
+    /// [`Self::deliver_prompt`] delivery, but sources its targets from the
+    /// live agent-state map rather than the manual `v` selection (so it
+    /// never touches that selection) and targets ONLY limit-blocked
+    /// workspaces. Each target has a live agent (that's what `LimitReached`
+    /// means), so none fall through to the spawn / skip cases.
+    pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
+        let terminals = self.sidebar.limit_reached_terminals();
+        if terminals.is_empty() {
+            self.flash_hint("no rate-limited agents to resume");
+            return Vec::new();
+        }
+        let mut cmds = Vec::new();
+        for terminal_id in &terminals {
+            // Every `LimitReached` terminal is an agent (the state only
+            // comes from agent detection), so `is_agent` is always true —
+            // each gets the settle-gated `InjectPrompt`, never a shell
+            // write.
+            self.deliver_prompt(
+                *terminal_id,
+                true,
+                RESUME_PROMPT,
+                lazybox_ipc::PromptSource::Typed,
+                &mut cmds,
+            );
+        }
+        let resumed = terminals.len();
+        let plural = if resumed == 1 { "" } else { "s" };
+        self.flash_info(format!("resuming {resumed} rate-limited agent{plural}"));
         self.redraw = true;
         cmds
     }

@@ -77,6 +77,9 @@ pub enum Filter {
     Unread,
     /// An agent in this workspace is waiting on input.
     Asking,
+    /// An agent in this workspace is blocked on a provider usage / rate
+    /// limit (#847).
+    RateLimited,
     /// A reviewer is requested, or a review is pending / changes-requested.
     ReviewRequested,
     /// Auto-merge is armed on the PR.
@@ -110,13 +113,14 @@ impl Filter {
     /// Every fixed filter, in menu order (State, Role, Kind, Priority).
     /// Value-driven axes (Label, Linear state) are enumerated separately
     /// from the candidate set — see [`FilterSet`] and `Sidebar`.
-    pub const ALL: [Filter; 23] = [
+    pub const ALL: [Filter; 24] = [
         Filter::WithAgent,
         Filter::CiFailing,
         Filter::CiRunning,
         Filter::Conflict,
         Filter::Unread,
         Filter::Asking,
+        Filter::RateLimited,
         Filter::ReviewRequested,
         Filter::AutoMerge,
         Filter::Draft,
@@ -144,6 +148,7 @@ impl Filter {
             | Filter::Conflict
             | Filter::Unread
             | Filter::Asking
+            | Filter::RateLimited
             | Filter::ReviewRequested
             | Filter::AutoMerge
             | Filter::Draft
@@ -182,6 +187,7 @@ impl Filter {
             Filter::Conflict => "conflict",
             Filter::Unread => "unread",
             Filter::Asking => "asking",
+            Filter::RateLimited => "rate-limited",
             Filter::ReviewRequested => "review-requested",
             Filter::AutoMerge => "auto-merge",
             Filter::Draft => "draft",
@@ -220,6 +226,9 @@ impl Filter {
             Filter::Conflict => task.is_some_and(|t| t.mergeable.is_conflicting()),
             Filter::Unread => w.unread_count() > 0,
             Filter::Asking => crate::agent_attention::workspace_is_asking(w, ctx.agents),
+            Filter::RateLimited => {
+                crate::agent_attention::workspace_is_limit_reached(w, ctx.agents)
+            }
             Filter::ReviewRequested => task.is_some_and(|t| {
                 matches!(
                     t.review,

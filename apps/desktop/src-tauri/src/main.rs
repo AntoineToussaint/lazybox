@@ -284,6 +284,9 @@ impl InboxModel {
 /// winning. Mirrors the TUI's `aggregate_agent_state`.
 fn aggregate_agent_state(states: impl Iterator<Item = AgentState>) -> Option<AgentState> {
     states.max_by_key(|state| match state {
+        // A usage-limit block outranks even `InputNeeded` — the most
+        // urgent "act externally before this moves" state (#847).
+        AgentState::LimitReached => 6,
         AgentState::InputNeeded => 5,
         AgentState::Working => 4,
         AgentState::Done => 3,

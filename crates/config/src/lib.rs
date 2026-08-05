@@ -579,6 +579,17 @@ pub struct UiSection {
     /// opted in.
     #[serde(default)]
     pub keep_awake: bool,
+    /// Auto-press "Wait" when a Claude agent hits its provider usage /
+    /// monthly limit (issue #847). When `true`, the daemon accepts the
+    /// limit prompt's default (Wait) option the moment an agent enters
+    /// the `LimitReached` state, so N agents all hitting the cap at once
+    /// don't each need a manual visit — you re-auth with another account
+    /// and then `Shift-K` (resume all rate-limited) to continue them.
+    /// The daemon re-reads this on every transition, so editing it takes
+    /// effect without a restart. Defaults to `false`: lazybox only
+    /// detects + surfaces the block unless you opt in.
+    #[serde(default)]
+    pub auto_wait_on_limit: bool,
     /// Show each running agent's model + reasoning effort next to its
     /// sidebar badge (`C Opus`, `X gpt-5.5 · xhigh`) and on its
     /// terminal tab (where it rides the `◆` tier badge). The value is the
@@ -623,6 +634,7 @@ impl Default for UiSection {
             activity_pane_default: ActivityPaneMode::default(),
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
+            auto_wait_on_limit: false,
             show_agent_model: true,
         }
     }

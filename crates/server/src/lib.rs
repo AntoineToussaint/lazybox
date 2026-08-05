@@ -32,6 +32,7 @@ pub mod agent_stream;
 pub mod agent_updates;
 pub mod api_gateway;
 pub mod auth;
+pub mod auto_wait;
 pub mod backend;
 pub mod chat;
 pub mod client_kv;

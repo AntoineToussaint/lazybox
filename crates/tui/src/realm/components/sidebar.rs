@@ -430,6 +430,18 @@ impl Sidebar {
         self.inner.focus_next_failing_ci_workspace()
     }
 
+    /// Move the cursor onto the next workspace whose agent is blocked on
+    /// a usage / rate limit, wrapping around. Returns true when a target
+    /// was found. Backs the `Shift-L` global key (#847).
+    pub fn focus_next_limit_reached_workspace(&mut self) -> bool {
+        self.inner.focus_next_limit_reached_workspace()
+    }
+
+    /// See `Sidebar::limit_reached_terminals`.
+    pub fn limit_reached_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.limit_reached_terminals()
+    }
+
     /// Move the cursor onto the `n`th (1-based) agent workspace in
     /// sidebar order. Returns true when that slot exists. Backs the
     /// `]]<digit>` focus-mode jump.

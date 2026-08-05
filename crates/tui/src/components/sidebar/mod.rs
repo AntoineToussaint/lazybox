@@ -1100,6 +1100,55 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// Move the cursor onto the next workspace whose agent is blocked on
+    /// a usage / rate limit, starting AFTER the current row and wrapping
+    /// (`Shift-L`, #847) — the rate-limited analog of
+    /// [`Self::focus_next_asking_workspace`].
+    pub fn focus_next_limit_reached_workspace(&mut self) -> bool {
+        let keys_order = self.visible_workspace_keys();
+        let current = self.selected_session_key().cloned();
+        let Some(target) = crate::agent_attention::next_limit_reached_workspace(
+            &self.agents,
+            &keys_order,
+            current.as_ref(),
+        ) else {
+            return false;
+        };
+        self.focus_workspace_key(&target)
+    }
+
+    /// Every agent terminal currently blocked on a usage / rate limit,
+    /// lowest id first — the exact target set for the bulk "resume all
+    /// rate-limited agents" action (`Shift-K`, #847).
+    ///
+    /// Targets *terminals*, not workspaces: a workspace's aggregate reads
+    /// `LimitReached` when ANY of its terminals is, but the resume must
+    /// inject into the blocked terminal(s) themselves — routing through
+    /// the workspace's lowest-id agent (as broadcast does) could hit a
+    /// still-working sibling and skip the blocked one entirely.
+    pub fn limit_reached_terminals(&self) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (_, state))| *state == lazybox_ipc::AgentState::LimitReached)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    /// The visible workspace keys in sidebar (top-down) order — shared by
+    /// the attention jumps and the rate-limited target set.
+    fn visible_workspace_keys(&self) -> Vec<SessionKey> {
+        self.visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Move the cursor onto the next workspace whose PR has failing
     /// (or mixed) CI, starting AFTER the current row and wrapping —
     /// so `Shift-F` cycles through broken PRs rather than re-selecting

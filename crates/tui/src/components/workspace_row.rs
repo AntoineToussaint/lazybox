@@ -45,6 +45,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// exclusive with `working` — input-needed wins if both were ever
     /// set (they can't be, by the disjoint asking/working sets).
     pub asking: bool,
+    /// Any agent in this workspace is in `AgentState::LimitReached` — a
+    /// provider usage / rate-limit block (#847). Renders the `⏳` pill in
+    /// the shared state slot. Highest precedence: it's the most urgent
+    /// "act (externally) before this moves" signal.
+    pub limit_reached: bool,
     /// Any agent in this workspace is in `AgentState::Working`
     /// (streaming / running a tool). Renders the animated spinner in
     /// the same slot the `?` pill uses.
@@ -421,16 +426,21 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     glyph: the agent is making progress right now.
 ///   - `Done`        → ` ✓ ` (success, bold) — a static glyph: the
 ///     agent finished its turn and is waiting to be looked at (#80).
+///   - `LimitReached`→ ` ⏳ ` (warn, bold) — a static glyph: the agent
+///     hit its provider usage limit and is waiting to be resumed (#847).
 ///   - `Exited`      → ` ✗ ` (dim) — a static glyph: the agent process
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
 /// Reserved width either way so the kind/title to the right don't
-/// jitter as a row moves between states. Precedence asking > working >
-/// done > exited, applied defensively though the states are disjoint
-/// upstream (a live signal always wins over the terminal exit marker).
+/// jitter as a row moves between states. Precedence limit-reached >
+/// asking > working > done > exited, applied defensively though the
+/// states are disjoint upstream (a live signal always wins over the
+/// terminal exit marker).
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let (glyph, fg) = if ctx.asking {
+    let (glyph, fg) = if ctx.limit_reached {
+        ("⏳", ctx.theme.warn)
+    } else if ctx.asking {
         ("?", ctx.theme.warn)
     } else if ctx.working {
         (ctx.working_glyph, ctx.theme.accent)
@@ -1156,6 +1166,7 @@ mod tests {
             is_selected: false,
             max_pr_num_width: 4,
             asking: false,
+            limit_reached: false,
             working: false,
             done: false,
             exited: false,
@@ -1510,6 +1521,7 @@ mod tests {
             is_selected: false,
             max_pr_num_width: 2,
             asking: false,
+            limit_reached: false,
             working: false,
             done: false,
             exited: false,
@@ -1900,6 +1912,7 @@ mod tests {
             is_selected: false,
             max_pr_num_width: 3,
             asking: false,
+            limit_reached: false,
             working: false,
             done: false,
             exited: false,
@@ -2957,6 +2970,7 @@ mod tests {
             is_selected: false,
             max_pr_num_width: 4,
             asking: false,
+            limit_reached: false,
             working: false,
             done: false,
             exited: false,

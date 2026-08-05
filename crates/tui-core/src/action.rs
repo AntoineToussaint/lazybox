@@ -336,6 +336,16 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace whose PR has
     /// failing / mixed CI (`Shift-F`). Wraps around.
     JumpToFailingCi,
+    /// Jump the sidebar cursor to the next workspace whose agent is
+    /// blocked on a provider usage / rate limit (`Shift-L`, #847). Wraps
+    /// around. The rate-limited analog of [`Action::JumpToAsking`].
+    JumpToLimited,
+    /// Resume every workspace currently blocked on a usage / rate limit
+    /// (`Shift-K`, #847): a one-shot settle-gated inject fan-out of a
+    /// "continue" prompt across exactly the limit-blocked set, reusing the
+    /// `Shift-B` broadcast delivery. The bulk companion to re-authing with
+    /// another account — no visiting each terminal.
+    ResumeRateLimited,
     /// Toggle focus mode — maximize the focused workspace's terminal
     /// to near-fullscreen behind a slim event header, hiding the
     /// sidebar and activity pane (`.` from the sidebar, `]]f` from
@@ -494,6 +504,8 @@ pub enum ActionKind {
     JumpToWorkspace,
     JumpToAsking,
     JumpToFailingCi,
+    JumpToLimited,
+    ResumeRateLimited,
     ToggleFocusMode,
     StartAgent,
     ToggleActivityPane,
@@ -534,8 +546,10 @@ impl ActionKind {
         Self::JumpToWorkspace,
         Self::JumpToAsking,
         Self::JumpToFailingCi,
+        Self::JumpToLimited,
         Self::ToggleFocusMode,
         Self::StartAgent,
+        Self::ResumeRateLimited,
         Self::ToggleActivityPane,
         Self::ToggleMouseCapture,
         Self::ResizeSplitter,
@@ -733,6 +747,8 @@ impl Action {
             Action::JumpToWorkspace => ActionKind::JumpToWorkspace,
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
+            Action::JumpToLimited => ActionKind::JumpToLimited,
+            Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
             Action::StartAgent => ActionKind::StartAgent,
             Action::ToggleActivityPane => ActionKind::ToggleActivityPane,
@@ -895,6 +911,20 @@ impl ActionDef {
                 default_keys: "Shift-F",
                 label: "next failing",
                 describe: "Jump the cursor to the next PR whose CI is failing (a quick jump; the workspace picker `` ` `` reaches any workspace).",
+                section: Section::Global,
+            },
+            ActionKind::JumpToLimited => &Self {
+                kind: ActionKind::JumpToLimited,
+                default_keys: "Shift-L",
+                label: "next rate-limited",
+                describe: "Jump the cursor to the next workspace whose agent hit its provider usage / rate limit (#847). Pair with Shift-K to resume them all after re-authing.",
+                section: Section::Global,
+            },
+            ActionKind::ResumeRateLimited => &Self {
+                kind: ActionKind::ResumeRateLimited,
+                default_keys: "Shift-K",
+                label: "resume rate-limited",
+                describe: "Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent. Use after switching Claude account / API key externally so you don't visit each terminal.",
                 section: Section::Global,
             },
             ActionKind::ToggleFocusMode => &Self {
@@ -1898,6 +1928,8 @@ impl ActionKind {
             ActionKind::JumpToWorkspace => "jump_to_workspace",
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
+            ActionKind::JumpToLimited => "jump_to_limited",
+            ActionKind::ResumeRateLimited => "resume_rate_limited",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
             ActionKind::StartAgent => "start_agent",
             ActionKind::ToggleActivityPane => "toggle_activity_pane",
@@ -2648,6 +2680,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToWorkspace
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
+        | ActionKind::JumpToLimited
+        | ActionKind::ResumeRateLimited
         | ActionKind::ToggleActivityPane
         | ActionKind::ToggleFocusMode
         | ActionKind::Quit

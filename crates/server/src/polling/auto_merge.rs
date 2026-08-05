@@ -222,8 +222,14 @@ pub trait MergeBackend {
     ) -> Result<Option<(Task, Option<String>)>, String>;
 
     /// Merge the workspace's PR, pinned to `expected_head_oid` when
-    /// known.
-    async fn merge(&self, ws: &Workspace, expected_head_oid: Option<&str>) -> Result<(), String>;
+    /// known. Returns the typed [`lazybox_core::ProviderError`] — not a
+    /// flattened `String` — so the attempt can tell a transient secondary rate limit
+    /// (retry on the next green poll) from a genuine rejection (stand down).
+    async fn merge(
+        &self,
+        ws: &Workspace,
+        expected_head_oid: Option<&str>,
+    ) -> Result<(), lazybox_core::ProviderError>;
 }
 
 impl MergeBackend for lazybox_gh::GhClient {
@@ -238,10 +244,12 @@ impl MergeBackend for lazybox_gh::GhClient {
             .map_err(|e| e.to_string())
     }
 
-    async fn merge(&self, ws: &Workspace, expected_head_oid: Option<&str>) -> Result<(), String> {
-        lazybox_core::TaskProvider::merge(self, ws, expected_head_oid)
-            .await
-            .map_err(|e| e.to_string())
+    async fn merge(
+        &self,
+        ws: &Workspace,
+        expected_head_oid: Option<&str>,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        lazybox_core::TaskProvider::merge(self, ws, expected_head_oid).await
     }
 }
 
@@ -405,15 +413,38 @@ pub async fn run_attempt<B: MergeBackend>(config: &ServerConfig, ticket: Attempt
             });
             config.poll.wake(true);
         }
+        Err(e) if e.is_retryable() => {
+            // A secondary rate limit is transient: GitHub resets it within a
+            // window and the PR is still green. Don't `Blocked`-latch (that
+            // stands the head down until a new commit and would strand a
+            // rate-limited auto-merge forever) — release the latch so the
+            // next green poll re-attempts.
+            //
+            // Deliberately no bus notice: this is a *background* retry that
+            // re-fires every poll until the window clears, so a per-poll
+            // "rate-limited — will retry" would just repeat. The user-facing
+            // signal is the terminal outcome — `PrMerged` once it lands, or a
+            // real `PrMergeFailed` if it turns out non-transient — not the
+            // daemon's internal waiting. Manual merges (`handle_merge_pr`) do
+            // surface a live queued status; auto-merge stays quiet.
+            tracing::warn!(
+                workspace = %key,
+                "auto-merge rate-limited; will re-attempt next poll: {}",
+                e.diagnostic()
+            );
+            settle(None);
+            commit_fresh_task(config, key, fresh).await;
+        }
         Err(e) => {
-            tracing::warn!(workspace = %key, "auto-merge failed: {e}");
+            tracing::warn!(workspace = %key, "auto-merge failed: {}", e.diagnostic());
             settle(Some(Latch::Blocked(head)));
             // Same loud, persistent surface as a manual merge failure —
-            // includes GitHub's reason (branch protection, head moved…).
+            // includes GitHub's reason (branch protection, head moved…),
+            // humanized so no raw GraphQL/JSON reaches the footer.
             let _ = config.bus.send(Event::PrMergeFailed {
                 workspace_key: key.clone(),
                 pr_label,
-                reason: e,
+                reason: super::handlers::humanize_mutation_failure("auto-merge", &e),
             });
             commit_fresh_task(config, key, fresh).await;
         }
@@ -609,7 +640,7 @@ mod tests {
     /// Recording fake: scripted fetch result + merge result.
     struct FakeBackend {
         fetch: Result<Option<(Task, Option<String>)>, String>,
-        merge_result: Result<(), String>,
+        merge_result: Result<(), lazybox_core::ProviderError>,
         merges: parking_lot::Mutex<Vec<Option<String>>>,
     }
 
@@ -618,6 +649,16 @@ mod tests {
             Self {
                 fetch: Ok(Some((fresh, Some(head.into())))),
                 merge_result: Ok(()),
+                merges: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+
+        /// A backend whose merge fails with a scripted error — used to
+        /// exercise the retryable (rate-limit) vs permanent branches.
+        fn failing(fresh: Task, head: &str, err: lazybox_core::ProviderError) -> Self {
+            Self {
+                fetch: Ok(Some((fresh, Some(head.into())))),
+                merge_result: Err(err),
                 merges: parking_lot::Mutex::new(Vec::new()),
             }
         }
@@ -637,7 +678,7 @@ mod tests {
             &self,
             _ws: &Workspace,
             expected_head_oid: Option<&str>,
-        ) -> Result<(), String> {
+        ) -> Result<(), lazybox_core::ProviderError> {
             self.merges
                 .lock()
                 .push(expected_head_oid.map(|s| s.to_string()));
@@ -784,11 +825,14 @@ mod tests {
         let ws = armed_ws("o/r#1");
         let config = config_with(&ws);
         let mut rx = config.bus.subscribe();
-        let backend = FakeBackend {
-            fetch: Ok(Some((green_task("o/r#1"), Some("abc123".into())))),
-            merge_result: Err("Head branch was modified. Review and try the merge again.".into()),
-            merges: parking_lot::Mutex::new(Vec::new()),
-        };
+        let backend = FakeBackend::failing(
+            green_task("o/r#1"),
+            "abc123",
+            lazybox_core::ProviderError::permanent(
+                "github",
+                "Head branch was modified. Review and try the merge again.",
+            ),
+        );
 
         run_attempt(&config, ticket(&ws, None), &backend).await;
 
@@ -800,8 +844,56 @@ mod tests {
         match evt {
             Event::PrMergeFailed { reason, .. } => {
                 assert!(reason.contains("Head branch was modified"), "{reason}");
+                assert!(!reason.contains('{'), "no raw JSON in the reason: {reason}");
             }
             other => panic!("expected PrMergeFailed, got {other:?}"),
+        }
+    }
+
+    /// A secondary rate limit during an auto-merge is transient: the attempt
+    /// must NOT `Blocked`-latch the head (which would strand it until a new
+    /// commit) — it releases the latch so the next green poll re-attempts.
+    /// And because that re-attempt fires every poll until the window clears,
+    /// the background path stays quiet: no red `PrMergeFailed`, and no
+    /// per-poll "will retry" notice that would just repeat.
+    #[tokio::test(flavor = "current_thread")]
+    async fn attempt_rate_limited_releases_latch_and_stays_quiet() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let mut rx = config.bus.subscribe();
+        let backend = FakeBackend::failing(
+            green_task("o/r#1"),
+            "abc123",
+            lazybox_core::ProviderError::retryable_after(
+                "github",
+                "You have exceeded a secondary rate limit",
+                60,
+            ),
+        );
+
+        run_attempt(&config, ticket(&ws, None), &backend).await;
+
+        // Latch released (not Blocked) so a still-green re-poll re-attempts.
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&ws.key),
+            None,
+            "a transient rate limit must not permanently block the head"
+        );
+        // No PrMergeFailed and no per-poll retry notice — the background
+        // retry is silent until it resolves to a terminal outcome.
+        loop {
+            match rx.try_recv() {
+                Ok(Event::PrMergeFailed { .. }) => {
+                    panic!("a rate limit must not surface as a red PrMergeFailed")
+                }
+                Ok(Event::ProviderError { source, .. }) if source == "auto-merge" => {
+                    panic!("a background auto-merge retry must not emit a per-poll notice")
+                }
+                // Unrelated commit/broadcast events (e.g. the fresh-task
+                // commit) are fine; keep draining until the bus is empty.
+                Ok(_) => continue,
+                Err(_) => break,
+            }
         }
     }
 

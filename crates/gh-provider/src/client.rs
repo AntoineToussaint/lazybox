@@ -638,6 +638,97 @@ impl From<GhError> for lazybox_core::ProviderError {
     }
 }
 
+/// GraphQL mutations that trip GitHub's secondary rate limit carry no
+/// `resetAt` in their (HTTP 200) error body — the reset window only
+/// rides the header path. Fall back to a modest wait the daemon's
+/// mutation-retry queue then backs off from across attempts.
+const MUTATION_RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 60;
+
+/// Turn a mutation response's `errors` array into a typed [`GhError`].
+///
+/// A rate-limit error is lifted to [`GhError::RateLimited`] (so the daemon
+/// queues + retries against the reset window instead of hard-failing);
+/// everything else joins the **human** messages — never `full()`'s
+/// path/extensions debug text, which is what dumped the raw
+/// `{…,"typeName":"Mutation"}` blob into the footer. The `full()` text
+/// still goes to the log at each call site for diagnosis.
+fn mutation_errors_to_gherror(operation: &str, errors: &[graphql::GqlError]) -> GhError {
+    let joined = errors
+        .iter()
+        .map(graphql::GqlError::human)
+        .filter(|m| !m.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if errors.iter().any(graphql::GqlError::is_rate_limited) {
+        let reason = if joined.is_empty() {
+            format!("{operation}: GitHub secondary rate limit")
+        } else {
+            joined
+        };
+        return GhError::RateLimited {
+            retry_after_secs: MUTATION_RATE_LIMIT_DEFAULT_WAIT_SECS,
+            reason,
+            self_throttle: false,
+        };
+    }
+    // A GitHub error with no message text at all (`human()` empty) would
+    // otherwise render as an empty footer reason ("merge failed: github:").
+    // Name the operation so the failure is never blank.
+    if joined.is_empty() {
+        return GhError::Graphql(format!(
+            "{operation} failed (GitHub returned an error with no message)"
+        ));
+    }
+    GhError::Graphql(joined)
+}
+
+/// Log the full (diagnostic) GraphQL error text for `operation`, then
+/// return the humanized / rate-limit-classified error for the caller to
+/// surface. Centralizes the mutation error tail so no call site dumps
+/// `full()` (path + extensions) at the user.
+fn mutation_error_response(operation: &str, errors: &[graphql::GqlError]) -> GhError {
+    let full = errors
+        .iter()
+        .map(graphql::GqlError::full)
+        .collect::<Vec<_>>()
+        .join("; ");
+    let classified = mutation_errors_to_gherror(operation, errors);
+    // A rate limit is a handled, transient condition the daemon queues +
+    // retries — log it as a warning, not an error, so a merge that later
+    // succeeds doesn't leave an ERROR line behind. A genuine rejection stays
+    // an error.
+    if matches!(classified, GhError::RateLimited { .. }) {
+        tracing::warn!("{operation} rate-limited (queued for retry): {full}");
+    } else {
+        tracing::error!("{operation} errors: {full}");
+    }
+    classified
+}
+
+/// Map a mutation's [`GhError`] to a [`ProviderError`] preserving the
+/// rate-limit classification: a secondary-rate-limited write becomes a
+/// `Retryable` carrying the reset hint (the daemon queues + retries it),
+/// while every genuine rejection (conflict, blocked checks, permission)
+/// stays `Permanent` — user intent against the state they saw, GitHub's
+/// own rejection as the backstop, surfaced verbatim.
+fn mutation_provider_error(err: GhError) -> lazybox_core::ProviderError {
+    match &err {
+        GhError::RateLimited {
+            retry_after_secs,
+            self_throttle,
+            ..
+        } => {
+            let detail = detail_of(&err);
+            if *self_throttle {
+                lazybox_core::ProviderError::self_throttle("github", detail, *retry_after_secs)
+            } else {
+                lazybox_core::ProviderError::retryable_after("github", detail, *retry_after_secs)
+            }
+        }
+        _ => lazybox_core::ProviderError::permanent("github", err.to_string()),
+    }
+}
+
 /// Search query for one watched repo's open-PR fan-out.
 ///
 /// The `-involves:USER` exclusion is the fix for issue #15. A watched
@@ -3508,13 +3599,12 @@ impl GhClient {
             .post_graphql_with_retry("addReaction(EYES) mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("addReaction(EYES) errors for {reactable_node_id}: {joined}");
-            return Err(GhError::Graphql(joined));
+            // `mutation_error_response` logs the operation + full error tail
+            // (at warn! for a rate limit, error! otherwise) — don't log again.
+            return Err(mutation_error_response(
+                "addReaction(EYES) mutation",
+                &errors,
+            ));
         }
         Ok(())
     }
@@ -3539,13 +3629,7 @@ impl GhClient {
                 );
                 return Ok(());
             }
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("updatePullRequestBranch errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response("updatePullRequestBranch", &errors));
         }
         Ok(())
     }
@@ -3626,12 +3710,7 @@ impl GhClient {
             .post_graphql_with_retry("user lookup query", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response("user lookup query", &errors));
         }
         let id = response
             .data
@@ -3662,13 +3741,7 @@ impl GhClient {
             .post_graphql_with_retry("requestReviews mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("requestReviews errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response("requestReviews mutation", &errors));
         }
         Ok(())
     }
@@ -3693,13 +3766,10 @@ impl GhClient {
             .post_graphql_with_retry("addAssigneesToAssignable mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("addAssigneesToAssignable errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response(
+                "addAssigneesToAssignable mutation",
+                &errors,
+            ));
         }
         Ok(())
     }
@@ -3726,13 +3796,10 @@ impl GhClient {
             .post_graphql_with_retry("removeAssigneesFromAssignable mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("removeAssigneesFromAssignable errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response(
+                "removeAssigneesFromAssignable mutation",
+                &errors,
+            ));
         }
         Ok(())
     }
@@ -3756,12 +3823,7 @@ impl GhClient {
             .post_graphql_with_retry("repository.labels query", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response("repository.labels query", &errors));
         }
         let data = response
             .data
@@ -3786,13 +3848,10 @@ impl GhClient {
             .post_graphql_with_retry("addLabelsToLabelable mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("addLabelsToLabelable errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response(
+                "addLabelsToLabelable mutation",
+                &errors,
+            ));
         }
         Ok(())
     }
@@ -3815,13 +3874,10 @@ impl GhClient {
             .post_graphql_with_retry("removeLabelsFromLabelable mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("removeLabelsFromLabelable errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response(
+                "removeLabelsFromLabelable mutation",
+                &errors,
+            ));
         }
         Ok(())
     }
@@ -3837,12 +3893,7 @@ impl GhClient {
             .post_graphql_with_retry("pr merge-method query", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response("pr merge-method query", &errors));
         }
         response
             .data
@@ -3885,13 +3936,7 @@ impl GhClient {
                 );
                 return Ok(());
             }
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("mergePullRequest errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response("mergePullRequest", &errors));
         }
         Ok(())
     }
@@ -3903,13 +3948,7 @@ impl GhClient {
             .post_graphql_with_retry("closeIssue mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("closeIssue errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response("closeIssue mutation", &errors));
         }
         Ok(())
     }
@@ -3921,13 +3960,10 @@ impl GhClient {
             .post_graphql_with_retry("closePullRequest mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("closePullRequest errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response(
+                "closePullRequest mutation",
+                &errors,
+            ));
         }
         Ok(())
     }
@@ -3939,13 +3975,7 @@ impl GhClient {
             .post_graphql_with_retry("deleteIssue mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
-            let joined = errors
-                .iter()
-                .map(|e| e.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            tracing::error!("deleteIssue errors: {joined}");
-            return Err(GhError::Graphql(joined));
+            return Err(mutation_error_response("deleteIssue mutation", &errors));
         }
         Ok(())
     }
@@ -3993,7 +4023,7 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         self.merge_pr(node_id, expected_head_oid)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(mutation_provider_error)
     }
 
     /// Update the workspace's PR branch against its base — the "Update
@@ -4017,7 +4047,7 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         self.update_branch(node_id)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(mutation_provider_error)
     }
 
     /// Close the workspace's GitHub issue (as `NOT_PLANNED`). GitHub
@@ -4042,7 +4072,7 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         self.close_issue_node(node_id)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(mutation_provider_error)
     }
 
     /// Close the workspace's PR without merging. Requires
@@ -4065,7 +4095,7 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         self.close_pr_node(node_id)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(mutation_provider_error)
     }
 
     /// Hard-delete the workspace's GitHub issue. Only repo admins may
@@ -4089,7 +4119,7 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         self.delete_issue_node(node_id)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(mutation_provider_error)
     }
 
     /// Request reviewer(s) on the workspace's PR. Logins are
@@ -4114,7 +4144,7 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         self.request_reviewers(node_id, logins)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(mutation_provider_error)
     }
 
     /// Add assignee(s) to the workspace's PR or issue. Both are
@@ -4147,7 +4177,7 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         self.add_assignees(node_id, logins)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(mutation_provider_error)
     }
 
     /// Replace the assignee set on the workspace's PR or issue.
@@ -4203,12 +4233,12 @@ impl lazybox_core::TaskProvider for GhClient {
         if !to_add.is_empty() {
             self.add_assignees(node_id, &to_add)
                 .await
-                .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
+                .map_err(mutation_provider_error)?;
         }
         if !to_remove.is_empty() {
             self.remove_assignees(node_id, &to_remove)
                 .await
-                .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
+                .map_err(mutation_provider_error)?;
         }
         Ok(())
     }
@@ -4259,7 +4289,7 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         self.post_issue_comment(repo, number, body)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+            .map_err(mutation_provider_error)
     }
 
     /// List the labels defined on the workspace's repository. Both
@@ -4287,6 +4317,10 @@ impl lazybox_core::TaskProvider for GhClient {
                 format!("can't parse owner/name from `{repo}`"),
             ));
         };
+        // A read that feeds the label picker (not a mutation): the client
+        // falls back to the task's own labels the instant this fails, so a
+        // rate limit here must surface at once — never a `Retryable` whose
+        // "retrying" message the picker path never honors.
         let nodes = self
             .list_labels_for_repo(owner, name)
             .await
@@ -4350,7 +4384,7 @@ impl lazybox_core::TaskProvider for GhClient {
         let repo_labels = self
             .list_labels_for_repo(owner, name)
             .await
-            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
+            .map_err(mutation_provider_error)?;
         // Hash lookup keeps the typical 0-50 repo-labels × 0-10 picks
         // case constant-time without the two extra HashSet allocs the
         // prior diff path used.
@@ -4382,12 +4416,12 @@ impl lazybox_core::TaskProvider for GhClient {
         if !to_add.is_empty() {
             self.add_labels(node_id, &to_add)
                 .await
-                .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
+                .map_err(mutation_provider_error)?;
         }
         if !to_remove.is_empty() {
             self.remove_labels(node_id, &to_remove)
                 .await
-                .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))?;
+                .map_err(mutation_provider_error)?;
         }
         Ok(())
     }
@@ -4569,6 +4603,111 @@ mod tests {
             scopes.iter().any(|s| s.contains('/')),
             "at least one owner/repo scope expected for an authenticated user"
         );
+    }
+
+    fn gql_err(
+        message: &str,
+        error_type: Option<&str>,
+        extensions: Option<&str>,
+    ) -> graphql::GqlError {
+        graphql::GqlError {
+            message: message.to_string(),
+            error_type: error_type.map(str::to_string),
+            path: None,
+            extensions: extensions.map(|e| serde_json::from_str(e).unwrap()),
+            locations: None,
+        }
+    }
+
+    /// A mutation whose GraphQL body carries a secondary rate-limit error
+    /// (the #804 case) must lift to `RateLimited` — with the reset-window
+    /// fallback — so the daemon queues + retries it instead of hard-failing.
+    #[test]
+    fn secondary_rate_limited_mutation_classifies_as_rate_limited() {
+        let errors = vec![gql_err(
+            "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+            Some("RATE_LIMITED"),
+            Some(r#"{"field":"rateLimit","typeName":"Mutation"}"#),
+        )];
+        match mutation_errors_to_gherror("mergePullRequest", &errors) {
+            GhError::RateLimited {
+                retry_after_secs,
+                reason,
+                self_throttle,
+            } => {
+                assert_eq!(retry_after_secs, MUTATION_RATE_LIMIT_DEFAULT_WAIT_SECS);
+                assert!(
+                    !self_throttle,
+                    "a GitHub limit is not a governor self-throttle"
+                );
+                assert!(reason.contains("secondary rate limit"));
+                assert!(
+                    !reason.contains("typeName"),
+                    "no serialized extensions blob: {reason}"
+                );
+                assert!(!reason.contains('{'));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+
+        // …and it maps through to a Retryable ProviderError carrying the
+        // reset hint, which is what the daemon's retry queue keys off.
+        let pe = mutation_provider_error(mutation_errors_to_gherror("mergePullRequest", &errors));
+        assert!(pe.is_retryable());
+        assert_eq!(
+            pe.retry_after_secs(),
+            Some(MUTATION_RATE_LIMIT_DEFAULT_WAIT_SECS)
+        );
+    }
+
+    /// A genuine, non-retryable mutation rejection renders one clean human
+    /// sentence — never the raw GraphQL/JSON that #804 dumped in the footer.
+    #[test]
+    fn non_retryable_mutation_error_is_humanized() {
+        let errors = vec![gql_err(
+            "Pull request is not mergeable",
+            Some("UNPROCESSABLE"),
+            Some(r#"{"typeName":"Mutation"}"#),
+        )];
+        let err = mutation_errors_to_gherror("mergePullRequest", &errors);
+        match &err {
+            GhError::Graphql(reason) => {
+                assert_eq!(reason, "Pull request is not mergeable");
+                assert!(!reason.contains("typeName"));
+            }
+            other => panic!("expected Graphql, got {other:?}"),
+        }
+        let pe = mutation_provider_error(err);
+        assert!(
+            !pe.is_retryable(),
+            "a real rejection is permanent, not retried"
+        );
+        let msg = pe.user_message();
+        assert!(msg.contains("Pull request is not mergeable"));
+        assert!(
+            !msg.contains("typeName"),
+            "footer message stays JSON-free: {msg}"
+        );
+        assert!(!msg.contains("(ext:"));
+    }
+
+    /// A GitHub error carrying no message text (`human()` empty) must still
+    /// produce a non-blank reason — otherwise the footer reads
+    /// "merge failed: github:" with nothing after it.
+    #[test]
+    fn empty_message_error_still_names_the_operation() {
+        let errors = vec![gql_err("", None, Some(r#"{"typeName":"Mutation"}"#))];
+        match mutation_errors_to_gherror("mergePullRequest", &errors) {
+            GhError::Graphql(reason) => {
+                assert!(!reason.trim().is_empty(), "reason must not be blank");
+                assert!(
+                    reason.contains("mergePullRequest"),
+                    "names the op: {reason}"
+                );
+                assert!(!reason.contains("typeName"), "still JSON-free: {reason}");
+            }
+            other => panic!("expected Graphql, got {other:?}"),
+        }
     }
 
     #[tokio::test]

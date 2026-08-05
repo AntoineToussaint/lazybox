@@ -59,9 +59,16 @@ pub async fn post_reply(
             return Err(emit_reply_error(config, &e));
         }
     };
-    if let Err(e) = provider.post_reply(&workspace, trimmed).await {
+    if let Err(e) = run_mutation_with_retry(&config.bus, "reply", || {
+        provider.post_reply(&workspace, trimmed)
+    })
+    .await
+    {
         tracing::warn!("post_reply {workspace_key}: {e:?}");
-        return Err(emit_reply_error(config, &format!("post failed: {e}")));
+        return Err(emit_reply_error(
+            config,
+            &format!("post failed: {}", humanize_mutation_failure("reply", &e)),
+        ));
     }
     tracing::info!(
         "posted reply to {} ({} chars)",
@@ -282,6 +289,160 @@ mod provider_resolution_tests {
     }
 }
 
+/// A user-initiated mutation that trips GitHub's secondary rate limit
+/// should not hard-fail — GitHub resets the limit within a window and the
+/// write can simply be retried. These bounds keep that retry queue honest:
+/// it gives up after `MUTATION_MAX_ATTEMPTS` tries or `MUTATION_MAX_WAIT_SECS`
+/// of total waiting, whichever comes first, and only then surfaces a real
+/// (humanized) failure.
+const MUTATION_MAX_ATTEMPTS: u32 = 5;
+const MUTATION_MAX_WAIT_SECS: u64 = 600;
+/// GraphQL mutation rate-limit errors carry no `resetAt` (that only rides
+/// the header path), so fall back to a modest wait the loop then backs off.
+const MUTATION_RETRY_FALLBACK_SECS: u64 = 60;
+
+/// Bounded retry queue for a user-initiated GitHub mutation (merge,
+/// update-branch, …) that hits GitHub's secondary rate limit.
+///
+/// A rate-limited write comes back as a `Retryable` [`lazybox_core::ProviderError`]
+/// carrying the reset hint (`crate`-side, `mutation_provider_error` in the
+/// GitHub client lifts a secondary-limit GraphQL error to that). Rather
+/// than hard-fail with a raw red `×` the user must clear and re-press, we
+/// surface a live, non-scary "queued — retrying in ~2m" notice, wait out
+/// the window (honoring the hint, with per-attempt backoff + jitter so
+/// lazybox doesn't re-collide with `gh`/agents on the shared token), and
+/// retry. Only once the bounds above are exhausted does the final error
+/// reach the caller.
+///
+/// Every non-retryable failure (a genuine GitHub rejection: conflict,
+/// blocked checks, permission) returns immediately — those are not rate
+/// limits and must surface at once.
+pub(super) async fn run_mutation_with_retry<F, Fut>(
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    op: &str,
+    mut attempt: F,
+) -> Result<(), lazybox_core::ProviderError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), lazybox_core::ProviderError>>,
+{
+    let mut attempt_num = 0u32;
+    let mut waited = 0u64;
+    loop {
+        attempt_num += 1;
+        let err = match attempt().await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        let base = err
+            .retry_after_secs()
+            .unwrap_or(MUTATION_RETRY_FALLBACK_SECS);
+        let wait = mutation_retry_wait(base, attempt_num);
+        // Give up — surface the error — when: the failure isn't retryable
+        // (a genuine rejection); we've spent our attempt budget; the whole
+        // queue window is exhausted; or the reset window itself is longer
+        // than we'll ever hold the queue. That last case is the honest exit
+        // for a *primary* quota exhaustion (resets an hour out, not a
+        // minute): queuing 10 min then failing is worse than telling the
+        // user now to come back when it resets — so we don't pretend.
+        if !err.is_retryable()
+            || attempt_num >= MUTATION_MAX_ATTEMPTS
+            || base > MUTATION_MAX_WAIT_SECS
+            || waited.saturating_add(wait) > MUTATION_MAX_WAIT_SECS
+        {
+            return Err(err);
+        }
+        let _ = bus.send(Event::provider_error_retryable(
+            op,
+            format!(
+                "{op} queued — GitHub rate-limited, retrying in {}",
+                humanize_wait(wait)
+            ),
+        ));
+        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+        waited = waited.saturating_add(wait);
+    }
+}
+
+/// Wait before the next mutation attempt: honor the reset hint as the
+/// floor, back off across attempts, and add ≤20% jitter so lazybox doesn't
+/// re-collide with `gh`/agents on the shared token's secondary-limit
+/// bucket. Capped at [`MUTATION_MAX_WAIT_SECS`].
+fn mutation_retry_wait(base_secs: u64, attempt: u32) -> u64 {
+    let base = base_secs.clamp(1, MUTATION_MAX_WAIT_SECS);
+    let scaled = base
+        .saturating_mul(u64::from(attempt))
+        .min(MUTATION_MAX_WAIT_SECS);
+    let span = (base / 5).max(1);
+    let jitter = u64::from(chrono::Utc::now().timestamp_subsec_nanos()) % (span + 1);
+    scaled.saturating_add(jitter).min(MUTATION_MAX_WAIT_SECS)
+}
+
+/// Render a wait as a short relative duration ("45s", "~2m"). Relative,
+/// not an absolute clock time, so the notice reads the same regardless of
+/// the daemon's timezone (it may be a headless / remote host whose local
+/// time isn't the user's).
+fn humanize_wait(secs: u64) -> String {
+    if secs < 90 {
+        format!("{secs}s")
+    } else {
+        format!("~{}m", secs.div_ceil(60))
+    }
+}
+
+/// Humanize a mutation's final failure for the footer — one clean
+/// sentence, never a raw GraphQL/JSON blob and never a false "retrying"
+/// claim once the retry queue has stopped. A still-rate-limited error names
+/// the window when it's known; every other failure is the provider's own
+/// (already-humanized) user message.
+pub(super) fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderError) -> String {
+    if err.is_retryable() {
+        match err.retry_after_secs() {
+            // A window measured in minutes (a primary quota reset) — name it
+            // so "try again" has a concrete when.
+            Some(secs) if secs >= 120 => {
+                format!(
+                    "GitHub is rate-limiting {op} — try again in about {}m",
+                    secs.div_ceil(60)
+                )
+            }
+            _ => format!("GitHub is rate-limiting {op} — try again shortly"),
+        }
+    } else {
+        err.user_message()
+    }
+}
+
+/// Run a user-initiated mutation as a **daemon-owned** task, detached from
+/// the per-connection command pool.
+///
+/// [`run_mutation_with_retry`] can hold its caller for minutes while it
+/// waits out a rate-limit window. A mutation command runs on the serve
+/// loop's per-connection `mutations` pool, bounded by `MAX_CONNECTION_MUTATIONS`;
+/// left there, a bulk flow under a rate limit (e.g. `Shift-U` on many
+/// behind PRs — exactly the burst that trips the secondary limit) would pin
+/// slots for the whole window, starving the pool so later commands are
+/// rejected, and a client disconnect would drop the still-queued write. As a
+/// detached daemon task it does neither: the retry outlives the connection
+/// and the outcome reaches every client over the event bus. Same dispatch
+/// shape as [`super::auto_merge::on_workspace_committed`].
+fn detach_mutation<Fut>(fut: Fut)
+where
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(fut);
+}
+
+/// After a `deleteIssue` fails, should the daemon fall back to a
+/// NOT_PLANNED close? Only for a genuine "delete not permitted" — GitHub's
+/// FORBIDDEN when the token lacks admin. A *retryable* rate-limit that only
+/// exhausted its retry window is not a permission problem, so downgrading a
+/// delete to a close on it would silently do the wrong thing; that surfaces
+/// as a failure instead.
+fn delete_should_fall_back_to_close(delete_err: &lazybox_core::ProviderError) -> bool {
+    !delete_err.is_retryable()
+}
+
 /// Handle `Command::MergePr` — the MANUAL merge path (`g m`): load the
 /// workspace, recover the PR's GraphQL node id from its primary task,
 /// and ship a `mergePullRequest` mutation. On success the next poll
@@ -300,6 +461,11 @@ mod provider_resolution_tests {
 /// Errors surface as `Event::ProviderError` so the TUI can flash the
 /// reason without us inventing a bespoke event variant.
 pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { merge_pr_task(&config, workspace_key).await });
+}
+
+async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -323,19 +489,24 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
             return;
         }
     };
-    if let Err(e) = provider.merge(&ws, None).await {
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "merge", || provider.merge(&ws, None)).await
+    {
         tracing::warn!("merge {workspace_key}: {e:?}");
         // A user-initiated merge that GitHub rejected is not a
         // transient blip — surface it as a distinct, persistent error
         // (with the reason) so the user can't mistake it for "the
-        // keypress did nothing." The PR stays Open/actionable.
+        // keypress did nothing." The PR stays Open/actionable. A
+        // secondary rate limit never lands here unless the retry queue
+        // exhausted its window; then the reason is a humanized sentence,
+        // not a raw GraphQL blob.
         let label = pr_label
             .clone()
             .unwrap_or_else(|| workspace_key.as_str().to_string());
         let _ = config.bus.send(Event::PrMergeFailed {
             workspace_key: workspace_key.clone(),
             pr_label: label,
-            reason: e.to_string(),
+            reason: humanize_mutation_failure("merge", &e),
         });
         return;
     }
@@ -379,6 +550,11 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
 /// (mirroring the merge path) so a rejected update can't be mistaken for
 /// "the keypress did nothing." The PR stays actionable.
 pub async fn handle_update_branch(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { update_branch_task(&config, workspace_key).await });
+}
+
+async fn update_branch_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -404,12 +580,14 @@ pub async fn handle_update_branch(config: &ServerConfig, workspace_key: Workspac
             return;
         }
     };
-    if let Err(e) = provider.update_branch(&ws).await {
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "update-branch", || provider.update_branch(&ws)).await
+    {
         tracing::warn!("update-branch {workspace_key}: {e:?}");
         let _ = config.bus.send(Event::BranchUpdateFailed {
             workspace_key: workspace_key.clone(),
             pr_label,
-            reason: e.to_string(),
+            reason: humanize_mutation_failure("update-branch", &e),
         });
         return;
     }
@@ -439,6 +617,11 @@ pub async fn handle_update_branch(config: &ServerConfig, workspace_key: Workspac
 /// the user can't mistake it for "the keypress did nothing" — the
 /// issue stays Open/actionable.
 pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { close_issue_task(&config, workspace_key).await });
+}
+
+async fn close_issue_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -462,12 +645,14 @@ pub async fn handle_close_issue(config: &ServerConfig, workspace_key: WorkspaceK
             return;
         }
     };
-    if let Err(e) = provider.close_issue(&ws).await {
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "close-issue", || provider.close_issue(&ws)).await
+    {
         tracing::warn!("close-issue {workspace_key}: {e:?}");
         let _ = config.bus.send(Event::IssueCloseFailed {
             workspace_key: workspace_key.clone(),
             issue_label,
-            reason: e.to_string(),
+            reason: humanize_mutation_failure("close-issue", &e),
         });
         return;
     }
@@ -549,6 +734,11 @@ fn closed_issue_cleanup(config: &ServerConfig, ws: &Workspace) -> Option<super::
 /// Failure surfaces as a persistent `Event::DeleteOrCloseFailed`,
 /// mirroring the merge/close paths.
 pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { delete_or_close_task(&config, workspace_key).await });
+}
+
+async fn delete_or_close_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -576,12 +766,14 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
     };
 
     if ws.pr.is_some() {
-        if let Err(e) = provider.close_pr(&ws).await {
+        if let Err(e) =
+            run_mutation_with_retry(&config.bus, "delete-or-close", || provider.close_pr(&ws)).await
+        {
             tracing::warn!("close-pr {workspace_key}: {e:?}");
             let _ = config.bus.send(Event::DeleteOrCloseFailed {
                 workspace_key: workspace_key.clone(),
                 label,
-                reason: e.to_string(),
+                reason: humanize_mutation_failure("close-pr", &e),
             });
             return;
         }
@@ -591,24 +783,52 @@ pub async fn handle_delete_or_close(config: &ServerConfig, workspace_key: Worksp
             pr_label: label,
         });
     } else {
-        let fell_back_to_close = match provider.delete_issue(&ws).await {
-            Ok(()) => false,
-            Err(delete_err) => {
-                tracing::warn!(
-                    "delete-issue {workspace_key}: {delete_err:?} — falling back to close"
-                );
-                if let Err(close_err) = provider.close_issue(&ws).await {
-                    tracing::warn!("close-issue fallback {workspace_key}: {close_err:?}");
+        // Retry a rate-limited *delete* against the reset window rather than
+        // letting it fall through to the close path — a transient limit must
+        // not silently downgrade a delete into a NOT_PLANNED close. The
+        // fallback is only for a genuine "delete not permitted" (a non-admin's
+        // FORBIDDEN); a rate-limit that merely exhausted its window is not a
+        // permission problem and surfaces as a failure instead.
+        let fell_back_to_close =
+            match run_mutation_with_retry(&config.bus, "delete-or-close", || {
+                provider.delete_issue(&ws)
+            })
+            .await
+            {
+                Ok(()) => false,
+                Err(delete_err) if !delete_should_fall_back_to_close(&delete_err) => {
+                    tracing::warn!(
+                        "delete-issue {workspace_key}: {delete_err:?} — rate-limited, not \
+                         downgrading to close"
+                    );
                     let _ = config.bus.send(Event::DeleteOrCloseFailed {
                         workspace_key: workspace_key.clone(),
                         label,
-                        reason: close_err.to_string(),
+                        reason: humanize_mutation_failure("delete-issue", &delete_err),
                     });
                     return;
                 }
-                true
-            }
-        };
+                Err(delete_err) => {
+                    tracing::warn!(
+                        "delete-issue {workspace_key}: {delete_err:?} — falling back to close"
+                    );
+                    if let Err(close_err) =
+                        run_mutation_with_retry(&config.bus, "delete-or-close", || {
+                            provider.close_issue(&ws)
+                        })
+                        .await
+                    {
+                        tracing::warn!("close-issue fallback {workspace_key}: {close_err:?}");
+                        let _ = config.bus.send(Event::DeleteOrCloseFailed {
+                            workspace_key: workspace_key.clone(),
+                            label,
+                            reason: humanize_mutation_failure("close-issue", &close_err),
+                        });
+                        return;
+                    }
+                    true
+                }
+            };
         tracing::info!(
             "deleted issue for workspace {workspace_key} (fell_back_to_close: {fell_back_to_close})"
         );
@@ -637,6 +857,15 @@ pub async fn handle_request_reviewers(
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
 ) {
+    let config = config.clone();
+    detach_mutation(async move { request_reviewers_task(&config, workspace_key, logins).await });
+}
+
+async fn request_reviewers_task(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -658,9 +887,16 @@ pub async fn handle_request_reviewers(
             return;
         }
     };
-    if let Err(e) = provider.request_reviewers(&ws, &logins).await {
+    if let Err(e) = run_mutation_with_retry(&config.bus, "reviewers", || {
+        provider.request_reviewers(&ws, &logins)
+    })
+    .await
+    {
         tracing::warn!("request_reviewers {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!("request reviewers failed: {e}"));
+        emit_err(&format!(
+            "request reviewers failed: {}",
+            humanize_mutation_failure("reviewers", &e)
+        ));
     } else {
         tracing::info!("requested reviewers {logins:?} on workspace {workspace_key}");
         // Wake the poll loop so the reviewer chip on the row
@@ -675,6 +911,15 @@ pub async fn handle_request_reviewers(
 /// `handle_request_reviewers` — same credential chain, same
 /// error-surface pattern.
 pub async fn handle_add_assignees(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
+    let config = config.clone();
+    detach_mutation(async move { add_assignees_task(&config, workspace_key, logins).await });
+}
+
+async fn add_assignees_task(
     config: &ServerConfig,
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
@@ -700,9 +945,16 @@ pub async fn handle_add_assignees(
             return;
         }
     };
-    if let Err(e) = provider.add_assignees(&ws, &logins).await {
+    if let Err(e) = run_mutation_with_retry(&config.bus, "assignees", || {
+        provider.add_assignees(&ws, &logins)
+    })
+    .await
+    {
         tracing::warn!("add_assignees {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!("add assignees failed: {e}"));
+        emit_err(&format!(
+            "add assignees failed: {}",
+            humanize_mutation_failure("assignees", &e)
+        ));
     } else {
         tracing::info!("added assignees {logins:?} on workspace {workspace_key}");
         config.poll.wake(true);
@@ -716,6 +968,15 @@ pub async fn handle_add_assignees(
 /// style poll afterwards so the sidebar / right pane reflect the
 /// new set without waiting for the regular tick.
 pub async fn handle_set_assignees(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    logins: Vec<String>,
+) {
+    let config = config.clone();
+    detach_mutation(async move { set_assignees_task(&config, workspace_key, logins).await });
+}
+
+async fn set_assignees_task(
     config: &ServerConfig,
     workspace_key: WorkspaceKey,
     logins: Vec<String>,
@@ -738,9 +999,16 @@ pub async fn handle_set_assignees(
             return;
         }
     };
-    if let Err(e) = provider.set_assignees(&ws, &logins).await {
+    if let Err(e) = run_mutation_with_retry(&config.bus, "assignees", || {
+        provider.set_assignees(&ws, &logins)
+    })
+    .await
+    {
         tracing::warn!("set_assignees {workspace_key} {logins:?}: {e:?}");
-        emit_err(&format!("update assignees failed: {e}"));
+        emit_err(&format!(
+            "update assignees failed: {}",
+            humanize_mutation_failure("assignees", &e)
+        ));
         return;
     }
     tracing::info!("set assignees to {logins:?} on workspace {workspace_key}");
@@ -761,6 +1029,11 @@ pub async fn handle_set_labels(
     workspace_key: WorkspaceKey,
     names: Vec<String>,
 ) {
+    let config = config.clone();
+    detach_mutation(async move { set_labels_task(&config, workspace_key, names).await });
+}
+
+async fn set_labels_task(config: &ServerConfig, workspace_key: WorkspaceKey, names: Vec<String>) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -777,9 +1050,14 @@ pub async fn handle_set_labels(
             return;
         }
     };
-    if let Err(e) = provider.set_labels(&ws, &names).await {
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "labels", || provider.set_labels(&ws, &names)).await
+    {
         tracing::warn!("set_labels {workspace_key} {names:?}: {e:?}");
-        emit_err(&format!("update labels failed: {e}"));
+        emit_err(&format!(
+            "update labels failed: {}",
+            humanize_mutation_failure("labels", &e)
+        ));
         return;
     }
     tracing::info!("set labels to {names:?} on workspace {workspace_key}");
@@ -4409,5 +4687,231 @@ mod fetch_repo_labels_tests {
             }
             other => panic!("expected a repo-labels ProviderError, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod mutation_retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// The #804 core fix: a secondary-rate-limited mutation is queued and
+    /// retried against the reset window, succeeding without a manual
+    /// re-press — and a live, non-scary "queued — retrying in …" notice
+    /// shows in place of a red `×`.
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_mutation_retries_then_succeeds() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(16);
+        let calls = AtomicU32::new(0);
+        let result = run_mutation_with_retry(&bus, "merge", || {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Err(lazybox_core::ProviderError::retryable_after(
+                        "github",
+                        "You have exceeded a secondary rate limit",
+                        1,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok(), "queued retry must succeed: {result:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "one failure, then one retry"
+        );
+
+        let ev = rx.try_recv().expect("a queued notice must be broadcast");
+        match ev {
+            Event::ProviderError {
+                source,
+                message,
+                kind,
+                ..
+            } => {
+                assert_eq!(source, "merge");
+                assert!(
+                    message.contains("queued"),
+                    "live status names the queue: {message}"
+                );
+                // Relative duration, not an absolute clock time — so the
+                // notice reads correctly regardless of the daemon's timezone.
+                assert!(
+                    message.contains("retrying in"),
+                    "status shows a relative retry time: {message}"
+                );
+                assert!(
+                    !message.contains(" at "),
+                    "no absolute (timezone-dependent) clock time: {message}"
+                );
+                assert!(!message.contains('{'), "status is JSON-free: {message}");
+                assert_eq!(
+                    kind, "retryable",
+                    "a queued notice must be non-scary / auto-fading"
+                );
+            }
+            other => panic!("expected a queued ProviderError notice, got {other:?}"),
+        }
+    }
+
+    /// A rate-limit whose reset window is longer than the whole queue budget
+    /// (a *primary* quota exhaustion, resets ~an hour out) must surface at
+    /// once — never spin ~10 min of doomed retries — and name the window so
+    /// "try again" has a concrete when.
+    #[tokio::test(start_paused = true)]
+    async fn long_reset_window_surfaces_immediately_without_spinning() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(16);
+        let calls = AtomicU32::new(0);
+        let result = run_mutation_with_retry(&bus, "merge", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Err(lazybox_core::ProviderError::retryable_after(
+                    "github",
+                    "API rate limit exceeded",
+                    4_000, // > MUTATION_MAX_WAIT_SECS
+                ))
+            }
+        })
+        .await;
+
+        let err = result.expect_err("a window we won't hold must surface");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no queuing/spinning on a window longer than the budget"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no 'queued, retrying' notice we can't honor"
+        );
+        let reason = humanize_mutation_failure("merge", &err);
+        assert!(
+            reason.contains("try again in about"),
+            "names the reset window: {reason}"
+        );
+        assert!(!reason.contains('{'), "JSON-free: {reason}");
+    }
+
+    #[test]
+    fn humanize_wait_is_relative_and_compact() {
+        assert_eq!(humanize_wait(45), "45s");
+        assert_eq!(humanize_wait(60), "60s");
+        assert_eq!(humanize_wait(120), "~2m");
+        assert_eq!(humanize_wait(121), "~3m");
+    }
+
+    /// A genuine rejection (conflict, blocked checks) is not a rate limit:
+    /// it must surface at once, with no retry and no queued notice, and its
+    /// footer reason stays a clean human sentence.
+    #[tokio::test(start_paused = true)]
+    async fn non_retryable_mutation_fails_immediately() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(16);
+        let calls = AtomicU32::new(0);
+        let result = run_mutation_with_retry(&bus, "merge", || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                Err(lazybox_core::ProviderError::permanent(
+                    "github",
+                    "GraphQL error: Pull request is not mergeable",
+                ))
+            }
+        })
+        .await;
+
+        let err = result.expect_err("a real rejection must fail");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "no retry on a permanent error"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "no queued notice for a permanent error"
+        );
+
+        let reason = humanize_mutation_failure("merge", &err);
+        assert!(
+            reason.contains("Pull request is not mergeable"),
+            "got {reason}"
+        );
+        assert!(
+            !reason.contains('{'),
+            "footer reason stays JSON-free: {reason}"
+        );
+    }
+
+    #[test]
+    fn retry_wait_honors_hint_floor_and_caps() {
+        assert!(
+            mutation_retry_wait(1, 1) >= 1,
+            "never zero (would hot-loop)"
+        );
+        assert!(
+            mutation_retry_wait(60, 3) >= 60,
+            "the reset hint is the floor, never undercut"
+        );
+        assert!(
+            mutation_retry_wait(MUTATION_MAX_WAIT_SECS + 1_000, 5) <= MUTATION_MAX_WAIT_SECS,
+            "a huge hint is capped so the queue stays bounded"
+        );
+    }
+
+    /// The retry queue must run detached from its caller: a mutation that
+    /// sits in the queue for minutes cannot hold the caller (a per-connection
+    /// command slot) for the whole window, and it must outlive the caller so
+    /// a disconnect doesn't drop the queued write. `detach_mutation` returns
+    /// before its (slow) work finishes, and that work completes on its own.
+    #[tokio::test(start_paused = true)]
+    async fn detached_mutation_runs_independently_of_its_caller() {
+        let (bus, mut rx) = tokio::sync::broadcast::channel(4);
+        let bus2 = bus.clone();
+        detach_mutation(async move {
+            // Stand in for a queued retry that waits out a rate-limit window.
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let _ = bus2.send(Event::provider_error_retryable("merge", "done"));
+        });
+
+        // The caller did NOT await the work — nothing has been emitted yet.
+        assert!(
+            rx.try_recv().is_err(),
+            "detach_mutation must return before the queued work finishes"
+        );
+
+        // The detached task completes on its own, after the caller moved on.
+        tokio::time::sleep(std::time::Duration::from_secs(301)).await;
+        assert!(
+            matches!(rx.recv().await, Ok(Event::ProviderError { .. })),
+            "the detached work still runs to completion / outlives the caller"
+        );
+    }
+
+    /// A `deleteIssue` falls back to a NOT_PLANNED close only for a genuine
+    /// permission failure — never for a rate-limit that merely exhausted its
+    /// retry window (which would silently downgrade a delete into a close).
+    #[test]
+    fn delete_falls_back_to_close_only_on_a_genuine_permission_failure() {
+        let forbidden = lazybox_core::ProviderError::permanent(
+            "github",
+            "Must have admin rights to Repository.",
+        );
+        assert!(
+            delete_should_fall_back_to_close(&forbidden),
+            "FORBIDDEN → fall back to close"
+        );
+
+        let rate_limited = lazybox_core::ProviderError::retryable_after(
+            "github",
+            "You have exceeded a secondary rate limit",
+            60,
+        );
+        assert!(
+            !delete_should_fall_back_to_close(&rate_limited),
+            "an exhausted rate limit must not downgrade a delete into a close"
+        );
     }
 }

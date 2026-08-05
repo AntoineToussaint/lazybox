@@ -40,6 +40,7 @@ fn rendered_frame_follows_delta_scroll() {
     let mut row_iter = RowIterator::new().unwrap();
     let mut cell_iter = CellIterator::new().unwrap();
     let mut shadow = None;
+    let mut last_visible_cursor = None;
     let area = Rect::new(0, 0, COLS, ROWS);
     // A macro rather than a helper fn: `Terminal<'alloc, 'cb>` is
     // invariant in 'alloc, so a parameterised render helper doesn't
@@ -47,8 +48,13 @@ fn rendered_frame_follows_delta_scroll() {
     macro_rules! render {
         () => {{
             let snapshot = render_state.update(&terminal).unwrap();
-            let widget =
-                GhosttyTerminal::new(&snapshot, &mut row_iter, &mut cell_iter, &mut shadow);
+            let widget = GhosttyTerminal::new(
+                &snapshot,
+                &mut row_iter,
+                &mut cell_iter,
+                &mut shadow,
+                &mut last_visible_cursor,
+            );
             let mut buf = Buffer::empty(area);
             widget.render(area, &mut buf);
             buf

@@ -42,7 +42,7 @@
 //! at the end, so libghostty's internal dirty state doesn't accumulate
 //! unbounded across frames.
 
-use libghostty_vt::render::{CellIterator, Dirty, RowIterator, Snapshot};
+use libghostty_vt::render::{CellIterator, CursorViewport, Dirty, RowIterator, Snapshot};
 use libghostty_vt::style::Underline;
 use ratatui::buffer::Buffer;
 use ratatui::prelude::*;
@@ -56,6 +56,11 @@ pub struct GhosttyTerminal<'a, 'alloc, 's> {
     row_iter: &'a mut RowIterator<'alloc>,
     cell_iter: &'a mut CellIterator<'alloc>,
     shadow: &'a mut Option<Buffer>,
+    /// Persistent slot for the last position the cursor was drawn at
+    /// while *genuinely* visible (DECTCEM on). It disambiguates the
+    /// two reasons a cursor can be hidden while the app marks it
+    /// blinking — see the cursor computation in `render`.
+    last_visible_cursor: &'a mut Option<CursorViewport>,
 }
 
 impl<'a, 'alloc, 's> GhosttyTerminal<'a, 'alloc, 's> {
@@ -67,12 +72,14 @@ impl<'a, 'alloc, 's> GhosttyTerminal<'a, 'alloc, 's> {
         row_iter: &'a mut RowIterator<'alloc>,
         cell_iter: &'a mut CellIterator<'alloc>,
         shadow: &'a mut Option<Buffer>,
+        last_visible_cursor: &'a mut Option<CursorViewport>,
     ) -> Self {
         Self {
             snapshot,
             row_iter,
             cell_iter,
             shadow,
+            last_visible_cursor,
         }
     }
 }
@@ -94,18 +101,40 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
         //
         // A blinking cursor drives its blink by toggling DECTCEM
         // (mode 25 / `cursor_visible`) on a timer. Gating the
-        // reversed-block highlight on `cursor_visible()` made it
+        // reversed-block highlight on `cursor_visible()` alone made it
         // flash in time with that blink — over the prompt's
-        // horizontal rule it reads as a blinking horizontal line.
-        // Same no-blink stance the cell path already takes for SGR
-        // 5/6: when the cursor is *blinking*, render it steadily on
-        // presence and ignore the phase. A non-blinking cursor still
-        // honours `cursor_visible()`, so a full-screen TUI that hides
-        // its cursor (DECTCEM off) doesn't get a stray block.
-        let cursor_pos = self.snapshot.cursor_viewport().ok().flatten().filter(|_| {
-            self.snapshot.cursor_visible().unwrap_or(false)
-                || self.snapshot.cursor_blinking().unwrap_or(false)
-        });
+        // horizontal rule it read as a blinking horizontal line (#192).
+        // So when the cursor is *blinking* we render it steadily and
+        // ignore the DECTCEM phase.
+        //
+        // But DECTCEM-off has a second meaning: an app also clears it
+        // to *genuinely hide* the cursor while it parks it off-caret
+        // mid-redraw. Claude Code does this constantly — it hides the
+        // cursor, moves it to column 0 of a scratch row to lay out an
+        // autosuggestion, then moves it back to the caret and shows it.
+        // Honouring the blink carve-out unconditionally drew a stray
+        // block at that parked scratch cell (#844). The blink phase
+        // never *moves* the cursor, so we distinguish the two by
+        // position: a hidden-but-blinking cursor is only drawn when it
+        // still sits where it last showed (`last_visible_cursor`). A
+        // hide that moved the cursor is a genuine park, not a blink,
+        // and stays undrawn.
+        let viewport = self.snapshot.cursor_viewport().ok().flatten();
+        let cursor_pos = match viewport {
+            Some(pos) if self.snapshot.cursor_visible().unwrap_or(false) => {
+                *self.last_visible_cursor = Some(pos);
+                Some(pos)
+            }
+            Some(pos)
+                if self.snapshot.cursor_blinking().unwrap_or(false)
+                    && self
+                        .last_visible_cursor
+                        .is_some_and(|last| last.x == pos.x && last.y == pos.y) =>
+            {
+                Some(pos)
+            }
+            _ => None,
+        };
 
         // Shadow buffer. No longer a render fast path — see module
         // docs: libghostty's dirty flags can't be trusted to skip work
@@ -362,6 +391,7 @@ mod tests {
         row_iter: RowIterator<'static>,
         cell_iter: CellIterator<'static>,
         shadow: Option<Buffer>,
+        last_visible_cursor: Option<CursorViewport>,
     }
 
     impl Harness {
@@ -377,6 +407,7 @@ mod tests {
                 row_iter: RowIterator::new().unwrap(),
                 cell_iter: CellIterator::new().unwrap(),
                 shadow: None,
+                last_visible_cursor: None,
             }
         }
 
@@ -387,6 +418,7 @@ mod tests {
                 &mut self.row_iter,
                 &mut self.cell_iter,
                 &mut self.shadow,
+                &mut self.last_visible_cursor,
             );
             let mut buf = Buffer::empty(area);
             widget.render(area, &mut buf);
@@ -410,6 +442,7 @@ mod tests {
                 &mut self.row_iter,
                 &mut self.cell_iter,
                 &mut shadow,
+                &mut self.last_visible_cursor,
             );
             let mut buf = Buffer::empty(area);
             widget.render(area, &mut buf);
@@ -434,6 +467,7 @@ mod tests {
                 &mut self.row_iter,
                 &mut self.cell_iter,
                 &mut shadow,
+                &mut self.last_visible_cursor,
             );
             let mut buf = Buffer::empty(area);
             widget.render(area, &mut buf);
@@ -457,6 +491,7 @@ mod tests {
                 &mut self.row_iter,
                 &mut self.cell_iter,
                 &mut self.shadow,
+                &mut self.last_visible_cursor,
             );
             let mut buf = Buffer::empty(area);
             widget.render(area, &mut buf);
@@ -1096,6 +1131,63 @@ mod tests {
         assert!(
             !buf[(0u16, 0u16)].modifier.contains(Modifier::REVERSED),
             "a hidden non-blinking cursor must not be highlighted",
+        );
+    }
+
+    fn any_reversed(buf: &Buffer, area: Rect) -> Option<(u16, u16)> {
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if buf[(x, y)].modifier.contains(Modifier::REVERSED) {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
+    }
+
+    /// #844 regression: Claude renders an inline autosuggestion by
+    /// *hiding* the cursor (DECTCEM off), parking it at column 0 of a
+    /// scratch row to lay out the ghost-text continuation, then moving
+    /// it back to the caret and showing it again. The cursor's visual
+    /// style is *blinking*, so the #192 carve-out (draw a blinking
+    /// cursor steadily, ignoring the DECTCEM phase) used to draw a
+    /// stray reversed block at that parked column-0 cell a row below
+    /// the composer text. The block must render only at the real caret,
+    /// never at the parked scratch cell.
+    #[test]
+    fn blinking_cursor_parked_while_hidden_leaves_no_stray_block() {
+        let mut h = Harness::new(24, 4);
+        let area = Rect::new(0, 0, 24, 4);
+        // Blinking block cursor (DECSCUSR 1). Draw the composer prompt +
+        // typed text on row 0 and show the cursor at the caret after it.
+        h.terminal
+            .vt_write("\x1b[1 q> apply the drawer\x1b[?25h".as_bytes());
+        let caret = (18u16, 0u16); // right after "> apply the drawer"
+        let shown = h.render(area);
+        assert!(
+            shown[caret].modifier.contains(Modifier::REVERSED),
+            "the caret cell must be highlighted while the cursor is shown",
+        );
+
+        // Autosuggestion layout: hide the cursor, park it at column 0 of
+        // the row below, and paint the dim ghost-text continuation there.
+        h.terminal
+            .vt_write("\x1b[?25l\x1b[2;1H\x1b[2m width fix on the paper\x1b[0m".as_bytes());
+        let parked = h.render(area);
+        assert_eq!(
+            any_reversed(&parked, area),
+            None,
+            "a hidden, parked blinking cursor must not draw a stray block \
+             (found one at the parked scratch cell)",
+        );
+
+        // Claude returns the cursor to the caret and shows it again.
+        h.terminal.vt_write("\x1b[1;19H\x1b[?25h".as_bytes());
+        let restored = h.render(area);
+        assert_eq!(
+            any_reversed(&restored, area),
+            Some(caret),
+            "the block must return to the real caret, and only there",
         );
     }
 }

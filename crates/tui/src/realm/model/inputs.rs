@@ -514,6 +514,20 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Some(Id::MoveToSpace) => {
+                let space = text.trim().to_string();
+                let source = match self.modal_flow.take() {
+                    Some(ModalFlow::MoveToSpace { source }) => Some(source),
+                    _ => None,
+                };
+                if let Some(source) = source {
+                    let resolved = self.sidebar.assign_source_to_space(&source, &space);
+                    self.flash_info(format!("{source} → {resolved}"));
+                    self.redraw = true;
+                } else {
+                    tracing::warn!("move-to-space submit without a stashed source — dropped");
+                }
+            }
             Some(Id::NewProject) => {
                 let name = text.trim().to_string();
                 if !name.is_empty() {

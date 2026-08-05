@@ -109,6 +109,14 @@ pub struct Sidebar {
     /// starred in is the display order, mirroring `pinned_repos` at
     /// workspace granularity.
     focused_workspaces: Vec<SessionKey>,
+    /// User-defined Spaces — the higher-level grouping tier above repo
+    /// headers (#860). Assignment maps a source label to a Space and is
+    /// persisted to `ui.spaces`; the tier only renders when it yields
+    /// ≥2 distinct Spaces (see `compute_visible`).
+    spaces: Vec<lazybox_config::SpaceConfig>,
+    /// Spaces the user collapsed. Mirrors `collapsed_repos` one tier up;
+    /// persisted to `ui.collapsed_spaces`.
+    collapsed_spaces: BTreeSet<String>,
     /// Per-repo counters computed during `recompute_visible`. Keys
     /// are the same display strings used by `VisibleRow::RepoHeader`.
     repo_summaries: BTreeMap<String, RepoSummary>,
@@ -307,6 +315,8 @@ impl Sidebar {
             collapsed_repos: BTreeSet::new(),
             pinned_repos: Vec::new(),
             focused_workspaces: Vec::new(),
+            spaces: Vec::new(),
+            collapsed_spaces: BTreeSet::new(),
             repo_summaries: BTreeMap::new(),
             cursor: 0,
             scroll: 0,
@@ -628,12 +638,15 @@ impl Sidebar {
     /// from `~/.lazybox/config.yaml`. Call once after construction
     /// (typically in main, between `Sidebar::new` and the first
     /// daemon Subscribe).
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_config(
         &mut self,
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: BTreeSet<String>,
         pinned_repos: Vec<String>,
         focused_workspaces: Vec<SessionKey>,
+        spaces: Vec<lazybox_config::SpaceConfig>,
+        collapsed_spaces: BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -650,6 +663,8 @@ impl Sidebar {
             .into_iter()
             .filter(|k| seen.insert(k.clone()))
             .collect();
+        self.spaces = spaces;
+        self.collapsed_spaces = collapsed_spaces;
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
@@ -663,7 +678,10 @@ impl Sidebar {
         match self.visible.get(self.cursor)? {
             VisibleRow::Workspace(k) => Some(k),
             VisibleRow::Session { workspace, .. } => Some(workspace),
-            VisibleRow::FocusedHeader | VisibleRow::RepoHeader(_) | VisibleRow::KindHeader(_) => {
+            VisibleRow::FocusedHeader
+            | VisibleRow::SpaceHeader(_)
+            | VisibleRow::RepoHeader(_)
+            | VisibleRow::KindHeader(_) => {
                 None
             }
         }
@@ -882,6 +900,7 @@ impl Sidebar {
             Some(VisibleRow::Workspace(_))
             | Some(VisibleRow::Session { .. })
             | Some(VisibleRow::FocusedHeader)
+            | Some(VisibleRow::SpaceHeader(_))
             | Some(VisibleRow::RepoHeader(_))
             | Some(VisibleRow::KindHeader(_)) => {
                 self.set_cursor(idx);
@@ -1471,6 +1490,8 @@ impl Sidebar {
                         _ => None,
                     })
             }
+            // A Space header spans multiple projects — no single one.
+            VisibleRow::SpaceHeader(_) => None,
         }
     }
 
@@ -1835,10 +1856,38 @@ impl Sidebar {
                     VisibleRow::RepoHeader(name) => Some(name.clone()),
                     _ => None,
                 }),
-            // The `★ Focused` header (and rows lifted under it) don't
-            // belong to a repo group — pin / collapse no-op there.
-            Some(VisibleRow::FocusedHeader) | None => None,
+            // Neither the `★ Focused` header (nor rows lifted under it)
+            // nor a Space header belongs to a repo group — pin / collapse
+            // no-op there.
+            Some(VisibleRow::FocusedHeader) | Some(VisibleRow::SpaceHeader(_)) | None => None,
         }
+    }
+
+    /// The Space group the cursor's row belongs to, if any — the
+    /// higher-tier analogue of [`Self::cursor_repo`]. A Space header
+    /// resolves to itself; a repo header / workspace / session / kind
+    /// row resolves to the nearest Space header above it. `None` when
+    /// the Space tier isn't active (no Space header precedes the row).
+    pub fn cursor_space(&self) -> Option<String> {
+        if let Some(VisibleRow::SpaceHeader(name)) = self.visible.get(self.cursor) {
+            return Some(name.clone());
+        }
+        self.visible
+            .iter()
+            .take(self.cursor + 1)
+            .rev()
+            .find_map(|r| match r {
+                VisibleRow::SpaceHeader(name) => Some(name.clone()),
+                _ => None,
+            })
+    }
+
+    /// True when the cursor sits directly on a Space header row.
+    pub fn cursor_on_space_header(&self) -> bool {
+        matches!(
+            self.visible.get(self.cursor),
+            Some(VisibleRow::SpaceHeader(_))
+        )
     }
 
     /// True when the cursor's repo group is currently collapsed. `None`
@@ -1883,6 +1932,66 @@ impl Sidebar {
             self.set_cursor(idx);
         }
         true
+    }
+
+    /// Toggle the collapsed flag for the Space at or above the cursor —
+    /// the higher-tier analogue of [`Self::toggle_repo_at_cursor`], fired
+    /// by `Space` when the cursor rests on a Space header. Persists to
+    /// `ui.collapsed_spaces` and re-parks the cursor on the toggled
+    /// header so a double-tap toggles the same Space (#860).
+    pub fn toggle_space_at_cursor(&mut self) -> bool {
+        let Some(space) = self.cursor_space() else {
+            return false;
+        };
+        if self.collapsed_spaces.contains(&space) {
+            self.collapsed_spaces.remove(&space);
+        } else {
+            self.collapsed_spaces.insert(space.clone());
+        }
+        self.recompute_visible();
+        let snapshot = self.collapsed_spaces.clone();
+        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.collapsed_spaces = snapshot) {
+            tracing::warn!("save collapsed_spaces failed: {e}");
+        }
+        if let Some(idx) = self
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::SpaceHeader(n) if n == &space))
+        {
+            self.set_cursor(idx);
+        }
+        true
+    }
+
+    /// True when the Space is currently collapsed (used by the header
+    /// render to pick `▾` vs `▸`).
+    pub fn is_space_collapsed(&self, name: &str) -> bool {
+        self.collapsed_spaces.contains(name)
+    }
+
+    /// The Space a source label currently resolves to (explicit
+    /// assignment, else owner auto-seed) — used to prefill the
+    /// move-to-Space prompt.
+    pub fn space_of_source(&self, source: &str) -> String {
+        lazybox_tui_core::inbox::space_of(source, &self.spaces)
+    }
+
+    /// Assign a source group (repo / Linear label) to a Space,
+    /// persisting to `ui.spaces` (#860). A blank `space` unassigns the
+    /// source (it falls back to owner auto-seed / `Ungrouped`); a name
+    /// not yet in `ui.spaces` creates that Space at the end (its display
+    /// order). The source is first removed from any Space it was in, so
+    /// re-assigning within the same Space moves it to the end — the
+    /// within-Space reorder handle. Returns the resolved Space name (the
+    /// auto-seed name when unassigned) for a footer notice.
+    pub fn assign_source_to_space(&mut self, source: &str, space: &str) -> String {
+        lazybox_tui_core::inbox::assign_source(&mut self.spaces, source, space);
+        self.recompute_visible();
+        let snapshot = self.spaces.clone();
+        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.spaces = snapshot) {
+            tracing::warn!("save spaces failed: {e}");
+        }
+        self.space_of_source(source)
     }
 
     /// True when the cursor's repo group is currently pinned. `None`
@@ -2092,9 +2201,14 @@ impl Sidebar {
         // where the prior row vanished.
         let prior_key = self.selected_session_key().cloned();
         let prior_session = self.selected_session_id();
+        // A header park is preserved by identity — a repo header and a
+        // Space header can share a name (owner auto-seed), so we keep
+        // the whole row to re-park on the exact same variant.
         let prior_header = if preserve_header_park {
             match self.visible.get(self.cursor) {
-                Some(VisibleRow::RepoHeader(name)) => Some(name.clone()),
+                Some(row @ (VisibleRow::RepoHeader(_) | VisibleRow::SpaceHeader(_))) => {
+                    Some(row.clone())
+                }
                 _ => None,
             }
         } else {
@@ -2116,6 +2230,8 @@ impl Sidebar {
                 collapsed_repos: &self.collapsed_repos,
                 pinned_repos: &self.pinned_repos,
                 focused_workspaces: &self.focused_workspaces,
+                spaces: &self.spaces,
+                collapsed_spaces: &self.collapsed_spaces,
                 attention: &self.attention,
                 agents: &self.agents,
                 now: self.now(),
@@ -2128,11 +2244,8 @@ impl Sidebar {
         // Preserve cursor on a repo header across reorderings — j/k
         // can land on headers (collapse target), and snapshots
         // arriving while parked there shouldn't yank focus.
-        if let Some(name) = prior_header
-            && let Some(idx) = self
-                .visible
-                .iter()
-                .position(|r| matches!(r, VisibleRow::RepoHeader(n) if n == &name))
+        if let Some(header) = prior_header
+            && let Some(idx) = self.visible.iter().position(|r| *r == header)
         {
             self.cursor = idx;
             return;
@@ -2151,6 +2264,7 @@ impl Sidebar {
                         session_id,
                     } => *workspace == key && Some(*session_id) == prior_session,
                     VisibleRow::FocusedHeader
+                    | VisibleRow::SpaceHeader(_)
                     | VisibleRow::RepoHeader(_)
                     | VisibleRow::KindHeader(_) => false,
                 };

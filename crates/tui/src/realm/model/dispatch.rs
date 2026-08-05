@@ -657,6 +657,17 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mount_rename_workspace_input(session_key);
                 }
             }
+            Action::MoveToSpace => {
+                // Assign the repo group at/above the cursor to a Space.
+                // The group resolves from a header row too, so this is
+                // reachable whether the cursor is on the header or a
+                // workspace under it.
+                if let Some(source) = self.sidebar.cursor_repo() {
+                    self.mount_move_to_space_input(source);
+                } else {
+                    self.flash_info("select a repo group first".to_string());
+                }
+            }
             Action::NewProject => {
                 self.mount_new_workspace_repo_picker();
             }
@@ -1186,7 +1197,14 @@ impl<T: TerminalAdapter> Model<T> {
                 self.sidebar.open_global_search();
             }
             Action::ToggleRepoGroup => {
-                self.sidebar.toggle_repo_at_cursor();
+                // `Space` folds whichever tier the cursor rests on: a
+                // Space header collapses the whole Space (#860), any
+                // other row collapses its repo group.
+                if self.sidebar.cursor_on_space_header() {
+                    self.sidebar.toggle_space_at_cursor();
+                } else {
+                    self.sidebar.toggle_repo_at_cursor();
+                }
             }
             Action::ToggleRepoPin => {
                 if let Some((repo, pinned)) = self.sidebar.toggle_pin_at_cursor() {

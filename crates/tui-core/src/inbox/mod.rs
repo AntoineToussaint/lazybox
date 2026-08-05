@@ -79,6 +79,15 @@ pub struct ComputeInputs<'a> {
     /// A key here with no matching visible workspace this pass is simply
     /// ignored. The manual, per-workspace counterpart to [`Self::pinned_repos`].
     pub focused_workspaces: &'a [SessionKey],
+    /// User-defined Spaces — the higher-level grouping tier rendered
+    /// above the repo headers (#860). Empty when the user has defined
+    /// none, in which case sources auto-seed into owner-named Spaces
+    /// via [`space_of`]. The Space tier only renders when it yields ≥2
+    /// distinct Spaces (a lone Space is pure chrome).
+    pub spaces: &'a [lazybox_config::SpaceConfig],
+    /// Space names whose repo groups the user collapsed. Mirrors
+    /// `collapsed_repos` one tier up.
+    pub collapsed_spaces: &'a BTreeSet<String>,
     pub attention: &'a lazybox_config::AttentionConfig,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     pub now: chrono::DateTime<chrono::Utc>,
@@ -91,6 +100,53 @@ pub struct ComputeInputs<'a> {
 }
 
 const NO_REPO: &str = "(no repo)";
+
+/// Default Space for a source that carries no owner boundary and isn't
+/// explicitly assigned — Linear project labels, the `(no repo)` bucket.
+pub const UNGROUPED_SPACE: &str = "Ungrouped";
+
+/// Which Space a source group label (`group_label`'s output) belongs
+/// to. An explicit `ui.spaces` assignment wins; otherwise the owner
+/// segment of an `owner/repo` label auto-seeds an owner-named Space;
+/// everything else falls into [`UNGROUPED_SPACE`]. Pure and total so
+/// both clients derive the same tier (#860).
+pub fn space_of(label: &str, spaces: &[lazybox_config::SpaceConfig]) -> String {
+    for s in spaces {
+        if s.sources.iter().any(|src| src == label) {
+            return s.name.clone();
+        }
+    }
+    if let Some((owner, _)) = label.split_once('/')
+        && !owner.is_empty()
+    {
+        return owner.to_string();
+    }
+    UNGROUPED_SPACE.to_string()
+}
+
+/// Assign `source` to the Space named `space`, mutating the persisted
+/// `ui.spaces` list in place (#860). The source is first removed from
+/// every Space, then appended to the target — so re-assigning within
+/// the same Space moves it to the end (the within-Space reorder
+/// handle), and a blank `space` leaves it unassigned (owner auto-seed).
+/// A `space` name not yet present is created at the end, establishing
+/// its display order. Pure over the config list so the mutation is
+/// testable without touching disk; the caller persists the result.
+pub fn assign_source(spaces: &mut Vec<lazybox_config::SpaceConfig>, source: &str, space: &str) {
+    let space = space.trim();
+    for s in spaces.iter_mut() {
+        s.sources.retain(|src| src != source);
+    }
+    if !space.is_empty() {
+        match spaces.iter_mut().find(|s| s.name == space) {
+            Some(existing) => existing.sources.push(source.to_string()),
+            None => spaces.push(lazybox_config::SpaceConfig {
+                name: space.to_string(),
+                sources: vec![source.to_string()],
+            }),
+        }
+    }
+}
 
 /// Pure function: build the sidebar's visible-row list + per-repo
 /// summaries from the workspace map, mailbox filter, and
@@ -238,14 +294,20 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     }
     ordered_repos.extend(all_repos);
 
-    // Step 5: emit headers + workspace rows + session sub-rows.
+    // Step 5: emit the row tree. Two shapes, chosen by whether the
+    // Space tier is active. A source's Space comes from `space_of`
+    // (explicit `ui.spaces` assignment, else owner auto-seed). The
+    // tier only renders when it yields ≥2 distinct Spaces this pass —
+    // a lone Space wrapping every repo is pure chrome, so we keep the
+    // legacy flat shape byte-for-byte in that case.
     let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + ordered_repos.len() + 4);
     let mut summaries: BTreeMap<String, RepoSummary> = BTreeMap::new();
 
-    // Step 5a: the `★ Focused` section, first and above every repo. Only
-    // emitted when at least one starred workspace is visible this pass.
-    // Session sub-rows follow the same 2+-sessions rule as repo rows;
-    // no KindHeader split — the section is a flat, cross-repo shortlist.
+    // Step 5a: the `★ Focused` section, first and above every repo /
+    // Space. Only emitted when at least one starred workspace is visible
+    // this pass. Session sub-rows follow the same 2+-sessions rule as
+    // repo rows; no KindHeader split — the section is a flat, cross-repo
+    // shortlist (#846).
     if !focused_rows.is_empty() {
         visible.push(VisibleRow::FocusedHeader);
         for (k, w) in &focused_rows {
@@ -264,53 +326,125 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         }
     }
 
-    for repo in &ordered_repos {
-        visible.push(VisibleRow::RepoHeader(repo.clone()));
-        let mut summary = RepoSummary::default();
-        if let Some(rows) = by_repo.get(repo) {
-            summary.active = rows.len();
-            for (_, w) in rows {
-                if workspace_needs_attention(w, input.attention, input.agents) {
-                    summary.attention += 1;
-                }
+    // Step 5b: the repo groups (#860). Two shapes, chosen by whether the
+    // Space tier is active. A source's Space comes from `space_of`
+    // (explicit `ui.spaces` assignment, else owner auto-seed). The tier
+    // only renders when it yields ≥2 distinct Spaces this pass — a lone
+    // Space wrapping every repo is pure chrome, so we keep the legacy
+    // flat shape byte-for-byte in that case.
+    let space_of_repo: Vec<String> = ordered_repos
+        .iter()
+        .map(|r| space_of(r, input.spaces))
+        .collect();
+    let distinct_spaces: BTreeSet<&str> = space_of_repo.iter().map(String::as_str).collect();
+
+    if distinct_spaces.len() < 2 {
+        for repo in &ordered_repos {
+            emit_repo_group(repo, &input, &by_repo, &mut visible, &mut summaries);
+        }
+    } else {
+        // Space order: explicitly-configured Spaces present this pass
+        // lead in `ui.spaces` order; the rest (owner auto-seed +
+        // Ungrouped) follow alphabetically (the `BTreeSet` iteration).
+        let mut space_order: Vec<String> = Vec::new();
+        let mut placed: BTreeSet<String> = BTreeSet::new();
+        for s in input.spaces {
+            if distinct_spaces.contains(s.name.as_str()) && placed.insert(s.name.clone()) {
+                space_order.push(s.name.clone());
             }
-            if !input.collapsed_repos.contains(repo) {
-                // ByRoleSplit drops a `KindHeader` between the PR
-                // workspaces and the Issue workspaces of this repo.
-                // Step 3 already sorted PRs ahead of issues, so a
-                // single linear pass detects the boundary cleanly.
-                // In other sort modes the kind header is suppressed.
-                let split = input.sort_mode == SortMode::ByRoleSplit;
-                let mut prev_kind: Option<WorkspaceKind> = None;
-                for (k, w) in rows {
-                    let cur_kind = WorkspaceKind::classify(w);
-                    if split && prev_kind != Some(cur_kind) {
-                        visible.push(VisibleRow::KindHeader(cur_kind));
-                        prev_kind = Some(cur_kind);
-                    }
-                    visible.push(VisibleRow::Workspace((*k).clone()));
-                    // Session sub-rows only when 2+ sessions —
-                    // showing the single-session case would be
-                    // visual noise (the workspace row itself
-                    // represents that session).
-                    if w.session_count() >= 2 {
-                        let mut sessions: Vec<&lazybox_core::WorkspaceSession> =
-                            w.sessions.iter().collect();
-                        sessions.sort_by_key(|s| s.created_at);
-                        for s in sessions {
-                            visible.push(VisibleRow::Session {
-                                workspace: (*k).clone(),
-                                session_id: s.id,
-                            });
-                        }
+        }
+        for s in &distinct_spaces {
+            if placed.insert((*s).to_string()) {
+                space_order.push((*s).to_string());
+            }
+        }
+
+        for space in &space_order {
+            visible.push(VisibleRow::SpaceHeader(space.clone()));
+            if input.collapsed_spaces.contains(space) {
+                continue;
+            }
+            // Repos in this Space, in `ordered_repos` order (which
+            // already encodes pins > alphabetical); an explicit source
+            // list in the matching Space config reorders within it.
+            let cfg = input.spaces.iter().find(|s| &s.name == space);
+            let mut repos: Vec<&String> = ordered_repos
+                .iter()
+                .zip(&space_of_repo)
+                .filter(|(_, sp)| *sp == space)
+                .map(|(r, _)| r)
+                .collect();
+            if let Some(cfg) = cfg {
+                repos.sort_by_key(|r| {
+                    cfg.sources
+                        .iter()
+                        .position(|src| src == *r)
+                        .unwrap_or(usize::MAX)
+                });
+            }
+            for repo in repos {
+                emit_repo_group(repo, &input, &by_repo, &mut visible, &mut summaries);
+            }
+        }
+    }
+
+    ComputeOutcome { visible, summaries }
+}
+
+/// Emit one repo group — its `RepoHeader`, the per-repo summary, and
+/// (unless collapsed) its workspace rows, `KindHeader`s, and session
+/// sub-rows. Shared by the flat and Space-tiered layouts so the
+/// within-group shape can't drift between them.
+fn emit_repo_group<'a>(
+    repo: &str,
+    input: &ComputeInputs<'a>,
+    by_repo: &BTreeMap<String, Vec<(&'a SessionKey, &'a Workspace)>>,
+    visible: &mut Vec<VisibleRow>,
+    summaries: &mut BTreeMap<String, RepoSummary>,
+) {
+    visible.push(VisibleRow::RepoHeader(repo.to_string()));
+    let mut summary = RepoSummary::default();
+    if let Some(rows) = by_repo.get(repo) {
+        summary.active = rows.len();
+        for (_, w) in rows {
+            if workspace_needs_attention(w, input.attention, input.agents) {
+                summary.attention += 1;
+            }
+        }
+        if !input.collapsed_repos.contains(repo) {
+            // ByRoleSplit drops a `KindHeader` between the PR
+            // workspaces and the Issue workspaces of this repo.
+            // Step 3 already sorted PRs ahead of issues, so a
+            // single linear pass detects the boundary cleanly.
+            // In other sort modes the kind header is suppressed.
+            let split = input.sort_mode == SortMode::ByRoleSplit;
+            let mut prev_kind: Option<WorkspaceKind> = None;
+            for (k, w) in rows {
+                let cur_kind = WorkspaceKind::classify(w);
+                if split && prev_kind != Some(cur_kind) {
+                    visible.push(VisibleRow::KindHeader(cur_kind));
+                    prev_kind = Some(cur_kind);
+                }
+                visible.push(VisibleRow::Workspace((*k).clone()));
+                // Session sub-rows only when 2+ sessions —
+                // showing the single-session case would be
+                // visual noise (the workspace row itself
+                // represents that session).
+                if w.session_count() >= 2 {
+                    let mut sessions: Vec<&lazybox_core::WorkspaceSession> =
+                        w.sessions.iter().collect();
+                    sessions.sort_by_key(|s| s.created_at);
+                    for s in sessions {
+                        visible.push(VisibleRow::Session {
+                            workspace: (*k).clone(),
+                            session_id: s.id,
+                        });
                     }
                 }
             }
         }
-        summaries.insert(repo.clone(), summary);
     }
-
-    ComputeOutcome { visible, summaries }
+    summaries.insert(repo.to_string(), summary);
 }
 
 fn github_task_repo(w: &Workspace, project_key: &ProjectKey) -> Option<String> {
@@ -489,6 +623,8 @@ mod tests {
         projects: &'a BTreeMap<ProjectKey, Project>,
     ) -> ComputeInputs<'a> {
         static NO_FILTERS: FilterSet = FilterSet::new();
+        static NO_SPACES: Vec<lazybox_config::SpaceConfig> = Vec::new();
+        static NO_COLLAPSED_SPACES: BTreeSet<String> = BTreeSet::new();
         ComputeInputs {
             workspaces,
             mailbox: Mailbox::Inbox,
@@ -499,6 +635,8 @@ mod tests {
             collapsed_repos: collapsed,
             pinned_repos: &[],
             focused_workspaces: &[],
+            spaces: &NO_SPACES,
+            collapsed_spaces: &NO_COLLAPSED_SPACES,
             attention,
             agents: asking,
             now: fixed_time(),
@@ -739,6 +877,199 @@ mod tests {
                 .any(|r| matches!(r, VisibleRow::FocusedHeader)),
             "no focused header when no starred row is visible"
         );
+    }
+
+    /// `space_of`: explicit assignment wins, else the owner segment
+    /// auto-seeds a Space, else the `Ungrouped` default.
+    #[test]
+    fn space_of_prefers_config_then_owner_then_ungrouped() {
+        let spaces = vec![lazybox_config::SpaceConfig {
+            name: "Obin".into(),
+            sources: vec!["me/side-project".into()],
+        }];
+        // Explicit assignment overrides the owner auto-seed.
+        assert_eq!(space_of("me/side-project", &spaces), "Obin");
+        // Owner auto-seed for an unassigned GitHub label.
+        assert_eq!(space_of("obin-ai/platform", &spaces), "obin-ai");
+        // No owner boundary (Linear label / no-repo) → default Space.
+        assert_eq!(space_of("Obin Eng", &spaces), UNGROUPED_SPACE);
+        assert_eq!(space_of(NO_REPO, &spaces), UNGROUPED_SPACE);
+    }
+
+    /// `assign_source` moves a source between Spaces, creates a new
+    /// Space at the end, reorders within a Space on re-assign, and
+    /// unassigns on a blank target — the persisted-mutation half of the
+    /// move/reorder acceptance criterion.
+    #[test]
+    fn assign_source_moves_creates_reorders_and_unassigns() {
+        let mut spaces: Vec<lazybox_config::SpaceConfig> = Vec::new();
+
+        // Create "Obin" with two sources.
+        assign_source(&mut spaces, "obin-ai/platform", "Obin");
+        assign_source(&mut spaces, "obin-ai/studio", "Obin");
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].name, "Obin");
+        assert_eq!(spaces[0].sources, ["obin-ai/platform", "obin-ai/studio"]);
+
+        // A second Space is appended (its display order).
+        assign_source(&mut spaces, "me/dotfiles", "Personal");
+        assert_eq!(spaces.iter().map(|s| &s.name).collect::<Vec<_>>(), ["Obin", "Personal"]);
+
+        // Re-assigning within Obin moves the source to the end.
+        assign_source(&mut spaces, "obin-ai/platform", "Obin");
+        assert_eq!(spaces[0].sources, ["obin-ai/studio", "obin-ai/platform"]);
+
+        // Moving across Spaces removes it from the old one first.
+        assign_source(&mut spaces, "obin-ai/studio", "Personal");
+        assert_eq!(spaces[0].sources, ["obin-ai/platform"]);
+        assert_eq!(spaces[1].sources, ["me/dotfiles", "obin-ai/studio"]);
+
+        // A blank target unassigns (back to owner auto-seed).
+        assign_source(&mut spaces, "obin-ai/platform", "");
+        assert!(spaces[0].sources.is_empty());
+        assert_eq!(space_of("obin-ai/platform", &spaces), "obin-ai");
+    }
+
+    /// A single owner yields a lone Space, so the tier stays suppressed
+    /// and the flat repo shape is preserved byte-for-byte.
+    #[test]
+    fn single_space_suppresses_the_tier() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "owner/a"), ("kb", "owner/b")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+        assert!(
+            !out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::SpaceHeader(_))),
+            "one owner = one Space = no tier"
+        );
+    }
+
+    /// Two owners auto-seed two Spaces, so the tier turns on: a
+    /// `SpaceHeader` leads each owner's repo group, Spaces alphabetical.
+    #[test]
+    fn two_owners_auto_seed_space_tier() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "zeta/a"), ("kb", "alpha/b")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+        let rows: Vec<String> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::SpaceHeader(n) => Some(format!("S:{n}")),
+                VisibleRow::RepoHeader(n) => Some(format!("R:{n}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["S:alpha", "R:alpha/b", "S:zeta", "R:zeta/a"],
+            "auto-seeded Spaces alphabetical, each above its repo"
+        );
+    }
+
+    /// A user-defined Space unifies repos across owners under one
+    /// bucket, in the config source order, and leads config Spaces
+    /// before auto-seeded ones.
+    #[test]
+    fn config_space_unifies_owners_in_source_order() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [
+            ("ka", "obin-ai/platform"),
+            ("kb", "obin-ai/studio"),
+            ("kc", "me/dotfiles"),
+        ] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let spaces = vec![lazybox_config::SpaceConfig {
+            name: "Obin".into(),
+            // studio before platform — source order overrides alpha.
+            sources: vec!["obin-ai/studio".into(), "obin-ai/platform".into()],
+        }];
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.spaces = &spaces;
+        let out = compute_visible(i);
+        let rows: Vec<String> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::SpaceHeader(n) => Some(format!("S:{n}")),
+                VisibleRow::RepoHeader(n) => Some(format!("R:{n}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "S:Obin",
+                "R:obin-ai/studio",
+                "R:obin-ai/platform",
+                "S:me",
+                "R:me/dotfiles",
+            ],
+            "config Space leads (source order), then the auto-seeded owner Space"
+        );
+    }
+
+    /// Collapsing a Space keeps its `SpaceHeader` but drops every repo
+    /// header and row beneath it.
+    #[test]
+    fn collapsed_space_hides_its_repos() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "alpha/a"), ("kb", "zeta/z")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut collapsed_spaces = BTreeSet::new();
+        collapsed_spaces.insert("alpha".to_string());
+        let mut i = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        i.collapsed_spaces = &collapsed_spaces;
+        let out = compute_visible(i);
+        let rows: Vec<String> = out
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::SpaceHeader(n) => Some(format!("S:{n}")),
+                VisibleRow::RepoHeader(n) => Some(format!("R:{n}")),
+                VisibleRow::Workspace(k) => Some(format!("W:{}", k.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            ["S:alpha", "S:zeta", "R:zeta/z", "W:kb"],
+            "collapsed Space shows only its header"
+        );
+        // Summary for the collapsed Space's repo isn't computed (its
+        // header never renders), but the visible Space's repo is.
+        assert!(out.summaries.contains_key("zeta/z"));
     }
 
     /// Collapsed repo: header only, workspace rows under it are

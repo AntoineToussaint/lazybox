@@ -113,6 +113,11 @@ pub enum Id {
     /// `Command::RenameWorkspace { session_key, name }`. Target key lives
     /// in the `ModalFlow::RenameWorkspace` flow.
     RenameWorkspace,
+    /// Single-line input prompt for assigning the cursor's source group
+    /// to a Space (#860), prefilled with its current Space. Submit
+    /// mutates `ui.spaces` in place (no daemon command). The source
+    /// label lives in the `ModalFlow::MoveToSpace` flow.
+    MoveToSpace,
     /// Single-line input prompt for naming a brand-new local
     /// Project. Submit → `Command::CreateProject { name }`.
     NewProject,
@@ -658,6 +663,10 @@ pub(crate) enum ModalFlow {
     /// rename. Consumed by `handle_input_submitted` →
     /// `Command::RenameWorkspace`.
     RenameWorkspace { target: lazybox_core::SessionKey },
+    /// Move-to-Space name input (#860), carrying the source group label
+    /// being assigned. Consumed by `handle_input_submitted` →
+    /// `Sidebar::assign_source_to_space`.
+    MoveToSpace { source: String },
     /// Startup update modal: the available target whose dismissal is
     /// persisted on Esc.
     UpdateTarget { target: String },
@@ -2040,6 +2049,8 @@ impl<T: TerminalAdapter> Model<T> {
         collapsed_repos: std::collections::BTreeSet<String>,
         pinned_repos: Vec<String>,
         focused_workspaces: Vec<lazybox_core::SessionKey>,
+        spaces: Vec<lazybox_config::SpaceConfig>,
+        collapsed_spaces: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
@@ -2059,6 +2070,8 @@ impl<T: TerminalAdapter> Model<T> {
             collapsed_repos,
             pinned_repos,
             focused_workspaces,
+            spaces,
+            collapsed_spaces,
             default_agent,
             display,
         );

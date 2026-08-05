@@ -396,6 +396,19 @@ where
     }))
 }
 
+/// One user-defined Space (#860): a higher-level bucket grouping a set
+/// of source labels (`owner/repo` for GitHub, the project display name
+/// for Linear/local) above the flat repo tier. The `sources` order is
+/// the within-Space display order; the enclosing `Vec<SpaceConfig>`
+/// position is the Space's own display order. Persisted under
+/// `ui.spaces`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SpaceConfig {
+    pub name: String,
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 ///
@@ -421,6 +434,19 @@ pub struct UiSection {
     /// order, mirroring [`Self::pinned_repos`] at workspace granularity.
     #[serde(default)]
     pub focused_workspaces: Vec<String>,
+    /// User-defined Spaces — the higher-level grouping tier rendered
+    /// above the flat repo/Linear headers (#860). Each Space names a
+    /// bucket and lists the source labels assigned to it; the Vec
+    /// position is the Space's display order. Sources not listed in any
+    /// Space auto-seed into an owner-named Space (`owner/repo` →
+    /// `owner`), falling back to a default bucket. See
+    /// `lazybox_tui_core::inbox::space_of`.
+    #[serde(default)]
+    pub spaces: Vec<SpaceConfig>,
+    /// Space names whose repo groups should start collapsed. Mirrors
+    /// `collapsed_repos` one tier up (#860).
+    #[serde(default)]
+    pub collapsed_spaces: std::collections::BTreeSet<String>,
     /// Sidebar column width as a percentage of total. None = use
     /// the default (40%).
     pub sidebar_pct: Option<u16>,
@@ -567,6 +593,8 @@ impl Default for UiSection {
             collapsed_repos: std::collections::BTreeSet::new(),
             pinned_repos: Vec::new(),
             focused_workspaces: Vec::new(),
+            spaces: Vec::new(),
+            collapsed_spaces: std::collections::BTreeSet::new(),
             keymap_preset: None,
             theme: None,
             sidebar_pct: None,
@@ -2436,6 +2464,36 @@ repos:
             ],
             "focus order is preserved across a round-trip",
         );
+    }
+
+    /// `ui.spaces` / `ui.collapsed_spaces` are empty on a fresh config
+    /// and survive a save/load round-trip preserving both Space order
+    /// and per-Space source order — the persistence half of #860.
+    #[test]
+    fn spaces_default_empty_and_round_trip_preserves_order() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.ui.spaces.is_empty(), "no spaces on a fresh config");
+        assert!(cfg.ui.collapsed_spaces.is_empty());
+
+        let mut cfg = Config::default();
+        cfg.ui.spaces = vec![
+            SpaceConfig {
+                name: "Obin".into(),
+                sources: vec!["obin-ai/platform".into(), "obin-ai/studio".into()],
+            },
+            SpaceConfig {
+                name: "Personal".into(),
+                sources: vec!["me/dotfiles".into()],
+            },
+        ];
+        cfg.ui.collapsed_spaces.insert("Personal".into());
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(
+            reparsed.ui.spaces, cfg.ui.spaces,
+            "space + source order preserved across a round-trip",
+        );
+        assert!(reparsed.ui.collapsed_spaces.contains("Personal"));
     }
 
     /// The theme is unset on a fresh config (so the default palette

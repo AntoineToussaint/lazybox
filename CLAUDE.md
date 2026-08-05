@@ -250,7 +250,13 @@ the active filters; matches title, number, repo, labels, reviewers /
 assignees). `x` is a
 leader for the **workspace** group (which-key popup): `x n` new
 workspace, `x R` rename (change the focused workspace's display name
-in place — key/worktree stay put; #744), `x p` new project, `x a`
+in place — key/worktree stay put; #744), `x m` move the cursor's
+source (repo / Linear team) to a **Space** — the higher-level grouping
+tier above repo headers (#860): sources auto-seed into an owner-named
+Space (`obin-ai/*` → `obin-ai`), a blank name unassigns back to that
+default, and a named Space collects repos across owners; `Space` on a
+Space header folds it, and both the assignment (`ui.spaces`) and
+collapse (`ui.collapsed_spaces`) persist. `x p` new project, `x a`
 adopt sessions, `x s` send to
 session (agent-to-agent handoff, #431 — capture the focused agent's
 on-screen output, pick a target workspace, edit the brief, and

@@ -37,6 +37,7 @@ impl ClientRuntime {
 
         crate::workspace::migrate_legacy_sandbox(&config);
         tasks.push(crate::polling::spawn(config.clone(), options.poll_interval));
+        tasks.push(crate::error_inbox::spawn(&config));
         if let Some(task) = crate::keep_awake::spawn(&config) {
             tasks.push(task);
         }

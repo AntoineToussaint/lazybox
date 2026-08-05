@@ -2031,6 +2031,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenMessages => Action::OpenMessages,
+        ActionKind::OpenErrorInbox => Action::OpenErrorInbox,
         // DismissNotice is deliberately absent: it's routed through the
         // explicit Esc branch in `handle_pane_key` (which yields to a
         // sidebar multi-select and to a live terminal), not the generic

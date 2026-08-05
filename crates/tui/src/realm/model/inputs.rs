@@ -1034,6 +1034,15 @@ showing keybinding search only",
                     self.apply_help_action(intent, skill_root);
                 }
             }
+            Some(Id::ErrorInboxClearConfirm) => {
+                // Yes → wipe the durable Error Inbox; the daemon's empty
+                // re-broadcast repaints the inbox still under this confirm.
+                // No / Esc → nothing changes. No `ModalFlow` payload: the
+                // clear has no target to stash.
+                if yes {
+                    cmds.push(IpcCommand::ClearErrors);
+                }
+            }
             _ => {}
         }
         self.drain_queued_daemon_prompts();

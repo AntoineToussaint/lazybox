@@ -2,7 +2,14 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use std::path::Path;
 
-use crate::traits::{Store, StoreError, StoreMutation};
+use crate::traits::{ErrorOccurrence, ErrorRecord, Store, StoreError, StoreMutation};
+use chrono::{DateTime, Utc};
+
+/// Hard cap on distinct deduplicated error classes kept in the durable
+/// inbox. Reached only under pathological cardinality (see the eviction
+/// note in `record_error`); a generous ceiling that still bounds the
+/// table so a long-lived daemon can't accrete unbounded rows.
+const ERROR_INBOX_MAX_ROWS: i64 = 1000;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -66,6 +73,18 @@ impl SqliteStore {
             "CREATE TABLE IF NOT EXISTS kv (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS errors (
+                dedupe_key    TEXT PRIMARY KEY,
+                source        TEXT NOT NULL,
+                severity      TEXT NOT NULL,
+                operation     TEXT,
+                workspace_key TEXT,
+                message       TEXT NOT NULL,
+                raw           TEXT NOT NULL,
+                count         INTEGER NOT NULL,
+                first_seen    TEXT NOT NULL,
+                last_seen     TEXT NOT NULL
             );",
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -175,6 +194,95 @@ impl Store for SqliteStore {
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
+    fn record_error(&self, occ: &ErrorOccurrence) -> Result<ErrorRecord, StoreError> {
+        let conn = self.conn();
+        let at = occ.at.to_rfc3339();
+        // Atomic upsert: a new dedupe_key inserts at count 1; an
+        // existing one bumps count and refreshes the sample. `first_seen`
+        // is deliberately left untouched on conflict.
+        conn.execute(
+            "INSERT INTO errors
+                (dedupe_key, source, severity, operation, workspace_key,
+                 message, raw, count, first_seen, last_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8)
+             ON CONFLICT(dedupe_key) DO UPDATE SET
+                 count         = count + 1,
+                 last_seen     = excluded.last_seen,
+                 source        = excluded.source,
+                 severity      = excluded.severity,
+                 operation     = excluded.operation,
+                 workspace_key = excluded.workspace_key,
+                 message       = excluded.message,
+                 raw           = excluded.raw",
+            rusqlite::params![
+                occ.dedupe_key,
+                occ.source,
+                occ.severity,
+                occ.operation,
+                occ.workspace_key,
+                occ.message,
+                occ.raw,
+                at,
+            ],
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // Bound the table: `normalize` only collapses digit / whitespace
+        // runs, so high-cardinality diagnostics (hex request-ids, SHAs,
+        // paths) mint a fresh row each and the store would otherwise grow
+        // without limit. Evict the least-recently-seen classes past the
+        // cap. The just-written row carries the newest `last_seen`, so it
+        // is always kept; the tie-break on `dedupe_key` makes eviction
+        // deterministic when timestamps collide.
+        conn.execute(
+            "DELETE FROM errors WHERE dedupe_key NOT IN (
+                 SELECT dedupe_key FROM errors
+                 ORDER BY last_seen DESC, dedupe_key DESC
+                 LIMIT ?1
+             )",
+            [ERROR_INBOX_MAX_ROWS],
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+        conn.query_row(
+            "SELECT dedupe_key, source, severity, operation, workspace_key,
+                    message, raw, count, first_seen, last_seen
+             FROM errors WHERE dedupe_key = ?1",
+            [&occ.dedupe_key],
+            error_record_from_row,
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    fn list_errors(&self) -> Result<Vec<ErrorRecord>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT dedupe_key, source, severity, operation, workspace_key,
+                        message, raw, count, first_seen, last_seen
+                 FROM errors
+                 ORDER BY last_seen DESC",
+            )
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let rows = stmt
+            .query_map([], error_record_from_row)
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    fn delete_error(&self, dedupe_key: &str) -> Result<(), StoreError> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM errors WHERE dedupe_key = ?1", [dedupe_key])
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        Ok(())
+    }
+
+    fn clear_errors(&self) -> Result<(), StoreError> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM errors", [])
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        Ok(())
+    }
+
     /// SQLite-native scan: prefix-match on the kv table. The default
     /// trait impl returns empty; we override so the snapshot path can
     /// replay every workspace at startup.
@@ -246,6 +354,36 @@ impl Store for SqliteStore {
         }
         Ok(out)
     }
+}
+
+/// Parse an RFC3339 timestamp column, failing the row (never
+/// fabricating a `now`) if it is unparseable — the same fail-safe
+/// stance `created_at_from_json` takes for workspace rows.
+fn parse_ts(raw: &str) -> Result<DateTime<Utc>, rusqlite::Error> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
+}
+
+/// Map an `errors`-table row (column order fixed by the `SELECT` queries above)
+/// into an [`ErrorRecord`].
+fn error_record_from_row(row: &rusqlite::Row<'_>) -> Result<ErrorRecord, rusqlite::Error> {
+    let first_seen: String = row.get(8)?;
+    let last_seen: String = row.get(9)?;
+    Ok(ErrorRecord {
+        dedupe_key: row.get(0)?,
+        source: row.get(1)?,
+        severity: row.get(2)?,
+        operation: row.get(3)?,
+        workspace_key: row.get(4)?,
+        message: row.get(5)?,
+        raw: row.get(6)?,
+        count: row.get::<_, i64>(7)? as u64,
+        first_seen: parse_ts(&first_seen)?,
+        last_seen: parse_ts(&last_seen)?,
+    })
 }
 
 trait OptionalExt<T> {
@@ -359,6 +497,92 @@ mod tests {
         let rows = store.list_workspaces().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].created_at, created_at);
+    }
+
+    /// Error Inbox records are durable: a record written before close is
+    /// still there — deduped count intact — after re-opening the file.
+    /// This is the "survives restart" acceptance for #831.
+    #[test]
+    fn error_records_survive_a_reopen() {
+        use crate::traits::ErrorOccurrence;
+        let db = TempDb::new("errors-reopen");
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let occ = ErrorOccurrence {
+            dedupe_key: "github|merge|rate limited".into(),
+            source: "github".into(),
+            severity: "retryable".into(),
+            operation: Some("merge".into()),
+            workspace_key: Some("github:o/r#1".into()),
+            message: "rate limited".into(),
+            raw: "code=RATE_LIMITED".into(),
+            at,
+        };
+        {
+            let store = SqliteStore::open(&db.0).unwrap();
+            store.record_error(&occ).unwrap();
+            store.record_error(&occ).unwrap();
+        }
+        // Re-open the same file — a fresh process would do the same.
+        let store = SqliteStore::open(&db.0).unwrap();
+        let rows = store.list_errors().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].count, 2, "the deduped count persisted");
+        assert_eq!(rows[0].first_seen, at);
+        assert_eq!(rows[0].raw, "code=RATE_LIMITED");
+    }
+
+    /// The inbox is bounded: once distinct classes exceed
+    /// `ERROR_INBOX_MAX_ROWS`, recording a new one evicts the
+    /// least-recently-seen class rather than growing without limit. The
+    /// just-recorded class always survives; the oldest is gone.
+    #[test]
+    fn error_inbox_evicts_least_recently_seen_past_the_cap() {
+        use crate::traits::ErrorOccurrence;
+        let store = SqliteStore::in_memory().unwrap();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Record cap + 5 distinct classes, each seen one second later than
+        // the last, so `dedupe_key i` is the oldest and the final ones the
+        // newest.
+        let overflow = 5;
+        for i in 0..(ERROR_INBOX_MAX_ROWS + overflow) {
+            store
+                .record_error(&ErrorOccurrence {
+                    dedupe_key: format!("github|merge|class {i}"),
+                    source: "github".into(),
+                    severity: "permanent".into(),
+                    operation: Some("merge".into()),
+                    workspace_key: None,
+                    message: format!("failure {i}"),
+                    raw: format!("raw {i}"),
+                    at: base + chrono::Duration::seconds(i),
+                })
+                .unwrap();
+        }
+        let rows = store.list_errors().unwrap();
+        assert_eq!(
+            rows.len() as i64,
+            ERROR_INBOX_MAX_ROWS,
+            "the table is capped, not unbounded"
+        );
+        let keys: std::collections::HashSet<&str> =
+            rows.iter().map(|r| r.dedupe_key.as_str()).collect();
+        // The five oldest classes were evicted…
+        for i in 0..overflow {
+            assert!(
+                !keys.contains(format!("github|merge|class {i}").as_str()),
+                "class {i} (oldest) should have been evicted"
+            );
+        }
+        // …and the newest class is still present.
+        let newest = ERROR_INBOX_MAX_ROWS + overflow - 1;
+        assert!(
+            keys.contains(format!("github|merge|class {newest}").as_str()),
+            "the most-recently-seen class must survive"
+        );
     }
 
     /// A backend error after an earlier mutation must roll the whole batch

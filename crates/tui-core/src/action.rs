@@ -293,6 +293,11 @@ pub enum Action {
     /// and faded, or one the user missed, is still readable after the
     /// fact. The durable half of the footer's transient surface.
     OpenMessages,
+    /// Open the durable Error Inbox (#831) — the daemon's persisted,
+    /// deduplicated error store, grouped by class with counts. Unlike
+    /// the session-only messages log, it survives restart and can turn
+    /// an error class into an issue, an agent run, or a JSONL export.
+    OpenErrorInbox,
     /// Clear the current footer notice regardless of severity. Severity
     /// still decides auto-fade (Retryable/Info fade on their timers;
     /// Permanent/Auth stay), but this lets the user swat any notice away
@@ -468,6 +473,7 @@ pub enum ActionKind {
     OpenTour,
     OpenSyncStatus,
     OpenMessages,
+    OpenErrorInbox,
     DismissNotice,
     InspectNotice,
     OpenSettings,
@@ -508,6 +514,7 @@ impl ActionKind {
         Self::OpenTour,
         Self::OpenSyncStatus,
         Self::OpenMessages,
+        Self::OpenErrorInbox,
         Self::DismissNotice,
         Self::InspectNotice,
         // The three Jump actions sit together so the help panel reads
@@ -702,6 +709,7 @@ impl Action {
             Action::OpenTour => ActionKind::OpenTour,
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenMessages => ActionKind::OpenMessages,
+            Action::OpenErrorInbox => ActionKind::OpenErrorInbox,
             Action::DismissNotice => ActionKind::DismissNotice,
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::OpenThemePicker => ActionKind::OpenThemePicker,
@@ -808,6 +816,13 @@ impl ActionDef {
                 default_keys: "Shift-M",
                 label: "messages",
                 describe: "Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. Press `c` there to clear it.",
+                section: Section::Global,
+            },
+            ActionKind::OpenErrorInbox => &Self {
+                kind: ActionKind::OpenErrorInbox,
+                default_keys: "Shift-E",
+                label: "errors",
+                describe: "Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. Sorted by frequency, filterable by source; the selected class shows its full raw + humanized detail. Turn a class into a GitHub issue (`i`), route it to an agent (`a`), or export the set as JSONL (`x`); `d` deletes one class, `c` clears all.",
                 section: Section::Global,
             },
             ActionKind::DismissNotice => &Self {
@@ -1842,6 +1857,7 @@ impl ActionKind {
             ActionKind::OpenTour => "open_tour",
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
+            ActionKind::OpenErrorInbox => "open_error_inbox",
             ActionKind::DismissNotice => "dismiss_notice",
             ActionKind::InspectNotice => "inspect_notice",
             ActionKind::OpenSettings => "open_settings",
@@ -2582,6 +2598,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenTour
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages
+        | ActionKind::OpenErrorInbox
         | ActionKind::DismissNotice
         | ActionKind::InspectNotice
         | ActionKind::OpenSettings

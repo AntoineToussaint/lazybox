@@ -95,6 +95,50 @@ impl ProjectRecord {
     }
 }
 
+/// A structured, deduplicated record in the durable Error Inbox.
+///
+/// Every error-severity event the daemon emits folds — by `dedupe_key`
+/// — into one of these, so N identical failures (500 throttle errors,
+/// a flapping merge) read as a single row carrying `count` and a
+/// first/last-seen window instead of scrolling past N times. The store
+/// is source-agnostic: `source` / `severity` / `operation` are opaque
+/// strings the daemon assigns, never an enum the store interprets.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ErrorRecord {
+    pub dedupe_key: String,
+    pub source: String,
+    pub severity: String,
+    pub operation: Option<String>,
+    pub workspace_key: Option<String>,
+    /// Humanized, user-facing summary (the footer-notice text).
+    pub message: String,
+    /// Underlying diagnostic — raw provider text, GraphQL `code` /
+    /// `typeName`, etc. — so a #822-class malformed-query bug stays
+    /// diagnosable long after the notice faded.
+    pub raw: String,
+    pub count: u64,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+
+/// One error occurrence to fold into the inbox via [`Store::record_error`].
+///
+/// The upsert is keyed by `dedupe_key`: a new key inserts with `count`
+/// 1; an existing key bumps `count`, refreshes `last_seen`, and replaces
+/// the stored sample (`message` / `raw` / context) with this latest
+/// occurrence's. `first_seen` is never overwritten.
+#[derive(Debug, Clone)]
+pub struct ErrorOccurrence {
+    pub dedupe_key: String,
+    pub source: String,
+    pub severity: String,
+    pub operation: Option<String>,
+    pub workspace_key: Option<String>,
+    pub message: String,
+    pub raw: String,
+    pub at: DateTime<Utc>,
+}
+
 /// One durable mutation in an atomic [`Store::apply_batch`] call.
 ///
 /// The daemon uses batches for domain operations that span more than one
@@ -155,6 +199,34 @@ pub trait Store: Send + Sync {
     /// from "there are no records".
     fn list_kv_prefix(&self, _prefix: &str) -> Result<Vec<(String, String)>, StoreError> {
         Err(StoreError::Unsupported("kv prefix listing"))
+    }
+
+    // ── Error Inbox ─────────────────────────────────────────────────
+    //
+    // A durable, deduplicated sink for every error-severity event. The
+    // defaults keep test stubs and read-only stores honest — a stub
+    // that never persisted an error must not silently claim to have.
+
+    /// Fold one occurrence into the inbox, returning the resulting
+    /// deduplicated record (post-increment). Backends without a real
+    /// implementation report unsupported rather than drop the error.
+    fn record_error(&self, _occ: &ErrorOccurrence) -> Result<ErrorRecord, StoreError> {
+        Err(StoreError::Unsupported("error inbox"))
+    }
+
+    /// Every deduplicated error record, most-recently-seen first.
+    fn list_errors(&self) -> Result<Vec<ErrorRecord>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Drop one record by its dedupe key. Idempotent.
+    fn delete_error(&self, _dedupe_key: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// Wipe the whole inbox.
+    fn clear_errors(&self) -> Result<(), StoreError> {
+        Ok(())
     }
 
     // ── Workspaces ──────────────────────────────────────────────────

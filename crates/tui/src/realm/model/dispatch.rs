@@ -949,6 +949,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenMessages => {
                 self.mount_messages();
             }
+            Action::OpenErrorInbox => {
+                self.mount_error_inbox();
+            }
             Action::OpenSettings => {
                 self.open_settings();
             }

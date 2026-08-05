@@ -1,5 +1,5 @@
 export const DESKTOP_PROTOCOL_VERSION = 2 as const;
-export const DESKTOP_PROTOCOL_FINGERPRINT = 1832716431 as const;
+export const DESKTOP_PROTOCOL_FINGERPRINT = 2325978854 as const;
 export const TERMINAL_SERVER_FRAME_HEADER_BYTES = 25 as const;
 export const TERMINAL_CLIENT_FRAME_HEADER_BYTES = 9 as const;
 export const TERMINAL_SERVER_FRAME_LAYOUT = {

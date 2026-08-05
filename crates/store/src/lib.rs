@@ -9,4 +9,6 @@ mod traits;
 
 pub use mock::MemoryStore;
 pub use sqlite::SqliteStore;
-pub use traits::{ProjectRecord, Store, StoreError, StoreMutation, WorkspaceRecord};
+pub use traits::{
+    ErrorOccurrence, ErrorRecord, ProjectRecord, Store, StoreError, StoreMutation, WorkspaceRecord,
+};

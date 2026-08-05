@@ -269,6 +269,17 @@ pub enum Id {
     /// recent footer notices built from `self.status.messages`; `c`
     /// clears the log, any other non-scroll key dismisses.
     Messages,
+    /// Durable Error Inbox window (default `Shift-E`, #831). Renders the
+    /// daemon's persisted, deduplicated error store (fetched via
+    /// `Command::ListErrors`), grouped by class with counts. Files an
+    /// issue / routes to an agent / exports JSONL from the selected
+    /// row; `d`/`c` delete/clear via the daemon.
+    ErrorInbox,
+    /// Confirm gate for the Error Inbox's `c` (clear-all). Wiping the
+    /// durable store is irreversible, so — like the other destructive
+    /// confirms — a single stray key must not do it; only an explicit
+    /// Yes sends `Command::ClearErrors`. Mounted on top of `ErrorInbox`.
+    ErrorInboxClearConfirm,
     /// Spinner + step checklist shown while a first spawn on a fresh
     /// workspace provisions its worktree. Mounted on the first
     /// `WorktreeProgress` daemon event (so an instant resume never
@@ -396,6 +407,7 @@ impl Id {
             Id::WorktreeProgress
                 | Id::SyncStatus
                 | Id::Messages
+                | Id::ErrorInbox
                 | Id::Error
                 | Id::SnippetPicker
                 | Id::SkillPicker
@@ -778,6 +790,21 @@ pub enum Msg {
     /// A link inside the description-reader modal (#448) was clicked —
     /// hand its URL to the platform browser launcher.
     OpenUrl(String),
+    /// `i` in the Error Inbox (#831) — draft a pre-filled GitHub issue
+    /// for the selected error class in the browser.
+    ErrorInboxFileIssue(lazybox_ipc::ErrorInboxRecord),
+    /// `a` in the Error Inbox — route the selected error class to an
+    /// agent: spawn the default agent on its workspace with the error
+    /// context as the opening prompt.
+    ErrorInboxRouteToAgent(lazybox_ipc::ErrorInboxRecord),
+    /// `x` in the Error Inbox — export the (filtered) set as JSONL to a
+    /// file for external analysis.
+    ErrorInboxExport(Vec<lazybox_ipc::ErrorInboxRecord>),
+    /// `d` in the Error Inbox — drop the selected error class from the
+    /// durable store (by dedupe key).
+    ErrorInboxDeleteRequested(String),
+    /// `c` in the Error Inbox — wipe the durable error store.
+    ErrorInboxClearRequested,
     /// `c` pressed in the messages window (#309) — wipe the notice
     /// history and re-render the (now empty) window.
     MessagesCleared,
@@ -4629,6 +4656,25 @@ impl<T: TerminalAdapter> Model<T> {
                     self.pop_modal();
                 }
                 self.mount_messages();
+            }
+            Msg::ErrorInboxClearRequested => {
+                // Wiping the durable store is irreversible — gate it behind
+                // a confirm (default No) rather than acting on a single
+                // keypress. Yes → `Command::ClearErrors` in `handle_confirmed`,
+                // whose empty re-broadcast repaints the open inbox.
+                self.mount_error_inbox_clear_confirm();
+            }
+            Msg::ErrorInboxDeleteRequested(dedupe_key) => {
+                self.send_cmd(IpcCommand::DeleteError { dedupe_key });
+            }
+            Msg::ErrorInboxFileIssue(record) => {
+                self.error_inbox_file_issue(record);
+            }
+            Msg::ErrorInboxRouteToAgent(record) => {
+                self.error_inbox_route_to_agent(record);
+            }
+            Msg::ErrorInboxExport(records) => {
+                self.error_inbox_export(records);
             }
             Msg::DiffReviewSubmitted {
                 workspace_key,

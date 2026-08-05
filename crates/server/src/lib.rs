@@ -36,6 +36,7 @@ pub mod backend;
 pub mod chat;
 pub mod client_kv;
 pub mod client_runtime;
+pub mod error_inbox;
 pub mod event_forward;
 pub mod keep_awake;
 pub mod lifecycle;
@@ -894,6 +895,9 @@ impl Server {
                         }
                         lazybox_ipc::Command::RenameWorkspace { .. } => "RenameWorkspace",
                         lazybox_ipc::Command::RecreateWorktree { .. } => "RecreateWorktree",
+                        lazybox_ipc::Command::ListErrors => "ListErrors",
+                        lazybox_ipc::Command::ClearErrors => "ClearErrors",
+                        lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -1826,6 +1830,15 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::UpdateAgentClis => {
             agent_updates::handle_update_all(config);
+        }
+        lazybox_ipc::Command::ListErrors => {
+            error_inbox::handle_list(config).await;
+        }
+        lazybox_ipc::Command::ClearErrors => {
+            error_inbox::handle_clear(config).await;
+        }
+        lazybox_ipc::Command::DeleteError { dedupe_key } => {
+            error_inbox::handle_delete(config, dedupe_key).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

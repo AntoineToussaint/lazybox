@@ -26,9 +26,7 @@ fn init_checkout(dir: &std::path::Path, origin: &str) {
 
 /// Accept one client, complete the handshake, and return the single command
 /// it wrote — the same shape `notification_click` uses to observe the CLI.
-fn accept_one_command(
-    listener: transport::Listener,
-) -> tokio::task::JoinHandle<Command> {
+fn accept_one_command(listener: transport::Listener) -> tokio::task::JoinHandle<Command> {
     tokio::spawn(async move {
         let (mut rd, mut wr) = listener.accept().await.expect("accept client");
         socket::server_handshake(&mut rd, &mut wr)
@@ -108,7 +106,10 @@ async fn workspace_create_infers_project_from_cwd_and_sends_create_workspace() {
             spawn_agent,
         } => {
             assert_eq!(name, "flaky-test investigation");
-            assert_eq!(project_key, lazybox_core::ProjectKey::github("acme", "widget"));
+            assert_eq!(
+                project_key,
+                lazybox_core::ProjectKey::github("acme", "widget")
+            );
             assert_eq!(spawn_agent.as_deref(), Some("claude"));
         }
         other => panic!("expected CreateWorkspace, got {other:?}"),

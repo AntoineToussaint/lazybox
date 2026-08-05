@@ -654,7 +654,10 @@ async fn resolve_project_key(
     explicit_repo: Option<String>,
     cwd: &std::path::Path,
 ) -> Option<lazybox_core::ProjectKey> {
-    if let Some(key) = explicit_project.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
+    if let Some(key) = explicit_project
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
         return Some(lazybox_core::ProjectKey::new(key));
     }
     if let Some(repo) = explicit_repo {
@@ -1795,11 +1798,20 @@ mod argv_tests {
     #[tokio::test]
     async fn resolve_project_key_rejects_a_malformed_repo() {
         let cwd = std::path::Path::new("/nonexistent");
-        assert_eq!(resolve_project_key(None, Some("no-slash".into()), cwd).await, None);
-        assert_eq!(resolve_project_key(None, Some("/widget".into()), cwd).await, None);
+        assert_eq!(
+            resolve_project_key(None, Some("no-slash".into()), cwd).await,
+            None
+        );
+        assert_eq!(
+            resolve_project_key(None, Some("/widget".into()), cwd).await,
+            None
+        );
         // A blank --project falls through; with no repo and a non-git cwd,
         // nothing resolves.
-        assert_eq!(resolve_project_key(Some("  ".into()), None, cwd).await, None);
+        assert_eq!(
+            resolve_project_key(Some("  ".into()), None, cwd).await,
+            None
+        );
     }
 
     #[test]

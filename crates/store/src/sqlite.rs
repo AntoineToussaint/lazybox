@@ -345,7 +345,7 @@ fn parse_ts(raw: &str) -> Result<DateTime<Utc>, rusqlite::Error> {
         })
 }
 
-/// Map an `errors`-table row (column order fixed by the SELECTs above)
+/// Map an `errors`-table row (column order fixed by the `SELECT` queries above)
 /// into an [`ErrorRecord`].
 fn error_record_from_row(row: &rusqlite::Row<'_>) -> Result<ErrorRecord, rusqlite::Error> {
     let first_seen: String = row.get(8)?;

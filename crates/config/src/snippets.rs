@@ -324,7 +324,10 @@ impl Snippets {
                      paths, and concurrency / partial-failure / bad-input scenarios that \
                      aren't handled — for each, give the concrete input or state that \
                      produces the wrong result, not a vague worry. Blast radius: what \
-                     breaks elsewhere if this is wrong, and is it reversible? Rank findings \
+                     breaks elsewhere if this is wrong, and is it reversible? Scope: flag \
+                     anything the task didn't need — opportunistic refactors, reformatting, \
+                     drive-by renames, unrelated edits — as out-of-scope; sprawl is a \
+                     finding, not a bonus. Rank findings \
                      by severity, each with a `file:line` anchor, separating \"will break\" \
                      (has a real failure scenario) from \"worth reconsidering\" (a design \
                      smell). Don't pad — a weak nit dressed as a bug erodes trust. End with \
@@ -353,7 +356,9 @@ impl Snippets {
                     "Self-review this branch as a skeptical reviewer seeing it for the \
                      first time. Read the full diff against the base branch, then call \
                      out anything that isn't obviously correct, any missing or weak \
-                     tests, any leftover debug code or stray TODOs, and anything you'd be \
+                     tests, any leftover debug code or stray TODOs, any change that's out \
+                     of scope for this branch's purpose (drive-by refactors, reformatting, \
+                     unrelated edits), and anything you'd be \
                      asked to change in review. List concrete items with `file:line` \
                      anchors so I can fix them before pushing. If it's genuinely ready, \
                      say so.",
@@ -429,11 +434,31 @@ impl Snippets {
                      you don't believe in. Whenever a fix changes behavior, add or adjust \
                      the test that would have caught the original problem. When you're \
                      done, re-run the build, tests, and linter to confirm the tree is \
-                     green, and don't drag unrelated edits into the diff. Commit the fixes \
+                     green, and stay strictly in scope — fix only the findings, and don't \
+                     refactor, reformat, or clean up anything they didn't call out. Commit \
+                     the fixes \
                      with a clear message that says what was wrong and why the change is \
                      the real fix, staging only the files you touched. Finish with a short \
                      summary: what you fixed, what you deliberately left and why, and \
                      anything you noticed in the code that the review missed.",
+                ),
+            ),
+            (
+                "scout".to_string(),
+                entry(
+                    "Review",
+                    "Scout rule: flag and trim out-of-scope changes",
+                    "Scope-check the current diff (`git diff` against the base branch) \
+                     against the one thing this change is meant to do. Go hunk by hunk and \
+                     flag every edit the task didn't require — opportunistic refactors, \
+                     drive-by renames, reformatting, unrelated cleanups, speculative \
+                     abstractions, leftover debug code or stray TODOs — each with a \
+                     `file:line` anchor and one line on why it doesn't belong. Then trim \
+                     them: revert the out-of-scope hunks so the diff carries only what the \
+                     task needs, and confirm the build and tests still pass afterward. Keep \
+                     anything that's genuinely load-bearing even if it looks unrelated — say \
+                     why you kept it rather than reverting it blindly. If the diff is \
+                     already tight, say so plainly instead of inventing trims.",
                 ),
             ),
             // ── Git & PR ────────────────────────────────────────────

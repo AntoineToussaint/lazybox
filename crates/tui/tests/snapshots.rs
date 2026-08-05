@@ -167,6 +167,85 @@ fn sidebar_golden_render_multiple_agent_badges() {
     insta::assert_snapshot!("sidebar_multiple_agent_badges", rendered);
 }
 
+/// Issue #813 golden: the density pass. Two single-agent rows — one
+/// running a verbose `gpt-5.6-sol · xhigh`, one a bare `Opus`, the second
+/// also merge-on-green armed. The verbose model is compacted so it can't
+/// anchor the agent column table-wide, the passive `ARM` badge packs into
+/// the right-side cluster, and both titles read in full with the trailer
+/// hugging the right edge instead of a starved title + big interior gap.
+#[test]
+fn sidebar_golden_render_dense_agent_rows() {
+    let mut s = sidebar();
+
+    let mut verbose_task = make_task("o/r#812", 5);
+    verbose_task.title = "feat: queue + retry the sync worker".into();
+    let mut verbose_ws = Workspace::from_task(verbose_task, fixed_time());
+    let verbose_key = SessionKey::from(&verbose_ws.key);
+
+    let mut opus_task = make_task("o/r#813", 20);
+    opus_task.title = "fix: sidebar columns waste half the row".into();
+    let mut opus_ws = Workspace::from_task(opus_task, fixed_time());
+    opus_ws.auto_merge_on_green = true; // → ` ARM ` in the packed cluster
+    let opus_key = SessionKey::from(&opus_ws.key);
+
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![verbose_ws.clone(), opus_ws.clone()],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    // The verbose gpt model runs under Codex (badge `X`), the bare `Opus`
+    // under Claude (badge `C`) — each model paired with an agent that could
+    // actually report it.
+    for (ws, key, terminal_id, agent, model) in [
+        (
+            &mut verbose_ws,
+            &verbose_key,
+            1u64,
+            "codex",
+            "gpt-5.6-sol · xhigh",
+        ),
+        (&mut opus_ws, &opus_key, 2u64, "claude", "Opus"),
+    ] {
+        let session = WorkspaceSession::new(
+            ws.key.clone(),
+            SessionKind::Agent {
+                agent_id: agent.into(),
+            },
+            PathBuf::from("/tmp/dense-agent"),
+            fixed_time(),
+        );
+        ws.add_session(session.clone());
+        s.on_event(&Event::WorkspaceUpserted(Box::new(ws.clone())));
+        s.on_event(&Event::SessionCreated(Box::new(session)));
+        s.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(terminal_id),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent(agent.into()),
+            no_permission: false,
+            on_main: false,
+            model_label: Some(model.into()),
+        });
+    }
+
+    let rendered = render_to_string(&mut s, 88, 10, true);
+    assert!(
+        !rendered.contains("xhigh"),
+        "the verbose effort must be abbreviated, not rendered raw:\n{rendered}",
+    );
+    assert!(
+        rendered.contains("feat: queue + retry the sync worker"),
+        "the title must read in full, not starve to a fragment:\n{rendered}",
+    );
+    assert!(
+        rendered.contains("fix: sidebar columns waste half the row"),
+        "the Opus row's title must not be widened away by the other row's model:\n{rendered}",
+    );
+    insta::assert_snapshot!("sidebar_dense_agent_rows", rendered);
+}
+
 /// Issue #65 golden: a list whose rows carry 1-, 2-, and 3-digit
 /// numbers. The type glyph must sit flush against the number on EVERY
 /// row (`○7`, `○42`, `○312`) — the regression was a right-aligned

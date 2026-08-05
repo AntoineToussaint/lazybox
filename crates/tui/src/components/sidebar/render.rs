@@ -580,9 +580,12 @@ impl Sidebar {
                     // collapses) — a star in the gutter, then the label,
                     // both in the accent tone so the shortlist reads as a
                     // deliberate pin above the algorithmic repo groups.
+                    // Honor `display.ascii_glyphs` like every other row
+                    // glyph so a non-Nerd-Font terminal gets a plain `*`.
+                    let star = if self.ascii_glyphs { "*" } else { icons::STAR };
                     let mut spans: Vec<Span> = vec![
                         Span::styled(
-                            format!("{} ", icons::STAR),
+                            format!("{star} "),
                             row_bg.unwrap_or_default().fg(theme.accent),
                         ),
                         Span::styled(

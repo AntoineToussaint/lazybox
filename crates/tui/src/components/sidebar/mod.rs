@@ -40,7 +40,7 @@ use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 // The inbox view-model types + grouping/sort/filter/search logic moved
 // to the client-free `lazybox_tui_core::inbox` module (#731) so the
@@ -640,7 +640,16 @@ impl Sidebar {
         self.attention = attention;
         self.collapsed_repos = collapsed_repos;
         self.pinned_repos = pinned_repos;
-        self.focused_workspaces = focused_workspaces;
+        // `ui.focused_workspaces` is a user-editable file, so normalize
+        // it at this boundary: a duplicate key would otherwise render the
+        // same workspace twice in the section AND break unstar (which
+        // removes only the first occurrence, leaving the row starred).
+        // Dedup preserving first-seen (focus) order.
+        let mut seen = HashSet::new();
+        self.focused_workspaces = focused_workspaces
+            .into_iter()
+            .filter(|k| seen.insert(k.clone()))
+            .collect();
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
@@ -1947,9 +1956,30 @@ impl Sidebar {
             true
         };
         self.recompute_visible();
-        // Persist to ~/.lazybox/config.yaml::ui.focused_workspaces so the
-        // shortlist survives restart. Best-effort; a write error just
-        // means the focus set resets next launch.
+        self.persist_focused_workspaces();
+        Some((label, now_focused))
+    }
+
+    /// Drop a workspace from the focus set when it's genuinely removed
+    /// (archived / deleted), so `ui.focused_workspaces` doesn't
+    /// accumulate keys for workspaces that no longer exist — the star
+    /// append is otherwise unbounded and, unlike a repo pin, workspaces
+    /// churn constantly. No-op (and no write) when the key wasn't
+    /// starred. Driven only by the authoritative `WorkspaceRemoved`
+    /// event, never the optimistic `take_workspace`, so a rolled-back
+    /// archive keeps the star.
+    pub fn forget_focused_workspace(&mut self, key: &SessionKey) {
+        if let Some(idx) = self.focused_workspaces.iter().position(|k| k == key) {
+            self.focused_workspaces.remove(idx);
+            self.persist_focused_workspaces();
+        }
+    }
+
+    /// Persist the current focus set to
+    /// `~/.lazybox/config.yaml::ui.focused_workspaces` so the shortlist
+    /// survives restart. Best-effort; a write error just means the focus
+    /// set resets next launch.
+    fn persist_focused_workspaces(&self) {
         let snapshot: Vec<String> = self
             .focused_workspaces
             .iter()
@@ -1958,7 +1988,6 @@ impl Sidebar {
         if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.focused_workspaces = snapshot) {
             tracing::warn!("save focused_workspaces failed: {e}");
         }
-        Some((label, now_focused))
     }
 
     /// True when the workspace is currently starred (used by the row

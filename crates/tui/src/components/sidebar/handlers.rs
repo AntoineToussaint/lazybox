@@ -315,6 +315,11 @@ impl Sidebar {
                 self.agents.remove(&session_key);
                 self.agent_terminal_states
                     .retain(|_, (key, _)| key != &session_key);
+                // A starred workspace that's archived / deleted must drop
+                // out of the persisted focus set, else `ui.focused_workspaces`
+                // grows unbounded with keys for workspaces that no longer
+                // exist (#846 review).
+                self.forget_focused_workspace(&session_key);
                 self.recompute_after_workspace_removed(&session_key);
             }
             Event::SessionCreated(session) => {

@@ -648,6 +648,19 @@ pub enum DesktopEvent {
         step: lazybox_ipc::WorktreeStep,
         status: lazybox_ipc::WorktreeStepStatus,
     },
+    /// A workspace mutation (merge / update-branch / close-issue /
+    /// delete-or-close) finished (#816). Maps the daemon's
+    /// `PrMerged` / `PrMergeFailed` / `BranchUpdated` / `IssueClosed` /
+    /// `IssueDeleted` / … outcome events into a single ready-to-show
+    /// notice so a fire-and-forget desktop command reports its result
+    /// instead of looking like a no-op. `ok` distinguishes success from a
+    /// GitHub-rejected attempt (branch protection, required checks,
+    /// permissions, conflict); the PR/issue stays actionable on failure.
+    WorkspaceActionOutcome {
+        workspace_key: lazybox_core::WorkspaceKey,
+        ok: bool,
+        message: String,
+    },
 }
 
 /// The grouped inbox view-model the desktop renders. Computed by the
@@ -782,6 +795,87 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             session_key,
             step,
             status,
+        }),
+        Event::PrMerged {
+            workspace_key,
+            pr_label,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: format!("Merged {pr_label}."),
+        }),
+        Event::PrMergeFailed {
+            workspace_key,
+            pr_label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Merge of {pr_label} failed: {reason}"),
+        }),
+        Event::BranchUpdated {
+            workspace_key,
+            pr_label,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: format!("Updated branch for {pr_label}."),
+        }),
+        Event::BranchUpdateFailed {
+            workspace_key,
+            pr_label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Branch update for {pr_label} failed: {reason}"),
+        }),
+        Event::IssueClosed {
+            workspace_key,
+            issue_label,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: format!("Closed {issue_label}."),
+        }),
+        Event::IssueCloseFailed {
+            workspace_key,
+            issue_label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Close of {issue_label} failed: {reason}"),
+        }),
+        Event::PrClosed {
+            workspace_key,
+            pr_label,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: format!("Closed {pr_label} without merging."),
+        }),
+        Event::IssueDeleted {
+            workspace_key,
+            issue_label,
+            fell_back_to_close,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: if fell_back_to_close {
+                format!("Closed {issue_label} as not-planned (delete not permitted).")
+            } else {
+                format!("Deleted {issue_label}.")
+            },
+        }),
+        Event::DeleteOrCloseFailed {
+            workspace_key,
+            label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Delete/close of {label} failed: {reason}"),
         }),
         _ => None,
     }

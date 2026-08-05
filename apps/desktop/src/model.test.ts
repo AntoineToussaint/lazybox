@@ -7,6 +7,8 @@ import {
   canReplyToTask,
   ciSignal,
   detailSignals,
+  hasRepoScope,
+  isTerminalTaskState,
   kindHeaderLabel,
   orderedWorkspaceKeys,
   preferredTerminal,
@@ -101,6 +103,38 @@ function activity(author: string, body: string) {
     thread_id: null,
   };
 }
+
+describe("act-on-work gating", () => {
+  it("treats a task-repo or github project as repo-scoped, local as not", () => {
+    // A PR with a repo is repo-scoped.
+    expect(hasRepoScope(workspace("w1", task("PR")))).toBe(true);
+    // A task-less workspace under a github project is still repo-scoped.
+    expect(
+      hasRepoScope({
+        ...workspace("w2", null),
+        project_key: "github-acme-widget",
+      }),
+    ).toBe(true);
+    // A local project (or no project) has no shared main checkout.
+    expect(
+      hasRepoScope({ ...workspace("w3", null), project_key: "local-scratch" }),
+    ).toBe(false);
+    expect(hasRepoScope(workspace("w4", null))).toBe(false);
+  });
+
+  it("flags only Merged/Closed tasks as terminal", () => {
+    expect(isTerminalTaskState({ ...task("open"), state: "Open" })).toBe(false);
+    expect(isTerminalTaskState({ ...task("draft"), state: "Draft" })).toBe(
+      false,
+    );
+    expect(isTerminalTaskState({ ...task("merged"), state: "Merged" })).toBe(
+      true,
+    );
+    expect(isTerminalTaskState({ ...task("closed"), state: "Closed" })).toBe(
+      true,
+    );
+  });
+});
 
 describe("workspace model", () => {
   it("keeps reply drafts scoped to their workspace", () => {

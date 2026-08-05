@@ -261,6 +261,32 @@ export function primaryTask(workspace: Workspace): Task | null {
   );
 }
 
+/**
+ * Whether the workspace tracks a GitHub repository — i.e. it has a
+ * shared main checkout an on-main spawn can target. Mirrors
+ * `Workspace::repo_slug().is_some()`: a `repo` on the primary task, or a
+ * `github-*` project key. Local (`local-*`) and repo-less workspaces
+ * return false, so the desktop never offers "on main" where it has no
+ * meaning (#816).
+ */
+export function hasRepoScope(workspace: Workspace): boolean {
+  if (primaryTask(workspace)?.repo != null) {
+    return true;
+  }
+  return workspace.project_key?.startsWith("github-") ?? false;
+}
+
+/**
+ * Whether a task is in a state where merge / update-branch / close /
+ * delete still make sense. Terminal states (Merged / Closed) are no-ops
+ * the desktop shouldn't offer; a Draft PR can't be merged. Never hides a
+ * genuinely-actionable item — the daemon remains the authority and
+ * reports any rejection via `WorkspaceActionOutcome` (#816).
+ */
+export function isTerminalTaskState(task: Task): boolean {
+  return task.state === "Merged" || task.state === "Closed";
+}
+
 export function unreadCount(workspace: Workspace): number {
   const unseenCount = Math.max(
     0,

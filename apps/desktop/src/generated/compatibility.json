@@ -303,8 +303,15 @@
         },
         "step": "Fetch"
       }
+    },
+    {
+      "WorkspaceActionOutcome": {
+        "message": "Merge of github:o/r#42 failed: not mergeable",
+        "ok": false,
+        "workspace_key": "github:o/r#42"
+      }
     }
   ],
-  "protocol_fingerprint": 2113630337,
+  "protocol_fingerprint": 3965296171,
   "protocol_version": 1
 }

@@ -11,6 +11,8 @@ import {
   canReplyToTask,
   detailSignals,
   filterMenuGroups,
+  hasRepoScope,
+  isTerminalTaskState,
   kindHeaderLabel,
   mailboxLabel,
   nextMailbox,
@@ -411,8 +413,10 @@ markReadButton.addEventListener("click", () => {
   void markSelectedRead();
 });
 
-actionsButton.addEventListener("click", (event) => {
-  event.stopPropagation();
+actionsButton.addEventListener("click", () => {
+  // No stopPropagation: the document click handler still runs and closes
+  // any other open menu (e.g. the filter menu), while its actions-menu
+  // guard excludes clicks on this button so it can't self-close here.
   toggleActionsMenu();
 });
 renameCancel.addEventListener("click", () => renameDialog.close());
@@ -723,6 +727,8 @@ function handleEvent(event: LazyboxEvent): void {
         `Preparing workspace: ${event.WorktreeProgress.step.toLowerCase()}`,
       );
     }
+  } else if ("WorkspaceActionOutcome" in event) {
+    setStatus(event.WorkspaceActionOutcome.message);
   }
 
   if (workspaceChanged || terminalChanged) {
@@ -2054,11 +2060,25 @@ function renderActionsMenu(): void {
   const key = selectedKey;
   const workspace = workspaces.get(key);
   const task = workspace === undefined ? null : primaryTask(workspace);
-  const isPr = task?.kind === "Pr";
-  const isIssue = task?.kind === "Issue";
-  const onMainAgents = setupState?.agents.filter((agent) => agent.available) ?? [];
+  // Classify by the filled task slot, mirroring `WorkspaceKind::classify`
+  // — `task.kind` can be null on older data, so keying off it would drop
+  // Merge/Close entirely for a real PR/issue.
+  const isPr = workspace?.pr != null;
+  const isIssue =
+    workspace !== undefined &&
+    workspace.pr == null &&
+    (workspace.gh_issues.length > 0 || workspace.linear_issues.length > 0);
+  // Terminal PRs/issues (Merged / Closed) are no-ops for the mutations,
+  // and a Draft PR can't be merged; suppress those rows so the menu never
+  // offers an action that can only fail (#816). The daemon still gates
+  // and reports, so this never hides a genuinely-actionable item.
+  const terminal = task !== null && isTerminalTaskState(task);
+  const canMerge = isPr && !terminal && task?.state !== "Draft";
+  const canUpdateBranch = isPr && !terminal;
+  const availableAgents =
+    setupState?.agents.filter((agent) => agent.available) ?? [];
   const defaultTiers =
-    onMainAgents.find((agent) => agent.id === defaultAgent)?.models ?? [];
+    availableAgents.find((agent) => agent.id === defaultAgent)?.models ?? [];
 
   const items: ActionMenuItem[] = [];
   // Spawn variants the primary Start button doesn't cover: per-tier and
@@ -2069,7 +2089,7 @@ function renderActionsMenu(): void {
       run: () => void spawnFromMenu(key, defaultAgent, tier.alias, false),
     });
   }
-  for (const agent of onMainAgents) {
+  for (const agent of availableAgents) {
     if (agent.id === defaultAgent) {
       continue;
     }
@@ -2078,7 +2098,7 @@ function renderActionsMenu(): void {
       run: () => void spawnFromMenu(key, agent.id, null, false),
     });
   }
-  if (workspace?.project_key != null) {
+  if (workspace !== undefined && hasRepoScope(workspace)) {
     items.push({
       label: `Start ${defaultAgent} on main checkout`,
       danger: true,
@@ -2094,7 +2114,7 @@ function renderActionsMenu(): void {
     const url = task.url;
     items.push({ label: "Open in browser", run: () => void openTaskUrl(url) });
   }
-  if (isPr) {
+  if (canMerge) {
     items.push({
       label: "Merge PR",
       danger: true,
@@ -2109,6 +2129,8 @@ function renderActionsMenu(): void {
           "Merge requested.",
         ),
     });
+  }
+  if (canUpdateBranch) {
     items.push({
       label: "Update branch",
       run: () =>
@@ -2134,7 +2156,7 @@ function renderActionsMenu(): void {
         "Workspace archived.",
       ),
   });
-  if (isIssue) {
+  if (isIssue && !terminal) {
     items.push({
       label: "Close issue",
       danger: true,
@@ -2150,7 +2172,7 @@ function renderActionsMenu(): void {
         ),
     });
   }
-  if (task !== null) {
+  if (task !== null && !terminal) {
     items.push({
       label: isPr ? "Close PR (no merge)" : "Delete or close",
       danger: true,

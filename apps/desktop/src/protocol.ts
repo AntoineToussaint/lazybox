@@ -1,3 +1,4 @@
+import type { PolicyArm } from "./generated/PolicyArm";
 import type {
   ComputeOutcome,
   DesktopInboxView,
@@ -37,6 +38,7 @@ export type {
   LazyboxEvent,
   Mailbox,
   PickerRow,
+  PolicyArm,
   RepoSummary,
   SnippetGroup,
   SnippetPickerView,
@@ -173,6 +175,50 @@ export function deliverSnippetCommand(
       body: row.body,
     },
   };
+}
+
+export function setAutoMergeOnGreenCommand(
+  sessionKey: string,
+  enabled: boolean,
+): LazyboxCommand {
+  return { SetAutoMergeOnGreen: { session_key: sessionKey, enabled } };
+}
+
+export function setTrackMainCommand(
+  sessionKey: string,
+  enabled: boolean,
+): LazyboxCommand {
+  return { SetTrackMain: { session_key: sessionKey, enabled } };
+}
+
+export function setAutoFixPoliciesCommand(
+  sessionKey: string,
+  ci: PolicyArm,
+  conflict: PolicyArm,
+): LazyboxCommand {
+  return { SetAutoFixPolicies: { session_key: sessionKey, ci, conflict } };
+}
+
+export function snoozeCommand(
+  sessionKey: string,
+  until: Date,
+): LazyboxCommand {
+  return { Snooze: { session_key: sessionKey, until: until.toISOString() } };
+}
+
+export function unsnoozeCommand(sessionKey: string): LazyboxCommand {
+  return { Unsnooze: { session_key: sessionKey } };
+}
+
+export function syncWorkspaceCommand(sessionKey: string): LazyboxCommand {
+  return { SyncWorkspace: { session_key: sessionKey } };
+}
+
+export function setNotesCommand(
+  sessionKey: string,
+  notes: string,
+): LazyboxCommand {
+  return { SetNotes: { session_key: sessionKey, notes } };
 }
 
 export function terminalKindLabel(kind: TerminalKind): string {

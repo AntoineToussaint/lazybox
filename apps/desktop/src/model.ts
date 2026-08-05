@@ -252,6 +252,38 @@ export class InboxConnection<T> {
   }
 }
 
+/**
+ * A snooze-duration choice, mirroring the TUI's `mount_snooze_picker`
+ * presets (#512). `until` resolves an absolute deadline from `now` so
+ * the value is a pure function of its inputs — the desktop computes the
+ * timestamp client-side and sends it as the daemon's UTC deadline.
+ */
+export interface SnoozePreset {
+  readonly label: string;
+  readonly until: (now: Date) => Date;
+}
+
+function afterSeconds(now: Date, seconds: number): Date {
+  return new Date(now.getTime() + seconds * 1000);
+}
+
+/** Next calendar day at 9am in the viewer's local wall-clock time. */
+function tomorrowMorning(now: Date): Date {
+  const target = new Date(now);
+  target.setDate(target.getDate() + 1);
+  target.setHours(9, 0, 0, 0);
+  return target;
+}
+
+export const SNOOZE_PRESETS: readonly SnoozePreset[] = [
+  { label: "1 hour", until: (now) => afterSeconds(now, 3600) },
+  { label: "4 hours", until: (now) => afterSeconds(now, 4 * 3600) },
+  { label: "Tomorrow 9am", until: tomorrowMorning },
+  { label: "1 week", until: (now) => afterSeconds(now, 7 * 24 * 3600) },
+  { label: "1 month", until: (now) => afterSeconds(now, 30 * 24 * 3600) },
+  { label: "Forever", until: (now) => afterSeconds(now, 365 * 24 * 3600) },
+];
+
 export function primaryTask(workspace: Workspace): Task | null {
   return (
     workspace.pr ??
@@ -285,6 +317,35 @@ export function hasRepoScope(workspace: Workspace): boolean {
  */
 export function isTerminalTaskState(task: Task): boolean {
   return task.state === "Merged" || task.state === "Closed";
+}
+
+/**
+ * Whether "track main" (#535) can apply to this workspace, mirroring
+ * `Workspace::supports_track_main` on the daemon: a GitHub upstream and a
+ * lazybox-provisioned worktree, and **no PR** (a PR branch is
+ * simultaneously ahead of and behind `main`, so a fast-forward can never
+ * apply). Repo-less rows and linked checkouts have no `origin/<default>`
+ * to fast-forward against.
+ */
+export function supportsTrackMain(workspace: Workspace): boolean {
+  return (
+    workspace.pr === null &&
+    workspace.linked_checkout === null &&
+    projectKeySource(workspace.project_key) === "github"
+  );
+}
+
+/**
+ * The source prefix of a ProjectKey (`github` / `linear` / `local`, or
+ * `""` when unprefixed), matching `ProjectKey::source_prefix` — the
+ * substring before the first `-`.
+ */
+function projectKeySource(key: string | null): string {
+  if (key === null) {
+    return "";
+  }
+  const dash = key.indexOf("-");
+  return dash === -1 ? "" : key.slice(0, dash);
 }
 
 export function unreadCount(workspace: Workspace): number {

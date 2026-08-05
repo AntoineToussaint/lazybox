@@ -7,7 +7,14 @@ import {
   deleteOrCloseCommand,
   mergePrCommand,
   renameWorkspaceCommand,
+  setAutoFixPoliciesCommand,
+  setAutoMergeOnGreenCommand,
+  setNotesCommand,
+  setTrackMainCommand,
+  snoozeCommand,
   spawnAgentCommand,
+  syncWorkspaceCommand,
+  unsnoozeCommand,
   updateBranchCommand,
 } from "./protocol";
 
@@ -101,6 +108,31 @@ describe("IPC command JSON", () => {
         },
       },
     ]);
+  });
+
+  it("builds automation, snooze, sync, and notes commands", () => {
+    const key = "github:owner/repo#1";
+    expect(setAutoMergeOnGreenCommand(key, true)).toEqual({
+      SetAutoMergeOnGreen: { session_key: key, enabled: true },
+    });
+    expect(setTrackMainCommand(key, false)).toEqual({
+      SetTrackMain: { session_key: key, enabled: false },
+    });
+    expect(setAutoFixPoliciesCommand(key, "Arm", "Disarm")).toEqual({
+      SetAutoFixPolicies: { session_key: key, ci: "Arm", conflict: "Disarm" },
+    });
+    expect(
+      snoozeCommand(key, new Date("2026-08-05T09:00:00.000Z")),
+    ).toEqual({
+      Snooze: { session_key: key, until: "2026-08-05T09:00:00.000Z" },
+    });
+    expect(unsnoozeCommand(key)).toEqual({ Unsnooze: { session_key: key } });
+    expect(syncWorkspaceCommand(key)).toEqual({
+      SyncWorkspace: { session_key: key },
+    });
+    expect(setNotesCommand(key, "flaky job")).toEqual({
+      SetNotes: { session_key: key, notes: "flaky job" },
+    });
   });
 
   it("does not emit mutations without a workspace or reply body", () => {

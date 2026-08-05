@@ -57,6 +57,9 @@ struct InboxModel {
     /// attention scoring reads.
     agents: HashMap<lazybox_core::SessionKey, AgentState>,
     sort_mode: SortMode,
+    /// Active mailbox (Inbox / Inactive / Snoozed), cycled by the
+    /// frontend's mailbox control (#816).
+    mailbox: Mailbox,
     collapsed_repos: BTreeSet<String>,
     attention: lazybox_config::AttentionConfig,
     /// Active filter set from the multi-select filter menu (#733).
@@ -74,6 +77,7 @@ impl InboxModel {
             agent_terminal_states: HashMap::new(),
             agents: HashMap::new(),
             sort_mode: SortMode::default(),
+            mailbox: Mailbox::default(),
             collapsed_repos,
             attention,
             filters: FilterSet::new(),
@@ -205,6 +209,11 @@ impl InboxModel {
         self.sort_mode
     }
 
+    fn cycle_mailbox(&mut self) -> Mailbox {
+        self.mailbox = self.mailbox.next();
+        self.mailbox
+    }
+
     /// Run the shared grouping/sort logic and wrap it with the current
     /// sort mode for the frontend's sort control.
     fn compute(&self) -> DesktopInboxView {
@@ -228,14 +237,14 @@ impl InboxModel {
         let candidates: Vec<&lazybox_core::Workspace> = self
             .workspaces
             .values()
-            .filter(|w| mailbox_membership(w, Mailbox::Inbox, now, false))
+            .filter(|w| mailbox_membership(w, self.mailbox, now, false))
             .collect();
         let filter_menu = Filter::menu(&candidates, &self.agents, &self.filters);
         let filter_chips: Vec<String> =
             self.filters.chips().iter().map(|c| c.to_string()).collect();
         let outcome = inbox::compute_visible(ComputeInputs {
             workspaces: &self.workspaces,
-            mailbox: Mailbox::Inbox,
+            mailbox: self.mailbox,
             filters: &self.filters,
             sort_mode: self.sort_mode,
             show_inactive_in_inbox: false,
@@ -252,6 +261,7 @@ impl InboxModel {
         DesktopInboxView {
             outcome,
             sort_mode: self.sort_mode,
+            mailbox: self.mailbox,
             filter_menu,
             filter_chips,
         }
@@ -718,6 +728,22 @@ async fn set_sort_mode(state: State<'_, DesktopState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Cycle the active mailbox (Inbox → Inactive → Snoozed) and push the
+/// recomputed grouped view to the webview (#816). The mailbox membership
+/// itself is computed only by the shared `tui-core` logic.
+#[tauri::command]
+async fn set_mailbox(state: State<'_, DesktopState>) -> Result<(), String> {
+    let view = {
+        let mut inbox = state.inbox.lock().await;
+        inbox.cycle_mailbox();
+        inbox.compute()
+    };
+    if let Some(channel) = state.event_channel.lock().await.as_ref() {
+        let _ = channel.send(DesktopStreamMessage::Inbox(Box::new(view)));
+    }
+    Ok(())
+}
+
 /// Recompute the snippet picker view for `filter` from the catalog and
 /// the daemon-owned MRU. Called on open and on every keystroke; the
 /// shared `tui-core::snippets` logic does the grouping / filter / recent
@@ -801,6 +827,15 @@ async fn send_gateway_command(
             .error
             .unwrap_or_else(|| "daemon did not complete the desktop command".to_string()))
     }
+}
+
+/// Open a task URL in the user's default browser (the TUI's `g o`).
+/// Reuses the shared platform launcher so the desktop and TUI behave
+/// identically; fire-and-forget, so a spawn failure surfaces as an error
+/// the frontend flashes (#816).
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    lazybox_tui_core::editors::open_url(&url, None).map_err(|error| format!("open {url}: {error}"))
 }
 
 #[tauri::command]
@@ -1682,11 +1717,13 @@ fn main() {
             record_analytics,
             list_workspaces,
             set_sort_mode,
+            set_mailbox,
             set_filters,
             set_search,
             snippet_view,
             set_filters,
             set_search,
+            open_url,
             send_command,
             send_terminal_frame,
             read_terminal_data,
@@ -1927,6 +1964,8 @@ mod tests {
         let command = Command::from(DesktopCommand::SpawnAgent {
             session_key: session_key.clone(),
             agent: "codex".to_string(),
+            model_alias: Some("L".to_string()),
+            on_main: true,
         });
 
         assert!(matches!(
@@ -1935,24 +1974,63 @@ mod tests {
                 kind: lazybox_ipc::TerminalKind::Agent(agent),
                 cwd: None,
                 initial_prompt: None,
-                on_main: false,
-                model_alias: None,
+                on_main: true,
+                model_alias: Some(alias),
                 access: lazybox_ipc::AgentRunAccess::Default,
                 client_request_id: None,
                 ..
-            } if agent == "codex"
+            } if agent == "codex" && alias == "L"
         ));
         assert!(matches!(
             Command::from(DesktopCommand::SpawnShell {
                 session_key: session_key.clone(),
+                on_main: true,
             }),
             Command::Spawn {
                 kind: lazybox_ipc::TerminalKind::Shell,
                 cwd: None,
                 initial_prompt: None,
-                on_main: false,
+                on_main: true,
                 ..
             }
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::MergePr {
+                session_key: session_key.clone(),
+            }),
+            Command::MergePr { workspace_key } if workspace_key.0 == session_key.as_str()
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::UpdateBranch {
+                session_key: session_key.clone(),
+            }),
+            Command::UpdateBranch { workspace_key } if workspace_key.0 == session_key.as_str()
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::Archive {
+                session_key: session_key.clone(),
+            }),
+            Command::Kill { session_key: key } if key == session_key
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::CloseIssue {
+                session_key: session_key.clone(),
+            }),
+            Command::CloseIssue { workspace_key } if workspace_key.0 == session_key.as_str()
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::DeleteOrClose {
+                session_key: session_key.clone(),
+            }),
+            Command::DeleteOrClose { workspace_key } if workspace_key.0 == session_key.as_str()
+        ));
+        assert!(matches!(
+            Command::from(DesktopCommand::RenameWorkspace {
+                session_key: session_key.clone(),
+                name: "renamed".to_string(),
+            }),
+            Command::RenameWorkspace { session_key: key, name }
+                if key == session_key && name == "renamed"
         ));
         assert!(matches!(
             Command::from(DesktopCommand::MarkRead {
@@ -2356,6 +2434,7 @@ mod tests {
             &gateway,
             DesktopCommand::SpawnShell {
                 session_key: (&workspace_key).into(),
+                on_main: false,
             },
         )
         .await
@@ -2525,6 +2604,32 @@ mod tests {
 
         assert_eq!(model.cycle_sort_mode(), SortMode::ByRole);
         assert_eq!(model.cycle_sort_mode(), SortMode::ByRoleSplit);
+    }
+
+    #[test]
+    fn cycling_mailbox_moves_off_the_inbox_and_hides_open_workspaces() {
+        let mut model = empty_model();
+        model.apply_event(&DesktopEvent::Snapshot {
+            workspaces: vec![contract_workspace("octo/widget", 10, true)],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+        // Open PR lands in the default Inbox mailbox.
+        let inbox = model.compute();
+        assert_eq!(inbox.mailbox, Mailbox::Inbox);
+        assert_eq!(inbox.outcome.summaries["octo/widget"].active, 1);
+
+        // Inbox → Inactive: an Open workspace is not historical, so it drops.
+        assert_eq!(model.cycle_mailbox(), Mailbox::Inactive);
+        let inactive = model.compute();
+        assert_eq!(inactive.mailbox, Mailbox::Inactive);
+        assert!(inactive.outcome.visible.is_empty());
+
+        // Inactive → Snoozed → Inbox wraps back.
+        assert_eq!(model.cycle_mailbox(), Mailbox::Snoozed);
+        assert_eq!(model.compute().mailbox, Mailbox::Snoozed);
+        assert_eq!(model.cycle_mailbox(), Mailbox::Inbox);
+        assert_eq!(model.compute().mailbox, Mailbox::Inbox);
     }
 
     #[test]

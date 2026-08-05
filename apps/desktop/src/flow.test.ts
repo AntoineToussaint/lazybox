@@ -210,10 +210,15 @@ describe("credential-free desktop workflow", () => {
     button("shell-button").click();
     await vi.waitFor(() => {
       expect(commandCalls()).toContainEqual({
-        SpawnAgent: { session_key: "github-o-r-42", agent: "codex" },
+        SpawnAgent: {
+          session_key: "github-o-r-42",
+          agent: "codex",
+          model_alias: null,
+          on_main: false,
+        },
       });
       expect(commandCalls()).toContainEqual({
-        SpawnShell: { session_key: "github-o-r-42" },
+        SpawnShell: { session_key: "github-o-r-42", on_main: false },
       });
     });
 
@@ -340,6 +345,108 @@ describe("credential-free desktop workflow", () => {
 
     releaseReply?.();
     await vi.waitFor(() => expect(button("reply-button").disabled).toBe(false));
+  });
+
+  it("gates act-on-work items by state/scope and surfaces mutation outcomes", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o/r"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    const openPr = pr(42);
+    const mergedPr = pr(43);
+    (mergedPr.pr as { state: string }).state = "Merged";
+    const localScratch = taskless("local-scratch");
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [openPr, mergedPr, localScratch],
+          terminals: [],
+        },
+      },
+    });
+    eventChannel().onmessage(
+      inboxMessage(["github-o-r-42", "github-o-r-43", "scratch"]),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row").length).toBe(3),
+    );
+
+    // Open PR: merge / update-branch / on-main / browser all offered.
+    selectWorkspaceRow("PR o/r#42");
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+    let labels = openActionsMenuLabels();
+    expect(labels).toContain("Merge PR");
+    expect(labels).toContain("Update branch");
+    expect(labels).toContain("Open in browser");
+    expect(labels).toContain("Start codex on main checkout");
+
+    // Merged PR is terminal: no merge / update-branch / delete offered.
+    selectWorkspaceRow("PR o/r#43");
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#43"),
+    );
+    labels = openActionsMenuLabels();
+    expect(labels).not.toContain("Merge PR");
+    expect(labels).not.toContain("Update branch");
+    expect(labels).not.toContain("Close PR (no merge)");
+    // A repo-scoped, non-mutating action still shows.
+    expect(labels).toContain("Open in browser");
+
+    // Local scratch has no repo: on-main must not be offered.
+    selectWorkspaceRow("Scratch");
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("Scratch"),
+    );
+    labels = openActionsMenuLabels();
+    expect(labels.some((label) => label.includes("on main checkout"))).toBe(
+      false,
+    );
+    expect(labels).toContain("Rename…");
+
+    // A GitHub-rejected merge must reach the status line, not vanish.
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        WorkspaceActionOutcome: {
+          workspace_key: "github-o-r-42",
+          ok: false,
+          message: "Merge of o/r#42 failed: not mergeable",
+        },
+      },
+    });
+    await vi.waitFor(() =>
+      expect(element("status-message").textContent).toContain("not mergeable"),
+    );
   });
 
   it("attaches the replacement terminal when the selected workspace is removed", async () => {
@@ -1538,6 +1645,18 @@ function taskless(projectKey: string): Record<string, unknown> {
   workspace.gh_issues = [];
   workspace.linear_issues = [];
   return workspace;
+}
+
+// Open the workspace actions menu and return its item labels. Clicking
+// the button re-renders the menu from the current selection each time.
+function openActionsMenuLabels(): string[] {
+  const menu = element("actions-menu");
+  if (menu.classList.contains("hidden")) {
+    button("actions-button").click();
+  }
+  return [...menu.querySelectorAll<HTMLButtonElement>(".actions-menu-item")].map(
+    (item) => item.textContent ?? "",
+  );
 }
 
 function selectWorkspaceRow(title: string): void {

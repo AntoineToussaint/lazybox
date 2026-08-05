@@ -3,11 +3,14 @@
     {
       "SpawnAgent": {
         "agent": "codex",
+        "model_alias": "L",
+        "on_main": true,
         "session_key": "github:o/r#42"
       }
     },
     {
       "SpawnShell": {
+        "on_main": false,
         "session_key": "github:o/r#42"
       }
     },
@@ -29,8 +32,39 @@
       }
     },
     {
+      "RenameWorkspace": {
+        "name": "renamed",
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
       "PostReply": {
         "body": "Ready for another look.",
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "MergePr": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "UpdateBranch": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "Archive": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "CloseIssue": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "DeleteOrClose": {
         "session_key": "github:o/r#42"
       }
     },
@@ -269,8 +303,15 @@
         },
         "step": "Fetch"
       }
+    },
+    {
+      "WorkspaceActionOutcome": {
+        "message": "Merge of github:o/r#42 failed: not mergeable",
+        "ok": false,
+        "workspace_key": "github:o/r#42"
+      }
     }
   ],
-  "protocol_fingerprint": 2748433511,
+  "protocol_fingerprint": 3965296171,
   "protocol_version": 1
 }

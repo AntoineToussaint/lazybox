@@ -175,7 +175,13 @@ fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
         DesktopCommand::CreateWorkspace { .. } => "CreateWorkspace",
         DesktopCommand::FocusWorkspace { .. } => "FocusWorkspace",
         DesktopCommand::MarkRead { .. } => "MarkRead",
+        DesktopCommand::RenameWorkspace { .. } => "RenameWorkspace",
         DesktopCommand::PostReply { .. } => "PostReply",
+        DesktopCommand::MergePr { .. } => "MergePr",
+        DesktopCommand::UpdateBranch { .. } => "UpdateBranch",
+        DesktopCommand::Archive { .. } => "Archive",
+        DesktopCommand::CloseIssue { .. } => "CloseIssue",
+        DesktopCommand::DeleteOrClose { .. } => "DeleteOrClose",
         DesktopCommand::DeliverSnippet { .. } => "DeliverSnippet",
         DesktopCommand::Refresh => "Refresh",
     }
@@ -196,6 +202,7 @@ fn desktop_event_tag(event: &DesktopEvent) -> &'static str {
         DesktopEvent::PollCompleted { .. } => "PollCompleted",
         DesktopEvent::PollProgress { .. } => "PollProgress",
         DesktopEvent::WorktreeProgress { .. } => "WorktreeProgress",
+        DesktopEvent::WorkspaceActionOutcome { .. } => "WorkspaceActionOutcome",
     }
 }
 
@@ -242,9 +249,12 @@ fn desktop_compatibility_fixture_is_current() {
         DesktopCommand::SpawnAgent {
             session_key: session_key.clone(),
             agent: "codex".into(),
+            model_alias: Some("L".into()),
+            on_main: true,
         },
         DesktopCommand::SpawnShell {
             session_key: session_key.clone(),
+            on_main: false,
         },
         DesktopCommand::CreateWorkspace {
             name: "first workspace".into(),
@@ -257,9 +267,28 @@ fn desktop_compatibility_fixture_is_current() {
         DesktopCommand::MarkRead {
             session_key: session_key.clone(),
         },
+        DesktopCommand::RenameWorkspace {
+            session_key: session_key.clone(),
+            name: "renamed".into(),
+        },
         DesktopCommand::PostReply {
             session_key: session_key.clone(),
             body: "Ready for another look.".into(),
+        },
+        DesktopCommand::MergePr {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::UpdateBranch {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::Archive {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::CloseIssue {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::DeleteOrClose {
+            session_key: session_key.clone(),
         },
         DesktopCommand::DeliverSnippet {
             terminal_id: TerminalId(7),
@@ -327,6 +356,11 @@ fn desktop_compatibility_fixture_is_current() {
             step: WorktreeStep::Fetch,
             status: WorktreeStepStatus::Progress("50%".into()),
         },
+        DesktopEvent::WorkspaceActionOutcome {
+            workspace_key: lazybox_core::WorkspaceKey("github:o/r#42".into()),
+            ok: false,
+            message: "Merge of github:o/r#42 failed: not mergeable".into(),
+        },
     ];
     let command_tags = commands
         .iter()
@@ -336,8 +370,8 @@ fn desktop_compatibility_fixture_is_current() {
         .iter()
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(command_tags.len(), 8);
-    assert_eq!(event_tags.len(), 13);
+    assert_eq!(command_tags.len(), 14);
+    assert_eq!(event_tags.len(), 14);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,
         "protocol_fingerprint": api_gateway::DESKTOP_PROTOCOL_FINGERPRINT,
@@ -380,6 +414,55 @@ fn desktop_boundary_rejects_internal_commands_and_private_events() {
         })
         .is_none()
     );
+}
+
+#[test]
+fn desktop_boundary_forwards_workspace_mutation_outcomes() {
+    let key = lazybox_core::WorkspaceKey("github:o/r#42".into());
+
+    // A GitHub-rejected merge must reach the desktop as a failure notice —
+    // not be dropped, which would leave the fired command looking like a
+    // no-op (#816).
+    let failed = api_gateway::desktop_event(Event::PrMergeFailed {
+        workspace_key: key.clone(),
+        pr_label: "o/r#42".into(),
+        reason: "not mergeable".into(),
+    });
+    match failed {
+        Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok,
+            message,
+        }) => {
+            assert_eq!(workspace_key, key);
+            assert!(!ok);
+            assert!(message.contains("not mergeable"), "message was {message:?}");
+        }
+        other => panic!("expected a failure outcome, got {other:?}"),
+    }
+
+    // A successful merge reports success.
+    match api_gateway::desktop_event(Event::PrMerged {
+        workspace_key: key.clone(),
+        pr_label: "o/r#42".into(),
+    }) {
+        Some(DesktopEvent::WorkspaceActionOutcome { ok, .. }) => assert!(ok),
+        other => panic!("expected a success outcome, got {other:?}"),
+    }
+
+    // The degraded delete (delete refused → closed) reports success but
+    // names the degradation so the user knows the issue still exists.
+    match api_gateway::desktop_event(Event::IssueDeleted {
+        workspace_key: key.clone(),
+        issue_label: "o/r#42".into(),
+        fell_back_to_close: true,
+    }) {
+        Some(DesktopEvent::WorkspaceActionOutcome { ok, message, .. }) => {
+            assert!(ok);
+            assert!(message.contains("not-planned"), "message was {message:?}");
+        }
+        other => panic!("expected a degraded-delete outcome, got {other:?}"),
+    }
 }
 
 async fn read_json<T: serde::de::DeserializeOwned>(

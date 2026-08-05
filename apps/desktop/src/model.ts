@@ -3,6 +3,7 @@ import type {
   FilterAxis,
   FilterMenuItem,
   LazyboxEvent,
+  Mailbox,
   SortMode,
   Task,
   TerminalKind,
@@ -148,6 +149,27 @@ export function sortModeLabel(mode: SortMode): string {
   }
 }
 
+/** Short label for the mailbox control, matching `Mailbox::chip_label`. */
+export function mailboxLabel(mailbox: Mailbox): string {
+  switch (mailbox) {
+    case "Inbox":
+      return "inbox";
+    case "Inactive":
+      return "inactive";
+    case "Snoozed":
+      return "snoozed";
+  }
+}
+
+/** Next mailbox in the cycle, matching `Mailbox::next`. */
+export function nextMailbox(mailbox: Mailbox): Mailbox {
+  return mailbox === "Inbox"
+    ? "Inactive"
+    : mailbox === "Inactive"
+      ? "Snoozed"
+      : "Inbox";
+}
+
 /** Header label for a PR/Issue/Other section, matching the TUI. */
 export function kindHeaderLabel(kind: "Pr" | "Issue" | "Other"): string {
   switch (kind) {
@@ -237,6 +259,32 @@ export function primaryTask(workspace: Workspace): Task | null {
     workspace.linear_issues[0] ??
     null
   );
+}
+
+/**
+ * Whether the workspace tracks a GitHub repository — i.e. it has a
+ * shared main checkout an on-main spawn can target. Mirrors
+ * `Workspace::repo_slug().is_some()`: a `repo` on the primary task, or a
+ * `github-*` project key. Local (`local-*`) and repo-less workspaces
+ * return false, so the desktop never offers "on main" where it has no
+ * meaning (#816).
+ */
+export function hasRepoScope(workspace: Workspace): boolean {
+  if (primaryTask(workspace)?.repo != null) {
+    return true;
+  }
+  return workspace.project_key?.startsWith("github-") ?? false;
+}
+
+/**
+ * Whether a task is in a state where merge / update-branch / close /
+ * delete still make sense. Terminal states (Merged / Closed) are no-ops
+ * the desktop shouldn't offer; a Draft PR can't be merged. Never hides a
+ * genuinely-actionable item — the daemon remains the authority and
+ * reports any rejection via `WorkspaceActionOutcome` (#816).
+ */
+export function isTerminalTaskState(task: Task): boolean {
+  return task.state === "Merged" || task.state === "Closed";
 }
 
 export function unreadCount(workspace: Workspace): number {

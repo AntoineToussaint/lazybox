@@ -26,7 +26,7 @@ describe("generated desktop compatibility fixture", () => {
   });
 
   it("covers every exported command and event variant", () => {
-    expect(new Set(fixture.commands.map(variantTag)).size).toBe(8);
-    expect(new Set(fixture.events.map(variantTag)).size).toBe(13);
+    expect(new Set(fixture.commands.map(variantTag)).size).toBe(14);
+    expect(new Set(fixture.events.map(variantTag)).size).toBe(14);
   });
 });

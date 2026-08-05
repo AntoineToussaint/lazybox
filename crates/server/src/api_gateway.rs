@@ -403,9 +403,24 @@ pub enum DesktopCommand {
     SpawnAgent {
         session_key: lazybox_core::SessionKey,
         agent: String,
+        /// Model-tier alias (`"S"`/`"M"`/`"L"`) from the agent's tier
+        /// menu, mirroring the TUI's `a S`/`w M` chords. `None` spawns
+        /// the agent's default tier. The daemon resolves it per agent and
+        /// falls back to the default model when the alias is undefined.
+        #[serde(default)]
+        model_alias: Option<String>,
+        /// Spawn on the repo's shared main checkout instead of an isolated
+        /// worktree (the TUI's `b`-leader on-main group). The desktop
+        /// confirms this before sending, since edits land on main.
+        #[serde(default)]
+        on_main: bool,
     },
     SpawnShell {
         session_key: lazybox_core::SessionKey,
+        /// Spawn the shell on the repo's shared main checkout instead of an
+        /// isolated worktree. See [`DesktopCommand::SpawnAgent::on_main`].
+        #[serde(default)]
+        on_main: bool,
     },
     CreateWorkspace {
         name: String,
@@ -418,9 +433,41 @@ pub enum DesktopCommand {
     MarkRead {
         session_key: lazybox_core::SessionKey,
     },
+    /// Rename the workspace's display name (the TUI's `x R`). Only the
+    /// label changes — the workspace key and any worktrees are untouched.
+    RenameWorkspace {
+        session_key: lazybox_core::SessionKey,
+        name: String,
+    },
     PostReply {
         session_key: lazybox_core::SessionKey,
         body: String,
+    },
+    /// Merge the workspace's PR (the TUI's `g m`). Fire-and-forget: the
+    /// merge outcome arrives asynchronously as a provider poll updates the
+    /// row, exactly as it does for the TUI.
+    MergePr {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Update the workspace's PR branch against its base (the TUI's `g u`).
+    UpdateBranch {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Archive the workspace: kill its sessions and drop the row (the TUI's
+    /// `x x` on a workspace). Maps to [`Command::Kill`].
+    Archive {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Close the workspace's GitHub issue upstream as not-planned (the
+    /// TUI's `x c`). Issue workspaces only.
+    CloseIssue {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Delete-or-close the workspace's primary upstream item (the TUI's
+    /// `g d`): a PR is closed without merging, an issue is hard-deleted
+    /// when the token has admin rights and closed as not-planned otherwise.
+    DeleteOrClose {
+        session_key: lazybox_core::SessionKey,
     },
     /// Deliver a snippet to a live terminal (the `]]s` picker's send).
     /// The daemon derives the workspace from `terminal_id`, does the
@@ -442,28 +489,43 @@ impl From<DesktopCommand> for Command {
     }
 }
 
+/// A desktop workspace key travels on the wire as a [`SessionKey`]
+/// string (they share the same value); the workspace-scoped mutations
+/// take a [`lazybox_core::WorkspaceKey`], so bridge the two here.
+fn workspace_key_of(session_key: &lazybox_core::SessionKey) -> lazybox_core::WorkspaceKey {
+    lazybox_core::WorkspaceKey::new(session_key.as_str().to_string())
+}
+
 impl DesktopCommand {
     pub fn into_correlated(self, client_request_id: Option<String>) -> Command {
         match self {
-            DesktopCommand::SpawnAgent { session_key, agent } => Command::Spawn {
+            DesktopCommand::SpawnAgent {
+                session_key,
+                agent,
+                model_alias,
+                on_main,
+            } => Command::Spawn {
                 session_key,
                 session_id: None,
                 client_request_id,
                 kind: lazybox_ipc::TerminalKind::Agent(agent),
                 cwd: None,
                 initial_prompt: None,
-                on_main: false,
-                model_alias: None,
+                on_main,
+                model_alias,
                 access: lazybox_ipc::AgentRunAccess::Default,
             },
-            DesktopCommand::SpawnShell { session_key } => Command::Spawn {
+            DesktopCommand::SpawnShell {
+                session_key,
+                on_main,
+            } => Command::Spawn {
                 session_key,
                 session_id: None,
                 client_request_id,
                 kind: lazybox_ipc::TerminalKind::Shell,
                 cwd: None,
                 initial_prompt: None,
-                on_main: false,
+                on_main,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
             },
@@ -480,9 +542,25 @@ impl DesktopCommand {
                 Command::FocusWorkspace { session_key }
             }
             DesktopCommand::MarkRead { session_key } => Command::MarkRead { session_key },
+            DesktopCommand::RenameWorkspace { session_key, name } => {
+                Command::RenameWorkspace { session_key, name }
+            }
             DesktopCommand::PostReply { session_key, body } => {
                 Command::PostReply { session_key, body }
             }
+            DesktopCommand::MergePr { session_key } => Command::MergePr {
+                workspace_key: workspace_key_of(&session_key),
+            },
+            DesktopCommand::UpdateBranch { session_key } => Command::UpdateBranch {
+                workspace_key: workspace_key_of(&session_key),
+            },
+            DesktopCommand::Archive { session_key } => Command::Kill { session_key },
+            DesktopCommand::CloseIssue { session_key } => Command::CloseIssue {
+                workspace_key: workspace_key_of(&session_key),
+            },
+            DesktopCommand::DeleteOrClose { session_key } => Command::DeleteOrClose {
+                workspace_key: workspace_key_of(&session_key),
+            },
             DesktopCommand::DeliverSnippet {
                 terminal_id,
                 snippet_key,
@@ -570,6 +648,19 @@ pub enum DesktopEvent {
         step: lazybox_ipc::WorktreeStep,
         status: lazybox_ipc::WorktreeStepStatus,
     },
+    /// A workspace mutation (merge / update-branch / close-issue /
+    /// delete-or-close) finished (#816). Maps the daemon's
+    /// `PrMerged` / `PrMergeFailed` / `BranchUpdated` / `IssueClosed` /
+    /// `IssueDeleted` / … outcome events into a single ready-to-show
+    /// notice so a fire-and-forget desktop command reports its result
+    /// instead of looking like a no-op. `ok` distinguishes success from a
+    /// GitHub-rejected attempt (branch protection, required checks,
+    /// permissions, conflict); the PR/issue stays actionable on failure.
+    WorkspaceActionOutcome {
+        workspace_key: lazybox_core::WorkspaceKey,
+        ok: bool,
+        message: String,
+    },
 }
 
 /// The grouped inbox view-model the desktop renders. Computed by the
@@ -593,6 +684,9 @@ pub struct DesktopInboxView {
     /// The sort mode this view was computed with, so the frontend can
     /// label its sort control (`recent` / `by-role` / `split`).
     pub sort_mode: lazybox_tui_core::inbox::SortMode,
+    /// The mailbox this view was computed with, so the frontend can label
+    /// its mailbox control (`inbox` / `inactive` / `snoozed`, #816).
+    pub mailbox: lazybox_tui_core::inbox::Mailbox,
     /// The filter menu the desktop draws (#733): every predicate in axis
     /// order with its live match count and active flag. Built by
     /// `Filter::menu` so the desktop never hardcodes the predicate list.
@@ -701,6 +795,87 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             session_key,
             step,
             status,
+        }),
+        Event::PrMerged {
+            workspace_key,
+            pr_label,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: format!("Merged {pr_label}."),
+        }),
+        Event::PrMergeFailed {
+            workspace_key,
+            pr_label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Merge of {pr_label} failed: {reason}"),
+        }),
+        Event::BranchUpdated {
+            workspace_key,
+            pr_label,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: format!("Updated branch for {pr_label}."),
+        }),
+        Event::BranchUpdateFailed {
+            workspace_key,
+            pr_label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Branch update for {pr_label} failed: {reason}"),
+        }),
+        Event::IssueClosed {
+            workspace_key,
+            issue_label,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: format!("Closed {issue_label}."),
+        }),
+        Event::IssueCloseFailed {
+            workspace_key,
+            issue_label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Close of {issue_label} failed: {reason}"),
+        }),
+        Event::PrClosed {
+            workspace_key,
+            pr_label,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: format!("Closed {pr_label} without merging."),
+        }),
+        Event::IssueDeleted {
+            workspace_key,
+            issue_label,
+            fell_back_to_close,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: if fell_back_to_close {
+                format!("Closed {issue_label} as not-planned (delete not permitted).")
+            } else {
+                format!("Deleted {issue_label}.")
+            },
+        }),
+        Event::DeleteOrCloseFailed {
+            workspace_key,
+            label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Delete/close of {label} failed: {reason}"),
         }),
         _ => None,
     }

@@ -21,12 +21,34 @@ use lazybox_core::{SessionId, SessionKey};
 /// PRs the user isn't involved in. That requires a separate GH fetch
 /// (today the poller filters by `role.*`) and lives with the
 /// org/repo picker work.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum Mailbox {
     #[default]
     Inbox,
     Inactive,
     Snoozed,
+}
+
+impl Mailbox {
+    /// Next mailbox in the cycle, matching the sidebar's `Shift-S`
+    /// order (Inbox → Inactive → Snoozed → Inbox).
+    pub fn next(self) -> Self {
+        match self {
+            Mailbox::Inbox => Mailbox::Inactive,
+            Mailbox::Inactive => Mailbox::Snoozed,
+            Mailbox::Snoozed => Mailbox::Inbox,
+        }
+    }
+
+    /// Short label for a mailbox control (mirrors [`SortMode::chip_label`]).
+    pub fn chip_label(self) -> &'static str {
+        match self {
+            Mailbox::Inbox => "inbox",
+            Mailbox::Inactive => "inactive",
+            Mailbox::Snoozed => "snoozed",
+        }
+    }
 }
 
 /// How the inbox orders workspaces within each repo group.
@@ -222,4 +244,24 @@ pub struct RepoSummary {
     /// the future; defaults are the indicators lazybox already
     /// surfaces as badges on workspace rows.
     pub attention: usize,
+}
+
+#[cfg(test)]
+mod mailbox_tests {
+    use super::Mailbox;
+
+    #[test]
+    fn mailbox_cycles_inbox_inactive_snoozed() {
+        assert_eq!(Mailbox::default(), Mailbox::Inbox);
+        assert_eq!(Mailbox::Inbox.next(), Mailbox::Inactive);
+        assert_eq!(Mailbox::Inactive.next(), Mailbox::Snoozed);
+        assert_eq!(Mailbox::Snoozed.next(), Mailbox::Inbox);
+    }
+
+    #[test]
+    fn mailbox_chip_labels_are_lowercase_names() {
+        assert_eq!(Mailbox::Inbox.chip_label(), "inbox");
+        assert_eq!(Mailbox::Inactive.chip_label(), "inactive");
+        assert_eq!(Mailbox::Snoozed.chip_label(), "snoozed");
+    }
 }

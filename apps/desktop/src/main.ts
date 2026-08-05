@@ -11,7 +11,11 @@ import {
   canReplyToTask,
   detailSignals,
   filterMenuGroups,
+  hasRepoScope,
+  isTerminalTaskState,
   kindHeaderLabel,
+  mailboxLabel,
+  nextMailbox,
   orderedWorkspaceKeys,
   preferredTerminal,
   primaryTask,
@@ -33,6 +37,7 @@ import {
   type FilterMenuItem,
   type LazyboxCommand,
   type LazyboxEvent,
+  type Mailbox,
   type PickerRow,
   type SnippetPickerView,
   type SortMode,
@@ -41,11 +46,17 @@ import {
   type TerminalSnapshot,
   type Workspace,
   type WorkspacesResponse,
+  archiveCommand,
+  closeIssueCommand,
   commandsForWorkspaceIntent,
   createWorkspaceCommand,
+  deleteOrCloseCommand,
   deliverSnippetCommand,
+  mergePrCommand,
+  renameWorkspaceCommand,
   spawnAgentCommand,
   terminalKindLabel,
+  updateBranchCommand,
 } from "./protocol";
 import {
   autoSubmitRow,
@@ -196,6 +207,8 @@ const workspaceCount = element<HTMLSpanElement>("workspace-count");
 const unreadTotal = element<HTMLSpanElement>("unread-count");
 const sortButton = element<HTMLButtonElement>("sort-button");
 const sortLabel = element<HTMLElement>("sort-label");
+const mailboxButton = element<HTMLButtonElement>("mailbox-button");
+const mailboxLabelElement = element<HTMLElement>("mailbox-label");
 const inboxSearch = element<HTMLInputElement>("inbox-search");
 const filterButton = element<HTMLButtonElement>("filter-button");
 const filterMenu = element<HTMLDivElement>("filter-menu");
@@ -217,6 +230,13 @@ const agentLabel = element<HTMLElement>("agent-label");
 const spawnButton = element<HTMLButtonElement>("spawn-button");
 const shellButton = element<HTMLButtonElement>("shell-button");
 const markReadButton = element<HTMLButtonElement>("mark-read-button");
+const actionsButton = element<HTMLButtonElement>("actions-button");
+const actionsMenu = element<HTMLDivElement>("actions-menu");
+const renameDialog = element<HTMLDialogElement>("rename-dialog");
+const renameForm = element<HTMLFormElement>("rename-form");
+const renameNameInput = element<HTMLInputElement>("rename-name");
+const renameError = element<HTMLParagraphElement>("rename-error");
+const renameCancel = element<HTMLButtonElement>("rename-cancel");
 const replyForm = element<HTMLFormElement>("reply-form");
 const replyBody = element<HTMLTextAreaElement>("reply-body");
 const replyButton = element<HTMLButtonElement>("reply-button");
@@ -294,6 +314,7 @@ let selectedKey: string | null = null;
 // never computes grouping or sort — it only renders this structure.
 let inboxView: ComputeOutcome | null = null;
 let sortMode: SortMode = "ByRoleSplit";
+let mailbox: Mailbox = "Inbox";
 // The filter menu (#733) — every predicate with its live count and
 // active flag — carried on the pushed `DesktopInboxView` alongside the
 // outcome. The frontend renders it; it never derives the predicate list.
@@ -306,6 +327,7 @@ let previewMode = false;
 let inboxLoading = true;
 let inboxError: string | null = null;
 let filterMenuOpen = false;
+let actionsMenuOpen = false;
 let searchTimer: number | undefined;
 // Optimistic active-filter set: updated synchronously on each toggle so
 // rapid clicks compose instead of racing the server round-trip. The
@@ -391,12 +413,25 @@ markReadButton.addEventListener("click", () => {
   void markSelectedRead();
 });
 
+actionsButton.addEventListener("click", () => {
+  // No stopPropagation: the document click handler still runs and closes
+  // any other open menu (e.g. the filter menu), while its actions-menu
+  // guard excludes clicks on this button so it can't self-close here.
+  toggleActionsMenu();
+});
+renameCancel.addEventListener("click", () => renameDialog.close());
+renameForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void submitRename();
+});
+
 replyForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void reviewReply();
 });
 
 sortButton.addEventListener("click", () => void cycleSortMode());
+mailboxButton.addEventListener("click", () => void cycleMailbox());
 filterButton.addEventListener("click", toggleFilterMenu);
 filterClear.addEventListener("click", () => {
   activeFilterSet.clear();
@@ -412,10 +447,19 @@ inboxSearch.addEventListener("input", () => {
   }, 120);
 });
 document.addEventListener("click", (event) => {
+  const target = event.target;
+  if (
+    actionsMenuOpen &&
+    !(
+      target instanceof Node &&
+      (actionsMenu.contains(target) || actionsButton.contains(target))
+    )
+  ) {
+    closeActionsMenu();
+  }
   if (!filterMenuOpen) {
     return;
   }
-  const target = event.target;
   if (
     target instanceof Node &&
     (filterMenu.contains(target) || filterButton.contains(target))
@@ -557,6 +601,7 @@ function handleStreamMessage(message: DesktopStreamMessage): void {
   if (message.type === "Inbox") {
     inboxView = message.payload.outcome;
     sortMode = message.payload.sort_mode;
+    mailbox = message.payload.mailbox;
     inboxFilterMenu = message.payload.filter_menu;
     inboxLoading = false;
     // The server is authoritative: reconcile the optimistic filter set to
@@ -682,6 +727,8 @@ function handleEvent(event: LazyboxEvent): void {
         `Preparing workspace: ${event.WorktreeProgress.step.toLowerCase()}`,
       );
     }
+  } else if ("WorkspaceActionOutcome" in event) {
+    setStatus(event.WorkspaceActionOutcome.message);
   }
 
   if (workspaceChanged || terminalChanged) {
@@ -901,6 +948,7 @@ function renderInbox(): void {
   workspaceList.replaceChildren();
   workspaceList.setAttribute("aria-busy", String(inboxLoading));
   sortLabel.textContent = sortModeLabel(sortMode);
+  mailboxLabelElement.textContent = mailboxLabel(mailbox);
 
   const allItems = [...workspaces.values()];
   // Scope the header total to the workspaces the view-model actually
@@ -1198,6 +1246,7 @@ function changeSelectedWorkspace(key: string | null): boolean {
   if (selectedKey !== null) {
     replyDrafts.save(selectedKey, replyBody.value);
   }
+  closeActionsMenu();
   selectedKey = key;
   replyBody.value = key === null ? "" : replyDrafts.get(key);
   return true;
@@ -1247,6 +1296,21 @@ function nextSortMode(mode: SortMode): SortMode {
     : mode === "ByRole"
       ? "ByRoleSplit"
       : "Recent";
+}
+
+async function cycleMailbox(): Promise<void> {
+  if (previewMode) {
+    mailbox = nextMailbox(mailbox);
+    mailboxLabelElement.textContent = mailboxLabel(mailbox);
+    return;
+  }
+  // The daemon-side model owns the mailbox; it recomputes and pushes a
+  // new Inbox view, which updates the label and re-renders (#816).
+  try {
+    await invoke("set_mailbox");
+  } catch (error) {
+    setStatus(String(error));
+  }
 }
 
 /** The selected workspace's terminals, in stable id order. */
@@ -1956,6 +2020,333 @@ async function startShell(): Promise<void> {
   }
 }
 
+function toggleActionsMenu(): void {
+  if (actionsMenuOpen) {
+    closeActionsMenu();
+  } else {
+    openActionsMenu();
+  }
+}
+
+function openActionsMenu(): void {
+  if (selectedKey === null) {
+    return;
+  }
+  renderActionsMenu();
+  actionsMenu.classList.remove("hidden");
+  actionsButton.setAttribute("aria-expanded", "true");
+  actionsMenuOpen = true;
+}
+
+function closeActionsMenu(): void {
+  actionsMenu.classList.add("hidden");
+  actionsButton.setAttribute("aria-expanded", "false");
+  actionsMenuOpen = false;
+}
+
+/** One act-on-work row: a label, whether it's destructive, and its run. */
+interface ActionMenuItem {
+  label: string;
+  danger?: boolean;
+  run: () => void;
+}
+
+/** Build the contextual act-on-work menu for the selected workspace. */
+function renderActionsMenu(): void {
+  actionsMenu.replaceChildren();
+  if (selectedKey === null) {
+    return;
+  }
+  const key = selectedKey;
+  const workspace = workspaces.get(key);
+  const task = workspace === undefined ? null : primaryTask(workspace);
+  // Classify by the filled task slot, mirroring `WorkspaceKind::classify`
+  // — `task.kind` can be null on older data, so keying off it would drop
+  // Merge/Close entirely for a real PR/issue.
+  const isPr = workspace?.pr != null;
+  const isIssue =
+    workspace !== undefined &&
+    workspace.pr == null &&
+    (workspace.gh_issues.length > 0 || workspace.linear_issues.length > 0);
+  // Terminal PRs/issues (Merged / Closed) are no-ops for the mutations,
+  // and a Draft PR can't be merged; suppress those rows so the menu never
+  // offers an action that can only fail (#816). The daemon still gates
+  // and reports, so this never hides a genuinely-actionable item.
+  const terminal = task !== null && isTerminalTaskState(task);
+  const canMerge = isPr && !terminal && task?.state !== "Draft";
+  const canUpdateBranch = isPr && !terminal;
+  const availableAgents =
+    setupState?.agents.filter((agent) => agent.available) ?? [];
+  const defaultTiers =
+    availableAgents.find((agent) => agent.id === defaultAgent)?.models ?? [];
+
+  const items: ActionMenuItem[] = [];
+  // Spawn variants the primary Start button doesn't cover: per-tier and
+  // on-main spawns, plus any non-default agent (#816).
+  for (const tier of defaultTiers) {
+    items.push({
+      label: `Start ${defaultAgent} · ${tier.label}`,
+      run: () => void spawnFromMenu(key, defaultAgent, tier.alias, false),
+    });
+  }
+  for (const agent of availableAgents) {
+    if (agent.id === defaultAgent) {
+      continue;
+    }
+    items.push({
+      label: `Start ${agent.label}`,
+      run: () => void spawnFromMenu(key, agent.id, null, false),
+    });
+  }
+  if (workspace !== undefined && hasRepoScope(workspace)) {
+    items.push({
+      label: `Start ${defaultAgent} on main checkout`,
+      danger: true,
+      run: () => void spawnFromMenu(key, defaultAgent, null, true),
+    });
+    items.push({
+      label: "Start shell on main checkout",
+      danger: true,
+      run: () => void spawnShellFromMenu(key, true),
+    });
+  }
+  if (task?.url) {
+    const url = task.url;
+    items.push({ label: "Open in browser", run: () => void openTaskUrl(url) });
+  }
+  if (canMerge) {
+    items.push({
+      label: "Merge PR",
+      danger: true,
+      run: () =>
+        void confirmedMutation(
+          key,
+          mergePrCommand(key),
+          "Merge this PR?",
+          "lazybox will merge the PR through GitHub once you confirm.",
+          "Merge PR",
+          "Merging PR…",
+          "Merge requested.",
+        ),
+    });
+  }
+  if (canUpdateBranch) {
+    items.push({
+      label: "Update branch",
+      run: () =>
+        void runWorkspaceMutation(
+          updateBranchCommand(key),
+          "Updating branch…",
+          "Branch update requested.",
+        ),
+    });
+  }
+  items.push({ label: "Rename…", run: () => openRenameDialog(key) });
+  items.push({
+    label: "Archive workspace",
+    danger: true,
+    run: () =>
+      void confirmedMutation(
+        key,
+        archiveCommand(key),
+        "Archive this workspace?",
+        "Its sessions are killed and the row leaves the inbox. The upstream PR/issue is untouched.",
+        "Archive",
+        "Archiving workspace…",
+        "Workspace archived.",
+      ),
+  });
+  if (isIssue && !terminal) {
+    items.push({
+      label: "Close issue",
+      danger: true,
+      run: () =>
+        void confirmedMutation(
+          key,
+          closeIssueCommand(key),
+          "Close this issue?",
+          "The GitHub issue is closed as not-planned.",
+          "Close issue",
+          "Closing issue…",
+          "Issue close requested.",
+        ),
+    });
+  }
+  if (task !== null && !terminal) {
+    items.push({
+      label: isPr ? "Close PR (no merge)" : "Delete or close",
+      danger: true,
+      run: () =>
+        void confirmedMutation(
+          key,
+          deleteOrCloseCommand(key),
+          isPr ? "Close this PR without merging?" : "Delete or close this item?",
+          isPr
+            ? "The pull request is closed on GitHub without merging."
+            : "The issue is deleted when your token has admin rights, else closed as not-planned.",
+          isPr ? "Close PR" : "Delete / close",
+          "Requesting…",
+          "Delete/close requested.",
+        ),
+    });
+  }
+
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = item.danger
+      ? "actions-menu-item danger"
+      : "actions-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.textContent = item.label;
+    button.addEventListener("click", () => {
+      closeActionsMenu();
+      item.run();
+    });
+    actionsMenu.append(button);
+  }
+}
+
+async function spawnFromMenu(
+  workspaceKey: string,
+  agent: string,
+  modelAlias: string | null,
+  onMain: boolean,
+): Promise<void> {
+  if (onMain) {
+    const accepted = await confirmUserAction(
+      "Start on the main checkout?",
+      "The agent runs on the repo's shared main checkout — edits land on the default branch, not an isolated worktree.",
+      "Start on main",
+    );
+    if (!accepted) {
+      return;
+    }
+  }
+  focusRequestedSession = workspaceKey;
+  const succeeded = await runCommands(
+    commandsForWorkspaceIntent(workspaceKey, {
+      type: "spawn-agent",
+      agent,
+      modelAlias,
+      onMain,
+    }),
+    `Starting ${agent}…`,
+    `${agent} launch requested.`,
+  );
+  if (succeeded) {
+    recordAnalytics("agent_started");
+  } else {
+    focusRequestedSession = null;
+  }
+}
+
+async function spawnShellFromMenu(
+  workspaceKey: string,
+  onMain: boolean,
+): Promise<void> {
+  if (onMain) {
+    const accepted = await confirmUserAction(
+      "Start a shell on the main checkout?",
+      "The shell runs on the repo's shared main checkout — edits land on the default branch, not an isolated worktree.",
+      "Start on main",
+    );
+    if (!accepted) {
+      return;
+    }
+  }
+  focusRequestedSession = workspaceKey;
+  const succeeded = await runCommands(
+    commandsForWorkspaceIntent(workspaceKey, { type: "spawn-shell", onMain }),
+    "Starting shell…",
+    "Shell launch requested.",
+  );
+  if (succeeded) {
+    recordAnalytics("shell_started");
+  } else {
+    focusRequestedSession = null;
+  }
+}
+
+async function openTaskUrl(url: string): Promise<void> {
+  if (previewMode) {
+    setStatus(`Would open ${url}.`);
+    return;
+  }
+  try {
+    await invoke("open_url", { url });
+    setStatus(`Opening ${url}…`);
+  } catch (error) {
+    setStatus(String(error));
+  }
+}
+
+async function runWorkspaceMutation(
+  command: LazyboxCommand,
+  pendingMessage: string,
+  successMessage: string,
+): Promise<void> {
+  await runCommands([command], pendingMessage, successMessage);
+}
+
+async function confirmedMutation(
+  workspaceKey: string,
+  command: LazyboxCommand,
+  title: string,
+  message: string,
+  acceptLabel: string,
+  pendingMessage: string,
+  successMessage: string,
+): Promise<void> {
+  const target = workspaces.get(workspaceKey);
+  const accepted = await confirmUserAction(
+    title,
+    message,
+    acceptLabel,
+    target?.name,
+  );
+  if (!accepted) {
+    return;
+  }
+  await runWorkspaceMutation(command, pendingMessage, successMessage);
+}
+
+function openRenameDialog(workspaceKey: string): void {
+  const workspace = workspaces.get(workspaceKey);
+  if (workspace === undefined) {
+    return;
+  }
+  renameNameInput.value = workspace.name;
+  renameError.classList.add("hidden");
+  renameDialog.dataset.key = workspaceKey;
+  renameDialog.showModal();
+  renameNameInput.focus();
+  renameNameInput.select();
+}
+
+async function submitRename(): Promise<void> {
+  const workspaceKey = renameDialog.dataset.key;
+  const name = renameNameInput.value.trim();
+  if (workspaceKey === undefined) {
+    renameDialog.close();
+    return;
+  }
+  if (name === "") {
+    renameError.textContent = "Name the workspace.";
+    renameError.classList.remove("hidden");
+    renameNameInput.focus();
+    return;
+  }
+  const succeeded = await sendCommand(renameWorkspaceCommand(workspaceKey, name));
+  if (succeeded) {
+    renameDialog.close();
+    setStatus(`Renamed to ${name}.`);
+  } else {
+    renameError.textContent = "Rename failed.";
+    renameError.classList.remove("hidden");
+  }
+}
+
 function launchKey(
   workspaceKey: string,
   kind: "agent" | "shell",
@@ -2617,6 +3008,11 @@ function handleKeyboard(event: KeyboardEvent): void {
   // Escape closes the filter menu or leaves the search box, ahead of
   // the editable guard so it works while the search input has focus.
   if (event.key === "Escape") {
+    if (actionsMenuOpen) {
+      event.preventDefault();
+      closeActionsMenu();
+      return;
+    }
     if (filterMenuOpen) {
       event.preventDefault();
       closeFilterMenu();

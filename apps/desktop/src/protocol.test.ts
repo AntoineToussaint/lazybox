@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  archiveCommand,
+  closeIssueCommand,
   commandsForWorkspaceIntent,
   createWorkspaceCommand,
+  deleteOrCloseCommand,
+  mergePrCommand,
+  renameWorkspaceCommand,
   spawnAgentCommand,
+  updateBranchCommand,
 } from "./protocol";
 
 describe("IPC command JSON", () => {
@@ -11,6 +17,18 @@ describe("IPC command JSON", () => {
       SpawnAgent: {
         session_key: "github:owner/repo#1",
         agent: "codex",
+        model_alias: null,
+        on_main: false,
+      },
+    });
+    expect(
+      spawnAgentCommand("github:owner/repo#1", "claude", "L", true),
+    ).toEqual({
+      SpawnAgent: {
+        session_key: "github:owner/repo#1",
+        agent: "claude",
+        model_alias: "L",
+        on_main: true,
       },
     });
     expect(
@@ -24,11 +42,49 @@ describe("IPC command JSON", () => {
     });
   });
 
+  it("builds the act-on-work mutations against the workspace key", () => {
+    const key = "github:owner/repo#1";
+    expect(mergePrCommand(key)).toEqual({ MergePr: { session_key: key } });
+    expect(updateBranchCommand(key)).toEqual({
+      UpdateBranch: { session_key: key },
+    });
+    expect(archiveCommand(key)).toEqual({ Archive: { session_key: key } });
+    expect(closeIssueCommand(key)).toEqual({
+      CloseIssue: { session_key: key },
+    });
+    expect(deleteOrCloseCommand(key)).toEqual({
+      DeleteOrClose: { session_key: key },
+    });
+    expect(renameWorkspaceCommand(key, "New name")).toEqual({
+      RenameWorkspace: { session_key: key, name: "New name" },
+    });
+  });
+
   it("maps every desktop workflow intent without exposing internal commands", () => {
     const key = "github:owner/repo#1";
+    expect(commandsForWorkspaceIntent(key, { type: "spawn-shell" })).toEqual([
+      { SpawnShell: { session_key: key, on_main: false } },
+    ]);
     expect(
-      commandsForWorkspaceIntent(key, { type: "spawn-shell" }),
-    ).toEqual([{ SpawnShell: { session_key: key } }]);
+      commandsForWorkspaceIntent(key, { type: "spawn-shell", onMain: true }),
+    ).toEqual([{ SpawnShell: { session_key: key, on_main: true } }]);
+    expect(
+      commandsForWorkspaceIntent(key, {
+        type: "spawn-agent",
+        agent: "claude",
+        modelAlias: "M",
+        onMain: true,
+      }),
+    ).toEqual([
+      {
+        SpawnAgent: {
+          session_key: key,
+          agent: "claude",
+          model_alias: "M",
+          on_main: true,
+        },
+      },
+    ]);
     expect(commandsForWorkspaceIntent(key, { type: "mark-read" })).toEqual([
       { MarkRead: { session_key: key } },
     ]);

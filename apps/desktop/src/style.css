@@ -306,6 +306,55 @@ textarea:focus-visible {
   padding: 5px 8px;
 }
 
+.actions-wrap {
+  position: relative;
+  display: flex;
+}
+
+.actions-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: 232px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid #2f3a43;
+  border-radius: 9px;
+  background: #131a20;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+
+.actions-menu.hidden {
+  display: none;
+}
+
+.actions-menu-item {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #cdd7da;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.actions-menu-item:hover {
+  background: #1a222a;
+}
+
+.actions-menu-item.danger {
+  color: #e0a2a2;
+}
+
+.actions-menu-item.danger:hover {
+  background: #2a1c1c;
+}
+
 .filter-chips {
   display: flex;
   flex-wrap: wrap;

@@ -108,6 +108,16 @@
               </div>
             </div>
             <button
+              id="mailbox-button"
+              class="sort-button"
+              type="button"
+              aria-label="Change mailbox"
+              title="Cycle mailbox: Inbox → Inactive → Snoozed (⇧S)"
+            >
+              <span aria-hidden="true">🗂</span>
+              <span>Box: <strong id="mailbox-label">inbox</strong></span>
+            </button>
+            <button
               id="sort-button"
               class="sort-button"
               type="button"
@@ -157,6 +167,25 @@
                 <button id="shell-button" class="quiet-button" type="button">
                   Shell
                 </button>
+                <div class="actions-wrap">
+                  <button
+                    id="actions-button"
+                    class="quiet-button"
+                    type="button"
+                    aria-haspopup="true"
+                    aria-expanded="false"
+                    aria-label="Workspace actions"
+                    title="Workspace actions"
+                  >
+                    Actions ▾
+                  </button>
+                  <div
+                    id="actions-menu"
+                    class="actions-menu hidden"
+                    role="menu"
+                    aria-label="Workspace actions"
+                  ></div>
+                </div>
                 <button id="spawn-button" class="primary-button" type="button">
                   <span>Start</span>
                   <strong id="agent-label">agent</strong>
@@ -404,6 +433,24 @@
             Cancel
           </button>
           <button class="primary-button" type="submit">Create workspace</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="rename-dialog" class="setup-dialog" aria-labelledby="rename-title">
+      <form id="rename-form" method="dialog">
+        <p class="eyebrow">Rename workspace</p>
+        <h2 id="rename-title">Rename workspace</h2>
+        <label>
+          <span>Display name</span>
+          <input id="rename-name" type="text" maxlength="80" required />
+        </label>
+        <p id="rename-error" class="dialog-error hidden" role="alert"></p>
+        <div class="dialog-footer">
+          <button id="rename-cancel" class="quiet-button" type="button">
+            Cancel
+          </button>
+          <button class="primary-button" type="submit">Rename</button>
         </div>
       </form>
     </dialog>

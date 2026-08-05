@@ -11,9 +11,12 @@
 //! 1. **merge-on-green** — lazybox's arm
 //!    ([`crate::Workspace::auto_merge_on_green`]). The *daemon* fires a
 //!    merge the moment your own PR is merge-ready (see
-//!    [`should_auto_merge`]), and only while the daemon runs. It
-//!    stays on its own `Workspace` field (already wired end-to-end) but
-//!    is presented in the same policies surface.
+//!    [`should_auto_merge`]), and only while the daemon runs. Its author
+//!    gate defaults to your own PRs but opens to configured logins via
+//!    [`MergeOnGreenPolicy`] (`merge_on_green.allow_authors`), so a green
+//!    Dependabot bump can land automatically. It stays on its own
+//!    `Workspace` field (already wired end-to-end) but is presented in
+//!    the same policies surface.
 //! 2. **auto-fix** — spawns an agent to fix failing CI / a merge
 //!    conflict. Globally opt-in ([`crate::AutoFixSettings::enabled`]) and
 //!    historically opt-*out* per PR via GitHub labels. This module adds
@@ -46,6 +49,83 @@
 
 use crate::{AutoFixKind, Task, Workspace};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+/// Which non-author logins may auto-merge their green PRs. The
+/// merge-on-green author gate ([`auto_merge_block_reason`]) defaults to
+/// "own PRs only"; this opens it, per config
+/// (`merge_on_green.allow_authors`), so a green Dependabot/bot bump can
+/// land automatically once opted in.
+///
+/// Logins are normalized on construction — lowercased and with a
+/// trailing `[bot]` stripped — so `dependabot`, `Dependabot`, and
+/// `dependabot[bot]` all match whichever form GitHub reports
+/// (`author.login` is `dependabot` over GraphQL, `dependabot[bot]`
+/// over REST). Empty (the default) preserves the own-PR-only guard for
+/// everyone who doesn't opt in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeOnGreenPolicy {
+    /// `None` opens the gate to every author — the internal "author
+    /// check doesn't apply" mode the daemon's fire decision uses (the
+    /// authoritative per-author gate runs in the merge attempt). `Some`
+    /// carries the normalized allowlist.
+    allow: Option<BTreeSet<String>>,
+}
+
+impl Default for MergeOnGreenPolicy {
+    /// The safe default: own PRs only (an empty allowlist), NOT the
+    /// gate-open [`MergeOnGreenPolicy::allow_all`]. A config-load
+    /// failure or a missing `merge_on_green` section must never widen
+    /// who can auto-merge.
+    fn default() -> Self {
+        Self {
+            allow: Some(BTreeSet::new()),
+        }
+    }
+}
+
+/// Normalize a login for allowlist comparison: trim, lowercase, and
+/// drop a trailing `[bot]` suffix.
+fn normalize_author(login: &str) -> String {
+    login.trim().trim_end_matches("[bot]").to_ascii_lowercase()
+}
+
+impl MergeOnGreenPolicy {
+    /// Build from a configured allowlist of logins.
+    pub fn from_allow_authors<I, S>(authors: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let allow = authors
+            .into_iter()
+            .map(|a| normalize_author(a.as_ref()))
+            .filter(|a| !a.is_empty())
+            .collect();
+        Self { allow: Some(allow) }
+    }
+
+    /// The gate-open policy: every author is allowed. Used by the
+    /// daemon's fire decision so any otherwise-mergeable green PR
+    /// dispatches an attempt; the attempt then re-checks against the
+    /// real configured policy. Keeps the fire path free of config I/O.
+    pub fn allow_all() -> Self {
+        Self { allow: None }
+    }
+
+    /// Is a non-author `login` permitted to auto-merge? An empty login
+    /// never matches (a legacy snapshot with no author can't be opted
+    /// in by mistake).
+    pub fn allows_author(&self, login: &str) -> bool {
+        match &self.allow {
+            None => true,
+            Some(set) => {
+                let norm = normalize_author(login);
+                !norm.is_empty() && set.contains(&norm)
+            }
+        }
+    }
+}
 
 /// Why this PR can't be merged from lazybox right now, as a
 /// user-facing phrase — or `None` when nothing blocks it. Drives both
@@ -91,8 +171,10 @@ pub fn merge_block_reason(pr: &Task) -> Option<&'static str> {
 /// (the manual `g m` gate), because auto-merge acts with no keypress:
 ///
 /// 1. The workspace must be armed (`auto_merge_on_green`).
-/// 2. Your **own** PR only (`TaskRole::Author`) — lazybox never
-///    auto-merges someone else's PR, even if it's green.
+/// 2. Your **own** PR only (`TaskRole::Author`), unless the author is
+///    opted in via `policy` (`merge_on_green.allow_authors`) — lazybox
+///    never auto-merges an arbitrary third party's PR, even if green,
+///    but a configured Dependabot/bot author may.
 /// 3. CI must be positively **green** (`CiStatus::Success`). Unlike the
 ///    manual gate, `CiStatus::None` (a PR with no checks configured)
 ///    does NOT qualify — we don't silently land a PR that never ran CI.
@@ -105,7 +187,10 @@ pub fn merge_block_reason(pr: &Task) -> Option<&'static str> {
 ///    redundant and races the server-side merge.
 ///
 /// Nothing here that `g m` wouldn't also merge — this is a subset.
-pub fn auto_merge_block_reason(workspace: &Workspace) -> Option<&'static str> {
+pub fn auto_merge_block_reason(
+    workspace: &Workspace,
+    policy: &MergeOnGreenPolicy,
+) -> Option<&'static str> {
     if !workspace.auto_merge_on_green {
         return Some("auto-merge on green isn't armed");
     }
@@ -116,7 +201,7 @@ pub fn auto_merge_block_reason(workspace: &Workspace) -> Option<&'static str> {
     if pr.auto_merge_enabled {
         return Some("GitHub's native auto-merge is already enabled");
     }
-    if pr.role != crate::TaskRole::Author {
+    if pr.role != crate::TaskRole::Author && !policy.allows_author(&pr.author) {
         return Some("only your own PRs auto-merge");
     }
     if pr.ci != crate::CiStatus::Success {
@@ -131,8 +216,8 @@ pub fn auto_merge_block_reason(workspace: &Workspace) -> Option<&'static str> {
 /// polling commit path (so it fires with or without an attached TUI,
 /// and exactly once across any number of clients). See
 /// [`auto_merge_block_reason`] for the full guard list.
-pub fn should_auto_merge(workspace: &Workspace) -> bool {
-    auto_merge_block_reason(workspace).is_none()
+pub fn should_auto_merge(workspace: &Workspace, policy: &MergeOnGreenPolicy) -> bool {
+    auto_merge_block_reason(workspace, policy).is_none()
 }
 
 /// Per-session override for an auto-fix behavior. The unified,
@@ -428,12 +513,23 @@ mod merge_gate_tests {
         t
     }
 
+    /// The default (own-PRs-only) policy: no author is allowlisted.
+    fn own() -> MergeOnGreenPolicy {
+        MergeOnGreenPolicy::default()
+    }
+
     #[test]
     fn should_auto_merge_only_when_armed() {
         let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
-        assert!(!should_auto_merge(&ws), "disarmed workspace never fires");
+        assert!(
+            !should_auto_merge(&ws, &own()),
+            "disarmed workspace never fires"
+        );
         ws.auto_merge_on_green = true;
-        assert!(should_auto_merge(&ws), "armed + green + own PR fires");
+        assert!(
+            should_auto_merge(&ws, &own()),
+            "armed + green + own PR fires"
+        );
     }
 
     #[test]
@@ -443,7 +539,10 @@ mod merge_gate_tests {
             let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
             ws.pr.as_mut().unwrap().role = role;
             ws.auto_merge_on_green = true;
-            assert!(!should_auto_merge(&ws), "role {role:?} must not auto-merge");
+            assert!(
+                !should_auto_merge(&ws, &own()),
+                "role {role:?} must not auto-merge"
+            );
         }
     }
 
@@ -454,7 +553,7 @@ mod merge_gate_tests {
         let mut ws = pr("o/r#1", CiStatus::None, ReviewStatus::Approved);
         ws.auto_merge_on_green = true;
         assert!(
-            !should_auto_merge(&ws),
+            !should_auto_merge(&ws, &own()),
             "no-CI PR must not auto-merge even though `g m` would allow it"
         );
         // Sanity: the manual gate DOES allow this one.
@@ -467,18 +566,21 @@ mod merge_gate_tests {
         let mut armed_conflict = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
         armed_conflict.auto_merge_on_green = true;
         armed_conflict.pr.as_mut().unwrap().mergeable = crate::Mergeable::Conflicting;
-        assert!(!should_auto_merge(&armed_conflict), "conflict blocks");
+        assert!(
+            !should_auto_merge(&armed_conflict, &own()),
+            "conflict blocks"
+        );
 
         let mut armed_changes = pr("o/r#1", CiStatus::Success, ReviewStatus::ChangesRequested);
         armed_changes.auto_merge_on_green = true;
         assert!(
-            !should_auto_merge(&armed_changes),
+            !should_auto_merge(&armed_changes, &own()),
             "changes-requested blocks"
         );
 
         let mut armed_failing = pr("o/r#1", CiStatus::Failure, ReviewStatus::Approved);
         armed_failing.auto_merge_on_green = true;
-        assert!(!should_auto_merge(&armed_failing), "red CI blocks");
+        assert!(!should_auto_merge(&armed_failing, &own()), "red CI blocks");
     }
 
     #[test]
@@ -489,10 +591,13 @@ mod merge_gate_tests {
         // and races the server-side one.
         let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
         ws.auto_merge_on_green = true;
-        assert!(should_auto_merge(&ws), "armed + green fires without native");
+        assert!(
+            should_auto_merge(&ws, &own()),
+            "armed + green fires without native"
+        );
         ws.pr.as_mut().unwrap().auto_merge_enabled = true;
         assert!(
-            !should_auto_merge(&ws),
+            !should_auto_merge(&ws, &own()),
             "native auto-merge takes precedence over lazybox merge-on-green"
         );
     }
@@ -502,7 +607,10 @@ mod merge_gate_tests {
         let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
         ws.auto_merge_on_green = true;
         ws.pr.as_mut().unwrap().state = TaskState::Draft;
-        assert!(!should_auto_merge(&ws), "draft PRs never auto-merge");
+        assert!(
+            !should_auto_merge(&ws, &own()),
+            "draft PRs never auto-merge"
+        );
     }
 
     #[test]
@@ -510,7 +618,7 @@ mod merge_gate_tests {
         let mut ws = issue("o/r#42");
         ws.auto_merge_on_green = true;
         assert!(
-            !should_auto_merge(&ws),
+            !should_auto_merge(&ws, &own()),
             "issue workspaces have no PR to merge"
         );
     }
@@ -522,14 +630,74 @@ mod merge_gate_tests {
     fn block_reason_is_none_exactly_when_predicate_fires() {
         let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
         ws.auto_merge_on_green = true;
-        assert_eq!(auto_merge_block_reason(&ws), None);
+        assert_eq!(auto_merge_block_reason(&ws, &own()), None);
         ws.pr.as_mut().unwrap().ci = CiStatus::Failure;
-        assert_eq!(auto_merge_block_reason(&ws), Some("CI isn't green"));
+        assert_eq!(auto_merge_block_reason(&ws, &own()), Some("CI isn't green"));
         ws.pr.as_mut().unwrap().ci = CiStatus::Success;
         ws.pr.as_mut().unwrap().review = ReviewStatus::ChangesRequested;
         assert_eq!(
-            auto_merge_block_reason(&ws),
+            auto_merge_block_reason(&ws, &own()),
             Some("changes were requested — address the review first")
         );
+    }
+
+    /// A non-author PR blocks under the default policy but merges once
+    /// its author is opted in via `merge_on_green.allow_authors` — the
+    /// Dependabot use case (issue #845).
+    #[test]
+    fn allowlisted_author_auto_merges_a_non_own_pr() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().unwrap().role = TaskRole::Mentioned;
+        ws.pr.as_mut().unwrap().author = "dependabot[bot]".into();
+
+        // Default: own PRs only — the bot PR stands down with a reason.
+        assert_eq!(
+            auto_merge_block_reason(&ws, &own()),
+            Some("only your own PRs auto-merge")
+        );
+
+        // Opted in (config login `dependabot`, PR author `dependabot[bot]`
+        // — the `[bot]` suffix and case are normalized away).
+        let allowed = MergeOnGreenPolicy::from_allow_authors(["Dependabot"]);
+        assert!(
+            should_auto_merge(&ws, &allowed),
+            "a green PR from an allowlisted author auto-merges"
+        );
+
+        // A different bot is still blocked — the allowlist is exact.
+        ws.pr.as_mut().unwrap().author = "renovate[bot]".into();
+        assert_eq!(
+            auto_merge_block_reason(&ws, &allowed),
+            Some("only your own PRs auto-merge")
+        );
+    }
+
+    /// `allow_all` opens the author gate (the daemon's fire decision)
+    /// but leaves every other guard — CI, conflict, review — intact.
+    #[test]
+    fn allow_all_opens_only_the_author_gate() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().unwrap().role = TaskRole::Reviewer;
+        assert!(
+            should_auto_merge(&ws, &MergeOnGreenPolicy::allow_all()),
+            "author-agnostic policy fires a green non-own PR"
+        );
+        // But a red one still blocks.
+        ws.pr.as_mut().unwrap().ci = CiStatus::Failure;
+        assert_eq!(
+            auto_merge_block_reason(&ws, &MergeOnGreenPolicy::allow_all()),
+            Some("CI isn't green")
+        );
+    }
+
+    /// An empty author never matches an allowlist — a legacy snapshot
+    /// with no recorded author can't be opted in by accident.
+    #[test]
+    fn empty_author_never_allowlisted() {
+        let allowed = MergeOnGreenPolicy::from_allow_authors(["dependabot"]);
+        assert!(!allowed.allows_author(""));
+        assert!(!allowed.allows_author("   "));
     }
 }

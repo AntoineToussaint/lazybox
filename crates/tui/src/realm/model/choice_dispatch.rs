@@ -116,7 +116,13 @@ impl<T: TerminalAdapter> Model<T> {
                         .map(|(_, workspace)| Box::new(workspace.clone())),
                     _ => None,
                 };
-                PickFlow::Policy { workspace }
+                let merge_policy = lazybox_config::Config::load()
+                    .map(|c| c.merge_on_green.to_policy())
+                    .unwrap_or_default();
+                PickFlow::Policy {
+                    workspace,
+                    merge_policy,
+                }
             }
             Id::WorkAgentPicker => {
                 let picker = match &self.modal_flow {

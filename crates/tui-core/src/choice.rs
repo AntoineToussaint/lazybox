@@ -112,6 +112,10 @@ pub enum PickFlow {
     },
     Policy {
         workspace: Option<Box<Workspace>>,
+        /// Configured merge-on-green allowlist, so arming a
+        /// non-opted-in third-party PR from the policies menu is refused
+        /// with a reason rather than lighting a dead pill (#845).
+        merge_policy: lazybox_core::MergeOnGreenPolicy,
     },
     WorkAgent {
         picker: Option<WorkPickerState>,
@@ -425,7 +429,10 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 _ => PickOutcome::NoOp,
             }
         }
-        PickFlow::Policy { workspace } => {
+        PickFlow::Policy {
+            workspace,
+            merge_policy,
+        } => {
             let Some(policy) = picks.first().and_then(P::policy) else {
                 return PickOutcome::NoOp;
             };
@@ -436,6 +443,22 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
             match policy {
                 PolicyPick::MergeOnGreen => {
                     let enabled = !workspace.auto_merge_on_green;
+                    // Refuse to arm a third-party PR that the author gate
+                    // would durably block — the pill would sit dead (#845).
+                    if enabled
+                        && let Some(pr) = workspace.pr.as_ref()
+                        && pr.role != lazybox_core::TaskRole::Author
+                        && !merge_policy.allows_author(&pr.author)
+                    {
+                        return PickOutcome::Commands {
+                            commands: vec![],
+                            notice: Some(
+                                "won't auto-merge: only your own PRs auto-merge — add this \
+                                 author to merge_on_green.allow_authors to allow it"
+                                    .to_string(),
+                            ),
+                        };
+                    }
                     PickOutcome::Commands {
                         commands: vec![Command::SetAutoMergeOnGreen {
                             session_key,
@@ -1014,6 +1037,7 @@ mod tests {
                 &[Payload::Policy(PolicyPick::MergeOnGreen)],
                 PickFlow::Policy {
                     workspace: Some(Box::new(ws)),
+                    merge_policy: lazybox_core::MergeOnGreenPolicy::default(),
                 },
             ),
             PickOutcome::Commands { commands, .. }

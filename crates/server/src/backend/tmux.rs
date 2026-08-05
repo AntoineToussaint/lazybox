@@ -66,10 +66,22 @@ pub const TMUX_SOCKET: &str = "lazybox";
 /// OUTER terminal changes.
 const SCROLLBACK_TERMINAL_OVERRIDES: &str = ",xterm*:smcup@:rmcup@";
 
-/// Per-pane scrollback depth tmux retains. Set as `history-limit` in the
-/// conf and used as the `-S` start line when capturing history to seed a
-/// reattaching client (`capture_history`), so the two never drift.
-const HISTORY_LIMIT: u32 = 10_000;
+/// Default per-pane scrollback depth tmux retains when the config
+/// doesn't override it (`terminal.scrollback_lines`). Set as
+/// `history-limit` in the conf and used as the `-S` start line when
+/// capturing history to seed a reattaching client (`capture_history`),
+/// so the two never drift.
+///
+/// A full-screen agent (Claude Code) redraws its viewport constantly,
+/// and with lazybox's alternate-screen-off model every repaint spills
+/// into history — so this budget is consumed by redraw churn far faster
+/// than by genuine new content, and older lines are evicted for good
+/// once it fills. 50k (up from the original 10k) buys a much longer
+/// window before that eviction bites; heavy users raise it further via
+/// YAML, trading per-pane tmux-server RAM for depth. Shares
+/// [`lazybox_config::DEFAULT_SCROLLBACK_LINES`] so the daemon fallback and
+/// the config default can't drift.
+pub const DEFAULT_HISTORY_LIMIT: u32 = lazybox_config::DEFAULT_SCROLLBACK_LINES;
 
 /// Minimum tmux version the backend's conf requires, enforced by
 /// [`TmuxBackend::detect`] (older tmux → raw-PTY fallback, same as no
@@ -106,22 +118,23 @@ const HYPERLINK_TERMINAL_FEATURES: &str = "set -as terminal-features 'xterm*:hyp
 /// `~/.tmux.conf`.
 ///
 /// tmux mouse handling stays off and both sides of the conduit reject
-/// alternate screens. The pane therefore retains output in tmux history,
-/// while the lazybox client accumulates the relayed output in its local
-/// 10k-line scrollback. Inner mouse modes still pass through for clicks;
-/// wheel events never leave the client.
+/// alternate screens. The pane therefore retains output in tmux history
+/// (bounded by `history-limit`, see [`DEFAULT_HISTORY_LIMIT`]), while the
+/// lazybox client accumulates the relayed output in its own scrollback and
+/// re-fetches the deeper tmux history on scroll-up. Inner mouse modes still
+/// pass through for clicks; wheel events never leave the client.
 ///
 /// Every option here may assume [`MIN_TMUX_VERSION`] — `detect()`
 /// refuses older tmux, because a single unknown option in this conf
 /// breaks every attach (see the constant's doc). Raising an option's
 /// floor means raising `MIN_TMUX_VERSION` with it.
-fn transparent_conf() -> String {
+fn transparent_conf(history_limit: u32) -> String {
     let mut conf = String::from(
         "set -g prefix None\n\
          set -g status off\n\
          set -g mouse off\n",
     );
-    conf.push_str(&format!("set -g history-limit {HISTORY_LIMIT}\n"));
+    conf.push_str(&format!("set -g history-limit {history_limit}\n"));
     // Lazybox scrollback exists ONLY for pane content that scrolls into
     // tmux history — the restart seed, the live deep-scrollback fetch,
     // and the attach client's own accumulation all read from the primary
@@ -213,45 +226,61 @@ fn normalize_capture(stdout: &[u8]) -> Vec<u8> {
 /// backend process, before the first attach, so re-attached clients
 /// pick the overrides up (terminal-overrides is consulted at client
 /// attach time).
-fn server_option_cmds() -> Vec<Vec<&'static str>> {
+fn server_option_cmds(history_limit: u32) -> Vec<Vec<String>> {
+    fn cmd(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
     // Clipboard passthrough is independent of scrollback handling, so
     // an already-running server picks it up either way.
     let clipboard = [
-        vec!["set-option", "-g", "set-clipboard", "on"],
-        vec!["set-option", "-g", "allow-passthrough", "on"],
+        cmd(&["set-option", "-g", "set-clipboard", "on"]),
+        cmd(&["set-option", "-g", "allow-passthrough", "on"]),
     ];
     // Agents (e.g. Claude Code) nag when they detect tmux with
     // focus-events off. We own the config, so enable it for both fresh
     // and recovered servers.
-    let focus_events = vec!["set-option", "-g", "focus-events", "on"];
+    let focus_events = cmd(&["set-option", "-g", "focus-events", "on"]);
     // Pane-level alt-screen denial (see `transparent_conf`): a
     // pre-existing server from an older lazybox still allows it, and
     // every alt-screen pane retains zero history — pushing this heals
     // sessions spawned after the push (a pane already inside the alt
     // screen stays there until its program leaves it).
-    let no_alt_screen = vec!["set-option", "-g", "alternate-screen", "off"];
+    let no_alt_screen = cmd(&["set-option", "-g", "alternate-screen", "off"]);
     // `terminal-features` is independent of scrollback handling — an
     // already-running server must learn the client speaks OSC 8 either
     // way, else surviving sessions keep stripping hyperlinks.
-    let hyperlinks = vec![
+    let hyperlinks = cmd(&[
         "set-option",
         "-as",
         "terminal-features",
         HYPERLINK_TERMINAL_FEATURES_VALUE,
+    ]);
+    // Push the configured `history-limit` onto a recovered server so
+    // sessions spawned after the push retain the current depth. tmux
+    // reads `history-limit` when a pane is CREATED, so this can't grow
+    // the scrollback of panes an older lazybox already opened — only new
+    // ones — but it keeps fresh spawns on a surviving server consistent
+    // with a freshly-started one (whose `-f` conf sets the same value).
+    let history = vec![
+        "set-option".to_string(),
+        "-g".to_string(),
+        "history-limit".to_string(),
+        history_limit.to_string(),
     ];
     let mut cmds = vec![
-        vec!["set-option", "-g", "mouse", "off"],
-        vec![
+        cmd(&["set-option", "-g", "mouse", "off"]),
+        cmd(&[
             "set-option",
             "-g",
             "terminal-overrides",
             SCROLLBACK_TERMINAL_OVERRIDES,
-        ],
+        ]),
         hyperlinks,
     ];
     cmds.extend(clipboard);
     cmds.push(focus_events);
     cmds.push(no_alt_screen);
+    cmds.push(history);
     cmds
 }
 
@@ -293,6 +322,9 @@ pub struct TmuxBackend {
     options_applied: tokio::sync::OnceCell<()>,
     sessions: Mutex<HashMap<String, Slot>>,
     next_key: AtomicU64,
+    /// Per-pane `history-limit` (and matching `-S` capture depth). From
+    /// `terminal.scrollback_lines`; [`DEFAULT_HISTORY_LIMIT`] otherwise.
+    history_limit: u32,
 }
 
 /// Pull `(major, minor)` out of a `tmux -V` banner. Handles the release
@@ -347,7 +379,7 @@ impl TmuxBackend {
     /// `None` when tmux isn't usable on this machine — missing entirely
     /// or older than [`MIN_TMUX_VERSION`] — and callers fall back to
     /// `RawPtyBackend`.
-    pub fn detect() -> Option<Self> {
+    pub fn detect(history_limit: u32) -> Option<Self> {
         let version = modern_tmux_version()?;
         tracing::info!("tmux backend available: {version}");
         // Profile-aware socket name. Default profile resolves to
@@ -355,16 +387,25 @@ impl TmuxBackend {
         // dev profile (`LAZYBOX_HOME=~/.lazybox-dev`) gets "lazybox-dev"
         // so two lazybox daemons don't share session state.
         let socket = lazybox_core::paths::tmux_socket_name();
-        Self::with_socket(&socket).ok()
+        Self::with_socket_and_history(&socket, history_limit).ok()
     }
 
-    /// Build a backend pinned to a specific tmux socket name. Useful for
-    /// tests so concurrent runs don't share state.
+    /// Build a backend pinned to a specific tmux socket name, at the
+    /// default scrollback depth. Useful for tests so concurrent runs
+    /// don't share state.
     pub fn with_socket(socket: &str) -> std::io::Result<Self> {
+        Self::with_socket_and_history(socket, DEFAULT_HISTORY_LIMIT)
+    }
+
+    /// Build a backend pinned to a socket and an explicit per-pane
+    /// scrollback depth (`terminal.scrollback_lines`). The depth drives
+    /// both the conf's `history-limit` and the `-S` capture start, so
+    /// seeding never under-reads what tmux was told to keep.
+    pub fn with_socket_and_history(socket: &str, history_limit: u32) -> std::io::Result<Self> {
         let dir = std::env::temp_dir().join("lazybox-tmux");
         std::fs::create_dir_all(&dir)?;
         let config_path = dir.join(format!("{socket}.conf"));
-        let conf = transparent_conf();
+        let conf = transparent_conf(history_limit);
         std::fs::write(&config_path, &conf)?;
         Ok(Self {
             socket: socket.into(),
@@ -373,6 +414,7 @@ impl TmuxBackend {
             options_applied: tokio::sync::OnceCell::new(),
             sessions: Mutex::new(HashMap::new()),
             next_key: AtomicU64::new(1),
+            history_limit,
         })
     }
 
@@ -472,8 +514,9 @@ impl TmuxBackend {
         // against a half-configured server.
         self.options_applied
             .get_or_init(|| async {
-                for cmd in server_option_cmds() {
-                    if let Err(e) = self.tmux(&cmd).await {
+                for cmd in server_option_cmds(self.history_limit) {
+                    let refs: Vec<&str> = cmd.iter().map(String::as_str).collect();
+                    if let Err(e) = self.tmux(&refs).await {
                         tracing::warn!("tmux server option setup failed: {e}");
                     }
                 }
@@ -576,7 +619,7 @@ impl TmuxBackend {
     /// Best-effort: any failure returns an empty seed and the client
     /// simply starts from the live repaint.
     async fn capture_history(&self, key: &str) -> Vec<u8> {
-        let start = format!("-{HISTORY_LIMIT}");
+        let start = format!("-{}", self.history_limit);
         let out = match self
             .tmux(&["capture-pane", "-p", "-e", "-J", "-S", &start, "-t", key])
             .await
@@ -1197,7 +1240,7 @@ mod tests {
     /// DECSET requests pass through to the client.
     #[test]
     fn conf_disables_mouse_and_alt_screen() {
-        let conf = transparent_conf();
+        let conf = transparent_conf(DEFAULT_HISTORY_LIMIT);
         assert!(conf.contains("set -g mouse off\n"));
         assert!(!conf.contains("mouse on"));
         assert!(conf.contains("set -g terminal-overrides ',xterm*:smcup@:rmcup@'\n"));
@@ -1207,7 +1250,7 @@ mod tests {
         // The transparent-client basics stay.
         assert!(conf.contains("set -g prefix None"));
         assert!(conf.contains("set -g status off"));
-        assert!(conf.contains("set -g history-limit 10000"));
+        assert!(conf.contains("set -g history-limit 50000"));
         assert!(conf.contains("unbind-key -a"));
         // Resize authority is pinned, not left to tmux's implicit default
         // (the `resize` impl's multi-client behavior depends on it).
@@ -1218,33 +1261,38 @@ mod tests {
     /// config, so recovered sessions behave like fresh ones.
     #[test]
     fn server_option_cmds_match_conf() {
+        fn owned(parts: &[&str]) -> Vec<String> {
+            parts.iter().map(|s| s.to_string()).collect()
+        }
         let clipboard = [
-            vec!["set-option", "-g", "set-clipboard", "on"],
-            vec!["set-option", "-g", "allow-passthrough", "on"],
+            owned(&["set-option", "-g", "set-clipboard", "on"]),
+            owned(&["set-option", "-g", "allow-passthrough", "on"]),
         ];
-        let hyperlinks = vec![
+        let hyperlinks = owned(&[
             "set-option",
             "-as",
             "terminal-features",
             "xterm*:hyperlinks",
-        ];
-        let focus_events = vec!["set-option", "-g", "focus-events", "on"];
-        let no_alt_screen = vec!["set-option", "-g", "alternate-screen", "off"];
+        ]);
+        let focus_events = owned(&["set-option", "-g", "focus-events", "on"]);
+        let no_alt_screen = owned(&["set-option", "-g", "alternate-screen", "off"]);
+        let history = owned(&["set-option", "-g", "history-limit", "50000"]);
         assert_eq!(
-            server_option_cmds(),
+            server_option_cmds(50_000),
             vec![
-                vec!["set-option", "-g", "mouse", "off"],
-                vec![
+                owned(&["set-option", "-g", "mouse", "off"]),
+                owned(&[
                     "set-option",
                     "-g",
                     "terminal-overrides",
-                    ",xterm*:smcup@:rmcup@",
-                ],
+                    ",xterm*:smcup@:rmcup@"
+                ]),
                 hyperlinks,
                 clipboard[0].clone(),
                 clipboard[1].clone(),
                 focus_events,
                 no_alt_screen,
+                history,
             ]
         );
     }
@@ -1253,7 +1301,7 @@ mod tests {
     /// OSC 52 reaches the host.
     #[test]
     fn conf_enables_clipboard_passthrough() {
-        let conf = transparent_conf();
+        let conf = transparent_conf(DEFAULT_HISTORY_LIMIT);
         assert!(conf.contains("set -g set-clipboard on\n"));
         assert!(conf.contains("set -g allow-passthrough on\n"));
     }
@@ -1265,7 +1313,10 @@ mod tests {
     /// "right-click never opens URLs under the tmux backend" report.
     #[test]
     fn conf_advertises_hyperlinks() {
-        assert!(transparent_conf().contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
+        assert!(
+            transparent_conf(DEFAULT_HISTORY_LIMIT)
+                .contains("set -as terminal-features 'xterm*:hyperlinks'\n")
+        );
     }
 
     /// Both config and server-option paths enable focus-events
@@ -1273,8 +1324,12 @@ mod tests {
     /// nagging "focus-events off". Regression for the focus-events warning.
     #[test]
     fn both_paths_enable_focus_events() {
-        assert!(transparent_conf().contains("set -g focus-events on\n"));
-        assert!(server_option_cmds().contains(&vec!["set-option", "-g", "focus-events", "on"]));
+        assert!(transparent_conf(DEFAULT_HISTORY_LIMIT).contains("set -g focus-events on\n"));
+        let focus_events: Vec<String> = ["set-option", "-g", "focus-events", "on"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(server_option_cmds(DEFAULT_HISTORY_LIMIT).contains(&focus_events));
     }
 
     /// `with_socket` drops the config to disk and the
@@ -1284,7 +1339,7 @@ mod tests {
         let socket = format!("lazybox-test-conf-{}", std::process::id());
         let backend = TmuxBackend::with_socket(&socket).expect("conf written");
         let on_disk = std::fs::read_to_string(&backend.config_path).expect("conf readable");
-        assert_eq!(on_disk, transparent_conf());
+        assert_eq!(on_disk, transparent_conf(DEFAULT_HISTORY_LIMIT));
         assert!(on_disk.contains("smcup@:rmcup@"));
 
         let argv = backend.attach_argv("lazybox-some-key");
@@ -1414,11 +1469,27 @@ mod tests {
         );
     }
 
-    /// The `-S` capture depth and the conf's `history-limit` come from
-    /// the same constant, so seeding can never under-read the history
-    /// tmux was told to keep.
+    /// The `-S` capture depth and the conf's `history-limit` both read
+    /// the backend's `history_limit` field, so seeding can never
+    /// under-read the history tmux was told to keep — and a configured
+    /// (`terminal.scrollback_lines`) value flows through to both. The
+    /// conf carries the exact limit the backend was built with, and the
+    /// capture start (`capture_history`) formats the same field.
     #[test]
-    fn capture_depth_matches_history_limit() {
-        assert!(transparent_conf().contains(&format!("set -g history-limit {HISTORY_LIMIT}\n")));
+    fn capture_depth_matches_configured_history_limit() {
+        for limit in [10_000_u32, DEFAULT_HISTORY_LIMIT, 250_000] {
+            let socket = format!("lazybox-test-hist-{limit}-{}", std::process::id());
+            let backend =
+                TmuxBackend::with_socket_and_history(&socket, limit).expect("conf written");
+            assert_eq!(backend.history_limit, limit);
+            assert!(
+                backend
+                    .conf
+                    .contains(&format!("set -g history-limit {limit}\n")),
+                "conf must carry the configured history-limit {limit}"
+            );
+            assert_eq!(format!("-{}", backend.history_limit), format!("-{limit}"));
+            let _ = std::fs::remove_file(&backend.config_path);
+        }
     }
 }

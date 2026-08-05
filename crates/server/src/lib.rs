@@ -413,16 +413,17 @@ impl ServerConfig {
         // survive lazybox-server restart and can be attached externally
         // via `tmux -L lazybox attach -t <key>`; raw-pty is the
         // ephemeral fallback when tmux isn't installed.
-        let backend: Arc<dyn SessionBackend> = match TmuxBackend::detect() {
-            Some(t) => {
-                tracing::info!("session backend: tmux");
-                Arc::new(t)
-            }
-            None => {
-                tracing::info!("session backend: raw-pty (tmux unavailable)");
-                Arc::new(RawPtyBackend::new())
-            }
-        };
+        let backend: Arc<dyn SessionBackend> =
+            match TmuxBackend::detect(user_config.terminal.scrollback_lines) {
+                Some(t) => {
+                    tracing::info!("session backend: tmux");
+                    Arc::new(t)
+                }
+                None => {
+                    tracing::info!("session backend: raw-pty (tmux unavailable)");
+                    Arc::new(RawPtyBackend::new())
+                }
+            };
         let mut config = Self::with_store_backend_and_root(
             store,
             backend,

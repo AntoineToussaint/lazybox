@@ -400,6 +400,84 @@ async fn live_backend_serves_deep_scrollback_without_restart() {
     result.expect("test timed out");
 }
 
+/// A session producing more lines than the configured scrollback depth
+/// retains the most recent `limit` lines, and the deep-scrollback fetch
+/// surfaces them (#857). Built with a deliberately small `history_limit`
+/// so the test runs fast: the fetch reaches lines well above the visible
+/// screen (proving the retention window is the configured depth, not one
+/// screenful) yet the oldest lines — evicted once history filled — are
+/// gone for good, which is exactly why the default was raised.
+#[tokio::test]
+async fn configured_history_limit_bounds_retained_scrollback() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping history-limit retention test");
+        return;
+    }
+    const LIMIT: u32 = 500;
+    const LINES: u32 = 2_000;
+    let socket = format!("lazybox-test-hist-limit-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let backend = TmuxBackend::with_socket_and_history(&socket, LIMIT).expect("conf written");
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!("for i in $(seq 1 {LINES}); do echo line-$i; done; exec sleep 300"),
+                ],
+                None,
+                &[],
+                "history-limit-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        let last = format!("line-{LINES}");
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let sub = backend.subscribe(&key).await.expect("subscribe");
+            if String::from_utf8_lossy(&sub.replay).contains(&last) {
+                break;
+            }
+            assert!(attempt < 200, "pane output never completed");
+        }
+
+        let (replay, _) = backend
+            .scrollback(&key)
+            .await
+            .expect("scrollback")
+            .expect("tmux session must have history to serve");
+        let replay = String::from_utf8_lossy(&replay);
+
+        // The most recent output is present.
+        assert!(
+            replay.contains(&last),
+            "fetch must surface the most recent line",
+        );
+        // A line well above the visible 32-row screen but INSIDE the
+        // retained window (line-1800 is 200 lines back, < LIMIT) survives:
+        // retention is the configured depth, not a screenful.
+        assert!(
+            replay.contains("line-1800\r"),
+            "fetch must reach the retained-history depth, not just the screen",
+        );
+        // The oldest lines fell out of the `LIMIT`-deep window and are
+        // gone — no client fetch can recover them. `\r` pins the exact
+        // line (capture lines are CRLF-joined) so `line-1` can't match
+        // inside `line-10`, `line-100`, …
+        assert!(
+            !replay.contains("line-1\r"),
+            "the oldest line must be evicted once history exceeds the limit",
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
 #[tokio::test]
 async fn capture_history_preserves_soft_wrapped_logical_lines() {
     if modern_tmux_version().is_none() {

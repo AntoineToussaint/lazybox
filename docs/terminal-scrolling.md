@@ -152,6 +152,44 @@ The notice is derived from the exact terminal snapshot sent on subscribe and
 stays outside provider polling, so concurrent teardown cannot produce a stale
 warning or turn terminal lifecycle state into a provider-sync failure.
 
+## Retention depth and repaint churn (#857)
+
+Scrollback is finite on both sides of the conduit and the two are kept in
+lockstep:
+
+- The tmux backend retains `history-limit` lines per pane
+  (`crates/server/src/backend/tmux.rs`), and the deep-scrollback fetch
+  captures from `-S -{history-limit}`, so the fetch can never under-read
+  what tmux was told to keep.
+- Each client VT sizes its `max_scrollback` from the same line count
+  (`CLIENT_SCROLLBACK_LINES` in `terminal_stack.rs`). libghostty caps
+  scrollback by **bytes** of page memory, not line count — the C header's
+  "number of lines" wording is misleading — so the line count is converted
+  through a per-line byte budget (`client_scrollback_bytes`). If the cap
+  were shallower, a deep fetch would replay the full history into the VT
+  but the parser would silently drop everything past its byte budget — the
+  deeper tmux history would never become scrollable. (The old flat
+  `10_000` was ~10 KB, only a few hundred lines — a client-side bottleneck
+  in its own right, #857.)
+
+Both come from **`terminal.scrollback_lines`** (default 50000). Raising
+it keeps more of a long session at the cost of per-pane RAM on the tmux
+server *and* in every client VT (roughly linear in the line count).
+
+**Why the depth matters more here than for a normal shell.** With
+alternate-screen forced off (so agent output flows into retained history
+at all — see *Wheel ownership*), a full-screen TUI that redraws its
+viewport spills every repaint into history, burning the budget far faster
+than genuine new content. Claude Code is mitigated at the source: it
+launches with `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, which selects its
+*inline* renderer (append-mostly) instead of a full-frame repaint loop, so
+its churn is a fraction of a naive full-screen redraw. The raised,
+configurable limit is the second half of the mitigation: it widens the
+window before eviction bites for a genuinely long session. Once history
+does exceed the limit the oldest lines are evicted for good — no client
+fetch can recover them — so the limit is the documented hard bound on how
+far back any session can scroll.
+
 ## The regression harness
 
 `crates/tui/tests/terminal_scroll.rs` drives every surface through the

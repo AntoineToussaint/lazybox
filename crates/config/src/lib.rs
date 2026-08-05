@@ -16,6 +16,13 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// Default per-pane scrollback depth, in lines (`terminal.scrollback_lines`).
+/// The single source of truth for this default: the tmux backend's
+/// `history-limit`, the deep-scrollback capture depth, and the client VT's
+/// scrollback budget all resolve to it so the three can never silently
+/// diverge (#857). See [`TerminalSection::scrollback_lines`].
+pub const DEFAULT_SCROLLBACK_LINES: u32 = 50_000;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to read config: {0}")]
@@ -632,6 +639,12 @@ pub struct UiDefaults {
     /// Show each agent's model + effort by its badge. See
     /// [`UiSection::show_agent_model`].
     pub show_agent_model: bool,
+    /// Per-pane client-VT scrollback depth, in lines. Mirrors the tmux
+    /// backend's `history-limit` so a deep-scrollback fetch renders the
+    /// full retained history instead of clipping it to a shallower local
+    /// grid. Sourced from `terminal.scrollback_lines`. See
+    /// [`TerminalSection::scrollback_lines`].
+    pub scrollback_lines: u32,
 }
 
 impl Default for UiDefaults {
@@ -653,6 +666,7 @@ impl Default for UiDefaults {
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
             show_agent_model: true,
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
     }
 }
@@ -689,6 +703,10 @@ impl UiSection {
             confirm_default: self.confirm_default,
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
+            // Sourced from the `terminal` section (see
+            // `Config::resolved_ui`); the default stands until that
+            // override is applied.
+            scrollback_lines: d.scrollback_lines,
         }
     }
 }
@@ -1166,6 +1184,18 @@ pub struct TerminalSection {
     /// a non-zero code or death-by-signal always keeps the pane. See
     /// #367 (and #356/#357 for why the linger view exists).
     pub agent_dead_on_arrival_ms: u64,
+    /// Per-pane scrollback depth, in lines. Sets tmux's `history-limit`
+    /// (how many lines each pane retains) and the depth the client VT
+    /// keeps, so a deep-scrollback fetch surfaces the full retained
+    /// history rather than truncating it. A full-screen agent (Claude
+    /// Code) redraws its viewport constantly, and with lazybox's
+    /// alternate-screen-off model every repaint spills into history —
+    /// so a busy session burns through this budget far faster than genuine
+    /// new content, and older lines are evicted permanently once it fills.
+    /// Raise it to keep more of a long session; the cost is per-pane RAM
+    /// on both the tmux server and each client (roughly linear in the
+    /// line count). Default 50000.
+    pub scrollback_lines: u32,
 }
 
 impl Default for TerminalSection {
@@ -1174,6 +1204,7 @@ impl Default for TerminalSection {
             escape_char: ']',
             escape_window_ms: 600,
             agent_dead_on_arrival_ms: 10_000,
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
     }
 }
@@ -1209,6 +1240,7 @@ impl Config {
         }
         ui.escape_window = Duration::from_millis(self.terminal.escape_window_ms);
         ui.agent_dead_on_arrival = Duration::from_millis(self.terminal.agent_dead_on_arrival_ms);
+        ui.scrollback_lines = self.terminal.scrollback_lines;
         ui
     }
 
@@ -2674,6 +2706,22 @@ auto_fix:
         )
         .expect("legacy ui override parses");
         assert_eq!(legacy.resolved_ui().terminal_escape_char, '*');
+    }
+
+    #[test]
+    fn scrollback_lines_defaults_and_is_configurable() {
+        // Default (no config) is the raised depth, surfaced through the
+        // resolved UI defaults the client reads.
+        let default: Config = serde_yaml::from_str("").expect("empty config parses");
+        assert_eq!(default.terminal.scrollback_lines, 50_000);
+        assert_eq!(default.resolved_ui().scrollback_lines, 50_000);
+
+        // An explicit `terminal.scrollback_lines` flows through to the
+        // resolved UI defaults (which drive the client VT depth).
+        let cfg: Config = serde_yaml::from_str("terminal:\n  scrollback_lines: 120000\n")
+            .expect("terminal config parses");
+        assert_eq!(cfg.terminal.scrollback_lines, 120_000);
+        assert_eq!(cfg.resolved_ui().scrollback_lines, 120_000);
     }
 
     #[test]

@@ -35,8 +35,8 @@ use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
 use lazybox_ipc::{
-    AgentRunAccess, Event, PromptSource, TerminalId, TerminalInputIntent, TerminalKind,
-    TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
+    AgentRunAccess, Event, MAX_FRAME_BYTES, PromptSource, TerminalId, TerminalInputIntent,
+    TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
 };
 use lazybox_store::{StoreMutation, WorkspaceRecord};
 use spawn_executor::{ExecutedSpawn, SpawnExecutionOutcome, execute_spawn_plan};
@@ -5543,6 +5543,34 @@ async fn commit_pty_reading(
     }
 }
 
+/// Byte ceiling on a single `TerminalScrollback` reply. The out-of-process
+/// transport rejects any event frame over [`MAX_FRAME_BYTES`] *fatally* —
+/// the sender tears the connection down rather than dropping one event — so
+/// an unbounded deep-scrollback capture (which grows with
+/// `terminal.scrollback_lines`) could disconnect a remote client instead of
+/// merely missing the fetch. Held a margin below the frame limit to leave
+/// room for the event's other fields and bincode framing.
+const MAX_SCROLLBACK_REPLAY_BYTES: usize = MAX_FRAME_BYTES as usize - 1024 * 1024;
+
+/// Bound a scrollback capture to what one event frame can carry, keeping
+/// the most-recent bytes. The client anchors its viewport to the bottom and
+/// its own VT can't hold unbounded history anyway, so dropping the *oldest*
+/// lines beyond the cap loses nothing it could display — and it converts a
+/// fatal oversized-frame disconnect into graceful truncation. The kept
+/// prefix is advanced to the next line boundary so the reply never starts
+/// mid-escape (at worst one already-truncated oldest line is dropped).
+fn cap_scrollback_replay(replay: Vec<u8>, max_bytes: usize) -> Vec<u8> {
+    if replay.len() <= max_bytes {
+        return replay;
+    }
+    let tail_start = replay.len() - max_bytes;
+    let aligned = replay[tail_start..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(tail_start, |off| tail_start + off + 1);
+    replay[aligned..].to_vec()
+}
+
 /// `Command::FetchScrollback` — hand the requesting client the
 /// terminal's deep history from the backend's own retention (tmux
 /// `capture-pane`), the same seed the restart/reattach path uses. The
@@ -5560,6 +5588,7 @@ pub async fn handle_fetch_scrollback(
     };
     match config.backend.scrollback(&key).await {
         Ok(Some((replay, seq))) => {
+            let replay = cap_scrollback_replay(replay, MAX_SCROLLBACK_REPLAY_BYTES);
             let _ = tx.send(Event::TerminalScrollback {
                 terminal_id,
                 replay,
@@ -9600,6 +9629,51 @@ mod tests {
         assert!(
             !orphan_file.exists(),
             "an archived session's file is reclaimed"
+        );
+    }
+
+    /// A scrollback capture within the cap is sent verbatim; the production
+    /// cap sits safely below the transport's fatal frame limit.
+    #[test]
+    fn small_scrollback_replay_is_unchanged() {
+        let replay = b"line-1\r\nline-2\r\nline-3".to_vec();
+        assert_eq!(
+            cap_scrollback_replay(replay.clone(), MAX_SCROLLBACK_REPLAY_BYTES),
+            replay
+        );
+        assert!(
+            MAX_SCROLLBACK_REPLAY_BYTES < MAX_FRAME_BYTES as usize,
+            "the reply cap must stay under the fatal frame limit"
+        );
+    }
+
+    /// An oversized capture is truncated to at most the cap (so it can never
+    /// blow the frame limit and drop the connection), keeps the MOST-RECENT
+    /// bytes, and starts on a clean line boundary rather than mid-escape.
+    #[test]
+    fn oversized_scrollback_replay_keeps_the_recent_tail_at_a_line_boundary() {
+        // 10 lines of 100 bytes each; cap at ~350 bytes keeps the last few.
+        let mut replay = Vec::new();
+        for i in 0..10u32 {
+            replay.extend_from_slice(format!("line-{i:03}").as_bytes());
+            replay.extend(std::iter::repeat_n(b'x', 100 - 8));
+            replay.extend_from_slice(b"\r\n");
+        }
+        let capped = cap_scrollback_replay(replay.clone(), 350);
+
+        assert!(capped.len() <= 350, "must fit the cap: {}", capped.len());
+        assert!(
+            capped.starts_with(b"line-"),
+            "kept prefix must begin at a line boundary, not mid-line: {:?}",
+            String::from_utf8_lossy(&capped[..capped.len().min(16)])
+        );
+        assert!(
+            capped.ends_with(b"\r\n") && capped.windows(8).any(|w| w == b"line-009"),
+            "the most-recent line must survive"
+        );
+        assert!(
+            !capped.windows(8).any(|w| w == b"line-000"),
+            "the oldest lines beyond the cap are dropped"
         );
     }
 

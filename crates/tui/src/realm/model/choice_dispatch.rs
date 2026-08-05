@@ -53,6 +53,9 @@ impl<T: TerminalAdapter> Model<T> {
                 snippets: snippets(),
                 submit,
             },
+            Id::SkillPicker => PickFlow::Skill {
+                terminal_id: self.terminals.active_terminal_id(),
+            },
             Id::PromptHistoryPicker => {
                 let terminal_id = match &self.modal_flow {
                     Some(ModalFlow::PromptHistory { terminal }) => Some(*terminal),
@@ -292,6 +295,21 @@ impl<T: TerminalAdapter> Model<T> {
                     &mut cmds,
                 );
                 self.flash_info("re-sent prompt");
+            }
+            PickOutcome::TriggerSkill {
+                terminal_id,
+                skill_name,
+                text,
+            } => {
+                self.deliver_prompt(
+                    terminal_id,
+                    true,
+                    &text,
+                    lazybox_ipc::PromptSource::Typed,
+                    &mut cmds,
+                );
+                self.apply_recent_skill(skill_name.clone());
+                self.flash_info(format!("triggered skill: {skill_name}"));
             }
             PickOutcome::Jump(key) => self.jump_to_workspace_key(&key),
             PickOutcome::OpenUrl(url) => self.open_external_url(&url),

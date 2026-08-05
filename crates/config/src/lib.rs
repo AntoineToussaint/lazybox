@@ -6,7 +6,10 @@
 mod skills;
 mod snippets;
 
-pub use skills::{SkillError, scaffold_skill, skill_md_path, validate_skill_name};
+pub use skills::{
+    Skill, SkillError, SkillScope, discover_skills, scaffold_skill, skill_md_path,
+    validate_skill_name,
+};
 pub use snippets::{Snippet, SnippetOrigin, Snippets, SnippetsError};
 
 use serde::{Deserialize, Serialize};

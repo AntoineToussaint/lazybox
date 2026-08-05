@@ -3824,6 +3824,190 @@ snippets:
         assert!(matches!(m.modal_stack.last(), Some(Id::SnippetPicker)));
     }
 
+    // ── Skills picker (issue #797) ──────────────────────────────────
+
+    /// `mount_skill_picker` with no active terminal flashes a hint and
+    /// refuses to mount — skills only make sense inside an agent session.
+    #[test]
+    fn mount_skill_picker_without_terminal_skips_mount() {
+        let mut m = build_model();
+        m.mount_skill_picker(String::new());
+        assert!(
+            !matches!(m.modal_stack.last(), Some(Id::SkillPicker)),
+            "no active terminal shouldn't open a skills picker",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("no active terminal")),
+        );
+    }
+
+    /// `mount_skill_picker` on a non-agent (shell) terminal nudges the
+    /// user rather than opening — a shell can't invoke a skill.
+    #[test]
+    fn mount_skill_picker_on_shell_terminal_skips_mount() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "skill-shell",
+            "snippets:\n  x:\n    description: d\n    body: b\n",
+            lazybox_ipc::TerminalKind::Shell,
+        );
+        m.modal_stack.clear();
+        m.mount_skill_picker(String::new());
+        assert!(
+            !matches!(m.modal_stack.last(), Some(Id::SkillPicker)),
+            "a shell terminal shouldn't open a skills picker",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("agent sessions")),
+        );
+    }
+
+    /// Picking a skill injects the explicit "Use the `<skill>` skill."
+    /// instruction through the settle-gated agent path and floats the
+    /// skill into the session-local Recent MRU.
+    #[test]
+    fn skill_pick_injects_explicit_trigger_and_records_recent() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "skill-pick",
+            "snippets:\n  x:\n    description: d\n    body: b\n",
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        );
+        // Swap the picker on top for the skills picker so the choice
+        // dispatch resolves against `PickFlow::Skill`.
+        m.modal_stack.pop();
+        m.modal_stack.push(Id::SkillPicker);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("code-review".into())]);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, prompt, .. }
+                    if *terminal_id == lazybox_ipc::TerminalId(1)
+                        && prompt == "Use the `code-review` skill."
+            )),
+            "skill trigger must inject the explicit instruction, got {cmds:?}",
+        );
+        assert_eq!(m.recent_skills, vec!["code-review".to_string()]);
+    }
+
+    /// A temp worktree carrying one repo skill under `.claude/skills/`,
+    /// plus a model whose focused agent terminal is rooted there — the
+    /// fixture for the end-to-end `]]l` chord tests.
+    fn tmp_worktree_with_skill(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-skilltest-{}-{}", std::process::id(), tag));
+        let skill_dir = dir.join(".claude").join("skills").join("code-review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: code-review\ndescription: Review a diff.\n---\nbody\n",
+        )
+        .unwrap();
+        dir
+    }
+
+    fn model_with_agent_at_worktree(
+        worktree: std::path::PathBuf,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        let mut ws = lazybox_core::Workspace::empty(ws_key.clone(), "main", chrono::Utc::now());
+        ws.add_session(lazybox_core::WorkspaceSession::new(
+            ws_key,
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            worktree,
+            chrono::Utc::now(),
+        ));
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key,
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        m
+    }
+
+    /// End-to-end: arming the leader and pressing `l` opens the skills
+    /// picker. Exercises the real key routing (`handle_pane_key`), which is
+    /// where the original #797 defect lived — `k` was shadowed by the
+    /// popup-navigation letters, so the direct chord silently did nothing.
+    #[test]
+    fn leader_l_opens_skill_picker_end_to_end() {
+        let worktree = tmp_worktree_with_skill("e2e");
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(RealmKey::new(Key::Char('l'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "`]]l` consumed the leader");
+        assert!(
+            matches!(m.top_modal(), Some(Id::SkillPicker)),
+            "`]]l` opens the skills picker",
+        );
+    }
+
+    /// `k` stays popup-highlight navigation inside the armed leader — it
+    /// must NOT resolve to the skills command (the shadowing that made the
+    /// original `]]k` binding dead). The leader stays armed and no picker
+    /// opens.
+    #[test]
+    fn leader_k_navigates_and_never_opens_skill_picker() {
+        let worktree = tmp_worktree_with_skill("k-nav");
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
+        assert!(
+            m.terminal_leader_pending(),
+            "`k` navigates the popup and keeps the leader armed",
+        );
+        assert!(
+            m.top_modal().is_none(),
+            "`]]k` must not open the skills picker",
+        );
+    }
+
+    /// Over `--connect` the agent's worktree and `~/.claude/skills` live on
+    /// the daemon host, so a local scan would surface the wrong machine's
+    /// skills. The picker refuses to mount and names the reason, even
+    /// though a scannable skill exists locally.
+    #[test]
+    fn skill_picker_is_unavailable_over_remote() {
+        let worktree = tmp_worktree_with_skill("remote");
+        let mut m = model_with_agent_at_worktree(worktree).with_remote();
+        m.mount_skill_picker(String::new());
+        assert!(
+            !matches!(m.modal_stack.last(), Some(Id::SkillPicker)),
+            "a remote client shouldn't scan the local filesystem for skills",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("--connect")),
+        );
+    }
+
     // ── `]]` leader chord (issue #205) ──────────────────────────────
 
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
@@ -8256,7 +8440,7 @@ mod leader_tile_tests {
 
     /// `]]` + `j`/`k` move a highlight through the command popup and keep
     /// the leader armed; `Enter` fires the highlighted command (#343).
-    /// Row 0 is `s` (snippets), row 1 is `f` (focus mode).
+    /// Row 0 is `s` (snippets); `f` (focus mode) is row 5.
     #[test]
     fn terminal_leader_jk_highlight_and_enter_fire() {
         let (mut m, mut server) = build_model_with_terminals(1);
@@ -8278,12 +8462,11 @@ mod leader_tile_tests {
         assert_eq!(m.terminal_leader_highlight(), Some(1));
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(m.terminal_leader_highlight(), Some(0));
-        // Menu order: s,r,h,u,f,… — step to `focus mode` at index 4.
-        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
-        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
-        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
-        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
-        assert_eq!(m.terminal_leader_highlight(), Some(4));
+        // Menu order: s,l,r,h,u,f,… — step to `focus mode` at index 5.
+        for _ in 0..5 {
+            m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        }
+        assert_eq!(m.terminal_leader_highlight(), Some(5));
 
         assert!(!m.focus_mode, "focus mode starts off");
         m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
@@ -8332,27 +8515,27 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         arm_leader(&mut m);
 
-        // Splits menu order: s,r,h,u,f,q,`,|,- then the `move tile`
-        // aggregate at index 9, then `x` at index 10. Nine `j` presses
-        // reach index 8.
-        for _ in 0..9 {
+        // Splits menu order: s,l,r,h,u,f,q,`,|,- then the `move tile`
+        // aggregate at index 10, then `x` at index 11. Ten `j` presses
+        // reach index 9.
+        for _ in 0..10 {
             m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         }
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(8),
+            Some(9),
             "reached the last row before the aggregate"
         );
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(10),
-            "`j` jumps over the aggregate at index 9"
+            Some(11),
+            "`j` jumps over the aggregate at index 10"
         );
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(8),
+            Some(9),
             "`k` skips it going back too"
         );
     }

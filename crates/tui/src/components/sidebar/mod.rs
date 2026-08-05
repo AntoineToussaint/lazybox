@@ -1121,7 +1121,10 @@ impl Sidebar {
     /// limit, in sidebar order — the target set for the bulk
     /// "resume all rate-limited agents" action (#847).
     pub fn limit_reached_workspace_keys(&self) -> Vec<SessionKey> {
-        crate::agent_attention::limit_reached_workspaces(&self.agents, &self.visible_workspace_keys())
+        crate::agent_attention::limit_reached_workspaces(
+            &self.agents,
+            &self.visible_workspace_keys(),
+        )
     }
 
     /// The visible workspace keys in sidebar (top-down) order — shared by

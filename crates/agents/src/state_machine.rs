@@ -27,7 +27,7 @@
 //! - `Working` — actively producing output or running a tool ("running").
 //! - `InputNeeded` — parked on a structural prompt ("awaiting input").
 //! - `LimitReached` — parked on a provider usage-limit block (#847); a
-//!   blocked, sticky sibling of `InputNeeded` (see [`is_blocked`]).
+//!   blocked, sticky sibling of `InputNeeded` (see `is_blocked`).
 //! - `Done` — finished a turn ("done").
 //! - `Exited` — the process ended (clean or crash); terminal.
 //!

@@ -319,6 +319,12 @@ pub enum Id {
     /// the picked snippet's body (custom text appends after it).
     /// Submit → one delivery per target in `ModalFlow::Broadcast`.
     BroadcastText,
+    /// Confirm gate shown before a broadcast spins up new agents (#836).
+    /// When the multi-select includes session-less-but-spawnable
+    /// workspaces, the compose submit stashes the composed body + targets
+    /// in `ModalFlow::BroadcastConfirm` and mounts this rather than
+    /// spawning silently; `Msg::Confirmed(true)` runs the fan-out.
+    BroadcastConfirm,
     /// Target picker for the agent-to-agent handoff flow (`x s`,
     /// issue #431) — pick the session the source agent's output should
     /// be injected into. Each row carries a [`ChoicePayload::Session`];
@@ -645,6 +651,14 @@ pub(crate) enum ModalFlow {
     UpdateTarget { target: String },
     /// Broadcast flow (`Shift-B`): snippet picker → compose textarea.
     Broadcast { draft: BroadcastDraft },
+    /// Broadcast confirm gate (#836): the composed message + resolved
+    /// targets, stashed while the "start N agents?" `Confirm` is up so a
+    /// "yes" can run the same fan-out the immediate path does.
+    BroadcastConfirm {
+        targets: Vec<lazybox_core::SessionKey>,
+        snippet_key: Option<String>,
+        body: String,
+    },
     /// Agent-to-agent handoff (`x s`, #431): target picker → compose.
     Handoff { draft: HandoffDraft },
     /// Structured session conversion (`x f`): role picker. Once picked,

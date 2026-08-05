@@ -2572,6 +2572,55 @@ snippets:
         (m, keys)
     }
 
+    /// Like [`model_with_broadcast_targets`], but every seeded workspace
+    /// carries a GitHub project scope, so a session-less target is
+    /// spawnable (`worktree_scope().is_some()`) rather than skipped —
+    /// the case #836's auto-start covers.
+    fn model_with_scoped_broadcast_targets(
+        kinds: &[Option<lazybox_ipc::TerminalKind>],
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        Vec<SessionKey>,
+    ) {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let keys: Vec<SessionKey> = (1..=kinds.len())
+            .map(|i| SessionKey::from(format!("github:o/r#{i}").as_str()))
+            .collect();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: keys
+                .iter()
+                .map(|k| {
+                    let mut w = lazybox_core::Workspace::empty(
+                        WorkspaceKey::new(k.as_str()),
+                        "main",
+                        chrono::Utc::now(),
+                    );
+                    w.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+                    w
+                })
+                .collect(),
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        for (i, kind) in kinds.iter().enumerate() {
+            if let Some(kind) = kind {
+                m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                    model_label: None,
+                    terminal_id: TerminalId(i as u64 + 1),
+                    session_key: keys[i].clone(),
+                    kind: kind.clone(),
+                    no_permission: false,
+                    on_main: false,
+                });
+            }
+        }
+        (m, keys)
+    }
+
     #[test]
     fn configured_model_broadcast_can_pick_the_builtin_audit_snippet() {
         let (mut m, keys) = model_with_broadcast_targets_and_snippets(
@@ -2768,6 +2817,151 @@ snippets:
         assert!(
             !cmds.iter().any(|c| matches!(c, IpcCommand::Write { .. })),
             "the shell must not receive a duplicate copy",
+        );
+    }
+
+    /// #836: a session-less target that still resolves to a repo scope
+    /// no longer gets silently skipped — because delivering means
+    /// spawning a fresh agent (heavy), the compose submit raises a
+    /// confirm gate first and dispatches nothing until it's answered.
+    #[test]
+    fn broadcast_confirms_before_starting_agents_for_scoped_session_less_targets() {
+        let (mut m, keys) = model_with_scoped_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+        ]);
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("ship it".into());
+        assert!(cmds.is_empty(), "nothing dispatched until confirmed: {cmds:?}");
+        assert_eq!(m.top_modal(), Some(&Id::BroadcastConfirm));
+        assert!(
+            matches!(
+                m.modal_flow,
+                Some(super::super::ModalFlow::BroadcastConfirm { .. })
+            ),
+            "the composed body + targets are stashed for the confirm",
+        );
+    }
+
+    /// #836: confirming the gate delivers to the live target AND spawns
+    /// the default agent into the session-less scoped one, seeded with
+    /// the broadcast as its initial prompt (the daemon injects it once
+    /// the agent settles).
+    #[test]
+    fn broadcast_confirm_yes_starts_default_agent_seeded_with_the_message() {
+        let (mut m, keys) = model_with_scoped_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+        ]);
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys.clone(),
+                snippet_key: None,
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let _ = m.handle_textarea_submitted("ship it".into());
+        assert_eq!(m.top_modal(), Some(&Id::BroadcastConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, prompt, .. }
+                    if terminal_id.0 == 1 && prompt == "ship it"
+            )),
+            "the live agent gets the settle-gated inject: {cmds:?}",
+        );
+        let spawn = cmds
+            .iter()
+            .find_map(|c| match c {
+                IpcCommand::Spawn {
+                    session_key,
+                    kind,
+                    initial_prompt,
+                    on_main,
+                    ..
+                } => Some((session_key.clone(), kind.clone(), initial_prompt.clone(), *on_main)),
+                _ => None,
+            })
+            .expect("the session-less scoped target spawns the default agent");
+        assert_eq!(spawn.0, keys[1]);
+        assert!(
+            matches!(&spawn.1, lazybox_ipc::TerminalKind::Agent(id) if id == "claude"),
+            "the default agent (claude) is spawned: {:?}",
+            spawn.1,
+        );
+        assert_eq!(
+            spawn.2.as_deref(),
+            Some("ship it"),
+            "the broadcast seeds the new agent's initial prompt",
+        );
+        assert!(!spawn.3, "broadcast spawns into a worktree, not main");
+        let notice = m.status.notice.as_ref().expect("summary notice");
+        assert!(
+            notice.message.contains("started 1 agent"),
+            "summary reports the auto-start: {}",
+            notice.message,
+        );
+    }
+
+    /// #836: declining the gate spawns nothing and keeps the sidebar
+    /// multi-select intact so the user can retry or change the pick.
+    #[test]
+    fn broadcast_confirm_no_cancels_without_spawning() {
+        let (mut m, keys) = model_with_scoped_broadcast_targets(&[None]);
+        assert!(m.sidebar.focus_workspace_key(&keys[0]));
+        assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let _ = m.handle_textarea_submitted("ship it".into());
+        assert_eq!(m.top_modal(), Some(&Id::BroadcastConfirm));
+
+        let cmds = m.handle_confirmed(false);
+        assert!(cmds.is_empty(), "cancel dispatches nothing: {cmds:?}");
+        assert!(m.modal_flow.is_none(), "the stash is dropped");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "the multi-select survives a cancel",
+        );
+    }
+
+    /// #836: a session-less workspace with NO repo scope (nothing to
+    /// spawn into) stays skipped — no confirm gate, named in the notice.
+    #[test]
+    fn broadcast_skips_session_less_workspace_with_no_repo_scope() {
+        let (mut m, keys) = model_with_broadcast_targets(&[None]);
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys,
+                snippet_key: None,
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let cmds = m.handle_textarea_submitted("ship it".into());
+        assert!(cmds.is_empty(), "nothing spawned for an unspawnable row: {cmds:?}");
+        assert_ne!(
+            m.top_modal(),
+            Some(&Id::BroadcastConfirm),
+            "no confirm gate when there's nothing to spawn",
+        );
+        let notice = m.status.notice.as_ref().expect("summary notice");
+        assert!(
+            notice.message.contains("skipped (no repo)"),
+            "the unspawnable target is named as skipped: {}",
+            notice.message,
         );
     }
 

@@ -5,6 +5,12 @@ use std::path::Path;
 use crate::traits::{ErrorOccurrence, ErrorRecord, Store, StoreError, StoreMutation};
 use chrono::{DateTime, Utc};
 
+/// Hard cap on distinct deduplicated error classes kept in the durable
+/// inbox. Reached only under pathological cardinality (see the eviction
+/// note in `record_error`); a generous ceiling that still bounds the
+/// table so a long-lived daemon can't accrete unbounded rows.
+const ERROR_INBOX_MAX_ROWS: i64 = 1000;
+
 pub struct SqliteStore {
     conn: Mutex<Connection>,
 }
@@ -218,6 +224,22 @@ impl Store for SqliteStore {
                 occ.raw,
                 at,
             ],
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // Bound the table: `normalize` only collapses digit / whitespace
+        // runs, so high-cardinality diagnostics (hex request-ids, SHAs,
+        // paths) mint a fresh row each and the store would otherwise grow
+        // without limit. Evict the least-recently-seen classes past the
+        // cap. The just-written row carries the newest `last_seen`, so it
+        // is always kept; the tie-break on `dedupe_key` makes eviction
+        // deterministic when timestamps collide.
+        conn.execute(
+            "DELETE FROM errors WHERE dedupe_key NOT IN (
+                 SELECT dedupe_key FROM errors
+                 ORDER BY last_seen DESC, dedupe_key DESC
+                 LIMIT ?1
+             )",
+            [ERROR_INBOX_MAX_ROWS],
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
         conn.query_row(
@@ -509,6 +531,58 @@ mod tests {
         assert_eq!(rows[0].count, 2, "the deduped count persisted");
         assert_eq!(rows[0].first_seen, at);
         assert_eq!(rows[0].raw, "code=RATE_LIMITED");
+    }
+
+    /// The inbox is bounded: once distinct classes exceed
+    /// `ERROR_INBOX_MAX_ROWS`, recording a new one evicts the
+    /// least-recently-seen class rather than growing without limit. The
+    /// just-recorded class always survives; the oldest is gone.
+    #[test]
+    fn error_inbox_evicts_least_recently_seen_past_the_cap() {
+        use crate::traits::ErrorOccurrence;
+        let store = SqliteStore::in_memory().unwrap();
+        let base = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Record cap + 5 distinct classes, each seen one second later than
+        // the last, so `dedupe_key i` is the oldest and the final ones the
+        // newest.
+        let overflow = 5;
+        for i in 0..(ERROR_INBOX_MAX_ROWS + overflow) {
+            store
+                .record_error(&ErrorOccurrence {
+                    dedupe_key: format!("github|merge|class {i}"),
+                    source: "github".into(),
+                    severity: "permanent".into(),
+                    operation: Some("merge".into()),
+                    workspace_key: None,
+                    message: format!("failure {i}"),
+                    raw: format!("raw {i}"),
+                    at: base + chrono::Duration::seconds(i),
+                })
+                .unwrap();
+        }
+        let rows = store.list_errors().unwrap();
+        assert_eq!(
+            rows.len() as i64,
+            ERROR_INBOX_MAX_ROWS,
+            "the table is capped, not unbounded"
+        );
+        let keys: std::collections::HashSet<&str> =
+            rows.iter().map(|r| r.dedupe_key.as_str()).collect();
+        // The five oldest classes were evicted…
+        for i in 0..overflow {
+            assert!(
+                !keys.contains(format!("github|merge|class {i}").as_str()),
+                "class {i} (oldest) should have been evicted"
+            );
+        }
+        // …and the newest class is still present.
+        let newest = ERROR_INBOX_MAX_ROWS + overflow - 1;
+        assert!(
+            keys.contains(format!("github|merge|class {newest}").as_str()),
+            "the most-recently-seen class must survive"
+        );
     }
 
     /// A backend error after an earlier mutation must roll the whole batch

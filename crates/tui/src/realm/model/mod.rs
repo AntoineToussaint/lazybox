@@ -275,6 +275,11 @@ pub enum Id {
     /// issue / routes to an agent / exports JSONL from the selected
     /// row; `d`/`c` delete/clear via the daemon.
     ErrorInbox,
+    /// Confirm gate for the Error Inbox's `c` (clear-all). Wiping the
+    /// durable store is irreversible, so — like the other destructive
+    /// confirms — a single stray key must not do it; only an explicit
+    /// Yes sends `Command::ClearErrors`. Mounted on top of `ErrorInbox`.
+    ErrorInboxClearConfirm,
     /// Spinner + step checklist shown while a first spawn on a fresh
     /// workspace provisions its worktree. Mounted on the first
     /// `WorktreeProgress` daemon event (so an instant resume never
@@ -4653,9 +4658,11 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_messages();
             }
             Msg::ErrorInboxClearRequested => {
-                // The daemon wipes the durable store and re-broadcasts an
-                // (empty) snapshot, which repaints the open inbox.
-                self.send_cmd(IpcCommand::ClearErrors);
+                // Wiping the durable store is irreversible — gate it behind
+                // a confirm (default No) rather than acting on a single
+                // keypress. Yes → `Command::ClearErrors` in `handle_confirmed`,
+                // whose empty re-broadcast repaints the open inbox.
+                self.mount_error_inbox_clear_confirm();
             }
             Msg::ErrorInboxDeleteRequested(dedupe_key) => {
                 self.send_cmd(IpcCommand::DeleteError { dedupe_key });

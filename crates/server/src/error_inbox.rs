@@ -33,10 +33,20 @@ async fn run(mut rx: broadcast::Receiver<Event>, store: Arc<dyn Store>) {
     loop {
         match rx.recv().await {
             Ok(event) => {
-                if let Some(occ) = occurrence_from_event(&event, chrono::Utc::now())
-                    && let Err(e) = store.record_error(&occ)
-                {
-                    tracing::warn!("error-inbox: failed to persist error: {e}");
+                if let Some(occ) = occurrence_from_event(&event, chrono::Utc::now()) {
+                    // `record_error` is a blocking SQLite write under a
+                    // parking_lot mutex — offload it off the runtime
+                    // worker (issue #34), the same discipline the list
+                    // path in `broadcast_snapshot` follows. Awaited here,
+                    // so occurrences still fold in the order they arrive.
+                    let store = store.clone();
+                    match tokio::task::spawn_blocking(move || store.record_error(&occ)).await {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
+                            tracing::warn!("error-inbox: failed to persist error: {e}")
+                        }
+                        Err(e) => tracing::warn!("error-inbox: record task panicked: {e}"),
+                    }
                 }
             }
             // A lagged receiver dropped some events; the inbox is a
@@ -232,6 +242,12 @@ pub(crate) fn occurrence_from_event(
             message,
             at,
         )),
+        // `Event::CommandRejected` is deliberately NOT recorded: it is
+        // admission-limit backpressure ("the queue was full, retry is
+        // safe"), not a failed operation. Folding it into the durable
+        // inbox would tally a transient, self-healing wait state as an
+        // error class. `CommandFailed` / `TerminalInputRejected` above
+        // are genuine deliveries that failed, so those DO record.
         _ => None,
     }
 }

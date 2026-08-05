@@ -243,6 +243,36 @@ mod effects_tests {
         Model::new_for_test(client, Size::new(120, 40)).expect("model init")
     }
 
+    /// `c` in the Error Inbox wipes a *durable* store, so it must not fire
+    /// on the keypress — it mounts a confirm, and only an explicit Yes
+    /// emits `ClearErrors`. Without the gate a stray `c` erased all triage
+    /// history irreversibly.
+    #[test]
+    fn error_inbox_clear_is_gated_by_a_confirm() {
+        use lazybox_ipc::Command;
+        let mut m = build_model();
+        m.mount_error_inbox();
+        assert_eq!(m.top_modal(), Some(&Id::ErrorInbox));
+
+        // Pressing `c` mounts the confirm gate; nothing is sent yet.
+        m.update(Msg::ErrorInboxClearRequested);
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::ErrorInboxClearConfirm),
+            "clear must be confirmed, not immediate",
+        );
+        // Declining sends no command and returns to the inbox.
+        assert!(m.handle_confirmed(false).is_empty());
+        assert_eq!(m.top_modal(), Some(&Id::ErrorInbox));
+
+        // Confirming is the only path that wipes the store.
+        m.update(Msg::ErrorInboxClearRequested);
+        assert!(matches!(
+            m.handle_confirmed(true).as_slice(),
+            [Command::ClearErrors]
+        ));
+    }
+
     #[test]
     fn diff_review_uses_the_settle_gated_agent_injection_path() {
         use crate::realm::components::diff_review::DiffReviewComment;

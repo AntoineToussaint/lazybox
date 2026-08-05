@@ -233,10 +233,14 @@ impl Component for ErrorInbox {
             return;
         }
 
-        let total: u64 = self.records.iter().map(|r| r.count).sum();
+        // Count the *visible* set so an active source filter's header
+        // agrees with the list under it — otherwise "N classes · M errors"
+        // reports the whole store while the list shows a subset.
+        let visible = self.filtered();
+        let total: u64 = visible.iter().map(|r| r.count).sum();
         let header = format!(
             "{} classes · {total} errors{}",
-            self.records.len(),
+            visible.len(),
             match &self.source_filter {
                 Some(s) => format!("  ·  source: {s}"),
                 None => String::new(),
@@ -453,6 +457,25 @@ mod tests {
         // Detail panel shows the raw diagnostic + workspace context.
         assert!(out.contains("raw rate limited"), "{out}");
         assert!(out.contains("github:o/r#1"), "{out}");
+    }
+
+    #[test]
+    fn header_counts_reflect_active_filter() {
+        let mut comp = ErrorInbox::new(
+            vec![rec("a", "github", 3, 10), rec("b", "linear", 50, 20)],
+            now(),
+            false,
+        );
+        // Unfiltered: both classes, 53 total.
+        assert!(render(&mut comp, 100, 18).contains("2 classes · 53 errors"));
+        // First cycle lands on the most-frequent source (linear, ×50,
+        // sorted first). The header must agree with the one-row list, not
+        // keep reporting the whole store.
+        comp.cycle_filter();
+        assert_eq!(comp.source_filter.as_deref(), Some("linear"));
+        let out = render(&mut comp, 100, 18);
+        assert!(out.contains("1 classes · 50 errors"), "{out}");
+        assert!(out.contains("source: linear"), "{out}");
     }
 
     #[test]

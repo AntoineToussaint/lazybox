@@ -1102,6 +1102,24 @@ impl<T: TerminalAdapter> Model<T> {
         self.send_cmd(lazybox_ipc::Command::ListErrors);
     }
 
+    /// Mount the confirm gate for the Error Inbox `c` (clear-all).
+    /// Stacks on top of the open inbox; `Msg::Confirmed(true)` (handled
+    /// in `handle_confirmed` under `Id::ErrorInboxClearConfirm`) sends
+    /// `Command::ClearErrors`. Default No — an irreversible wipe should
+    /// never ride a reflexive Enter.
+    pub(super) fn mount_error_inbox_clear_confirm(&mut self) {
+        use crate::realm::components::confirm::Confirm;
+
+        if matches!(self.modal_stack.last(), Some(Id::ErrorInboxClearConfirm)) {
+            return;
+        }
+        let modal = Confirm::new(
+            "Clear the entire durable Error Inbox? This permanently deletes every recorded error class.",
+        )
+        .default_no();
+        self.mount_modal(Id::ErrorInboxClearConfirm, modal);
+    }
+
     /// Repaint a live Error Inbox with a fresh daemon snapshot. A
     /// snapshot that arrives after the window was closed is dropped.
     pub(super) fn update_error_inbox(&mut self, errors: Vec<lazybox_ipc::ErrorInboxRecord>) {
@@ -2490,7 +2508,19 @@ pub(super) fn percent_encode(s: &str) -> String {
 }
 
 /// Pre-filled GitHub issue body for an error class.
+///
+/// `message` / `raw` are bounded before they go in: this body is
+/// percent-encoded into a `github.com/…/issues/new?…` GET URL, and a
+/// multi-KB `raw` (a full GraphQL error, a stack trace) inflates ~3×
+/// under encoding and blows past browser / server URL caps — the draft
+/// then 414s or silently truncates. Clipping the two unbounded fields
+/// keeps the whole URL comfortably viable; the full text still lives in
+/// the inbox and the JSONL export.
 fn error_issue_body(r: &lazybox_ipc::ErrorInboxRecord) -> String {
+    // Char budgets sized so the encoded URL stays well under the ~8 KB
+    // ceiling common servers (GitHub included) enforce.
+    const MESSAGE_BUDGET: usize = 300;
+    const RAW_BUDGET: usize = 1500;
     let mut body = format!(
         "Recurring error surfaced by the lazybox Error Inbox (#831).\n\n\
          - **Class:** `{}`\n\
@@ -2506,7 +2536,8 @@ fn error_issue_body(r: &lazybox_ipc::ErrorInboxRecord) -> String {
     }
     body.push_str(&format!(
         "\n**Sample message:**\n\n> {}\n\n**Raw:**\n\n```\n{}\n```\n",
-        r.message, r.raw,
+        truncate(&r.message, MESSAGE_BUDGET),
+        truncate(&r.raw, RAW_BUDGET),
     ));
     body
 }
@@ -2550,6 +2581,38 @@ mod tests {
     fn truncate_appends_ellipsis_only_when_clipped() {
         assert_eq!(truncate("short", 10), "short");
         assert_eq!(truncate("abcdef", 4), "abc…");
+    }
+
+    /// A pathologically large `raw` (or `message`) must not bloat the
+    /// issue-draft body: it feeds a GET URL, so the fields are clipped.
+    /// Without the bound the encoded URL 414s / truncates on GitHub.
+    #[test]
+    fn error_issue_body_bounds_message_and_raw() {
+        let record = lazybox_ipc::ErrorInboxRecord {
+            dedupe_key: "github|merge|boom".into(),
+            source: "github".into(),
+            severity: "permanent".into(),
+            operation: Some("merge".into()),
+            workspace_key: Some("github:o/r#1".into()),
+            message: "m".repeat(5_000),
+            raw: "r".repeat(50_000),
+            count: 3,
+            first_seen: chrono::Utc::now(),
+            last_seen: chrono::Utc::now(),
+        };
+        let body = error_issue_body(&record);
+        // The 50 KB raw is clipped to its budget (+ellipsis), not embedded
+        // whole; the whole body stays small enough for a GET URL.
+        assert!(body.contains('…'), "clipped fields end with an ellipsis");
+        assert!(
+            !body.contains(&"r".repeat(2_000)),
+            "the full 50KB raw must not be embedded"
+        );
+        assert!(
+            body.chars().count() < 2_500,
+            "body stays URL-safe, was {} chars",
+            body.chars().count()
+        );
     }
 
     /// A minimal open, author, CI-failing PR workspace with the given

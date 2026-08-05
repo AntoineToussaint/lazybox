@@ -12244,6 +12244,23 @@ mod tests {
         assert!(exe.is_file());
     }
 
+    /// The injected hook command pins the *running* binary by absolute
+    /// path, never bare `lazybox` — so PATH skew can't select a stale build
+    /// that rejects the flags we baked in (#848). Covers both the Claude
+    /// (`--backend-key`) and Codex (`--backend-key-file`) forms.
+    #[test]
+    fn hook_commands_use_absolute_exe_path() {
+        let exe = hook_exe().expect("running test binary must resolve");
+        assert!(exe.is_absolute(), "current_exe must be absolute: {exe:?}");
+        let quoted = format!("\"{}\"", exe.display());
+
+        let claude = hook_command(&exe, "lzb-sess-7");
+        assert!(claude.contains(&quoted), "bare/relative exe in: {claude}");
+
+        let codex = hook_command_keyfile(&exe, &hook_backend_key_path(TerminalId(7)));
+        assert!(codex.contains(&quoted), "bare/relative exe in: {codex}");
+    }
+
     #[test]
     fn hook_command_quotes_exe_and_bakes_backend_key() {
         let cmd = hook_command(Path::new("/opt/lazy box/lazybox"), "lzb-sess-7");

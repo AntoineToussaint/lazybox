@@ -1266,7 +1266,12 @@ mod tests {
             owned(&["set-option", "-g", "set-clipboard", "on"]),
             owned(&["set-option", "-g", "allow-passthrough", "on"]),
         ];
-        let hyperlinks = owned(&["set-option", "-as", "terminal-features", "xterm*:hyperlinks"]);
+        let hyperlinks = owned(&[
+            "set-option",
+            "-as",
+            "terminal-features",
+            "xterm*:hyperlinks",
+        ]);
         let focus_events = owned(&["set-option", "-g", "focus-events", "on"]);
         let no_alt_screen = owned(&["set-option", "-g", "alternate-screen", "off"]);
         let history = owned(&["set-option", "-g", "history-limit", "50000"]);
@@ -1274,7 +1279,12 @@ mod tests {
             server_option_cmds(50_000),
             vec![
                 owned(&["set-option", "-g", "mouse", "off"]),
-                owned(&["set-option", "-g", "terminal-overrides", ",xterm*:smcup@:rmcup@"]),
+                owned(&[
+                    "set-option",
+                    "-g",
+                    "terminal-overrides",
+                    ",xterm*:smcup@:rmcup@"
+                ]),
                 hyperlinks,
                 clipboard[0].clone(),
                 clipboard[1].clone(),
@@ -1301,7 +1311,10 @@ mod tests {
     /// "right-click never opens URLs under the tmux backend" report.
     #[test]
     fn conf_advertises_hyperlinks() {
-        assert!(transparent_conf(DEFAULT_HISTORY_LIMIT).contains("set -as terminal-features 'xterm*:hyperlinks'\n"));
+        assert!(
+            transparent_conf(DEFAULT_HISTORY_LIMIT)
+                .contains("set -as terminal-features 'xterm*:hyperlinks'\n")
+        );
     }
 
     /// Both config and server-option paths enable focus-events
@@ -1464,7 +1477,8 @@ mod tests {
     fn capture_depth_matches_configured_history_limit() {
         for limit in [10_000_u32, DEFAULT_HISTORY_LIMIT, 250_000] {
             let socket = format!("lazybox-test-hist-{limit}-{}", std::process::id());
-            let backend = TmuxBackend::with_socket_and_history(&socket, limit).expect("conf written");
+            let backend =
+                TmuxBackend::with_socket_and_history(&socket, limit).expect("conf written");
             assert_eq!(backend.history_limit, limit);
             assert!(
                 backend

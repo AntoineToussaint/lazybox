@@ -416,8 +416,7 @@ async fn configured_history_limit_bounds_retained_scrollback() {
     const LINES: u32 = 2_000;
     let socket = format!("lazybox-test-hist-limit-{}", std::process::id());
     let result = timeout(TEST_DEADLINE, async {
-        let backend =
-            TmuxBackend::with_socket_and_history(&socket, LIMIT).expect("conf written");
+        let backend = TmuxBackend::with_socket_and_history(&socket, LIMIT).expect("conf written");
         let key = backend
             .spawn(
                 &[

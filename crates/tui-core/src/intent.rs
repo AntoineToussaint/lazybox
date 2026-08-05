@@ -911,6 +911,7 @@ mod tests {
     fn pr(key: &str, ci: CiStatus, review: ReviewStatus) -> Workspace {
         let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),

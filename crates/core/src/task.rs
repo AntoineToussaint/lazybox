@@ -399,6 +399,12 @@ pub struct Task {
     /// Assignees (user logins).
     #[serde(default)]
     pub assignees: Vec<String>,
+    /// Login of whoever opened this task — the PR/issue author or the
+    /// Linear issue creator. Empty when the provider didn't supply one
+    /// (older snapshots, providers without an author concept).
+    /// `#[serde(default)]` so older persisted snapshots deserialize.
+    #[serde(default)]
+    pub author: String,
     /// Auto-merge is enabled ("merge when ready" armed by someone).
     /// NOTE: this does NOT mean the PR is approved or that anything will
     /// merge right now — only that it will merge once CI + reviews pass.
@@ -777,6 +783,7 @@ mod status_tag_tests {
 
     fn base() -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "gh".into(),
                 key: "o/r#1".into(),

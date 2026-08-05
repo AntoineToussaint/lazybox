@@ -166,6 +166,7 @@ fn task(
 ) -> lazybox_core::Task {
     let repo = key.split_once('#').map(|(repo, _)| repo.to_string());
     lazybox_core::Task {
+        author: String::new(),
         id: lazybox_core::TaskId {
             source: "github".into(),
             key: key.into(),

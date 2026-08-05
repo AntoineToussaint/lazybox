@@ -49,6 +49,7 @@ fn sample_workspace() -> lazybox_core::Workspace {
         labels: vec![],
         reviewers: vec![],
         assignees: vec![],
+        author: String::new(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,
         mergeable: lazybox_core::Mergeable::Mergeable,

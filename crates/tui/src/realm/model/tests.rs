@@ -6262,6 +6262,7 @@ mod merge_focus_follow_tests {
         let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
         let segment = if is_pr { "pull" } else { "issues" };
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -9974,6 +9975,7 @@ mod destructive_confirm_tests {
     fn merge_ready_pr_without_approval(key: &str) -> Workspace {
         let num = key.rsplit_once('#').map(|(_, n)| n).unwrap_or("1");
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -11353,6 +11355,7 @@ mod focus_mode_tests {
 
     fn workspace_with_agent(key: &str) -> Workspace {
         let task = Task {
+            author: String::new(),
             id: lazybox_core::TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -11613,6 +11616,7 @@ mod jump_to_workspace_tests {
     fn task(key: &str, age: Duration) -> Task {
         let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -13189,6 +13193,7 @@ mod merge_latch_tests {
     /// several distinct rows (e.g. to navigate the sidebar between them).
     fn pr_ws_n(num: u32, state: TaskState) -> Workspace {
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("owner/repo#{num}"),
@@ -16233,6 +16238,7 @@ mod spawn_focus_steal_tests {
         use chrono::Utc;
         let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
         let task = lazybox_core::Task {
+            author: String::new(),
             id: lazybox_core::TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -16354,6 +16360,7 @@ mod repo_labels_failure_tests {
     fn pr_task_with_labels(key: &str, labels: &[&str]) -> Task {
         let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -16734,6 +16741,7 @@ mod keybinding_audit_tests {
     fn pr_workspace(key: &str, activity_rows: usize) -> Workspace {
         let num = key.rsplit_once('#').map(|(_, n)| n).unwrap_or("1");
         let task = Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),
@@ -17839,6 +17847,7 @@ mod optimistic_mutation_tests {
     fn pr_task(key: &str) -> Task {
         let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: key.into(),

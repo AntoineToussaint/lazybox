@@ -30,6 +30,7 @@ fn fixed_time() -> chrono::DateTime<Utc> {
 
 fn make_task(key: &str, minutes_old: i64) -> Task {
     Task {
+        author: String::new(),
         id: TaskId {
             source: "github".into(),
             key: key.into(),

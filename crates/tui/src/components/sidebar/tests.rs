@@ -156,6 +156,7 @@ mod status_pill_tests {
 
     pub(super) fn base_task() -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "gh".into(),
                 key: "o/r#1".into(),

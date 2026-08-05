@@ -179,6 +179,20 @@ fn mapper_author_role_when_only_creator_matches() {
 }
 
 #[test]
+fn mapper_maps_creator_to_author() {
+    let issue = make_issue("x", "ENG-2", "unstarted", Some("other"), Some("me"));
+    let task = graphql::issue_to_task(&issue, "me");
+    assert_eq!(task.author, "Creator");
+}
+
+#[test]
+fn mapper_author_empty_when_no_creator() {
+    let issue = make_issue("x", "ENG-2", "unstarted", Some("other"), None);
+    let task = graphql::issue_to_task(&issue, "me");
+    assert_eq!(task.author, "");
+}
+
+#[test]
 fn mapper_mentioned_when_neither_matches() {
     let issue = make_issue("x", "ENG-3", "unstarted", Some("a"), Some("b"));
     let task = graphql::issue_to_task(&issue, "me");

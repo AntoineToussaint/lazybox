@@ -48,6 +48,7 @@ function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
     labels: [],
     reviewers: [],
     assignees: [],
+    author: "",
     auto_merge_enabled: false,
     is_in_merge_queue: false,
     mergeable: "Unknown",

@@ -1184,14 +1184,23 @@ impl RightPane {
 
         // Breadcrumb above the title: `repo · #1234`. Dim, separated
         // by a `›`. Orients the user to "where am I?" before they
-        // read the title — yazi's cwd line plays the same role.
+        // read the title — yazi's cwd line plays the same role. The
+        // item's creator rides the far right of this top row
+        // (`opened by @author`) so "who opened this" reads as primary
+        // top-right context for PRs, issues, and Linear alike (#849) —
+        // this row is always present and short, unlike the Branch row
+        // (which is filler `Branch: -` for issues).
+        let mut crumbs: Vec<Span> = Vec::new();
         if let Some(repo) = task.repo.as_deref() {
-            let pr_num = crate::components::task_label::pr_number(task);
-            let mut crumbs: Vec<Span> = vec![
-                Span::styled(format!("{} ", icons::REPO), Style::default().fg(theme.warn)),
-                Span::styled(repo.to_string(), Style::default().fg(theme.text_strong)),
-            ];
-            if let Some(n) = pr_num {
+            crumbs.push(Span::styled(
+                format!("{} ", icons::REPO),
+                Style::default().fg(theme.warn),
+            ));
+            crumbs.push(Span::styled(
+                repo.to_string(),
+                Style::default().fg(theme.text_strong),
+            ));
+            if let Some(n) = crate::components::task_label::pr_number(task) {
                 crumbs.push(Span::styled("  ›  ", Style::default().fg(theme.chrome)));
                 crumbs.push(Span::styled(
                     format!("#{n}"),
@@ -1200,6 +1209,28 @@ impl RightPane {
                         .add_modifier(Modifier::BOLD),
                 ));
             }
+        }
+        // Skip the creator when the viewer is the author — you don't need
+        // "opened by @you" on your own PR/issue. #849 is about seeing who
+        // opened *someone else's* item, so the byline only earns its space
+        // when the author isn't the viewer.
+        if !task.author.is_empty() && task.role != lazybox_core::TaskRole::Author {
+            let opened_by = "opened by ";
+            let handle = format!("@{}", task.author);
+            let left: usize = crumbs
+                .iter()
+                .map(|s| crate::util::visual_width(s.content.as_ref()))
+                .sum();
+            let right = crate::util::visual_width(opened_by) + crate::util::visual_width(&handle);
+            // Right-align when the row has slack; otherwise keep a single
+            // space so the crumb and creator never glue together as the
+            // pane narrows.
+            let gap = (area.width as usize).saturating_sub(left + right).max(1);
+            crumbs.push(Span::raw(" ".repeat(gap)));
+            crumbs.push(Span::styled(opened_by, Style::default().fg(theme.text_dim)));
+            crumbs.push(Span::styled(handle, Style::default().fg(theme.hover)));
+        }
+        if !crumbs.is_empty() {
             lines.push(Line::from(crumbs));
         }
 
@@ -1292,7 +1323,7 @@ impl RightPane {
         // to dig through `?` to learn how to add them. Empty
         // *issues* don't get the hint for reviewers (issues have no
         // reviewers on GitHub), but they DO get the assignees hint.
-        let is_pr = task.url.contains("/pull/");
+        let is_pr = task.is_pr();
         if !task.reviewers.is_empty() {
             let mut spans: Vec<Span> = Vec::with_capacity(task.reviewers.len() * 2 + 1);
             spans.push(Span::styled(

@@ -100,6 +100,7 @@ fn github_task(
     closes_issues: Vec<lazybox_core::TaskId>,
 ) -> lazybox_core::Task {
     lazybox_core::Task {
+        author: String::new(),
         id: lazybox_core::TaskId {
             source: "github".into(),
             key: format!("o/r#{number}"),

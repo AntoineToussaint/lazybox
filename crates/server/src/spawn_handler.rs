@@ -12549,6 +12549,7 @@ mod tests {
 
     fn task_for(source: &str, key: &str) -> Task {
         Task {
+            author: String::new(),
             id: lazybox_core::TaskId {
                 source: source.into(),
                 key: key.into(),

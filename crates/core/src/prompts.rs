@@ -327,6 +327,7 @@ mod tests {
 
     fn issue(repo: &str, n: u64, title: &str, body: Option<&str>) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: format!("{repo}#{n}"),

@@ -5806,6 +5806,7 @@ mod tests {
             TaskKind::Issue => ("o/r#2", "https://github.com/o/r/issues/2"),
         };
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".to_string(),
                 key: key.to_string(),

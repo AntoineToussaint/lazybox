@@ -140,6 +140,7 @@ mod tests {
 
     fn task(labels: Vec<Label>, body: Option<&str>) -> Task {
         Task {
+            author: String::new(),
             id: TaskId {
                 source: "github".into(),
                 key: "o/r#1".into(),

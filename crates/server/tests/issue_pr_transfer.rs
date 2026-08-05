@@ -129,6 +129,7 @@ fn gh_task(key: &str, is_pr: bool, branch: Option<&str>, closes: Vec<TaskId>) ->
         format!("https://github.com/{path}/issues/{num}")
     };
     Task {
+        author: String::new(),
         id: TaskId {
             source: "github".into(),
             key: key.into(),

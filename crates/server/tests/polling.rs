@@ -161,6 +161,7 @@ fn make_task(key: &str) -> Task {
     // a GhIssue and the assertions on `workspace.pr` fail.
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
     Task {
+        author: String::new(),
         id: TaskId {
             source: "github".into(),
             key: key.into(),

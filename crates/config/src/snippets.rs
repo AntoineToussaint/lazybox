@@ -357,6 +357,26 @@ impl Snippets {
                      impact, say so plainly instead of inventing concerns.",
                 ),
             ),
+            (
+                "fixall".to_string(),
+                entry(
+                    "Review",
+                    "Apply the review findings you just produced",
+                    "Take the findings from the review you just produced and work through \
+                     them end to end. Go in severity order — highest first — and for each \
+                     finding fix the *real cause* at the `file:line` it names, not the \
+                     surface symptom. If a finding is wrong, already handled, or not worth \
+                     acting on, skip it and say so in one line rather than forcing a change \
+                     you don't believe in. Whenever a fix changes behavior, add or adjust \
+                     the test that would have caught the original problem. When you're \
+                     done, re-run the build, tests, and linter to confirm the tree is \
+                     green, and don't drag unrelated edits into the diff. Commit the fixes \
+                     with a clear message that says what was wrong and why the change is \
+                     the real fix, staging only the files you touched. Finish with a short \
+                     summary: what you fixed, what you deliberately left and why, and \
+                     anything you noticed in the code that the review missed.",
+                ),
+            ),
             // ── Git & PR ────────────────────────────────────────────
             (
                 "pr".to_string(),
@@ -1177,6 +1197,22 @@ snippets:
             assert_eq!(s.category, "Review", "`{key}` is a Review-category lens");
             assert_eq!(s.origin, SnippetOrigin::BuiltIn);
         }
+    }
+
+    /// `fixall` is the apply step paired with the review lenses (#838):
+    /// it turns a findings list into a clean, tested diff. It ships as a
+    /// Review-category built-in with a real body.
+    #[test]
+    fn builtin_ships_fixall() {
+        let b = Snippets::builtin();
+        let s = b.get("fixall").expect("`fixall` ships built-in");
+        assert_eq!(s.category, "Review");
+        assert_eq!(s.origin, SnippetOrigin::BuiltIn);
+        assert!(!s.body.is_empty());
+        assert!(
+            s.body.contains("file:line"),
+            "`fixall` fixes findings at their `file:line` anchor",
+        );
     }
 
     /// No built-in key may be a strict prefix of another. The picker's

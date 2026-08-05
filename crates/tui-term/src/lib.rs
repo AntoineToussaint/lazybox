@@ -38,9 +38,11 @@ pub fn render_to_frame(
     frame: &mut ratatui::Frame,
     area: ratatui::prelude::Rect,
 ) {
-    let (terminal, render_state, row_iter, cell_iter, shadow) = term.render_data();
+    let (terminal, render_state, row_iter, cell_iter, shadow, last_visible_cursor) =
+        term.render_data();
     if let Ok(snapshot) = render_state.update(terminal) {
-        let widget = GhosttyTerminal::new(&snapshot, row_iter, cell_iter, shadow);
+        let widget =
+            GhosttyTerminal::new(&snapshot, row_iter, cell_iter, shadow, last_visible_cursor);
         frame.render_widget(widget, area);
     }
 }

@@ -115,6 +115,10 @@ pub struct TermSession {
     /// Per-session render cache — see `GhosttyTerminal` for the
     /// dirty-tracking flow that uses it.
     shadow: Option<ratatui::buffer::Buffer>,
+    /// Last viewport cell the cursor was drawn at while genuinely
+    /// visible — see `GhosttyTerminal` for how it suppresses a stray
+    /// block from a hidden, parked cursor (#844).
+    last_visible_cursor: Option<libghostty_vt::render::CursorViewport>,
     /// Explicit `!Send + !Sync` marker — see struct doc.
     _not_send: std::marker::PhantomData<*mut ()>,
 }
@@ -223,6 +227,7 @@ impl TermSession {
             row_iter,
             cell_iter,
             shadow: None,
+            last_visible_cursor: None,
             _not_send: std::marker::PhantomData,
         })
     }
@@ -281,6 +286,7 @@ impl TermSession {
         &mut libghostty_vt::render::RowIterator<'static>,
         &mut libghostty_vt::render::CellIterator<'static>,
         &mut Option<ratatui::buffer::Buffer>,
+        &mut Option<libghostty_vt::render::CursorViewport>,
     ) {
         (
             &mut self.state.terminal,
@@ -288,6 +294,7 @@ impl TermSession {
             &mut self.row_iter,
             &mut self.cell_iter,
             &mut self.shadow,
+            &mut self.last_visible_cursor,
         )
     }
 

@@ -1094,6 +1094,12 @@ struct TerminalVt {
     /// redraws (see `GhosttyTerminal` docs / #239), so the widget
     /// walks every cell every frame.
     shadow: Option<ratatui::buffer::Buffer>,
+    /// Last viewport cell the cursor was drawn at while genuinely
+    /// visible (DECTCEM on). Lets `GhosttyTerminal` tell a blink's
+    /// hidden phase (cursor unmoved) from a genuine park-and-hide
+    /// (cursor moved off-caret) so a hidden, parked cursor doesn't
+    /// leave a stray block (#844).
+    last_visible_cursor: Option<vt::render::CursorViewport>,
     /// Deterministic fault injection for the resync retry contract.
     #[cfg(test)]
     fail_next_reset: bool,
@@ -1119,6 +1125,7 @@ impl TerminalVt {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             shadow: None,
+            last_visible_cursor: None,
             #[cfg(test)]
             fail_next_reset: false,
             _not_send: std::marker::PhantomData,
@@ -4180,6 +4187,7 @@ impl TerminalStack {
                     &mut slot.vt.row_iter,
                     &mut slot.vt.cell_iter,
                     &mut slot.vt.shadow,
+                    &mut slot.vt.last_visible_cursor,
                 );
                 frame.render_widget(widget, grid);
             }

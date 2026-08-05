@@ -182,6 +182,13 @@ pub fn role_rank(role: Option<lazybox_core::TaskRole>) -> u8 {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum VisibleRow {
+    /// Synthetic `★ Focused` group header, emitted first (above every
+    /// repo header) when the user has starred one or more workspaces
+    /// that are visible in the current mailbox/filter. Holds no data —
+    /// the starred workspace rows follow it directly, lifted out of
+    /// their repo groups regardless of which repo they belong to.
+    /// Non-selectable like the other headers; j/k skips it.
+    FocusedHeader,
     /// Repo group header. The string is the repo display name
     /// (`"owner/name"` for GitHub, the project key for Linear, or
     /// `"(no repo)"` for unattached workspaces).

@@ -2019,6 +2019,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenGlobalSearch => Action::OpenGlobalSearch,
         ActionKind::ToggleRepoGroup => Action::ToggleRepoGroup,
         ActionKind::ToggleRepoPin => Action::ToggleRepoPin,
+        ActionKind::ToggleFocusWorkspace => Action::ToggleFocusWorkspace,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
         ActionKind::UpdateBranchSelected => Action::UpdateBranchSelected,

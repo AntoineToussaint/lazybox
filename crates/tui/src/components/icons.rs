@@ -17,6 +17,11 @@ pub const REPO: &str = "";
 /// user floated to the top of the sidebar.
 pub const PIN: &str = "\u{f08d}";
 
+/// Starred / "focused" workspace (`★`, U+2605) — marks a workspace the
+/// user hand-picked into the top `Focused` section. A plain unicode
+/// star (not a Nerd Font glyph) so it renders on any terminal.
+pub const STAR: &str = "\u{2605}";
+
 // ── Activity kinds ────────────────────────────────────────────────────
 
 pub const COMMENT: &str = "";

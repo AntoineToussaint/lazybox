@@ -986,6 +986,12 @@ async fn run_embedded_realm(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),
             user_config.ui.pinned_repos.clone(),
+            user_config
+                .ui
+                .focused_workspaces
+                .iter()
+                .map(|s| lazybox_core::SessionKey::from(s.as_str()))
+                .collect(),
             user_config.setup.default_agent.clone(),
             &user_config.display,
             &ui_defaults,

@@ -2012,6 +2012,7 @@ impl<T: TerminalAdapter> Model<T> {
         attention: lazybox_config::AttentionConfig,
         collapsed_repos: std::collections::BTreeSet<String>,
         pinned_repos: Vec<String>,
+        focused_workspaces: Vec<lazybox_core::SessionKey>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
@@ -2030,6 +2031,7 @@ impl<T: TerminalAdapter> Model<T> {
             attention,
             collapsed_repos,
             pinned_repos,
+            focused_workspaces,
             default_agent,
             display,
         );

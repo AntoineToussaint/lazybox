@@ -73,6 +73,12 @@ pub struct ComputeInputs<'a> {
     /// keeps the algorithmic (alphabetical) order. A name here that
     /// has no matching group this pass is simply ignored.
     pub pinned_repos: &'a [String],
+    /// Workspace keys the user has starred ("focused"), in focus order.
+    /// A visible starred workspace is lifted out of its repo group into
+    /// the synthetic `★ Focused` section rendered first, in this order.
+    /// A key here with no matching visible workspace this pass is simply
+    /// ignored. The manual, per-workspace counterpart to [`Self::pinned_repos`].
+    pub focused_workspaces: &'a [SessionKey],
     pub attention: &'a lazybox_config::AttentionConfig,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     pub now: chrono::DateTime<chrono::Utc>,
@@ -121,14 +127,36 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         })
         .collect();
 
-    // Step 2: bucket by project. A workspace's parent project is
-    // looked up via `lazybox_core::workspace_project_key` → resolved
-    // through the daemon's project table to get the display name.
-    // Workspaces with no project_key (back-compat reads of pre-
-    // Stage-1 records OR orphans whose task.repo failed to derive)
-    // land under `(no repo)`.
+    // Step 1b: lift the starred ("focused") workspaces out of the
+    // filtered set. A visible starred workspace is gathered into the
+    // synthetic `★ Focused` section — rendered first, in focus order —
+    // regardless of which repo it belongs to, and is NOT re-listed
+    // under its repo group. A star naming a workspace not visible in
+    // the current mailbox/filter this pass is simply skipped, exactly
+    // as a pin naming an absent repo is (Step 4b). Focus is the manual,
+    // per-workspace counterpart to the repo pin.
+    let focused_set: BTreeSet<&str> = input.focused_workspaces.iter().map(|k| k.as_str()).collect();
+    let filtered_by_key: BTreeMap<&str, (&SessionKey, &Workspace)> = filtered
+        .iter()
+        .map(|(k, w)| (k.as_str(), (*k, *w)))
+        .collect();
+    let focused_rows: Vec<(&SessionKey, &Workspace)> = input
+        .focused_workspaces
+        .iter()
+        .filter_map(|key| filtered_by_key.get(key.as_str()).copied())
+        .collect();
+
+    // Step 2: bucket the non-focused workspaces by project. A
+    // workspace's parent project is looked up via
+    // `lazybox_core::workspace_project_key` → resolved through the
+    // daemon's project table to get the display name. Workspaces with
+    // no project_key (back-compat reads of pre-Stage-1 records OR
+    // orphans whose task.repo failed to derive) land under `(no repo)`.
     let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
     for (k, w) in &filtered {
+        if focused_set.contains(k.as_str()) {
+            continue;
+        }
         by_repo
             .entry(group_label(w, input.projects, input.workspaces))
             .or_default()
@@ -209,6 +237,28 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // Step 5: emit headers + workspace rows + session sub-rows.
     let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + ordered_repos.len() + 4);
     let mut summaries: BTreeMap<String, RepoSummary> = BTreeMap::new();
+
+    // Step 5a: the `★ Focused` section, first and above every repo. Only
+    // emitted when at least one starred workspace is visible this pass.
+    // Session sub-rows follow the same 2+-sessions rule as repo rows;
+    // no KindHeader split — the section is a flat, cross-repo shortlist.
+    if !focused_rows.is_empty() {
+        visible.push(VisibleRow::FocusedHeader);
+        for (k, w) in &focused_rows {
+            visible.push(VisibleRow::Workspace((*k).clone()));
+            if w.session_count() >= 2 {
+                let mut sessions: Vec<&lazybox_core::WorkspaceSession> = w.sessions.iter().collect();
+                sessions.sort_by_key(|s| s.created_at);
+                for s in sessions {
+                    visible.push(VisibleRow::Session {
+                        workspace: (*k).clone(),
+                        session_id: s.id,
+                    });
+                }
+            }
+        }
+    }
+
     for repo in &ordered_repos {
         visible.push(VisibleRow::RepoHeader(repo.clone()));
         let mut summary = RepoSummary::default();
@@ -443,6 +493,7 @@ mod tests {
             projects,
             collapsed_repos: collapsed,
             pinned_repos: &[],
+            focused_workspaces: &[],
             attention,
             agents: asking,
             now: fixed_time(),
@@ -573,6 +624,116 @@ mod tests {
             })
             .collect();
         assert_eq!(headers, ["owner/c", "owner/a", "owner/b"]);
+    }
+
+    /// A starred workspace is lifted into the `★ Focused` section at the
+    /// very top — a `FocusedHeader` first, the starred row under it — and
+    /// is NOT re-listed under its repo group.
+    #[test]
+    fn focused_workspace_lifts_into_top_section() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "owner/a"), ("kb", "owner/b")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let focus = vec![SessionKey::from("kb")];
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.focused_workspaces = &focus;
+        let out = compute_visible(inp);
+
+        // First two rows: the synthetic header then the starred row.
+        assert!(matches!(out.visible[0], VisibleRow::FocusedHeader));
+        assert!(matches!(&out.visible[1], VisibleRow::Workspace(k) if k.as_str() == "kb"));
+
+        // `kb` appears exactly once (lifted, not duplicated); its repo
+        // header still renders but with no workspace under it.
+        let kb_rows = out
+            .visible
+            .iter()
+            .filter(|r| matches!(r, VisibleRow::Workspace(k) if k.as_str() == "kb"))
+            .count();
+        assert_eq!(kb_rows, 1);
+        // The non-focused `ka` stays in its repo group.
+        let ka_after_a_header = out.visible.windows(2).any(|w| {
+            matches!(&w[0], VisibleRow::RepoHeader(n) if n == "owner/a")
+                && matches!(&w[1], VisibleRow::Workspace(k) if k.as_str() == "ka")
+        });
+        assert!(ka_after_a_header, "ka stays under owner/a");
+    }
+
+    /// The Focused section renders its rows in focus (Vec) order, and a
+    /// star naming a workspace not visible this pass is skipped — the
+    /// per-workspace parallel of the pin's skip-absent behavior.
+    #[test]
+    fn focused_section_keeps_focus_order_and_skips_absent() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "owner/a"), ("kb", "owner/b"), ("kc", "owner/c")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        // Focus kc then ka; "kz" has no workspace and must be skipped.
+        let focus = vec![
+            SessionKey::from("kc"),
+            SessionKey::from("kz"),
+            SessionKey::from("ka"),
+        ];
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.focused_workspaces = &focus;
+        let out = compute_visible(inp);
+
+        // Rows under the FocusedHeader, up to the first RepoHeader.
+        let focused: Vec<&str> = out
+            .visible
+            .iter()
+            .skip_while(|r| !matches!(r, VisibleRow::FocusedHeader))
+            .skip(1)
+            .take_while(|r| matches!(r, VisibleRow::Workspace(_)))
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(focused, ["kc", "ka"]);
+    }
+
+    /// A star naming a workspace filtered out by the current mailbox is
+    /// not surfaced — the Focused section respects the same filtered set
+    /// the repo groups do (parity with the pin, which only reorders what
+    /// the view already shows). With no visible starred rows, no
+    /// `FocusedHeader` is emitted.
+    #[test]
+    fn focused_section_respects_mailbox_filter() {
+        let mut ws = HashMap::new();
+        let w = workspace_with_task("ka", Some("owner/a"), 10);
+        ws.insert(SessionKey::from(&w.key), w);
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let focus = vec![SessionKey::from("ka")];
+        // Snoozed mailbox: the (non-snoozed) workspace isn't a member, so
+        // even though it's starred it doesn't appear anywhere.
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.mailbox = Mailbox::Snoozed;
+        inp.focused_workspaces = &focus;
+        let out = compute_visible(inp);
+        assert!(
+            !out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::FocusedHeader)),
+            "no focused header when no starred row is visible"
+        );
     }
 
     /// Collapsed repo: header only, workspace rows under it are

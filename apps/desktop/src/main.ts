@@ -1036,7 +1036,9 @@ function renderInbox(): void {
   }
 
   const rows = inboxView?.visible ?? [];
-  const workspaceRowCount = rows.filter((row) => "Workspace" in row).length;
+  const workspaceRowCount = rows.filter(
+    (row) => typeof row === "object" && "Workspace" in row,
+  ).length;
   workspaceCount.textContent = `${workspaceRowCount} workspace${
     workspaceRowCount === 1 ? "" : "s"
   }`;
@@ -1056,7 +1058,13 @@ function renderInbox(): void {
   // rows; it never reorders.
   let collapsed = false;
   for (const row of rows) {
-    if ("RepoHeader" in row) {
+    if (row === "FocusedHeader") {
+      // The synthetic `★ Focused` section leads the list, above every
+      // repo group, and never collapses (it holds starred workspaces
+      // lifted out of their repos).
+      collapsed = false;
+      workspaceList.append(renderFocusedHeader());
+    } else if ("RepoHeader" in row) {
       collapsed = collapsedRepos.has(row.RepoHeader);
       workspaceList.append(renderRepoHeader(row.RepoHeader));
     } else if ("KindHeader" in row) {
@@ -1107,6 +1115,17 @@ function renderRepoHeader(repo: string): HTMLDivElement {
     }
     renderInbox();
   });
+  return header;
+}
+
+function renderFocusedHeader(): HTMLDivElement {
+  const header = document.createElement("div");
+  header.className = "repo-header focused-header";
+  header.setAttribute("role", "presentation");
+  const label = document.createElement("span");
+  label.className = "repo-label";
+  label.textContent = "★ Focused";
+  header.append(label);
   return header;
 }
 

@@ -38,6 +38,7 @@ pub mod client_kv;
 pub mod client_runtime;
 pub mod error_inbox;
 pub mod event_forward;
+pub mod auto_wait;
 pub mod keep_awake;
 pub mod lifecycle;
 pub mod metrics;

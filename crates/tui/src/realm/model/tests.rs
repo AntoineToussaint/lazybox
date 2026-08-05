@@ -3146,6 +3146,69 @@ snippets:
         );
     }
 
+    /// #847: the bulk "resume all rate-limited agents" action injects a
+    /// settle-gated "continue" into every limit-blocked agent — and ONLY
+    /// those, never a merely-working or asking one.
+    #[test]
+    fn resume_rate_limited_targets_only_limit_blocked_agents() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent(), agent()]);
+        // ws1 + ws3 rate-limited, ws2 merely working.
+        for (i, state) in [
+            AgentState::LimitReached,
+            AgentState::Working,
+            AgentState::LimitReached,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        let mut injected: Vec<(u64, &str)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    prompt,
+                    submit: true,
+                    ..
+                } => Some((terminal_id.0, prompt.as_str())),
+                _ => None,
+            })
+            .collect();
+        injected.sort();
+        assert_eq!(
+            injected,
+            vec![(1, "continue"), (3, "continue")],
+            "only the two limit-blocked agents get the settle-gated resume, \
+             never the working one: {cmds:?}",
+        );
+    }
+
+    /// #847: with nothing rate-limited, the bulk resume dispatches no
+    /// inject and flashes a hint rather than silently doing nothing.
+    #[test]
+    fn resume_rate_limited_with_no_targets_is_a_no_op_hint() {
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, _keys) = model_with_broadcast_targets(&[agent()]);
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "no agent is rate-limited, so nothing is injected: {cmds:?}",
+        );
+    }
+
     /// #836: a session-less workspace with NO repo scope (nothing to
     /// spawn into) stays skipped — no confirm gate, named in the notice.
     #[test]

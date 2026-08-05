@@ -1100,6 +1100,42 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// Move the cursor onto the next workspace whose agent is blocked on
+    /// a usage / rate limit, starting AFTER the current row and wrapping
+    /// (`Shift-L`, #847) — the rate-limited analog of
+    /// [`Self::focus_next_asking_workspace`].
+    pub fn focus_next_limit_reached_workspace(&mut self) -> bool {
+        let keys_order = self.visible_workspace_keys();
+        let current = self.selected_session_key().cloned();
+        let Some(target) = crate::agent_attention::next_limit_reached_workspace(
+            &self.agents,
+            &keys_order,
+            current.as_ref(),
+        ) else {
+            return false;
+        };
+        self.focus_workspace_key(&target)
+    }
+
+    /// Every visible workspace whose agent is blocked on a usage / rate
+    /// limit, in sidebar order — the target set for the bulk
+    /// "resume all rate-limited agents" action (#847).
+    pub fn limit_reached_workspace_keys(&self) -> Vec<SessionKey> {
+        crate::agent_attention::limit_reached_workspaces(&self.agents, &self.visible_workspace_keys())
+    }
+
+    /// The visible workspace keys in sidebar (top-down) order — shared by
+    /// the attention jumps and the rate-limited target set.
+    fn visible_workspace_keys(&self) -> Vec<SessionKey> {
+        self.visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Move the cursor onto the next workspace whose PR has failing
     /// (or mixed) CI, starting AFTER the current row and wrapping —
     /// so `Shift-F` cycles through broken PRs rather than re-selecting

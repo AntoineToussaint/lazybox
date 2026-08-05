@@ -109,6 +109,23 @@ pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
     "mcp servers need authentication",
 ];
 
+/// Phrases Claude Code renders ONLY when it has hit its provider usage /
+/// monthly limit and paused on the "limit reached — Wait?" prompt (issue
+/// #847). No normal chat output produces "usage limit reached" as a live
+/// gate, so — like [`CLAUDE_BLOCKING_INTERSTITIAL_PHRASES`] — a single
+/// match is enough confidence to classify the distinct
+/// [`AgentState::LimitReached`] rather than a generic `InputNeeded`.
+/// Lowercase; matched against the space-free buffer so the
+/// cursor-positioned banner (whose inter-word gaps arrive as cursor moves
+/// rather than space bytes) still matches. The reset countdown Claude
+/// prints alongside (`resets 3pm`) is deliberately NOT required here —
+/// the wording of the time varies and the banner alone is the block.
+pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
+    "usage limit reached",
+    "reached your usage limit",
+    "monthly limit reached",
+];
+
 /// Substring "any-of" match. Plain text in; bytes should be passed
 /// through [`strip_ansi_lossy`] first so escape sequences don't split
 /// the markers.
@@ -262,6 +279,9 @@ enum Trigger {
     /// A startup blocker an unattended spawn can't clear — an MCP server
     /// awaiting interactive auth (`CLAUDE_BLOCKING_INTERSTITIAL_PHRASES`).
     BlockingInterstitial,
+    /// A provider usage / monthly-limit block
+    /// (`CLAUDE_USAGE_LIMIT_PHRASES`) — the distinct `LimitReached` state.
+    UsageLimit,
     /// Selection arrow + numbered options, more recent than the composer.
     StructuralChooser,
     /// `Esc to cancel` permission footer + numbered options.
@@ -473,6 +493,22 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
         return d;
     }
 
+    // A provider usage-limit block (#847) is a distinct blocked state, not
+    // a generic prompt: classify it as `LimitReached` so it gets its own
+    // pill / jump / filter / bulk-resume. Placed BEFORE the chooser and
+    // consent branches — Claude's limit prompt itself renders a numbered
+    // "Wait / Exit" chooser, which would otherwise read as a plain
+    // `InputNeeded`. Gated only against a live working anchor painted
+    // after it (the agent resumed = the block cleared), like the
+    // interstitial above and never on the composer footer, since the
+    // banner renders alongside the drawn composer.
+    let limit_pos = last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_PHRASES);
+    if marker_at_least_as_recent(limit_pos, work_anchor_against(limit_pos)) {
+        d.state = AgentState::LimitReached;
+        d.trigger = Some(Trigger::UsageLimit);
+        return d;
+    }
+
     // WEAK: arrow + numbered options, gated on the full composer footer
     // (incl. `Tab to amend`) so injected prose / parked prompts stay Idle.
     if has_arrow && has_chooser && chooser_live && (has_recency_anchor || corroborated) {
@@ -567,7 +603,10 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     // `claude_state_of`) so the spawn-time injector's readiness polling
     // doesn't double-emit the decision trace on every chunk.
     let decision = classify(&s, &compact, None);
-    if decision.state == AgentState::InputNeeded {
+    if matches!(
+        decision.state,
+        AgentState::InputNeeded | AgentState::LimitReached
+    ) {
         return false;
     }
     // Folder-trust prompts don't always render as a numbered chooser
@@ -619,6 +658,7 @@ fn dialog_marker_pos(compact: &str) -> Option<usize> {
         chooser_pos(compact),
         last_compact_match_pos(compact, CLAUDE_STANDALONE_PROMPT_PHRASES),
         last_compact_match_pos(compact, CLAUDE_CHOICE_MARKERS),
+        last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_PHRASES),
         compact.rfind("esctocancel"),
     ]
     .into_iter()
@@ -1812,6 +1852,49 @@ mod tests {
             claude_state(recovered.as_bytes()),
             Some(AgentState::Working)
         );
+    }
+
+    #[test]
+    fn usage_limit_prompt_reads_as_limit_reached() {
+        // The #847 block: Claude hit its usage cap and paused on the
+        // "limit reached — Wait?" prompt. It must classify as the distinct
+        // `LimitReached`, NOT a generic `InputNeeded`, even though the
+        // prompt renders a numbered Wait/Exit chooser (which alone would
+        // read `InputNeeded`). The reset countdown rides along but isn't
+        // required for the match.
+        let blocked = "Claude usage limit reached ∙ resets 3pm\n❯ 1. Wait until it resets\n  2. Exit\n? for shortcuts";
+        assert_eq!(
+            claude_state(blocked.as_bytes()),
+            Some(AgentState::LimitReached),
+        );
+        // A limit-blocked composer never reports ready — a pasted prompt
+        // would be eaten by the Wait/Exit gate.
+        assert!(!claude_ready_for_prompt(blocked.as_bytes()));
+
+        // The "reached your usage limit" phrasing fires the same way.
+        let alt = "You've reached your usage limit for the month.\n? for shortcuts";
+        assert_eq!(claude_state(alt.as_bytes()), Some(AgentState::LimitReached));
+    }
+
+    #[test]
+    fn usage_limit_clears_once_the_agent_resumes() {
+        // After a re-auth / reset the agent streams again: a live working
+        // status line painted AFTER the banner supersedes the block, so it
+        // no longer pins `LimitReached`.
+        let recovered =
+            "Claude usage limit reached ∙ resets 3pm\n✻ (8s · 412 tokens · esc to interrupt)";
+        assert_eq!(
+            claude_state(recovered.as_bytes()),
+            Some(AgentState::Working),
+        );
+    }
+
+    #[test]
+    fn ordinary_prose_mentioning_a_limit_is_not_limit_reached() {
+        // The phrase must be distinctive enough that chat prose about
+        // limits doesn't trip it — only the exact banner wording matches.
+        let prose = "I checked and you have not reached any limit yet.\n? for shortcuts";
+        assert_eq!(claude_state(prose.as_bytes()), Some(AgentState::Idle));
     }
 
     #[test]

@@ -428,12 +428,36 @@ impl Sidebar {
                         crate::util::notice_slug(&workspace.name)
                     ));
                 }
-                // Only a change in asking-ness can change the visible set
-                // (it feeds the per-repo attention counter); a done- or
-                // working-only change reads fresh at render time, and the
-                // daemon-event path forces the redraw via
-                // `displays_agent_state`.
-                if change.asking_changed {
+                // Rising edge into a usage-limit block (#847) — alert on
+                // the same path as asking/done so N agents all hitting the
+                // cap at once surface without visiting each terminal. The
+                // footer notice names the bulk-resume key.
+                if change.now_limit_reached
+                    && let Some(workspace) = self.workspaces.get(session_key)
+                {
+                    if self.attention.desktop_notify {
+                        let title = format!("lazybox — {} rate-limited", workspace.name);
+                        let body = workspace
+                            .primary_task()
+                            .map(|t| t.title.clone())
+                            .unwrap_or_else(|| workspace.name.clone());
+                        self.pending_notifications.push(PendingNotification {
+                            title,
+                            body,
+                            workspace_key: session_key.clone(),
+                        });
+                    }
+                    self.pending_asking_notices.push(format!(
+                        "{} hit its usage limit — Shift-L to jump, Shift-K to resume all",
+                        crate::util::notice_slug(&workspace.name)
+                    ));
+                }
+                // Only a change in asking-ness or rate-limited-ness can
+                // change the visible set (both feed their own attention
+                // axis); a done- or working-only change reads fresh at
+                // render time, and the daemon-event path forces the redraw
+                // via `displays_agent_state`.
+                if change.asking_changed || change.limit_changed {
                     self.recompute_visible();
                 }
             }
@@ -510,6 +534,10 @@ fn aggregate_agent_state(
     states: impl Iterator<Item = lazybox_ipc::AgentState>,
 ) -> Option<lazybox_ipc::AgentState> {
     states.max_by_key(|state| match state {
+        // A usage-limit block outranks even `InputNeeded`: it's the most
+        // urgent "you must act (externally) before this agent moves" state
+        // across a workspace's terminals (#847).
+        lazybox_ipc::AgentState::LimitReached => 6,
         lazybox_ipc::AgentState::InputNeeded => 5,
         lazybox_ipc::AgentState::Working => 4,
         lazybox_ipc::AgentState::Done => 3,

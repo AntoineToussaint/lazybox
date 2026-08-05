@@ -989,6 +989,17 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_hint("no failing PRs");
                 }
             }
+            Action::JumpToLimited => {
+                if self.sidebar.focus_next_limit_reached_workspace() {
+                    self.set_focus(PaneFocus::Sidebar);
+                    self.redraw = true;
+                } else {
+                    self.flash_hint("no rate-limited agents");
+                }
+            }
+            Action::ResumeRateLimited => {
+                cmds.extend(self.resume_rate_limited_agents());
+            }
             Action::ToggleActivityPane => {
                 if let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone()) {
                     self.activity_pane.cycle(

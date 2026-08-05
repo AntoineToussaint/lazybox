@@ -41,6 +41,7 @@ impl ClientRuntime {
         if let Some(task) = crate::keep_awake::spawn(&config) {
             tasks.push(task);
         }
+        tasks.push(crate::auto_wait::spawn(&config));
         tasks.push(crate::agent_updates::spawn_scheduled(config.clone()));
         if let Some(slack) = options.slack
             && let Some(task) = crate::slack::spawn(config, slack)

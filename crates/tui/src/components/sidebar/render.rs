@@ -997,6 +997,9 @@ impl Sidebar {
                 max_pr_num_width,
                 asking: workspace
                     .is_some_and(|w| crate::agent_attention::workspace_is_asking(w, &self.agents)),
+                limit_reached: workspace.is_some_and(|w| {
+                    crate::agent_attention::workspace_is_limit_reached(w, &self.agents)
+                }),
                 working: workspace
                     .is_some_and(|w| crate::agent_attention::workspace_is_working(w, &self.agents)),
                 done: workspace

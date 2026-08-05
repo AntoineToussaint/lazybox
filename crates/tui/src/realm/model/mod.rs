@@ -1095,6 +1095,11 @@ pub struct Model<T: TerminalAdapter> {
     /// toggles expand/collapse on the card. Crossterm doesn't
     /// report double-clicks natively — we synthesize them here.
     last_click: Option<(u16, u16, std::time::Instant)>,
+    /// Screen rect of the footer's `… +N ? all` overflow cell, set on
+    /// every render (`None` when the hint bar fits). A left-click inside
+    /// it opens `?` so the hidden hints are reachable instead of the
+    /// count being a dead end (#805).
+    footer_overflow_rect: Option<Rect>,
     /// True if the user has typed at least one non-Tab key since
     /// focus entered the terminal pane. While `false`, Tab in the
     /// terminal pane cycles focus like everywhere else; once the
@@ -1724,6 +1729,7 @@ impl<T: TerminalAdapter> Model<T> {
             terminal_leader_armed: false,
             terminal_leader_highlight: None,
             last_click: None,
+            footer_overflow_rect: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
             sync_error_source: None,
@@ -4195,18 +4201,40 @@ impl<T: TerminalAdapter> Model<T> {
         // Universal hints appended to panes where their shortcuts are
         // available. A live terminal owns its keys, so its command
         // leader above is the only steady-state gateway hint.
+        //
+        // Two tiers: `globals` are the escape hatches (`?` help, `q q`
+        // quit) that must stay findable (#100), and `evergreen` is the
+        // low-value tour hint that the footer drops FIRST so
+        // context-relevant bindings survive truncation ahead of it
+        // (#805). Both honor the terminal availability filter.
+        let make_hint = |def: &lazybox_tui_core::action::ActionDef| crate::pane::Binding {
+            keys: def.effective_keys_display(&self.action_key_overrides),
+            label: std::borrow::Cow::Borrowed(def.label),
+        };
         let globals: Vec<crate::pane::Binding> = {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
-            let tail = [ActionKind::OpenHelp, ActionKind::OpenTour, ActionKind::Quit]
-                .map(ActionDef::for_kind);
-            tail.iter()
+            [ActionKind::OpenHelp, ActionKind::Quit]
+                .map(ActionDef::for_kind)
+                .iter()
                 .filter(|def| self.focus != PaneFocus::Terminals || def.available_in_terminal())
-                .map(|def| crate::pane::Binding {
-                    keys: def.effective_keys_display(&self.action_key_overrides),
-                    label: std::borrow::Cow::Borrowed(def.label),
-                })
+                .map(|def| make_hint(def))
                 .collect()
         };
+        let evergreen: Vec<crate::pane::Binding> = {
+            use lazybox_tui_core::action::{ActionDef, ActionKind};
+            let tour = ActionDef::for_kind(ActionKind::OpenTour);
+            (self.focus != PaneFocus::Terminals || tour.available_in_terminal())
+                .then(|| make_hint(tour))
+                .into_iter()
+                .collect()
+        };
+        // Effective help key for the overflow cell's "press <key> for
+        // all" label — resolved here so a remap of `OpenHelp` is honored
+        // (#805).
+        let help_key = lazybox_tui_core::action::ActionDef::for_kind(
+            lazybox_tui_core::action::ActionKind::OpenHelp,
+        )
+        .effective_keys_display(&self.action_key_overrides);
         // While a sticky error is pinned, advertise how to inspect its
         // full text and dismiss it right in the hint bar (#453). Inserted
         // just before `quit` so #100's quit guarantee survives narrow
@@ -4313,6 +4341,7 @@ impl<T: TerminalAdapter> Model<T> {
             (String::new(), Default::default(), String::new())
         };
         let mut captured_area = Rect::default();
+        let mut footer_overflow: Option<Rect> = None;
         let _ = self.terminal.draw(|f| {
             let area = f.area();
             captured_area = area;
@@ -4366,12 +4395,17 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
 
-            // Footer: keymap + globals + polling status + notice.
-            crate::realm::components::footer::render(
+            // Footer: keymap + globals + polling status + notice. The
+            // returned rect (if any) is the `… +N ? all` overflow cell,
+            // stashed so a click on it opens `?` — the hidden hints
+            // (#805).
+            footer_overflow = crate::realm::components::footer::render(
                 f,
                 footer_area,
                 &keymap,
                 &globals,
+                &evergreen,
+                help_key.as_ref(),
                 polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
                 notice.as_ref(),
             );
@@ -4422,6 +4456,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
         });
         self.layout.last_area = captured_area;
+        self.footer_overflow_rect = footer_overflow;
         // Resize commands are queued by the terminal stack's render
         // path each time a slot's rect changes. Drain + ship them so
         // libghostty's PTY learns the new size — without this,

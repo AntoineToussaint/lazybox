@@ -1211,6 +1211,22 @@ impl<T: TerminalAdapter> Model<T> {
                     self.sync_panes();
                     self.redraw = true;
                 }
+                // A left-click on the footer's `… +N ? all` overflow
+                // cell opens `?` so the elided hints are reachable — the
+                // count is no longer a dead end (#805). The footer sits
+                // outside every pane rect, so this is the only handler
+                // that claims the click; checked before pane routing.
+                if matches!(button, crossterm::event::MouseButton::Left)
+                    && self
+                        .footer_overflow_rect
+                        .is_some_and(|r| rect_contains(r, m.column, m.row))
+                {
+                    self.q_latch.disarm();
+                    self.cancel_leader_chords();
+                    self.mount_help_ask();
+                    self.redraw = true;
+                    return;
+                }
                 let right_click_span =
                     matches!(button, crossterm::event::MouseButton::Right).then(|| {
                         tracing::info_span!("terminal_right_click", column = m.column, row = m.row)

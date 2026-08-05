@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { DiffFileDto, WorkspaceDiffDto } from "./protocol";
-import { buildDiffView, fileHeading } from "./diff_view";
+import { MAX_DIFF_LINES, buildDiffView, fileHeading } from "./diff_view";
 
 function file(overrides: Partial<DiffFileDto> & { path: string }): DiffFileDto {
   return {
@@ -136,5 +136,91 @@ describe("buildDiffView", () => {
       diff({ files: [file({ path: "a.rs" })], truncated: true }),
     );
     expect(view.querySelector(".diff-truncated")).not.toBeNull();
+  });
+
+  it("caps how many lines it renders and flags the overflow", () => {
+    const overflow = MAX_DIFF_LINES + 500;
+    const lines = Array.from({ length: overflow }, (_, i) => ({
+      kind: "Addition" as const,
+      text: `+line ${i}`,
+      old_line: null,
+      new_line: i + 1,
+    }));
+    const view = buildDiffView(
+      diff({
+        files: [
+          file({
+            path: "big.rs",
+            hunks: [
+              {
+                header: `@@ -1 +1,${overflow} @@`,
+                old_start: 1,
+                new_start: 1,
+                lines,
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    // Never build more DOM rows than the budget, however big the diff.
+    expect(view.querySelectorAll(".diff-line").length).toBeLessThanOrEqual(
+      MAX_DIFF_LINES,
+    );
+    const notice = view.querySelector(".diff-truncated");
+    expect(notice?.textContent).toContain("too large");
+  });
+
+  it("renders a diff of exactly the budget in full, unflagged", () => {
+    // One hunk header + (MAX - 1) lines = exactly MAX_DIFF_LINES rows.
+    const lines = Array.from({ length: MAX_DIFF_LINES - 1 }, (_, i) => ({
+      kind: "Addition" as const,
+      text: `+line ${i}`,
+      old_line: null,
+      new_line: i + 1,
+    }));
+    const view = buildDiffView(
+      diff({
+        files: [
+          file({
+            path: "exact.rs",
+            hunks: [
+              { header: "@@ -1 +1 @@", old_start: 1, new_start: 1, lines },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(view.querySelectorAll(".diff-line").length).toBe(MAX_DIFF_LINES);
+    expect(view.querySelector(".diff-truncated")).toBeNull();
+  });
+
+  it("does not flag a diff that fits within the budget", () => {
+    const view = buildDiffView(
+      diff({
+        files: [
+          file({
+            path: "small.rs",
+            hunks: [
+              {
+                header: "@@ -1 +1 @@",
+                old_start: 1,
+                new_start: 1,
+                lines: [
+                  {
+                    kind: "Addition",
+                    text: "+one line",
+                    old_line: null,
+                    new_line: 1,
+                  },
+                ],
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    expect(view.querySelector(".diff-truncated")).toBeNull();
   });
 });

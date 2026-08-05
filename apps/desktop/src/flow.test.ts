@@ -558,6 +558,11 @@ describe("credential-free desktop workflow", () => {
     await vi.waitFor(() => expect(dialog("diff-dialog").open).toBe(true));
     expect(element("diff-body").textContent).toContain("src/main.rs");
     expect(element("diff-body").textContent).toContain("+let x = 1;");
+
+    // While the reader is up it is a modal: global shortcuts must not
+    // leak to the inbox behind it. `f` (open filter menu) stays inert.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "f" }));
+    expect(element("filter-menu").classList.contains("hidden")).toBe(true);
   });
 
   it("sends automation, snooze, sync, and notes commands from the detail pane", async () => {

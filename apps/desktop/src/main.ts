@@ -3426,7 +3426,8 @@ function handleKeyboard(event: KeyboardEvent): void {
     setupDialog.open ||
     confirmDialog.open ||
     newWorkspaceDialog.open ||
-    snippetDialog.open
+    snippetDialog.open ||
+    diffDialog.open
   ) {
     return;
   }

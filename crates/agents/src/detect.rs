@@ -498,12 +498,23 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // pill / jump / filter / bulk-resume. Placed BEFORE the chooser and
     // consent branches — Claude's limit prompt itself renders a numbered
     // "Wait / Exit" chooser, which would otherwise read as a plain
-    // `InputNeeded`. Gated only against a live working anchor painted
-    // after it (the agent resumed = the block cleared), like the
-    // interstitial above and never on the composer footer, since the
-    // banner renders alongside the drawn composer.
+    // `InputNeeded`.
+    //
+    // Gated like the STRONG consent phrases (`resting_pos`), NOT like the
+    // interstitial (work-anchor only): the limit prompt is a blocking
+    // dialog that REPLACES the composer, so a live block has no resting
+    // `? for shortcuts` / bypass footer beneath it. When the same phrase
+    // sits ABOVE a redrawn resting footer it's stale scrollback — the
+    // agent finished a turn whose output merely MENTIONED a usage limit
+    // ("you've reached your usage limit before …") — and must stay Idle.
+    // Erring toward this false-negative rather than a false-positive
+    // matters here because a positive can fire the opt-in auto-`Wait`
+    // keystroke; a stray keystroke into an idle composer is worse than
+    // missing a block the user can still act on manually. A live working
+    // anchor painted after the phrase suppresses it the same way (the
+    // agent resumed = the block cleared).
     let limit_pos = last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_PHRASES);
-    if marker_at_least_as_recent(limit_pos, work_anchor_against(limit_pos)) {
+    if marker_at_least_as_recent(limit_pos, resting_pos.max(work_anchor_against(limit_pos))) {
         d.state = AgentState::LimitReached;
         d.trigger = Some(Trigger::UsageLimit);
         return d;
@@ -1861,8 +1872,10 @@ mod tests {
         // `LimitReached`, NOT a generic `InputNeeded`, even though the
         // prompt renders a numbered Wait/Exit chooser (which alone would
         // read `InputNeeded`). The reset countdown rides along but isn't
-        // required for the match.
-        let blocked = "Claude usage limit reached ∙ resets 3pm\n❯ 1. Wait until it resets\n  2. Exit\n? for shortcuts";
+        // required for the match. A live block REPLACES the composer, so
+        // there's no resting footer beneath the chooser.
+        let blocked =
+            "Claude usage limit reached ∙ resets 3pm\n❯ 1. Wait until it resets\n  2. Exit";
         assert_eq!(
             claude_state(blocked.as_bytes()),
             Some(AgentState::LimitReached),
@@ -1872,8 +1885,26 @@ mod tests {
         assert!(!claude_ready_for_prompt(blocked.as_bytes()));
 
         // The "reached your usage limit" phrasing fires the same way.
-        let alt = "You've reached your usage limit for the month.\n? for shortcuts";
+        let alt = "You've reached your usage limit for the month.";
         assert_eq!(claude_state(alt.as_bytes()), Some(AgentState::LimitReached));
+    }
+
+    #[test]
+    fn a_usage_limit_phrase_above_a_resting_composer_is_stale_scrollback() {
+        // Regression for the false-positive the review caught: a finished
+        // turn whose OUTPUT merely mentioned a usage limit, now at rest
+        // with the composer footer redrawn BELOW the phrase, must read
+        // Idle — not LimitReached (which would flash a spurious pill and,
+        // with auto-`Wait` on, submit a stray keystroke into the idle
+        // composer). Gating the limit branch on the resting footer, like
+        // the STRONG consent phrases, is what suppresses it.
+        let stale = "You've reached your usage limit before, but you're fine now.\n? for shortcuts";
+        assert_eq!(claude_state(stale.as_bytes()), Some(AgentState::Idle));
+        // The bypass-mode footer lazybox actually runs under
+        // (`--dangerously-skip-permissions`) suppresses it too.
+        let bypass =
+            "earlier you reached your usage limit\nbypass permissions on (shift+tab to cycle)";
+        assert_eq!(claude_state(bypass.as_bytes()), Some(AgentState::Idle));
     }
 
     #[test]

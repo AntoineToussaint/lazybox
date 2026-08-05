@@ -437,9 +437,9 @@ impl Sidebar {
         self.inner.focus_next_limit_reached_workspace()
     }
 
-    /// See `Sidebar::limit_reached_workspace_keys`.
-    pub fn limit_reached_workspace_keys(&self) -> Vec<lazybox_core::SessionKey> {
-        self.inner.limit_reached_workspace_keys()
+    /// See `Sidebar::limit_reached_terminals`.
+    pub fn limit_reached_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.limit_reached_terminals()
     }
 
     /// Move the cursor onto the `n`th (1-based) agent workspace in

@@ -27,9 +27,13 @@ use tokio::sync::broadcast;
 
 use crate::ServerConfig;
 
-/// The byte the daemon writes to accept the limit prompt's default (Wait)
-/// option — a bare carriage return, exactly what a user pressing Enter on
-/// the chooser sends.
+/// The byte the daemon writes to accept the limit prompt — a bare
+/// carriage return, exactly what a user pressing Enter on the chooser
+/// sends. This *assumes* the prompt highlights "Wait" (keep the session,
+/// wait for reset) as its default option, which is why the policy is
+/// opt-in and off by default: if a future Claude build ever defaulted the
+/// highlight to "Exit", Enter would take that instead. A keystroke, not a
+/// settle-gated paste — a chooser answer must not wait for a composer.
 const WAIT_KEYSTROKE: &[u8] = b"\r";
 
 /// Spawn the auto-wait watcher. Always runs (the task is cheap and
@@ -90,6 +94,12 @@ async fn run<F, P, Fut>(
                 ..
             }) => terminal_id,
             Ok(_) => continue,
+            // Best-effort: a lagged receiver may have dropped a
+            // `LimitReached` transition, so auto-Wait can miss it. Unlike
+            // `keep_awake` we can't safely recompute from the states map
+            // (no per-terminal "already pressed" latch, so a rescan could
+            // double-press). The user's manual `Shift-K` bulk resume is
+            // the backstop.
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         };

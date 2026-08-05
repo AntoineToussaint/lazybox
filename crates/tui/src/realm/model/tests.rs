@@ -3209,6 +3209,54 @@ snippets:
         );
     }
 
+    /// #847 (review finding): a workspace with two agents where only the
+    /// HIGHER-id one is rate-limited must resume THAT terminal, not the
+    /// lower-id working sibling. Targeting the workspace and routing
+    /// through its lowest-id agent (as broadcast does) would inject
+    /// "continue" into the working agent and skip the blocked one.
+    #[test]
+    fn resume_rate_limited_targets_the_blocked_terminal_not_a_working_sibling() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        // One workspace with agent terminal 1; add a second agent (id 2)
+        // into the SAME workspace.
+        let (mut m, keys) = model_with_broadcast_targets(&[agent()]);
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: keys[0].clone(),
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        // Lower-id agent is working; only the higher-id one is blocked.
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        });
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::LimitReached,
+        });
+
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        let injected: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            injected,
+            vec![2],
+            "only the blocked terminal (2) resumes, never the working sibling (1): {cmds:?}",
+        );
+    }
+
     /// #836: a session-less workspace with NO repo scope (nothing to
     /// spawn into) stays skipped — no confirm gate, named in the notice.
     #[test]

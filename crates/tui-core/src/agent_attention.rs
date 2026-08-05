@@ -238,21 +238,6 @@ pub fn next_limit_reached_workspace(
     })
 }
 
-/// Every workspace key currently blocked on a usage / rate limit, in
-/// `keys_order` (the sidebar's visible order). The target set for the
-/// bulk "resume all rate-limited agents" action (#847) — restricting the
-/// broadcast fan-out to exactly the limit-blocked workspaces.
-pub fn limit_reached_workspaces(
-    states: &HashMap<SessionKey, AgentState>,
-    keys_order: &[SessionKey],
-) -> Vec<SessionKey> {
-    keys_order
-        .iter()
-        .filter(|k| matches!(states.get(*k), Some(AgentState::LimitReached)))
-        .cloned()
-        .collect()
-}
-
 /// Generic "advance the cursor to the next flagged row" sweep: pick
 /// the next key in `keys_order` that is a member of `flagged`,
 /// starting after `current` and wrapping. `None` when none match.
@@ -437,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn limit_reached_edges_and_target_set() {
+    fn limit_reached_edges_and_jump() {
         // Entering the block reports the rising edge; leaving it flips
         // `limit_changed` without re-alerting.
         let mut states = HashMap::new();
@@ -447,20 +432,14 @@ mod tests {
         let ch = apply_agent_state(&mut states, &ws_key(1), Working);
         assert!(ch.limit_changed && !ch.now_limit_reached);
 
-        // The bulk-resume target set is exactly the limit-blocked
-        // workspaces, in visible order — never a merely-asking or working
-        // one.
+        // The `Shift-L` jump advances only across the limit-blocked rows,
+        // never a merely-asking or working one, and wraps.
         let mut states = HashMap::new();
         states.insert(ws_key(1), LimitReached);
         states.insert(ws_key(2), InputNeeded);
         states.insert(ws_key(3), LimitReached);
         states.insert(ws_key(4), Working);
         let order = [ws_key(1), ws_key(2), ws_key(3), ws_key(4)];
-        assert_eq!(
-            limit_reached_workspaces(&states, &order),
-            vec![ws_key(1), ws_key(3)],
-        );
-        // The jump predicate advances only across the limit-blocked rows.
         assert_eq!(
             next_limit_reached_workspace(&states, &order, Some(&ws_key(1))),
             Some(ws_key(3)),

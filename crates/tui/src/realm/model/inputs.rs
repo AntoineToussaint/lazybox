@@ -392,25 +392,26 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspaces. Each target has a live agent (that's what `LimitReached`
     /// means), so none fall through to the spawn / skip cases.
     pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
-        let targets = self.sidebar.limit_reached_workspace_keys();
-        if targets.is_empty() {
+        let terminals = self.sidebar.limit_reached_terminals();
+        if terminals.is_empty() {
             self.flash_hint("no rate-limited agents to resume");
             return Vec::new();
         }
         let mut cmds = Vec::new();
-        let mut resumed = 0usize;
-        for key in &targets {
-            if let Some((terminal_id, is_agent)) = self.sidebar.broadcast_terminal(key) {
-                self.deliver_prompt(
-                    terminal_id,
-                    is_agent,
-                    RESUME_PROMPT,
-                    lazybox_ipc::PromptSource::Typed,
-                    &mut cmds,
-                );
-                resumed += 1;
-            }
+        for terminal_id in &terminals {
+            // Every `LimitReached` terminal is an agent (the state only
+            // comes from agent detection), so `is_agent` is always true —
+            // each gets the settle-gated `InjectPrompt`, never a shell
+            // write.
+            self.deliver_prompt(
+                *terminal_id,
+                true,
+                RESUME_PROMPT,
+                lazybox_ipc::PromptSource::Typed,
+                &mut cmds,
+            );
         }
+        let resumed = terminals.len();
         let plural = if resumed == 1 { "" } else { "s" };
         self.flash_info(format!("resuming {resumed} rate-limited agent{plural}"));
         self.redraw = true;

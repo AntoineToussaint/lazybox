@@ -1117,14 +1117,24 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
-    /// Every visible workspace whose agent is blocked on a usage / rate
-    /// limit, in sidebar order — the target set for the bulk
-    /// "resume all rate-limited agents" action (#847).
-    pub fn limit_reached_workspace_keys(&self) -> Vec<SessionKey> {
-        crate::agent_attention::limit_reached_workspaces(
-            &self.agents,
-            &self.visible_workspace_keys(),
-        )
+    /// Every agent terminal currently blocked on a usage / rate limit,
+    /// lowest id first — the exact target set for the bulk "resume all
+    /// rate-limited agents" action (`Shift-K`, #847).
+    ///
+    /// Targets *terminals*, not workspaces: a workspace's aggregate reads
+    /// `LimitReached` when ANY of its terminals is, but the resume must
+    /// inject into the blocked terminal(s) themselves — routing through
+    /// the workspace's lowest-id agent (as broadcast does) could hit a
+    /// still-working sibling and skip the blocked one entirely.
+    pub fn limit_reached_terminals(&self) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (_, state))| *state == lazybox_ipc::AgentState::LimitReached)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
     }
 
     /// The visible workspace keys in sidebar (top-down) order — shared by

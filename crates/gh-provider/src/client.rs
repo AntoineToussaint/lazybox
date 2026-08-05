@@ -6265,6 +6265,46 @@ mod tests {
             .expect("update-branch success must not report a false failure");
     }
 
+    /// Issue #822: a successful mutation carries no body `rateLimit`
+    /// block (it's a Query-root-only field), so its GraphQL budget
+    /// refresh must ride the `x-ratelimit-*` response headers GitHub
+    /// sends on every call. Before the header fallback existed a
+    /// successful mutation updated no primary budget at all, so the
+    /// `graphql` resource stayed absent — this asserts it now carries
+    /// the header-reported window.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mutation_success_refreshes_budget_from_headers() {
+        const BODY: &str =
+            r#"{"data":{"updatePullRequestBranch":{"pullRequest":{"id":"PR_kwDO"}}}}"#;
+        // A far-future reset keeps the observation inside a live window
+        // without depending on the wall clock; GitHub bills GraphQL calls
+        // against the `graphql` resource.
+        const HEADERS: &str = "x-ratelimit-resource: graphql\r\n\
+                               x-ratelimit-remaining: 4990\r\n\
+                               x-ratelimit-limit: 5000\r\n\
+                               x-ratelimit-reset: 4102444800\r\n\
+                               x-ratelimit-used: 10\r\n";
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", HEADERS, BODY, hits).await;
+        let client = make_client(&base_uri);
+
+        client
+            .update_branch("PR_kwDO")
+            .await
+            .expect("update-branch success must not report a false failure");
+
+        let graphql = client
+            .persisted_rate_state()
+            .resources
+            .remove("graphql")
+            .expect("a successful mutation must refresh the graphql budget from its headers");
+        assert_eq!(graphql.remaining, 4990);
+        assert_eq!(graphql.limit, 5000);
+        assert_eq!(graphql.used, 10);
+        assert_eq!(graphql.reset_at.timestamp(), 4102444800);
+    }
+
     /// A branch already up to date comes back as a GraphQL error that
     /// matches the idempotence markers — the caller asked for "up to
     /// date," which it is, so this must resolve to `Ok`.

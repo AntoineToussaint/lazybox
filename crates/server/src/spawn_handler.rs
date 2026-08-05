@@ -335,6 +335,20 @@ fn stabilize_exe(current: &Path, stable: &Path) -> Option<PathBuf> {
     if current == stable {
         return Some(stable.to_path_buf());
     }
+    // Serialize concurrent copies. Spawns run on the Detached command lane
+    // (up to `MAX_CONNECTION_MUTATIONS` at once — a `Shift-B` broadcast
+    // fires many together) and every one calls this. Without the lock,
+    // racing copies share the one fixed `lazybox.tmp`: a `rename` can
+    // publish it as `stable` while another copy is still writing that
+    // inode, briefly exposing a half-written binary — a hook exec in that
+    // window fails with `ETXTBSY`, the exact red error the guard exists to
+    // avoid. One daemon owns the profile (socket lock), so an in-process
+    // lock suffices. Re-checking freshness *inside* the lock also collapses
+    // the racing copies to one: the losers see the winner's copy and skip.
+    static COPY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = COPY_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
     let src = std::fs::metadata(current).ok()?;
     let fresh =
         std::fs::metadata(stable)
@@ -352,7 +366,8 @@ fn stabilize_exe(current: &Path, stable: &Path) -> Option<PathBuf> {
     std::fs::create_dir_all(stable.parent()?).ok()?;
     // Copy to a temp sibling then rename: a hook mid-exec of the old copy
     // keeps its inode (rename only swaps the directory entry, so no
-    // ETXTBSY and no torn read). `fs::copy` carries the exec bit over.
+    // ETXTBSY and no torn read). `fs::copy` carries the exec bit over. The
+    // fixed tmp name is safe only because `COPY_LOCK` serializes writers.
     let tmp = stable.with_extension("tmp");
     std::fs::copy(current, &tmp).ok()?;
     std::fs::rename(&tmp, stable).ok()?;
@@ -12889,6 +12904,71 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&stable).unwrap(),
             "a-longer-new-build-payload"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Concurrent spawns (the Detached command lane runs many at once) must
+    /// never expose a half-written `stable`: before `COPY_LOCK`, racing
+    /// copies shared the one fixed `lazybox.tmp` and a `rename` could
+    /// publish an inode another copy was still writing. A reader thread
+    /// asserts `stable` is only ever absent or the full length, and the
+    /// final bytes match the source exactly.
+    #[cfg(unix)]
+    #[test]
+    fn stabilize_exe_serializes_concurrent_copies_without_tearing() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-stabilize-conc-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("src");
+        let stable = dir.join("bin").join("lazybox");
+        // Large enough that a torn copy would be observable mid-write.
+        let payload = vec![b'z'; 4 * 1024 * 1024];
+        std::fs::write(&src, &payload).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let full_len = payload.len() as u64;
+
+        let src = Arc::new(src);
+        let stable = Arc::new(stable);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let reader = {
+            let stable = Arc::clone(&stable);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(meta) = std::fs::metadata(&*stable) {
+                        let len = meta.len();
+                        assert!(
+                            len == 0 || len == full_len,
+                            "observed a torn `stable` of {len} bytes"
+                        );
+                    }
+                }
+            })
+        };
+
+        let writers: Vec<_> = (0..8)
+            .map(|_| {
+                let src = Arc::clone(&src);
+                let stable = Arc::clone(&stable);
+                std::thread::spawn(move || stabilize_exe(&src, &stable).expect("stabilize"))
+            })
+            .collect();
+        for w in writers {
+            assert_eq!(w.join().unwrap(), *stable);
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+
+        assert_eq!(
+            std::fs::read(&*stable).unwrap(),
+            payload,
+            "final copy intact"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

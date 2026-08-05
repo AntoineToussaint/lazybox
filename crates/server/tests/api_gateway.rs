@@ -9,7 +9,7 @@ pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 mod api_gateway;
 
 use api_gateway::{
-    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCommand, DesktopEvent,
+    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCommand, DesktopEvent, DesktopInfo,
     DesktopTerminalSnapshot, GatewayOptions, HealthResponse, JsonClientFrame, JsonServerFrame,
     ProtocolResponse, UnsupportedProtocolResponse, WorkspacesResponse,
 };
@@ -197,6 +197,41 @@ fn desktop_event_tag(event: &DesktopEvent) -> &'static str {
         DesktopEvent::PollProgress { .. } => "PollProgress",
         DesktopEvent::WorktreeProgress { .. } => "WorktreeProgress",
     }
+}
+
+#[test]
+fn desktop_info_projects_the_daemons_own_agents_and_repositories() {
+    // An unconfigured daemon still offers a spawnable set: the built-in
+    // trio with the real `cursor-agent` registry id (not `cursor`), and
+    // `claude` as the default.
+    let mut config = lazybox_config::Config::default();
+    let info: DesktopInfo = api_gateway::build_desktop_info(&config);
+    assert!(info.agents.contains(&"claude".to_string()));
+    assert!(info.agents.contains(&"codex".to_string()));
+    assert!(info.agents.contains(&"cursor-agent".to_string()));
+    assert_eq!(info.default_agent, "claude");
+    assert!(info.repositories.is_empty());
+
+    // A configured daemon reports its enabled agents, its default, and its
+    // concrete `owner/repo` scopes — a whole-org scope is not a spawn
+    // target and is excluded.
+    config.setup.agents = ["codex".to_string()].into_iter().collect();
+    config.setup.default_agent = Some("codex".to_string());
+    config.setup.scopes.insert(
+        "github".into(),
+        ["github:acme/widget".into(), "github:whole-org".into()]
+            .into_iter()
+            .collect(),
+    );
+    let info = api_gateway::build_desktop_info(&config);
+    assert_eq!(info.default_agent, "codex");
+    assert!(info.agents.contains(&"codex".to_string()));
+    assert_eq!(info.repositories.len(), 1);
+    assert_eq!(info.repositories[0].label, "acme/widget");
+    assert_eq!(
+        info.repositories[0].project_key,
+        lazybox_core::ProjectKey::github("acme", "widget")
+    );
 }
 
 #[test]

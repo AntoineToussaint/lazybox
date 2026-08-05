@@ -1249,37 +1249,6 @@ fn effective_default_agent(config: &lazybox_config::Config) -> String {
         .unwrap_or_else(|| "claude".to_string())
 }
 
-fn configured_agent_ids(config: &lazybox_config::Config) -> Vec<String> {
-    let mut agents = config.setup.agents.iter().cloned().collect::<BTreeSet<_>>();
-    if agents.is_empty() {
-        agents.extend(["claude", "codex", "cursor-agent"].map(str::to_string));
-    }
-    agents.insert(effective_default_agent(config));
-    agents.into_iter().collect()
-}
-
-fn configured_repositories(config: &lazybox_config::Config) -> Vec<DesktopRepository> {
-    let mut repositories = config
-        .setup
-        .scopes
-        .get("github")
-        .into_iter()
-        .flatten()
-        .filter_map(|scope| {
-            let slug = scope.strip_prefix("github:")?;
-            let (owner, repository) = slug.split_once('/')?;
-            (!owner.is_empty() && !repository.is_empty() && !repository.contains('/')).then(|| {
-                DesktopRepository {
-                    project_key: lazybox_core::ProjectKey::github(owner, repository),
-                    label: slug.to_string(),
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    repositories.sort_by(|left, right| left.label.cmp(&right.label));
-    repositories
-}
-
 fn diagnostics_dir() -> std::path::PathBuf {
     lazybox_core::paths::state_root().join("desktop-crashes")
 }
@@ -1381,9 +1350,132 @@ fn extract_login_shell_path(output: &str) -> Option<&str> {
         .filter(|path| !path.is_empty())
 }
 
+/// Env var pointing the desktop at an existing gateway's base URL. Its
+/// presence (with a non-empty value) selects remote-attach mode and wins
+/// over `desktop.remote.url` in config.
+const DESKTOP_GATEWAY_URL_ENV: &str = "LAZYBOX_DESKTOP_GATEWAY_URL";
+/// Env var carrying that gateway's bearer token; wins over
+/// `desktop.remote.token`.
+const DESKTOP_GATEWAY_TOKEN_ENV: &str = "LAZYBOX_DESKTOP_GATEWAY_TOKEN";
+
+/// The effective gateway the desktop should attach to, resolved from env
+/// vars layered over `desktop.remote:` config. `None` means the default
+/// self-spawned local daemon.
+struct ResolvedRemote {
+    base_url: String,
+    bearer_token: String,
+}
+
+/// Resolve the remote gateway target: env vars win over config, an empty
+/// URL from either source is ignored, and a trailing slash on the URL is
+/// trimmed so `GatewayClient::url` composes cleanly. A token is optional
+/// (the gateway may run `--insecure-no-auth`).
+fn resolve_remote_gateway(
+    config: Option<&lazybox_config::RemoteGatewayConfig>,
+    env_url: Option<String>,
+    env_token: Option<String>,
+) -> Option<ResolvedRemote> {
+    let non_empty = |value: String| -> Option<String> {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    };
+    let url = env_url
+        .and_then(non_empty)
+        .or_else(|| config.map(|remote| remote.url.clone()).and_then(non_empty))?;
+    let bearer_token = env_token
+        .and_then(&non_empty)
+        .or_else(|| {
+            config
+                .map(|remote| remote.token.clone())
+                .and_then(non_empty)
+        })
+        .unwrap_or_default();
+    Some(ResolvedRemote {
+        base_url: url.trim_end_matches('/').to_string(),
+        bearer_token,
+    })
+}
+
 async fn start_desktop_state() -> Result<DesktopState, String> {
     let user_config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
+
+    let (gateway, client_runtime, gateway_task) = match resolve_remote_gateway(
+        user_config.desktop.remote.as_ref(),
+        std::env::var(DESKTOP_GATEWAY_URL_ENV).ok(),
+        std::env::var(DESKTOP_GATEWAY_TOKEN_ENV).ok(),
+    ) {
+        Some(remote) => {
+            eprintln!(
+                "lazybox desktop attaching to existing gateway at {}",
+                remote.base_url
+            );
+            let gateway = GatewayClient {
+                base_url: remote.base_url,
+                bearer_token: remote.bearer_token,
+                client: Client::new(),
+            };
+            (gateway, None, None)
+        }
+        None => start_local_gateway(&user_config).await?,
+    };
+
+    // Validate the protocol and read the daemon's spawn menu (agents,
+    // default, repositories) from the gateway itself, so an attached
+    // desktop offers what the *daemon* runs rather than the local config —
+    // which, over a remote link, describes the laptop, not the box.
+    let info = establish_gateway_session(&gateway).await?;
+    let DesktopInfo {
+        agents,
+        default_agent,
+        repositories,
+        protocol_notice,
+        ..
+    } = info;
+    if let Some(notice) = &protocol_notice {
+        eprintln!("lazybox desktop: {notice}");
+    }
+    let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
+    let (terminal_tx, terminal_rx) = mpsc::channel(32);
+    let inbox = InboxModel::new(
+        user_config.ui.collapsed_repos.clone(),
+        user_config.attention.clone(),
+    );
+    let snippets = SnippetModel::new(load_snippet_catalog());
+
+    Ok(DesktopState {
+        gateway,
+        agents,
+        default_agent,
+        repositories,
+        terminal_commands,
+        terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
+        terminal_rx: Mutex::new(terminal_rx),
+        terminal_tx,
+        streams_started: AtomicBool::new(false),
+        protocol_notice,
+        client_runtime: Mutex::new(client_runtime),
+        gateway_task: Mutex::new(gateway_task),
+        inbox: Arc::new(Mutex::new(inbox)),
+        event_channel: Arc::new(Mutex::new(None)),
+        snippets: Arc::new(Mutex::new(snippets)),
+    })
+}
+
+/// Spawn the in-process daemon and its loopback API gateway, returning a
+/// client pointed at the ephemeral address plus the handles the caller
+/// must own for shutdown. Used unless the desktop is configured to attach
+/// to an existing gateway.
+async fn start_local_gateway(
+    user_config: &lazybox_config::Config,
+) -> Result<
+    (
+        GatewayClient,
+        Option<ClientRuntime>,
+        Option<tokio::task::JoinHandle<()>>,
+    ),
+    String,
+> {
     let config = ServerConfig::from_user_config()
         .map_err(|error| format!("start lazybox daemon: {error}"))?;
     let client_runtime = ClientRuntime::start(
@@ -1421,47 +1513,100 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         bearer_token,
         client: Client::new(),
     };
-    let protocol: ProtocolResponse = decode_response(
-        gateway
-            .authorized(gateway.client.get(gateway.url("/v1/protocol")))
-            .send()
-            .await
-            .map_err(|error| format!("discover daemon protocol: {error}"))?,
+    Ok((gateway, Some(client_runtime), Some(gateway_task)))
+}
+
+/// How many times the startup handshake retries a gateway that isn't
+/// answering yet, and the wait between tries. Roughly ten seconds — long
+/// enough for a just-launched desktop to catch an SSH-forwarded loopback
+/// port that comes up a beat late, short enough that a truly-down box
+/// fails the launch with a clear error rather than hanging. Matches the
+/// 750 ms cadence the live stream loops re-dial with.
+const GATEWAY_HANDSHAKE_ATTEMPTS: u32 = 14;
+const GATEWAY_HANDSHAKE_BACKOFF: Duration = Duration::from_millis(750);
+
+/// A failed startup handshake, split by whether retrying can help: a
+/// transport error (the port isn't up yet) is [`Transient`] and retried;
+/// a reachable gateway that answers wrong — bad token, protocol/build
+/// mismatch — is [`Fatal`] and fails immediately, because re-dialing a
+/// misconfigured or incompatible daemon never converges.
+///
+/// [`Transient`]: GatewaySessionError::Transient
+/// [`Fatal`]: GatewaySessionError::Fatal
+enum GatewaySessionError {
+    Transient(String),
+    Fatal(String),
+}
+
+/// Discover + validate the gateway protocol and read the daemon's spawn
+/// menu, retrying transport failures with backoff so a not-quite-ready
+/// remote tunnel connects instead of hard-failing the app launch.
+async fn establish_gateway_session(gateway: &GatewayClient) -> Result<DesktopInfo, String> {
+    retry_handshake(
+        GATEWAY_HANDSHAKE_ATTEMPTS,
+        GATEWAY_HANDSHAKE_BACKOFF,
+        || gateway_session_once(gateway),
     )
-    .await?;
-    let protocol_notice = validate_protocol(&protocol)?;
-    if let Some(notice) = &protocol_notice {
-        eprintln!("lazybox desktop: {notice}");
+    .await
+}
+
+/// Run a handshake `attempt` up to `attempts` times: retry a
+/// [`GatewaySessionError::Transient`] result after `backoff`, return a
+/// [`GatewaySessionError::Fatal`] result immediately, and give up with
+/// the last transient message once the attempts are spent.
+async fn retry_handshake<F, Fut>(
+    attempts: u32,
+    backoff: Duration,
+    mut attempt: F,
+) -> Result<DesktopInfo, String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<DesktopInfo, GatewaySessionError>>,
+{
+    let mut last_transient = None;
+    for index in 0..attempts {
+        if index > 0 {
+            tokio::time::sleep(backoff).await;
+        }
+        match attempt().await {
+            Ok(info) => return Ok(info),
+            Err(GatewaySessionError::Fatal(message)) => return Err(message),
+            Err(GatewaySessionError::Transient(message)) => last_transient = Some(message),
+        }
     }
+    Err(format!(
+        "gateway unreachable after {attempts} attempts: {}",
+        last_transient.unwrap_or_else(|| "no response".to_string())
+    ))
+}
 
-    let agents = configured_agent_ids(&user_config);
-    let default_agent = effective_default_agent(&user_config);
-    let repositories = configured_repositories(&user_config);
-    let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
-    let (terminal_tx, terminal_rx) = mpsc::channel(32);
-    let inbox = InboxModel::new(
-        user_config.ui.collapsed_repos.clone(),
-        user_config.attention.clone(),
-    );
-    let snippets = SnippetModel::new(load_snippet_catalog());
+async fn gateway_session_once(gateway: &GatewayClient) -> Result<DesktopInfo, GatewaySessionError> {
+    let protocol_response = gateway
+        .authorized(gateway.client.get(gateway.url("/v1/protocol")))
+        .send()
+        .await
+        .map_err(|error| {
+            GatewaySessionError::Transient(format!("discover daemon protocol: {error}"))
+        })?;
+    let protocol: ProtocolResponse = decode_response(protocol_response)
+        .await
+        .map_err(GatewaySessionError::Fatal)?;
+    // A tolerable build-skew warning (#815 — fingerprint differs but the
+    // protocol version matches) rides back on the info's `protocol_notice`
+    // so the webview can surface it. The gateway sends `None`; the client
+    // fills it from its own build comparison.
+    let protocol_notice = validate_protocol(&protocol).map_err(GatewaySessionError::Fatal)?;
 
-    Ok(DesktopState {
-        gateway,
-        agents,
-        default_agent,
-        repositories,
-        terminal_commands,
-        terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
-        terminal_rx: Mutex::new(terminal_rx),
-        terminal_tx,
-        streams_started: AtomicBool::new(false),
-        protocol_notice,
-        client_runtime: Mutex::new(Some(client_runtime)),
-        gateway_task: Mutex::new(Some(gateway_task)),
-        inbox: Arc::new(Mutex::new(inbox)),
-        event_channel: Arc::new(Mutex::new(None)),
-        snippets: Arc::new(Mutex::new(snippets)),
-    })
+    let info_response = gateway
+        .authorized(gateway.client.get(gateway.url("/v1/info")))
+        .send()
+        .await
+        .map_err(|error| GatewaySessionError::Transient(format!("read daemon info: {error}")))?;
+    let mut info: DesktopInfo = decode_response(info_response)
+        .await
+        .map_err(GatewaySessionError::Fatal)?;
+    info.protocol_notice = protocol_notice;
+    Ok(info)
 }
 
 /// Load the client-wide snippet catalog (built-in → global → launch
@@ -1602,6 +1747,130 @@ mod tests {
             "http://127.0.0.1:1234/v1/terminal"
         );
         assert!(!gateway.url("/v1/terminal").contains("secret"));
+    }
+
+    #[test]
+    fn remote_gateway_defaults_to_local_when_unconfigured() {
+        assert!(resolve_remote_gateway(None, None, None).is_none());
+        // A `desktop.remote:` block with an empty URL is inert.
+        let empty = lazybox_config::RemoteGatewayConfig::default();
+        assert!(resolve_remote_gateway(Some(&empty), None, None).is_none());
+    }
+
+    #[test]
+    fn remote_gateway_reads_config_and_trims_trailing_slash() {
+        let config = lazybox_config::RemoteGatewayConfig {
+            url: "http://127.0.0.1:8787/".to_string(),
+            token: "box-token".to_string(),
+        };
+        let remote =
+            resolve_remote_gateway(Some(&config), None, None).expect("config selects remote");
+        assert_eq!(remote.base_url, "http://127.0.0.1:8787");
+        assert_eq!(remote.bearer_token, "box-token");
+    }
+
+    #[test]
+    fn remote_gateway_env_overrides_config() {
+        let config = lazybox_config::RemoteGatewayConfig {
+            url: "http://127.0.0.1:8787".to_string(),
+            token: "config-token".to_string(),
+        };
+        let remote = resolve_remote_gateway(
+            Some(&config),
+            Some("http://127.0.0.1:9000".to_string()),
+            Some("env-token".to_string()),
+        )
+        .expect("env selects remote");
+        assert_eq!(remote.base_url, "http://127.0.0.1:9000");
+        assert_eq!(remote.bearer_token, "env-token");
+    }
+
+    #[test]
+    fn remote_gateway_blank_env_url_falls_back_to_config() {
+        let config = lazybox_config::RemoteGatewayConfig {
+            url: "http://127.0.0.1:8787".to_string(),
+            token: "config-token".to_string(),
+        };
+        // A blank env URL must not clobber a real config URL, and the
+        // config token survives when the env token is also blank.
+        let remote =
+            resolve_remote_gateway(Some(&config), Some("   ".to_string()), Some(String::new()))
+                .expect("config still selects remote");
+        assert_eq!(remote.base_url, "http://127.0.0.1:8787");
+        assert_eq!(remote.bearer_token, "config-token");
+    }
+
+    #[test]
+    fn remote_gateway_allows_an_empty_token() {
+        let remote = resolve_remote_gateway(None, Some("http://127.0.0.1:9000".to_string()), None)
+            .expect("env url selects remote");
+        assert_eq!(remote.base_url, "http://127.0.0.1:9000");
+        assert!(remote.bearer_token.is_empty());
+    }
+
+    fn sample_desktop_info() -> DesktopInfo {
+        DesktopInfo {
+            protocol_version: DESKTOP_PROTOCOL_VERSION,
+            max_terminal_frame_bytes: 0,
+            max_terminal_write_bytes: 0,
+            agents: vec!["claude".to_string()],
+            default_agent: "claude".to_string(),
+            repositories: Vec::new(),
+            protocol_notice: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn handshake_retries_transient_failures_then_connects() {
+        // A tunnel that isn't up yet fails transiently a few times before
+        // the gateway answers; the handshake keeps trying instead of
+        // aborting the launch.
+        let calls = std::cell::Cell::new(0u32);
+        let result = retry_handshake(GATEWAY_HANDSHAKE_ATTEMPTS, Duration::ZERO, || {
+            let attempt = calls.get();
+            calls.set(attempt + 1);
+            async move {
+                if attempt < 3 {
+                    Err(GatewaySessionError::Transient("tunnel not up".to_string()))
+                } else {
+                    Ok(sample_desktop_info())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 4, "3 transient failures then one success");
+    }
+
+    #[tokio::test]
+    async fn handshake_does_not_retry_a_fatal_failure() {
+        // A reachable gateway that answers wrong (bad token, build
+        // mismatch) is fatal: retrying never converges, so it fails fast.
+        let calls = std::cell::Cell::new(0u32);
+        let result = retry_handshake(GATEWAY_HANDSHAKE_ATTEMPTS, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            async { Err(GatewaySessionError::Fatal("protocol mismatch".to_string())) }
+        })
+        .await;
+
+        assert_eq!(result.unwrap_err(), "protocol mismatch");
+        assert_eq!(calls.get(), 1, "a fatal error must not be retried");
+    }
+
+    #[tokio::test]
+    async fn handshake_gives_up_after_exhausting_attempts() {
+        let result = retry_handshake(3, Duration::ZERO, || async {
+            Err(GatewaySessionError::Transient("down".to_string()))
+        })
+        .await;
+
+        let error = result.unwrap_err();
+        assert!(error.contains("after 3 attempts"), "got: {error}");
+        assert!(
+            error.contains("down"),
+            "surfaces the last transient: {error}"
+        );
     }
 
     #[test]
@@ -1810,7 +2079,6 @@ mod tests {
 
         let initial = desktop_setup_state_from_config(&config);
         assert_eq!(initial.default_agent, "claude");
-        assert!(configured_agent_ids(&config).contains(&"claude".to_string()));
         // Appearance / workspace defaults surface for the settings UI, and
         // the theme catalog comes from the shared palette (not hardcoded TS).
         assert!(initial.theme.is_none());
@@ -1844,7 +2112,6 @@ mod tests {
         config.setup.default_agent = Some("cursor-agent".to_string());
         let changed = desktop_setup_state_from_config(&config);
         assert_eq!(changed.default_agent, "cursor-agent");
-        assert!(configured_agent_ids(&config).contains(&"cursor-agent".to_string()));
         assert!(
             changed
                 .agents
@@ -1912,26 +2179,6 @@ mod tests {
             validate_github_scopes(vec!["github:acme/widget/extra".to_string()], false).is_err()
         );
         assert!(validate_github_scopes(vec!["linear:acme/widget".to_string()], false).is_err());
-    }
-
-    #[test]
-    fn configured_repository_is_available_before_its_first_workspace() {
-        let mut config = lazybox_config::Config::default();
-        config.setup.scopes.insert(
-            "github".into(),
-            ["github:acme/widget".into(), "github:whole-org".into()]
-                .into_iter()
-                .collect(),
-        );
-
-        let repositories = configured_repositories(&config);
-
-        assert_eq!(repositories.len(), 1);
-        assert_eq!(repositories[0].label, "acme/widget");
-        assert_eq!(
-            repositories[0].project_key,
-            lazybox_core::ProjectKey::github("acme", "widget")
-        );
     }
 
     #[test]

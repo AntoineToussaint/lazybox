@@ -765,6 +765,88 @@ pub fn metrics_response(config: &ServerConfig) -> EventMetricsSnapshot {
     config.event_metrics.snapshot()
 }
 
+/// The daemon's spawn menu for a desktop client (`GET /v1/info`): the
+/// agent ids it will spawn, its default work agent, and its configured
+/// repositories. Read from the daemon's *own* config so a desktop
+/// attached to a remote box offers what the box runs, not what the
+/// laptop happens to be configured for. Config load runs on
+/// `spawn_blocking` (a synchronous file read) so it never pins the
+/// gateway runtime.
+pub async fn info_response() -> DesktopInfo {
+    let config = tokio::task::spawn_blocking(|| lazybox_config::Config::load().unwrap_or_default())
+        .await
+        .unwrap_or_default();
+    build_desktop_info(&config)
+}
+
+pub fn build_desktop_info(config: &lazybox_config::Config) -> DesktopInfo {
+    DesktopInfo {
+        protocol_version: DESKTOP_PROTOCOL_VERSION,
+        max_terminal_frame_bytes: MAX_TERMINAL_BINARY_FRAME_BYTES,
+        max_terminal_write_bytes: lazybox_ipc::MAX_WRITE_CHUNK_BYTES,
+        agents: desktop_spawnable_agents(config),
+        default_agent: desktop_default_agent(config),
+        repositories: desktop_repositories(config),
+        // The client fills this from its own build comparison after
+        // reading the protocol; the daemon has no view of client skew.
+        protocol_notice: None,
+    }
+}
+
+/// The daemon's default work agent, falling back to `claude` when unset.
+fn desktop_default_agent(config: &lazybox_config::Config) -> String {
+    config
+        .setup
+        .default_agent
+        .clone()
+        .filter(|agent| !agent.trim().is_empty())
+        .unwrap_or_else(|| "claude".to_string())
+}
+
+/// The agent ids the desktop offers for spawning: the daemon's enabled
+/// `setup.agents` plus its default, or the built-in trio when the daemon
+/// is unconfigured so a zero-config box still spawns. `cursor-agent` is
+/// the real registry id ([`lazybox_agents::agent::builtins::Cursor`]).
+fn desktop_spawnable_agents(config: &lazybox_config::Config) -> Vec<String> {
+    let mut agents = config
+        .setup
+        .agents
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    if agents.is_empty() {
+        agents.extend(["claude", "codex", "cursor-agent"].map(str::to_string));
+    }
+    agents.insert(desktop_default_agent(config));
+    agents.into_iter().collect()
+}
+
+/// The daemon's configured GitHub repositories, projected to the
+/// project-picker rows the desktop's spawn flow shows. Whole-org scopes
+/// (no `/`) and malformed slugs are skipped — only a concrete
+/// `owner/repo` can seed a workspace.
+fn desktop_repositories(config: &lazybox_config::Config) -> Vec<DesktopRepository> {
+    let mut repositories = config
+        .setup
+        .scopes
+        .get("github")
+        .into_iter()
+        .flatten()
+        .filter_map(|scope| {
+            let slug = scope.strip_prefix("github:")?;
+            let (owner, repository) = slug.split_once('/')?;
+            (!owner.is_empty() && !repository.is_empty() && !repository.contains('/')).then(|| {
+                DesktopRepository {
+                    project_key: lazybox_core::ProjectKey::github(owner, repository),
+                    label: slug.to_string(),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    repositories.sort_by(|left, right| left.label.cmp(&right.label));
+    repositories
+}
+
 /// Full workspace scan + deserialize on `spawn_blocking` (issue #34's
 /// convention): the synchronous rusqlite scan can pin a runtime
 /// worker for up to the 5s busy_timeout when another process
@@ -1003,6 +1085,7 @@ where
     match (request.method(), request.uri().path()) {
         (&Method::GET, "/v1/health") => json_response(StatusCode::OK, &health_response()),
         (&Method::GET, "/v1/protocol") => json_response(StatusCode::OK, &protocol_response()),
+        (&Method::GET, "/v1/info") => json_response(StatusCode::OK, &info_response().await),
         (&Method::GET, "/v1/metrics") => json_response(StatusCode::OK, &metrics_response(&config)),
         (&Method::GET, "/v1/workspaces") => match workspaces_response(&config).await {
             Ok(payload) => json_response(StatusCode::OK, &payload),

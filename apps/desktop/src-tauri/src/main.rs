@@ -253,6 +253,10 @@ impl InboxModel {
             // The desktop client has no pin-to-top UI yet; the shared
             // builder honors pins when a caller supplies them (#760).
             pinned_repos: &[],
+            // No star/focus UI yet either; the shared builder lifts
+            // starred workspaces into the `★ Focused` section when a
+            // caller supplies them (#846).
+            focused_workspaces: &[],
             attention: &self.attention,
             agents: &self.agents,
             now,

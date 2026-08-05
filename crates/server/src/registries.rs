@@ -42,6 +42,10 @@ pub struct TerminalRegistry {
     pub(crate) hook_driven_terminals: Arc<Mutex<HashMap<TerminalId, std::time::Instant>>>,
     /// Distinguishes one-key chooser answers from free-text input requests.
     pub(crate) input_needed_shapes: Arc<Mutex<HashMap<TerminalId, lazybox_agents::PromptShape>>>,
+    /// On-demand reclassify pokes: a deferred inject asks the terminal's PTY
+    /// pump to re-read the live screen so a stale `InputNeeded` releases
+    /// without waiting for a keystroke-driven transition (issue #869).
+    pub(crate) reclassify_requests: Arc<Mutex<HashMap<TerminalId, Arc<Notify>>>>,
     /// View and submission epochs used to keep client-provoked repaint output
     /// out of agent lifecycle detection.
     pub(crate) agent_terminal_activities: terminal_io::AgentTerminalActivities,
@@ -156,6 +160,7 @@ impl TerminalRegistry {
         self.agent_detect_resets.lock().await.remove(&id);
         self.hook_driven_terminals.lock().await.remove(&id);
         self.input_needed_shapes.lock().await.remove(&id);
+        self.reclassify_requests.lock().await.remove(&id);
         self.agent_terminal_activities.lock().await.remove(&id);
         backend_key
     }
@@ -253,6 +258,27 @@ impl TerminalRegistry {
         shape: lazybox_agents::PromptShape,
     ) {
         self.input_needed_shapes.lock().await.insert(id, shape);
+    }
+
+    /// Register the reclassify poke channel a terminal's PTY pump listens on,
+    /// returning the `Notify` the pump selects against. Kept in a shared map so
+    /// a deferred inject can find it by terminal id (issue #869).
+    pub(crate) async fn register_reclassify(&self, id: TerminalId) -> Arc<Notify> {
+        let notify = Arc::new(Notify::new());
+        self.reclassify_requests
+            .lock()
+            .await
+            .insert(id, notify.clone());
+        notify
+    }
+
+    /// Ask a terminal's PTY pump to re-read the live screen now. A no-op when
+    /// no pump is registered (a recovered/shell terminal, or a unit test with
+    /// no pump) — the caller falls back to its own cached-state re-check.
+    pub(crate) async fn request_reclassify(&self, id: TerminalId) {
+        if let Some(notify) = self.reclassify_requests.lock().await.get(&id) {
+            notify.notify_one();
+        }
     }
 
     /// Report whether any registered agent is currently working.
@@ -396,6 +422,9 @@ impl TerminalRegistry {
             return false;
         }
         if !self.input_needed_shapes.lock().await.is_empty() {
+            return false;
+        }
+        if !self.reclassify_requests.lock().await.is_empty() {
             return false;
         }
         if !self.agent_terminal_activities.lock().await.is_empty() {
@@ -799,6 +828,28 @@ mod tests {
             .remove_prompt_confirmation(TerminalId(2), &signal)
             .await;
         assert!(spawns.prompt_confirmations_are_empty().await);
+    }
+
+    #[tokio::test]
+    async fn reclassify_request_pokes_a_registered_pump_and_no_ops_otherwise() {
+        let registry = TerminalRegistry::default();
+        let id = TerminalId(869);
+        // No pump registered yet: a poke must be a harmless no-op, so a
+        // deferred inject falls back to its own cached-state re-check.
+        registry.request_reclassify(id).await;
+
+        let notify = registry.register_reclassify(id).await;
+        // A poke stores a permit even with no waiter parked yet, so the pump's
+        // next `notified()` returns immediately (no lost reclassify).
+        registry.request_reclassify(id).await;
+        tokio::time::timeout(std::time::Duration::from_millis(200), notify.notified())
+            .await
+            .expect("a registered reclassify channel must receive the poke");
+
+        // Teardown drops the registration; a later poke is a no-op again.
+        registry.remove_terminal(id).await;
+        assert!(registry.reclassify_requests.lock().await.is_empty());
+        registry.request_reclassify(id).await;
     }
 
     #[tokio::test]

@@ -1608,6 +1608,35 @@ impl AutoFixConfig {
 #[derive(Default)]
 pub struct ProvidersConfig {
     pub github: GithubConfig,
+    pub linear: LinearConfig,
+}
+
+/// `providers.linear:` block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LinearConfig {
+    /// Which issues the poller requests, as `or` clauses in the issues
+    /// query: any subset of `assigned` / `created` / `subscribed`.
+    /// Defaults to `[assigned, created]` — `subscribed` is opt-in
+    /// because Linear auto-subscribes you to entire teams and to issues
+    /// you merely opened, which floods the inbox with unrelated issues.
+    /// An empty list falls back to the default rather than sweeping the
+    /// whole workspace.
+    ///
+    /// ```yaml
+    /// providers:
+    ///   linear:
+    ///     scope: [assigned, created, subscribed]
+    /// ```
+    pub scope: Vec<lazybox_core::LinearScope>,
+}
+
+impl Default for LinearConfig {
+    fn default() -> Self {
+        Self {
+            scope: lazybox_core::LinearScope::default_scopes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

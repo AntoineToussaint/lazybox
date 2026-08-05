@@ -158,7 +158,11 @@ impl ProviderConfig {
                 keys.insert("pr.assignee".into());
             }
             "linear" => {
+                // Assigned-to-me + created-by-me, matching the default
+                // query scope ([`LinearScope::default_scopes`]). Subscriber
+                // / mentioned are off — the noisy signals a user opts into.
                 keys.insert("role.assignee".into());
+                keys.insert("role.author".into());
             }
             _ => {}
         }
@@ -184,6 +188,34 @@ fn issue_key(role: crate::task::TaskRole) -> Option<&'static str> {
         crate::task::TaskRole::Reviewer => None,
         crate::task::TaskRole::Assignee => Some("issue.assignee"),
         crate::task::TaskRole::Mentioned => Some("issue.mentioned"),
+    }
+}
+
+/// Which Linear issues the poller asks for. Each variant maps to one
+/// `or` clause in the issues GraphQL filter (assignee / creator /
+/// subscriber `isMe`). `Subscribed` is the noisy one — Linear
+/// auto-subscribes you to a whole team's issues, ones you merely
+/// opened, and more — so it's deliberately *not* in [`Self::default_scopes`].
+/// Surfaced to users as `providers.linear.scope: [assigned, created]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinearScope {
+    /// Issues assigned to me.
+    Assigned,
+    /// Issues I created.
+    Created,
+    /// Issues I subscribe to. Off by default — Linear auto-subscribes
+    /// aggressively (team defaults, opening an issue), so this floods
+    /// the inbox with issues you have no real relationship to.
+    Subscribed,
+}
+
+impl LinearScope {
+    /// The default query scope: assigned-to-me OR created-by-me, with
+    /// no subscriber clause. This is the flood-free baseline; a user
+    /// opts into `Subscribed` explicitly.
+    pub fn default_scopes() -> Vec<Self> {
+        vec![Self::Assigned, Self::Created]
     }
 }
 
@@ -402,6 +434,41 @@ mod tests {
     fn default_linear_uses_flat_role_keys() {
         let c = ProviderConfig::default_for("linear");
         assert!(c.allows_linear_role(TaskRole::Assignee));
+        assert!(
+            c.allows_linear_role(TaskRole::Author),
+            "created-by-me on by default"
+        );
+        // Subscribed issues map to `Mentioned` — off by default so the
+        // subscriber flood (#862) stays out even if it were fetched.
+        assert!(!c.allows_linear_role(TaskRole::Mentioned));
         assert!(!c.allows_linear_role(TaskRole::Reviewer));
+    }
+
+    #[test]
+    fn linear_default_scope_is_assigned_and_created_only() {
+        // The subscriber clause is the #862 flood — it must not be in
+        // the default query scope.
+        let scopes = LinearScope::default_scopes();
+        assert!(scopes.contains(&LinearScope::Assigned));
+        assert!(scopes.contains(&LinearScope::Created));
+        assert!(!scopes.contains(&LinearScope::Subscribed));
+    }
+
+    #[test]
+    fn linear_scope_serde_is_lowercase() {
+        let json = r#"["assigned", "created", "subscribed"]"#;
+        let parsed: Vec<LinearScope> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                LinearScope::Assigned,
+                LinearScope::Created,
+                LinearScope::Subscribed
+            ]
+        );
+        assert_eq!(
+            serde_json::to_string(&LinearScope::Subscribed).unwrap(),
+            r#""subscribed""#
+        );
     }
 }

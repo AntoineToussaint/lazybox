@@ -2705,11 +2705,16 @@ pub(super) async fn sources_for_with_engagement(
             .resolve(lazybox_linear::SOURCE)
             .await
         {
-            Ok(cred) => sources.push(Box::new(LinearSource::new(
-                LinearClient::from_credential(cred),
-                setup.provider_config("linear"),
-                bus.clone(),
-            ))),
+            Ok(cred) => {
+                let scope = lazybox_config::Config::load()
+                    .map(|c| c.providers.linear.scope)
+                    .unwrap_or_else(|_| lazybox_core::LinearScope::default_scopes());
+                sources.push(Box::new(LinearSource::new(
+                    LinearClient::from_credential(cred).with_scope(scope),
+                    setup.provider_config("linear"),
+                    bus.clone(),
+                )))
+            }
             Err(e) => tracing::info!("linear not configured: {e}"),
         }
     }

@@ -2,7 +2,8 @@
 
 use chrono::{DateTime, Utc};
 use lazybox_core::{
-    Activity, ActivityKind, CiStatus, ReviewStatus, Task, TaskId, TaskKind, TaskRole, TaskState,
+    Activity, ActivityKind, CiStatus, LinearScope, ReviewStatus, Task, TaskId, TaskKind, TaskRole,
+    TaskState,
 };
 use serde::Deserialize;
 
@@ -12,30 +13,55 @@ pub const VIEWER_QUERY: &str = r#"
 query { viewer { id name } }
 "#;
 
-// Scope: open issues (`state.type` not completed/canceled) that are
-// mine — assigned to me, created by me, OR that I subscribe to (Linear
-// auto-subscribes you when you're @-mentioned or comment, so this also
-// covers involvement). Without the `or` clause the `issues` connection
-// returns EVERY open issue in every team the token can see (the whole
-// workspace), which floods the inbox and the renderer. `isMe` is
-// evaluated server-side against the token's viewer, so no viewer id
-// needs threading into the query.
-const ISSUES_QUERY: &str = r#"
-query($after: String) {
+/// The `or` filter clause selecting one [`LinearScope`]. `isMe` is
+/// evaluated server-side against the token's viewer, so no viewer id
+/// needs threading into the query.
+fn scope_clause(scope: LinearScope) -> &'static str {
+    match scope {
+        LinearScope::Assigned => "{ assignee: { isMe: { eq: true } } }",
+        LinearScope::Created => "{ creator: { isMe: { eq: true } } }",
+        LinearScope::Subscribed => "{ subscribers: { some: { isMe: { eq: true } } } }",
+    }
+}
+
+// Scope: open issues (`state.type` not completed/canceled) whose `or`
+// clauses are built from the caller's [`LinearScope`] set — assigned to
+// me and/or created by me by default, and subscriptions only when the
+// user opts in (`Subscribed`), because Linear auto-subscribes you to a
+// whole team's issues and ones you merely opened. Without a non-empty
+// `or` the `issues` connection returns EVERY open issue in every team
+// the token can see (the whole workspace), so an empty scope falls back
+// to [`LinearScope::default_scopes`] rather than emitting a bare filter.
+fn issues_query(scope: &[LinearScope]) -> String {
+    let mut selected: Vec<LinearScope> = Vec::new();
+    for &s in scope {
+        if !selected.contains(&s) {
+            selected.push(s);
+        }
+    }
+    if selected.is_empty() {
+        selected = LinearScope::default_scopes();
+    }
+    let clauses = selected
+        .iter()
+        .map(|&s| scope_clause(s))
+        .collect::<Vec<_>>()
+        .join(",\n        ");
+    format!(
+        r#"
+query($after: String) {{
   issues(
     first: 50,
     after: $after,
-    filter: {
-      state: { type: { nin: ["completed", "canceled"] } },
+    filter: {{
+      state: {{ type: {{ nin: ["completed", "canceled"] }} }},
       or: [
-        { assignee: { isMe: { eq: true } } },
-        { creator: { isMe: { eq: true } } },
-        { subscribers: { some: { isMe: { eq: true } } } }
+        {clauses}
       ]
-    }
-  ) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
+    }}
+  ) {{
+    pageInfo {{ hasNextPage endCursor }}
+    nodes {{
       id
       identifier
       title
@@ -44,23 +70,25 @@ query($after: String) {
       updatedAt
       createdAt
       priority
-      state { name type }
-      assignee { id name }
-      creator { id name }
-      team { key }
-      labels(first: 10) { nodes { name } }
-    }
-  }
+      state {{ name type }}
+      assignee {{ id name }}
+      creator {{ id name }}
+      team {{ key }}
+      labels(first: 10) {{ nodes {{ name }} }}
+    }}
+  }}
+}}
+"#
+    )
 }
-"#;
 
-pub fn build_issues_body(after: Option<&str>) -> serde_json::Value {
+pub fn build_issues_body(after: Option<&str>, scope: &[LinearScope]) -> serde_json::Value {
     let variables = match after {
         Some(cursor) => serde_json::json!({ "after": cursor }),
         None => serde_json::json!({}),
     };
     serde_json::json!({
-        "query": ISSUES_QUERY,
+        "query": issues_query(scope),
         "variables": variables,
     })
 }
@@ -268,4 +296,60 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
 #[allow(dead_code)]
 fn _activity_kind_imported() {
     let _ = ActivityKind::Comment;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn query_for(scope: &[LinearScope]) -> String {
+        build_issues_body(None, scope)["query"]
+            .as_str()
+            .expect("query is a string")
+            .to_string()
+    }
+
+    #[test]
+    fn default_scope_excludes_subscribers_clause() {
+        let q = query_for(&LinearScope::default_scopes());
+        assert!(q.contains("assignee: {"), "default keeps assigned-to-me");
+        assert!(q.contains("creator: {"), "default keeps created-by-me");
+        assert_eq!(q.matches("isMe").count(), 2, "exactly two `or` clauses");
+        assert!(
+            !q.contains("subscribers"),
+            "default must NOT request the subscriber flood: {q}"
+        );
+    }
+
+    #[test]
+    fn empty_scope_falls_back_to_default_not_unscoped() {
+        // An empty `or` would return EVERY open issue in the workspace.
+        let q = query_for(&[]);
+        assert!(q.contains("assignee"));
+        assert!(q.contains("creator"));
+        assert!(!q.contains("subscribers"));
+        assert!(!q.contains("or: [\n      ]"), "the `or` is never empty");
+    }
+
+    #[test]
+    fn subscribed_scope_adds_the_subscribers_clause() {
+        let q = query_for(&[
+            LinearScope::Assigned,
+            LinearScope::Created,
+            LinearScope::Subscribed,
+        ]);
+        assert!(q.contains("subscribers"), "opt-in adds the clause: {q}");
+    }
+
+    #[test]
+    fn scope_is_deduped() {
+        // "assignee" also appears in the node selection, so count the
+        // filter clause (`assignee: { isMe … }`) via its `isMe` marker.
+        let q = query_for(&[LinearScope::Assigned, LinearScope::Assigned]);
+        assert_eq!(q.matches("isMe").count(), 1, "duplicate scope collapses");
+        assert!(
+            !q.contains("creator: {"),
+            "only the requested scope clause is emitted"
+        );
+    }
 }

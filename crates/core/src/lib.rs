@@ -28,8 +28,8 @@ pub use autofix::{
     evaluate_auto_fix, is_auto_fix_opted_out, resolve_auto_fix,
 };
 pub use config::{
-    KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, PaneLayout, PersistedSetup,
-    ProviderConfig,
+    KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, LinearScope, PaneLayout,
+    PersistedSetup, ProviderConfig,
 };
 pub use conventions::{CommitStyle, Conventions};
 pub use error_class::{ErrorClass, HttpErrorSignals, classify, classify_message, classify_status};

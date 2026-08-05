@@ -13,17 +13,21 @@
 //!
 //! ## Scope
 //!
-//! Fetches issues the authenticated user is assigned to, created, or
-//! subscribes to (subscription covers @-mentions / commented issues).
-//! States `completed` / `canceled` are filtered out server-side.
-//! Pagination support: up to 50 issues per page, up to 20 pages.
+//! Fetches issues the authenticated user is assigned to or created, by
+//! default. Subscription coverage is opt-in via `providers.linear.scope`
+//! (`[assigned, created, subscribed]`) because Linear auto-subscribes you
+//! aggressively — team defaults, opening an issue — so a subscriber clause
+//! floods the inbox with unrelated issues. See [`LinearScope`] and
+//! [`LinearClient::with_scope`]. States `completed` / `canceled` are
+//! filtered out server-side. Pagination support: up to 50 issues per
+//! page, up to 20 pages.
 
 pub mod graphql;
 
 use lazybox_auth::{CommandProvider, CredentialChain, EnvProvider};
 use lazybox_core::{
-    DEFAULT_MAX_PAGES, FetchOutcome, FetchPage, FetchPageInfo, ProviderError, Task, TaskProvider,
-    paginate,
+    DEFAULT_MAX_PAGES, FetchOutcome, FetchPage, FetchPageInfo, LinearScope, ProviderError, Task,
+    TaskProvider, paginate,
 };
 use serde::Serialize;
 
@@ -130,6 +134,11 @@ pub struct LinearClient {
     http: reqwest::Client,
     api_key: String,
     endpoint: String,
+    /// Which `or` clauses the issues query requests. Defaults to
+    /// [`LinearScope::default_scopes`] (assigned + created, no
+    /// subscriber flood); override via [`Self::with_scope`] from
+    /// `providers.linear.scope`.
+    scope: Vec<LinearScope>,
 }
 
 impl LinearClient {
@@ -169,6 +178,7 @@ impl LinearClient {
             http,
             api_key: api_key.into(),
             endpoint: LINEAR_GRAPHQL.to_string(),
+            scope: LinearScope::default_scopes(),
         }
     }
 
@@ -176,6 +186,14 @@ impl LinearClient {
     /// local mock server.
     pub fn with_endpoint(mut self, url: impl Into<String>) -> Self {
         self.endpoint = url.into();
+        self
+    }
+
+    /// Set which issues the query requests (`providers.linear.scope`).
+    /// An empty slice falls back to [`LinearScope::default_scopes`] so
+    /// the query is never an unscoped whole-workspace sweep.
+    pub fn with_scope(mut self, scope: Vec<LinearScope>) -> Self {
+        self.scope = scope;
         self
     }
 
@@ -248,7 +266,7 @@ impl LinearClient {
             |cursor, page| {
                 let viewer_id = &viewer_id;
                 async move {
-                    let body = graphql::build_issues_body(cursor.as_deref());
+                    let body = graphql::build_issues_body(cursor.as_deref(), &self.scope);
                     let resp: graphql::IssuesResponse =
                         self.graphql(&body).await.map_err(|error| {
                             tracing::error!("Linear page {page} failed: {error}");

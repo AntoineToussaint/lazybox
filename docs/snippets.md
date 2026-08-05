@@ -65,8 +65,11 @@ The picker is organized for a catalog larger than a handful of keys:
 
 To browse without a focused terminal, press `]` from the sidebar or
 activity pane, or choose **Browse snippets** from the `,` Settings
-palette. This read-only catalog shows every merged workflow with its
-key, origin, description, and full body. `↑`/`↓` scrolls and `e` opens
+palette. This read-only catalog is provider-scoped like the picker (see
+[Provider-scoped workflows](#provider-scoped-workflows)): it shows every
+workflow relevant to the focused workspace with its key, origin,
+description, and full body — open it from Settings with no session
+focused to see the whole merged catalog. `↑`/`↓` scrolls and `e` opens
 the global YAML file in your editor.
 
 ## Understand Recent and the `]N` workspace badge
@@ -201,8 +204,8 @@ snippets:
       Address the unresolved review comments on this PR…
 ```
 
-The picker reads the focused workspace's task sources and hides snippets
-scoped to a provider the workspace doesn't touch. A `provider: github`
+The picker and the `]` browser read the focused workspace's task sources
+and hide snippets scoped to a provider the workspace doesn't touch. A `provider: github`
 snippet shows only on GitHub workspaces; a `provider: linear` one only on
 Linear workspaces; a snippet with no `provider` shows everywhere. A
 workspace can span both — a Linear issue that already has a GitHub PR —

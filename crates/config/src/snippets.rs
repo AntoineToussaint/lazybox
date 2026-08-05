@@ -292,6 +292,10 @@ impl Snippets {
             provider: Some(provider.to_string()),
             origin: SnippetOrigin::BuiltIn,
         };
+        // Scope on the canonical provider ids so config can't drift from
+        // the `TaskId.source` the providers actually stamp (see
+        // [`Snippet::matches_sources`]).
+        let (gh, lin) = (lazybox_core::GITHUB_SOURCE, lazybox_core::LINEAR_SOURCE);
         let by_key = BTreeMap::from([
             // ── Review ──────────────────────────────────────────────
             (
@@ -607,7 +611,7 @@ impl Snippets {
             (
                 "triage".to_string(),
                 scoped(
-                    "github",
+                    gh,
                     "GitHub",
                     "Triage the issue into a plan",
                     "Triage the GitHub issue this workspace is on. Read the body and every \
@@ -624,7 +628,7 @@ impl Snippets {
             (
                 "respond".to_string(),
                 scoped(
-                    "github",
+                    gh,
                     "GitHub",
                     "Address the PR review comments",
                     "Address the unresolved review comments on this PR. Pull them with \
@@ -641,7 +645,7 @@ impl Snippets {
             (
                 "link".to_string(),
                 scoped(
-                    "github",
+                    gh,
                     "GitHub",
                     "Link this PR and the issue it closes",
                     "Wire this PR to the issue it resolves so they track as one. Confirm \
@@ -658,7 +662,7 @@ impl Snippets {
                 // a strict prefix would break `]]ci` auto-submit.
                 "whyci".to_string(),
                 scoped(
-                    "github",
+                    gh,
                     "GitHub",
                     "Summarize why CI is failing",
                     "Summarize why CI is failing on this PR. List the failing checks with \
@@ -673,7 +677,7 @@ impl Snippets {
             (
                 "nudge".to_string(),
                 scoped(
-                    "github",
+                    gh,
                     "GitHub",
                     "Request or nudge reviewers",
                     "Get this PR the review it needs. Check its state with `gh pr view` — is \
@@ -689,7 +693,7 @@ impl Snippets {
             (
                 "release".to_string(),
                 scoped(
-                    "github",
+                    gh,
                     "GitHub",
                     "Cut a release PR",
                     "Cut a release PR from the current state. Determine the next version \
@@ -706,7 +710,7 @@ impl Snippets {
             (
                 "convert".to_string(),
                 scoped(
-                    "github",
+                    gh,
                     "GitHub",
                     "Convert the issue into a PR",
                     "Turn the GitHub issue this workspace is on into a PR. Read it with \
@@ -724,7 +728,7 @@ impl Snippets {
             (
                 "wip".to_string(),
                 scoped(
-                    "linear",
+                    lin,
                     "Linear",
                     "Move the Linear issue to In Progress",
                     "Move this workspace's Linear issue to In Progress to signal you've \
@@ -739,7 +743,7 @@ impl Snippets {
             (
                 "done".to_string(),
                 scoped(
-                    "linear",
+                    lin,
                     "Linear",
                     "Move the Linear issue to Done",
                     "Mark this workspace's Linear issue Done. First confirm the work is \
@@ -754,7 +758,7 @@ impl Snippets {
             (
                 "status".to_string(),
                 scoped(
-                    "linear",
+                    lin,
                     "Linear",
                     "Comment a status update back to Linear",
                     "Post a concise status update as a comment on this workspace's Linear \
@@ -769,7 +773,7 @@ impl Snippets {
             (
                 "subissues".to_string(),
                 scoped(
-                    "linear",
+                    lin,
                     "Linear",
                     "Break the Linear issue into sub-issues",
                     "Break this workspace's Linear issue into well-scoped sub-issues. Read \
@@ -786,7 +790,7 @@ impl Snippets {
             (
                 "attach".to_string(),
                 scoped(
-                    "linear",
+                    lin,
                     "Linear",
                     "Link the PR to the Linear issue",
                     "Connect this PR to its Linear issue so both sides cross-reference. Put \
@@ -801,7 +805,7 @@ impl Snippets {
             (
                 "estimate".to_string(),
                 scoped(
-                    "linear",
+                    lin,
                     "Linear",
                     "Estimate and prioritize the Linear issue",
                     "Estimate and prioritize this workspace's Linear issue. Read it fully \

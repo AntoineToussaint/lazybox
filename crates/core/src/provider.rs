@@ -28,6 +28,15 @@ use crate::{Task, Workspace};
 /// Default safety cap for provider cursor walks.
 pub const DEFAULT_MAX_PAGES: usize = 20;
 
+/// Canonical provider `source` ids — the string each built-in provider
+/// stamps on `TaskId.source`, and the value that snippet `provider:`
+/// scoping and the mutation routers key off. Defined here, in the crate
+/// both the providers and `config` depend on, so they can't drift on the
+/// spelling: `gh_provider::SOURCE` / `linear_provider::SOURCE` derive from
+/// these, and `config`'s built-in GitHub/Linear snippets scope on them.
+pub const GITHUB_SOURCE: &str = "github";
+pub const LINEAR_SOURCE: &str = "linear";
+
 /// Whether a fetch consumed the entire upstream result set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchCoverage {

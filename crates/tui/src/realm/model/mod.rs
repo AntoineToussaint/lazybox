@@ -2265,18 +2265,27 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SnippetPicker, picker);
     }
 
-    /// The snippet-picker rows for the focused workspace, provider-scoped
-    /// (#868): every generic snippet plus those whose `provider` matches
-    /// one of the workspace's task sources. `mount_snippet_picker` and its
-    /// test share this so the filter under test is the one the picker
-    /// actually shows.
-    fn scoped_picker_rows(&self) -> Vec<crate::realm::components::snippet_picker::PickerRow> {
-        use crate::realm::components::snippet_picker::PickerRow;
+    /// The snippet entries visible on the focused workspace, provider-scoped
+    /// (#868): every generic snippet plus those whose `provider` matches one
+    /// of the workspace's task sources. Shared by the `]]s` picker and the
+    /// `]` browser so both surfaces scope identically; browsing from
+    /// Settings with no session focused leaves `sources` empty and shows the
+    /// whole catalog.
+    fn scoped_snippets(&self) -> Vec<(&str, &lazybox_config::Snippet)> {
         let sources = self.active_workspace_sources();
         let source_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
         self.snippets
             .all()
             .filter(|(_, snippet)| snippet.matches_sources(&source_refs))
+            .collect()
+    }
+
+    /// The provider-scoped picker rows fed to `mount_snippet_picker`.
+    /// Split out so its test exercises the filter the picker actually shows.
+    fn scoped_picker_rows(&self) -> Vec<crate::realm::components::snippet_picker::PickerRow> {
+        use crate::realm::components::snippet_picker::PickerRow;
+        self.scoped_snippets()
+            .into_iter()
             .map(|(key, snippet)| PickerRow::new(key, snippet))
             .collect()
     }
@@ -2505,9 +2514,13 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::SnippetBrowser)) {
             return;
         }
+        // Provider-scope the catalog the same way the `]]s` picker does
+        // (#868), so the two surfaces agree on what's relevant here; opened
+        // from Settings with no session focused, `scoped_snippets` returns
+        // the whole catalog.
         let rows: Vec<BrowserRow> = self
-            .snippets
-            .all()
+            .scoped_snippets()
+            .into_iter()
             .map(|(k, v)| BrowserRow::new(k, v))
             .collect();
         self.mount_modal(

@@ -986,6 +986,90 @@ describe("credential-free desktop workflow", () => {
       ),
     );
   });
+
+  it("surfaces a tolerated protocol-skew notice and keeps it past a workspace warning (#815)", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+          protocol_notice:
+            "daemon build 9.9.9+deadbeef differs from desktop build 0.1.9+cafef00d; update one side if anything misbehaves",
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({
+          workspaces: [],
+          warnings: ["a workspace row could not be decoded"],
+        });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    const notice = element("protocol-notice");
+    expect(notice.hidden).toBe(false);
+    expect(notice.textContent).toContain("9.9.9+deadbeef");
+    expect(notice.textContent).toContain("update one side");
+    // The workspace warning lands on the ephemeral status line; the
+    // persistent skew notice must survive it rather than be overwritten.
+    expect(element("status-message").textContent).toContain(
+      "could not be decoded",
+    );
+  });
+
+  it("hides the protocol-skew surface when the daemon build matches (#815)", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+          protocol_notice: null,
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("workspace-list").textContent).toContain("inbox is empty"),
+    );
+
+    expect(element("protocol-notice").hidden).toBe(true);
+  });
 });
 
 // Stand-in for the grouped view `src-tauri` computes and pushes. In

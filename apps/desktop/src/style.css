@@ -925,6 +925,18 @@ h2 {
   white-space: nowrap;
 }
 
+.protocol-notice {
+  max-width: 40%;
+  overflow: hidden;
+  color: #e9c280;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.protocol-notice[hidden] {
+  display: none;
+}
+
 dialog {
   color: #dce5e8;
   border: 1px solid #35434a;

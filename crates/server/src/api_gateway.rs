@@ -29,9 +29,16 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc};
 
 pub type Body = UnsyncBoxBody<Bytes, Infallible>;
+/// The desktop wire compatibility gate. A client and daemon that agree on
+/// this integer are treated as compatible; a mismatch is fatal (startup
+/// abort / HTTP 426). Since the fingerprint is now advisory (#815), this is
+/// the *sole* guard against genuine wire incompatibility — bump it on any
+/// change to the desktop `Command`/`Event`/DTO shapes or the terminal frame
+/// layout, so a real wire change can't ride an unchanged version across a
+/// remote hop. Non-wire churn (a `Cargo.lock` bump, a comment) must not
+/// bump it; that is exactly the skew the advisory fingerprint tolerates.
 pub const DESKTOP_PROTOCOL_VERSION: u32 = 1;
 pub const PROTOCOL_VERSION_HEADER: &str = "x-lazybox-protocol-version";
-pub const PROTOCOL_FINGERPRINT_HEADER: &str = "x-lazybox-protocol-fingerprint";
 pub const TERMINAL_BINARY_CONTENT_TYPE: &str = "application/vnd.lazybox.terminal.v1";
 pub const TERMINAL_FRAME_LENGTH_OFFSET: usize = 0;
 pub const TERMINAL_FRAME_LENGTH_PREFIX_BYTES: usize = 4;
@@ -81,6 +88,14 @@ pub const TERMINAL_WRITE_INTENT_VIEW: u8 = 2;
 pub const DESKTOP_TERMINAL_STREAM_ITEM_RESET: u8 = 0;
 pub const DESKTOP_TERMINAL_STREAM_ITEM_DATA: u8 = 1;
 
+/// Advisory build-identity signal reported through `/v1/protocol`. It
+/// over-approximates the wire contract — a `Cargo.lock` bump or a comment
+/// edit in a hashed source flips it — so it is *not* a compatibility gate.
+/// `DESKTOP_PROTOCOL_VERSION` is the gate; a client that sees a differing
+/// fingerprint over an otherwise-compatible version surfaces a "these two
+/// builds differ, update one" notice rather than refusing the link. That
+/// tolerance is what lets a remote-hop daemon and a separately-built client
+/// stay connected across non-wire skew (#815).
 pub const DESKTOP_PROTOCOL_FINGERPRINT: u32 = desktop_protocol_fingerprint();
 
 const fn desktop_protocol_fingerprint() -> u32 {
@@ -167,14 +182,6 @@ pub struct ProtocolResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct UnsupportedProtocolResponse {
-    pub error: String,
-    pub requested: String,
-    pub supported: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
-pub struct UnsupportedFingerprintResponse {
     pub error: String,
     pub requested: String,
     pub supported: u32,
@@ -376,6 +383,11 @@ pub struct DesktopInfo {
     pub agents: Vec<String>,
     pub default_agent: String,
     pub repositories: Vec<DesktopRepository>,
+    /// A tolerated protocol-skew advisory: set when the daemon and this
+    /// client share a compatible protocol version but differ in build
+    /// fingerprint (#815). The link works; the UI shows it so the user can
+    /// update one side if something misbehaves.
+    pub protocol_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -984,22 +996,6 @@ where
                 ),
                 requested: requested.to_str().unwrap_or("<non-UTF-8>").to_string(),
                 supported: DESKTOP_PROTOCOL_VERSION,
-            },
-        );
-    }
-    if let Some(requested) = request.headers().get(PROTOCOL_FINGERPRINT_HEADER)
-        && requested.as_bytes() != DESKTOP_PROTOCOL_FINGERPRINT.to_string().as_bytes()
-    {
-        return json_response(
-            StatusCode::UPGRADE_REQUIRED,
-            &UnsupportedFingerprintResponse {
-                error: format!(
-                    "unsupported lazybox protocol fingerprint {}; this daemon supports {}",
-                    requested.to_str().unwrap_or("<non-UTF-8>"),
-                    DESKTOP_PROTOCOL_FINGERPRINT
-                ),
-                requested: requested.to_str().unwrap_or("<non-UTF-8>").to_string(),
-                supported: DESKTOP_PROTOCOL_FINGERPRINT,
             },
         );
     }

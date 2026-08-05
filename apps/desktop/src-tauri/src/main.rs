@@ -10,9 +10,8 @@ use lazybox_server::api_gateway::{
     CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
     DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand,
     DesktopEvent, DesktopInboxView, DesktopInfo, DesktopRepository, DesktopStreamMessage,
-    GatewayOptions, JsonClientFrame, JsonServerFrame, PROTOCOL_FINGERPRINT_HEADER,
-    PROTOCOL_VERSION_HEADER, ProtocolResponse, TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse,
-    desktop_event,
+    GatewayOptions, JsonClientFrame, JsonServerFrame, PROTOCOL_VERSION_HEADER, ProtocolResponse,
+    TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
 use lazybox_tui_core::inbox::{
@@ -291,6 +290,10 @@ struct DesktopState {
     streams_started: AtomicBool,
     client_runtime: Mutex<Option<ClientRuntime>>,
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// A tolerated protocol-skew advisory captured at startup (#815): set
+    /// when the daemon speaks a compatible protocol version but a different
+    /// build fingerprint. Surfaced to the UI through `desktop_info`.
+    protocol_notice: Option<String>,
     /// Grouped-inbox state-of-record (#732). Shared between the event
     /// stream (which folds in workspace/agent changes and re-emits the
     /// view) and the `set_sort_mode` command.
@@ -423,6 +426,7 @@ fn desktop_info(state: State<'_, DesktopState>) -> DesktopInfo {
         agents: state.agents.clone(),
         default_agent: state.default_agent.clone(),
         repositories: state.repositories.clone(),
+        protocol_notice: state.protocol_notice.clone(),
     }
 }
 
@@ -875,7 +879,6 @@ impl GatewayClient {
         request
             .bearer_auth(&self.bearer_token)
             .header(PROTOCOL_VERSION_HEADER, DESKTOP_PROTOCOL_VERSION)
-            .header(PROTOCOL_FINGERPRINT_HEADER, DESKTOP_PROTOCOL_FINGERPRINT)
     }
 }
 
@@ -1426,7 +1429,10 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
             .map_err(|error| format!("discover daemon protocol: {error}"))?,
     )
     .await?;
-    validate_protocol(&protocol)?;
+    let protocol_notice = validate_protocol(&protocol)?;
+    if let Some(notice) = &protocol_notice {
+        eprintln!("lazybox desktop: {notice}");
+    }
 
     let agents = configured_agent_ids(&user_config);
     let default_agent = effective_default_agent(&user_config);
@@ -1449,6 +1455,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         terminal_rx: Mutex::new(terminal_rx),
         terminal_tx,
         streams_started: AtomicBool::new(false),
+        protocol_notice,
         client_runtime: Mutex::new(Some(client_runtime)),
         gateway_task: Mutex::new(Some(gateway_task)),
         inbox: Arc::new(Mutex::new(inbox)),
@@ -1467,17 +1474,22 @@ fn load_snippet_catalog() -> Vec<PickerRow> {
         .collect()
 }
 
-fn validate_protocol(protocol: &ProtocolResponse) -> Result<(), String> {
+/// Check the daemon's advertised protocol against this build.
+///
+/// The protocol *version* and terminal transport are the hard
+/// compatibility contract — a mismatch is a genuine wire incompatibility
+/// and aborts startup. The *fingerprint* only over-approximates that
+/// contract (a `Cargo.lock` bump or a comment edit flips it), so across a
+/// remote-daemon hop (#815) two independently-built binaries routinely
+/// disagree on it while speaking the same wire. That case returns
+/// `Ok(Some(notice))`: the link proceeds, and the caller surfaces the
+/// notice so the user can update one side if anything misbehaves. A clean
+/// match returns `Ok(None)`.
+fn validate_protocol(protocol: &ProtocolResponse) -> Result<Option<String>, String> {
     if protocol.protocol_version != DESKTOP_PROTOCOL_VERSION {
         return Err(format!(
             "unsupported lazybox protocol version {}; desktop supports version {}",
             protocol.protocol_version, DESKTOP_PROTOCOL_VERSION
-        ));
-    }
-    if protocol.protocol_fingerprint != DESKTOP_PROTOCOL_FINGERPRINT {
-        return Err(format!(
-            "unsupported lazybox protocol fingerprint {}; desktop supports {}",
-            protocol.protocol_fingerprint, DESKTOP_PROTOCOL_FINGERPRINT
         ));
     }
     if protocol.terminal_transport != TERMINAL_BINARY_CONTENT_TYPE {
@@ -1486,7 +1498,15 @@ fn validate_protocol(protocol: &ProtocolResponse) -> Result<(), String> {
             protocol.terminal_transport, TERMINAL_BINARY_CONTENT_TYPE
         ));
     }
-    Ok(())
+    if protocol.protocol_fingerprint != DESKTOP_PROTOCOL_FINGERPRINT {
+        return Ok(Some(format!(
+            "daemon build {} differs from desktop build {}; the connection works but \
+             update one side if anything misbehaves",
+            protocol.build_version,
+            lazybox_ipc::BUILD_VERSION
+        )));
+    }
+    Ok(None)
 }
 
 fn main() {
@@ -1600,13 +1620,36 @@ mod tests {
     }
 
     #[test]
-    fn desktop_rejects_a_daemon_with_a_different_contract_fingerprint() {
+    fn desktop_accepts_a_matching_daemon_without_a_notice() {
+        let protocol = lazybox_server::api_gateway::protocol_response();
+
+        let notice = validate_protocol(&protocol).expect("matching contract must be accepted");
+
+        assert_eq!(notice, None);
+    }
+
+    #[test]
+    fn desktop_tolerates_a_daemon_with_a_different_build_fingerprint() {
         let mut protocol = lazybox_server::api_gateway::protocol_response();
         protocol.protocol_fingerprint = DESKTOP_PROTOCOL_FINGERPRINT.wrapping_add(1);
+        protocol.build_version = "9.9.9+deadbeef".to_string();
 
-        let error = validate_protocol(&protocol).expect_err("fingerprint mismatch must fail");
+        let notice = validate_protocol(&protocol)
+            .expect("a build-fingerprint skew must be tolerated, not fatal")
+            .expect("a tolerated skew must carry a user-facing notice");
 
-        assert!(error.contains("unsupported lazybox protocol fingerprint"));
+        assert!(notice.contains("9.9.9+deadbeef"), "notice: {notice}");
+        assert!(notice.contains("update one side"), "notice: {notice}");
+    }
+
+    #[test]
+    fn desktop_rejects_a_daemon_with_an_incompatible_protocol_version() {
+        let mut protocol = lazybox_server::api_gateway::protocol_response();
+        protocol.protocol_version = DESKTOP_PROTOCOL_VERSION.wrapping_add(1);
+
+        let error = validate_protocol(&protocol).expect_err("protocol-version skew must be fatal");
+
+        assert!(error.contains("unsupported lazybox protocol version"));
     }
 
     #[test]

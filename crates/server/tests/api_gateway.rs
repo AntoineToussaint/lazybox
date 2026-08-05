@@ -11,8 +11,7 @@ mod api_gateway;
 use api_gateway::{
     AgentTaskKind, AgentsResponse, CommandResponse, DesktopCommand, DesktopEvent,
     DesktopTerminalSnapshot, GatewayOptions, HealthResponse, JsonClientFrame, JsonServerFrame,
-    ProtocolResponse, UnsupportedFingerprintResponse, UnsupportedProtocolResponse,
-    WorkspacesResponse,
+    ProtocolResponse, UnsupportedProtocolResponse, WorkspacesResponse,
 };
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
@@ -568,13 +567,17 @@ async fn unsupported_protocol_header_is_rejected_clearly() {
 }
 
 #[tokio::test]
-async fn unsupported_protocol_fingerprint_is_rejected_clearly() {
+async fn matching_protocol_version_serves_regardless_of_build_fingerprint() {
+    // The fingerprint over-approximates the wire contract (a Cargo.lock
+    // bump flips it), so it is advisory only (#815): a request carrying a
+    // compatible protocol version is served even when the two builds differ,
+    // instead of the old per-request 426.
     let request = Request::builder()
         .method(Method::GET)
         .uri("/v1/protocol")
         .header(
-            api_gateway::PROTOCOL_FINGERPRINT_HEADER,
-            api_gateway::DESKTOP_PROTOCOL_FINGERPRINT.wrapping_add(1),
+            api_gateway::PROTOCOL_VERSION_HEADER,
+            api_gateway::DESKTOP_PROTOCOL_VERSION,
         )
         .body(Full::new(Bytes::new()))
         .unwrap();
@@ -586,13 +589,11 @@ async fn unsupported_protocol_fingerprint_is_rejected_clearly() {
     )
     .await;
 
-    assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
-    let payload: UnsupportedFingerprintResponse = read_json(response).await;
-    assert_eq!(payload.supported, api_gateway::DESKTOP_PROTOCOL_FINGERPRINT);
-    assert!(
-        payload
-            .error
-            .contains("unsupported lazybox protocol fingerprint")
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: ProtocolResponse = read_json(response).await;
+    assert_eq!(
+        payload.protocol_fingerprint,
+        api_gateway::DESKTOP_PROTOCOL_FINGERPRINT
     );
 }
 

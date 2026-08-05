@@ -222,6 +222,7 @@ const terminalState = element<HTMLSpanElement>("terminal-state");
 const connectionDot = element<HTMLSpanElement>("connection-dot");
 const connectionLabel = element<HTMLSpanElement>("connection-label");
 const statusMessage = element<HTMLSpanElement>("status-message");
+const protocolNotice = element<HTMLSpanElement>("protocol-notice");
 const setupDialog = element<HTMLDialogElement>("setup-dialog");
 const setupForm = element<HTMLFormElement>("setup-form");
 const setupTitle = element<HTMLHeadingElement>("setup-title");
@@ -477,6 +478,7 @@ async function initializeDesktopMetadata(): Promise<void> {
     defaultAgent = info.default_agent;
     configuredRepositories = info.repositories;
     agentLabel.textContent = defaultAgent;
+    setProtocolNotice(info.protocol_notice);
     desktopMetadataLoaded = true;
   } catch (error) {
     desktopMetadataLoaded = false;
@@ -2538,6 +2540,19 @@ function setConnection(connected: boolean, label: string): void {
 
 function setStatus(message: string): void {
   statusMessage.textContent = message;
+}
+
+// The protocol-skew advisory describes a session-long condition (two builds
+// that differ), so it gets its own persistent surface rather than the
+// ephemeral status line, which transient warnings and user actions overwrite.
+function setProtocolNotice(message: string | null): void {
+  if (message) {
+    protocolNotice.textContent = message;
+    protocolNotice.hidden = false;
+  } else {
+    protocolNotice.textContent = "";
+    protocolNotice.hidden = true;
+  }
 }
 
 function setTerminalState(state: string): void {

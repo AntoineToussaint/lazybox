@@ -165,3 +165,55 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
         other => panic!("expected CreateWorkspace, got {other:?}"),
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_create_rejects_an_unknown_agent_without_sending() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("daemon.sock");
+    let listener = transport::Listener::bind(&socket_path)
+        .await
+        .expect("bind test socket");
+    // The daemon creates the workspace before spawning, so a bad --agent
+    // must be caught here — before any frame is sent. This listener should
+    // never see a connection.
+    let server = tokio::spawn(async move {
+        let (mut rd, mut wr) = listener.accept().await.expect("accept client");
+        socket::server_handshake(&mut rd, &mut wr)
+            .await
+            .expect("handshake");
+        socket::read_frame::<_, Command>(&mut rd)
+            .await
+            .ok()
+            .flatten()
+    });
+
+    let binary = env!("CARGO_BIN_EXE_lazybox");
+    let child = run_workspace_create(
+        binary,
+        &[
+            "--name",
+            "scratch",
+            "--project",
+            "local-sandbox",
+            "--agent",
+            "totally-not-a-real-agent",
+            "--socket",
+            &socket_path.to_string_lossy(),
+        ],
+        temp.path().join("home"),
+    );
+
+    let status = tokio::time::timeout(Duration::from_secs(10), child)
+        .await
+        .expect("cli exits")
+        .expect("cli task");
+    assert!(!status.success(), "unknown --agent must fail the command");
+
+    // Nothing should have reached the socket: the CLI bailed at validation,
+    // so the accept never completes and this times out.
+    let sent = tokio::time::timeout(Duration::from_millis(500), server).await;
+    assert!(
+        sent.is_err(),
+        "unknown --agent must not send a CreateWorkspace, but the daemon received one",
+    );
+}

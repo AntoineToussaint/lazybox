@@ -610,6 +610,9 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     let Some(name) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) else {
         anyhow::bail!("workspace create needs a non-empty --name");
     };
+    if let Some(agent) = agent.as_deref() {
+        validate_agent_id(agent)?;
+    }
     let cwd = match cwd {
         Some(path) => path,
         None => std::env::current_dir()
@@ -636,11 +639,38 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
             )
         })?;
 
+    // The daemon hasn't confirmed anything yet — `send_command` only
+    // guarantees the frame was delivered. Report a request, not a fait
+    // accompli: the final key can carry a collision suffix and creation
+    // could still fail store-side.
     match &agent {
-        Some(agent) => println!("Created workspace \"{name}\" in {project_key} (spawning {agent})"),
-        None => println!("Created workspace \"{name}\" in {project_key}"),
+        Some(agent) => {
+            println!("Requested workspace \"{name}\" in {project_key} (spawning {agent})")
+        }
+        None => println!("Requested workspace \"{name}\" in {project_key}"),
     }
     Ok(())
+}
+
+/// Reject an unknown `--agent` id before sending anything. The daemon
+/// creates the workspace *before* it spawns (`CreateWorkspace` handler),
+/// so an unregistered id would leave a bare taskless workspace while the
+/// daemon's async spawn error never reaches this fire-and-forget CLI —
+/// the caller would see success and a false "spawning" line. Validating
+/// against the same registry the daemon builds (built-ins + YAML
+/// `GenericCli`s) turns that silent partial failure into a clear error.
+fn validate_agent_id(agent: &str) -> anyhow::Result<()> {
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    let registry = lazybox_server::registry_from_config(&cfg);
+    if registry.get(agent).is_some() {
+        return Ok(());
+    }
+    let mut ids: Vec<&str> = registry.ids().collect();
+    ids.sort_unstable();
+    anyhow::bail!(
+        "unknown --agent {agent:?}; known agents: {}",
+        ids.join(", ")
+    );
 }
 
 /// Resolve the Project a `workspace create` targets. Precedence: an explicit
@@ -661,9 +691,18 @@ async fn resolve_project_key(
         return Some(lazybox_core::ProjectKey::new(key));
     }
     if let Some(repo) = explicit_repo {
-        let (owner, repo) = repo.trim().split_once('/')?;
-        return (!owner.is_empty() && !repo.is_empty())
-            .then(|| lazybox_core::ProjectKey::github(owner, repo));
+        // Accept the same shapes the origin-URL path yields — a bare
+        // `owner/repo`, tolerating a trailing `.git` — and reject anything
+        // that wouldn't form a clean key (extra path segments, embedded
+        // whitespace, an empty half) rather than minting a malformed one.
+        let slug = repo.trim();
+        let slug = slug.strip_suffix(".git").unwrap_or(slug);
+        let (owner, repo) = slug.split_once('/')?;
+        let well_formed = !owner.is_empty()
+            && !repo.is_empty()
+            && !repo.contains('/')
+            && !slug.chars().any(char::is_whitespace);
+        return well_formed.then(|| lazybox_core::ProjectKey::github(owner, repo));
     }
     let checkout = lazybox_git_ops::describe_checkout_at(cwd.to_path_buf()).await?;
     let key = checkout
@@ -1793,6 +1832,12 @@ mod argv_tests {
             resolve_project_key(None, Some("acme/widget".into()), cwd).await,
             Some(lazybox_core::ProjectKey::github("acme", "widget")),
         );
+        // A trailing `.git` (as pasted from a clone URL) is tolerated, same
+        // as the origin-URL inference path.
+        assert_eq!(
+            resolve_project_key(None, Some("acme/widget.git".into()), cwd).await,
+            Some(lazybox_core::ProjectKey::github("acme", "widget")),
+        );
     }
 
     #[tokio::test]
@@ -1806,12 +1851,35 @@ mod argv_tests {
             resolve_project_key(None, Some("/widget".into()), cwd).await,
             None
         );
+        // Extra path segments and embedded whitespace would form a
+        // malformed key (`github-owner-repo/extra`, `github-a - b`); reject
+        // them rather than mint one the daemon can't match to a project.
+        assert_eq!(
+            resolve_project_key(None, Some("owner/repo/extra".into()), cwd).await,
+            None
+        );
+        assert_eq!(
+            resolve_project_key(None, Some("a / b".into()), cwd).await,
+            None
+        );
         // A blank --project falls through; with no repo and a non-git cwd,
         // nothing resolves.
         assert_eq!(
             resolve_project_key(Some("  ".into()), None, cwd).await,
             None
         );
+    }
+
+    #[test]
+    fn validate_agent_id_accepts_a_builtin_and_rejects_an_unknown_id() {
+        // `claude` is always registered (a built-in), regardless of the
+        // machine's config; a nonsense id never is. This is the guard that
+        // stops `--agent` typos from creating a workspace whose agent
+        // silently never spawns.
+        assert!(validate_agent_id("claude").is_ok());
+        let err = validate_agent_id("totally-not-a-real-agent")
+            .expect_err("unknown agent must be rejected");
+        assert!(err.to_string().contains("known agents"));
     }
 
     #[test]

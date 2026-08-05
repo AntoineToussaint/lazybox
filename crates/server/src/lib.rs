@@ -597,7 +597,12 @@ impl ServerConfig {
     }
 }
 
-fn registry_from_config(config: &lazybox_config::Config) -> Registry {
+/// Build the agent registry the daemon spawns from: the built-ins plus
+/// every YAML-configured `GenericCli`. The `lazybox workspace create`
+/// CLI reuses this to validate `--agent` against the exact set the daemon
+/// would accept, so a mistyped id fails fast instead of creating a
+/// workspace whose agent silently never spawns.
+pub fn registry_from_config(config: &lazybox_config::Config) -> Registry {
     let mut registry = Registry::default_builtins();
     for (id, entry) in &config.agents {
         let Some(spawn_cmd) = entry.spawn_argv() else {

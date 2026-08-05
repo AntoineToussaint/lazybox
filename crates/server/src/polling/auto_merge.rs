@@ -222,8 +222,8 @@ pub trait MergeBackend {
     ) -> Result<Option<(Task, Option<String>)>, String>;
 
     /// Merge the workspace's PR, pinned to `expected_head_oid` when
-    /// known. Returns the typed [`ProviderError`] — not a flattened
-    /// `String` — so the attempt can tell a transient secondary rate limit
+    /// known. Returns the typed [`lazybox_core::ProviderError`] — not a
+    /// flattened `String` — so the attempt can tell a transient secondary rate limit
     /// (retry on the next green poll) from a genuine rejection (stand down).
     async fn merge(
         &self,

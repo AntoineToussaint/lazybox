@@ -304,7 +304,7 @@ const MUTATION_RETRY_FALLBACK_SECS: u64 = 60;
 /// Bounded retry queue for a user-initiated GitHub mutation (merge,
 /// update-branch, …) that hits GitHub's secondary rate limit.
 ///
-/// A rate-limited write comes back as a `Retryable` [`ProviderError`]
+/// A rate-limited write comes back as a `Retryable` [`lazybox_core::ProviderError`]
 /// carrying the reset hint (`crate`-side, `mutation_provider_error` in the
 /// GitHub client lifts a secondary-limit GraphQL error to that). Rather
 /// than hard-fail with a raw red `×` the user must clear and re-press, we
@@ -425,7 +425,7 @@ pub(super) fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderEr
 /// rejected, and a client disconnect would drop the still-queued write. As a
 /// detached daemon task it does neither: the retry outlives the connection
 /// and the outcome reaches every client over the event bus. Same dispatch
-/// shape as [`auto_merge::on_workspace_committed`].
+/// shape as [`super::auto_merge::on_workspace_committed`].
 fn detach_mutation<Fut>(fut: Fut)
 where
     Fut: std::future::Future<Output = ()> + Send + 'static,

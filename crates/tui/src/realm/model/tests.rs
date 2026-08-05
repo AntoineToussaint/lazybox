@@ -11577,6 +11577,32 @@ mod focus_mode_tests {
         assert!(!m.focus_mode, "no terminal → no focus mode");
     }
 
+    /// The snippet picker is provider-scoped by the focused workspace's
+    /// task source (#868): `active_workspace_source` reports the provider
+    /// so `mount_snippet_picker` can drop the wrong-provider snippets. A
+    /// GitHub workspace reports `"github"`; with no focused terminal there
+    /// is nothing to key off, so it reports `None` and the picker shows
+    /// every snippet.
+    #[test]
+    fn active_workspace_source_resolves_the_focused_workspace_provider() {
+        let mut m = build_model();
+        assert_eq!(
+            m.active_workspace_source(),
+            None,
+            "no focused terminal → unknown source → show everything",
+        );
+
+        let ws = workspace_with_agent("owner/repo#1");
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        spawn_terminal(&mut m, &key);
+        assert_eq!(
+            m.active_workspace_source().as_deref(),
+            Some("github"),
+            "the focused GitHub workspace scopes the picker to github",
+        );
+    }
+
     /// `]]q` exits the terminal to the sidebar — and in focus mode that
     /// must also drop focus mode, since the sidebar it returns to is
     /// hidden while focus mode is on (#252, replacing the old idle-tick

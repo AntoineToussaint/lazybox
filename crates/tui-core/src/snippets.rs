@@ -62,13 +62,15 @@ pub fn category_rank(cat: &str) -> u8 {
     match cat {
         "Review" => 0,
         "Git & PR" => 1,
-        "Testing" => 2,
-        "Debugging" => 3,
-        "Refactor" => 4,
-        "Performance" => 5,
-        "Security" => 6,
-        "Docs" => 7,
-        "Chores" => 8,
+        "GitHub" => 2,
+        "Linear" => 3,
+        "Testing" => 4,
+        "Debugging" => 5,
+        "Refactor" => 6,
+        "Performance" => 7,
+        "Security" => 8,
+        "Docs" => 9,
+        "Chores" => 10,
         "" => 254, // "Other" bucket, always last
         _ => 200,  // custom categories, before Other, sorted by name
     }
@@ -303,6 +305,7 @@ mod tests {
             category: category.into(),
             body: body.into(),
             skill: None,
+            provider: None,
             origin,
         }
     }

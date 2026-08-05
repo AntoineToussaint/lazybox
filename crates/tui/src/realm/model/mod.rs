@@ -2259,9 +2259,16 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no snippets configured — add some to ~/.lazybox/snippets.yaml");
             return;
         }
+        // Provider-scope the catalog (#868): a snippet tagged for a
+        // specific source (`github` / `linear`) only surfaces on a
+        // workspace of that source; generic snippets always show, and when
+        // the workspace has no task to key off, nothing is hidden.
+        let source = self.active_workspace_source();
         let mut rows = Vec::with_capacity(self.snippets.len());
         for (k, v) in self.snippets.all() {
-            rows.push(PickerRow::new(k, v));
+            if v.matches_source(source.as_deref()) {
+                rows.push(PickerRow::new(k, v));
+            }
         }
         let picker = SnippetPicker::new(rows, initial_filter)
             .with_recent(self.recent_snippets.clone())
@@ -2341,6 +2348,19 @@ impl<T: TerminalAdapter> Model<T> {
             .sessions
             .first()
             .map(|session| session.worktree_path.clone())
+    }
+
+    /// The task `source` (`"github"` / `"linear"`) of the focused
+    /// terminal's workspace, used to provider-scope the snippet picker
+    /// (#868). `None` when the terminal has no session or its workspace
+    /// carries no PR/issue to key off — the picker then shows every
+    /// snippet, generic and provider-scoped alike.
+    fn active_workspace_source(&self) -> Option<String> {
+        let session_key = self.terminals.active_session()?;
+        self.sidebar
+            .workspace_by_key(session_key)?
+            .primary_task()
+            .map(|task| task.id.source.clone())
     }
 
     /// Kick off the broadcast flow (`Shift-B`): resolve the sidebar's

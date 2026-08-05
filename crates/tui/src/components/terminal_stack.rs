@@ -37,12 +37,47 @@ use ratatui::prelude::*;
 use ratatui::widgets::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Default cell grid size for new terminals before the first
 /// resize-from-render. Sized to match a typical agent default; the
 /// renderer overrides as soon as it knows the actual viewport.
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
+
+/// Configured per-terminal client-VT scrollback depth, in lines. Must
+/// mirror the tmux backend's `history-limit`: a deep-scrollback fetch
+/// (`apply_scrollback`) replays tmux's full retained history into the
+/// local VT, and a shallower cap here would silently clip everything past
+/// the last N lines — the client would show only a fraction of the
+/// history the daemon actually holds. Set once from
+/// `terminal.scrollback_lines` via [`TerminalStack::apply_ui_defaults`];
+/// the default covers any VT built before config lands (tests, the brief
+/// window before `apply_ui_defaults`). Process-wide because the VTs that
+/// read it are built in static contexts (`TerminalVt::new`, `reset`, the
+/// `apply_scrollback` scratch parser) with no handle to per-stack config.
+static CLIENT_SCROLLBACK_LINES: AtomicUsize = AtomicUsize::new(DEFAULT_SCROLLBACK_LINES);
+const DEFAULT_SCROLLBACK_LINES: usize = 50_000;
+
+/// libghostty's `max_scrollback` bounds the scrollback by **bytes** of
+/// page memory, not line count (the C header's "number of lines" wording
+/// is misleading — memory is what it actually caps). ghostty stores each
+/// scrollback row as full-width cells plus page overhead, so a row costs
+/// on the order of ~1.8 KB at a typical agent width; this per-line budget
+/// carries margin over that so the client holds the configured line count
+/// even for wide, styled output. ghostty grows the page list lazily, so
+/// an idle terminal pays ~nothing — the budget is a ceiling, not an
+/// upfront allocation. The old flat `10_000` was ~10 KB total, a few
+/// hundred rows, far below the tmux history it was meant to mirror (#857).
+const CLIENT_SCROLLBACK_BYTES_PER_LINE: usize = 2048;
+
+/// The client VT's `max_scrollback` byte budget for the current
+/// configured line depth.
+fn client_scrollback_bytes() -> usize {
+    CLIENT_SCROLLBACK_LINES
+        .load(Ordering::Relaxed)
+        .saturating_mul(CLIENT_SCROLLBACK_BYTES_PER_LINE)
+}
 
 /// Cap for the per-terminal recent-output buffer.
 ///
@@ -1105,7 +1140,7 @@ impl TerminalVt {
         let terminal = vt::Terminal::new(vt::TerminalOptions {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
-            max_scrollback: 10_000,
+            max_scrollback: client_scrollback_bytes(),
         })
         .ok()?;
         let render_state = vt::RenderState::new().ok()?;
@@ -1270,6 +1305,12 @@ impl TerminalStack {
     pub fn apply_ui_defaults(&mut self, ui: &lazybox_config::UiDefaults) {
         self.dead_on_arrival = ui.agent_dead_on_arrival;
         self.terminal_new_layout = ui.terminal_new_layout;
+        // Match the client VT's scrollback depth to the daemon's tmux
+        // `history-limit` (both from `terminal.scrollback_lines`) so a
+        // deep-scrollback fetch can surface the full retained history
+        // rather than clipping it to a shallower local grid. Read by
+        // `TerminalVt::new` when each terminal's parser is built.
+        CLIENT_SCROLLBACK_LINES.store(ui.scrollback_lines as usize, Ordering::Relaxed);
     }
 
     /// The current new-terminal layout preference.
@@ -6441,6 +6482,44 @@ mod deep_scrollback_tests {
                 }]
             ),
             "expected a single FetchScrollback, got {cmds:?}"
+        );
+    }
+
+    /// A deep-scrollback capture larger than the old hardcoded 10k client
+    /// VT cap must be retained in full once `terminal.scrollback_lines` is
+    /// raised (#857) — otherwise the client silently clips everything past
+    /// the last 10k lines and the deeper tmux history the daemon fetched
+    /// never becomes scrollable. The VT reads the depth at creation, so
+    /// `apply_ui_defaults` runs before the terminal is spawned.
+    #[test]
+    fn raised_scrollback_lines_lets_client_retain_beyond_old_cap() {
+        let sk = SessionKey::new("s");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.apply_ui_defaults(&lazybox_config::UiDefaults {
+            scrollback_lines: 30_000,
+            ..Default::default()
+        });
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        stack.set_active_session(Some(sk.clone()));
+
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: TerminalId(1),
+            replay: deep_history(15_000),
+            seq: 9,
+        });
+
+        let after = scrollbar(&stack, TerminalId(1));
+        assert!(
+            after.total > 12_000,
+            "client VT must retain the deep capture in full, not clip it \
+             to the old 10k cap: {after:?}"
         );
     }
 

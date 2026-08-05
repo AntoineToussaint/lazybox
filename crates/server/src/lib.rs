@@ -413,7 +413,9 @@ impl ServerConfig {
         // survive lazybox-server restart and can be attached externally
         // via `tmux -L lazybox attach -t <key>`; raw-pty is the
         // ephemeral fallback when tmux isn't installed.
-        let backend: Arc<dyn SessionBackend> = match TmuxBackend::detect() {
+        let backend: Arc<dyn SessionBackend> = match TmuxBackend::detect(
+            user_config.terminal.scrollback_lines,
+        ) {
             Some(t) => {
                 tracing::info!("session backend: tmux");
                 Arc::new(t)

@@ -9086,12 +9086,7 @@ mod terminal_url_mouse_tests {
         });
     }
 
-    fn modifier_left_click(
-        model: &mut TestModel,
-        col: u16,
-        row: u16,
-        modifiers: KeyModifiers,
-    ) {
+    fn modifier_left_click(model: &mut TestModel, col: u16, row: u16, modifiers: KeyModifiers) {
         model.handle_mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: col,

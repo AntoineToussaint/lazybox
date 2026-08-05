@@ -2838,7 +2838,10 @@ snippets:
         });
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("ship it".into());
-        assert!(cmds.is_empty(), "nothing dispatched until confirmed: {cmds:?}");
+        assert!(
+            cmds.is_empty(),
+            "nothing dispatched until confirmed: {cmds:?}"
+        );
         assert_eq!(m.top_modal(), Some(&Id::BroadcastConfirm));
         assert!(
             matches!(
@@ -2887,7 +2890,12 @@ snippets:
                     initial_prompt,
                     on_main,
                     ..
-                } => Some((session_key.clone(), kind.clone(), initial_prompt.clone(), *on_main)),
+                } => Some((
+                    session_key.clone(),
+                    kind.clone(),
+                    initial_prompt.clone(),
+                    *on_main,
+                )),
                 _ => None,
             })
             .expect("the session-less scoped target spawns the default agent");
@@ -2951,7 +2959,10 @@ snippets:
         });
         m.modal_stack.push(Id::BroadcastText);
         let cmds = m.handle_textarea_submitted("ship it".into());
-        assert!(cmds.is_empty(), "nothing spawned for an unspawnable row: {cmds:?}");
+        assert!(
+            cmds.is_empty(),
+            "nothing spawned for an unspawnable row: {cmds:?}"
+        );
         assert_ne!(
             m.top_modal(),
             Some(&Id::BroadcastConfirm),

@@ -252,7 +252,9 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let agent = self.sidebar.default_agent().to_string();
         let prompt = if spawn_count == 1 {
-            format!("1 selected workspace has no agent — start the default agent ({agent}) there and broadcast?")
+            format!(
+                "1 selected workspace has no agent — start the default agent ({agent}) there and broadcast?"
+            )
         } else {
             format!(
                 "{spawn_count} selected workspaces have no agent — start the default agent ({agent}) in each and broadcast?"
@@ -1017,11 +1019,7 @@ showing keybinding search only",
                 }) = self.modal_flow.take()
                 {
                     if yes {
-                        cmds.extend(self.run_broadcast(
-                            &targets,
-                            snippet_key.as_deref(),
-                            &body,
-                        ));
+                        cmds.extend(self.run_broadcast(&targets, snippet_key.as_deref(), &body));
                     } else {
                         self.flash_info("broadcast cancelled");
                     }

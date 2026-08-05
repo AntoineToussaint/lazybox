@@ -117,6 +117,12 @@
         "session_key": "github:o/r#42"
       }
     },
+    {
+      "InspectWorkspaceDiff": {
+        "session_key": "github:o/r#42",
+        "target": "LinkedCheckout"
+      }
+    },
     "Refresh"
   ],
   "events": [
@@ -351,8 +357,47 @@
         "ok": false,
         "workspace_key": "github:o/r#42"
       }
+    },
+    {
+      "WorkspaceDiffInspected": {
+        "diff": {
+          "files": [
+            {
+              "headers": [
+                "diff --git a/src/main.rs b/src/main.rs"
+              ],
+              "hunks": [
+                {
+                  "header": "@@ -1,2 +1,2 @@",
+                  "lines": [
+                    {
+                      "kind": "Addition",
+                      "new_line": 1,
+                      "old_line": null,
+                      "text": "+let x = 1;"
+                    }
+                  ],
+                  "new_start": 1,
+                  "old_start": 1
+                }
+              ],
+              "old_path": null,
+              "path": "src/main.rs"
+            }
+          ],
+          "stat": [
+            " src/main.rs | 2 +-"
+          ],
+          "status": [
+            " M src/main.rs"
+          ],
+          "truncated": false
+        },
+        "error": null,
+        "workspace_key": "github:o/r#42"
+      }
     }
   ],
-  "protocol_fingerprint": 2325978854,
+  "protocol_fingerprint": 83678823,
   "protocol_version": 2
 }

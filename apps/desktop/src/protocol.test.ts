@@ -5,6 +5,7 @@ import {
   commandsForWorkspaceIntent,
   createWorkspaceCommand,
   deleteOrCloseCommand,
+  inspectWorkspaceDiffCommand,
   mergePrCommand,
   renameWorkspaceCommand,
   setAutoFixPoliciesCommand,
@@ -132,6 +133,17 @@ describe("IPC command JSON", () => {
     });
     expect(setNotesCommand(key, "flaky job")).toEqual({
       SetNotes: { session_key: key, notes: "flaky job" },
+    });
+    expect(
+      inspectWorkspaceDiffCommand(key, { Session: "session-uuid" }),
+    ).toEqual({
+      InspectWorkspaceDiff: {
+        session_key: key,
+        target: { Session: "session-uuid" },
+      },
+    });
+    expect(inspectWorkspaceDiffCommand(key, "LinkedCheckout")).toEqual({
+      InspectWorkspaceDiff: { session_key: key, target: "LinkedCheckout" },
     });
   });
 

@@ -130,9 +130,13 @@ browser (`open_url`, shared launcher); cycle mailbox (`set_mailbox` over the
 shared `Mailbox`); rename workspace (`RenameWorkspace`). Exposed through the
 workspace actions menu + a mailbox control.
 
-**Tier A — still missing:** view diff (`action.rs:412`) — needs the
-`InspectWorkspaceDiff` → `WorkspaceDiffInspected` request/response plus a diff
-reader, tracked separately; open in editor (`:411`) — needs terminal-spawn-with-
+**Tier A — view diff landed (#843):** the workspace actions menu now has a
+**View diff** entry that fires `DesktopCommand::InspectWorkspaceDiff` (target
+resolved from the workspace's newest session or its linked checkout, mirroring
+the TUI's `ViewDiff`) and renders the returned `WorkspaceDiffInspected` diff in
+a read-only reader modal.
+
+**Tier A — still missing:** open in editor (`:411`) — needs terminal-spawn-with-
 command semantics the one-shot command path doesn't model.
 
 **Missing — Tier B/C (hands-off + batch + navigation):** automation policies

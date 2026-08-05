@@ -22,7 +22,9 @@ import {
   supportsTrackMain,
   unreadCount,
   visibleUnreadCount,
+  workspaceDiffTarget,
 } from "./model";
+import type { Session } from "./generated/Session";
 
 function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
   return {
@@ -91,6 +93,51 @@ function workspace(key: string, pr: Task | null): Workspace {
     last_viewed_at: null,
   };
 }
+
+function session(id: string, createdAt: string): Session {
+  return {
+    id,
+    workspace_key: "ws",
+    name: "claude",
+    kind: { Agent: { agent_id: "claude" } },
+    state: "Idle",
+    worktree_path: `/tmp/${id}`,
+    worktree_branch: null,
+    created_at: createdAt,
+    last_output_at: null,
+    layout: { Tabs: { active: 0 } },
+    provider_session_ids: {},
+  };
+}
+
+describe("workspaceDiffTarget", () => {
+  it("targets the newest session's worktree", () => {
+    const ws = workspace("ws", null);
+    ws.sessions = [
+      session("older", "2026-01-01T00:00:00Z"),
+      session("newest", "2026-01-03T00:00:00Z"),
+      session("middle", "2026-01-02T00:00:00Z"),
+    ];
+    expect(workspaceDiffTarget(ws)).toEqual({ Session: "newest" });
+  });
+
+  it("falls back to the linked checkout when there are no sessions", () => {
+    const ws = workspace("ws", null);
+    ws.linked_checkout = "/home/dev/repo";
+    expect(workspaceDiffTarget(ws)).toBe("LinkedCheckout");
+  });
+
+  it("prefers a session over a linked checkout", () => {
+    const ws = workspace("ws", null);
+    ws.sessions = [session("s", "2026-01-01T00:00:00Z")];
+    ws.linked_checkout = "/home/dev/repo";
+    expect(workspaceDiffTarget(ws)).toEqual({ Session: "s" });
+  });
+
+  it("returns null for a pure tracking row", () => {
+    expect(workspaceDiffTarget(workspace("ws", null))).toBeNull();
+  });
+});
 
 function activity(author: string, body: string) {
   return {

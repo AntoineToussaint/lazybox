@@ -5,6 +5,10 @@ import type {
   DesktopInfo,
   DesktopRepository,
   DesktopStreamMessage,
+  DiffFileDto,
+  DiffHunkDto,
+  DiffLineDto,
+  DiffLineKindDto,
   Filter,
   FilterAxis,
   FilterMenuItem,
@@ -21,6 +25,8 @@ import type {
   TerminalSnapshot,
   VisibleRow,
   Workspace,
+  WorkspaceDiffDto,
+  WorkspaceDiffTarget,
   WorkspaceKind,
   WorkspacesResponse,
 } from "./generated";
@@ -31,6 +37,10 @@ export type {
   DesktopInfo,
   DesktopRepository,
   DesktopStreamMessage,
+  DiffFileDto,
+  DiffHunkDto,
+  DiffLineDto,
+  DiffLineKindDto,
   Filter,
   FilterAxis,
   FilterMenuItem,
@@ -48,6 +58,8 @@ export type {
   TerminalSnapshot,
   VisibleRow,
   Workspace,
+  WorkspaceDiffDto,
+  WorkspaceDiffTarget,
   WorkspaceKind,
   WorkspacesResponse,
 };
@@ -219,6 +231,13 @@ export function setNotesCommand(
   notes: string,
 ): LazyboxCommand {
   return { SetNotes: { session_key: sessionKey, notes } };
+}
+
+export function inspectWorkspaceDiffCommand(
+  sessionKey: string,
+  target: WorkspaceDiffTarget,
+): LazyboxCommand {
+  return { InspectWorkspaceDiff: { session_key: sessionKey, target } };
 }
 
 export function terminalKindLabel(kind: TerminalKind): string {

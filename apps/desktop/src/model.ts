@@ -9,6 +9,7 @@ import type {
   TerminalKind,
   VisibleRow,
   Workspace,
+  WorkspaceDiffTarget,
 } from "./protocol";
 
 /** A run of filter-menu items sharing one axis (State / Role / Kind). */
@@ -415,6 +416,33 @@ export function preferredTerminal<T extends WorkspaceTerminal>(
       }
       return right.id - left.id;
     })[0];
+}
+
+/**
+ * The exact checkout whose worktree diff the desktop should inspect
+ * (#843), or null when the workspace has nothing on disk to review.
+ * Mirrors the TUI's `ViewDiff` target resolution: the newest session's
+ * worktree (`Workspace::default_session`, the max-`created_at` session),
+ * else the workspace's linked checkout. A pure tracking row (no sessions,
+ * no linked checkout) has no diff to show.
+ */
+export function workspaceDiffTarget(
+  workspace: Workspace,
+): WorkspaceDiffTarget | null {
+  let newest: { id: string; at: number } | null = null;
+  for (const session of workspace.sessions) {
+    const at = Date.parse(session.created_at);
+    if (newest === null || at > newest.at) {
+      newest = { id: session.id, at };
+    }
+  }
+  if (newest !== null) {
+    return { Session: newest.id };
+  }
+  if (workspace.linked_checkout !== null) {
+    return "LinkedCheckout";
+  }
+  return null;
 }
 
 export function canReplyToTask(task: Task | null): boolean {

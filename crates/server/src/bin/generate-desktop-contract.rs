@@ -102,6 +102,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          export type { DesktopTerminalSnapshot as TerminalSnapshot } from \"./DesktopTerminalSnapshot\";\n\
          export type { Task } from \"./Task\";\n\
          export type { Workspace } from \"./Workspace\";\n\
+         export type { WorkspaceDiffTarget } from \"./WorkspaceDiffTarget\";\n\
+         export type { WorkspaceDiffDto } from \"./WorkspaceDiffDto\";\n\
+         export type { DiffFileDto } from \"./DiffFileDto\";\n\
+         export type { DiffHunkDto } from \"./DiffHunkDto\";\n\
+         export type { DiffLineDto } from \"./DiffLineDto\";\n\
+         export type { DiffLineKindDto } from \"./DiffLineKindDto\";\n\
          export type { WorkspacesResponse } from \"./WorkspacesResponse\";\n\
          export { DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION } from \"./terminal-wire\";\n";
     std::fs::write(output.join("index.ts"), index)?;

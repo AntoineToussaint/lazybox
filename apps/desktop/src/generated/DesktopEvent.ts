@@ -5,6 +5,7 @@ import type { SessionKey } from "./SessionKey";
 import type { TerminalId } from "./TerminalId";
 import type { TerminalKind } from "./TerminalKind";
 import type { Workspace } from "./Workspace";
+import type { WorkspaceDiffDto } from "./WorkspaceDiffDto";
 import type { WorkspaceKey } from "./WorkspaceKey";
 import type { WorktreeStep } from "./WorktreeStep";
 import type { WorktreeStepStatus } from "./WorktreeStepStatus";
@@ -15,4 +16,4 @@ export type DesktopEvent = { "Snapshot": { workspaces: Array<Workspace>, termina
  * the daemon (#548) so the desktop's "Recent" group shares one
  * MRU with the in-process TUI.
  */
-recent_snippets: Array<string>, } } | { "WorkspaceUpserted": Workspace } | { "WorkspaceRemoved": WorkspaceKey } | { "TerminalSpawned": { terminal_id: TerminalId, session_key: SessionKey, kind: TerminalKind, } } | { "TerminalExited": { terminal_id: TerminalId, exit_code: number | null, last_output: string | null, } } | { "TerminalFocusRequested": { terminal_id: TerminalId, } } | { "AgentState": { session_key: SessionKey, terminal_id: TerminalId, state: AgentState, } } | { "SnippetDelivered": { terminal_id: TerminalId, session_key: SessionKey, snippet_key: string, } } | { "ProviderError": { source: string, message: string, } } | { "CommandRejected": { command: string, message: string, } } | { "PollCompleted": { source: string, count: number, } } | { "PollProgress": { source: string, message: string, } } | { "WorktreeProgress": { session_key: SessionKey, step: WorktreeStep, status: WorktreeStepStatus, } } | { "WorkspaceActionOutcome": { workspace_key: WorkspaceKey, ok: boolean, message: string, } };
+recent_snippets: Array<string>, } } | { "WorkspaceUpserted": Workspace } | { "WorkspaceRemoved": WorkspaceKey } | { "TerminalSpawned": { terminal_id: TerminalId, session_key: SessionKey, kind: TerminalKind, } } | { "TerminalExited": { terminal_id: TerminalId, exit_code: number | null, last_output: string | null, } } | { "TerminalFocusRequested": { terminal_id: TerminalId, } } | { "AgentState": { session_key: SessionKey, terminal_id: TerminalId, state: AgentState, } } | { "SnippetDelivered": { terminal_id: TerminalId, session_key: SessionKey, snippet_key: string, } } | { "ProviderError": { source: string, message: string, } } | { "CommandRejected": { command: string, message: string, } } | { "PollCompleted": { source: string, count: number, } } | { "PollProgress": { source: string, message: string, } } | { "WorktreeProgress": { session_key: SessionKey, step: WorktreeStep, status: WorktreeStepStatus, } } | { "WorkspaceActionOutcome": { workspace_key: WorkspaceKey, ok: boolean, message: string, } } | { "WorkspaceDiffInspected": { workspace_key: WorkspaceKey, diff: WorkspaceDiffDto | null, error: string | null, } };

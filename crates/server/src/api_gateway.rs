@@ -522,6 +522,16 @@ pub enum DesktopCommand {
         session_key: lazybox_core::SessionKey,
         notes: String,
     },
+    /// Read the workspace's combined staged/unstaged worktree diff (the
+    /// TUI's `view diff`, #843). Read-only. `target` names the exact
+    /// checkout — a session's worktree, or the workspace's linked
+    /// checkout — which the desktop derives from the `Workspace` it
+    /// already holds. The diff arrives asynchronously as
+    /// [`DesktopEvent::WorkspaceDiffInspected`].
+    InspectWorkspaceDiff {
+        session_key: lazybox_core::SessionKey,
+        target: lazybox_ipc::WorkspaceDiffTarget,
+    },
     Refresh,
 }
 
@@ -646,6 +656,13 @@ impl DesktopCommand {
             DesktopCommand::SetNotes { session_key, notes } => {
                 Command::SetNotes { session_key, notes }
             }
+            DesktopCommand::InspectWorkspaceDiff {
+                session_key,
+                target,
+            } => Command::InspectWorkspaceDiff {
+                workspace_key: workspace_key_of(&session_key),
+                target,
+            },
             DesktopCommand::Refresh => Command::Refresh,
         }
     }
@@ -733,6 +750,17 @@ pub enum DesktopEvent {
         workspace_key: lazybox_core::WorkspaceKey,
         ok: bool,
         message: String,
+    },
+    /// A `InspectWorkspaceDiff` request finished (#843): the read-only
+    /// worktree diff for the desktop's diff reader. `diff` is absent (and
+    /// `error` set) when the checkout disappeared or git could not read
+    /// it. `workspace_key` correlates the reply with the request the
+    /// desktop fired, so a diff for a since-reselected workspace is
+    /// ignored.
+    WorkspaceDiffInspected {
+        workspace_key: lazybox_core::WorkspaceKey,
+        diff: Option<lazybox_ipc::WorkspaceDiffDto>,
+        error: Option<String>,
     },
 }
 
@@ -949,6 +977,16 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             workspace_key,
             ok: false,
             message: format!("Delete/close of {label} failed: {reason}"),
+        }),
+        Event::WorkspaceDiffInspected {
+            workspace_key,
+            diff,
+            error,
+            ..
+        } => Some(DesktopEvent::WorkspaceDiffInspected {
+            workspace_key,
+            diff,
+            error,
         }),
         _ => None,
     }

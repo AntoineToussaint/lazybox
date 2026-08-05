@@ -190,6 +190,7 @@ fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
         DesktopCommand::Unsnooze { .. } => "Unsnooze",
         DesktopCommand::SyncWorkspace { .. } => "SyncWorkspace",
         DesktopCommand::SetNotes { .. } => "SetNotes",
+        DesktopCommand::InspectWorkspaceDiff { .. } => "InspectWorkspaceDiff",
         DesktopCommand::Refresh => "Refresh",
     }
 }
@@ -210,6 +211,7 @@ fn desktop_event_tag(event: &DesktopEvent) -> &'static str {
         DesktopEvent::PollProgress { .. } => "PollProgress",
         DesktopEvent::WorktreeProgress { .. } => "WorktreeProgress",
         DesktopEvent::WorkspaceActionOutcome { .. } => "WorkspaceActionOutcome",
+        DesktopEvent::WorkspaceDiffInspected { .. } => "WorkspaceDiffInspected",
     }
 }
 
@@ -330,6 +332,10 @@ fn desktop_compatibility_fixture_is_current() {
             session_key: session_key.clone(),
             notes: "Waiting on the flaky integration job.".into(),
         },
+        DesktopCommand::InspectWorkspaceDiff {
+            session_key: session_key.clone(),
+            target: lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout,
+        },
         DesktopCommand::Refresh,
     ];
     let events = vec![
@@ -395,6 +401,31 @@ fn desktop_compatibility_fixture_is_current() {
             ok: false,
             message: "Merge of github:o/r#42 failed: not mergeable".into(),
         },
+        DesktopEvent::WorkspaceDiffInspected {
+            workspace_key: lazybox_core::WorkspaceKey("github:o/r#42".into()),
+            diff: Some(lazybox_ipc::WorkspaceDiffDto {
+                status: vec![" M src/main.rs".into()],
+                stat: vec![" src/main.rs | 2 +-".into()],
+                files: vec![lazybox_ipc::DiffFileDto {
+                    old_path: None,
+                    path: "src/main.rs".into(),
+                    headers: vec!["diff --git a/src/main.rs b/src/main.rs".into()],
+                    hunks: vec![lazybox_ipc::DiffHunkDto {
+                        header: "@@ -1,2 +1,2 @@".into(),
+                        old_start: 1,
+                        new_start: 1,
+                        lines: vec![lazybox_ipc::DiffLineDto {
+                            kind: lazybox_ipc::DiffLineKindDto::Addition,
+                            text: "+let x = 1;".into(),
+                            old_line: None,
+                            new_line: Some(1),
+                        }],
+                    }],
+                }],
+                truncated: false,
+            }),
+            error: None,
+        },
     ];
     let command_tags = commands
         .iter()
@@ -404,8 +435,8 @@ fn desktop_compatibility_fixture_is_current() {
         .iter()
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(command_tags.len(), 21);
-    assert_eq!(event_tags.len(), 14);
+    assert_eq!(command_tags.len(), 22);
+    assert_eq!(event_tags.len(), 15);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,
         "protocol_fingerprint": api_gateway::DESKTOP_PROTOCOL_FINGERPRINT,
@@ -496,6 +527,72 @@ fn desktop_boundary_forwards_workspace_mutation_outcomes() {
             assert!(message.contains("not-planned"), "message was {message:?}");
         }
         other => panic!("expected a degraded-delete outcome, got {other:?}"),
+    }
+}
+
+#[test]
+fn desktop_inspect_diff_command_maps_to_ipc() {
+    let session_key: lazybox_core::SessionKey = "github:o/r#42".into();
+    let command = DesktopCommand::InspectWorkspaceDiff {
+        session_key: session_key.clone(),
+        target: lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout,
+    };
+    match command.into_correlated(Some("req-1".into())) {
+        lazybox_ipc::Command::InspectWorkspaceDiff {
+            workspace_key,
+            target,
+        } => {
+            assert_eq!(workspace_key.as_str(), session_key.as_str());
+            assert_eq!(target, lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout);
+        }
+        other => panic!("expected InspectWorkspaceDiff, got {other:?}"),
+    }
+}
+
+#[test]
+fn desktop_boundary_forwards_workspace_diff() {
+    let key = lazybox_core::WorkspaceKey("github:o/r#42".into());
+    let dto = lazybox_ipc::WorkspaceDiffDto {
+        status: vec![" M src/main.rs".into()],
+        stat: vec![" src/main.rs | 1 +".into()],
+        files: Vec::new(),
+        truncated: false,
+    };
+
+    // A successful inspection carries the diff and drops the internal-only
+    // `agent_terminal_ids` / `target` the desktop reader doesn't use.
+    match api_gateway::desktop_event(Event::WorkspaceDiffInspected {
+        workspace_key: key.clone(),
+        target: lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout,
+        agent_terminal_ids: vec![lazybox_ipc::TerminalId(3)],
+        diff: Some(dto.clone()),
+        error: None,
+    }) {
+        Some(DesktopEvent::WorkspaceDiffInspected {
+            workspace_key,
+            diff,
+            error,
+        }) => {
+            assert_eq!(workspace_key, key);
+            assert_eq!(diff, Some(dto));
+            assert!(error.is_none());
+        }
+        other => panic!("expected a diff event, got {other:?}"),
+    }
+
+    // A read failure forwards the error with no diff.
+    match api_gateway::desktop_event(Event::WorkspaceDiffInspected {
+        workspace_key: key.clone(),
+        target: lazybox_ipc::WorkspaceDiffTarget::LinkedCheckout,
+        agent_terminal_ids: Vec::new(),
+        diff: None,
+        error: Some("not a git repository".into()),
+    }) {
+        Some(DesktopEvent::WorkspaceDiffInspected { diff, error, .. }) => {
+            assert!(diff.is_none());
+            assert_eq!(error.as_deref(), Some("not a git repository"));
+        }
+        other => panic!("expected a diff error event, got {other:?}"),
     }
 }
 

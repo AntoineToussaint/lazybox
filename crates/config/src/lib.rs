@@ -133,6 +133,31 @@ pub struct DesktopConfig {
     /// Allow the desktop client to record its fixed, content-free usage
     /// events. Disabled unless the user explicitly opts in.
     pub analytics_enabled: bool,
+    /// Attach the desktop to an already-running gateway instead of
+    /// spawning an in-process daemon. Set this to drive agents on a
+    /// remote box reached through an SSH-forwarded loopback port
+    /// (`ssh -L 127.0.0.1:<port>:127.0.0.1:<remote> box`): point `url`
+    /// at the forwarded loopback address and `token` at the box's
+    /// gateway bearer. The `LAZYBOX_DESKTOP_GATEWAY_URL` /
+    /// `LAZYBOX_DESKTOP_GATEWAY_TOKEN` env vars override these. Omitted
+    /// from a written config when unset, rather than serialized as `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteGatewayConfig>,
+}
+
+/// A `desktop.remote:` block — an existing API gateway the desktop
+/// attaches to rather than starting its own daemon. The gateway is
+/// loopback-only and unencrypted by design, so a remote target is
+/// reached through an SSH-forwarded loopback port, never a routable URL.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RemoteGatewayConfig {
+    /// Base URL of the gateway, e.g. `http://127.0.0.1:8787`.
+    pub url: String,
+    /// Bearer token the gateway was started with (`LAZYBOX_API_TOKEN` on
+    /// the box). Empty when the gateway runs `--insecure-no-auth`.
+    #[serde(default)]
+    pub token: String,
 }
 
 /// One entry under `editors:`. Args support `{path}` for the
@@ -1760,6 +1785,29 @@ mod duration_human_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An unset `desktop.remote` must not serialize as `remote: null`
+    /// into a written config; a configured block round-trips intact.
+    #[test]
+    fn desktop_remote_is_omitted_when_unset_and_round_trips_when_set() {
+        let default_yaml =
+            serde_yaml::to_string(&DesktopConfig::default()).expect("serialize default desktop");
+        assert!(
+            !default_yaml.contains("remote"),
+            "unset remote must be omitted, got:\n{default_yaml}"
+        );
+
+        let configured = DesktopConfig {
+            analytics_enabled: false,
+            remote: Some(RemoteGatewayConfig {
+                url: "http://127.0.0.1:8787".to_string(),
+                token: "box-token".to_string(),
+            }),
+        };
+        let yaml = serde_yaml::to_string(&configured).expect("serialize configured desktop");
+        let restored: DesktopConfig = serde_yaml::from_str(&yaml).expect("round-trip desktop");
+        assert_eq!(restored.remote, configured.remote);
+    }
 
     /// config.yaml can hold Slack tokens: every write path must land
     /// owner-only, and loading a pre-existing loose file tightens it.

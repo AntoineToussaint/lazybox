@@ -57,6 +57,58 @@ progressively instead of hammered, and if the box comes back on an
 incompatible lazybox build the client stops retrying and shows the usual
 disconnect banner naming the build mismatch.
 
+## The desktop app
+
+The desktop app speaks HTTP/JSON to the daemon's API gateway rather than the
+TUI's Unix socket, so it takes a different door to the same box. By default it
+spawns its own in-process daemon and a loopback gateway; point it at an
+existing gateway instead and it skips the local daemon entirely.
+
+On the box, run the standalone gateway (not `server start`):
+
+```sh
+LAZYBOX_API_TOKEN=secret lazybox server api   # binds 127.0.0.1:8787
+```
+
+On your laptop, forward that loopback port and tell the desktop where to
+reach it — either in `~/.lazybox/config.yaml`:
+
+```yaml
+desktop:
+  remote:
+    url: http://127.0.0.1:8787   # the SSH-forwarded loopback port
+    token: secret                # the box's LAZYBOX_API_TOKEN
+```
+
+or through the environment (these win over config):
+
+```sh
+ssh -L 127.0.0.1:8787:127.0.0.1:8787 user@box
+LAZYBOX_DESKTOP_GATEWAY_URL=http://127.0.0.1:8787 \
+LAZYBOX_DESKTOP_GATEWAY_TOKEN=secret \
+  lazybox-desktop
+```
+
+The gateway is loopback-only and unencrypted by design (it refuses any
+non-loopback bind), so the `url` always points at a forwarded `127.0.0.1`
+port, never a routable host — SSH is the trust boundary, exactly as for the
+TUI socket. Leave `token` empty only if the box runs the gateway with
+`--insecure-no-auth`.
+
+The agents you can spawn and the repositories the project picker offers come
+from the **box** — the desktop reads them from the gateway (`/v1/info`) on
+attach, not from your laptop's config — so, like the TUI, a remote desktop
+offers exactly what the box is set up to run.
+
+The desktop's `/v1/events` and `/v1/terminal` streams re-dial on a dropped
+link (laptop sleep, wifi change, tunnel reset). Each re-dial opens a fresh
+gateway connection that re-`Subscribe`s and replays the authoritative
+per-terminal ring buffer in its opening snapshot, so the inbox and terminals
+reconstruct after a remote hop the same way the socket path resyncs. The
+initial attach also tolerates a tunnel that isn't up yet: the handshake
+retries for a few seconds before giving up, so launching the desktop a beat
+before the `ssh -L` forward is ready still connects.
+
 ## What degrades under remote
 
 Client-local actions that need a **local** filesystem are unavailable or

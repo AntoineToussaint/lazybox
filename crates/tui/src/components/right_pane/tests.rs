@@ -1231,6 +1231,8 @@ mod description_expand_tests {
         // there put it next to filler (#849 review).
         let mut task = task_with_body("body");
         task.author = "alice".into();
+        // Someone else's item, so the creator earns its byline.
+        task.role = lazybox_core::TaskRole::Reviewer;
         let ws = Workspace::from_task(task, Utc::now());
         let mut pane = RightPane::new(PaneId::new(0));
         pane.set_workspace(Some(ws));
@@ -1257,6 +1259,23 @@ mod description_expand_tests {
     }
 
     #[test]
+    fn header_omits_creator_when_viewer_is_author() {
+        // Your own item (role == Author): "opened by @you" is redundant,
+        // so the byline is suppressed even though `author` is populated.
+        let mut task = task_with_body("body");
+        task.author = "alice".into();
+        task.role = lazybox_core::TaskRole::Author;
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            !text.contains("opened by"),
+            "no creator byline on your own item: {text}",
+        );
+    }
+
+    #[test]
     fn header_omits_creator_when_author_empty() {
         // task_with_body leaves author empty — no `opened by` row.
         let mut pane = pane_showing("body");
@@ -1264,6 +1283,25 @@ mod description_expand_tests {
         assert!(
             !text.contains("opened by"),
             "no creator row when author is unset: {text}",
+        );
+    }
+
+    #[test]
+    fn reviewers_hint_follows_kind_not_url() {
+        // The empty-reviewers hint keys off `Task::is_pr()` (authoritative
+        // `kind`), not a `/pull/` URL sniff — so a PR whose URL doesn't
+        // contain `/pull/` (e.g. an API/merge-request shape) still gets
+        // the hint. Regression for the old `url.contains("/pull/")` path.
+        let mut task = task_with_body("body");
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task.url = "https://example.test/o/r/123".into();
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            text.contains("Reviewers:") && text.contains("g r to request"),
+            "a PR-kind task must surface the reviewers hint: {text}",
         );
     }
 

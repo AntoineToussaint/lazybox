@@ -1210,7 +1210,11 @@ impl RightPane {
                 ));
             }
         }
-        if !task.author.is_empty() {
+        // Skip the creator when the viewer is the author — you don't need
+        // "opened by @you" on your own PR/issue. #849 is about seeing who
+        // opened *someone else's* item, so the byline only earns its space
+        // when the author isn't the viewer.
+        if !task.author.is_empty() && task.role != lazybox_core::TaskRole::Author {
             let opened_by = "opened by ";
             let handle = format!("@{}", task.author);
             let left: usize = crumbs
@@ -1319,7 +1323,7 @@ impl RightPane {
         // to dig through `?` to learn how to add them. Empty
         // *issues* don't get the hint for reviewers (issues have no
         // reviewers on GitHub), but they DO get the assignees hint.
-        let is_pr = task.url.contains("/pull/");
+        let is_pr = task.is_pr();
         if !task.reviewers.is_empty() {
             let mut spans: Vec<Span> = Vec::with_capacity(task.reviewers.len() * 2 + 1);
             spans.push(Span::styled(

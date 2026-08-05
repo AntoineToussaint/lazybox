@@ -5,7 +5,7 @@
 //! monthly limit at once, each parking on the "limit reached — Wait?"
 //! prompt. Visiting every terminal to press Wait is pure toil. With this
 //! opt-in policy on, the daemon watches the event bus and, the moment an
-//! agent transitions into [`AgentState::LimitReached`], sends a submit
+//! agent transitions into `AgentState::LimitReached`, sends a submit
 //! keystroke to accept the prompt's highlighted default (Wait) — the same
 //! byte a user pressing Enter on that chooser would send.
 //!

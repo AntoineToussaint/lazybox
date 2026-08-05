@@ -9,5 +9,5 @@ expression: rendered
 
  ▾  owner/repo
   I Issues
- ▶○ 812 A   feat: queue + retry the sync worker           1 C gpt-5.6-s… ·xhi        5m
+ ▶○ 812 A   feat: queue + retry the sync worker           1 X gpt-5.6-s… ·xhi        5m
   ○ 813 A   fix: sidebar columns waste half the row       2 C Opus             ARM  20m

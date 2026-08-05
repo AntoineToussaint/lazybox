@@ -196,14 +196,23 @@ fn sidebar_golden_render_dense_agent_rows() {
         dismissed_updates: Vec::new(),
     });
 
-    for (ws, key, terminal_id, model) in [
-        (&mut verbose_ws, &verbose_key, 1u64, "gpt-5.6-sol · xhigh"),
-        (&mut opus_ws, &opus_key, 2u64, "Opus"),
+    // The verbose gpt model runs under Codex (badge `X`), the bare `Opus`
+    // under Claude (badge `C`) — each model paired with an agent that could
+    // actually report it.
+    for (ws, key, terminal_id, agent, model) in [
+        (
+            &mut verbose_ws,
+            &verbose_key,
+            1u64,
+            "codex",
+            "gpt-5.6-sol · xhigh",
+        ),
+        (&mut opus_ws, &opus_key, 2u64, "claude", "Opus"),
     ] {
         let session = WorkspaceSession::new(
             ws.key.clone(),
             SessionKind::Agent {
-                agent_id: "claude".into(),
+                agent_id: agent.into(),
             },
             PathBuf::from("/tmp/dense-agent"),
             fixed_time(),
@@ -214,7 +223,7 @@ fn sidebar_golden_render_dense_agent_rows() {
         s.on_event(&Event::TerminalSpawned {
             terminal_id: TerminalId(terminal_id),
             session_key: key.clone(),
-            kind: TerminalKind::Agent("claude".into()),
+            kind: TerminalKind::Agent(agent.into()),
             no_permission: false,
             on_main: false,
             model_label: Some(model.into()),

@@ -203,25 +203,31 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    `gpt-5.6-sol · xhigh` can't anchor this Max column table-wide.
 /// 8. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
-/// 9. Passive badge cluster — one right-aligned, Max-collapsing column
-///    holding whatever low-frequency badges the row actually carries,
-///    packed together: `⎇ local` (linked checkout), `✎` (has notes),
-///    `]N` (snippet count), `⤓main`/`behind` (track-main, #535), `FIX`
-///    (auto-fix armed), `ARM` (merge-on-green armed), `AUTO`
-///    (GitHub-native auto-merge, #778). These used to own one anchored
-///    column each (#524), which reserved the *sum* of every badge type's
-///    widest cell on every row — a wide, gap-ridden trailer even though
-///    the badges rarely co-occur. Merged into a single cluster (#813) the
-///    column only reserves the widest single row's badges, reclaiming the
-///    interior gaps for the title. Vertical alignment of individual
-///    badges is traded away for that density.
-/// 10. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
+/// 9. Passive-info badge cluster — one right-aligned, Max-collapsing
+///    column packing the low-signal badges: `⎇ local` (linked checkout),
+///    `✎` (has notes), `]N` (snippet count), `⤓main`/`behind` (track-main,
+///    #535), `FIX` (auto-fix armed). These used to own one anchored column
+///    each (#524), which reserved the *sum* of every badge type's widest
+///    cell on every row — a wide, gap-ridden trailer even though the badges
+///    rarely co-occur. Packed into one cluster (#813) the column only
+///    reserves the widest single row's cluster, reclaiming the interior
+///    gaps for the title. Vertical alignment of individual badges is traded
+///    away for that density.
+/// 10. Merge-arm badge cluster — a second right-aligned, Max-collapsing
+///    column for the two "merge when green" arms: `ARM` (lazybox
+///    merge-on-green) and `AUTO` (GitHub-native auto-merge, #778). Split
+///    from the passive-info cluster so it keeps a *higher* drop priority
+///    (`P_ARMS` > `P_BADGES`): the arms that decide whether the PR merges
+///    itself survive under width pressure after the low-signal decoration
+///    has shed, exactly as the per-badge priorities did before the pack
+///    (#813). Sits rightmost of the badges, nearest the status pill.
+/// 11. Status pill — ` MERGED ` / ` REVIEW  CI FAIL ` / blank.
 ///    Right-aligned, sized to the pills actually present (each pill is
 ///    trimmed to its own ` LABEL ` block — no blank-slot filler), so a
 ///    lone CI pill sits one clean gap off the time. Cell is empty
 ///    (width 0) when both review + CI pills are None, so the column
 ///    collapses for an all-empty table.
-/// 11. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
+/// 12. Time — ` Xm` / ` Xh` / ` Xd`, right-aligned. Leading space is
 ///    baked into the cell so a 1-cell gap separates time from
 ///    whatever sits to its left (status pill or, when status is
 ///    empty, the title flex padding).
@@ -235,14 +241,18 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // pill (CI / CONFLICT — the actionable signal), which is kept
     // nearly as long as the title (issue #328).
     const P_TIME: u8 = 10;
-    // The passive badge cluster (#813) is decoration, so it sheds early —
+    // The badges pack into two priority-tiered clusters (#813) rather than
+    // seven per-badge columns (#524), keeping graduated shedding without the
+    // per-column reserved gaps. The passive-info cluster (linked / notes /
+    // snippet / track / fix) is low-signal decoration, so it sheds first —
     // right after the timestamp (which #328 keeps as the first trailer to
-    // go, `P_TIME` below `P_UNREAD`), and before the unread count and the
-    // CI/CONFLICT status pill. It drops as one unit now that the seven
-    // per-badge columns (#524) are packed into a single cell — the granular
-    // per-badge drop order is traded for the horizontal density the merge
-    // buys.
+    // go, `P_TIME` below `P_UNREAD`). The merge-arm cluster (`ARM`/`AUTO`)
+    // sheds one step later at `P_ARMS`, so the arms that decide whether the
+    // PR merges itself outlive the decoration exactly as the old per-badge
+    // priorities did — but the whole set still yields to the unread count
+    // and the CI/CONFLICT status pill.
     const P_BADGES: u8 = 20;
+    const P_ARMS: u8 = 21;
     const P_UNREAD: u8 = 30;
     const P_BADGE_SHELL: u8 = 40;
     const P_BADGE_AGENT: u8 = 50;
@@ -268,9 +278,10 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
         Column::max(0).right().priority(P_UNREAD), // 6: unread
         Column::max(0).priority(P_BADGE_AGENT), // 7: badge_agent (+ capped model label)
         Column::max(0).priority(P_BADGE_SHELL), // 8: badge_shell (carries its own leading space)
-        Column::max(0).right().priority(P_BADGES), // 9: passive badge cluster (#813)
-        Column::max(0).right().priority(P_STATUS), // 10: status (CI / review pills)
-        Column::max(0).right().priority(P_TIME), // 11: time (carries its own leading space)
+        Column::max(0).right().priority(P_BADGES), // 9: passive-info badge cluster (#813)
+        Column::max(0).right().priority(P_ARMS), // 10: merge-arm badge cluster (#813)
+        Column::max(0).right().priority(P_STATUS), // 11: status (CI / review pills)
+        Column::max(0).right().priority(P_TIME), // 12: time (carries its own leading space)
     ]
 }
 
@@ -290,6 +301,7 @@ pub fn build_row(ctx: &WorkspaceRowCtx<'_>) -> Row {
         cell_badge_agent(ctx),
         cell_badge_shell(ctx),
         cell_badges(ctx),
+        cell_merge_arms(ctx),
         cell_status(ctx),
         cell_time(ctx),
     ];
@@ -718,16 +730,17 @@ fn compact_model_label(label: &str) -> String {
     match label.split_once(" · ") {
         Some((model, effort)) => format!(
             "{} ·{}",
-            truncate_chars(model, MODEL_NAME_MAX),
+            truncate_display(model, MODEL_NAME_MAX),
             abbreviate_effort(effort),
         ),
-        None => truncate_chars(label, MODEL_NAME_MAX),
+        None => truncate_display(label, MODEL_NAME_MAX),
     }
 }
 
-/// Abbreviate a reasoning-effort token to a compact form. Unknown tokens
-/// pass through unchanged (they're already short, or a provider we don't
-/// special-case).
+/// Abbreviate a reasoning-effort token to a compact form. Covers every
+/// token Codex emits (`CODEX_EFFORT_TOKENS`): the verbose ones shorten and
+/// the already-short ones (`max`, `none`) pass through, as does any unknown
+/// token a future provider might introduce.
 fn abbreviate_effort(effort: &str) -> &str {
     match effort {
         "xhigh" => "xhi",
@@ -735,20 +748,33 @@ fn abbreviate_effort(effort: &str) -> &str {
         "medium" => "med",
         "low" => "lo",
         "minimal" => "min",
+        "default" => "def",
         other => other,
     }
 }
 
-/// Truncate `s` to at most `max` display characters, appending `…` when
-/// it was cut. Char-based (not byte-based) so multi-byte model names
-/// don't slice through a code point.
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let head: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{head}…")
-    } else {
-        s.to_string()
+/// Truncate `s` to at most `max` display cells, appending `…` (itself one
+/// cell) when it was cut. Measures visual width, not byte or `char` count,
+/// so a wide glyph counts as the two cells the terminal actually draws —
+/// this is the guarantee that keeps the agent column bounded. Walks by
+/// `char` so the cut never splits a code point.
+fn truncate_display(s: &str, max: usize) -> String {
+    if crate::util::visual_width(s) <= max {
+        return s.to_string();
     }
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let w = crate::util::char_visual_width(ch);
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 fn cell_badge_shell(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -770,35 +796,52 @@ fn badge_slot_cell(ctx: &WorkspaceRowCtx<'_>, badge: Option<(char, usize)>) -> C
     }
 }
 
-/// The passive badge cluster (#813): every low-frequency badge the row
-/// carries, packed into one right-aligned cell instead of seven anchored
-/// columns (#524). Left → right (least → most consequential, so the
-/// merge-when-green arms sit rightmost, nearest the actionable status
-/// pill): `⎇ local` → `✎` → `]N` → `⤓main`/`behind` → `FIX` → `ARM` →
-/// `AUTO`. Each sub-cell already carries its own padding, so concatenating
-/// their spans keeps every badge visually separated; an all-absent row
-/// yields an empty cell so the shared `Column::max(0)` collapses to 0.
-///
-/// The merge trades per-badge vertical alignment for horizontal density:
-/// the column now reserves only the widest single row's cluster rather
-/// than the sum of every badge type's widest cell across the whole table.
-fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+/// Concatenate a set of single-badge sub-cells into one packed cluster
+/// cell, or [`Cell::empty`] when none are present. Each sub-cell already
+/// carries its own padding, so concatenating their spans keeps the badges
+/// visually separated; the shared `Column::max(0)` collapses to 0 when no
+/// row in the pass carries any of them.
+fn pack_badges(cells: impl IntoIterator<Item = Cell>) -> Cell {
     let mut spans = Vec::new();
-    for cell in [
-        cell_linked(ctx),
-        cell_notes(ctx),
-        cell_snippet(ctx),
-        cell_track_main(ctx),
-        cell_fix(ctx),
-        cell_arm(ctx),
-        cell_auto(ctx),
-    ] {
+    for cell in cells {
         spans.extend(cell.spans);
     }
     if spans.is_empty() {
         return Cell::empty();
     }
     Cell::new(spans)
+}
+
+/// The passive-info badge cluster (#813): the low-signal badges the row
+/// carries, packed into one right-aligned cell instead of five anchored
+/// columns (#524). Left → right, least → most consequential: `⎇ local` →
+/// `✎` → `]N` → `⤓main`/`behind` → `FIX`. The two merge-when-green arms
+/// live in [`cell_merge_arms`] instead, at a higher drop priority, so this
+/// decoration sheds first under width pressure while the arms survive —
+/// the graduated shedding the per-badge priorities gave before the pack.
+///
+/// The pack trades per-badge vertical alignment for horizontal density:
+/// the column reserves only the widest single row's cluster rather than
+/// the sum of every badge type's widest cell across the whole table.
+fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    pack_badges([
+        cell_linked(ctx),
+        cell_notes(ctx),
+        cell_snippet(ctx),
+        cell_track_main(ctx),
+        cell_fix(ctx),
+    ])
+}
+
+/// The merge-arm badge cluster (#813): ` ARM ` (lazybox client-side
+/// merge-on-green) then ` AUTO ` (GitHub-native, durable), packed into one
+/// right-aligned cell. Kept out of [`cell_badges`] so its column carries a
+/// higher drop priority (`P_ARMS`): the arms that decide whether the PR
+/// merges itself outlive the low-signal decoration under width pressure,
+/// preserving the shed order (`… → track → arm → auto`) the per-badge
+/// columns had. Sits rightmost of the badges, nearest the status pill.
+fn cell_merge_arms(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    pack_badges([cell_arm(ctx), cell_auto(ctx)])
 }
 
 /// The `⎇ local` badge for a linked (no-worktree) checkout — the
@@ -858,7 +901,7 @@ fn cell_snippet(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// block, the same slot family as ` ARM `/` FIX `. It's a standing
 /// automation *policy*, so it lives here rather than in the status
 /// column, where it used to hide ` CI FAIL ` on exactly the armed PRs
-/// that most need it. Packs into the shared badge cluster (#813).
+/// that most need it. Packs into the merge-arm cluster (#813).
 ///
 /// Accent-filled, deliberately *not* the same color as ` ARM ` (#794):
 /// ` AUTO ` is GitHub's server-side merge, so it lands the PR even while
@@ -882,7 +925,7 @@ fn cell_auto(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 
 /// The ` ARM ` auto-merge-on-green badge — a filled block so the "this
 /// row will merge itself once CI goes green" signal reads at a glance.
-/// Packs into the shared badge cluster (#813).
+/// Packs into the merge-arm cluster (#813).
 ///
 /// Filled with `success` (green), not the accent of ` AUTO ` (#794), so
 /// the two merge-on-green arms never blur into one pill: ` ARM ` is
@@ -1112,10 +1155,11 @@ mod tests {
     #[test]
     fn build_columns_have_expected_count_and_order() {
         let cols = build_columns(5);
-        // 12 columns: the labels column retired into the title cell
+        // 13 columns: the labels column retired into the title cell
         // (#329), and the seven per-badge passive columns (#524) packed
-        // back into a single right-aligned cluster (#813).
-        assert_eq!(cols.len(), 12);
+        // into two priority-tiered clusters (#813): passive-info and
+        // merge-arms.
+        assert_eq!(cols.len(), 13);
         // Title column (idx 5) is the only Flex one.
         let flex_indices: Vec<_> = cols
             .iter()
@@ -1677,6 +1721,11 @@ mod tests {
             compact_model_label("gpt-5.6-sol · xhigh"),
             "gpt-5.6-s… ·xhi"
         );
+        // Every verbose Codex effort token abbreviates, `default` included —
+        // otherwise a `default`-effort row rides ~4 cells wider than its
+        // siblings even though the model itself is capped.
+        assert_eq!(compact_model_label("gpt-5.5 · default"), "gpt-5.5 ·def");
+        assert_eq!(compact_model_label("gpt-5.5 · medium"), "gpt-5.5 ·med");
         // No effort suffix → the whole label is capped.
         assert_eq!(compact_model_label("Opus"), "Opus");
         assert_eq!(
@@ -1684,10 +1733,25 @@ mod tests {
             "claude-op…",
             "a long no-effort label caps at MODEL_NAME_MAX",
         );
-        // The compacted model portion never exceeds MODEL_NAME_MAX cells.
+        // The compacted model portion never exceeds MODEL_NAME_MAX display
+        // cells — measured by visual width, not `char` count, so a wide
+        // glyph counts as the two cells the terminal draws.
         let long = compact_model_label("some-really-long-model-name · high");
         let model = long.split(" ·").next().unwrap();
-        assert!(model.chars().count() <= MODEL_NAME_MAX, "{long:?}");
+        assert!(
+            crate::util::visual_width(model) <= MODEL_NAME_MAX,
+            "{long:?}",
+        );
+        // A wide-glyph model is bounded by display cells: `ＡＢＣＤＥＦ` is 6
+        // chars but 12 cells, so it truncates to fit MODEL_NAME_MAX cells
+        // (a `char`-count cap would have kept all 6, leaving it 12 wide).
+        let wide = compact_model_label("ＡＢＣＤＥＦ");
+        assert!(
+            crate::util::visual_width(&wide) <= MODEL_NAME_MAX,
+            "wide-glyph model must be bounded by display cells: {wide:?} \
+             ({} cells)",
+            crate::util::visual_width(&wide),
+        );
     }
 
     /// #813: the capped label actually keeps the agent column narrow —
@@ -2623,21 +2687,26 @@ mod tests {
         assert!(line.contains("Fix bug"), "title dropped: {line:?}");
     }
 
-    /// #813: the passive badges are one packed cluster now, so they shed
-    /// together as a unit under width pressure — and, like the per-badge
-    /// columns before them (#524), ahead of the actionable CI/CONFLICT
-    /// status pill, which sheds nearly last.
+    /// #813 regression: the badges pack into two priority tiers, not one
+    /// atomic cluster, so they shed *graduated* under width pressure — the
+    /// low-signal passive-info badges (`⤓main`) drop first, the
+    /// merge-when-green arms (`ARM`/`AUTO`) outlive them, and the actionable
+    /// CI status pill outlives every badge. Packing all seven into a single
+    /// cell regressed this: the arms that decide whether the PR merges
+    /// itself vanished together with the decoration the moment the row got
+    /// tight (the invariant the retired per-badge `merge_arms_outlive_*`
+    /// test guarded).
     #[test]
-    fn passive_cluster_sheds_as_one_unit_before_status() {
+    fn merge_arms_outlive_passive_badges_then_status_survives() {
         let mut task = make_task("owner/repo#1", "Readable title text here");
         task.state = TaskState::Open;
         task.ci = CiStatus::Failure; // " CI FAIL " status pill
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.track_main = true; // ⤓main
-        ctx.auto_merge_armed = true; // ARM
-        ctx.auto_merge_enabled = true; // AUTO
+        ctx.track_main = true; // ⤓main — passive-info tier
+        ctx.auto_merge_armed = true; // ARM — merge-arm tier
+        ctx.auto_merge_enabled = true; // AUTO — merge-arm tier
 
         let columns = build_columns(4);
         let render = |w: usize| -> String {
@@ -2646,27 +2715,41 @@ mod tests {
             lines[0].spans.iter().map(|s| s.content.as_ref()).collect()
         };
 
-        // Wide: the whole cluster and the status pill all show.
+        // Wide: every badge and the status pill show.
         let wide = render(100);
         assert!(
-            wide.contains("⤓main") && wide.contains("ARM") && wide.contains("AUTO"),
-            "all cluster badges visible when wide: {wide:?}",
-        );
-        assert!(
-            wide.contains("CI FAIL"),
-            "status visible when wide: {wide:?}"
+            wide.contains("⤓main")
+                && wide.contains("ARM")
+                && wide.contains("AUTO")
+                && wide.contains("CI FAIL"),
+            "all badges + status visible when wide: {wide:?}",
         );
 
-        // Narrow enough to drop the cluster while keeping the status pill:
-        // every passive badge vanishes as a unit, CI FAIL survives.
-        let narrow = render(40);
+        // Mid: the passive-info tier sheds first; the merge arms survive.
+        let mid = render(55);
         assert!(
-            !narrow.contains("⤓main") && !narrow.contains("ARM") && !narrow.contains("AUTO"),
-            "the cluster must shed as one unit: {narrow:?}",
+            !mid.contains("⤓main"),
+            "passive-info badge must shed first: {mid:?}",
+        );
+        assert!(
+            mid.contains("ARM") && mid.contains("AUTO"),
+            "merge arms must outlive the passive-info badges: {mid:?}",
+        );
+        assert!(
+            mid.contains("CI FAIL"),
+            "status still present at mid width: {mid:?}",
+        );
+
+        // Narrow: the merge arms shed too, but the actionable status
+        // outlives every badge.
+        let narrow = render(44);
+        assert!(
+            !narrow.contains("ARM") && !narrow.contains("AUTO"),
+            "merge arms shed under enough pressure: {narrow:?}",
         );
         assert!(
             narrow.contains("CI FAIL"),
-            "status must outlive the passive cluster: {narrow:?}",
+            "status must outlive every badge: {narrow:?}",
         );
     }
 
@@ -2856,13 +2939,13 @@ mod tests {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
     }
 
-    /// #813: the seven per-badge columns (#524) are packed into one
-    /// right-aligned cluster. Present badges render contiguously in the
-    /// fixed linked → notes → snippet → track → fix → arm → auto order,
-    /// and a badge-less row carries none of them — no per-type slot is
-    /// reserved on rows that don't use it.
+    /// #813: the seven per-badge columns (#524) are packed into two
+    /// clusters. The passive-info cell packs linked → notes → snippet →
+    /// track → fix contiguously; the merge-arm cell packs arm → auto. A
+    /// badge-less row carries none of them — no per-type slot is reserved
+    /// on rows that don't use it.
     #[test]
-    fn passive_badges_pack_into_one_cluster() {
+    fn passive_badges_pack_into_two_clusters() {
         let theme = theme();
         // Row 0: linked / notes / snippet / fix / arm. Row 1: just notes.
         // Row 2: no passive badges.
@@ -2883,14 +2966,20 @@ mod tests {
         ctx1.has_notes = true;
         let ctx2 = ctx_for(&ws2, &task2, &theme);
 
-        // The cluster cell packs every present badge into one contiguous
-        // run, in the fixed order.
-        let cluster: String = cell_badges(&ctx0)
+        // Passive-info cluster packs the low-signal badges; the merge arms
+        // live in their own cell so they can outlive the decoration.
+        let info: String = cell_badges(&ctx0)
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(cluster, " ⎇ local  ✎  ]2  FIX  ARM ");
+        assert_eq!(info, " ⎇ local  ✎  ]2  FIX ");
+        let arms: String = cell_merge_arms(&ctx0)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(arms, " ARM ");
 
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx0), build_row(&ctx1), build_row(&ctx2)];
@@ -2899,14 +2988,14 @@ mod tests {
         let l1 = line_text(&lines[1]);
         let l2 = line_text(&lines[2]);
 
-        // One uniform cluster column → rows still render to equal total
-        // width, so the status / time trailer stays aligned across rows.
+        // Uniform cluster columns → rows still render to equal total width,
+        // so the status / time trailer stays aligned across rows.
         let w0 = crate::util::visual_width(&l0);
         assert_eq!(w0, crate::util::visual_width(&l1), "{l0:?} vs {l1:?}");
         assert_eq!(w0, crate::util::visual_width(&l2), "{l0:?} vs {l2:?}");
 
-        // The all-badges row shows the packed cluster; the badge-less row
-        // shows none of them.
+        // The all-badges row shows both clusters, arms right of the info;
+        // the badge-less row shows none of them.
         assert!(l0.contains(" ⎇ local  ✎  ]2  FIX  ARM "), "{l0:?}");
         assert!(l1.contains('✎'), "{l1:?}");
         assert!(
@@ -2915,7 +3004,7 @@ mod tests {
         );
     }
 
-    /// #813: the packed cluster is right-aligned, so a row with fewer
+    /// #813: both packed clusters are right-aligned, so a row with fewer
     /// badges pads on the left and its badges hug the same right edge —
     /// nearest the status / time trailer — as a row carrying more.
     #[test]
@@ -2926,10 +3015,10 @@ mod tests {
         let ws0 = linked_ws("wide");
         let ws1 = Workspace::from_task(task1.clone(), fixed_time());
         let mut ctx0 = ctx_for(&ws0, &task0, &theme);
-        ctx0.has_notes = true; // wider cluster: ⎇ local + ✎ + ARM
+        ctx0.has_notes = true; // wider info cluster: ⎇ local + ✎
         ctx0.auto_merge_armed = true;
         let mut ctx1 = ctx_for(&ws1, &task1, &theme);
-        ctx1.auto_merge_armed = true; // narrow cluster: just ARM
+        ctx1.auto_merge_armed = true; // no info cluster, just the ARM arm
 
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx0), build_row(&ctx1)];

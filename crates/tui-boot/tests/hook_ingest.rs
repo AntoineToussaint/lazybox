@@ -45,7 +45,12 @@ fn hook_ingest_ignores_unknown_flags() {
 
     assert!(run_hook_ingest(
         &home,
-        &["--backend-key", "lzb-sess-7", "--some-future-flag", "whatever"],
+        &[
+            "--backend-key",
+            "lzb-sess-7",
+            "--some-future-flag",
+            "whatever"
+        ],
     ));
 }
 

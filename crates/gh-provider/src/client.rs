@@ -60,6 +60,18 @@ pub enum GhError {
         /// non-escalating backoff, never "check your token" (#782).
         self_throttle: bool,
     },
+    /// A whole user-facing GitHub operation blew its overall wall-clock
+    /// deadline — the *sum* of governor pacing, the concurrency-slot
+    /// wait, every network round-trip, and retry backoff. Each piece is
+    /// individually bounded (the per-request timeout, the permit-wait
+    /// cap), but nothing capped their sum, so a starved governor (#782)
+    /// could stall an op for minutes behind a spinner (#825). Retryable:
+    /// the next attempt may find the backlog cleared.
+    #[error("{operation} timed out after {after_secs}s")]
+    Timeout {
+        operation: &'static str,
+        after_secs: u64,
+    },
 }
 
 impl GhError {
@@ -540,6 +552,7 @@ fn detail_of(err: &GhError) -> String {
             format!("all {count} configured watched-repo queries failed (network or auth issue)")
         }
         GhError::HttpStatus { .. } => format!("{err}"),
+        GhError::Timeout { .. } => format!("{err}"),
         GhError::Api(octo) => match octo {
             octocrab::Error::GitHub { source, .. } => {
                 // GitHubError's Display does the right thing —
@@ -607,6 +620,14 @@ impl From<GhError> for lazybox_core::ProviderError {
             return lazybox_core::ProviderError::retryable_after(SOURCE, detail, *retry_after_secs);
         }
 
+        // A blown operation deadline is transient by construction — the
+        // backlog that starved it may have cleared by the next attempt —
+        // so it retries on the poll's normal cadence, never escalates to
+        // an auth/permanent verdict (#825).
+        if matches!(err, GhError::Timeout { .. }) {
+            return lazybox_core::ProviderError::retryable(SOURCE, detail);
+        }
+
         // Status-aware classification when we have an octocrab
         // GitHub error: the shared classifier maps 401/403 → auth,
         // 5xx + 429 → retryable, other statuses → permanent. Feeding
@@ -668,6 +689,26 @@ impl From<GhError> for lazybox_core::ProviderError {
 /// rides the header path. Fall back to a modest wait the daemon's
 /// mutation-retry queue then backs off from across attempts.
 const MUTATION_RATE_LIMIT_DEFAULT_WAIT_SECS: u64 = 60;
+
+/// Overall wall-clock ceiling on a single user-facing GraphQL operation
+/// (sync/poll, merge, update-branch, reviewers/assignees/labels, …). It
+/// bounds the *sum* the per-request timeout can't: governor pacing, the
+/// concurrency-slot acquire, every network round-trip, and retry
+/// backoff. When it trips the op aborts with a clean
+/// [`GhError::Timeout`] instead of an open-ended spinner (#825). A single
+/// healthy attempt — `PERMIT_WAIT_TIMEOUT` + one 25s request — fits
+/// comfortably inside it.
+const GRAPHQL_OPERATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Max wall-clock the self-imposed governor waits — request pacing plus
+/// the concurrency-slot acquire — may consume before we give up and fail
+/// fast. Waiting on our OWN governor for minutes is worse than a clean
+/// "GitHub is busy, retry later": under governor self-starvation (#782) an
+/// uncapped pacing sleep was the mechanism behind a 307s frozen spinner
+/// (#825). Kept well under [`GRAPHQL_OPERATION_DEADLINE`] so a starved
+/// permit surfaces as its own clear error before the whole-operation
+/// backstop trips.
+const PERMIT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Turn a mutation response's `errors` array into a typed [`GhError`].
 ///
@@ -749,6 +790,14 @@ fn mutation_provider_error(err: GhError) -> lazybox_core::ProviderError {
             } else {
                 lazybox_core::ProviderError::retryable_after("github", detail, *retry_after_secs)
             }
+        }
+        // A mutation that blew the overall deadline may well have landed
+        // on GitHub's side (request sent, response lost) — the same
+        // idempotent-resend case `merge_pr` / `update_branch` already
+        // guard. Retryable so the daemon's mutation queue re-drives it,
+        // never a permanent rejection (#825).
+        GhError::Timeout { .. } => {
+            lazybox_core::ProviderError::retryable("github", detail_of(&err))
         }
         _ => lazybox_core::ProviderError::permanent("github", err.to_string()),
     }
@@ -1160,7 +1209,52 @@ impl GhClient {
     /// Like [`Self::post_graphql_with_retry`] but also surfaces the byte
     /// length of the successful response body. Used by the PR-fetch
     /// path to record per-branch response size for sync profiling.
+    ///
+    /// Wraps the retry ladder in [`GRAPHQL_OPERATION_DEADLINE`] so the
+    /// *whole* operation — governor pacing, the concurrency-slot wait,
+    /// every network round-trip, and retry backoff — is bounded, not just
+    /// each individual network call. Without this a starved governor
+    /// (#782) could stall an op for minutes behind a spinner (#825).
     async fn post_graphql_with_retry_measured<T>(
+        &self,
+        operation: &'static str,
+        body: &serde_json::Value,
+    ) -> Result<(T, usize), GhError>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        match tokio::time::timeout(
+            GRAPHQL_OPERATION_DEADLINE,
+            self.post_graphql_retry_loop(operation, body),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                self.budget.lock().observe_failed_response(
+                    operation,
+                    crate::rate_budget::ApiResource::Graphql,
+                    0,
+                    0,
+                    GRAPHQL_OPERATION_DEADLINE,
+                );
+                tracing::warn!(
+                    "graphql operation {operation:?} exceeded {}s overall deadline",
+                    GRAPHQL_OPERATION_DEADLINE.as_secs(),
+                );
+                Err(GhError::Timeout {
+                    operation,
+                    after_secs: GRAPHQL_OPERATION_DEADLINE.as_secs(),
+                })
+            }
+        }
+    }
+
+    /// The bounded retry ladder itself. Each network attempt is capped by
+    /// `REQUEST_TIMEOUT`; the caller
+    /// ([`Self::post_graphql_with_retry_measured`]) caps the sum with
+    /// [`GRAPHQL_OPERATION_DEADLINE`].
+    async fn post_graphql_retry_loop<T>(
         &self,
         operation: &'static str,
         body: &serde_json::Value,
@@ -1173,8 +1267,9 @@ impl GhClient {
         // no timeout — a flaky network can leave the HTTP call
         // hanging forever, which the user perceives as "lazybox's
         // sync froze." 25s is generous (a real PR search rarely
-        // breaks 5s) but well under the 90s spinner guard so a hung
-        // call surfaces as an error before the UI gives up.
+        // breaks 5s) but well under `GRAPHQL_OPERATION_DEADLINE` so a
+        // hung call surfaces — and the op can still retry — before the
+        // overall deadline aborts it.
         const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
         let mut last_err: Option<GhError> = None;
         // `0..=DELAYS_MS.len()` is intentional: we try once at
@@ -1508,11 +1603,39 @@ impl GhClient {
         // waiting out its governor gap is not doing work, so it must not
         // occupy a permit (that would shrink effective concurrency and
         // let a background sleeper delay an interactive request).
-        self.pace().await;
-        self.request_gate
-            .acquire()
-            .await
-            .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))
+        //
+        // Bound the COMBINED wait. Both the pacing sleep and the slot
+        // acquire are governed by lazybox's own state, so under governor
+        // self-starvation (#782) they could block for minutes with no
+        // network involved — the mechanism behind the 307s spinner (#825).
+        // Cap it and fail fast with a self-throttle "GitHub is busy" the
+        // poll scheduler backs off from honestly, rather than hanging.
+        let acquire = async {
+            self.pace().await;
+            self.request_gate
+                .acquire()
+                .await
+                .map_err(|_| GhError::Graphql("GitHub request gate closed".to_string()))
+        };
+        match tokio::time::timeout(PERMIT_WAIT_TIMEOUT, acquire).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!(
+                    "request pacing/concurrency wait exceeded {}s — governor backlog",
+                    PERMIT_WAIT_TIMEOUT.as_secs()
+                );
+                Err(GhError::RateLimited {
+                    retry_after_secs: PERMIT_WAIT_TIMEOUT.as_secs(),
+                    reason: format!(
+                        "GitHub is busy: pacing/concurrency wait exceeded {}s",
+                        PERMIT_WAIT_TIMEOUT.as_secs()
+                    ),
+                    // lazybox's own governor stalled, not a GitHub-imposed
+                    // limit — honest backoff, never "check your token".
+                    self_throttle: true,
+                })
+            }
+        }
     }
 
     /// Sleep out the governor-computed inter-request gap so request
@@ -6730,6 +6853,80 @@ mod tests {
         assert!(
             matches!(poll3, NotificationsPoll::NotModified),
             "a committed cursor reaches the 304 steady state",
+        );
+    }
+
+    /// #825: waiting on our own governor must never hang forever. With
+    /// every concurrency slot occupied (a stand-in for #782's governor
+    /// self-starvation, where a slot/budget never frees), `request_permit`
+    /// gives up after `PERMIT_WAIT_TIMEOUT` and fails fast with a
+    /// self-throttle rate limit instead of blocking indefinitely. Runs on
+    /// paused time so the virtual `PERMIT_WAIT_TIMEOUT` elapses instantly.
+    #[tokio::test(start_paused = true)]
+    async fn request_permit_gives_up_when_slot_never_frees() {
+        let client = GhClient::stub_for_tests("cmd:test", "fp").unwrap();
+
+        // Take every concurrency slot and hold them, so the gate acquire
+        // inside `request_permit` can never succeed.
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(
+                client
+                    .request_gate
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("gate open"),
+            );
+        }
+
+        let start = tokio::time::Instant::now();
+        let err = client
+            .request_permit()
+            .await
+            .expect_err("permit acquire must fail fast, not hang");
+        let waited = start.elapsed();
+
+        match err {
+            GhError::RateLimited {
+                self_throttle,
+                retry_after_secs,
+                ..
+            } => {
+                assert!(self_throttle, "our own governor stalled → self-throttle");
+                assert_eq!(retry_after_secs, PERMIT_WAIT_TIMEOUT.as_secs());
+            }
+            other => panic!("expected a bounded self-throttle, got {other:?}"),
+        }
+        assert!(
+            waited <= PERMIT_WAIT_TIMEOUT + std::time::Duration::from_secs(1),
+            "the wait was bounded by PERMIT_WAIT_TIMEOUT, took {waited:?}",
+        );
+        drop(held);
+    }
+
+    /// A blown operation deadline (#825) is transient: it retries on the
+    /// next tick, and — critically for merge/update-branch — a timed-out
+    /// mutation is re-drivable, never a permanent rejection.
+    #[test]
+    fn operation_timeout_is_retryable_not_permanent() {
+        let err = GhError::Timeout {
+            operation: "PR search",
+            after_secs: 90,
+        };
+        assert_eq!(err.to_string(), "PR search timed out after 90s");
+
+        let provider: lazybox_core::ProviderError = err.into();
+        assert!(provider.is_retryable(), "a blown deadline retries");
+        assert!(!provider.is_auth(), "never an auth verdict");
+
+        let mutation = mutation_provider_error(GhError::Timeout {
+            operation: "mergePullRequest mutation",
+            after_secs: 90,
+        });
+        assert!(
+            mutation.is_retryable(),
+            "a timed-out mutation is re-drivable, not permanently rejected",
         );
     }
 }

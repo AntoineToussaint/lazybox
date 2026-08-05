@@ -25,7 +25,10 @@ serde = { workspace = true }
 http = "1.4"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+# `test-util` powers `#[tokio::test(start_paused = true)]`, which the
+# request-permit deadline test uses to elapse a 30s virtual timeout
+# instantly.
+tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { workspace = true }
 
 [lints]

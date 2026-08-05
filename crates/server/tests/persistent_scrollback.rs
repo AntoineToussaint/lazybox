@@ -31,9 +31,21 @@ fn sh(script: &str) -> Vec<String> {
 /// stream delivers until it closes) into one byte buffer.
 async fn drain_replay(backend: &RawPtyBackend, key: &str) -> Vec<u8> {
     let mut sub = backend.subscribe(key).await.expect("subscribe");
+    let last_seq = sub.last_seq;
     let mut out = sub.replay.clone();
     while let Some(chunk) = sub.live.recv().await {
-        out.extend_from_slice(&chunk.bytes);
+        // `subscribe` opens the broadcast receiver and THEN takes the
+        // ring snapshot, so a chunk emitted in that window sits in BOTH
+        // `replay` and `live`. Honor the documented contract — live
+        // chunks are authoritative only past `last_seq` — so the
+        // replayed prefix isn't double-counted. Without this the overlap
+        // inflates run 1's reconstructed scrollback by however many
+        // chunks the window happened to catch (wider under CI load), and
+        // the restart-durability assertion (`recovered >= run1`) then
+        // races that phantom depth (#833).
+        if chunk.seq > last_seq {
+            out.extend_from_slice(&chunk.bytes);
+        }
     }
     out
 }

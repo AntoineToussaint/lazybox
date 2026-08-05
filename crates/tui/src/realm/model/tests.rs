@@ -995,6 +995,43 @@ mod effects_tests {
         );
     }
 
+    /// Letting an action-error toast auto-fade (its 45s elapses, no Esc)
+    /// is the same acknowledgment as dismissing it: an identical re-fire
+    /// afterwards must stay quiet, not resurrect the banner on the next
+    /// genuine attempt (#832). Before the fix only the Esc path
+    /// suppressed, so a faded failure re-shouted — the never-disappearing
+    /// footer for anyone who didn't press Esc.
+    #[test]
+    fn faded_merge_failure_stays_dismissed_on_identical_refire() {
+        use lazybox_ipc::Event as IpcEvent;
+        use std::time::{Duration, Instant};
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let fail = || IpcEvent::PrMergeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+            reason: "not mergeable".into(),
+        };
+
+        m.handle_daemon_event(fail());
+        assert!(m.status.notice.is_some(), "the first failure surfaces");
+
+        // Age the toast past its fade window, then run the fade tick.
+        m.status.notice.as_mut().expect("toast up").set_at =
+            Instant::now() - Duration::from_secs(120);
+        assert!(m.status.tick_notice(), "the toast auto-fades");
+        assert!(m.status.notice.is_none(), "faded away");
+
+        // The next identical failure must not re-surface — the fade
+        // acknowledged it, exactly as an Esc would have.
+        m.handle_daemon_event(fail());
+        assert!(
+            m.status.notice.is_none(),
+            "a faded failure stays dismissed on an identical re-fire (#832)",
+        );
+    }
+
     /// A manual-refresh sync failure paints a sticky "✗ sync failed"
     /// banner; the next successful poll (auto-cycle) from the *same*
     /// provider must clear it so a recovered sync doesn't leave the

@@ -1224,16 +1224,35 @@ mod description_expand_tests {
     }
 
     #[test]
-    fn header_shows_creator_top_right() {
+    fn header_shows_creator_on_top_crumb_row() {
+        // The creator rides the top breadcrumb row (top-right), alongside
+        // the repo — NOT the Branch row. `task_with_body` is an issue, so
+        // its Branch row would read `Branch: -`; anchoring the creator
+        // there put it next to filler (#849 review).
         let mut task = task_with_body("body");
         task.author = "alice".into();
         let ws = Workspace::from_task(task, Utc::now());
         let mut pane = RightPane::new(PaneId::new(0));
         pane.set_workspace(Some(ws));
         let text = full_buffer_text(&mut pane, 80, 24);
+        let rows: Vec<&str> = text.lines().collect();
+
+        let crumb_row = rows
+            .iter()
+            .find(|r| r.contains("o/r"))
+            .expect("breadcrumb row with the repo");
         assert!(
-            text.contains("opened by @alice"),
-            "header should surface the creator: {text}",
+            crumb_row.contains("opened by @alice"),
+            "creator belongs on the top crumb row: {crumb_row}",
+        );
+
+        let branch_row = rows
+            .iter()
+            .find(|r| r.contains("Branch:"))
+            .expect("branch row");
+        assert!(
+            !branch_row.contains("opened by"),
+            "creator must not ride the Branch row: {branch_row}",
         );
     }
 

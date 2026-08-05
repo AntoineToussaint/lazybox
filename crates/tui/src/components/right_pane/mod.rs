@@ -1184,14 +1184,23 @@ impl RightPane {
 
         // Breadcrumb above the title: `repo · #1234`. Dim, separated
         // by a `›`. Orients the user to "where am I?" before they
-        // read the title — yazi's cwd line plays the same role.
+        // read the title — yazi's cwd line plays the same role. The
+        // item's creator rides the far right of this top row
+        // (`opened by @author`) so "who opened this" reads as primary
+        // top-right context for PRs, issues, and Linear alike (#849) —
+        // this row is always present and short, unlike the Branch row
+        // (which is filler `Branch: -` for issues).
+        let mut crumbs: Vec<Span> = Vec::new();
         if let Some(repo) = task.repo.as_deref() {
-            let pr_num = crate::components::task_label::pr_number(task);
-            let mut crumbs: Vec<Span> = vec![
-                Span::styled(format!("{} ", icons::REPO), Style::default().fg(theme.warn)),
-                Span::styled(repo.to_string(), Style::default().fg(theme.text_strong)),
-            ];
-            if let Some(n) = pr_num {
+            crumbs.push(Span::styled(
+                format!("{} ", icons::REPO),
+                Style::default().fg(theme.warn),
+            ));
+            crumbs.push(Span::styled(
+                repo.to_string(),
+                Style::default().fg(theme.text_strong),
+            ));
+            if let Some(n) = crate::components::task_label::pr_number(task) {
                 crumbs.push(Span::styled("  ›  ", Style::default().fg(theme.chrome)));
                 crumbs.push(Span::styled(
                     format!("#{n}"),
@@ -1200,6 +1209,24 @@ impl RightPane {
                         .add_modifier(Modifier::BOLD),
                 ));
             }
+        }
+        if !task.author.is_empty() {
+            let opened_by = "opened by ";
+            let handle = format!("@{}", task.author);
+            let left: usize = crumbs
+                .iter()
+                .map(|s| crate::util::visual_width(s.content.as_ref()))
+                .sum();
+            let right = crate::util::visual_width(opened_by) + crate::util::visual_width(&handle);
+            // Right-align when the row has slack; otherwise keep a single
+            // space so the crumb and creator never glue together as the
+            // pane narrows.
+            let gap = (area.width as usize).saturating_sub(left + right).max(1);
+            crumbs.push(Span::raw(" ".repeat(gap)));
+            crumbs.push(Span::styled(opened_by, Style::default().fg(theme.text_dim)));
+            crumbs.push(Span::styled(handle, Style::default().fg(theme.hover)));
+        }
+        if !crumbs.is_empty() {
             lines.push(Line::from(crumbs));
         }
 
@@ -1256,28 +1283,12 @@ impl RightPane {
         ));
 
         // Branch line — confirms which worktree lazybox will spawn an
-        // agent into. Cyan accent on a "Branch:" dim label. The item's
-        // creator rides the right edge of this row (`opened by @author`)
-        // so "who opened this" reads as primary top-right context for
-        // PRs, issues, and Linear alike.
+        // agent into. Cyan accent on a "Branch:" dim label.
         let branch = task.branch.as_deref().unwrap_or("-");
-        let mut branch_spans = vec![
+        lines.push(Line::from(vec![
             Span::styled("Branch: ", Style::default().fg(theme.text_dim)),
             Span::styled(branch, Style::default().fg(theme.accent)),
-        ];
-        if !task.author.is_empty() {
-            let opened_by = "opened by ";
-            let handle = format!("@{}", task.author);
-            let left = crate::util::visual_width("Branch: ") + crate::util::visual_width(branch);
-            let right = crate::util::visual_width(opened_by) + crate::util::visual_width(&handle);
-            // Only right-align when the row has slack; otherwise a single
-            // space keeps it on-row rather than overflowing the width.
-            let gap = (area.width as usize).saturating_sub(left + right).max(1);
-            branch_spans.push(Span::raw(" ".repeat(gap)));
-            branch_spans.push(Span::styled(opened_by, Style::default().fg(theme.text_dim)));
-            branch_spans.push(Span::styled(handle, Style::default().fg(theme.hover)));
-        }
-        lines.push(Line::from(branch_spans));
+        ]));
 
         // Originating issue — the Issue this PR was created from /
         // closes. An explicit, clickable path to it so the user doesn't

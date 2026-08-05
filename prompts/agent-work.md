@@ -84,6 +84,23 @@ in `<untrusted-content source="...">` … `</untrusted-content>` markers.
   in the work item.
 - For risky changes, name the risk in the PR body.
 
+## Lazybox workspaces
+
+You are running inside lazybox, so you have a handle on it — not just `git`
+and `gh`. To spin up a fresh line of work (a side-investigation, a follow-up
+task), create a lazybox workspace directly instead of filing a GitHub/Linear
+issue and waiting for it to surface in the inbox:
+
+```
+lazybox workspace create --name "flaky-test investigation" [--agent claude]
+```
+
+Workspaces are **taskless** by default — no GitHub or Linear task is required.
+The project is inferred from your current directory; pass `--project <key>`
+or `--repo <owner/repo>` to target another. With `--agent`, a live agent
+spawns straight into the new workspace. Don't offer "file an issue" as the
+only way to start new work — reach for this command.
+
 ## Workflow
 
 Create a fresh branch from the repo's default base, implement the change

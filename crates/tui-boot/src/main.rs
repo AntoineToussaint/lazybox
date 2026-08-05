@@ -13,6 +13,9 @@
 //!   lazybox server api              foreground JSON HTTP API gateway
 //!   lazybox worktree list           report managed worktrees + disk totals
 //!   lazybox worktree gc             reclaim safe orphaned worktrees
+//!   lazybox workspace create --name N   create a taskless pre-PR workspace via
+//!                                  the daemon socket (--project/--repo or
+//!                                  inferred from cwd; --agent spawns into it)
 //!   lazybox slack init              interactive Slack token setup wizard
 //!   lazybox slack doctor            read-only validation of an existing setup
 //!   lazybox slack prune             archive stale per-(session, agent) channels
@@ -292,6 +295,10 @@ Remote & services:
                               --depth N to bound the walk, --hidden for dotdirs)
   lazybox worktree list       report managed worktrees (size, orphan reasons, totals)
   lazybox worktree gc         reclaim safe orphaned worktrees (--force / --dry-run)
+  lazybox workspace create    create a taskless pre-PR workspace via the daemon
+    --name <name>             (--project <key> / --repo <owner/repo>, or inferred
+                              from cwd; --agent <id> spawns an agent into it;
+                              --socket <path> targets a non-default daemon)
 
 Advanced:
   lazybox --fresh             wipe ~/.lazybox/v2/state.db and re-run setup (destructive)
@@ -366,6 +373,7 @@ async fn main() -> anyhow::Result<()> {
         Some("slack") => slack_subcommand(&args[1..]).await,
         Some("scan") => scan_subcommand(&args[1..]).await,
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
+        Some("workspace") => workspace_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)
@@ -560,6 +568,219 @@ fn parse_hook_correlation(args: &mut Vec<String>) -> (Option<String>, Option<u64
         .filter(|k| !k.is_empty());
     let terminal_id = take_value(args, "--terminal").and_then(|s| s.parse::<u64>().ok());
     (backend_key, terminal_id)
+}
+
+/// `lazybox workspace <verb>` — the agent-facing surface over the running
+/// daemon. Lets a spawned agent (or a script) drive lazybox itself, not just
+/// the repo. Today the only verb is `create`.
+async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("create") => workspace_create_subcommand(&args[1..]).await,
+        other => {
+            anyhow::bail!(
+                "unknown `lazybox workspace` verb {:?}; usage: lazybox workspace create \
+                 --name <name> [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>]",
+                other.unwrap_or("<none>"),
+            );
+        }
+    }
+}
+
+/// `lazybox workspace create --name <name> [--project <key> | --repo
+/// <owner/repo>] [--agent <id>] [--cwd <path>]` — create a taskless pre-PR
+/// workspace by sending `Command::CreateWorkspace` to the daemon over its
+/// socket, the same IPC path `hook-ingest` uses. With `--agent`, the daemon
+/// spawns that agent into the fresh workspace so a live session lands in it.
+///
+/// The Project is resolved from `--project`/`--repo`, else inferred from the
+/// checkout at `--cwd` (default: the process cwd) — so an agent running in a
+/// worktree just needs `--name`. Unlike `hook-ingest`, a failure here is
+/// surfaced (non-zero exit): the caller asked for a workspace and deserves to
+/// know if the daemon wasn't reachable or the project couldn't be resolved.
+async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let name = take_value(&mut args, "--name");
+    let project = take_value(&mut args, "--project");
+    let repo = take_value(&mut args, "--repo");
+    let agent = take_value(&mut args, "--agent");
+    let cwd = take_value(&mut args, "--cwd").map(PathBuf::from);
+    let socket_path = take_value(&mut args, "--socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(lifecycle::socket_path);
+
+    let Some(name) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) else {
+        anyhow::bail!("workspace create needs a non-empty --name");
+    };
+    if let Some(agent) = agent.as_deref() {
+        validate_agent_id(agent)?;
+    }
+    let cwd = match cwd {
+        Some(path) => path,
+        None => std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("resolve current directory: {e}"))?,
+    };
+    let Some(project_key) = resolve_project_key(project, repo, &cwd).await else {
+        anyhow::bail!(
+            "could not resolve a project: pass --project <key> or --repo <owner/repo>, \
+             or run inside a git checkout so it can be inferred from the origin remote",
+        );
+    };
+
+    // Use a full subscribing client, not fire-and-forget: the daemon
+    // allocates the final `WorkspaceKey` (which may carry a `-2` collision
+    // suffix), and the caller — often an agent that wants to hand off to
+    // the new workspace next — needs it back. `CreateWorkspace` has no
+    // request/response, so we recover the key by diffing: snapshot the
+    // existing keys, create, then take the one new `WorkspaceUpserted` that
+    // matches our name + project.
+    let (mut client, _peer) = socket::connect(&socket_path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "connect to daemon at {}: {e} (is lazybox running?)",
+            socket_path.display(),
+        )
+    })?;
+    client
+        .send(lazybox_ipc::Command::Subscribe)
+        .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
+    let existing = snapshot_workspace_keys(&mut client).await?;
+
+    client
+        .send(lazybox_ipc::Command::CreateWorkspace {
+            name: name.clone(),
+            project_key: project_key.clone(),
+            spawn_agent: agent.clone(),
+        })
+        .map_err(|e| anyhow::anyhow!("send CreateWorkspace: {e}"))?;
+
+    let created = await_created_workspace(&mut client, &existing, &name, &project_key).await;
+    match (created, &agent) {
+        (Some(key), Some(agent)) => {
+            println!("Created workspace {key} \"{name}\" in {project_key} (spawning {agent})")
+        }
+        (Some(key), None) => println!("Created workspace {key} \"{name}\" in {project_key}"),
+        // The create was delivered but no confirming broadcast arrived in
+        // time. The workspace is very likely created; we just can't name its
+        // final key, so report honestly rather than invent one.
+        (None, Some(agent)) => {
+            println!("Requested workspace \"{name}\" in {project_key} (spawning {agent})")
+        }
+        (None, None) => println!("Requested workspace \"{name}\" in {project_key}"),
+    }
+    Ok(())
+}
+
+/// Read the post-`Subscribe` snapshot and return the workspace keys already
+/// present — the baseline a freshly created key is diffed against. The
+/// daemon's contract is snapshot-before-live-events, so at most a few frames
+/// are consumed before it arrives.
+async fn snapshot_workspace_keys(
+    client: &mut lazybox_ipc::Client,
+) -> anyhow::Result<std::collections::HashSet<lazybox_core::WorkspaceKey>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::Snapshot { workspaces, .. })) => {
+                return Ok(workspaces.into_iter().map(|w| w.key).collect());
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before sending a snapshot"),
+            Err(_) => anyhow::bail!("timed out waiting for the daemon snapshot"),
+        }
+    }
+}
+
+/// Wait for the `WorkspaceUpserted` carrying the workspace we just created:
+/// the first whose key wasn't in `existing` and whose name + project match
+/// the request. Returns its final key, or `None` if no such broadcast arrives
+/// before the deadline (the create still likely succeeded — see the caller).
+async fn await_created_workspace(
+    client: &mut lazybox_ipc::Client,
+    existing: &std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    name: &str,
+    project_key: &lazybox_core::ProjectKey,
+) -> Option<lazybox_core::WorkspaceKey> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::WorkspaceUpserted(ws)))
+                if !existing.contains(&ws.key)
+                    && ws.name == name
+                    && ws.project_key.as_ref() == Some(project_key) =>
+            {
+                return Some(ws.key.clone());
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
+/// Reject an unknown `--agent` id before sending anything. The daemon
+/// creates the workspace *before* it spawns (`CreateWorkspace` handler),
+/// so an unregistered id would leave a bare taskless workspace while the
+/// daemon's async spawn error never reaches this fire-and-forget CLI —
+/// the caller would see success and a false "spawning" line. Validating
+/// against the same registry the daemon builds (built-ins + YAML
+/// `GenericCli`s) turns that silent partial failure into a clear error.
+fn validate_agent_id(agent: &str) -> anyhow::Result<()> {
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    let registry = lazybox_server::registry_from_config(&cfg);
+    if registry.get(agent).is_some() {
+        return Ok(());
+    }
+    let mut ids: Vec<&str> = registry.ids().collect();
+    ids.sort_unstable();
+    anyhow::bail!(
+        "unknown --agent {agent:?}; known agents: {}",
+        ids.join(", ")
+    );
+}
+
+/// Resolve the Project a `workspace create` targets. Precedence: an explicit
+/// `--project` key, then `--repo owner/repo`, then inference from the checkout
+/// at `cwd` — its `origin` remote maps to a `github-<owner>-<repo>` project,
+/// and a checkout without a usable GitHub origin falls back to a `local-<dir>`
+/// project. Mirrors `workspace::import_local_checkout`'s derivation so a key
+/// produced here matches the one provider polling registered.
+async fn resolve_project_key(
+    explicit_project: Option<String>,
+    explicit_repo: Option<String>,
+    cwd: &std::path::Path,
+) -> Option<lazybox_core::ProjectKey> {
+    if let Some(key) = explicit_project
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+    {
+        return Some(lazybox_core::ProjectKey::new(key));
+    }
+    if let Some(repo) = explicit_repo {
+        // Accept the same shapes the origin-URL path yields — a bare
+        // `owner/repo`, tolerating a trailing `.git` — and reject anything
+        // that wouldn't form a clean key (extra path segments, embedded
+        // whitespace, an empty half) rather than minting a malformed one.
+        let slug = repo.trim();
+        let slug = slug.strip_suffix(".git").unwrap_or(slug);
+        let (owner, repo) = slug.split_once('/')?;
+        let well_formed = !owner.is_empty()
+            && !repo.is_empty()
+            && !repo.contains('/')
+            && !slug.chars().any(char::is_whitespace);
+        return well_formed.then(|| lazybox_core::ProjectKey::github(owner, repo));
+    }
+    let checkout = lazybox_git_ops::describe_checkout_at(cwd.to_path_buf()).await?;
+    let key = checkout
+        .remote_url
+        .as_deref()
+        .and_then(lazybox_core::github_owner_repo_from_url)
+        .map(|(owner, repo)| lazybox_core::ProjectKey::github(&owner, &repo))
+        .unwrap_or_else(|| {
+            let dir = cwd
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "checkout".to_string());
+            lazybox_core::ProjectKey::local(&lazybox_core::slug::slugify(&dir))
+        });
+    Some(key)
 }
 
 /// Read all of stdin into a string (best-effort; an IO error yields what
@@ -1660,6 +1881,68 @@ mod argv_tests {
         assert!(wants_version(&args(&["--version"])));
         assert!(wants_version(&args(&["-V"])));
         assert!(!wants_version(&args(&["-v"]))); // lowercase -v is not the version flag
+    }
+
+    #[tokio::test]
+    async fn resolve_project_key_prefers_explicit_project_then_repo() {
+        let cwd = std::path::Path::new("/nonexistent");
+        assert_eq!(
+            resolve_project_key(Some("local-foo".into()), None, cwd).await,
+            Some(lazybox_core::ProjectKey::new("local-foo")),
+        );
+        // --repo wins over cwd inference, and maps to a github project key.
+        assert_eq!(
+            resolve_project_key(None, Some("acme/widget".into()), cwd).await,
+            Some(lazybox_core::ProjectKey::github("acme", "widget")),
+        );
+        // A trailing `.git` (as pasted from a clone URL) is tolerated, same
+        // as the origin-URL inference path.
+        assert_eq!(
+            resolve_project_key(None, Some("acme/widget.git".into()), cwd).await,
+            Some(lazybox_core::ProjectKey::github("acme", "widget")),
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_project_key_rejects_a_malformed_repo() {
+        let cwd = std::path::Path::new("/nonexistent");
+        assert_eq!(
+            resolve_project_key(None, Some("no-slash".into()), cwd).await,
+            None
+        );
+        assert_eq!(
+            resolve_project_key(None, Some("/widget".into()), cwd).await,
+            None
+        );
+        // Extra path segments and embedded whitespace would form a
+        // malformed key (`github-owner-repo/extra`, `github-a - b`); reject
+        // them rather than mint one the daemon can't match to a project.
+        assert_eq!(
+            resolve_project_key(None, Some("owner/repo/extra".into()), cwd).await,
+            None
+        );
+        assert_eq!(
+            resolve_project_key(None, Some("a / b".into()), cwd).await,
+            None
+        );
+        // A blank --project falls through; with no repo and a non-git cwd,
+        // nothing resolves.
+        assert_eq!(
+            resolve_project_key(Some("  ".into()), None, cwd).await,
+            None
+        );
+    }
+
+    #[test]
+    fn validate_agent_id_accepts_a_builtin_and_rejects_an_unknown_id() {
+        // `claude` is always registered (a built-in), regardless of the
+        // machine's config; a nonsense id never is. This is the guard that
+        // stops `--agent` typos from creating a workspace whose agent
+        // silently never spawns.
+        assert!(validate_agent_id("claude").is_ok());
+        let err = validate_agent_id("totally-not-a-real-agent")
+            .expect_err("unknown agent must be rejected");
+        assert!(err.to_string().contains("known agents"));
     }
 
     #[test]

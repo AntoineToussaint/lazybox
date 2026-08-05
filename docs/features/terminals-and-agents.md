@@ -444,6 +444,8 @@ leaving, splitting, scrolling, and copying.
   **under the cursor**, not the focused one (#362). Mouse tracking still applies
   to clicks, but never redirects a wheel event into the inner program.
 - Left-click + drag does pane-scoped selection; release copies via OSC 52 (footer shows `copied N lines`). For host-native selection across the whole screen, press `F8` to flip mouse capture off, drag, then `F8` back.
+- Open a link under the cursor by **right-click** or, more reliably, an **Alt / Ctrl / Cmd + left-click** (#842). Right-click is the least consistently forwarded button — many emulators bind it to their own context menu — so the modifier-click is an emulator-independent path to the same open-URL behavior. Both require mouse capture on (`F8`); the keyboard `]]u` picker works even with capture off.
+- **Per-emulator right-click note:** whether a bare right-click reaches lazybox depends on the host terminal. Ghostty and Terminal.app generally forward it once mouse reporting is enabled; iTerm2 shows its own context menu on right-click by default (use the Alt/Cmd-click path or `]]u`, or disable "Report mouse clicks" overrides). When right-click does nothing and the footer shows `mouse ?` (capture requested but unverified), the emulator is eating the event — reach for `]]u` or a modifier-click.
 - `Shift-PageUp/PageDown` and `Shift-Home/End` move through scrollback (focused tile).
 
 ### How it works (brief)
@@ -468,6 +470,7 @@ are documented in [`docs/terminal-scrolling.md`](../terminal-scrolling.md).
 - [ ] Full-screen and mouse-tracking programs scroll lazybox history without receiving wheel input.
 - [ ] Drag-select copies via OSC 52 and the footer confirms the line count.
 - [ ] `F8` toggles mouse capture for host-native selection.
+- [ ] Right-click and Alt/Ctrl/Cmd + left-click both open the URL under the cursor; a modifier-click that misses a link starts an ordinary selection instead.
 
 ### Known sharp edges
 - `]]…` tile management and `Shift-Home/End` scrollback aren't in the README key tables — discover them via the `]]` popup or help (`?`).

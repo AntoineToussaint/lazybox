@@ -78,7 +78,7 @@ impl<T: TerminalAdapter> Model<T> {
         let msg = if self.mouse_capture_on {
             "mouse: lazybox capture requested — move the pointer to verify; F8 or Alt-s for host selection"
         } else {
-            "mouse: host selection — right-click links are off; press F8 or Alt-s to enable"
+            "mouse: host selection — right-click links off; use ]]u to open a link, or F8 / Alt-s to enable"
         };
         match self.request_host_mouse_capture(self.mouse_capture_on) {
             Ok(()) => {
@@ -128,7 +128,7 @@ impl<T: TerminalAdapter> Model<T> {
                 );
                 if !was_verified && self.focus == PaneFocus::Terminals {
                     self.flash_info(
-                        "mouse: waiting for host reporting — move the pointer; if ? remains, enable mouse reporting in the terminal",
+                        "mouse: waiting for host reporting — move the pointer; if ? remains, use ]]u or Alt/Ctrl-click to open links",
                     );
                 }
             }

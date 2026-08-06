@@ -29,6 +29,12 @@ the one-scan consumer pairing that builds on this, see #749.
    foreground. Packaged systemd units (`lazybox-daemon@`, `lazybox-api@`) live
    in [`contrib/systemd/`][systemd] so the box auto-starts the daemon on boot.
 
+   On a cloud box you pay for by the hour (a per-user GCE box), don't leave it
+   always-on — give it a lifecycle instead. [`contrib/box-lifecycle/`][lifecycle]
+   ships a stop-on-idle timer that stops the instance when no tunnel is
+   connected and no agent is working, and a `connect.sh` that starts it back up
+   on connect. See its README for install.
+
 ## On your laptop (machine A)
 
 Forward the daemon's socket over SSH, then attach a local TUI:
@@ -139,3 +145,4 @@ daemon on the box (or the client) so both sides match, then reconnect.
 
 [scoping]: remote-daemon-scoping.md
 [systemd]: ../contrib/systemd/README.md
+[lifecycle]: ../contrib/box-lifecycle/README.md

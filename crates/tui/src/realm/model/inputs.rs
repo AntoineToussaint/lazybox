@@ -1091,10 +1091,11 @@ showing keybinding search only",
             }
             Some(Id::BulkSpawnConfirm) => {
                 // Bulk `w w` / spawn / shell would start new agents (#899,
-                // #836); yes emits the plan snapshotted at mount, no drops
-                // it. The plan already carries its outcome summary.
+                // #836); yes runs the plan snapshotted at mount, no drops
+                // it. The steps stay inert until run here, so a cancel
+                // records nothing into any terminal's recap.
                 if let Some(ModalFlow::BulkSpawnConfirm {
-                    commands,
+                    steps,
                     summary,
                     follow,
                 }) = self.modal_flow.take()
@@ -1106,7 +1107,7 @@ showing keybinding search only",
                         }
                         self.flash_info(summary);
                         self.redraw = true;
-                        cmds.extend(commands);
+                        cmds.extend(self.run_bulk_agent_steps(steps));
                     } else {
                         self.flash_info("cancelled");
                     }

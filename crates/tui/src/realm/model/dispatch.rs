@@ -33,12 +33,13 @@ enum BulkAgentOp {
     SpawnShell,
 }
 
-/// The pre-computed result of a bulk agent fan-out: the exact commands
-/// to emit, the spawn/inject/skip tallies driving the confirm copy and
-/// summary, and the workspace focus should follow to.
+/// The pre-computed result of a bulk agent fan-out: the ordered,
+/// side-effect-free steps to run, the spawn/inject/skip tallies driving
+/// the confirm copy and summary, and the workspace focus should follow
+/// to. The steps stay inert (no recap mutation) until run.
 #[derive(Default)]
 struct BulkAgentPlan {
-    commands: Vec<IpcCommand>,
+    steps: Vec<super::BulkAgentStep>,
     spawned: usize,
     injected: usize,
     skipped: Vec<String>,
@@ -115,13 +116,30 @@ fn bulk_agent_confirm_prompt(plan: &BulkAgentPlan) -> String {
     prompt
 }
 
+/// The destructive actions a `v` multi-selection fans out over. Every
+/// other destructive action stays focused-only even under a selection
+/// (see [`Model::resolve_confirm_targets`]) — so this is also the exact
+/// set [`bulk_confirm_prompt`] and [`bulk_confirmed_verb`] must render
+/// copy for. Adding an action here without adding its copy there falls
+/// through to a neutral prompt, never a wrong one.
+fn is_bulk_destructive(action: &lazybox_tui_core::action::Action) -> bool {
+    use lazybox_tui_core::action::Action;
+    matches!(
+        action,
+        Action::Archive | Action::MergePr | Action::LongSnooze
+    )
+}
+
 /// Past-tense verb for the bulk-confirmed summary notice, per action.
+/// Only the [`is_bulk_destructive`] actions reach this; the neutral
+/// fallback is a safety net, not a lie about what happened.
 fn bulk_confirmed_verb(action: &lazybox_tui_core::action::Action) -> &'static str {
     use lazybox_tui_core::action::Action;
     match action {
+        Action::Archive => "archived",
         Action::MergePr => "merged",
         Action::LongSnooze => "snoozed",
-        _ => "archived",
+        _ => "applied to",
     }
 }
 
@@ -273,11 +291,16 @@ impl<T: TerminalAdapter> Model<T> {
         if ActionDef::for_action(action).is_destructive() {
             // Resolve the concrete target set NOW, while the selection
             // is what the user acted on. A `v` multi-selection targets
-            // every marked row; otherwise the focused row (or project
-            // header). The confirm fires against this stash — see
-            // `ModalFlow::ActionConfirm` — never the live selection, so
-            // a cursor drift under the modal can't redirect it (#899).
-            let targets = self.resolve_confirm_targets();
+            // every marked row *only for the bulk-appropriate destructive
+            // actions* (archive / merge / long-snooze); the inherently
+            // single-target ones (close-issue, delete-or-close, on-main
+            // spawn) stay on the focused row even under a selection, so
+            // pressing `x c` with rows marked closes the focused issue,
+            // not the whole set (#899). The confirm fires against this
+            // stash — see `ModalFlow::ActionConfirm` — never the live
+            // selection, so a cursor drift under the modal can't redirect
+            // it.
+            let targets = self.resolve_confirm_targets(action);
             if targets.is_empty() {
                 // Nothing focused to act on. The catalog's
                 // availability gate keeps surfaces from offering the
@@ -345,15 +368,26 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// The target *set* a destructive action fires against: every
-    /// `v`-marked row when a multi-selection is active, else the single
+    /// `v`-marked row when a multi-selection is active **and the action
+    /// is bulk-appropriate** ([`is_bulk_destructive`]), else the single
     /// focused row / project header. Sidebar (visible) order (#899).
-    fn resolve_confirm_targets(&self) -> Vec<ActionConfirmTarget> {
-        let selected = self.sidebar.selected_broadcast_keys();
-        if !selected.is_empty() {
-            return selected
-                .into_iter()
-                .map(ActionConfirmTarget::Workspace)
-                .collect();
+    /// Gating on `is_bulk_destructive` keeps the inherently single-target
+    /// destructive actions (close-issue, delete-or-close, on-main spawn)
+    /// focused-only even under a selection — a bulk set would otherwise
+    /// reach them with the generic archive prompt and fire them across
+    /// the whole selection.
+    fn resolve_confirm_targets(
+        &self,
+        action: &lazybox_tui_core::action::Action,
+    ) -> Vec<ActionConfirmTarget> {
+        if is_bulk_destructive(action) {
+            let selected = self.sidebar.selected_broadcast_keys();
+            if !selected.is_empty() {
+                return selected
+                    .into_iter()
+                    .map(ActionConfirmTarget::Workspace)
+                    .collect();
+            }
         }
         self.resolve_action_confirm_target().into_iter().collect()
     }
@@ -427,9 +461,13 @@ impl<T: TerminalAdapter> Model<T> {
             Action::LongSnooze => {
                 format!("Snooze {n} workspaces for a long time? {list}")
             }
-            // Archive and any future bulk-destructive action name the
-            // count + list; the per-target kill runs on confirm.
-            _ => format!("Archive {n} workspaces? Any running sessions are killed. {list}"),
+            Action::Archive => {
+                format!("Archive {n} workspaces? Any running sessions are killed. {list}")
+            }
+            // Only the `is_bulk_destructive` actions reach a bulk confirm;
+            // a neutral fallback keeps a future mis-wiring from lying
+            // ("Archive N…") about what a different action does.
+            _ => format!("Apply this action to {n} workspaces? {list}"),
         }
     }
 
@@ -1752,7 +1790,7 @@ impl<T: TerminalAdapter> Model<T> {
         let plan = self.build_bulk_agent_plan(&op, model_alias);
         let summary = bulk_agent_summary(&plan);
         if plan.spawned == 0 {
-            // No heavy spawns — deliver injects (or nothing) right away.
+            // No heavy spawns — run the plan (injects, or nothing) now.
             if plan.injected > 0 {
                 self.sidebar.clear_broadcast_selection();
             }
@@ -1761,11 +1799,11 @@ impl<T: TerminalAdapter> Model<T> {
             }
             self.flash_info(summary);
             self.redraw = true;
-            return plan.commands;
+            return self.run_bulk_agent_steps(plan.steps);
         }
         let prompt = bulk_agent_confirm_prompt(&plan);
         self.set_modal_flow(super::ModalFlow::BulkSpawnConfirm {
-            commands: plan.commands,
+            steps: plan.steps,
             summary,
             follow: plan.follow,
         });
@@ -1774,13 +1812,47 @@ impl<T: TerminalAdapter> Model<T> {
         Vec::new()
     }
 
-    /// Build the spawn/inject command plan for a bulk agent op over the
+    /// Run a snapshotted bulk agent plan: emit each spawn and deliver
+    /// each inject (the recap-mutating [`deliver_prompt`] fires here, at
+    /// run time — never at plan-build time). Shared by the immediate
+    /// (`spawned == 0`) path and the post-confirm handler so both
+    /// materialize the plan identically.
+    pub(super) fn run_bulk_agent_steps(
+        &mut self,
+        steps: Vec<super::BulkAgentStep>,
+    ) -> Vec<IpcCommand> {
+        let mut cmds = Vec::new();
+        for step in steps {
+            match step {
+                super::BulkAgentStep::Spawn(cmd) => cmds.push(cmd),
+                super::BulkAgentStep::Inject { terminal_id, body } => {
+                    self.deliver_prompt(
+                        terminal_id,
+                        true,
+                        &body,
+                        lazybox_ipc::PromptSource::Typed,
+                        &mut cmds,
+                    );
+                }
+            }
+        }
+        cmds
+    }
+
+    /// Build the spawn/inject step plan for a bulk agent op over the
     /// current multi-select, in sidebar order. Each target either injects
     /// the contextual work prompt into its live agent, spawns a fresh
     /// session, or is skipped (session-less scratch row, or a
-    /// merged/finished workspace that steers to cleanup instead).
+    /// merged/finished workspace that steers to cleanup instead). Takes
+    /// `&self` and produces only inert steps — nothing is delivered or
+    /// recorded here, so a plan the user later cancels leaves no trace.
+    ///
+    /// A workspace running *several* agents (`WorkTarget::Choose`, #418)
+    /// can't raise its per-row chooser mid-fan-out, so bulk work targets
+    /// its first live agent — the deliberate "resolve per target, don't
+    /// prompt N times" bulk trade-off.
     fn build_bulk_agent_plan(
-        &mut self,
+        &self,
         op: &BulkAgentOp,
         model_alias: Option<String>,
     ) -> BulkAgentPlan {
@@ -1810,12 +1882,13 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                         _ => unreachable!(),
                     };
-                    plan.commands.push(bulk_spawn_command(
-                        key.clone(),
-                        kind,
-                        None,
-                        model_alias.clone(),
-                    ));
+                    plan.steps
+                        .push(super::BulkAgentStep::Spawn(bulk_spawn_command(
+                            key.clone(),
+                            kind,
+                            None,
+                            model_alias.clone(),
+                        )));
                     plan.spawned += 1;
                     plan.follow.get_or_insert_with(|| key.clone());
                 }
@@ -1853,14 +1926,12 @@ impl<T: TerminalAdapter> Model<T> {
                             prompt,
                         } => match (running_terminal, prompt) {
                             // A live agent + fresh instructions → inject.
+                            // Recorded as an inert step: the recap-mutating
+                            // delivery runs only when the plan does, so
+                            // cancelling the spawn confirm records nothing.
                             (Some(terminal_id), Some(body)) => {
-                                self.deliver_prompt(
-                                    terminal_id,
-                                    true,
-                                    &body,
-                                    lazybox_ipc::PromptSource::Typed,
-                                    &mut plan.commands,
-                                );
+                                plan.steps
+                                    .push(super::BulkAgentStep::Inject { terminal_id, body });
                                 plan.injected += 1;
                             }
                             // A live agent but nothing new to say (a scratch
@@ -1868,12 +1939,13 @@ impl<T: TerminalAdapter> Model<T> {
                             (Some(_), None) => plan.skipped.push(name),
                             // No live agent → spawn one with the prompt.
                             (None, body) => {
-                                plan.commands.push(bulk_spawn_command(
-                                    (&workspace_key).into(),
-                                    lazybox_ipc::TerminalKind::Agent(agent_id),
-                                    body,
-                                    model_alias.clone(),
-                                ));
+                                plan.steps
+                                    .push(super::BulkAgentStep::Spawn(bulk_spawn_command(
+                                        (&workspace_key).into(),
+                                        lazybox_ipc::TerminalKind::Agent(agent_id),
+                                        body,
+                                        model_alias.clone(),
+                                    )));
                                 plan.spawned += 1;
                                 plan.follow.get_or_insert_with(|| (&workspace_key).into());
                             }

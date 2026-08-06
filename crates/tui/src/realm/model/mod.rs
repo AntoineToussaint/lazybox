@@ -468,6 +468,20 @@ pub(crate) enum ActionConfirmTarget {
     Project(lazybox_core::ProjectKey),
 }
 
+/// One step of a bulk `w w` / spawn / shell fan-out (#899), kept inert
+/// until the plan runs. A `Spawn` is a pure `Command`; an `Inject`
+/// carries only the target terminal + body, so the recap-mutating
+/// delivery ([`Model::deliver_prompt`]) happens at run time, not when
+/// the plan is built — cancelling the confirm then records nothing.
+#[derive(Debug, Clone)]
+pub(crate) enum BulkAgentStep {
+    Spawn(lazybox_ipc::Command),
+    Inject {
+        terminal_id: lazybox_ipc::TerminalId,
+        body: String,
+    },
+}
+
 /// A validated `edit_config` edit (#353), derived by
 /// `Model::validate_config_edit` from an allowlisted help-agent intent.
 /// Carries everything the confirm preview and the apply step need, so
@@ -640,12 +654,16 @@ pub(crate) enum ModalFlow {
         targets: Vec<ActionConfirmTarget>,
     },
     /// Bulk agent/shell start over a `v` multi-selection (#899). The
-    /// plan — the exact spawn/inject commands and the outcome summary —
-    /// is computed and snapshotted at mount, so a daemon event that
-    /// reshuffles the sidebar under the confirm can't change who gets
-    /// started. `Msg::Confirmed(true)` emits the stashed commands.
+    /// plan — the ordered spawn/inject *steps* and the outcome summary —
+    /// is snapshotted at mount, so a daemon event that reshuffles the
+    /// sidebar under the confirm can't change who gets started. The steps
+    /// stay inert until `Msg::Confirmed(true)` runs them: an inject only
+    /// records into a terminal's recap when it actually fires, so
+    /// cancelling leaves no phantom prompt behind (unlike stashing
+    /// already-built inject commands, which would have recorded at mount
+    /// time).
     BulkSpawnConfirm {
-        commands: Vec<lazybox_ipc::Command>,
+        steps: Vec<BulkAgentStep>,
         summary: String,
         follow: Option<lazybox_core::SessionKey>,
     },

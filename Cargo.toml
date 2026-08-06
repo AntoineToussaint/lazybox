@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/auth",
+    "crates/entitlement",
     "crates/store",
     "crates/config",
     "crates/git-ops",
@@ -95,6 +96,7 @@ publish = false
 # ── Shared library crates ──────────────────────────────────────────────
 lazybox-core        = { path = "crates/core" }
 lazybox-auth        = { path = "crates/auth" }
+lazybox-entitlement = { path = "crates/entitlement" }
 lazybox-store       = { path = "crates/store" }
 lazybox-config      = { path = "crates/config" }
 lazybox-git-ops     = { path = "crates/git-ops" }

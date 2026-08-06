@@ -1679,6 +1679,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazybox-entitlement"
+version = "0.1.9"
+dependencies = [
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "lazybox-gh"
 version = "0.1.9"
 dependencies = [

@@ -578,6 +578,25 @@ fallback shouldn't resurrect it)",
         assert!(ctx.contains("## Doc: Themes"));
     }
 
+    /// The terminals doc teaches the browserless-auth flow so the help
+    /// agent can answer "why didn't `gcloud auth ... login` take effect"
+    /// (#884): the PTY is interactive, but a browser / localhost-callback
+    /// auth opens on the daemon host — steer to `--no-launch-browser` +
+    /// `]]u`.
+    #[test]
+    fn agent_context_teaches_browserless_auth() {
+        let ctx = agent_context(&catalog(), ']');
+        assert!(ctx.contains("## Doc: Terminals and agents"));
+        assert!(
+            ctx.contains("--no-launch-browser"),
+            "terminals doc must steer to the browserless auth flow",
+        );
+        assert!(
+            ctx.contains("]]u"),
+            "terminals doc must point at `]]u` to open the URL on the client",
+        );
+    }
+
     /// The context teaches the agent the action vocabulary: both verbs,
     /// every editable config key, and the exact fence tag lazybox parses.
     #[test]

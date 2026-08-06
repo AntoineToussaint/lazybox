@@ -97,6 +97,19 @@ pub struct Snippet {
     /// against an empty dispatch target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
+    /// Optional provider scope — which workspace *source* this snippet is
+    /// relevant to (`"github"`, `"linear"`, …, matching `Task.id.source`).
+    /// When set, the picker only surfaces the snippet on a workspace of
+    /// that source, so provider-specific workflows (a GitHub PR-review
+    /// reply, a Linear state transition) don't clutter the list on an
+    /// unrelated workspace. When `None` the snippet is generic and shows
+    /// everywhere (see [`Snippet::matches_sources`]).
+    ///
+    /// Invariant, like `skill:`: `Some` always names a real, trimmed,
+    /// lowercased, non-empty source. A blank `provider:` in a user file is
+    /// normalized to `None` at load ([`Snippet::normalize_provider`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// Provenance — which file the entry came from. Hand-set by the
     /// loader; serde ignores it on the way in / out. Used by the
     /// picker to show "global" vs "repo" hints alongside each row,
@@ -142,6 +155,34 @@ impl Snippet {
             let trimmed = name.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
         });
+    }
+
+    /// Normalize `provider` to uphold its invariant: trim, collapse a
+    /// blank value to `None`, and lowercase so a `provider: GitHub` in a
+    /// user file still matches the `"github"` source string. Applied at
+    /// every load boundary, alongside [`Snippet::normalize_skill`].
+    pub fn normalize_provider(&mut self) {
+        self.provider = self.provider.take().and_then(|p| {
+            let trimmed = p.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_ascii_lowercase())
+        });
+    }
+
+    /// Whether this snippet should surface on a workspace spanning the
+    /// given task `sources` (e.g. `["github"]`, or `["github", "linear"]`
+    /// for a Linear issue that already has a GitHub PR). A snippet with no
+    /// `provider` is generic and always applies. A provider-scoped one
+    /// applies when its provider is among `sources` — keying off *every*
+    /// source on the workspace, not just the primary task's, so the other
+    /// provider's snippets aren't hidden on a cross-provider workspace. So
+    /// nothing is hidden when the context is unknown (the workspace carries
+    /// no task, or the catalog is browsed without a focused session), an
+    /// empty `sources` also matches. Matching is case-insensitive.
+    pub fn matches_sources(&self, sources: &[&str]) -> bool {
+        match &self.provider {
+            None => true,
+            Some(p) => sources.is_empty() || sources.iter().any(|s| p.eq_ignore_ascii_case(s)),
+        }
     }
 
     /// The text actually delivered to the focused agent.
@@ -219,6 +260,7 @@ impl Snippets {
             .map(|(k, mut s)| {
                 s.origin = origin;
                 s.normalize_skill();
+                s.normalize_provider();
                 (k, s)
             })
             .collect();
@@ -236,8 +278,24 @@ impl Snippets {
             category: category.to_string(),
             body: body.to_string(),
             skill: None,
+            provider: None,
             origin: SnippetOrigin::BuiltIn,
         };
+        // Provider-scoped built-in: only surfaces on a workspace whose task
+        // source matches (`"github"` / `"linear"`). See
+        // [`Snippet::matches_sources`].
+        let scoped = |provider: &str, category: &str, description: &str, body: &str| Snippet {
+            description: description.to_string(),
+            category: category.to_string(),
+            body: body.to_string(),
+            skill: None,
+            provider: Some(provider.to_string()),
+            origin: SnippetOrigin::BuiltIn,
+        };
+        // Scope on the canonical provider ids so config can't drift from
+        // the `TaskId.source` the providers actually stamp (see
+        // [`Snippet::matches_sources`]).
+        let (gh, lin) = (lazybox_core::GITHUB_SOURCE, lazybox_core::LINEAR_SOURCE);
         let by_key = BTreeMap::from([
             // ── Review ──────────────────────────────────────────────
             (
@@ -262,15 +320,25 @@ impl Snippets {
                 "deepreview".to_string(),
                 entry(
                     "Review",
-                    "Deep review: design, edge cases, failure modes",
-                    "Review the current diff deeply, past surface bugs. First evaluate \
-                     the design: are the abstractions and boundaries right, is there a \
-                     simpler shape, and does it fit the surrounding code? Then stress the \
-                     change — enumerate the edge cases, error paths, and concurrency / \
-                     partial-failure / bad-input scenarios that aren't handled. Report \
-                     findings as a list ranked by severity with `file:line` anchors, \
-                     separating \"will break\" from \"worth reconsidering\". If the design \
-                     is sound, say so and name the one thing you'd still keep an eye on.",
+                    "Deep review: design, stress, blast radius (flagship)",
+                    "Review the current diff (`git diff` against the base branch) as a \
+                     skeptical senior engineer — deeper than surface bugs, in three \
+                     passes. Design: are the abstractions, boundaries, and ownership \
+                     right; does it fit the patterns already in this codebase; is there a \
+                     materially simpler shape that does the same job? Correctness under \
+                     stress: trace the real code path and enumerate the edge cases, error \
+                     paths, and concurrency / partial-failure / bad-input scenarios that \
+                     aren't handled — for each, give the concrete input or state that \
+                     produces the wrong result, not a vague worry. Blast radius: what \
+                     breaks elsewhere if this is wrong, and is it reversible? Scope: flag \
+                     anything the task didn't need — opportunistic refactors, reformatting, \
+                     drive-by renames, unrelated edits — as out-of-scope; sprawl is a \
+                     finding, not a bonus. Rank findings \
+                     by severity, each with a `file:line` anchor, separating \"will break\" \
+                     (has a real failure scenario) from \"worth reconsidering\" (a design \
+                     smell). Don't pad — a weak nit dressed as a bug erodes trust. End with \
+                     a one-line verdict — ship / reshape / rethink — and, if it's sound, \
+                     the single risk you'd keep watching.",
                 ),
             ),
             (
@@ -294,7 +362,9 @@ impl Snippets {
                     "Self-review this branch as a skeptical reviewer seeing it for the \
                      first time. Read the full diff against the base branch, then call \
                      out anything that isn't obviously correct, any missing or weak \
-                     tests, any leftover debug code or stray TODOs, and anything you'd be \
+                     tests, any leftover debug code or stray TODOs, any change that's out \
+                     of scope for this branch's purpose (drive-by refactors, reformatting, \
+                     unrelated edits), and anything you'd be \
                      asked to change in review. List concrete items with `file:line` \
                      anchors so I can fix them before pushing. If it's genuinely ready, \
                      say so.",
@@ -370,11 +440,31 @@ impl Snippets {
                      you don't believe in. Whenever a fix changes behavior, add or adjust \
                      the test that would have caught the original problem. When you're \
                      done, re-run the build, tests, and linter to confirm the tree is \
-                     green, and don't drag unrelated edits into the diff. Commit the fixes \
+                     green, and stay strictly in scope — fix only the findings, and don't \
+                     refactor, reformat, or clean up anything they didn't call out. Commit \
+                     the fixes \
                      with a clear message that says what was wrong and why the change is \
                      the real fix, staging only the files you touched. Finish with a short \
                      summary: what you fixed, what you deliberately left and why, and \
                      anything you noticed in the code that the review missed.",
+                ),
+            ),
+            (
+                "scout".to_string(),
+                entry(
+                    "Review",
+                    "Scout rule: flag and trim out-of-scope changes",
+                    "Scope-check the current diff (`git diff` against the base branch) \
+                     against the one thing this change is meant to do. Go hunk by hunk and \
+                     flag every edit the task didn't require — opportunistic refactors, \
+                     drive-by renames, reformatting, unrelated cleanups, speculative \
+                     abstractions, leftover debug code or stray TODOs — each with a \
+                     `file:line` anchor and one line on why it doesn't belong. Then trim \
+                     them: revert the out-of-scope hunks so the diff carries only what the \
+                     task needs, and confirm the build and tests still pass afterward. Keep \
+                     anything that's genuinely load-bearing even if it looks unrelated — say \
+                     why you kept it rather than reverting it blindly. If the diff is \
+                     already tight, say so plainly instead of inventing trims.",
                 ),
             ),
             // ── Git & PR ────────────────────────────────────────────
@@ -515,6 +605,217 @@ impl Snippets {
                      is rejected because the remote moved, stop and tell me what changed \
                      rather than escalating to `--force`. Confirm the push landed and the \
                      branch is in sync when done.",
+                ),
+            ),
+            // ── GitHub ──────────────────────────────────────────────
+            (
+                "triage".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Triage the issue into a plan",
+                    "Triage the GitHub issue this workspace is on. Read the body and every \
+                     comment with `gh issue view --comments`, restate the problem in one \
+                     line, and confirm it's real and still relevant. If it's a bug, \
+                     reproduce it — trace the actual code path rather than trusting the \
+                     report — then break the work into an ordered, checkable plan: the root \
+                     change, the tests that prove it, and any follow-ups worth splitting \
+                     out. Raise anything under-specified or out of scope as a question back \
+                     on the issue instead of guessing. Don't start coding yet — deliver the \
+                     plan first.",
+                ),
+            ),
+            (
+                "respond".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Address the PR review comments",
+                    "Address the unresolved review comments on this PR. Pull them with \
+                     `gh pr view --comments` plus the inline review threads, and for each \
+                     one either make the change the reviewer asked for or, if you disagree, \
+                     reply with the concrete reason rather than silently skipping it. Fix \
+                     the real cause, not just the flagged line, and add or adjust a test \
+                     whenever the change alters behavior. Re-run the relevant checks, push, \
+                     and post a short reply on each thread saying what you did so the \
+                     reviewer can resolve it. Don't mark anything resolved you didn't \
+                     actually handle.",
+                ),
+            ),
+            (
+                "link".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Link this PR and the issue it closes",
+                    "Wire this PR to the issue it resolves so they track as one. Confirm \
+                     which issue it closes, then make sure the PR body carries a \
+                     `Closes #N` line — edit it with `gh pr edit` if it's missing — so the \
+                     issue auto-closes on merge and GitHub shows the link. For an issue in \
+                     another repo use the full `Closes owner/repo#N` form. Cross-check that \
+                     no other open PR already claims the same issue, and report the final \
+                     linked pair.",
+                ),
+            ),
+            (
+                // Not `ci*`: `ci` is a built-in key, so a key with `ci` as
+                // a strict prefix would break `]]ci` auto-submit.
+                "whyci".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Summarize why CI is failing",
+                    "Summarize why CI is failing on this PR. List the failing checks with \
+                     `gh pr checks`, pull each failed job's log with `gh run view \
+                     --log-failed`, and for every distinct failure give the check name, the \
+                     real cause (not just the last red line), and the `file:line` or step \
+                     it points at. Separate genuine code failures from flakes and infra \
+                     errors. End with the shortest path back to green — which failures to \
+                     fix first and why. Don't fix anything yet; this is the diagnosis.",
+                ),
+            ),
+            (
+                "nudge".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Request or nudge reviewers",
+                    "Get this PR the review it needs. Check its state with `gh pr view` — is \
+                     it a draft, are checks green, does it already have reviewers? If it's \
+                     ready and unreviewed, request the right people with `gh pr edit \
+                     --add-reviewer`, preferring the code owners or recent authors of the \
+                     touched files. If review was already requested and has gone stale, \
+                     draft a short, specific nudge comment naming what changed since they \
+                     last looked and what you need from them. Don't nudge while CI is red or \
+                     the PR is still a draft — say so instead.",
+                ),
+            ),
+            (
+                "release".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Cut a release PR",
+                    "Cut a release PR from the current state. Determine the next version \
+                     from the commits since the last tag (`git log <last-tag>..HEAD`) and \
+                     the project's versioning scheme, bump the version files, and assemble \
+                     a changelog grouped by feat / fix / chore with the notable \
+                     user-facing changes — not a raw commit dump. Confirm the build and \
+                     tests are green first, then open the PR with `gh pr create` targeting \
+                     the release base, titled for the version, with the changelog as the \
+                     body. Flag any breaking change prominently. Don't tag or publish — the \
+                     PR is the deliverable.",
+                ),
+            ),
+            (
+                "convert".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Convert the issue into a PR",
+                    "Turn the GitHub issue this workspace is on into a PR. Read it with \
+                     `gh issue view --comments`, branch off the default base with a name \
+                     drawn from the issue, and implement the smallest change that fully \
+                     resolves it — root cause, not symptom — with tests for the new \
+                     behavior. Run the project's checks until green, then open the PR with \
+                     `gh pr create`, its body starting with `Closes #N` so the issue \
+                     collapses into it. Keep it one logical change; if the issue is really \
+                     several, say so and scope this PR to the first. Print the PR URL when \
+                     it's open.",
+                ),
+            ),
+            // ── Linear ──────────────────────────────────────────────
+            (
+                "wip".to_string(),
+                scoped(
+                    lin,
+                    "Linear",
+                    "Move the Linear issue to In Progress",
+                    "Move this workspace's Linear issue to In Progress to signal you've \
+                     started. Use the Linear tooling available to you (MCP, CLI, or API) to \
+                     set the workflow state — states are team-specific, so the started \
+                     state may be named differently; pick the one that fits. Confirm the \
+                     transition actually applied and report the issue identifier and its \
+                     new state. If you can't reach Linear from here, say so plainly instead \
+                     of assuming it worked.",
+                ),
+            ),
+            (
+                "done".to_string(),
+                scoped(
+                    lin,
+                    "Linear",
+                    "Move the Linear issue to Done",
+                    "Mark this workspace's Linear issue Done. First confirm the work is \
+                     actually complete — the change is merged or its PR is approved and \
+                     green, and the issue's acceptance criteria are met — then transition \
+                     it to the team's completed state via the Linear tooling available to \
+                     you (MCP, CLI, or API). Add a one-line closing comment linking the PR \
+                     that resolved it. If any acceptance criterion is unmet, don't close \
+                     it — tell me what's outstanding instead.",
+                ),
+            ),
+            (
+                "status".to_string(),
+                scoped(
+                    lin,
+                    "Linear",
+                    "Comment a status update back to Linear",
+                    "Post a concise status update as a comment on this workspace's Linear \
+                     issue. Summarize what's done, what's in progress, and any blocker or \
+                     decision you need — grounded in the real state of the branch and PR, \
+                     not a guess. Keep it to a few lines a teammate can skim, link the PR \
+                     if one exists, and post it with the Linear tooling available to you \
+                     (MCP, CLI, or API). Confirm the comment landed; if you can't reach \
+                     Linear, show me the update text instead.",
+                ),
+            ),
+            (
+                "subissues".to_string(),
+                scoped(
+                    lin,
+                    "Linear",
+                    "Break the Linear issue into sub-issues",
+                    "Break this workspace's Linear issue into well-scoped sub-issues. Read \
+                     the parent with its comments, then decompose the work into \
+                     independently shippable pieces — each with a clear title and a \
+                     one-line deliverable — without slicing so thin that the overhead \
+                     outweighs the work. Create them as children of the parent under the \
+                     same team via the Linear tooling available to you, preserving the link \
+                     to the parent, and report the created sub-issues with their \
+                     identifiers. If the issue is already small enough to do in one pass, \
+                     say so instead of splitting it.",
+                ),
+            ),
+            (
+                "attach".to_string(),
+                scoped(
+                    lin,
+                    "Linear",
+                    "Link the PR to the Linear issue",
+                    "Connect this PR to its Linear issue so both sides cross-reference. Put \
+                     the issue identifier (e.g. `ENG-123`) in the PR title or body — \
+                     Linear's GitHub integration links them automatically from that magic \
+                     word — and confirm the link shows up on the Linear issue. If the \
+                     integration isn't wired up, instead add a comment on the issue with \
+                     the PR URL and a comment on the PR with the issue link. Report the \
+                     linked pair when done.",
+                ),
+            ),
+            (
+                "estimate".to_string(),
+                scoped(
+                    lin,
+                    "Linear",
+                    "Estimate and prioritize the Linear issue",
+                    "Estimate and prioritize this workspace's Linear issue. Read it fully \
+                     and assess the real scope against the surrounding code — trace what \
+                     actually has to change, don't guess from the title — then propose a \
+                     point estimate on the team's scale plus a priority, each with a \
+                     one-line justification. Call out the biggest uncertainty that could \
+                     blow the estimate. Set the fields via the Linear tooling available to \
+                     you if the values are clearly right, otherwise propose them for me to \
+                     confirm. Say so if the issue is too vague to estimate.",
                 ),
             ),
             // ── Testing ─────────────────────────────────────────────
@@ -1389,6 +1690,7 @@ snippets:
             category: category.to_string(),
             body: body.to_string(),
             skill: None,
+            provider: None,
             origin: SnippetOrigin::Unknown,
         }
     }
@@ -1596,5 +1898,109 @@ snippets:
             padded.dispatch_body(),
             "Use the `code-review` skill to complete this task:\n\nreview the diff"
         );
+    }
+
+    /// The `provider:` field parses from YAML and defaults to `None` when
+    /// absent, so existing generic snippet files are unaffected.
+    #[test]
+    fn provider_field_parses_and_defaults_to_none() {
+        let path = write_tmp(
+            "provider-parse",
+            "snippets:\n  \
+             generic:\n    body: any workspace\n  \
+             ghonly:\n    provider: github\n    body: github workflow\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+        assert_eq!(loaded.get("generic").expect("generic").provider, None);
+        assert_eq!(
+            loaded.get("ghonly").expect("ghonly").provider.as_deref(),
+            Some("github")
+        );
+    }
+
+    /// A blank `provider:` collapses to `None`; a real one is trimmed and
+    /// lowercased so `provider: GitHub` still matches the `"github"` source.
+    #[test]
+    fn blank_provider_normalizes_to_none_and_names_are_lowercased() {
+        let path = write_tmp(
+            "provider-normalize",
+            "snippets:\n  \
+             empty:\n    provider: \"\"\n    body: text\n  \
+             spaces:\n    provider: \"   \"\n    body: text\n  \
+             padded:\n    provider: \"  GitHub  \"\n    body: text\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+        assert_eq!(loaded.get("empty").expect("empty").provider, None);
+        assert_eq!(loaded.get("spaces").expect("spaces").provider, None);
+        assert_eq!(
+            loaded.get("padded").expect("padded").provider.as_deref(),
+            Some("github"),
+        );
+    }
+
+    /// A generic snippet applies to every workspace; a provider-scoped one
+    /// applies when its provider is among the workspace's sources —
+    /// including a cross-provider workspace that spans both — but also when
+    /// the sources are unknown, so nothing is silently hidden.
+    #[test]
+    fn matches_sources_scopes_by_provider() {
+        let mut generic = snippet("Review", "Review", "body");
+        generic.provider = None;
+        assert!(generic.matches_sources(&["github"]));
+        assert!(generic.matches_sources(&["linear"]));
+        assert!(generic.matches_sources(&[]));
+
+        let mut gh = snippet("GitHub", "Triage", "body");
+        gh.provider = Some("github".into());
+        assert!(gh.matches_sources(&["github"]));
+        assert!(gh.matches_sources(&["GitHub"]), "case-insensitive");
+        assert!(!gh.matches_sources(&["linear"]));
+        assert!(
+            gh.matches_sources(&["github", "linear"]),
+            "a cross-provider workspace surfaces both providers' snippets",
+        );
+        assert!(
+            gh.matches_sources(&[]),
+            "unknown context surfaces the snippet rather than hiding it",
+        );
+    }
+
+    /// The built-in library ships provider-scoped GitHub and Linear
+    /// categories (#868): every entry in those categories carries the
+    /// matching `provider`, and generic snippets stay unscoped so they show
+    /// everywhere.
+    #[test]
+    fn builtin_ships_provider_scoped_github_and_linear() {
+        let b = Snippets::builtin();
+        for (key, provider) in [
+            ("triage", "github"),
+            ("respond", "github"),
+            ("convert", "github"),
+            ("whyci", "github"),
+            ("wip", "linear"),
+            ("done", "linear"),
+            ("attach", "linear"),
+            ("estimate", "linear"),
+        ] {
+            let s = b
+                .get(key)
+                .unwrap_or_else(|| panic!("`{key}` ships built-in"));
+            assert_eq!(s.provider.as_deref(), Some(provider), "`{key}` provider");
+            let cat = if provider == "github" {
+                "GitHub"
+            } else {
+                "Linear"
+            };
+            assert_eq!(s.category, cat, "`{key}` category");
+        }
+        // Every GitHub/Linear-category built-in is provider-scoped, and no
+        // generic-category built-in carries a provider.
+        for (key, s) in b.all() {
+            match s.category.as_str() {
+                "GitHub" => assert_eq!(s.provider.as_deref(), Some("github"), "{key}"),
+                "Linear" => assert_eq!(s.provider.as_deref(), Some("linear"), "{key}"),
+                _ => assert_eq!(s.provider, None, "generic `{key}` stays unscoped"),
+            }
+        }
     }
 }

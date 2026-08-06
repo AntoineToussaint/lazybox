@@ -801,6 +801,58 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
     .expect("deadline");
 }
 
+/// The stable-launcher copy that lets an agent's hook path survive a
+/// rebuild / `cargo clean` / worktree removal belongs at daemon boot
+/// (`ensure_stable_hook_exe`), never on the per-spawn hot path: a per-spawn
+/// ~80 MB `fs::copy` blocked every `TerminalSpawned`, and because this
+/// harness drives `handle_spawn` against a real `LAZYBOX_HOME` it raced
+/// every test process on one `<home>/bin/lazybox`. A spawn must leave
+/// `<home>/bin` untouched — proven here — while `ensure_stable_hook_exe`
+/// itself is exercised by the `stabilize_exe_*` unit tests. (This asserts
+/// only *absence*, so it's immune to the harness's shared-`LAZYBOX_HOME`
+/// races: nothing writes the stable path, so it never appears.)
+#[tokio::test]
+async fn spawn_hot_path_never_copies_into_the_stable_bin_dir() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let stable = lazybox_core::paths::stable_exe_path();
+        assert!(
+            !stable.exists(),
+            "precondition: an isolated home starts without a stable copy"
+        );
+
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                session_key: "test:ws-bin".into(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: test_cwd(),
+                initial_prompt: None,
+                on_main: false,
+            })
+            .unwrap();
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+
+        assert!(
+            !stable.exists(),
+            "the spawn hot path must not copy the binary into <home>/bin"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 #[tokio::test]
 async fn read_only_spawn_rejects_a_writable_singleton() {
     timeout(TEST_DEADLINE, async {

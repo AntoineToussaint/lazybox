@@ -7,11 +7,15 @@ workspace has already received.
 
 A snippet is a short key backed by a complete agent instruction. It is
 sent and **submitted** to the focused agent in one action, not merely
-pasted for you to finish. lazybox ships 42 categorized workflows, so
-the system is useful before you create anything: review (`rev`,
-`deepreview`, `fixall`, `audit`), Git and PR (`pr`, `rebase`, `push`), testing
-(`test`, `tdd`, `repro`), debugging (`bug`, `bisect`, `trace`),
-security (`sec`, `deps`, `leaks`), and more.
+pasted for you to finish. lazybox ships 56 categorized workflows, so
+the system is useful before you create anything: review (`deepreview`
+— the flagship deep review — plus `rev`, `fixall`, `audit`, `scout`), Git and PR
+(`pr`, `rebase`, `push`), GitHub (`triage`, `respond`, `convert`),
+Linear (`wip`, `done`, `attach`), testing (`test`, `tdd`, `repro`),
+debugging (`bug`, `bisect`, `trace`), security (`sec`, `deps`, `leaks`),
+and more. The GitHub and Linear workflows are **provider-scoped**: they
+only appear on a workspace of that source (see
+[Provider-scoped workflows](#provider-scoped-workflows)).
 
 Snippets are the *human-only* half of a pair: Claude Code — one of the
 agents lazybox spawns — also loads its own **Skills** (`SKILL.md`),
@@ -49,8 +53,8 @@ prefix with `terminal.escape_char`.
 
 The picker is organized for a catalog larger than a handful of keys:
 
-- Category headers group Review, Git & PR, Testing, Debugging, and other
-  workflows.
+- Category headers group Review, Git & PR, GitHub, Linear, Testing,
+  Debugging, and other workflows, in that order.
 - Live filtering matches the key, description, and category.
 - The right pane previews the full wrapped body, category, and origin
   (`built-in`, `global`, or `repo`) before you send it. `repo` means the
@@ -61,8 +65,11 @@ The picker is organized for a catalog larger than a handful of keys:
 
 To browse without a focused terminal, press `]` from the sidebar or
 activity pane, or choose **Browse snippets** from the `,` Settings
-palette. This read-only catalog shows every merged workflow with its
-key, origin, description, and full body. `↑`/`↓` scrolls and `e` opens
+palette. This read-only catalog is provider-scoped like the picker (see
+[Provider-scoped workflows](#provider-scoped-workflows)): it shows every
+workflow relevant to the focused workspace with its key, origin,
+description, and full body — open it from Settings with no session
+focused to see the whole merged catalog. `↑`/`↓` scrolls and `e` opens
 the global YAML file in your editor.
 
 ## Understand Recent and the `]N` workspace badge
@@ -179,13 +186,54 @@ skill-dispatching snippet like any other. The skill must already exist
 for the focused agent — lazybox constructs the invocation but does not
 create the skill.
 
+## Provider-scoped workflows
+
+Most workflows are generic — a review or a rebase reads the same whether
+the work came from GitHub or Linear. Some, though, are provider-specific:
+replying to PR review threads is a GitHub concept, moving an issue to
+*In Progress* is a Linear one. A `provider:` field scopes those so they
+only surface where they apply:
+
+```yaml
+snippets:
+  respond:
+    description: Address the PR review comments
+    category: GitHub
+    provider: github
+    body: |
+      Address the unresolved review comments on this PR…
+```
+
+The picker and the `]` browser read the focused workspace's task sources
+and hide snippets scoped to a provider the workspace doesn't touch. A `provider: github`
+snippet shows only on GitHub workspaces; a `provider: linear` one only on
+Linear workspaces; a snippet with no `provider` shows everywhere. A
+workspace can span both — a Linear issue that already has a GitHub PR —
+and then both providers' snippets surface. When the focused workspace has
+no task to key off — a scratch workspace, or browsing the catalog without
+a session — nothing is hidden, so you always see the full set.
+
+lazybox ships two provider-scoped categories:
+
+- **GitHub** — `triage` (issue → plan), `respond` (review comments),
+  `link` (PR ↔ issue), `whyci` (summarize failing CI), `nudge`
+  (request/nudge reviewers), `release` (cut a release PR), `convert`
+  (issue → PR).
+- **Linear** — `wip` / `done` (move the issue's state), `status`
+  (comment an update back), `subissues` (break into sub-issues),
+  `attach` (link the PR), `estimate` (estimate & prioritize).
+
+The Linear workflows drive Linear through whatever tooling the agent
+has (an MCP server, a CLI, or the API) and fall back to showing you the
+text when they can't reach it.
+
 ## Choose the right scope
 
 The three layers merge from least to most specific:
 
 | Scope          | Path                          | Use it for                                      |
 | -------------- | ----------------------------- | ----------------------------------------------- |
-| **Built-in**   | _(shipped with lazybox)_       | 42 categorized daily engineering workflows.    |
+| **Built-in**   | _(shipped with lazybox)_       | 56 categorized daily engineering workflows.    |
 | **Global**     | `~/.lazybox/snippets.yaml`     | Personal habits reused across every repository. |
 | **Launch directory** | `<launch-dir>/.lazybox/snippets.yaml` | Overrides for this lazybox client catalog. |
 
@@ -292,6 +340,7 @@ snippets:
     description: <optional one-line label>
     category: <optional grouping label>
     skill: <optional native skill name>
+    provider: <optional workspace source scope>
     body: |
       <text sent to the agent>
 ```
@@ -302,6 +351,7 @@ snippets:
 | `description` | no       | One-line label shown in the picker. Defaults to empty.         |
 | `category`    | no       | Group header + colored tag in the picker (e.g. `Review`, `Git & PR`). Free-form; defaults to empty, which files under a trailing **Other** group. |
 | `skill`       | no       | Name of a native agent skill this snippet dispatches. When set, the delivered instruction tells the agent to invoke that `SKILL.md` skill; `body` becomes the task context. See [Dispatch a native skill](#dispatch-a-native-skill). |
+| `provider`    | no       | Workspace source this snippet is scoped to (`github`, `linear`, matching a task's provider). When set, the picker only shows it on a workspace of that source; when omitted the snippet is generic and shows everywhere. See [Provider-scoped workflows](#provider-scoped-workflows). |
 | `body`        | yes\*    | Sent to the agent. May span multiple lines. \*Optional when `skill` is set — the skill invocation is then the whole instruction. |
 
 ## Behaviour & gotchas

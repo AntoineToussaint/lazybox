@@ -42,8 +42,8 @@ pub use policy::{
 pub use priority::{PriorityTier, resolve_priority_tier};
 pub use project::{Project, ProjectKey, github_owner_repo_from_url};
 pub use provider::{
-    DEFAULT_MAX_PAGES, FetchCoverage, FetchOutcome, FetchPage, FetchPageInfo, PaginationOutcome,
-    PaginationStop, ProviderError, TaskProvider, paginate,
+    DEFAULT_MAX_PAGES, FetchCoverage, FetchOutcome, FetchPage, FetchPageInfo, GITHUB_SOURCE,
+    LINEAR_SOURCE, PaginationOutcome, PaginationStop, ProviderError, TaskProvider, paginate,
 };
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;

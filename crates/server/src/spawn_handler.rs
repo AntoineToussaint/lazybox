@@ -262,6 +262,7 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
     guarded_hook_command(
         exe,
         &format!(" --backend-key-file \"{}\"", key_path.display()),
+        &lazybox_core::paths::hook_log_path(),
     )
 }
 
@@ -275,7 +276,11 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
 fn hook_command(exe: &Path, backend_key: &str) -> String {
-    guarded_hook_command(exe, &format!(" --backend-key \"{backend_key}\""))
+    guarded_hook_command(
+        exe,
+        &format!(" --backend-key \"{backend_key}\""),
+        &lazybox_core::paths::hook_log_path(),
+    )
 }
 
 /// Hook command with no correlation flag — what the pre-spawn
@@ -285,28 +290,113 @@ fn hook_command(exe: &Path, backend_key: &str) -> String {
 /// reads the placeholder, its hooks are harmless no-ops and the
 /// session just keeps PTY detection.
 fn hook_command_placeholder(exe: &Path) -> String {
-    guarded_hook_command(exe, "")
+    guarded_hook_command(exe, "", &lazybox_core::paths::hook_log_path())
 }
 
-/// Absolute path of the running lazybox binary, verified to still exist
-/// on disk. The path can be dead even while the daemon is running: a
-/// `cargo run` daemon execs from `target/debug/lazybox`, and a later
-/// `cargo clean` unlinks that file while the process keeps running off
-/// the deleted inode. `None` → the caller skips hook settings and the
-/// spawn falls back to PTY state detection.
+/// A build-independent path to the lazybox binary to bake into an agent's
+/// hook command. The daemon's own `current_exe()` for a dev build is
+/// `<worktree>/target/debug/lazybox` — a path a `cargo clean`, a rebuild,
+/// worktree removal, or session transfer (PR #717) invalidates, after
+/// which every hook fires against a dead reference. So
+/// [`ensure_stable_hook_exe`] copies that binary to the stable
+/// `<home>/bin/lazybox` (see [`lazybox_core::paths::stable_exe_path`]) and
+/// this bakes *that*: nothing under `<home>/bin` moves when a worktree does,
+/// and the copy keeps working even after the original `target/debug`
+/// artifact is cleaned.
+///
+/// This is a pure read — the copy lives in [`ensure_stable_hook_exe`], which
+/// the daemon runs once at boot — so resolving a path here never writes to
+/// `<home>/bin` (which would block the spawn on an ~80 MB copy and, in the
+/// integration tests that don't isolate `LAZYBOX_HOME`, thrash the real
+/// home). Returns the stable copy when present; otherwise the raw
+/// `current_exe()` (still absolute, just less durable); or `None` when no
+/// executable resolves at all, and the spawn falls back to PTY detection.
 fn hook_exe() -> Option<PathBuf> {
+    let stable = lazybox_core::paths::stable_exe_path();
+    if stable.is_file() {
+        return Some(stable);
+    }
     std::env::current_exe().ok().filter(|p| p.is_file())
 }
 
+/// Copy the running binary to the stable `<home>/bin/lazybox` so agent
+/// hooks can bake a path that survives a rebuild / `cargo clean` / worktree
+/// removal. Best-effort and idempotent (a fresh copy is skipped by
+/// `stabilize_exe`'s freshness check).
+///
+/// The daemon calls this **once at boot**, never per spawn: the copy is an
+/// ~80 MB blocking `fs::copy` that would delay every `TerminalSpawned`, and
+/// integration tests drive `handle_spawn` directly against the real
+/// `LAZYBOX_HOME` — a per-spawn copy there raced dozens of test processes on
+/// one `~/.lazybox/bin/lazybox`. Doing it at boot keeps the hot path a pure
+/// `hook_exe` read and leaves tests (which never boot a daemon) untouched.
+pub fn ensure_stable_hook_exe() {
+    if let Ok(current) = std::env::current_exe() {
+        let _ = stabilize_exe(&current, &lazybox_core::paths::stable_exe_path());
+    }
+}
+
+/// Copy `current` to the stable `stable` path when the copy is missing or
+/// stale, returning `stable`. Freshness is length + mtime: a re-copy only
+/// happens after a rebuild (which bumps both), so a repeat call is a cheap
+/// stat. `None` on any IO failure, leaving the caller to fall back to the
+/// raw `current` path.
+fn stabilize_exe(current: &Path, stable: &Path) -> Option<PathBuf> {
+    if current == stable {
+        return Some(stable.to_path_buf());
+    }
+    // Serialize concurrent copies. Spawns run on the Detached command lane
+    // (up to `MAX_CONNECTION_MUTATIONS` at once — a `Shift-B` broadcast
+    // fires many together) and every one calls this. Without the lock,
+    // racing copies share the one fixed `lazybox.tmp`: a `rename` can
+    // publish it as `stable` while another copy is still writing that
+    // inode, briefly exposing a half-written binary — a hook exec in that
+    // window fails with `ETXTBSY`, the exact red error the guard exists to
+    // avoid. One daemon owns the profile (socket lock), so an in-process
+    // lock suffices. Re-checking freshness *inside* the lock also collapses
+    // the racing copies to one: the losers see the winner's copy and skip.
+    static COPY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = COPY_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let src = std::fs::metadata(current).ok()?;
+    let fresh =
+        std::fs::metadata(stable)
+            .ok()
+            .is_some_and(|dst| match (dst.modified(), src.modified()) {
+                // A newer-or-equal copy of the same size is up to date: our
+                // own copy stamps a copy-time mtime ≥ the build's, and a
+                // rebuild makes the source newer than any prior copy.
+                (Ok(dst_m), Ok(src_m)) => dst.len() == src.len() && dst_m >= src_m,
+                _ => false,
+            });
+    if fresh {
+        return Some(stable.to_path_buf());
+    }
+    std::fs::create_dir_all(stable.parent()?).ok()?;
+    // Copy to a temp sibling then rename: a hook mid-exec of the old copy
+    // keeps its inode (rename only swaps the directory entry, so no
+    // ETXTBSY and no torn read). `fs::copy` carries the exec bit over. The
+    // fixed tmp name is safe only because `COPY_LOCK` serializes writers.
+    let tmp = stable.with_extension("tmp");
+    std::fs::copy(current, &tmp).ok()?;
+    std::fs::rename(&tmp, stable).ok()?;
+    Some(stable.to_path_buf())
+}
+
 /// The exec is guarded: the binary verified at spawn time can still be
-/// deleted mid-session (`cargo clean`), and without the guard every hook
+/// deleted mid-session (`cargo clean` of the stable copy's source, or the
+/// copy's own directory being removed), and without the guard every hook
 /// fails with a raw `/bin/sh: <path>: No such file or directory`. The
-/// guard names the problem on stderr instead, so Claude's hook-failure
-/// report points at the actual cause.
-fn guarded_hook_command(exe: &Path, args: &str) -> String {
+/// guard degrades gracefully instead — it appends a note to
+/// [`lazybox_core::paths::hook_log_path`] and exits 0, so a stale reference
+/// costs a single missed state signal, never a red `PostToolUse:Bash hook
+/// error` on every command the agent runs.
+fn guarded_hook_command(exe: &Path, args: &str, log: &Path) -> String {
     let exe = exe.to_string_lossy();
+    let log = log.display();
     format!(
-        "[ -x \"{exe}\" ] || {{ echo \"lazybox hook: binary missing at {exe} (removed by cargo clean or a rebuild?)\" >&2; exit 1; }}; \"{exe}\" hook-ingest{args}"
+        "[ -x \"{exe}\" ] || {{ echo \"lazybox hook: binary missing at {exe} (rebuild, cargo clean, or worktree removed) — state signal skipped\" >> \"{log}\" 2>/dev/null; exit 0; }}; \"{exe}\" hook-ingest{args}"
     )
 }
 
@@ -1172,7 +1262,11 @@ async fn handle_spawn_inner(
     // `write_hook_settings`). Skipped entirely when the running binary
     // is no longer on disk (`cargo clean` under a `cargo run` daemon):
     // hooks would be guaranteed to fail, so the session keeps PTY
-    // detection instead.
+    // detection instead. The stable `<home>/bin/lazybox` copy that makes
+    // this path survive a rebuild/clean/worktree-removal (#856) is
+    // established once at daemon boot by `ensure_stable_hook_exe`, so this
+    // hot path only *reads* it — a per-spawn copy would block every
+    // `TerminalSpawned` on ~80 MB of IO.
     let exe = hook_exe();
     if exe.is_none() {
         tracing::warn!(
@@ -1491,6 +1585,12 @@ async fn handle_spawn_inner(
             // resync).
             let mut last_seq = sub.last_seq;
             let mut resync_unavailable_announced = false;
+            // On-demand reclassify poke (#869). A deferred prompt injection
+            // asks the pump to re-read the live screen so a stale
+            // `InputNeeded` — one whose gate already cleared without further
+            // output to re-arm the quiet timer — releases without waiting for
+            // a keystroke to drive the transition.
+            let reclassify = terminal_registry.register_reclassify(id_for_pump).await;
             loop {
                 let watchdog_due = working_watchdog
                     .prepare_select(tokio::time::Instant::now(), sub.live.len());
@@ -1779,7 +1879,7 @@ async fn handle_spawn_inner(
                                 "working watchdog firing",
                             );
                         }
-                        watchdog_escape_working(
+                        watchdog_reverify_parked_turn(
                             agent_for_pump.as_ref(),
                             &state_buf,
                             last_chunk_len,
@@ -1791,6 +1891,37 @@ async fn handle_spawn_inner(
                             &mut state_machine,
                         )
                         .await;
+                    }
+                    // On-demand reclassify (#869): a deferred inject asks the
+                    // pump to re-read the resting screen NOW rather than wait
+                    // up to the quiet window — or forever, once that timer has
+                    // disarmed on a quiescent terminal. `force_reclassify_allowed`
+                    // gates it on a settled stream and a non-reset terminal so
+                    // the poke can't scrape a torn frame or preempt the
+                    // reset-latched settle with a spurious Done.
+                    _ = reclassify.notified() => {
+                        if force_reclassify_allowed(
+                            agent_for_pump.is_some(),
+                            last_output_at,
+                            &terminal_registry,
+                            id_for_pump,
+                        )
+                        .await
+                        {
+                            classify_quiet_screen(
+                                agent_for_pump.as_ref(),
+                                &state_buf,
+                                last_chunk_len,
+                                lazybox_agents::Liveness::Silent,
+                                &terminal_registry,
+                                &bus,
+                                state_durability_for_pump.as_ref(),
+                                id_for_pump,
+                                &session_key_for_pump,
+                                &mut state_machine,
+                            )
+                            .await;
+                        }
                     }
                 }
             }
@@ -3394,7 +3525,7 @@ pub(crate) const PTY_QUIET_CLASSIFY_AFTER: Duration = Duration::from_secs(5);
 /// ([`lazybox_agents::detect::content_fingerprint`] — repaint churn
 /// doesn't reset it) and, once a `Working` terminal has shown none for
 /// this long, classifies the screen regardless of byte flow and forces
-/// the turn closed ([`watchdog_escape_working`]). Default; override
+/// the turn closed ([`watchdog_reverify_parked_turn`]). Default; override
 /// with `agent.working_watchdog_secs` (0 disables).
 pub(crate) const WORKING_WATCHDOG_AFTER: Duration = Duration::from_secs(15);
 
@@ -4908,6 +5039,12 @@ async fn finish_terminal(
         .lock()
         .await
         .remove(&terminal_id);
+    config
+        .terminal
+        .reclassify_requests
+        .lock()
+        .await
+        .remove(&terminal_id);
     // Close the state owner's live-terminal ingress gate before dropping the
     // absorbing Exited tombstone. Reversing these two removals creates a
     // window where a delayed hook sees `(meta: live, state: None)` and
@@ -5252,15 +5389,25 @@ async fn classify_quiet_screen(
     .await;
 }
 
-/// The Working watchdog fired (#398): [`WORKING_WATCHDOG_AFTER`] with
-/// no meaningful content change while the terminal reads `Working`.
-/// Classify the screen exactly as the quiet path would — this is how a
-/// parked prompt hidden behind spinner/status churn surfaces as `?`,
-/// since churn re-arms the quiet timer and `classify_quiet_screen`
-/// never runs on its own — and, if the terminal *still* reads
-/// `Working` afterwards (a frozen status line re-reads as `Working`;
-/// hookless agents have no other exit), force the turn closed with a
-/// clear `Done` reading.
+/// The content-stability watchdog fired (#398): [`WORKING_WATCHDOG_AFTER`]
+/// with no meaningful content change. Re-classify the screen exactly as the
+/// quiet path would — churn re-arms the byte-silence quiet timer so
+/// `classify_quiet_screen` never runs on its own — for the two states a
+/// content-stable screen can be wrong about:
+///
+///   - **`Working`** — a frozen status line that never settled. If it
+///     *still* reads `Working` afterwards (hookless agents have no other
+///     exit), force the turn closed with a clear `Done` reading.
+///   - **`InputNeeded`** — a stale `?` whose turn has actually ended. A
+///     finished agent that leaves a background shell running keeps the PTY
+///     emitting bytes, so the stream never goes byte-silent and the quiet
+///     timer can't reach it; only content-stability can notice the prompt
+///     is gone (#872). The re-classification is a *clear* reading, so a
+///     resting composer resolves the `?` while a genuinely live prompt
+///     re-reads `InputNeeded` and stays. Subject to the same hooks-primary
+///     gate as any PTY reading, so a fresh hook still owns the asking call
+///     (#62) — only a stale-hook / hookless `?` clears here. `Working` is
+///     the only state force-closed; a surviving `InputNeeded` is left as-is.
 ///
 /// The force commits through [`commit_pty_reading`]. Its
 /// [`Liveness::Watchdog`] evidence is authoritative while `Working`, so a
@@ -5270,7 +5417,7 @@ async fn classify_quiet_screen(
 /// followed, so the stale-buffer classify (which would re-raise the
 /// just-answered `?`) is skipped and the turn is settled `Done` directly.
 /// See the inline comment for why that can't pin `Working`.
-async fn watchdog_escape_working(
+async fn watchdog_reverify_parked_turn(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &[u8],
     last_chunk_len: usize,
@@ -5291,9 +5438,10 @@ async fn watchdog_escape_working(
         );
         return;
     };
-    if terminals.agent_states.lock().await.get(&id).copied()
-        != Some(lazybox_ipc::AgentState::Working)
-    {
+    if !matches!(
+        terminals.agent_states.lock().await.get(&id).copied(),
+        Some(lazybox_ipc::AgentState::Working | lazybox_ipc::AgentState::InputNeeded)
+    ) {
         return;
     }
     // A pending answer reset normally vetoes the whole tick: the buffer
@@ -5327,11 +5475,18 @@ async fn watchdog_escape_working(
             state_machine,
         )
         .await;
-        if terminals.agent_states.lock().await.get(&id).copied()
-            != Some(lazybox_ipc::AgentState::Working)
-        {
-            return;
-        }
+    }
+    // Force the turn closed only while the terminal STILL reads `Working` —
+    // the stuck-status case the force exists for (a frozen status line, or a
+    // zero-output answer the `?` flip pinned at `Working`). A re-classify
+    // that already settled the turn, or an `InputNeeded` the answered-branch
+    // skipped past (a hook/answer race), is resolved and must not be
+    // force-closed: a `Done` from `InputNeeded` is rejected anyway, but this
+    // also stops the spurious "forcing the turn closed" log for it.
+    if terminals.agent_states.lock().await.get(&id).copied()
+        != Some(lazybox_ipc::AgentState::Working)
+    {
+        return;
     }
     tracing::info!(
         terminal_id = ?id,
@@ -5773,6 +5928,45 @@ pub(crate) async fn handle_write_batch(
 /// prompt from leaking the waiter task indefinitely.
 const INJECT_INPUT_DEADLINE: Duration = Duration::from_secs(120);
 
+/// How long a deferred inject waits between forcing a live re-read of the
+/// agent's screen (issue #869). The loop is level-triggered: each tick pokes
+/// the PTY pump to reclassify and then re-checks the *fresh* cached state, so
+/// a quiescent-but-ready agent releases on its own rather than parking until a
+/// keystroke drives a transition. Short enough that the release feels
+/// immediate; long enough that a genuine gate isn't re-scraped in a busy loop.
+const INJECT_RECLASSIFY_POLL: Duration = Duration::from_millis(250);
+
+/// Minimum byte-quiet a forced reclassify requires before it scrapes the
+/// screen. A reclassify poke that lands mid-paint would read a torn frame;
+/// while bytes still flow the injection releases off the transitions that flow
+/// already produces, so the poke can safely no-op until the stream settles.
+const RECLASSIFY_MIN_QUIET: Duration = Duration::from_millis(150);
+
+/// Whether a pump should honor an on-demand reclassify poke (#869) and scrape
+/// the screen now. Shared by both PTY pumps' reclassify arms. Three conditions:
+///
+/// - only agent terminals have a detector to run;
+/// - the stream must have been byte-quiet for [`RECLASSIFY_MIN_QUIET`], else a
+///   mid-paint scrape reads a torn frame (the injection still releases off the
+///   transitions that live output produces);
+/// - the terminal must NOT be sitting on a just-answered prompt's reset. While
+///   that reset is latched, [`classify_quiet_screen`]'s reset branch
+///   force-settles `Done` on the stale pre-answer buffer — a settle the
+///   deliberate quiet/watchdog timers own only after a FULL window of silence.
+///   Firing it here (150ms after the optimistic `Working` flip, before the
+///   answer's first output clears the reset) would preempt that with a spurious
+///   `Done` that wakes polling and flickers the pill.
+async fn force_reclassify_allowed(
+    agent_present: bool,
+    last_output_at: tokio::time::Instant,
+    terminals: &TerminalRegistry,
+    id: TerminalId,
+) -> bool {
+    agent_present
+        && last_output_at.elapsed() >= RECLASSIFY_MIN_QUIET
+        && !terminals.agent_detect_resets.lock().await.contains(&id)
+}
+
 /// Base wait for proof an injected prompt's submit actually
 /// registered — a `UserPromptSubmit` hook or a `Working` transition.
 /// Claude fires `UserPromptSubmit` synchronously with the submit, so
@@ -6175,7 +6369,7 @@ async fn await_paste_settled(
 ///
 /// On a `Lagged` receiver the very `Working` transition may have been
 /// dropped, so the authoritative `states` map is consulted (mirroring
-/// [`wait_until_input_resolved`]) rather than ignoring the gap — an
+/// [`poll_input_resolution`]) rather than ignoring the gap — an
 /// unobserved flip must not trigger spurious Enter resends into an
 /// already-working agent. Only a cached `Working` counts as evidence:
 /// any resting state (`Idle`/`Done`) may simply predate the submit.
@@ -6216,24 +6410,30 @@ async fn await_submit_evidence(
     matches!(tokio::time::timeout(deadline, wait).await, Ok(true))
 }
 
-/// Park until the agent on `terminal_id` leaves `InputNeeded` — i.e. the
-/// permission gate / chooser / Y-N prompt it was blocked on has been
-/// answered and it's safe to deliver an injected prompt. Returns `true`
-/// once the agent reports any non-`InputNeeded` state, `false` if the
-/// terminal exits first or `deadline` elapses while still blocked.
-///
-/// `events` must be subscribed BEFORE the caller reads the current state
-/// so a transition that races the read isn't missed. On a `Lagged`
-/// receiver (the very transition may have been dropped) the authoritative
-/// `states` map is consulted rather than risk blocking to the deadline.
-async fn wait_until_input_resolved(
-    mut events: tokio::sync::broadcast::Receiver<Event>,
+/// Outcome of one level-triggered poll step in the deferred-inject loop.
+enum InputPoll {
+    /// A non-`InputNeeded` transition arrived (the gate cleared).
+    Resolved,
+    /// The terminal exited while still blocked.
+    Exited,
+    /// The poll interval elapsed with no transition — re-read the fresh
+    /// cached state, which the reclassify poke may have just refreshed.
+    Tick,
+}
+
+/// One step of the level-triggered deferred-inject wait (issue #869): wait up
+/// to `step` for a resolving state transition or a terminal exit, returning
+/// [`InputPoll::Tick`] when neither arrives in time so the caller can re-read
+/// the freshly-reclassified cached state rather than block on an event that a
+/// quiescent agent never emits.
+async fn poll_input_resolution(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
     terminal_id: TerminalId,
     states: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
-    deadline: Duration,
-) -> bool {
+    step: Duration,
+) -> InputPoll {
     let wait = async {
         loop {
             match events.recv().await {
@@ -6243,25 +6443,25 @@ async fn wait_until_input_resolved(
                     ..
                 }) if tid == terminal_id => {
                     if state != lazybox_ipc::AgentState::InputNeeded {
-                        return true;
+                        return InputPoll::Resolved;
                     }
                 }
                 Ok(Event::TerminalExited {
                     terminal_id: tid, ..
-                }) if tid == terminal_id => return false,
+                }) if tid == terminal_id => return InputPoll::Exited,
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     if states.lock().await.get(&terminal_id)
                         != Some(&lazybox_ipc::AgentState::InputNeeded)
                     {
-                        return true;
+                        return InputPoll::Resolved;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return InputPoll::Exited,
             }
         }
     };
-    matches!(tokio::time::timeout(deadline, wait).await, Ok(true))
+    (tokio::time::timeout(step, wait).await).unwrap_or(InputPoll::Tick)
 }
 
 /// Owns the single in-flight readiness-gated prompt injection for a terminal.
@@ -6479,9 +6679,7 @@ async fn handle_inject_prompt_inner(
         }
         while blocked {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero()
-                || !wait_until_input_resolved(events, id, &states, remaining).await
-            {
+            if remaining.is_zero() {
                 tracing::warn!(
                     terminal_id = ?id,
                     "inject_prompt: agent still blocked on input after {INJECT_INPUT_DEADLINE:?}; dropping injection rather than feeding it into the prompt"
@@ -6496,14 +6694,29 @@ async fn handle_inject_prompt_inner(
                 });
                 return;
             }
-            // The release may be the optimistic InputNeeded → Working
-            // flip from the user's keystroke, not a genuinely cleared
-            // prompt (the answer could re-render another chooser).
-            // Debounce, then re-check the cached state; if the prompt is
-            // back, go around again. Re-subscribe BEFORE the re-read so
-            // a transition racing the check isn't missed.
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            events = bus.subscribe();
+            // Level-triggered readiness poll (#869). Ask the PTY pump to
+            // re-read the live screen NOW, then wait a bounded step for the
+            // resulting transition before re-checking the fresh cached state.
+            // A quiescent agent whose gate already cleared releases here on
+            // its own — no keystroke to drive the transition — while a genuine
+            // gate re-scrapes as `InputNeeded` and stays parked. Without the
+            // poke the wait would block on a bus transition a resting agent
+            // never emits, so the injection sat until an inbound keystroke.
+            config_for_confirm.terminal.request_reclassify(id).await;
+            let step = INJECT_RECLASSIFY_POLL.min(remaining);
+            match poll_input_resolution(&mut events, id, &states, step).await {
+                // The terminal exited; fall through to `acquire_live`, which
+                // recognizes the gone terminal and returns quietly.
+                InputPoll::Exited => break,
+                // A transition arrived — possibly the optimistic
+                // InputNeeded → Working flip from a keystroke, or a just-
+                // answered gate re-rendering another chooser. Let that output
+                // settle before trusting the re-read.
+                InputPoll::Resolved => tokio::time::sleep(INJECT_RECLASSIFY_POLL).await,
+                // The step elapsed with no transition — the reclassify poke
+                // above may have refreshed the cache; re-read it directly.
+                InputPoll::Tick => {}
+            }
             blocked = inject_must_defer(&states, &shapes, id).await;
         }
         let Some(interaction) =
@@ -6983,6 +7196,7 @@ async fn pump_recovered_session(
         WorkingWatchdog::new(agent.as_ref().and(working_watchdog_after(&cfg)));
     let mut quiet_deadline = None;
     let mut last_chunk_len = 0;
+    let mut last_output_at = tokio::time::Instant::now();
     let mut auth_required_emitted = false;
 
     if !sub.replay.is_empty() {
@@ -7010,7 +7224,8 @@ async fn pump_recovered_session(
         )
         .await;
         if agent.is_some() {
-            quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
+            last_output_at = tokio::time::Instant::now();
+            quiet_deadline = Some(last_output_at + quiet_after);
         }
         let _ = config.bus.send(Event::TerminalOutput {
             terminal_id,
@@ -7022,6 +7237,9 @@ async fn pump_recovered_session(
 
     let mut last_seq = sub.last_seq;
     let mut resync_unavailable_announced = false;
+    // On-demand reclassify poke (#869): mirror the primary pump so a deferred
+    // inject into a recovered agent releases off a live re-read too.
+    let reclassify = config.terminal.register_reclassify(terminal_id).await;
     loop {
         let watchdog_due =
             working_watchdog.prepare_select(tokio::time::Instant::now(), sub.live.len());
@@ -7070,7 +7288,8 @@ async fn pump_recovered_session(
                     .await;
                     last_chunk_len = 0;
                     if agent.is_some() {
-                        quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
+                        last_output_at = tokio::time::Instant::now();
+                        quiet_deadline = Some(last_output_at + quiet_after);
                     }
                     let _ = config.bus.send(Event::TerminalResync {
                         terminal_id,
@@ -7113,6 +7332,7 @@ async fn pump_recovered_session(
                 last_chunk_len = chunk.bytes.len();
                 if agent.is_some() {
                     let now = tokio::time::Instant::now();
+                    last_output_at = now;
                     quiet_deadline = Some(now + quiet_after);
                     if progress {
                         working_watchdog.note_progress(now);
@@ -7149,7 +7369,7 @@ async fn pump_recovered_session(
                 if working_watchdog.fire(tokio::time::Instant::now()).is_none() {
                     continue;
                 }
-                watchdog_escape_working(
+                watchdog_reverify_parked_turn(
                     agent.as_ref(),
                     &state_buf,
                     last_chunk_len,
@@ -7161,6 +7381,30 @@ async fn pump_recovered_session(
                     &mut state_machine,
                 )
                 .await;
+            }
+            _ = reclassify.notified() => {
+                if force_reclassify_allowed(
+                    agent.is_some(),
+                    last_output_at,
+                    &config.terminal,
+                    terminal_id,
+                )
+                .await
+                {
+                    classify_quiet_screen(
+                        agent.as_ref(),
+                        &state_buf,
+                        last_chunk_len,
+                        lazybox_agents::Liveness::Silent,
+                        &config.terminal,
+                        &config.bus,
+                        durability,
+                        terminal_id,
+                        session_key,
+                        &mut state_machine,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -10135,8 +10379,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_until_input_resolved_releases_on_non_input_needed_state() {
-        let (tx, rx) = tokio::sync::broadcast::channel(16);
+    async fn poll_input_resolution_releases_on_non_input_needed_state() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let id = TerminalId(1);
         // A different terminal's transition is ignored; ours releases it.
         tx.send(Event::AgentState {
@@ -10151,34 +10395,47 @@ mod tests {
             state: lazybox_ipc::AgentState::Working,
         })
         .unwrap();
-        assert!(
-            wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_secs(1))
-                .await
-        );
+        assert!(matches!(
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_secs(1)
+            )
+            .await,
+            InputPoll::Resolved
+        ));
     }
 
     #[tokio::test]
-    async fn wait_until_input_resolved_gives_up_on_deadline_while_blocked() {
-        let (tx, rx) = tokio::sync::broadcast::channel(16);
+    async fn poll_input_resolution_ticks_when_still_blocked() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let id = TerminalId(1);
-        // Prompt stays up: only InputNeeded arrives, so the wait must
-        // time out rather than write into the live prompt.
+        // Prompt stays up: only InputNeeded arrives, so the step must time out
+        // into a Tick (re-read the freshly-reclassified cache) rather than
+        // write into the live prompt.
         tx.send(Event::AgentState {
             session_key: "ws:1".into(),
             terminal_id: id,
             state: lazybox_ipc::AgentState::InputNeeded,
         })
         .unwrap();
-        assert!(
-            !wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_millis(80))
-                .await
-        );
+        assert!(matches!(
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_millis(80)
+            )
+            .await,
+            InputPoll::Tick
+        ));
         drop(tx);
     }
 
     #[tokio::test]
-    async fn wait_until_input_resolved_returns_false_when_terminal_exits() {
-        let (tx, rx) = tokio::sync::broadcast::channel(16);
+    async fn poll_input_resolution_reports_terminal_exit() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let id = TerminalId(1);
         tx.send(Event::TerminalExited {
             terminal_id: id,
@@ -10186,9 +10443,65 @@ mod tests {
             last_output: None,
         })
         .unwrap();
+        assert!(matches!(
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_secs(1)
+            )
+            .await,
+            InputPoll::Exited
+        ));
+    }
+
+    /// The reclassify poke's screen scrape (#869) must NOT fire while a
+    /// just-answered prompt's reset is latched. `classify_quiet_screen`'s reset
+    /// branch force-settles `Done` on the stale pre-answer buffer — a settle the
+    /// quiet/watchdog timers own only after a full window — so letting the poke
+    /// run there flickers a spurious `Done` right after the user answers a gate
+    /// with an inject pending. Also pins the byte-quiet and agent-only guards.
+    #[tokio::test]
+    async fn force_reclassify_is_blocked_by_a_latched_answer_reset() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(869);
+        let quiet = tokio::time::Instant::now() - (RECLASSIFY_MIN_QUIET * 2);
+
+        // Quiescent agent, no reset: the poke is honored.
         assert!(
-            !wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_secs(1))
-                .await
+            force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "a settled agent terminal with no pending answer must reclassify",
+        );
+
+        // A non-agent (shell) terminal has no detector to run.
+        assert!(
+            !force_reclassify_allowed(false, quiet, &config.terminal, id).await,
+            "a non-agent terminal must never reclassify",
+        );
+
+        // Bytes still flowing (last output just now): scraping would read a
+        // torn mid-paint frame, so the poke no-ops until the stream settles.
+        assert!(
+            !force_reclassify_allowed(true, tokio::time::Instant::now(), &config.terminal, id)
+                .await,
+            "a mid-paint terminal must not be scraped",
+        );
+
+        // The user just answered a gate: the reset is latched until the
+        // answer's first output clears it. The poke must stand down.
+        config.terminal.agent_detect_resets.lock().await.insert(id);
+        assert!(
+            !force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "a latched answer reset must suppress the forced reclassify so it \
+             can't preempt the deliberate settle with a spurious Done",
+        );
+
+        // Once the reset clears (the answer's output arrived), the poke is
+        // honored again.
+        config.terminal.agent_detect_resets.lock().await.remove(&id);
+        assert!(
+            force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "clearing the reset must re-enable the forced reclassify",
         );
     }
 
@@ -10326,6 +10639,95 @@ mod tests {
 
         // The reservation is released after delivery, not held open by a
         // 30-second readiness waiter.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !config.spawn.pending_prompt_injections.lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("injection reservation released after delivery");
+    }
+
+    /// A deferred inject must release the instant a live re-read shows the
+    /// gate has cleared — driven by the loop's own reclassify poll, with no
+    /// inbound transition event (issue #869). Before the fix the waiter blocked
+    /// on a bus transition a quiescent agent never emits, so the snippet sat
+    /// until the user typed and their keystroke drove the flip. Here NO bus
+    /// event is ever sent: flipping only the cached state (exactly what the
+    /// pump's forced reclassify would commit) must be enough to deliver, and a
+    /// genuine gate that stays `InputNeeded` must keep deferring meanwhile.
+    #[tokio::test]
+    async fn deferred_injection_releases_via_live_state_poll_without_an_event() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "stale-input-needed")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(869);
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
+        config.terminal.terminal_meta.lock().await.insert(
+            id,
+            (
+                SessionKey::new("stale-input-needed"),
+                TerminalKind::Agent("claude".into()),
+            ),
+        );
+        // A chooser gate: a pasted prompt would corrupt the choice, so the
+        // inject defers rather than delivering.
+        config
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::InputNeeded);
+        config
+            .terminal
+            .input_needed_shapes
+            .lock()
+            .await
+            .insert(id, lazybox_agents::PromptShape::Chooser);
+
+        handle_inject_prompt(&config, id, "deferred work", None, false).await;
+
+        // While the gate stands, the reservation is held and nothing is
+        // written into the live dialog — even though several poll ticks run.
+        assert_eq!(config.spawn.pending_prompt_injections.lock().len(), 1);
+        tokio::time::sleep(INJECT_RECLASSIFY_POLL * 2).await;
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "a genuine gate must keep deferring — nothing pasted into the dialog",
+        );
+
+        // The gate clears to a resting composer. In production the pump's
+        // forced reclassify refreshes this cache off a fresh screen read; here
+        // we set it directly and send NO bus event, proving the release is
+        // level-triggered off the poll rather than a keystroke transition.
+        config
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::Idle);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let joined: Vec<u8> = mock.writes_for(&backend_key).await.concat();
+                if String::from_utf8_lossy(&joined).contains("deferred work") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(
+            "a deferred inject must deliver once a live re-read clears the gate — no keystroke",
+        );
+
         tokio::time::timeout(Duration::from_secs(1), async {
             while !config.spawn.pending_prompt_injections.lock().is_empty() {
                 tokio::task::yield_now().await;
@@ -12435,12 +12837,164 @@ mod tests {
         assert_eq!(priority_alias_for(&config, &key, &no_map), None);
     }
 
-    /// The running test binary exists on disk, so resolution succeeds;
-    /// the verified path is what gets baked into hook commands.
+    #[cfg(unix)]
+    fn write_fake_exe(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).expect("write fake exe");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake exe");
+    }
+
+    /// The stable copy is a real, executable duplicate of the source that
+    /// keeps working after the source (a per-worktree `target/debug`
+    /// artifact) is removed — the whole point of not baking the source path.
+    #[cfg(unix)]
     #[test]
-    fn hook_exe_resolves_to_existing_file() {
-        let exe = hook_exe().expect("running test binary must resolve");
-        assert!(exe.is_file());
+    fn stabilize_exe_copies_and_survives_source_removal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("lazybox-stabilize-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("target-debug-lazybox");
+        let stable = dir.join("bin").join("lazybox");
+        write_fake_exe(&src, "#!/bin/sh\necho hi\n");
+
+        let got = stabilize_exe(&src, &stable).expect("copy succeeds");
+        assert_eq!(got, stable);
+        assert_eq!(
+            std::fs::read_to_string(&stable).unwrap(),
+            "#!/bin/sh\necho hi\n"
+        );
+        assert!(
+            std::fs::metadata(&stable).unwrap().permissions().mode() & 0o111 != 0,
+            "exec bit must survive the copy"
+        );
+
+        std::fs::remove_file(&src).unwrap();
+        assert!(stable.is_file(), "stable copy outlives its source");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A fresh copy is not re-written on every spawn: the second call is a
+    /// no-op, so the steady-state cost is a stat, not a binary copy.
+    #[cfg(unix)]
+    #[test]
+    fn stabilize_exe_skips_recopy_when_fresh() {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-stabilize-fresh-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("src");
+        let stable = dir.join("bin").join("lazybox");
+        write_fake_exe(&src, "one");
+
+        stabilize_exe(&src, &stable).expect("first copy");
+        let first = std::fs::metadata(&stable).unwrap().modified().unwrap();
+        stabilize_exe(&src, &stable).expect("second call");
+        let second = std::fs::metadata(&stable).unwrap().modified().unwrap();
+        assert_eq!(first, second, "a fresh copy must not be re-written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A rebuild (source bytes change) re-copies so the stable path tracks
+    /// the live binary rather than pinning the first build seen. A differing
+    /// length trips the freshness check regardless of mtime granularity.
+    #[cfg(unix)]
+    #[test]
+    fn stabilize_exe_recopies_when_source_changes() {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-stabilize-rebuild-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("src");
+        let stable = dir.join("bin").join("lazybox");
+        write_fake_exe(&src, "old-build");
+        stabilize_exe(&src, &stable).expect("first copy");
+
+        write_fake_exe(&src, "a-longer-new-build-payload");
+        stabilize_exe(&src, &stable).expect("re-copy");
+        assert_eq!(
+            std::fs::read_to_string(&stable).unwrap(),
+            "a-longer-new-build-payload"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Concurrent spawns (the Detached command lane runs many at once) must
+    /// never expose a half-written `stable`: before `COPY_LOCK`, racing
+    /// copies shared the one fixed `lazybox.tmp` and a `rename` could
+    /// publish an inode another copy was still writing. A reader thread
+    /// asserts `stable` is only ever absent or the full length, and the
+    /// final bytes match the source exactly.
+    #[cfg(unix)]
+    #[test]
+    fn stabilize_exe_serializes_concurrent_copies_without_tearing() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-stabilize-conc-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let src = dir.join("src");
+        let stable = dir.join("bin").join("lazybox");
+        // Large enough that a torn copy would be observable mid-write.
+        let payload = vec![b'z'; 4 * 1024 * 1024];
+        std::fs::write(&src, &payload).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let full_len = payload.len() as u64;
+
+        let src = Arc::new(src);
+        let stable = Arc::new(stable);
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let reader = {
+            let stable = Arc::clone(&stable);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    if let Ok(meta) = std::fs::metadata(&*stable) {
+                        let len = meta.len();
+                        assert!(
+                            len == 0 || len == full_len,
+                            "observed a torn `stable` of {len} bytes"
+                        );
+                    }
+                }
+            })
+        };
+
+        let writers: Vec<_> = (0..8)
+            .map(|_| {
+                let src = Arc::clone(&src);
+                let stable = Arc::clone(&stable);
+                std::thread::spawn(move || stabilize_exe(&src, &stable).expect("stabilize"))
+            })
+            .collect();
+        for w in writers {
+            assert_eq!(w.join().unwrap(), *stable);
+        }
+        stop.store(true, Ordering::Relaxed);
+        reader.join().unwrap();
+
+        assert_eq!(
+            std::fs::read(&*stable).unwrap(),
+            payload,
+            "final copy intact"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Running already from the stable path is a no-op — never a self-copy
+    /// (which would risk `ETXTBSY` writing over the live binary).
+    #[cfg(unix)]
+    #[test]
+    fn stabilize_exe_noop_when_current_is_stable() {
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-stabilize-self-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let stable = dir.join("lazybox");
+        write_fake_exe(&stable, "self");
+        let got = stabilize_exe(&stable, &stable).expect("no-op returns the path");
+        assert_eq!(got, stable);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The injected hook command pins the *running* binary by absolute
@@ -12515,7 +13069,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn hook_command_execs_existing_binary_via_sh() {
-        let cmd = hook_command(Path::new("/bin/echo"), "lzb-sess-7");
+        let cmd = guarded_hook_command(
+            Path::new("/bin/echo"),
+            " --backend-key lzb-sess-7",
+            &std::env::temp_dir().join("lazybox-unused-hook.log"),
+        );
         let out = std::process::Command::new("/bin/sh")
             .args(["-c", &cmd])
             .output()
@@ -12527,28 +13085,38 @@ mod tests {
         );
     }
 
-    /// Through a real `/bin/sh`: a binary deleted after spawn produces a
-    /// named lazybox error on stderr, not the shell's raw
-    /// "No such file or directory".
+    /// Through a real `/bin/sh`: a binary deleted after spawn must NOT hard
+    /// error the lifecycle hook. It exits 0 (no `PostToolUse:Bash hook
+    /// error`), writes nothing to the agent's stderr, and records the cause
+    /// in the hook log instead — a missed state signal, not a failure.
     #[cfg(unix)]
     #[test]
-    fn hook_command_missing_binary_reports_named_error() {
+    fn hook_command_missing_binary_degrades_silently() {
+        let dir = std::env::temp_dir().join(format!("lazybox-hook-missing-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let log = dir.join("hook.log");
         let gone = "/nonexistent/target/debug/lazybox";
-        let cmd = hook_command(Path::new(gone), "lzb-sess-9");
+        let cmd = guarded_hook_command(Path::new(gone), " --backend-key \"lzb-sess-9\"", &log);
         let out = std::process::Command::new("/bin/sh")
             .args(["-c", &cmd])
             .output()
             .expect("sh runs");
-        assert_eq!(out.status.code(), Some(1));
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("lazybox hook: binary missing at /nonexistent/target/debug/lazybox"),
-            "stderr should name the cause: {stderr}"
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "a lifecycle hook must not hard-error"
         );
         assert!(
-            !stderr.contains("No such file or directory"),
-            "raw shell error leaked: {stderr}"
+            out.stderr.is_empty(),
+            "nothing on the agent-facing stderr: {:?}",
+            String::from_utf8_lossy(&out.stderr)
         );
+        let logged = std::fs::read_to_string(&log).expect("hook log written");
+        assert!(
+            logged.contains("lazybox hook: binary missing at /nonexistent/target/debug/lazybox"),
+            "log should name the cause: {logged}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -14098,12 +14666,13 @@ mod tests {
                 .insert(self.id, std::time::Instant::now());
         }
 
-        /// The pump's Working watchdog fired — [`WORKING_WATCHDOG_AFTER`]
-        /// with no meaningful content change — so classify the screen and,
-        /// if still Working, force the turn closed; return the
-        /// `AgentState`s broadcast as a result.
+        /// The pump's content-stability watchdog fired —
+        /// [`WORKING_WATCHDOG_AFTER`] with no meaningful content change — so
+        /// re-classify the screen, force a still-`Working` turn closed, and
+        /// resolve a stale `InputNeeded`; return the `AgentState`s broadcast
+        /// as a result.
         async fn watchdog(&mut self) -> Vec<lazybox_ipc::AgentState> {
-            watchdog_escape_working(
+            watchdog_reverify_parked_turn(
                 Some(&self.agent),
                 &self.buf,
                 self.last_chunk_len,
@@ -15031,6 +15600,131 @@ mod tests {
             p.watchdog().await,
             vec![InputNeeded],
             "the watchdog tick must surface the parked dialog, not claim Done",
+        );
+    }
+
+    /// The permission dialog and the resting composer that replaces it — the
+    /// #872 shape: a real prompt parks the agent at `?`, the turn ends, and
+    /// the composer is redrawn at rest with the prompt now scrollback.
+    const PERMISSION_DIALOG: &str = concat!(
+        "Do you want to proceed?\n",
+        "❯ 1. Yes\n",
+        "  2. No\n",
+        "Esc to cancel · Tab to amend · ctrl+e to explain",
+    );
+    const SETTLED_COMPOSER: &str = concat!(
+        "Final state: all checks pass — the PR is CLEAN.\n",
+        "\n",
+        "❯ \n",
+        "? for shortcuts",
+    );
+
+    /// #872: a finished agent that leaves a background shell running keeps
+    /// the PTY emitting bytes, so the byte-silence quiet timer never fires
+    /// and a stale `?` (a prompt the turn has since moved past) would pin
+    /// forever. The content-stability watchdog re-classifies the settled
+    /// screen — the prompt is gone — and the `?` resolves instead of
+    /// sticking.
+    #[tokio::test]
+    async fn watchdog_clears_a_stale_input_needed_when_the_turn_has_settled() {
+        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(PERMISSION_DIALOG.as_bytes()).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+
+        // The turn ends: the composer is redrawn at rest above the now-stale
+        // prompt. As an ambiguous byte-flow reading this must NOT clear the
+        // `?` on its own (#374) — a stray repaint reads exactly the same.
+        assert_eq!(
+            p.feed(SETTLED_COMPOSER.as_bytes()).await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "an ambiguous reading must not un-ask a parked prompt",
+        );
+
+        // The watchdog fires on content-stability (a background shell's
+        // heartbeat keeps the stream alive, so the quiet timer can't) and
+        // re-classifies: the prompt is scrollback now, so the `?` clears.
+        assert_eq!(
+            p.watchdog().await,
+            vec![Idle],
+            "a settled resting composer must resolve a stale InputNeeded",
+        );
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Idle),
+        );
+    }
+
+    /// The guard the #872 clear must keep: a prompt that is STILL on screen
+    /// when the watchdog fires re-reads `InputNeeded`, so the `?` stays. The
+    /// re-classification is affirmative evidence, not a blind timer, so it
+    /// never un-asks a live prompt.
+    #[tokio::test]
+    async fn watchdog_leaves_a_live_parked_prompt_asking() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(PERMISSION_DIALOG.as_bytes()).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a live prompt must survive the watchdog re-classification",
+        );
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&InputNeeded),
+        );
+    }
+
+    /// #62: while a lifecycle hook is fresh it owns the asking call, so the
+    /// watchdog's re-classification of a resting-looking screen must NOT
+    /// clear the `?` (the idle nudge raises it precisely at a ready
+    /// composer). Only a stale-hook / hookless `?` clears here — the
+    /// broken-hook case #872 is actually about.
+    #[tokio::test]
+    async fn watchdog_defers_to_a_fresh_hook_before_clearing_input_needed() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(PERMISSION_DIALOG.as_bytes()).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        p.hook_now().await;
+        p.feed(SETTLED_COMPOSER.as_bytes()).await;
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a fresh hook keeps the `?` even when the screen looks resting",
+        );
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&InputNeeded),
+        );
+    }
+
+    /// The force-`Done` tail exists only for a stuck `Working` turn. A
+    /// pending answer reset latched while the terminal reads `InputNeeded`
+    /// (a hook/answer race) makes the watchdog skip the stale-buffer
+    /// re-classify — so the tail must NOT then force the turn closed and
+    /// must leave the `?` untouched (a `Done` from `InputNeeded` is rejected,
+    /// so the guard is what stops the spurious "forcing the turn closed").
+    #[tokio::test]
+    async fn watchdog_does_not_force_close_an_input_needed_with_a_latched_reset() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(PERMISSION_DIALOG.as_bytes()).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        p.terminals.agent_detect_resets.lock().await.insert(p.id);
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a latched reset must not force an InputNeeded turn to Done",
+        );
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&InputNeeded),
         );
     }
 

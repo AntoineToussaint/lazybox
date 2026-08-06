@@ -54,6 +54,71 @@ streams live `TerminalOutput` bytes. The default session backend is tmux
 
 ---
 
+## Interactive & browser-based auth in terminals
+
+**Status:** stable
+**Crate(s):** `server` (`pty.rs`, `backend/tmux.rs`, `backend/raw_pty.rs`), `tui-core` (`editors.rs`)
+**Config / flags:** —
+**Key bindings:** `]]u` open a URL from the terminal on the client machine
+
+### What it does
+The embedded terminal is a **real PTY** — the child's stdin/stdout are an
+`openpty` slave, so `isatty()` is true and the process' environment is inherited
+wholesale (lazybox forces only `TERM`/`COLORTERM` and never clears the env).
+Ordinary interactive commands therefore behave exactly as in any terminal:
+`read -p`, a password prompt, or pasting a verification code all work.
+
+The one flow that does **not** "just work" is a CLI that opens a browser and/or
+binds a **localhost OAuth callback** — `gcloud auth application-default login`,
+`gcloud auth login`, `gh auth login`'s web flow, `vercel login`, and the like.
+lazybox has no browser-launch code in the agent PTY path, so the CLI relies on
+its own inherited env (`BROWSER`, `DISPLAY`, a macOS GUI session) to spawn one.
+That launch — and the `127.0.0.1` callback the CLI listens on — happens on the
+machine running the **daemon**, which for a remote session (`lazybox --connect`,
+see [Remote connect](daemon-and-deployment.md#remote-connect)) is the box, not
+your laptop, and for a detached/headless daemon may have no browser at all.
+This is inherent to browser + localhost-callback OAuth over a remote daemon, not
+lazybox stripping TTY interactivity.
+
+### How to use it
+Run the **browserless** variant so the CLI prints a URL and reads the code back
+over stdin, then open that URL on your own machine:
+
+- `gcloud auth application-default login --no-launch-browser`
+- `gcloud auth login --no-launch-browser`
+- `gh auth login` → pick the "Paste an authentication token" path
+- generally look for `--no-launch-browser`, `--no-browser`, or `--device-code`
+
+Press `]]u` to open the printed URL — it scans the visible terminal and opens
+the link on the **client** (your laptop), not the daemon host — complete the
+flow there, and paste the verification code back at the prompt. Run these in a
+shell (`s`) or via Claude's `!` bash line, **not** as an agent tool call: the
+agent's non-interactive Bash tool can't paste the code back and will hang on the
+prompt. When the daemon is local the default browser-launching flow already
+works; the browserless path is what you reach for on a remote or headless box.
+
+### How it works (brief)
+`DaemonPty::spawn_inner` (`crates/server/src/pty.rs`, the raw-PTY backend's
+spawn path) opens the PTY and inherits the daemon env, adding only
+`TERM=xterm-256color` / `COLORTERM=truecolor`; the default tmux backend seeds
+`COLORTERM` the same way (`-e`) and sets `TERM` from its `default-terminal`
+conf. Browser launching lives only host-side
+in the client (`browser_argv` / `open_url`, `crates/tui-core/src/editors.rs`),
+which `]]u` drives (and `g o` for a workspace's PR/issue page) — never inside
+the agent PTY.
+
+### Test checklist
+- [ ] An interactive prompt (`read -p "x: " v`, a password) works in an embedded terminal.
+- [ ] `gcloud auth application-default login --no-launch-browser` prints a URL and accepts a pasted code.
+- [ ] `]]u` opens the printed auth URL on the client machine, not the daemon host.
+- [ ] With a remote daemon, the default (browser-launching) flow targets the box — the browserless variant is the working path.
+
+### Known sharp edges
+- The agent's own non-interactive Bash tool can't complete a code-paste flow — run auth in a shell (`s`) or via `!`.
+- A detached/headless daemon may have no browser or GUI session; always prefer the browserless flag there.
+
+---
+
 ## Spawn shell & agents
 
 **Status:** stable

@@ -31,8 +31,10 @@ use std::sync::Arc;
 /// Workspaces from GitHub are keyed `"github-<owner>-<repo>-<n>"`;
 /// `build_provider_for_workspace` routes on `split_once('-').0`.
 /// Using a single constant keeps the prefix authoritative — both the
-/// router AND the credential resolve scope read it from here.
-pub const SOURCE: &str = "github";
+/// router AND the credential resolve scope read it from here. The value
+/// comes from `lazybox_core` so config's snippet scoping and the UI can't
+/// drift from it.
+pub const SOURCE: &str = lazybox_core::GITHUB_SOURCE;
 
 /// Credential chain GitHub uses. Tried in order:
 /// `LAZYBOX_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `gh auth

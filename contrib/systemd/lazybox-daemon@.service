@@ -1,0 +1,27 @@
+[Unit]
+Description=lazybox daemon (Unix socket) for %i
+Documentation=https://github.com/AntoineToussaint/lazybox/blob/main/contrib/systemd/README.md
+After=network-online.target
+Wants=network-online.target
+# Crash-loop backstop: give up after 5 failed starts in a minute rather
+# than hammer a misconfigured box forever.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=%i
+# One daemon per user: one identity, one store, one socket. %i is the
+# account name; homes are assumed under /home. Override LAZYBOX_HOME in the
+# env file below for a non-standard layout.
+Environment=LAZYBOX_HOME=/home/%i/.lazybox
+EnvironmentFile=-/etc/lazybox/%i.env
+ExecStart=/usr/local/bin/lazybox server start
+# `server start` removes its socket/pid on SIGTERM, so the default stop
+# signal is enough for a clean shutdown.
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

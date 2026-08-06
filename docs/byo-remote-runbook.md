@@ -25,8 +25,9 @@ the one-scan consumer pairing that builds on this, see #749.
 
    It survives client disconnects like a tmux server, keeping every PTY,
    agent, and poll loop alive between sessions. For an always-on box, put it
-   under a service unit (systemd / launchd) with restart-on-crash — `server
-   start` runs in the foreground.
+   under a service unit with restart-on-crash — `server start` runs in the
+   foreground. Packaged systemd units (`lazybox-daemon@`, `lazybox-api@`) live
+   in [`contrib/systemd/`][systemd] so the box auto-starts the daemon on boot.
 
 ## On your laptop (machine A)
 
@@ -137,3 +138,4 @@ rejects a fingerprint mismatch. If `--connect` reports a mismatch, rebuild the
 daemon on the box (or the client) so both sides match, then reconnect.
 
 [scoping]: remote-daemon-scoping.md
+[systemd]: ../contrib/systemd/README.md

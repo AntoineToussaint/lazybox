@@ -1,0 +1,23 @@
+[Unit]
+Description=lazybox JSON API gateway (loopback) for %i
+Documentation=https://github.com/AntoineToussaint/lazybox/blob/main/contrib/systemd/README.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=%i
+Environment=LAZYBOX_HOME=/home/%i/.lazybox
+# Required, not optional (no `-` prefix): the gateway refuses to start
+# without LAZYBOX_API_TOKEN, so a box missing the env file should fail
+# loudly at unit level rather than crash-loop the process.
+EnvironmentFile=/etc/lazybox/%i.env
+ExecStart=/usr/local/bin/lazybox server api
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

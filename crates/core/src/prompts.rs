@@ -156,10 +156,21 @@ pub fn build_implement_linear_prompt_with(ticket: &Task, conventions: &Conventio
     } else {
         String::new()
     };
+    // The shared preamble tells the agent to open the PR body with a
+    // `Closes #N.` line — GitHub-specific and inapplicable here (a Linear
+    // ticket has no GitHub issue number). Left standing, the agent can
+    // invent a `Closes #N` that auto-closes an unrelated GitHub issue on
+    // merge, so countermand it unconditionally; the `Fixes {key}` clause
+    // above (or the manual note below) is the Linear-native replacement.
     let notes = notes_block(&[
+        Some(
+            "There is no GitHub issue number for a Linear ticket — disregard the \
+             `Closes #N` PR-body guidance in the principles above."
+                .to_string(),
+        ),
         (!conventions.include_closes).then(|| {
-            "Do NOT reference `Fixes <ticket>` in the PR — this workspace closes \
-             Linear tickets manually."
+            "Do NOT reference `Fixes <ticket>` in the PR either — this workspace \
+             closes Linear tickets manually."
                 .to_string()
         }),
         conventions.commit_override(),
@@ -847,11 +858,14 @@ mod tests {
             &Conventions::default(),
         );
         assert!(prompt.contains("Linear ticket OBI-1749"));
-        // Linear's close mechanism, not GitHub's — asserted on the task
-        // section (the shared preamble legitimately mentions `Closes #N`).
+        // Linear's close mechanism, not GitHub's.
         let task = &prompt[prompt.find("## Task").expect("task section")..];
         assert!(task.contains("Fixes OBI-1749"));
-        assert!(!task.contains("Closes #"));
+        // The only `Closes #N` mention in the task is the explicit
+        // countermand of the preamble's GitHub-specific guidance — never a
+        // positive instruction to add one (which could auto-close an
+        // unrelated GitHub issue on merge).
+        assert!(task.contains("disregard the `Closes #N`"));
         // The branch is server-provisioned — the agent is told to work in
         // place, not to create one.
         assert!(prompt.contains("already checked out"));
@@ -893,5 +907,8 @@ mod tests {
             build_implement_linear_prompt_with(&linear_ticket("OBI-1749", "Ship it", None), &conv);
         assert!(!prompt.contains("Include `Fixes OBI-1749`"));
         assert!(prompt.contains("closes Linear tickets manually"));
+        // The preamble's `Closes #N` is countermanded regardless of the
+        // close mode.
+        assert!(prompt.contains("disregard the `Closes #N`"));
     }
 }

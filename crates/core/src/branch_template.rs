@@ -20,6 +20,12 @@ use std::collections::BTreeMap;
 /// trailing `-` are trimmed; a segment left empty drops out entirely.
 /// Returns `None` when nothing survives, so the caller can fall back
 /// rather than build an empty ref.
+///
+/// Only token *values* are sanitized — the template literal's own
+/// characters (beyond `/` and `-`) are emitted verbatim, so a template
+/// carrying git-illegal punctuation (`{handle}:{id}`) renders an invalid
+/// ref. The template is user-authored config; it must use only ref-safe
+/// characters plus the `{…}` tokens.
 pub fn render_branch_template(template: &str, tokens: &[(&str, &str)]) -> Option<String> {
     let substituted = substitute(template, tokens);
     let collapsed: Vec<String> = substituted

@@ -61,7 +61,8 @@ use crate::{
 /// let mut terminal = Terminal::new(TerminalOptions {
 ///     cols: 40,
 ///     rows: 5,
-///     max_scrollback: 10000,
+///     max_scrollback_lines: 10000,
+///     max_scrollback_bytes: None,
 /// }).unwrap();
 ///
 /// let mut render_state = RenderState::new().unwrap();
@@ -83,7 +84,8 @@ use crate::{
 /// # let terminal = Terminal::new(TerminalOptions {
 /// #     cols: 80,
 /// #     rows: 25,
-/// #     max_scrollback: 10000,
+/// #     max_scrollback_lines: 10000,
+/// #     max_scrollback_bytes: None,
 /// # }).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
@@ -104,7 +106,8 @@ use crate::{
 /// # let terminal = Terminal::new(TerminalOptions {
 /// #     cols: 80,
 /// #     rows: 25,
-/// #     max_scrollback: 10000,
+/// #     max_scrollback_lines: 10000,
+/// #     max_scrollback_bytes: None,
 /// # }).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
@@ -129,7 +132,8 @@ use crate::{
 /// # let terminal = Terminal::new(TerminalOptions {
 /// #     cols: 80,
 /// #     rows: 25,
-/// #     max_scrollback: 10000,
+/// #     max_scrollback_lines: 10000,
+/// #     max_scrollback_bytes: None,
 /// # }).unwrap();
 /// # let mut render_state = RenderState::new().unwrap();
 /// let snapshot = render_state.update(&terminal).unwrap();
@@ -155,7 +159,8 @@ use crate::{
 /// # let terminal = Terminal::new(TerminalOptions {
 /// #     cols: 80,
 /// #     rows: 25,
-/// #     max_scrollback: 10000,
+/// #     max_scrollback_lines: 10000,
+/// #     max_scrollback_bytes: None,
 /// # }).unwrap();
 /// # let mut render_state = RenderState::new()?;
 /// use libghostty_vt::render::{RowIterator, CellIterator};

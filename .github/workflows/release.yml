@@ -127,10 +127,10 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
-      - name: "Install Zig 0.15.2"
+      - name: "Install Zig 0.16.0"
         uses: "mlugg/setup-zig@v2"
         with:
-          "version": "0.15.2"
+          "version": "0.16.0"
       - name: "Install C toolchain (Linux)"
         if: "runner.os == 'Linux'"
         run: "sudo apt-get update && sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev"

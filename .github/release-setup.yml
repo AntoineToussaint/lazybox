@@ -2,10 +2,11 @@
 # workflow. Installs the prerequisites lazybox's build needs that
 # Rust's toolchain doesn't provide:
 #
-# - Zig 0.15.2: libghostty-vt's `build.rs` invokes `zig build` to
-#   compile the embedded ghostty source. Pinned to 0.15.2 because
-#   newer Zig (0.16+) broke the upstream `requireZig` check that
-#   libghostty's build.zig enforces.
+# - Zig 0.16.0: libghostty-vt's `build.rs` invokes `zig build` to
+#   compile the embedded ghostty source. Pinned to the exact version in
+#   `.zig-version` because ghostty's build.zig enforces a `requireZig`
+#   check that accepts only that minor — a newer or older Zig fails at
+#   comptime, so bump this in lockstep with `.zig-version`.
 # - SQLite headers: `rusqlite { features = ["bundled"] }` ships its
 #   own SQLite source, but the `cc` crate still needs a working C
 #   toolchain. macOS has CLT; Linux runners install build-essential.
@@ -13,10 +14,10 @@
 # Once libghostty-rs is published with relaxed Zig pinning, the Zig
 # install step is the only platform-specific bit here.
 
-- name: Install Zig 0.15.2
+- name: Install Zig 0.16.0
   uses: mlugg/setup-zig@v2
   with:
-    version: "0.15.2"
+    version: "0.16.0"
 
 - name: Install C toolchain (Linux)
   if: runner.os == 'Linux'

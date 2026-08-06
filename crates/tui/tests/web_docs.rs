@@ -270,7 +270,7 @@ fn homepage_install_prioritizes_prebuilt_releases() {
         page.contains(
             "cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot"
         ) && page.contains("Compiles the current main branch (HEAD) locally.")
-            && page.contains("Zig 0.15.2"),
+            && page.contains("Zig 0.16.0"),
         "the advanced source build must identify HEAD and its toolchain requirements"
     );
 }

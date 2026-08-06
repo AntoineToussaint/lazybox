@@ -1,6 +1,6 @@
 # lazybox — reactive PR inbox TUI
 #
-# Self-contained build: `make setup` downloads a pinned zig 0.15.2 to
+# Self-contained build: `make setup` downloads a pinned zig 0.16.0 to
 # a host-level cache (`~/.cache/lazybox/zig/` by default) — the only
 # out-of-band dependency. Caching it OUTSIDE the checkout means every
 # clone and every git worktree shares one download instead of each

@@ -20,8 +20,9 @@ use libghostty_vt::{Terminal, TerminalOptions};
 
 const COLS: u16 = 120;
 const ROWS: u16 = 32;
-/// Mirrors `max_scrollback` in the TUI client's `TerminalVt`.
-const MAX_SCROLLBACK: usize = 10_000;
+/// Mirrors `max_scrollback_lines` in the TUI client's `TerminalVt`, which
+/// now takes the configured line depth directly.
+const MAX_SCROLLBACK: usize = lazybox_config::DEFAULT_SCROLLBACK_LINES as usize;
 
 /// A churn-heavy PTY stream: `lines` rows of committed output, each
 /// preceded by a burst of carriage-return redraws on the *current* line
@@ -56,7 +57,8 @@ fn recovered_scrollback(cap: usize, stream: &[u8]) -> usize {
     let mut term = Terminal::new(TerminalOptions {
         cols: COLS,
         rows: ROWS,
-        max_scrollback: MAX_SCROLLBACK,
+        max_scrollback_lines: MAX_SCROLLBACK,
+        max_scrollback_bytes: None,
     })
     .expect("vt init");
     term.vt_write(&ring.snapshot());
@@ -122,11 +124,13 @@ fn colored_line(i: usize) -> Vec<u8> {
 fn reconstructed_rows(stream: &[u8]) -> Vec<String> {
     // Deep scrollback budget so the ring (not the grid) bounds recovered
     // depth. The budget is spent on the retained pages, not reserved, so a
-    // generous ceiling is cheap.
+    // generous ceiling is cheap. (Was a 64 MiB *byte* ceiling before the
+    // limit became line-denominated.)
     let mut term = Terminal::new(TerminalOptions {
         cols: COLS,
         rows: ROWS,
-        max_scrollback: 64 * 1024 * 1024,
+        max_scrollback_lines: 64 * 1024 * 1024,
+        max_scrollback_bytes: None,
     })
     .expect("vt init");
     term.vt_write(stream);

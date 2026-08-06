@@ -366,7 +366,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 Prereqs: Rust 1.88+, a C compiler (bundled SQLite), and `gh` for real GitHub
 credentials. Network is required by `make setup`, not subsequent release
 builds. Linux
-also needs libc++ / libc++abi. Direct `cargo build` needs **zig 0.15.2** on
+also needs libc++ / libc++abi. Direct `cargo build` needs **zig 0.16.0** on
 PATH.
 
 ### How it works (brief)
@@ -380,7 +380,7 @@ cargo-dist pipeline (`.github/workflows/release.yml` + `[workspace.metadata.dist
 builds macOS + Linux binaries on a version tag.
 
 ### Test checklist
-- [ ] `make setup` downloads/caches zig 0.15.2.
+- [ ] `make setup` downloads/caches zig 0.16.0.
 - [ ] `make run` builds and launches from a clean checkout.
 - [ ] A second worktree and a post-`cargo clean` release reuse Zig and Ghostty.
 - [ ] With networking disabled, `make release` completes without a fetch.

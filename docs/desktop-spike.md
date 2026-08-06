@@ -59,11 +59,12 @@ zig toolchain.
 Because the fingerprint is hashed over `crates/{ipc,core}/src` + `Cargo.lock`,
 *any* edit under those crates rewrites `apps/desktop/src/generated/*` — so a
 branch rebased across such an edit conflicts on the generated files every time.
-That is automated away: `make setup` (or `make install-merge-driver`) registers
-a `lazybox-contract` git merge driver that regenerates the files from the merged
-tree instead of leaving conflict markers, and `make rebase-main` rebases onto
-`origin/main`, resolving any contract-only conflict the same way (other
-conflicts stop for manual resolution).
+`make rebase-main` automates that away: it rebases onto `origin/main` and, for a
+conflict confined to the generated contract, regenerates it from the merged tree
+(which git has already checked out at the conflict stop) instead of leaving you
+to hand-regenerate. Any conflict outside the generated dir stops the rebase for
+manual resolution — the tool only ever automates the mechanical regenerate step,
+never a real code merge.
 
 ## Terminal transport
 

@@ -46,7 +46,7 @@ LOCAL_ZIG_DIR := vendor/zig/$(ZIG_SLUG)
 ZIG_DIR := $(if $(wildcard $(LOCAL_ZIG_DIR)/zig),$(LOCAL_ZIG_DIR),$(CACHE_ZIG_DIR))
 PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
 
-.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract install-merge-driver rebase-main test lint clean distclean install help
+.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract rebase-main test lint clean distclean install help
 
 # Side-by-side dev profile root. Picked up by `lazybox_core::paths`
 # everywhere — independent state.db, worktrees, daemon socket, tmux
@@ -142,9 +142,6 @@ desktop-test: desktop-deps ## Headless desktop checks, as CI gates them (fronten
 desktop-contract: ## Regenerate apps/desktop/src/generated from the Rust desktop DTOs (CI fails on a diff).
 	@PATH="$(PINNED_PATH)" cargo run -p lazybox-server --features desktop-contract --bin generate-desktop-contract
 	@PATH="$(PINNED_PATH)" UPDATE_DESKTOP_CONTRACT=1 cargo test -p lazybox-server --test api_gateway desktop_compatibility_fixture_is_current -- --exact
-
-install-merge-driver: ## Register the desktop-contract merge driver (auto-resolves generated-file rebase conflicts). Included in `make setup`.
-	@./scripts/install-merge-driver.sh
 
 rebase-main: ## Rebase the current branch onto origin/main, auto-regenerating the desktop contract on conflict.
 	@PATH="$(PINNED_PATH)" ./scripts/rebase-onto-main.sh

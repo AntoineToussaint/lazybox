@@ -6,11 +6,12 @@
 # for manual resolution — this only automates the mechanical regenerate step,
 # never a real code merge.
 #
-# With the `lazybox-contract` merge driver installed (make setup /
-# make install-merge-driver) the rebase usually resolves those files itself
-# and this script just drives fetch → rebase → done. The regenerate loop
-# below is the fallback for a clone without the driver, so `make rebase-main`
-# works either way.
+# It regenerates *after* git stops on the conflict, not during the merge: at a
+# conflict stop git has already checked the fully-merged tree into the working
+# directory (only the generated files carry markers), so `make desktop-contract`
+# compiles the merged wire crates and emits the correct fingerprint. A git merge
+# driver cannot do this — it runs mid-merge, before the merged source reaches the
+# working tree, so it would regenerate from the un-merged (ours) side.
 #
 # Run via `make rebase-main` (which puts pinned zig on PATH).
 
@@ -51,19 +52,29 @@ fi
 while rebase_in_progress; do
 	unmerged="$(git diff --name-only --diff-filter=U)"
 
-	if [ -n "$unmerged" ]; then
-		# Every unmerged path must live under the generated contract dir.
-		if printf '%s\n' "$unmerged" | grep -qv "^${CONTRACT_PREFIX}"; then
-			echo "✗ conflict outside the generated contract — resolve by hand," \
-				"then run 'git rebase --continue' (or 'make rebase-main' again):" >&2
-			printf '%s\n' "$unmerged" | grep -v "^${CONTRACT_PREFIX}" | sed 's/^/    /' >&2
-			exit 1
-		fi
-		echo "▸ regenerating the desktop contract to resolve:" \
-			"$(printf '%s ' $unmerged)"
-		make desktop-contract
-		git add "$CONTRACT_PREFIX"
+	# Nothing conflicts, yet the rebase is still stopped: this isn't a contract
+	# conflict we can auto-resolve (e.g. a commit that emptied on replay and
+	# needs --skip, a failing hook, or unstaged changes blocking --continue).
+	# Bail instead of looping — every iteration must resolve real conflicts or
+	# stop, so `git rebase --continue` is never retried against unchanged state.
+	if [ -z "$unmerged" ]; then
+		echo "✗ rebase stopped without a contract conflict to auto-resolve." \
+			"Sort it out by hand, then 'git rebase --continue' (or --skip / --abort):" >&2
+		git status --short >&2
+		exit 1
 	fi
+
+	# Every unmerged path must live under the generated contract dir.
+	if printf '%s\n' "$unmerged" | grep -qv "^${CONTRACT_PREFIX}"; then
+		echo "✗ conflict outside the generated contract — resolve by hand," \
+			"then run 'git rebase --continue' (or 'make rebase-main' again):" >&2
+		printf '%s\n' "$unmerged" | grep -v "^${CONTRACT_PREFIX}" | sed 's/^/    /' >&2
+		exit 1
+	fi
+	echo "▸ regenerating the desktop contract to resolve:" \
+		"$(printf '%s ' $unmerged)"
+	make desktop-contract
+	git add "$CONTRACT_PREFIX"
 
 	# Continue; a clean finish drops out of the loop, a further conflict
 	# re-enters it. GIT_EDITOR=true keeps the replayed commit messages as-is.

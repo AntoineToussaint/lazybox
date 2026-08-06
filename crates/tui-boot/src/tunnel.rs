@@ -20,8 +20,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use lazybox_config::{TunnelConfig, TunnelMode};
-use tokio::process::{Child, Command};
-use tokio::sync::watch;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, ChildStderr, Command};
 use tokio::time::Instant;
 
 /// Initial delay before the first re-spawn, and the value the backoff
@@ -47,18 +47,6 @@ fn next_backoff_after_exit(current: Duration, ran: Duration) -> Duration {
     } else {
         grow_backoff(current)
     }
-}
-
-/// Live state of the supervised forward, published so a caller can wait
-/// for the first `Up` and log transitions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TunnelStatus {
-    /// Spawning (or re-spawning) the forward process.
-    Starting,
-    /// The forward process is running.
-    Up,
-    /// The forward exited; backing off before the next attempt.
-    Retrying,
 }
 
 /// A validated, ready-to-spawn forward.
@@ -177,15 +165,24 @@ impl Tunnel {
             format!("ServerAliveInterval={}", self.server_alive_interval),
             "-o".to_string(),
             format!("ServerAliveCountMax={}", self.server_alive_count_max),
-            // Bail immediately if a forward can't bind, so the supervisor
-            // re-spawns instead of holding a live-but-useless session.
+            // Unattended: never block on an interactive auth prompt. ssh
+            // reads passphrases / keyboard-interactive from /dev/tty, which
+            // the TUI owns in raw mode — a prompt would corrupt the screen
+            // and steal keystrokes, and the supervisor retries forever. Fail
+            // fast instead; a working forward needs agent- or passphrase-less
+            // key auth.
             "-o".to_string(),
-            "ExitOnForwardFailure=yes".to_string(),
+            "BatchMode=yes".to_string(),
             // Unattended: a first-connect host key can't be confirmed at a
             // prompt, so trust-on-first-use it rather than hang.
             "-o".to_string(),
             "StrictHostKeyChecking=accept-new".to_string(),
         ];
+        // Deliberately no `ExitOnForwardFailure`: it applies to *every* `-L`,
+        // so a workload port already taken locally (a dev server on `:3000`)
+        // would sink the whole session including the daemon socket. Forwards
+        // are best-effort; the daemon socket's readiness is gated separately
+        // by `wait_for_socket`.
         for spec in self.forward_specs() {
             args.push("-L".to_string());
             args.push(spec);
@@ -211,7 +208,15 @@ impl Tunnel {
                     Some(u) => format!("{u}@{instance}"),
                     None => instance.clone(),
                 };
-                let mut args = vec!["compute".to_string(), "ssh".to_string(), dest];
+                // `--quiet` so gcloud never blocks on an interactive confirm
+                // (e.g. first-run SSH-key generation) — same unattended
+                // stance as the inner ssh's `BatchMode`.
+                let mut args = vec![
+                    "compute".to_string(),
+                    "ssh".to_string(),
+                    dest,
+                    "--quiet".to_string(),
+                ];
                 if let Some(zone) = zone {
                     args.push(format!("--zone={zone}"));
                 }
@@ -238,10 +243,12 @@ impl Tunnel {
         Command::new(&program)
             .args(&args)
             .stdin(Stdio::null())
-            // Keep the forward's own diagnostics out of the TUI's alternate
-            // screen; the daemon log already narrates connection state.
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // Piped, not inherited: the forward's diagnostics stay out of the
+            // TUI's alternate screen but are drained into the log (see
+            // `supervise_with`), so a failing tunnel — bad auth, a taken
+            // workload port — is diagnosable instead of silent.
+            .stderr(Stdio::piped())
             // If the supervisor task is dropped (client exit), the child
             // ssh/gcloud is killed rather than orphaned holding the ports.
             .kill_on_drop(true)
@@ -250,25 +257,27 @@ impl Tunnel {
 }
 
 /// Supervise the forward forever: spawn it, wait for it to exit, then
-/// re-spawn with capped-backoff keepalive. Publishes [`TunnelStatus`]
-/// transitions. Runs until the task is aborted/dropped, which kills the
-/// live child (`kill_on_drop`).
-pub async fn supervise(tunnel: Tunnel, status: watch::Sender<TunnelStatus>) {
-    supervise_with(|| tunnel.spawn(), status).await
+/// re-spawn with capped-backoff keepalive. Runs until the task is
+/// aborted/dropped, which kills the live child (`kill_on_drop`). Live state
+/// isn't published here — a forward flap drops the daemon socket with it, so
+/// the transport's existing reconnect banner is the UI signal.
+pub async fn supervise(tunnel: Tunnel) {
+    supervise_with(|| tunnel.spawn()).await
 }
 
 /// The supervision loop over an injectable spawner, so the backoff /
-/// status machine is testable without shelling out to `ssh`/`gcloud`.
-async fn supervise_with<F>(mut spawn: F, status: watch::Sender<TunnelStatus>)
+/// re-spawn machine is testable without shelling out to `ssh`/`gcloud`.
+async fn supervise_with<F>(mut spawn: F)
 where
     F: FnMut() -> std::io::Result<Child>,
 {
     let mut backoff = BACKOFF_START;
     loop {
-        let _ = status.send_replace(TunnelStatus::Starting);
         match spawn() {
             Ok(mut child) => {
-                let _ = status.send_replace(TunnelStatus::Up);
+                if let Some(stderr) = child.stderr.take() {
+                    tokio::spawn(log_child_stderr(stderr));
+                }
                 let started = Instant::now();
                 let _ = child.wait().await;
                 backoff = next_backoff_after_exit(backoff, started.elapsed());
@@ -279,8 +288,19 @@ where
                 tracing::warn!("tunnel: spawn failed: {error}; retrying in {backoff:?}");
             }
         }
-        let _ = status.send_replace(TunnelStatus::Retrying);
         tokio::time::sleep(backoff).await;
+    }
+}
+
+/// Drain a forward's stderr into the log so a failing tunnel (auth denied,
+/// a taken workload port, an unreachable host) leaves a trace instead of
+/// dying silently behind the startup timeout.
+async fn log_child_stderr(stderr: ChildStderr) {
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if !line.trim().is_empty() {
+            tracing::debug!("tunnel: {line}");
+        }
     }
 }
 
@@ -319,9 +339,16 @@ mod tests {
         let tunnel = Tunnel::resolve(ssh_cfg(), std::path::Path::new("/tmp/lb.sock")).unwrap();
         let (program, args) = tunnel.command();
         assert_eq!(program, "ssh");
-        // Keepalive + fail-fast options are present.
+        // Keepalive is present, and auth is non-interactive so a prompt can't
+        // fight the TUI for the tty.
         assert!(args.contains(&"ServerAliveInterval=15".to_string()));
-        assert!(args.contains(&"ExitOnForwardFailure=yes".to_string()));
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+        // No ExitOnForwardFailure: a taken workload port must not sink the
+        // daemon-socket forward with it.
+        assert!(
+            !args.iter().any(|a| a.contains("ExitOnForwardFailure")),
+            "workload-port failure must not be fused to the session, got: {args:?}"
+        );
         // Socket forward uses the resolved local path (the --connect path).
         assert!(
             args.contains(&"/tmp/lb.sock:/home/me/.lazybox/run/daemon.sock".to_string()),
@@ -352,6 +379,8 @@ mod tests {
         assert_eq!(&args[0], "compute");
         assert_eq!(&args[1], "ssh");
         assert_eq!(&args[2], "me@box-1");
+        // gcloud runs non-interactively, matching the inner ssh's BatchMode.
+        assert!(args.contains(&"--quiet".to_string()));
         assert!(args.contains(&"--zone=us-central1-a".to_string()));
         assert!(args.contains(&"--project=proj".to_string()));
         assert!(args.contains(&"--tunnel-through-iap".to_string()));
@@ -359,6 +388,7 @@ mod tests {
         let sep = args.iter().position(|a| a == "--").expect("-- separator");
         let ssh_args = &args[sep + 1..];
         assert!(ssh_args.contains(&"-N".to_string()));
+        assert!(ssh_args.contains(&"BatchMode=yes".to_string()));
         assert!(ssh_args.contains(&"-L".to_string()));
         assert!(ssh_args.contains(&"localhost:3000:localhost:3000".to_string()));
     }
@@ -445,8 +475,7 @@ mod tests {
             spawns_in.fetch_add(1, Ordering::SeqCst);
             Command::new("true").kill_on_drop(true).spawn()
         };
-        let (tx, _rx) = watch::channel(TunnelStatus::Starting);
-        let handle = tokio::spawn(supervise_with(spawn, tx));
+        let handle = tokio::spawn(supervise_with(spawn));
 
         // Each attempt spends the ~250ms floor backing off, so a handful of
         // re-spawns fit comfortably in this window.
@@ -469,8 +498,9 @@ mod tests {
 
     #[tokio::test]
     async fn supervise_recovers_from_a_spawn_failure() {
-        // A spawner that fails then succeeds proves the error arm also
-        // backs off and retries rather than giving up.
+        // A spawner that errors on the first attempt then succeeds proves the
+        // error arm also backs off and retries rather than giving up: the
+        // loop must reach a second (successful) attempt.
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -486,22 +516,19 @@ mod tests {
                 Command::new("true").kill_on_drop(true).spawn()
             }
         };
-        let (tx, mut rx) = watch::channel(TunnelStatus::Starting);
-        let handle = tokio::spawn(supervise_with(spawn, tx));
-        let reached_up = tokio::time::timeout(Duration::from_secs(5), async {
+        let handle = tokio::spawn(supervise_with(spawn));
+        let recovered = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if *rx.borrow_and_update() == TunnelStatus::Up {
+                if attempts.load(Ordering::SeqCst) >= 2 {
                     return true;
                 }
-                if rx.changed().await.is_err() {
-                    return false;
-                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .unwrap_or(false);
         handle.abort();
-        assert!(reached_up, "a spawn failure must retry, not abort the loop");
+        assert!(recovered, "a spawn failure must retry, not abort the loop");
     }
 
     #[tokio::test]

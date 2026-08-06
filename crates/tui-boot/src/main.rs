@@ -971,8 +971,7 @@ async fn bring_up_tunnel(
     // about to dial; a ports-only (or differently-pinned) tunnel never
     // binds it, so waiting would just time out.
     let should_wait = tunnel.forwards_socket() && tunnel.local_socket() == socket_path;
-    let (status_tx, _status_rx) = tokio::sync::watch::channel(tunnel::TunnelStatus::Starting);
-    let handle = tokio::spawn(tunnel::supervise(tunnel, status_tx));
+    let handle = tokio::spawn(tunnel::supervise(tunnel));
 
     if should_wait && !tunnel::wait_for_socket(socket_path, TUNNEL_STARTUP_TIMEOUT).await {
         handle.abort();

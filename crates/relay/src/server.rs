@@ -24,6 +24,12 @@ use crate::protocol::{Ack, Hello, ToBox, read_msg, write_msg};
 /// been announced, before giving up and closing.
 const DEFAULT_BROKER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a freshly-accepted connection has to send its [`Hello`]
+/// frame before the relay drops it. Bounds the resources an idle or
+/// dead peer can hold on an internet-facing relay (mirrors
+/// `lazybox_ipc::socket::HANDSHAKE_TIMEOUT`).
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A registered box's control channel.
 struct BoxHandle {
     /// Announces new clients down the box's held control connection.
@@ -39,12 +45,14 @@ pub struct Relay {
     /// relay-assigned session id.
     pending: Mutex<HashMap<Uuid, oneshot::Sender<TcpStream>>>,
     broker_timeout: Duration,
+    handshake_timeout: Duration,
 }
 
 impl Relay {
     pub fn new() -> Self {
         Self {
             broker_timeout: DEFAULT_BROKER_TIMEOUT,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             ..Self::default()
         }
     }
@@ -69,7 +77,12 @@ impl Relay {
     }
 
     async fn handle(self: Arc<Self>, mut stream: TcpStream) -> std::io::Result<()> {
-        match read_msg::<_, Hello>(&mut stream).await? {
+        let hello = tokio::time::timeout(self.handshake_timeout, read_msg::<_, Hello>(&mut stream))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "handshake timed out")
+            })??;
+        match hello {
             Hello::RegisterBox { box_id, account } => {
                 self.register_box(stream, box_id, account).await
             }
@@ -191,5 +204,32 @@ impl Relay {
             // and it is simply dropped.
             let _ = tx.send(stream);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn idle_connection_is_dropped_after_handshake_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let relay = Arc::new(Relay {
+            handshake_timeout: Duration::from_millis(150),
+            broker_timeout: DEFAULT_BROKER_TIMEOUT,
+            ..Default::default()
+        });
+        tokio::spawn(relay.serve(listener));
+
+        // Connect and never send a `Hello` — the relay must close us out.
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+            .await
+            .expect("relay should close the idle connection before the test's own deadline")
+            .unwrap();
+        assert_eq!(read, 0, "expected EOF once the handshake timeout elapsed");
     }
 }

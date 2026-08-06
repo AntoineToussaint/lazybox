@@ -498,6 +498,7 @@ mod engagement_tier_tests {
             additions: 0,
             deletions: 0,
             closes_issues: vec![],
+            linked_tasks: vec![],
             kind: Some(TaskKind::Pr),
             priority: None,
             state_label: None,
@@ -3134,12 +3135,67 @@ fn closing_issue_workspace_keys(pr: &Task) -> Vec<WorkspaceKey> {
     {
         ids.push(id);
     }
+    // Cross-provider links (#922): Linear ticket identifiers parsed from
+    // the PR's branch / title / body by the GitHub provider. Always
+    // considered — the `TEAM-<n>` shape is specific, and the downstream
+    // "target must be a ticket/issue workspace" filter keeps a stray
+    // match harmless.
+    ids.extend(pr.linked_tasks.iter().cloned());
     let mut keys: Vec<_> = ids
         .into_iter()
         .map(|id| issue_id_to_workspace_key(&id))
         .collect();
     keys.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     keys.dedup();
+    keys
+}
+
+/// Full collapse-candidate set for a PR, unioning the pure candidates
+/// ([`closing_issue_workspace_keys`]) with the authoritative Linear
+/// attachment signal (#922), which lives on the *ticket* and so needs a
+/// store scan the pure list can't do. Used by both lock planning and the
+/// merge pass so the two can't recognize different source rows.
+fn collapse_candidate_keys(config: &ServerConfig, pr: &Task) -> Vec<WorkspaceKey> {
+    let mut keys = closing_issue_workspace_keys(pr);
+    for key in linked_ticket_workspace_keys(config, pr) {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    keys.dedup();
+    keys
+}
+
+/// Linear ticket workspaces that link back to `pr` through the ticket's
+/// own GitHub attachment (#922) — Linear's integration records the PR
+/// URL, which the Linear provider parsed into the ticket's
+/// `linked_tasks`. Authoritative but ticket-side, so it can't be derived
+/// from the PR alone. Only PR-less (ticket) workspaces are considered, so
+/// this never folds one PR into another.
+fn linked_ticket_workspace_keys(config: &ServerConfig, pr: &Task) -> Vec<WorkspaceKey> {
+    let Ok(records) = config.store.list_workspaces() else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    for record in records {
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
+            continue;
+        };
+        if ws.pr.is_some() {
+            continue;
+        }
+        let links_pr = ws
+            .linear_issues
+            .iter()
+            .any(|ticket| ticket.linked_tasks.contains(&pr.id));
+        if links_pr {
+            keys.push(ws.key);
+        }
+    }
     keys
 }
 
@@ -3155,7 +3211,7 @@ async fn lock_workspace_with_closing_issues(
     let mut keys = std::collections::BTreeSet::from([workspace_key.as_str().to_string()]);
     if let Some(pr) = incoming_pr.filter(|task| task.is_pr()) {
         keys.extend(
-            closing_issue_workspace_keys(pr)
+            collapse_candidate_keys(config, pr)
                 .into_iter()
                 .map(|key| key.as_str().to_string()),
         );
@@ -3168,7 +3224,7 @@ async fn lock_workspace_with_closing_issues(
             && let Some(pr) = workspace.pr.as_ref()
         {
             required.extend(
-                closing_issue_workspace_keys(pr)
+                collapse_candidate_keys(config, pr)
                     .into_iter()
                     .map(|key| key.as_str().to_string()),
             );
@@ -3189,7 +3245,7 @@ async fn merge_closing_issue_workspaces(
     let Some(pr) = workspace.pr.as_ref() else {
         return pending;
     };
-    let issue_keys = closing_issue_workspace_keys(pr);
+    let issue_keys = collapse_candidate_keys(config, pr);
     // Snapshot which candidates came from GitHub's `closingIssuesReferences`
     // (vs the weak branch-name fallback) so the merge log names the real
     // source (#581) — the immutable `pr` borrow ends before the loop mutates
@@ -3911,6 +3967,7 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        linked_tasks: vec![],
         priority: None,
         state_label: None,
     };
@@ -4089,6 +4146,7 @@ mod workspace_lock_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -4313,6 +4371,7 @@ mod merge_detection_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -4623,6 +4682,7 @@ mod rescope_collapse_tests {
             deletions: 0,
             kind: None,
             closes_issues: closes,
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -5645,6 +5705,7 @@ mod unreadable_row_preservation_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -5956,6 +6017,7 @@ mod tick_noop_skip_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }

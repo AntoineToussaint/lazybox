@@ -1518,6 +1518,7 @@ mod merge_pr_details_tests {
             deletions: 0,
             kind: None,
             closes_issues: closes,
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -2720,6 +2721,7 @@ mod github_target_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -2792,6 +2794,7 @@ mod prefetch_score_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -3059,6 +3062,7 @@ mod inspect_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };
@@ -3503,6 +3507,7 @@ mod inspect_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };
@@ -3564,6 +3569,7 @@ mod inspect_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };
@@ -3620,6 +3626,7 @@ mod inspect_tests {
             deletions: 0,
             kind: Some(TaskKind::Issue),
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -4501,6 +4508,7 @@ mod inspect_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };

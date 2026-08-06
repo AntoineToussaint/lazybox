@@ -776,6 +776,7 @@ mod has_visible_content_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -871,6 +872,7 @@ mod summary_render_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -993,6 +995,7 @@ mod mark_workspace_merged_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -1086,6 +1089,7 @@ mod description_expand_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -1440,6 +1444,7 @@ mod linked_issue_modal_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -1560,6 +1565,7 @@ mod originating_issue_header_tests {
             deletions: 0,
             kind: None,
             closes_issues: closes,
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -1630,6 +1636,78 @@ mod originating_issue_header_tests {
             .clone()
             .expect("issue line registers a click target");
         assert_eq!(url, "https://github.com/o/r/issues/167");
+        assert!(pane.handle_mouse_click(0, row));
+        assert_eq!(pane.take_open_url().as_deref(), Some(url.as_str()));
+    }
+
+    /// A Linear ticket task, optionally linking a GitHub PR (#922).
+    fn linear_ticket(ident: &str, linked_prs: Vec<TaskId>) -> Task {
+        let mut t = task("issues", 1, vec![]);
+        t.id = TaskId {
+            source: "linear".into(),
+            key: ident.into(),
+        };
+        t.title = format!("ticket {ident}");
+        t.url = format!("https://linear.app/acme/issue/{ident}");
+        t.repo = Some("linear/ENG".into());
+        t.kind = Some(lazybox_core::TaskKind::Issue);
+        t.linked_tasks = linked_prs;
+        t
+    }
+
+    #[test]
+    fn folded_linear_ticket_shows_as_linear_link() {
+        // #922: a Linear ticket folded into a PR reads `Linear: ENG-123`
+        // (not `Issue:`) and clicks through to its Linear URL.
+        let mut ws = Workspace::from_task(task("pull", 172, vec![]), Utc::now());
+        ws.attach_task(linear_ticket("ENG-123", vec![]));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        assert!(
+            rows(&mut pane, 80, 24)
+                .iter()
+                .any(|r| r.contains("Linear: ENG-123")),
+            "header shows the folded Linear ticket",
+        );
+        let (row, url) = pane
+            .click_hits
+            .header_issue
+            .clone()
+            .expect("linear line registers a click target");
+        assert_eq!(url, "https://linear.app/acme/issue/ENG-123");
+        assert!(pane.handle_mouse_click(0, row));
+        assert_eq!(pane.take_open_url().as_deref(), Some(url.as_str()));
+    }
+
+    #[test]
+    fn linear_ticket_primary_shows_its_linked_pr() {
+        // #922 (display-first, pre-collapse): a Linear ticket primary
+        // workspace surfaces its linked GitHub PR as `PR: #42`, clicking
+        // through to the derived GitHub PR URL.
+        let ticket = linear_ticket(
+            "ENG-9",
+            vec![TaskId {
+                source: "github".into(),
+                key: "o/r#42".into(),
+            }],
+        );
+        let ws = Workspace::from_task(ticket, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        assert!(
+            rows(&mut pane, 80, 24)
+                .iter()
+                .any(|r| r.contains("PR: #42")),
+            "header shows the linked PR",
+        );
+        let (row, url) = pane
+            .click_hits
+            .header_issue
+            .clone()
+            .expect("PR line registers a click target");
+        assert_eq!(url, "https://github.com/o/r/pull/42");
         assert!(pane.handle_mouse_click(0, row));
         assert_eq!(pane.take_open_url().as_deref(), Some(url.as_str()));
     }

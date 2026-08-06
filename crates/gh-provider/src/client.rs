@@ -5840,6 +5840,7 @@ mod tests {
             additions: 0,
             deletions: 0,
             closes_issues: vec![],
+            linked_tasks: vec![],
             kind: Some(kind),
             priority: None,
             state_label: None,

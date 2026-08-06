@@ -75,6 +75,7 @@ query($after: String) {{
       creator {{ id name }}
       team {{ key }}
       labels(first: 10) {{ nodes {{ name }} }}
+      attachments(first: 20) {{ nodes {{ url }} }}
     }}
   }}
 }}
@@ -164,6 +165,21 @@ pub struct Issue {
     pub team: Option<Team>,
     #[serde(default)]
     pub labels: Option<Labels>,
+    /// External links attached to the issue. Linear's GitHub integration
+    /// records a linked PR here as an attachment whose `url` is the PR's
+    /// GitHub URL — the authoritative cross-provider link (#922).
+    #[serde(default)]
+    pub attachments: Option<Attachments>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Attachments {
+    pub nodes: Vec<Attachment>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Attachment {
+    pub url: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -243,6 +259,21 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
     // comment threads for now. A richer query can fill them in later.
     let activity: Vec<Activity> = vec![];
 
+    // Cross-provider link (#922): Linear's GitHub integration records a
+    // linked PR as an attachment whose URL is the PR's GitHub URL. Parse
+    // those into GitHub `TaskId`s so the poller can collapse the ticket
+    // and its PR into one workspace and render the link both ways.
+    let mut linked_tasks: Vec<TaskId> = Vec::new();
+    if let Some(attachments) = issue.attachments.as_ref() {
+        for node in &attachments.nodes {
+            if let Some(id) = github_pr_id_from_url(&node.url)
+                && !linked_tasks.contains(&id)
+            {
+                linked_tasks.push(id);
+            }
+        }
+    }
+
     Task {
         id: TaskId {
             source: "linear".into(),
@@ -282,6 +313,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         additions: 0,
         deletions: 0,
         closes_issues: vec![],
+        linked_tasks,
         kind: Some(TaskKind::Issue),
         // Linear's numeric issue priority (0 = none → `None`).
         priority: issue.priority.and_then(lazybox_core::Priority::from_linear),
@@ -289,6 +321,37 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         // "Todo", …), which `state` above collapses to a canonical set.
         state_label: Some(issue.state.name.clone()),
     }
+}
+
+/// Parse a GitHub PR URL into its `TaskId` (`{github, owner/repo#N}`),
+/// the id the GitHub provider mints for that PR. `None` for any URL that
+/// isn't a `github.com/<owner>/<repo>/pull/<n>` link — Linear attaches
+/// other kinds of links too (Slack, Figma, plain GitHub issues), and
+/// only the PR shape carries a cross-provider match.
+fn github_pr_id_from_url(url: &str) -> Option<TaskId> {
+    let rest = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))?;
+    let mut parts = rest.split('/');
+    let owner = parts.next().filter(|s| !s.is_empty())?;
+    let repo = parts.next().filter(|s| !s.is_empty())?;
+    if parts.next()? != "pull" {
+        return None;
+    }
+    let number = parts.next()?;
+    // Trailing path/query/fragment after the number is fine
+    // (`/pull/12/files`, `/pull/12#discussion`); reject a non-numeric
+    // leading segment so `/pull/foo` doesn't match.
+    let number: u64 = number
+        .split(['/', '#', '?'])
+        .next()
+        .filter(|n| !n.is_empty())?
+        .parse()
+        .ok()?;
+    Some(TaskId {
+        source: "github".into(),
+        key: format!("{owner}/{repo}#{number}"),
+    })
 }
 
 /// Suppress lint for unused `ActivityKind` import since Linear's simple
@@ -351,5 +414,102 @@ mod tests {
             !q.contains("creator: {"),
             "only the requested scope clause is emitted"
         );
+    }
+
+    #[test]
+    fn query_requests_attachments() {
+        // #922: the cross-provider link needs each issue's attachments.
+        let q = query_for(&LinearScope::default_scopes());
+        assert!(
+            q.contains("attachments"),
+            "issue query must pull attachments"
+        );
+    }
+
+    #[test]
+    fn github_pr_url_parses_to_task_id() {
+        assert_eq!(
+            github_pr_id_from_url("https://github.com/obin-ai/lazybox/pull/922"),
+            Some(TaskId {
+                source: "github".into(),
+                key: "obin-ai/lazybox#922".into(),
+            })
+        );
+        // Trailing path / fragment after the number is tolerated.
+        assert_eq!(
+            github_pr_id_from_url("https://github.com/o/r/pull/12/files"),
+            Some(TaskId {
+                source: "github".into(),
+                key: "o/r#12".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn non_pr_urls_do_not_parse() {
+        // Linear attaches Slack/Figma/issue links too — only PR shapes
+        // carry a cross-provider match.
+        assert_eq!(
+            github_pr_id_from_url("https://github.com/o/r/issues/12"),
+            None
+        );
+        assert_eq!(
+            github_pr_id_from_url("https://linear.app/acme/issue/ENG-1"),
+            None
+        );
+        assert_eq!(
+            github_pr_id_from_url("https://github.com/o/r/pull/abc"),
+            None
+        );
+    }
+
+    fn issue_with_attachments(urls: &[&str]) -> Issue {
+        Issue {
+            id: "issue-node".into(),
+            identifier: "ENG-1".into(),
+            title: "Fix it".into(),
+            description: None,
+            url: "https://linear.app/acme/issue/ENG-1".into(),
+            updated_at: Utc::now(),
+            created_at: None,
+            priority: None,
+            state: IssueState {
+                name: "Todo".into(),
+                kind: "unstarted".into(),
+            },
+            assignee: None,
+            creator: None,
+            team: Some(Team { key: "ENG".into() }),
+            labels: None,
+            attachments: Some(Attachments {
+                nodes: urls
+                    .iter()
+                    .map(|u| Attachment { url: (*u).into() })
+                    .collect(),
+            }),
+        }
+    }
+
+    #[test]
+    fn issue_to_task_links_pr_from_attachment() {
+        // #922: a GitHub PR attachment becomes a cross-provider link.
+        let issue = issue_with_attachments(&[
+            "https://linear.app/acme/issue/ENG-1", // self link — ignored
+            "https://github.com/obin-ai/lazybox/pull/922",
+        ]);
+        let task = issue_to_task(&issue, "viewer");
+        assert_eq!(
+            task.linked_tasks,
+            vec![TaskId {
+                source: "github".into(),
+                key: "obin-ai/lazybox#922".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn issue_to_task_has_no_links_without_pr_attachment() {
+        let issue = issue_with_attachments(&["https://figma.com/file/xyz"]);
+        assert!(issue_to_task(&issue, "viewer").linked_tasks.is_empty());
     }
 }

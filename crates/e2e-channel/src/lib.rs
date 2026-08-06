@@ -457,6 +457,14 @@ mod tests {
         (client, server, device_pub, learned_device)
     }
 
+    /// The QR encode/decode path: a public key survives the byte
+    /// round-trip a pairing code puts it through.
+    #[test]
+    fn public_key_round_trips_through_bytes() {
+        let key = Identity::generate().expect("identity").public_key();
+        assert_eq!(PublicKey::from_bytes(*key.as_bytes()), key);
+    }
+
     #[tokio::test]
     async fn round_trips_plaintext_in_both_directions() {
         let (mut client, mut server, _, _) = paired().await;

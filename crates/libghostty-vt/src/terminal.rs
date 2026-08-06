@@ -152,8 +152,8 @@ pub struct Options {
     /// whichever is reached first. A fresh terminal carries a modest default
     /// byte limit, so a caller that asks for a deep line count and leaves
     /// this alone gets neither: measured on ghostty d5c7e54a, a 120-col
-    /// terminal retained ~613 rows whether it asked for 1_000 lines or
-    /// 67_000_000. Set it explicitly.
+    /// terminal retained ~613 rows whether it asked for `1_000` lines or
+    /// `67_000_000`. Set it explicitly.
     pub max_scrollback_bytes: Option<usize>,
 }
 

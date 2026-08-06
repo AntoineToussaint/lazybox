@@ -536,6 +536,86 @@ mod status_pill_consistency_tests {
         assert_eq!(pill.label, " REVIEW   ");
     }
 
+    /// The pills Ask Lazybox documents (`lazybox_tui_core::markers`)
+    /// must be exactly the pills the sidebar actually paints. The
+    /// renderer is `status_pills` (the two-column producer used by
+    /// `workspace_row`), not the `StatusTag`→pill map — they diverge
+    /// (`Behind` is a `StatusTag` variant with no rendered pill), and the
+    /// help context is keyed to `StatusTag`, so a documented-but-
+    /// unrendered pill (or a rendered-but-undocumented one) would let the
+    /// help agent lie about the UI. This sweep is that drift guard; it
+    /// lives here because only `tui` sees both sides.
+    #[test]
+    fn documented_status_pills_match_the_renderer() {
+        use super::super::status_pills;
+        use lazybox_core::Mergeable;
+        use std::collections::BTreeSet;
+
+        let states = [
+            TaskState::Open,
+            TaskState::InReview,
+            TaskState::InProgress,
+            TaskState::Merged,
+            TaskState::Closed,
+            TaskState::Draft,
+        ];
+        let reviews = [
+            ReviewStatus::None,
+            ReviewStatus::Pending,
+            ReviewStatus::Approved,
+            ReviewStatus::ChangesRequested,
+        ];
+        let cis = [
+            CiStatus::None,
+            CiStatus::Pending,
+            CiStatus::Running,
+            CiStatus::Success,
+            CiStatus::Failure,
+            CiStatus::Mixed,
+        ];
+        let mergeables = [
+            Mergeable::Mergeable,
+            Mergeable::Conflicting,
+            Mergeable::Unknown,
+        ];
+
+        let mut rendered: BTreeSet<String> = BTreeSet::new();
+        for &state in &states {
+            for &review in &reviews {
+                for &ci in &cis {
+                    for &mergeable in &mergeables {
+                        for in_queue in [false, true] {
+                            for behind in [false, true] {
+                                let mut t = base_task();
+                                t.state = state;
+                                t.review = review;
+                                t.ci = ci;
+                                t.mergeable = mergeable;
+                                t.is_in_merge_queue = in_queue;
+                                t.is_behind_base = behind;
+                                let (a, b) = status_pills(&t);
+                                for pill in [a, b].into_iter().flatten() {
+                                    rendered.insert(pill.label.trim().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let documented: BTreeSet<String> = lazybox_tui_core::markers::status_pill_docs()
+            .into_iter()
+            .map(|d| d.label.trim().to_string())
+            .collect();
+
+        assert_eq!(
+            documented, rendered,
+            "Ask Lazybox's documented status pills must be exactly what the sidebar renders \
+             (left = documented in tui-core::markers, right = emitted by status_pills)"
+        );
+    }
+
     #[test]
     fn task_pill_matches_tag_priority() {
         // Sanity-check the pipeline: for a handful of (task) inputs

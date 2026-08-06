@@ -12,6 +12,16 @@
 //! renders whatever this module returns, so Ask Lazybox can then explain
 //! any pill the user sees.
 //!
+//! `StatusTag` is a superset of the pills the sidebar actually paints —
+//! the visible pills come from `status_pills`/`lifecycle_pill` in
+//! `lazybox_tui::components::sidebar::pills`, not from `StatusTag`
+//! directly (e.g. `Behind` is a `StatusTag` variant but renders no row
+//! pill). So the *documented set* is pinned to the real renderer by the
+//! `documented_status_pills_match_the_renderer` test in `tui`, which
+//! lives there because only `tui` can see both the renderer and this
+//! registry — that is the drift guard that would have caught a
+//! documented-but-unrendered pill.
+//!
 //! Not every marker is enum-backed: the passive row badges (` ARM `,
 //! ` FIX `, `⎇ local`, role letters, …) are rendered ad hoc from
 //! `Workspace` fields in `lazybox_tui::components::workspace_row`, so
@@ -33,9 +43,11 @@ pub struct MarkerDoc {
     pub when: &'static str,
 }
 
-/// Documentation for a single status pill, or `None` for the empty
-/// [`StatusTag::None`] (no pill rendered). Exhaustive over `StatusTag`,
-/// so a new variant can't ship without a meaning (#883).
+/// Documentation for a single status pill, or `None` for the variants
+/// the sidebar renders no pill for (`Behind`, `None`). Exhaustive over
+/// `StatusTag`, so a new variant can't ship without a decision here; the
+/// *set* of documented pills is pinned to what the real renderer emits
+/// by `documented_status_pills_match_the_renderer` in `tui` (#883).
 fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
     let doc = |label, meaning, when| {
         Some(MarkerDoc {
@@ -110,12 +122,14 @@ fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
             "CI is green and nothing more pressing applies.",
             "Shows when all checks passed and nothing more pressing applies.",
         ),
-        StatusTag::Behind => doc(
-            "BEHIND",
-            "The branch is behind its base — informational; update it to catch up.",
-            "Shows when the PR's branch is behind its base branch.",
-        ),
-        StatusTag::None => None,
+        // `Behind` and `None` render no status pill: the two-column
+        // renderer (`lazybox_tui::components::sidebar::status_pills`)
+        // has no arm for either. Behind-ness surfaces instead as the
+        // `⤓main`→`behind` track-main badge and the header tally, so
+        // documenting a "BEHIND" pill would describe something the row
+        // never shows. The `documented_status_pills_match_the_renderer`
+        // test in `tui` pins this set to what actually renders.
+        StatusTag::Behind | StatusTag::None => None,
     }
 }
 
@@ -130,7 +144,7 @@ fn agent_state_doc(state: &AgentState) -> MarkerDoc {
     };
     match state {
         AgentState::Working => doc(
-            "⟳ Working (animated spinner)",
+            "Working (an animated spinner)",
             "The agent is actively producing output or running a tool right now.",
             "Shows while the agent is mid-turn.",
         ),
@@ -212,8 +226,8 @@ const ROW_BADGES: &[MarkerDoc] = &[
         when: "Always present, as the row's leading badge.",
     },
     MarkerDoc {
-        label: "Runner letter (C / X / U / S)",
-        meaning: "The agent or shell running in the workspace: `C` claude, `X` codex, `U` cursor, `S` shell.",
+        label: "Runner letter (C / X / U / S), optionally jump-numbered",
+        meaning: "The agent or shell running in the workspace: `C` claude, `X` codex, `U` cursor, `S` shell. On the first nine agent workspaces it's prefixed by a 1–9 jump number (` 2 C `) that `]]<digit>` jumps to.",
         when: "Shows when the workspace has a live session.",
     },
     MarkerDoc {
@@ -246,12 +260,21 @@ pub fn row_badge_docs() -> &'static [MarkerDoc] {
 mod tests {
     use super::*;
 
-    /// Every rendered status pill has a non-empty meaning and when-clause,
-    /// and the count matches the enum (minus the no-pill `None`).
+    /// Every documented status pill has a non-empty meaning and
+    /// when-clause. The exact *set* (which `StatusTag` variants render a
+    /// pill) is pinned to the renderer by
+    /// `documented_status_pills_match_the_renderer` in `tui`; here we
+    /// only guard that each entry is filled in and the #883 quick win is
+    /// present. `Behind` and `None` render no pill, so this is a subset
+    /// of `StatusTag::ALL`.
     #[test]
     fn every_status_pill_is_documented() {
         let docs = status_pill_docs();
-        assert_eq!(docs.len(), StatusTag::ALL.len() - 1);
+        assert!(!docs.is_empty());
+        assert!(
+            docs.len() < StatusTag::ALL.len(),
+            "not every tag renders a pill"
+        );
         for doc in &docs {
             assert!(!doc.label.is_empty());
             assert!(!doc.meaning.is_empty(), "{}: empty meaning", doc.label);
@@ -259,6 +282,12 @@ mod tests {
         }
         // The quick win from #883: CHANGES must now be explainable.
         assert!(docs.iter().any(|d| d.label == "CHANGES"));
+        // Regression for the review finding: BEHIND is not a rendered
+        // row pill, so it must not be documented as one.
+        assert!(
+            !docs.iter().any(|d| d.label == "BEHIND"),
+            "BEHIND renders no status pill; documenting it reintroduces the drift #883 fixes"
+        );
     }
 
     /// Every agent state has a non-empty meaning, one doc per variant.

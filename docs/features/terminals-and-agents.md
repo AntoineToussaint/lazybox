@@ -98,10 +98,11 @@ prompt. When the daemon is local the default browser-launching flow already
 works; the browserless path is what you reach for on a remote or headless box.
 
 ### How it works (brief)
-`DaemonPty::spawn_inner` (`crates/server/src/pty.rs`) opens the PTY and inherits
-the daemon env, adding only `TERM=xterm-256color` / `COLORTERM=truecolor`; the
-tmux backend seeds `COLORTERM` the same way (`-e`) and sets `TERM` from its
-`default-terminal` conf. Browser launching lives only host-side
+`DaemonPty::spawn_inner` (`crates/server/src/pty.rs`, the raw-PTY backend's
+spawn path) opens the PTY and inherits the daemon env, adding only
+`TERM=xterm-256color` / `COLORTERM=truecolor`; the default tmux backend seeds
+`COLORTERM` the same way (`-e`) and sets `TERM` from its `default-terminal`
+conf. Browser launching lives only host-side
 in the client (`browser_argv` / `open_url`, `crates/tui-core/src/editors.rs`),
 which `]]u` drives (and `g o` for a workspace's PR/issue page) — never inside
 the agent PTY.

@@ -94,20 +94,6 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
             Err(_) => return,
         };
 
-        // A resize invalidates the persistent cursor slots: the
-        // shadow's cached rows and `last_visible_cursor`'s coordinates
-        // were captured in the previous geometry and mean nothing in
-        // the new one. Detected once here so both are reset together —
-        // otherwise the #844 blink carve-out could anchor a hidden
-        // cursor to a stale cell after a resize.
-        let shadow_needs_init = match self.shadow.as_ref() {
-            Some(b) => b.area != area,
-            None => true,
-        };
-        if shadow_needs_init {
-            *self.last_visible_cursor = None;
-        }
-
         // Cursor position (pre-extracted so the cell loops don't
         // pay an Option-deref per cell). Applied at the end of
         // render — NOT written into the shadow — so a cursor move
@@ -155,8 +141,12 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
         // (region scrolls under-report all the way to `Clean`). The
         // shadow now only backs the per-row FFI-error fallback below,
         // holding the last good content for a row whose cell iterator
-        // transiently fails. Reset it on resize (detected above) so the
-        // fallback never replays content sized for a different rect.
+        // transiently fails. Reset it on resize so the fallback never
+        // replays content sized for a different rect.
+        let shadow_needs_init = match self.shadow.as_ref() {
+            Some(b) => b.area != area,
+            None => true,
+        };
         if shadow_needs_init {
             *self.shadow = Some(Buffer::empty(area));
         }
@@ -1201,16 +1191,18 @@ mod tests {
         );
     }
 
-    /// A resize must invalidate the `last_visible_cursor` slot the #844
-    /// blink carve-out relies on: its coordinates were captured in the
-    /// old geometry. Otherwise a blinking cursor the app has hidden
-    /// (DECTCEM off) would be redrawn at that stale cell after the
-    /// viewport reflowed to a new size.
+    /// A resize must NOT drop the `last_visible_cursor` slot: the block
+    /// is always drawn at the *current* (in-bounds) viewport position and
+    /// the slot is only an equality gate, so a resize can't strand it on
+    /// a stale cell — but clearing it on resize would suppress the #192
+    /// steady-blink for the first post-resize frame whenever the cursor
+    /// is caught in its DECTCEM off-phase. Hold a blinking cursor at an
+    /// unchanged caret, hide it (a blink off-phase), re-render at a
+    /// narrower area, and require it to still render steadily.
     #[test]
-    fn resize_clears_stale_last_visible_cursor() {
+    fn resize_keeps_steady_blinking_cursor() {
         let mut h = Harness::new(10, 1);
-        // Blinking block cursor (DECSCUSR 1) shown at column 5 in the
-        // pre-resize geometry, right after "abcde".
+        // Blinking block cursor (DECSCUSR 1) shown at column 5, after "abcde".
         h.terminal.vt_write("\x1b[1 qabcde\x1b[?25h".as_bytes());
         let wide = h.render(Rect::new(0, 0, 10, 1));
         assert!(
@@ -1218,15 +1210,12 @@ mod tests {
             "the shown blinking cursor must be highlighted before resize",
         );
 
-        // The app hides the cursor (a blink off-phase). Re-render at a
-        // narrower area: the slot captured for the old geometry must not
-        // anchor a stray block after the reflow.
         h.terminal.vt_write(b"\x1b[?25l");
         let narrow = h.render(Rect::new(0, 0, 8, 1));
         assert_eq!(
             any_reversed(&narrow, Rect::new(0, 0, 8, 1)),
-            None,
-            "a hidden blinking cursor must not redraw at the pre-resize cell",
+            Some((5, 0)),
+            "the steady blinking cursor must survive a resize, not blink out",
         );
     }
 

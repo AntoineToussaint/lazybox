@@ -225,6 +225,17 @@ if [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI:-}" ] && [ -d "${ROOT}/.githooks" 
   fi
 fi
 
+# ── Register the desktop-contract merge driver ──────────────────────────
+# A wire-crate edit rewrites the generated protocol fingerprint, so a rebase
+# across one conflicts on apps/desktop/src/generated/* every time. The
+# `lazybox-contract` merge driver (see .gitattributes) resolves those by
+# regenerating instead of dropping markers. Like the hooks it's local config,
+# so setup registers it once per clone (shared config covers every worktree).
+# Skipped in CI — no rebases to resolve there.
+if [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI:-}" ] && [ -x "${ROOT}/scripts/install-merge-driver.sh" ]; then
+  "${ROOT}/scripts/install-merge-driver.sh"
+fi
+
 # ── Print activation hint ───────────────────────────────────────────────
 echo
 echo "Bootstrap complete. To use pinned zig in this shell:"

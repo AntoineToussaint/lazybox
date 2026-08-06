@@ -1,0 +1,9 @@
+# The desktop contract is generated from the Rust DTOs and carries a protocol
+# fingerprint hashed over the wire crates (see crates/ipc/build.rs), so any
+# edit under crates/{ipc,core}/src rewrites these files — and a rebase across
+# such an edit conflicts on them every time. The `lazybox-contract` merge
+# driver regenerates them from the merged tree instead of leaving markers.
+# Register it with `make setup` or `make install-merge-driver`; without it git
+# falls back to a normal (conflicting) text merge, which `make rebase-main`
+# then resolves the same way.
+apps/desktop/src/generated/* merge=lazybox-contract

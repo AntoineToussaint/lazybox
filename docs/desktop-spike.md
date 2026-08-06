@@ -53,7 +53,17 @@ The committed compatibility fixture is serialized from every desktop command
 and event shape. Frontend tests pin the protocol version, fingerprint, and
 variant coverage. The desktop CI job regenerates the types and fails on any
 diff, so a Rust desktop wire change cannot silently leave the frontend
-contract stale.
+contract stale. `make desktop-contract` runs both steps above with the pinned
+zig toolchain.
+
+Because the fingerprint is hashed over `crates/{ipc,core}/src` + `Cargo.lock`,
+*any* edit under those crates rewrites `apps/desktop/src/generated/*` — so a
+branch rebased across such an edit conflicts on the generated files every time.
+That is automated away: `make setup` (or `make install-merge-driver`) registers
+a `lazybox-contract` git merge driver that regenerates the files from the merged
+tree instead of leaving conflict markers, and `make rebase-main` rebases onto
+`origin/main`, resolving any contract-only conflict the same way (other
+conflicts stop for manual resolution).
 
 ## Terminal transport
 

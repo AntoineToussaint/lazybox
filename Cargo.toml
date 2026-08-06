@@ -13,6 +13,7 @@ members = [
     "crates/tui-term",
     "crates/ipc",
     "crates/e2e-channel",
+    "crates/relay",
     "crates/server",
     "crates/agents",
     "crates/linear-provider",
@@ -109,6 +110,7 @@ lazybox-tui-core    = { path = "crates/tui-core" }
 
 # ── Daemon-side crates ─────────────────────────────────────────────────
 lazybox-ipc       = { path = "crates/ipc" }
+lazybox-relay     = { path = "crates/relay" }
 lazybox-agents    = { path = "crates/agents" }
 
 # ── Third-party ────────────────────────────────────────────────────────

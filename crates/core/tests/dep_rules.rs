@@ -58,6 +58,10 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ("lazybox-git-ops", set(&["lazybox-core"])),
         ("lazybox-ipc", set(&["lazybox-core"])),
         ("lazybox-linear", set(&["lazybox-auth", "lazybox-core"])),
+        // The rendezvous relay is a standalone, codefly-hosted deployable
+        // and a dumb ciphertext forwarder — it depends on no internal
+        // crate so it can build and deploy on its own.
+        ("lazybox-relay", set(&[])),
         (
             "lazybox-server",
             set(&[
@@ -111,6 +115,7 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-git-ops",
                 "lazybox-ipc",
                 "lazybox-linear",
+                "lazybox-relay",
                 "lazybox-server",
                 "lazybox-slack",
                 "lazybox-store",

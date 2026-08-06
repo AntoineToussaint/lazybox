@@ -1861,6 +1861,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazybox-relay"
+version = "0.1.9"
+dependencies = [
+ "bincode",
+ "serde",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "lazybox-server"
 version = "0.1.9"
 dependencies = [
@@ -1965,6 +1977,7 @@ dependencies = [
  "lazybox-git-ops",
  "lazybox-ipc",
  "lazybox-linear",
+ "lazybox-relay",
  "lazybox-server",
  "lazybox-slack",
  "lazybox-store",
@@ -1978,6 +1991,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "which",
 ]
 

@@ -31,6 +31,7 @@
 // build-guard fetch (octocrab), provider detection, setup persistence,
 // the Slack CLI flows, and the test harness.
 mod build_guard;
+mod serve;
 mod setup_detect;
 mod setup_persist;
 mod slack_init;
@@ -290,6 +291,9 @@ Remote & services:
                               needs LAZYBOX_API_TOKEN or --insecure-no-auth;
                               loopback only — use an encrypted tunnel remotely)
   lazybox --connect <socket>  attach a TUI to a running daemon
+  lazybox serve --relay <a>   dial out to a rendezvous relay so clients can
+                              reach this box's daemon (behind NAT, no ports;
+                              --account <id>, LAZYBOX_RELAY env)
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
   lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots;
@@ -371,6 +375,7 @@ async fn main() -> anyhow::Result<()> {
     }
     match args.first().map(String::as_str) {
         Some("server") => server_subcommand(&args[1..]).await,
+        Some("serve") => serve::serve_subcommand(&args[1..]).await,
         Some("slack") => slack_subcommand(&args[1..]).await,
         Some("scan") => scan_subcommand(&args[1..]).await,
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,

@@ -2370,6 +2370,14 @@ impl<T: TerminalAdapter> Model<T> {
                 self.escape_latch.disarm();
                 self.flush_held_escape_char();
                 self.redraw = true;
+            } else if self.focus == PaneFocus::Sidebar {
+                // A lone `]` in the sidebar that never saw a second press
+                // resolves to the snippet browser once the chord window
+                // lapses (#871) — the sidebar mirror of the literal-`]`
+                // flush above.
+                self.escape_latch.disarm();
+                self.resolve_held_sidebar_escape();
+                self.redraw = true;
             } else {
                 self.escape_latch.disarm();
             }

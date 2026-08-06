@@ -4482,6 +4482,176 @@ snippets:
         assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
     }
 
+    // ── Sidebar `]]` leader parity (issue #871) ─────────────────────
+
+    /// Two agent workspaces (`github:o/r#1` → terminal 1, `github:o/r#2`
+    /// → terminal 2), a one-snippet library, sidebar focused with the
+    /// cursor on workspace #1 — the fixture that proves a sidebar `]]s`
+    /// addresses the cursor workspace's agent, not the other workspace's.
+    fn model_two_agent_workspaces_sidebar(
+        label: &str,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        use lazybox_ipc::{Event as IpcEvent, TerminalId};
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            label,
+            "snippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+        ));
+        let a = WorkspaceKey::new("github:o/r#1");
+        let b = WorkspaceKey::new("github:o/r#2");
+        let a_key: SessionKey = (&a).into();
+        let b_key: SessionKey = (&b).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![
+                lazybox_core::Workspace::empty(a, "main", chrono::Utc::now()),
+                lazybox_core::Workspace::empty(b, "main", chrono::Utc::now()),
+            ],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        for (tid, key) in [(1, &a_key), (2, &b_key)] {
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: key.clone(),
+                kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        m.set_focus(PaneFocus::Sidebar);
+        assert!(m.sidebar.focus_workspace_key(&a_key));
+        m
+    }
+
+    /// `]]` arms in the sidebar too, and its menu offers only the
+    /// workspace-addressed subset (snippets/skills/recall/history/urls) —
+    /// no terminal-only tile/focus rows.
+    #[test]
+    fn sidebar_double_bracket_arms_leader_with_workspace_subset() {
+        let mut m = model_two_agent_workspaces_sidebar("sidebar-arm");
+        m.dispatch_key(esc_key());
+        assert!(!m.terminal_leader_pending(), "one `]` only holds");
+        m.dispatch_key(esc_key());
+        assert!(m.terminal_leader_pending(), "`]]` arms the sidebar leader");
+        assert_eq!(m.focus(), PaneFocus::Sidebar, "stays in the sidebar");
+        let rows = m.terminal_leader_menu_rows();
+        let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["s", "l", "r", "h", "u"],
+            "sidebar menu is the workspace-addressed subset only",
+        );
+    }
+
+    /// The headline acceptance: `]]s` from the sidebar delivers the picked
+    /// snippet to the *cursor* workspace's agent (terminal 1) — NOT the
+    /// active/focused terminal (terminal 2) — via `DeliverSnippet`.
+    #[test]
+    fn sidebar_snippet_send_delivers_to_cursor_workspace_only() {
+        use lazybox_ipc::TerminalId;
+        let mut m = model_two_agent_workspaces_sidebar("sidebar-send");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('s'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert!(matches!(m.top_modal(), Some(Id::SnippetPicker)));
+        assert_eq!(
+            m.leader_target,
+            Some(TerminalId(1)),
+            "retarget resolves the cursor workspace, not the active terminal",
+        );
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
+        match cmds.as_slice() {
+            [
+                IpcCommand::DeliverSnippet {
+                    terminal_id,
+                    body,
+                    submit,
+                    ..
+                },
+            ] => {
+                assert_eq!(
+                    *terminal_id,
+                    TerminalId(1),
+                    "delivered to the cursor workspace"
+                );
+                assert_eq!(body, "review the diff");
+                assert!(*submit, "a picked snippet submits");
+            }
+            other => panic!("expected one DeliverSnippet to terminal 1, got {other:?}"),
+        }
+        // The retarget is scoped to that one pick — the next picker falls
+        // back to the focused terminal.
+        assert_eq!(m.leader_target, None, "leader_target cleared on modal pop");
+    }
+
+    /// A terminal-only chord (`]]f` focus mode) is inert from the sidebar:
+    /// it isn't offered and resolves to nothing rather than toggling.
+    #[test]
+    fn sidebar_leader_ignores_terminal_only_commands() {
+        let mut m = model_two_agent_workspaces_sidebar("sidebar-inert");
+        m.dispatch_key(esc_key());
+        m.dispatch_key(esc_key());
+        m.dispatch_key(RealmKey::new(Key::Char('f'), RealmMods::NONE));
+        assert!(!m.terminal_leader_pending(), "leader consumed");
+        assert!(!m.focus_mode, "`]]f` does nothing from the sidebar");
+        assert_eq!(m.focus(), PaneFocus::Sidebar);
+    }
+
+    /// A lone `]` in the sidebar keeps its browse meaning: once resolved
+    /// (here by the next non-`]` key) it opens the read-only snippet
+    /// browser rather than arming the leader.
+    #[test]
+    fn sidebar_lone_bracket_opens_snippet_browser() {
+        let mut m = model_two_agent_workspaces_sidebar("sidebar-browse");
+        m.dispatch_key(esc_key());
+        assert!(!m.terminal_leader_pending());
+        m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
+        assert!(
+            matches!(m.top_modal(), Some(Id::SnippetBrowser)),
+            "a lone `]` browses the snippet library",
+        );
+    }
+
+    /// Session-less but spawnable cursor workspace: `]]s` reuses the
+    /// broadcast flow (#836 spawn-if-none) rather than dropping the send.
+    #[test]
+    fn sidebar_snippet_send_session_less_falls_back_to_broadcast() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            "sidebar-sessionless",
+            "snippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+        ));
+        let a = WorkspaceKey::new("github:o/r#1");
+        let a_key: SessionKey = (&a).into();
+        // A repo/project scope makes the session-less workspace spawnable
+        // (`worktree_scope().is_some()`), the #836 case broadcast covers.
+        let mut ws = lazybox_core::Workspace::empty(a, "main", chrono::Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        m.set_focus(PaneFocus::Sidebar);
+        assert!(m.sidebar.focus_workspace_key(&a_key));
+        let mut cmds = Vec::new();
+        m.run_sidebar_leader_cmd(
+            crate::realm::model::terminal_leader::LeaderCmd::Snippets,
+            &mut cmds,
+        );
+        assert!(
+            matches!(m.top_modal(), Some(Id::BroadcastSnippet)),
+            "a session-less workspace routes through the broadcast flow",
+        );
+    }
+
     /// `]]<unbound>` — a key that isn't a leader command — cancels back
     /// to the terminal without opening the picker or leaving (#252). Only
     /// `s`/`f`/`q`/`x`/digit/`` ` ``/the split-and-arrow tile chords are
@@ -6154,10 +6324,12 @@ mod modal_input_responsiveness_tests {
         assert_eq!(m.sidebar.default_agent(), "codex");
     }
 
-    /// `]` opens the read-only snippets browser from the sidebar
-    /// (catalog → dispatch → mount), and Esc pops it. The browser is a
-    /// global, so it fires with no workspace selected — the discovery
-    /// entry point issue #237 asks for outside the `]]` terminal leader.
+    /// `]` opens the read-only snippets browser from the sidebar, and Esc
+    /// pops it. Since #871 made `]]` a sidebar leader too, the first `]` is
+    /// held pending a possible second — a lone press resolves to the
+    /// browser once a non-`]` key follows (mirroring the terminal's held
+    /// literal `]`). The browser is a global, so it fires with no
+    /// workspace selected — the discovery entry point issue #237 asks for.
     #[test]
     fn bracket_opens_and_closes_snippet_browser() {
         let mut m = build_model();
@@ -6165,6 +6337,8 @@ mod modal_input_responsiveness_tests {
 
         assert!(m.top_modal().is_none(), "no modal before ]");
         m.dispatch_key(KeyEvent::new(Key::Char(']'), KeyModifiers::NONE));
+        assert!(m.top_modal().is_none(), "a lone `]` is held pending `]]`");
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
         assert_eq!(m.top_modal(), Some(&Id::SnippetBrowser));
 
         m.dispatch_modal_key(key(Key::Esc));

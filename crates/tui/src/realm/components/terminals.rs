@@ -322,6 +322,12 @@ impl Terminals {
         self.inner.focused_urls()
     }
 
+    /// Like [`Self::focused_urls`] but scans an explicit terminal — the
+    /// sidebar `]]u` scans the cursor workspace's terminal (#871).
+    pub fn urls_for(&mut self, id: TerminalId) -> Option<Vec<String>> {
+        self.inner.urls_for(id)
+    }
+
     /// Forward `agent_terminal_for` — the agent terminal for a session
     /// (live, else a kept exited pane). Resolves the handoff source so a
     /// finished-and-exited agent's final output can still be captured.
@@ -446,6 +452,15 @@ impl Terminals {
         self.inner.recall_prompt()
     }
 
+    /// Like [`Self::recall_prompt`] but for an explicit terminal — the
+    /// sidebar `]]r` targets the cursor workspace's agent (#871).
+    pub fn recall_prompt_for(
+        &mut self,
+        id: lazybox_ipc::TerminalId,
+    ) -> Option<(lazybox_ipc::TerminalId, String)> {
+        self.inner.recall_prompt_for(id)
+    }
+
     /// Mirror bytes written straight to a terminal's PTY (e.g. a
     /// snippet body submitted in one shot) into that terminal's
     /// user-message tracker, so the pinned recap reflects commands
@@ -478,6 +493,15 @@ impl Terminals {
         &self,
     ) -> Option<(lazybox_ipc::TerminalId, Vec<lazybox_ipc::UserPrompt>)> {
         self.inner.focused_prompt_history()
+    }
+
+    /// Like [`Self::focused_prompt_history`] but for an explicit terminal —
+    /// the sidebar `]]h` targets the cursor workspace's agent (#871).
+    pub fn prompt_history_for(
+        &self,
+        id: lazybox_ipc::TerminalId,
+    ) -> Option<(lazybox_ipc::TerminalId, Vec<lazybox_ipc::UserPrompt>)> {
+        self.inner.prompt_history_for(id)
     }
 
     /// Encode a mouse event for the focused terminal. Returns the

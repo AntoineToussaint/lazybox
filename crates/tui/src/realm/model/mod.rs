@@ -1245,6 +1245,14 @@ pub struct Model<T: TerminalAdapter> {
     /// tab movement, #286); `Enter` fires the highlighted command. Reset
     /// on every (dis)arm of the leader (#343).
     terminal_leader_highlight: Option<usize>,
+    /// When the `]]` leader was armed from the *sidebar* (#871), the
+    /// terminal a workspace-addressed command (`]]s`/`]]l`/`]]h`) should
+    /// deliver to — the cursor workspace's agent, resolved when the
+    /// command mounts its picker and consumed at pick time so the
+    /// snippet/skill/history flow retargets away from the focused tile.
+    /// `None` for a terminal-armed leader (the picker falls back to the
+    /// active terminal). Cleared whenever a modal pops.
+    leader_target: Option<lazybox_ipc::TerminalId>,
     /// Pending `--workspace` / `--session` preselect from the CLI.
     /// Applied after the daemon's first Snapshot — by then the
     /// sidebar has the full workspace list and `focus_workspace_key`
@@ -1778,6 +1786,7 @@ impl<T: TerminalAdapter> Model<T> {
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             terminal_leader_armed: false,
             terminal_leader_highlight: None,
+            leader_target: None,
             last_click: None,
             footer_overflow_rect: None,
             terminal_user_typed_since_focus: false,
@@ -2247,6 +2256,16 @@ impl<T: TerminalAdapter> Model<T> {
     /// snippet key as a [`ChoicePayload::Text`] so `handle_choice_picked`
     /// resolves the pick back to a snippet via `self.snippets.get(...)`
     /// regardless of the picker's row order.
+    /// The terminal a snippet / skill pick should deliver to: the
+    /// sidebar `]]` leader's resolved cursor-workspace target (#871) when
+    /// one is armed, else the focused terminal. Consulted at pick time so
+    /// a picker opened from the sidebar retargets away from the focused
+    /// tile without the terminal path having to change.
+    pub(crate) fn picker_target_terminal(&self) -> Option<lazybox_ipc::TerminalId> {
+        self.leader_target
+            .or_else(|| self.terminals.active_terminal_id())
+    }
+
     pub(crate) fn mount_snippet_picker(&mut self, initial_filter: String) {
         use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
@@ -2280,14 +2299,27 @@ impl<T: TerminalAdapter> Model<T> {
     /// trigger. Skills only apply to an agent conversation, so a
     /// non-agent (shell/log) terminal gets a nudge instead of the picker.
     pub(crate) fn mount_skill_picker(&mut self, initial_filter: String) {
-        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
-        if matches!(self.modal_stack.last(), Some(Id::SkillPicker)) {
-            return;
-        }
         let Some(terminal_id) = self.terminals.active_terminal_id() else {
             self.flash_info("no active terminal — open an agent session first");
             return;
         };
+        let worktree = self.active_terminal_worktree();
+        self.mount_skill_picker_for(initial_filter, terminal_id, worktree);
+    }
+
+    /// Body of [`Self::mount_skill_picker`] against an explicit target
+    /// terminal + worktree, so the sidebar `]]l` (#871) can point it at
+    /// the cursor workspace's agent instead of the focused tile.
+    pub(crate) fn mount_skill_picker_for(
+        &mut self,
+        initial_filter: String,
+        terminal_id: lazybox_ipc::TerminalId,
+        worktree: Option<std::path::PathBuf>,
+    ) {
+        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
+        if matches!(self.modal_stack.last(), Some(Id::SkillPicker)) {
+            return;
+        }
         if !self.terminals.terminal_is_agent(terminal_id) {
             self.flash_info("skills apply to agent sessions — focus one first");
             return;
@@ -2301,7 +2333,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("skills discovery needs a local daemon — unavailable over --connect");
             return;
         }
-        let skills = lazybox_config::discover_skills(self.active_terminal_worktree().as_deref());
+        let skills = lazybox_config::discover_skills(worktree.as_deref());
         if skills.is_empty() {
             self.flash_info("no skills found — add SKILL.md folders under .claude/skills/");
             return;
@@ -2335,7 +2367,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// `first()` therefore yields a valid repo root regardless of which
     /// session the focused terminal belongs to (mirrors the editor flow).
     fn active_terminal_worktree(&self) -> Option<std::path::PathBuf> {
-        let session_key = self.terminals.active_session()?;
+        self.workspace_worktree(self.terminals.active_session()?)
+    }
+
+    /// The repo root under which a workspace's `.claude/skills/` are
+    /// scanned — its first session's worktree. Used by the sidebar `]]l`
+    /// (#871), which scans the cursor workspace rather than the focused
+    /// terminal's. `None` when the workspace carries no session yet. See
+    /// [`Self::active_terminal_worktree`] for why `first()` is sound.
+    fn workspace_worktree(
+        &self,
+        session_key: &lazybox_core::SessionKey,
+    ) -> Option<std::path::PathBuf> {
         self.sidebar
             .workspace_by_key(session_key)?
             .sessions
@@ -2348,12 +2391,21 @@ impl<T: TerminalAdapter> Model<T> {
     /// snippet-pick step (skipped straight to compose when the snippet
     /// library is empty). No selection → a footer nudge instead.
     pub(crate) fn mount_broadcast_picker(&mut self) {
-        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
         let targets = self.sidebar.selected_broadcast_keys();
         if targets.is_empty() {
             self.flash_info("nothing selected — mark workspaces with v first");
             return;
         }
+        self.mount_broadcast_picker_for(targets);
+    }
+
+    /// Start the broadcast flow against an explicit target list. Shared by
+    /// the `Shift-B` multi-select path and the sidebar `]]s` single-target
+    /// send to a session-less workspace (#871), which reuses broadcast's
+    /// spawn-if-none + confirm so a snippet can start the default agent
+    /// there (#836).
+    pub(crate) fn mount_broadcast_picker_for(&mut self, targets: Vec<lazybox_core::SessionKey>) {
+        use crate::realm::components::snippet_picker::{PickerRow, SnippetPicker};
         self.set_modal_flow(ModalFlow::Broadcast {
             draft: BroadcastDraft {
                 targets,
@@ -2508,14 +2560,32 @@ impl<T: TerminalAdapter> Model<T> {
     /// footer hint) when the focused terminal isn't an agent or has no
     /// history yet.
     pub(crate) fn mount_prompt_history_picker(&mut self) {
-        use crate::realm::components::prompt_history_picker::{PromptHistoryPicker, PromptRow};
-        if matches!(self.modal_stack.last(), Some(Id::PromptHistoryPicker)) {
-            return;
-        }
         let Some((terminal_id, history)) = self.terminals.focused_prompt_history() else {
             self.flash_info("no prompts sent in this session yet");
             return;
         };
+        self.mount_prompt_history_picker_with(terminal_id, history);
+    }
+
+    /// Open the prompt-history picker for an explicit terminal — the
+    /// sidebar `]]h` (#871) addresses the cursor workspace's agent.
+    pub(crate) fn mount_prompt_history_picker_for(&mut self, terminal_id: lazybox_ipc::TerminalId) {
+        let Some((terminal_id, history)) = self.terminals.prompt_history_for(terminal_id) else {
+            self.flash_info("no prompts sent in this session yet");
+            return;
+        };
+        self.mount_prompt_history_picker_with(terminal_id, history);
+    }
+
+    fn mount_prompt_history_picker_with(
+        &mut self,
+        terminal_id: lazybox_ipc::TerminalId,
+        history: Vec<lazybox_ipc::UserPrompt>,
+    ) {
+        use crate::realm::components::prompt_history_picker::{PromptHistoryPicker, PromptRow};
+        if matches!(self.modal_stack.last(), Some(Id::PromptHistoryPicker)) {
+            return;
+        }
         let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
         // Each row pairs its display summary with the *full* prompt text
         // it re-sends — the summary is truncated for display, so the
@@ -3677,6 +3747,20 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no terminal focused");
             return;
         };
+        self.open_urls(urls);
+    }
+
+    /// Like [`Self::open_terminal_urls`] but scans an explicit terminal —
+    /// the sidebar `]]u` (#871) scans the cursor workspace's terminal.
+    fn open_terminal_urls_for(&mut self, terminal_id: lazybox_ipc::TerminalId) {
+        let Some(urls) = self.terminals.urls_for(terminal_id) else {
+            self.flash_info("no running session here");
+            return;
+        };
+        self.open_urls(urls);
+    }
+
+    fn open_urls(&mut self, urls: Vec<String>) {
         match urls.len() {
             0 => self.flash_info("no URLs on screen"),
             1 => self.open_external_url(&urls[0]),
@@ -4271,7 +4355,21 @@ impl<T: TerminalAdapter> Model<T> {
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.
         let keymap: Vec<crate::pane::Binding> = match self.focus {
-            PaneFocus::Sidebar => self.sidebar.contextual_bindings(&self.catalog, self.remote),
+            PaneFocus::Sidebar => {
+                let mut bindings = self.sidebar.contextual_bindings(&self.catalog, self.remote);
+                // The `]]` leader also arms from the sidebar (#871),
+                // addressing the cursor workspace's agent. It's not a
+                // catalog action, so append its gateway hint here — the
+                // popup carries the individual `]]s`/`]]l`/… commands.
+                if self.sidebar.selected_workspace().is_some() {
+                    let esc = self.ui_defaults.terminal_escape_char;
+                    bindings.push(crate::pane::Binding {
+                        keys: std::borrow::Cow::Owned(format!("{esc}{esc}")),
+                        label: std::borrow::Cow::Borrowed("send"),
+                    });
+                }
+                bindings
+            }
             PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
             PaneFocus::Terminals => self
                 .terminals

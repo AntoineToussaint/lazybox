@@ -566,6 +566,7 @@ pub enum ActionPriority {
 /// Priority order matters: the first matching variant in `for_task`
 /// wins. Comments at each branch explain why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum StatusTag {
     /// PR is merged. Past-tense state — trumps everything CI / review
     /// related because there's nothing actionable left.
@@ -603,6 +604,34 @@ pub enum StatusTag {
 }
 
 impl StatusTag {
+    /// Number of variants in this contiguous `repr(u8)` enum. `None`
+    /// deliberately stays last so this stays a compile-time completeness
+    /// check for [`Self::ALL`].
+    const COUNT: usize = Self::None as usize + 1;
+
+    /// Every variant, in the declaration (severity) order. The array
+    /// length is tied to the discriminant count, so omitting a
+    /// newly-added variant is a compile error. The Ask-Lazybox marker
+    /// registry (`lazybox_tui_core::markers`) iterates this so a new
+    /// status pill can never ship without a documented meaning (#883).
+    pub const ALL: [StatusTag; Self::COUNT] = [
+        Self::Merged,
+        Self::Closed,
+        Self::Conflict,
+        Self::CiFailed,
+        Self::CiMixed,
+        Self::ChangesRequested,
+        Self::Queued,
+        Self::Draft,
+        Self::Ready,
+        Self::Approved,
+        Self::ReviewPending,
+        Self::CiRunning,
+        Self::CiOk,
+        Self::Behind,
+        Self::None,
+    ];
+
     pub fn label(&self) -> &'static str {
         match self {
             Self::Merged => "MERGED",

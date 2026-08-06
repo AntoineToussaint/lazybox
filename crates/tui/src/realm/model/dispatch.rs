@@ -800,16 +800,10 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::ToggleAutoMerge => {
                 let workspace = self.sidebar.selected_workspace().cloned();
-                // Resolve the configured allowlist so arming a
-                // non-opted-in third-party PR is refused with a reason
-                // rather than lighting a pill that never fires (#845).
-                let policy = lazybox_config::Config::load()
-                    .map(|c| c.merge_on_green.to_policy())
-                    .unwrap_or_default();
                 // Explicit variant list — a new Intent variant must be
                 // triaged here at compile time, not silently dropped.
                 use crate::intent::Intent;
-                match crate::intent::resolve_toggle_auto_merge(workspace.as_ref(), &policy) {
+                match crate::intent::resolve_toggle_auto_merge(workspace.as_ref()) {
                     Intent::SetAutoMergeOnGreen {
                         workspace_key,
                         enabled,

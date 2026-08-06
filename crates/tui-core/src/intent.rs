@@ -566,36 +566,25 @@ pub use lazybox_core::policy::merge_block_reason;
 /// issue-only or empty workspace has nothing to merge, so we surface
 /// a `Notice` instead of arming a flag that could never fire.
 ///
-/// The transient CI / conflict / review guards live in
-/// [`should_auto_merge`] (the daemon trigger), not here — arming is the
-/// deliberate way to *wait through* a red or pending CI. But the
-/// **author gate** is durable: arming merge-on-green on a third party's
-/// PR that isn't opted in (`merge_on_green.allow_authors`) would never
-/// fire, and letting the `ARM` pill light as if it were live is exactly
-/// the silent no-op issue #845 reports. So we refuse that arm up front
-/// with the reason, instead of accepting it into a pill that does
-/// nothing. `policy` is the resolved allowlist (empty = own PRs only).
-pub fn resolve_toggle_auto_merge(
-    workspace: Option<&Workspace>,
-    policy: &lazybox_core::MergeOnGreenPolicy,
-) -> Intent {
+/// Deliberately **config-agnostic**: every eligibility guard — the
+/// transient CI / conflict / review states *and* the durable author
+/// gate — is evaluated by the daemon, which holds the authoritative
+/// `merge_on_green.allow_authors` config. A client (especially a remote
+/// `--connect` session whose local config differs) must not pre-judge
+/// the author gate here, or it would refuse an arm the daemon would
+/// honor. Arming an ineligible PR is not silent: the daemon refuses the
+/// author gate at arm time (its `set_auto_merge_on_green`) and surfaces
+/// every transient stand-down through the merge attempt.
+pub fn resolve_toggle_auto_merge(workspace: Option<&Workspace>) -> Intent {
     let Some(ws) = workspace else {
         return Intent::NoOp;
     };
-    let Some(pr) = ws.pr.as_ref() else {
+    if ws.pr.is_none() {
         return Intent::Notice("auto-merge on green applies to a PR".into());
-    };
-    let enabling = !ws.auto_merge_on_green;
-    if enabling && pr.role != lazybox_core::TaskRole::Author && !policy.allows_author(&pr.author) {
-        return Intent::Notice(
-            "won't auto-merge: only your own PRs auto-merge — add this author to \
-             merge_on_green.allow_authors to allow it"
-                .into(),
-        );
     }
     Intent::SetAutoMergeOnGreen {
         workspace_key: ws.key.clone(),
-        enabled: enabling,
+        enabled: !ws.auto_merge_on_green,
     }
 }
 
@@ -1668,16 +1657,11 @@ mod tests {
 
     // ── Auto-merge toggle + trigger ──────────────────────────────
 
-    /// The default (own-PRs-only) allowlist.
-    fn own() -> lazybox_core::MergeOnGreenPolicy {
-        lazybox_core::MergeOnGreenPolicy::default()
-    }
-
     #[test]
     fn toggle_auto_merge_flips_the_arm() {
         let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
         assert!(!ws.auto_merge_on_green);
-        match resolve_toggle_auto_merge(Some(&ws), &own()) {
+        match resolve_toggle_auto_merge(Some(&ws)) {
             Intent::SetAutoMergeOnGreen {
                 workspace_key,
                 enabled,
@@ -1688,9 +1672,26 @@ mod tests {
             other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
         }
         ws.auto_merge_on_green = true;
-        match resolve_toggle_auto_merge(Some(&ws), &own()) {
+        match resolve_toggle_auto_merge(Some(&ws)) {
             Intent::SetAutoMergeOnGreen { enabled, .. } => {
                 assert!(!enabled, "toggling an armed workspace disarms it");
+            }
+            other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
+        }
+    }
+
+    /// The toggle is deliberately config-agnostic: even a third party's
+    /// PR arms here (the daemon's `set_auto_merge_on_green` owns the
+    /// author-gate refusal against its authoritative config, so a remote
+    /// client can't wrongly pre-refuse it — issue #845).
+    #[test]
+    fn toggle_auto_merge_arms_a_non_own_pr_leaving_the_gate_to_the_daemon() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        ws.pr.as_mut().unwrap().role = TaskRole::Reviewer;
+        ws.pr.as_mut().unwrap().author = "dependabot[bot]".into();
+        match resolve_toggle_auto_merge(Some(&ws)) {
+            Intent::SetAutoMergeOnGreen { enabled, .. } => {
+                assert!(enabled, "arming is client-config-agnostic")
             }
             other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
         }
@@ -1699,7 +1700,7 @@ mod tests {
     #[test]
     fn toggle_auto_merge_on_issue_surfaces_notice() {
         let ws = issue("o/r#42");
-        match resolve_toggle_auto_merge(Some(&ws), &own()) {
+        match resolve_toggle_auto_merge(Some(&ws)) {
             Intent::Notice(msg) => assert!(msg.contains("PR"), "{msg}"),
             other => panic!("expected Notice, got {other:?}"),
         }
@@ -1707,40 +1708,7 @@ mod tests {
 
     #[test]
     fn toggle_auto_merge_no_workspace_is_noop() {
-        assert_eq!(resolve_toggle_auto_merge(None, &own()), Intent::NoOp);
-    }
-
-    /// Arming merge-on-green on a third party's PR that isn't opted in is
-    /// refused with the reason — no dead `ARM` pill (issue #845). Opting
-    /// the author in lets the same arm through.
-    #[test]
-    fn toggle_auto_merge_refuses_non_own_pr_until_opted_in() {
-        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().role = TaskRole::Reviewer;
-        ws.pr.as_mut().unwrap().author = "dependabot[bot]".into();
-
-        match resolve_toggle_auto_merge(Some(&ws), &own()) {
-            Intent::Notice(msg) => assert!(msg.contains("your own PRs"), "{msg}"),
-            other => panic!("expected a refusal Notice, got {other:?}"),
-        }
-
-        let allowed = lazybox_core::MergeOnGreenPolicy::from_allow_authors(["dependabot"]);
-        match resolve_toggle_auto_merge(Some(&ws), &allowed) {
-            Intent::SetAutoMergeOnGreen { enabled, .. } => {
-                assert!(enabled, "an opted-in author arms normally")
-            }
-            other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
-        }
-
-        // Disarming an already-armed non-own PR is always allowed (the
-        // guard only gates *enabling*).
-        ws.auto_merge_on_green = true;
-        match resolve_toggle_auto_merge(Some(&ws), &own()) {
-            Intent::SetAutoMergeOnGreen { enabled, .. } => {
-                assert!(!enabled, "disarming is never refused")
-            }
-            other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
-        }
+        assert_eq!(resolve_toggle_auto_merge(None), Intent::NoOp);
     }
 
     // ── Track-main toggle ────────────────────────────────────────

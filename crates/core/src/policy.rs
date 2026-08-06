@@ -127,6 +127,23 @@ impl MergeOnGreenPolicy {
     }
 }
 
+/// User-facing phrase for the merge-on-green author gate. Shared so the
+/// daemon's arm-time refusal, the merge attempt's stand-down, and
+/// [`auto_merge_block_reason`] all name the block identically.
+pub const NON_AUTHOR_BLOCK: &str = "only your own PRs auto-merge";
+
+/// Does the merge-on-green **author gate** alone block this PR — it isn't
+/// yours ([`crate::TaskRole::Author`]) and its author isn't opted in via
+/// `policy`? Unlike the CI / review / conflict guards, this is *stable*
+/// across a poll: a PR's author never changes, nor does your relationship
+/// to it. That lets callers decide it against a stored snapshot — the
+/// daemon refuses the arm up front on this, and the merge attempt
+/// short-circuits on it before spending an API call on a PR that can
+/// never merge.
+pub fn author_gate_blocks(pr: &Task, policy: &MergeOnGreenPolicy) -> bool {
+    pr.role != crate::TaskRole::Author && !policy.allows_author(&pr.author)
+}
+
 /// Why this PR can't be merged from lazybox right now, as a
 /// user-facing phrase — or `None` when nothing blocks it. Drives both
 /// the merge-ready gate (`resolve_merge` in `lazybox-tui-core`) and the
@@ -201,8 +218,8 @@ pub fn auto_merge_block_reason(
     if pr.auto_merge_enabled {
         return Some("GitHub's native auto-merge is already enabled");
     }
-    if pr.role != crate::TaskRole::Author && !policy.allows_author(&pr.author) {
-        return Some("only your own PRs auto-merge");
+    if author_gate_blocks(pr, policy) {
+        return Some(NON_AUTHOR_BLOCK);
     }
     if pr.ci != crate::CiStatus::Success {
         return Some("CI isn't green");

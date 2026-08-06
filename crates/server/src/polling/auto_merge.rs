@@ -14,8 +14,9 @@
 //!
 //! - [`signal_for`] projects a freshly-committed workspace onto a
 //!   [`Signal`] using the shared core predicate
-//!   ([`lazybox_core::should_auto_merge`] — the same one the TUI renders
-//!   its pill from).
+//!   ([`lazybox_core::should_auto_merge`]). It fires author-agnostically
+//!   ([`lazybox_core::MergeOnGreenPolicy::allow_all`]); the authoritative
+//!   author gate runs in the attempt against the configured allowlist.
 //! - [`plan`] runs the one-shot latch ([`AutoMergeMemory`]) and decides
 //!   whether to dispatch an attempt.
 //! - [`run_attempt`] is the attempt itself: **re-fetch the PR fresh**
@@ -142,7 +143,7 @@ pub fn signal_for(ws: &Workspace) -> Signal {
 /// attempts are latched to at most one per green head, so a config read
 /// here is rare, and reading fresh means an edited allowlist takes
 /// effect without a daemon restart.
-fn merge_on_green_policy() -> lazybox_core::MergeOnGreenPolicy {
+pub(crate) fn merge_on_green_policy() -> lazybox_core::MergeOnGreenPolicy {
     lazybox_config::Config::load()
         .map(|c| c.merge_on_green.to_policy())
         .unwrap_or_default()

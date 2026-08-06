@@ -8326,6 +8326,134 @@ mod merge_focus_follow_tests {
             }
         )));
     }
+
+    /// #899 regression: an inherently single-target destructive action
+    /// (`x c` close-issue) must stay focused-only even under a `v`
+    /// selection — before the fix it swept the whole set behind the
+    /// generic "Archive N workspaces?" prompt and closed every marked
+    /// issue.
+    #[test]
+    fn close_issue_under_selection_stays_focused_only() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", false, Duration::hours(1));
+        let focus_key = SessionKey::from(&a.key);
+        seed_and_select(
+            &mut m,
+            vec![a, workspace("owner/repo#2", false, Duration::hours(2))],
+        );
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+        assert!(m.sidebar.focus_workspace_key(&focus_key));
+
+        assert!(m.dispatch_action(&Action::CloseIssue).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        match &m.modal_flow {
+            Some(ModalFlow::ActionConfirm {
+                action: Action::CloseIssue,
+                targets,
+            }) => assert_eq!(
+                targets.as_slice(),
+                [ActionConfirmTarget::Workspace(focus_key.clone())],
+                "close-issue targets the focused row only, never the selection",
+            ),
+            other => panic!("expected a single-target close-issue confirm, got {other:?}"),
+        }
+    }
+
+    /// #899 regression: on-main spawn (`b c`) is inherently single-target
+    /// too — a `v` selection must not fan it out or mislabel it as an
+    /// archive.
+    #[test]
+    fn on_main_spawn_under_selection_stays_focused_only() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let focus_key = SessionKey::from(&a.key);
+        seed_and_select(
+            &mut m,
+            vec![a, workspace("owner/repo#2", true, Duration::hours(2))],
+        );
+        assert!(m.sidebar.focus_workspace_key(&focus_key));
+
+        assert!(
+            m.dispatch_action(&Action::SpawnAgentOnMain("claude".into()))
+                .is_empty()
+        );
+        match &m.modal_flow {
+            Some(ModalFlow::ActionConfirm {
+                action: Action::SpawnAgentOnMain(_),
+                targets,
+            }) => assert_eq!(
+                targets.as_slice(),
+                [ActionConfirmTarget::Workspace(focus_key.clone())],
+                "on-main spawn stays focused-only under a selection",
+            ),
+            other => panic!("expected a single-target on-main confirm, got {other:?}"),
+        }
+    }
+
+    /// #899 regression: a bulk `w w` over a *mixed* selection (one live
+    /// agent → inject, one no-agent → spawn) gates behind the spawn
+    /// confirm. Cancelling must record NOTHING into the live agent's
+    /// recap — before the fix the inject's `record_pty_write` ran at
+    /// plan-build time, leaving a phantom prompt the user never sent.
+    #[test]
+    fn cancelled_bulk_work_records_no_phantom_prompt() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        // A row with a live agent (will be an inject target) …
+        let live = workspace("owner/repo#1", true, Duration::hours(1));
+        let live_sk: SessionKey = (&live.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(live)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(7),
+            session_key: live_sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        // … and a row with no agent (a spawn target), so `spawned > 0`
+        // forces the confirm gate.
+        let fresh = workspace("owner/repo#2", true, Duration::hours(2));
+        let fresh_sk: SessionKey = (&fresh.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(fresh)));
+
+        for key in [&live_sk, &fresh_sk] {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
+
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BulkSpawnConfirm),
+            "a spawn in the mix gates the fan-out",
+        );
+
+        // Cancel: nothing runs, so nothing is recorded.
+        let cmds = m.handle_confirmed(false);
+        assert!(cmds.is_empty(), "cancel emits no commands");
+        assert!(
+            m.terminals.prompt_history_for(TerminalId(7)).is_none(),
+            "cancelling must not leave a phantom prompt in the live agent's recap",
+        );
+
+        // Confirming instead does record + inject.
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "confirm injects into the live agent",
+        );
+        assert!(
+            m.terminals.prompt_history_for(TerminalId(7)).is_some(),
+            "confirm records the prompt it actually delivered",
+        );
+    }
 }
 
 #[cfg(test)]

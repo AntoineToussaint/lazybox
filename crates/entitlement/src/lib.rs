@@ -15,6 +15,7 @@
 //! implementation.
 
 use std::future::Future;
+use std::pin::Pin;
 
 /// The account an incoming relay connection claims to act on behalf of.
 ///
@@ -67,25 +68,30 @@ pub enum EntitlementError {
 /// Resolves whether an account is entitled to the relay's brokering.
 ///
 /// Implement this over the real subscription service when licensing
-/// lands. The relay holds a gate as a trait object so the stub and the
-/// real check are interchangeable without touching the broker.
+/// lands. The relay holds a gate as a trait object (`Box<dyn
+/// EntitlementGate>`) so the stub and the real check are interchangeable
+/// without touching the broker — hence the boxed-future return, which
+/// keeps the trait dyn-compatible.
 pub trait EntitlementGate: Send + Sync {
-    fn check(
-        &self,
-        account: &AccountId,
-    ) -> impl Future<Output = Result<Entitlement, EntitlementError>> + Send;
+    fn check<'a>(
+        &'a self,
+        account: &'a AccountId,
+    ) -> Pin<Box<dyn Future<Output = Result<Entitlement, EntitlementError>> + Send + 'a>>;
 }
 
 /// Stub gate that treats every account as entitled.
 ///
-/// The wired default until real licensing lands, per the "stub /
+/// The gate to wire until real licensing lands, per the "stub /
 /// allow-all first" plan. It never errors and never denies.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllowAll;
 
 impl EntitlementGate for AllowAll {
-    async fn check(&self, _account: &AccountId) -> Result<Entitlement, EntitlementError> {
-        Ok(Entitlement::Active)
+    fn check<'a>(
+        &'a self,
+        _account: &'a AccountId,
+    ) -> Pin<Box<dyn Future<Output = Result<Entitlement, EntitlementError>> + Send + 'a>> {
+        Box::pin(async { Ok(Entitlement::Active) })
     }
 }
 
@@ -124,14 +130,40 @@ mod tests {
     struct DenyAccount(&'static str);
 
     impl EntitlementGate for DenyAccount {
-        async fn check(&self, account: &AccountId) -> Result<Entitlement, EntitlementError> {
-            if account.as_str() == self.0 {
-                Ok(Entitlement::Inactive {
-                    reason: "no active subscription".into(),
-                })
-            } else {
-                Ok(Entitlement::Active)
-            }
+        fn check<'a>(
+            &'a self,
+            account: &'a AccountId,
+        ) -> Pin<Box<dyn Future<Output = Result<Entitlement, EntitlementError>> + Send + 'a>>
+        {
+            Box::pin(async move {
+                if account.as_str() == self.0 {
+                    Ok(Entitlement::Inactive {
+                        reason: "no active subscription".into(),
+                    })
+                } else {
+                    Ok(Entitlement::Active)
+                }
+            })
+        }
+    }
+
+    /// A gate whose backing subscription service is unreachable. Proves
+    /// the `Lookup` error path is constructible and distinct from a
+    /// definitive `Inactive` answer — the fail-closed signal the relay
+    /// keys on.
+    struct AlwaysUnavailable;
+
+    impl EntitlementGate for AlwaysUnavailable {
+        fn check<'a>(
+            &'a self,
+            _account: &'a AccountId,
+        ) -> Pin<Box<dyn Future<Output = Result<Entitlement, EntitlementError>> + Send + 'a>>
+        {
+            Box::pin(async {
+                Err(EntitlementError::Lookup(
+                    "subscription service unreachable".into(),
+                ))
+            })
         }
     }
 
@@ -147,6 +179,41 @@ mod tests {
         );
         assert!(
             gate.check(&AccountId::new("acct_paid"))
+                .await
+                .unwrap()
+                .is_active()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gate_can_fail_lookup() {
+        let gate = AlwaysUnavailable;
+        let error = gate.check(&AccountId::new("acct")).await.unwrap_err();
+        assert!(matches!(error, EntitlementError::Lookup(_)));
+        assert_eq!(
+            error.to_string(),
+            "entitlement lookup failed: subscription service unreachable"
+        );
+    }
+
+    /// The seam's whole purpose: the relay holds gates behind
+    /// `Box<dyn EntitlementGate>` and swaps stub for real without
+    /// touching the broker. This exercises dynamic dispatch, which an
+    /// `impl Future` (RPITIT) signature would not permit.
+    #[tokio::test]
+    async fn gate_is_usable_as_a_trait_object() {
+        let gates: Vec<Box<dyn EntitlementGate>> =
+            vec![Box::new(AllowAll), Box::new(DenyAccount("acct_lapsed"))];
+        assert!(
+            gates[0]
+                .check(&AccountId::new("anyone"))
+                .await
+                .unwrap()
+                .is_active()
+        );
+        assert!(
+            !gates[1]
+                .check(&AccountId::new("acct_lapsed"))
                 .await
                 .unwrap()
                 .is_active()

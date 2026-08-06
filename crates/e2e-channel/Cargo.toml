@@ -1,0 +1,19 @@
+[package]
+name = "lazybox-e2e-channel"
+description = "End-to-end encrypted channel (Noise/X25519) wrapping any async byte stream."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+snow      = "0.10"
+thiserror = { workspace = true }
+tokio     = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

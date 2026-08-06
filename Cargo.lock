@@ -1825,6 +1825,7 @@ dependencies = [
  "lazybox-ipc",
  "lazybox-tui-core",
  "lazybox-tui-term",
+ "libc",
  "libghostty-vt",
  "pulldown-cmark",
  "ratatui",

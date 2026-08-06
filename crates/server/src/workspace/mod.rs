@@ -309,12 +309,53 @@ pub async fn record_sent_snippet(config: &ServerConfig, key: &WorkspaceKey, snip
 /// Persist the workspace's "auto-merge on green" arm. Mirrors
 /// [`set_snooze`]: load, flip the field, commit (which persists the
 /// JSON blob and broadcasts `WorkspaceUpserted` so every TUI sees the
-/// new arm state). The merge decision itself stays client-side.
+/// new arm state). The daemon owns the merge decision
+/// ([`crate::polling::auto_merge`]).
+///
+/// Arming is **refused** when the merge-on-green author gate would
+/// durably block the PR — a third party's PR whose author isn't opted
+/// into `merge_on_green.allow_authors`. That decision is made HERE,
+/// against the *daemon's* own config, so it's correct for every client
+/// including a remote `--connect` session whose local config differs
+/// (issue #845): the flag is left off and the reason is broadcast, so
+/// the `ARM` pill never lights on a PR that could never merge. Only the
+/// author gate refuses — transient CI / conflict / review states are
+/// exactly what arming waits through, so those still arm.
 pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let policy = crate::polling::auto_merge::merge_on_green_policy();
+    set_auto_merge_on_green_with_policy(config, key, enabled, &policy).await;
+}
+
+/// Policy-injecting core of [`set_auto_merge_on_green`], split out so a
+/// test can pin the allowlist instead of reading the real config file.
+async fn set_auto_merge_on_green_with_policy(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    enabled: bool,
+    policy: &lazybox_core::MergeOnGreenPolicy,
+) {
     let _ws_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
+    if enabled
+        && !workspace.auto_merge_on_green
+        && let Some(pr) = workspace.pr.as_ref()
+        && lazybox_core::author_gate_blocks(pr, policy)
+    {
+        let label = pr.id.key.clone();
+        let _ = config
+            .bus
+            .send(lazybox_ipc::Event::provider_error_retryable(
+                "auto-merge",
+                format!(
+                    "won't arm merge-on-green for {label}: {} — add the author to \
+                 merge_on_green.allow_authors to allow it",
+                    lazybox_core::NON_AUTHOR_BLOCK
+                ),
+            ));
+        return;
+    }
     workspace.auto_merge_on_green = enabled;
     commit_upsert_offloaded_reported(config, key, workspace, "set auto-merge preference").await;
 }
@@ -1319,5 +1360,158 @@ mod archived_set_degraded_read_tests {
             &config, "new-key"
         ));
         assert_eq!(persisted_set(&store).len(), 3);
+    }
+}
+
+/// The daemon owns the merge-on-green arm-time author gate (issue #845):
+/// arming a third party's PR that isn't opted into the *daemon's*
+/// `merge_on_green.allow_authors` is refused with a reason, so a remote
+/// client whose local config differs can't wrongly pre-refuse or
+/// pre-accept it. These pin the policy directly rather than reading the
+/// real config file.
+#[cfg(test)]
+mod set_auto_merge_on_green_tests {
+    use super::*;
+    use lazybox_core::{
+        CiStatus, MergeOnGreenPolicy, Mergeable, ReviewStatus, Task, TaskId, TaskKind, TaskRole,
+        TaskState,
+    };
+
+    fn pr_task(key: &str, role: TaskRole, author: &str) -> Task {
+        let repo = key.rsplit_once('#').map(|(p, _)| p).unwrap_or("o/r");
+        Task {
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("PR {key}"),
+            body: None,
+            state: TaskState::Open,
+            role,
+            author: author.into(),
+            ci: CiStatus::Success,
+            review: ReviewStatus::Approved,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{repo}/pull/1"),
+            repo: Some(repo.into()),
+            branch: Some("feature".into()),
+            base_branch: Some("main".into()),
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: Some(TaskKind::Pr),
+            closes_issues: vec![],
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    /// Seed a PR workspace and return the key it was stored under — the
+    /// key [`Workspace::from_task`] derives, which is also the key the
+    /// commit persists to (a hand-written key would miss the re-store).
+    fn seed(config: &ServerConfig, task: Task, armed: bool) -> WorkspaceKey {
+        let mut ws = Workspace::from_task(task, Utc::now());
+        ws.auto_merge_on_green = armed;
+        let key = ws.key.clone();
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+        key
+    }
+
+    fn stored_arm(config: &ServerConfig, key: &WorkspaceKey) -> bool {
+        let record = config.store.get_workspace(key).unwrap().unwrap();
+        serde_json::from_str::<Workspace>(record.workspace_json.as_deref().unwrap())
+            .unwrap()
+            .auto_merge_on_green
+    }
+
+    #[tokio::test]
+    async fn refuses_arming_a_non_opted_in_third_party_pr() {
+        let config = ServerConfig::in_memory();
+        let key = seed(
+            &config,
+            pr_task("o/r#1", TaskRole::Reviewer, "dependabot[bot]"),
+            false,
+        );
+        let mut rx = config.bus.subscribe();
+
+        set_auto_merge_on_green_with_policy(&config, &key, true, &MergeOnGreenPolicy::default())
+            .await;
+
+        assert!(!stored_arm(&config, &key), "the arm flag must stay off");
+        match rx.try_recv().expect("a refusal notice") {
+            Event::ProviderError {
+                source, message, ..
+            } => {
+                assert_eq!(source, "auto-merge");
+                assert!(message.contains("your own PRs"), "{message}");
+            }
+            other => panic!("expected a ProviderError notice, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn arms_an_opted_in_third_party_pr() {
+        let config = ServerConfig::in_memory();
+        let key = seed(
+            &config,
+            pr_task("o/r#2", TaskRole::Reviewer, "dependabot[bot]"),
+            false,
+        );
+
+        // `dependabot` opted in — the `[bot]` suffix is normalized away.
+        let policy = MergeOnGreenPolicy::from_allow_authors(["dependabot"]);
+        set_auto_merge_on_green_with_policy(&config, &key, true, &policy).await;
+
+        assert!(stored_arm(&config, &key), "an opted-in author arms");
+    }
+
+    #[tokio::test]
+    async fn arms_your_own_pr_under_the_default_policy() {
+        let config = ServerConfig::in_memory();
+        let key = seed(&config, pr_task("o/r#3", TaskRole::Author, "me"), false);
+
+        set_auto_merge_on_green_with_policy(&config, &key, true, &MergeOnGreenPolicy::default())
+            .await;
+
+        assert!(stored_arm(&config, &key), "own PRs arm normally");
+    }
+
+    #[tokio::test]
+    async fn disarming_a_non_own_pr_is_never_refused() {
+        let config = ServerConfig::in_memory();
+        let key = seed(
+            &config,
+            pr_task("o/r#4", TaskRole::Reviewer, "dependabot[bot]"),
+            true,
+        );
+
+        set_auto_merge_on_green_with_policy(&config, &key, false, &MergeOnGreenPolicy::default())
+            .await;
+
+        assert!(
+            !stored_arm(&config, &key),
+            "the guard only gates enabling, never disarming"
+        );
     }
 }

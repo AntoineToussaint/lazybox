@@ -85,6 +85,11 @@ pub struct Config {
     /// [`AutoFixConfig`]. Off by default.
     #[serde(default)]
     pub auto_fix: AutoFixConfig,
+    /// Merge-on-green tuning. Opts specific non-author logins (e.g.
+    /// `dependabot`) into lazybox's arm so their green PRs auto-merge.
+    /// Empty by default — own PRs only. See [`MergeOnGreenConfig`].
+    #[serde(default)]
+    pub merge_on_green: MergeOnGreenConfig,
     /// Roots the `lazybox scan` command walks to discover git repos
     /// and worktrees you created outside lazybox, for import. Empty
     /// by default; `scan` also accepts roots as CLI args. See
@@ -1601,6 +1606,37 @@ impl AutoFixConfig {
     }
 }
 
+// ─── Merge on green ────────────────────────────────────────────────────────
+
+/// Tuning for lazybox's "merge on green" arm (`g g`). By default the
+/// daemon only auto-merges PRs **you** authored; this opts specific
+/// other authors in so their green PRs land automatically once armed.
+///
+/// The canonical use is a green Dependabot bump: add its login here,
+/// arm merge-on-green on the PR, and lazybox merges it the moment CI
+/// passes. Logins match case-insensitively and a trailing `[bot]` is
+/// ignored, so `dependabot` covers `dependabot[bot]` too.
+///
+/// ```yaml
+/// merge_on_green:
+///   allow_authors: [dependabot, renovate]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MergeOnGreenConfig {
+    /// Non-author logins whose green PRs may auto-merge. Empty (the
+    /// default) keeps the safe own-PRs-only behavior.
+    pub allow_authors: Vec<String>,
+}
+
+impl MergeOnGreenConfig {
+    /// Build the runtime [`lazybox_core::MergeOnGreenPolicy`] the
+    /// daemon's merge attempt enforces.
+    pub fn to_policy(&self) -> lazybox_core::MergeOnGreenPolicy {
+        lazybox_core::MergeOnGreenPolicy::from_allow_authors(&self.allow_authors)
+    }
+}
+
 // ─── Provider configs ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1928,6 +1964,23 @@ mod duration_human_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default merge-on-green config keeps own-PRs-only; a
+    /// configured allowlist opts specific authors in, parsed from YAML.
+    #[test]
+    fn merge_on_green_allowlist_parses_and_builds_a_policy() {
+        // Default: nobody else is allowed.
+        let default_policy = MergeOnGreenConfig::default().to_policy();
+        assert!(!default_policy.allows_author("dependabot[bot]"));
+
+        let cfg: Config =
+            Config::parse("merge_on_green:\n  allow_authors: [dependabot, Renovate]\n")
+                .expect("parse merge_on_green section");
+        let policy = cfg.merge_on_green.to_policy();
+        assert!(policy.allows_author("dependabot[bot]"), "normalized match");
+        assert!(policy.allows_author("renovate"), "case-insensitive match");
+        assert!(!policy.allows_author("someone-else"));
+    }
 
     /// An unset `desktop.remote` must not serialize as `remote: null`
     /// into a written config; a configured block round-trips intact.

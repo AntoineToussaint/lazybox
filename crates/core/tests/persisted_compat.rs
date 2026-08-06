@@ -255,6 +255,21 @@ fn v0_legacy_minimal_blob_deserializes() {
     assert_eq!(ws.cleanup_prompt, CleanupPrompt::Unresolved);
 }
 
+/// A PR row persisted before `Task::author` existed (issue #845) has no
+/// `author` key; it must read back with an empty author, never fail to
+/// decode.
+#[test]
+fn pr_row_without_author_field_deserializes_as_empty() {
+    let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
+    legacy["pr"]
+        .as_object_mut()
+        .expect("pr object")
+        .remove("author");
+    let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
+        .expect("a pre-author PR row remains readable");
+    assert_eq!(ws.pr.expect("pr present").author, "");
+}
+
 /// Schema v1 sessions predate the persisted worktree branch. They remain
 /// readable with an unknown branch, so a current daemon can preserve their
 /// established checkout without inventing intent from mutable workspace data.

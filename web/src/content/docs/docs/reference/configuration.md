@@ -36,6 +36,7 @@ which is the canonical source of truth for defaults and field names.
 | [`hooks`](#hooks) | Periodic maintenance scripts |
 | [`mention`](#mention) | Auto-spawn on `@lazybox` mention |
 | [`auto_fix`](#auto_fix) | Auto-fix PRs on CI failure / conflict |
+| [`merge_on_green`](#merge_on_green) | Opt bot authors into merge-on-green |
 | [`conventions`](#conventions) | Commit / PR conventions injected into the agent-work brief |
 | [`shell`](#shell) | Shell command for the `s` spawn |
 
@@ -526,6 +527,21 @@ Opt-in — it pushes commits to your PRs with no manual nudge.
 | `max_attempts` | int | `3` | Attempts per PR, per failure-kind, per `window` |
 | `cooldown` | duration | `1h` | Minimum gap between attempts on the same PR (floored at 60s) |
 | `window` | duration | `24h` | Rolling window the `max_attempts` budget is measured over |
+
+## `merge_on_green`
+
+Tuning for lazybox's "merge on green" arm (`g g`). By default the daemon only
+auto-merges PRs **you** authored; this opts specific other authors in so their
+green PRs land automatically once armed. The canonical use is a green Dependabot
+bump: add its login, arm merge-on-green on the PR, and lazybox merges it the
+moment CI passes. Logins match case-insensitively and a trailing `[bot]` is
+ignored, so `dependabot` covers `dependabot[bot]` too. Arming merge-on-green on
+a third party's PR that isn't listed here is refused with a reason rather than
+lighting a pill that never fires.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `allow_authors` | list of string | `[]` | Non-author logins whose green PRs may auto-merge. Empty keeps the safe own-PRs-only behavior. |
 
 ## `conventions`
 

@@ -435,6 +435,9 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
             let session_key = SessionKey::from(&workspace.key);
             match policy {
                 PolicyPick::MergeOnGreen => {
+                    // Config-agnostic: the daemon's `set_auto_merge_on_green`
+                    // owns the author-gate refusal against its authoritative
+                    // config, so this menu never pre-judges it (#845).
                     let enabled = !workspace.auto_merge_on_green;
                     PickOutcome::Commands {
                         commands: vec![Command::SetAutoMergeOnGreen {

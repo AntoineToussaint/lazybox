@@ -311,8 +311,8 @@
   ],
   "seen_count": 1,
   "read_indices": [
-    0,
-    2
+    2,
+    0
   ],
   "snoozed_until": "2026-03-14T18:00:00Z",
   "auto_merge_on_green": true,

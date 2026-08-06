@@ -14,8 +14,9 @@
 //!
 //! - [`signal_for`] projects a freshly-committed workspace onto a
 //!   [`Signal`] using the shared core predicate
-//!   ([`lazybox_core::should_auto_merge`] — the same one the TUI renders
-//!   its pill from).
+//!   ([`lazybox_core::should_auto_merge`]). It fires author-agnostically
+//!   ([`lazybox_core::MergeOnGreenPolicy::allow_all`]); the authoritative
+//!   author gate runs in the attempt against the configured allowlist.
 //! - [`plan`] runs the one-shot latch ([`AutoMergeMemory`]) and decides
 //!   whether to dispatch an attempt.
 //! - [`run_attempt`] is the attempt itself: **re-fetch the PR fresh**
@@ -124,11 +125,28 @@ pub fn signal_for(ws: &Workspace) -> Signal {
     if !ws.auto_merge_on_green || ws.pr.is_none() || terminal {
         return Signal::Release;
     }
-    if lazybox_core::should_auto_merge(ws) {
+    // Author-agnostic here (`allow_all`): any otherwise-mergeable green
+    // PR dispatches an attempt, and the attempt re-checks against the
+    // *configured* author allowlist ([`merge_on_green_policy`]). This is
+    // what makes a declined non-own PR audible — it reaches the
+    // attempt's stand-down notice/log instead of holding silently
+    // (issue #845) — and keeps this hot projection free of config I/O.
+    if lazybox_core::should_auto_merge(ws, &lazybox_core::MergeOnGreenPolicy::allow_all()) {
         Signal::Fire
     } else {
         Signal::Hold
     }
+}
+
+/// The configured merge-on-green policy (`merge_on_green.allow_authors`).
+/// Loaded fresh from `~/.lazybox/config.yaml` at merge-attempt time —
+/// attempts are latched to at most one per green head, so a config read
+/// here is rare, and reading fresh means an edited allowlist takes
+/// effect without a daemon restart.
+pub(crate) fn merge_on_green_policy() -> lazybox_core::MergeOnGreenPolicy {
+    lazybox_config::Config::load()
+        .map(|c| c.merge_on_green.to_policy())
+        .unwrap_or_default()
 }
 
 /// Dispatch ticket for one attempt. `skip_if_head` carries the head a
@@ -294,7 +312,7 @@ async fn run_real_attempt_with_resolver<F, Fut>(
     }
 
     match resolve_client().await {
-        Some(client) => run_attempt(config, ticket, &client).await,
+        Some(client) => run_attempt(config, ticket, &merge_on_green_policy(), &client).await,
         None => {
             tracing::warn!(
                 workspace = %ticket.workspace_key,
@@ -316,7 +334,12 @@ async fn run_real_attempt_with_resolver<F, Fut>(
 /// can never wedge the key. Unlike the manual `g m` handler
 /// (`handle_merge_pr`), which honors user intent against the *local*
 /// snapshot, this path trusts nothing it didn't just fetch.
-pub async fn run_attempt<B: MergeBackend>(config: &ServerConfig, ticket: AttemptPlan, backend: &B) {
+pub async fn run_attempt<B: MergeBackend>(
+    config: &ServerConfig,
+    ticket: AttemptPlan,
+    policy: &lazybox_core::MergeOnGreenPolicy,
+    backend: &B,
+) {
     let key = &ticket.workspace_key;
     let settle = |latch: Option<Latch>| {
         config.poll.auto_merge.lock().settle(key, latch);
@@ -386,7 +409,10 @@ pub async fn run_attempt<B: MergeBackend>(config: &ServerConfig, ticket: Attempt
     // after the last poll aborts here instead of being merged over.
     let mut probe = ws.clone();
     probe.pr = Some(fresh.clone());
-    if let Some(reason) = lazybox_core::auto_merge_block_reason(&probe) {
+    // The authoritative author gate runs HERE (not in `signal_for`),
+    // against the configured allowlist: a non-own PR whose author is not
+    // opted in stands down with a logged + broadcast reason (issue #845).
+    if let Some(reason) = lazybox_core::auto_merge_block_reason(&probe, policy) {
         tracing::info!(workspace = %key, reason, "auto-merge: fresh re-check stood down");
         let _ = config.bus.send(Event::provider_error_retryable(
             "auto-merge",
@@ -519,6 +545,11 @@ mod tests {
         ws
     }
 
+    /// The default (own-PRs-only) allowlist.
+    fn own_policy() -> lazybox_core::MergeOnGreenPolicy {
+        lazybox_core::MergeOnGreenPolicy::default()
+    }
+
     fn seed(store: &MemoryStore, ws: &Workspace) {
         store
             .save_workspace(&WorkspaceRecord {
@@ -546,6 +577,22 @@ mod tests {
         ws.pr.as_mut().unwrap().ci = CiStatus::Success;
         ws.auto_merge_on_green = false;
         assert_eq!(signal_for(&ws), Signal::Release, "disarm releases");
+    }
+
+    /// A green non-own PR now Fires (author-agnostic) rather than
+    /// holding silently — so it reaches the attempt's author gate, whose
+    /// stand-down surfaces the reason (issue #845). Before, `signal_for`
+    /// tripped the own-PR gate and returned `Hold`, and nothing was ever
+    /// logged or shown.
+    #[test]
+    fn signal_fires_non_own_green_pr_for_the_attempt_to_decide() {
+        let mut ws = armed_ws("o/r#1");
+        ws.pr.as_mut().unwrap().role = TaskRole::Reviewer;
+        assert_eq!(signal_for(&ws), Signal::Fire);
+        // A red non-own PR still holds — only fully-mergeable-but-for-the
+        // -author PRs dispatch an attempt.
+        ws.pr.as_mut().unwrap().ci = CiStatus::Failure;
+        assert_eq!(signal_for(&ws), Signal::Hold);
     }
 
     #[test]
@@ -703,7 +750,7 @@ mod tests {
         let mut rx = config.bus.subscribe();
         let backend = FakeBackend::merging(green_task("o/r#1"), "abc123");
 
-        run_attempt(&config, ticket(&ws, None), &backend).await;
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
 
         assert_eq!(
             backend.merges.lock().as_slice(),
@@ -716,6 +763,73 @@ mod tests {
         );
         let evt = rx.try_recv().expect("PrMerged must be broadcast");
         assert!(matches!(evt, Event::PrMerged { .. }), "got {evt:?}");
+    }
+
+    /// Build an armed workspace whose PR is authored by someone else
+    /// (a bot) — the Dependabot shape from issue #845.
+    fn armed_bot_ws(key: &str, author: &str) -> Workspace {
+        let mut task = green_task(key);
+        task.role = TaskRole::Mentioned;
+        task.author = author.into();
+        let mut ws = Workspace::from_task(task, Utc::now());
+        ws.auto_merge_on_green = true;
+        ws
+    }
+
+    /// Issue #845 acceptance — the feature half: with the author opted
+    /// in via the policy, a green non-own (bot) PR auto-merges.
+    #[tokio::test(flavor = "current_thread")]
+    async fn attempt_merges_a_green_bot_pr_when_opted_in() {
+        let ws = armed_bot_ws("o/r#1", "dependabot[bot]");
+        let config = config_with(&ws);
+        let mut rx = config.bus.subscribe();
+        let mut fresh = green_task("o/r#1");
+        fresh.role = TaskRole::Mentioned;
+        fresh.author = "dependabot[bot]".into();
+        let backend = FakeBackend::merging(fresh, "abc123");
+        let policy = lazybox_core::MergeOnGreenPolicy::from_allow_authors(["dependabot"]);
+
+        run_attempt(&config, ticket(&ws, None), &policy, &backend).await;
+
+        assert_eq!(
+            backend.merges.lock().as_slice(),
+            &[Some("abc123".to_string())],
+            "an opted-in green bot PR merges"
+        );
+        assert!(matches!(rx.try_recv(), Ok(Event::PrMerged { .. })));
+    }
+
+    /// Issue #845 acceptance — the feedback half: an armed non-own PR
+    /// that is NOT opted in must not merge, and must surface the reason
+    /// (broadcast notice) rather than standing down silently.
+    #[tokio::test(flavor = "current_thread")]
+    async fn attempt_declines_non_own_pr_with_a_reason_when_not_opted_in() {
+        let ws = armed_bot_ws("o/r#1", "dependabot[bot]");
+        let config = config_with(&ws);
+        let mut rx = config.bus.subscribe();
+        let mut fresh = green_task("o/r#1");
+        fresh.role = TaskRole::Mentioned;
+        fresh.author = "dependabot[bot]".into();
+        let backend = FakeBackend::merging(fresh, "abc123");
+
+        // Default policy: own PRs only.
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
+
+        assert!(backend.merges.lock().is_empty(), "must not merge");
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&ws.key),
+            Some(&Latch::Blocked(Some("abc123".into())))
+        );
+        let evt = rx.try_recv().expect("a stand-down notice");
+        match evt {
+            Event::ProviderError {
+                source, message, ..
+            } => {
+                assert_eq!(source, "auto-merge");
+                assert!(message.contains("your own PRs"), "{message}");
+            }
+            other => panic!("expected a ProviderError notice, got {other:?}"),
+        }
     }
 
     /// The stale-row hole this feature closes: the stored workspace is
@@ -735,7 +849,7 @@ mod tests {
             merges: parking_lot::Mutex::new(Vec::new()),
         };
 
-        run_attempt(&config, ticket(&ws, None), &backend).await;
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
 
         assert!(backend.merges.lock().is_empty(), "must not merge");
         assert_eq!(
@@ -772,7 +886,13 @@ mod tests {
         let mut rx = config.bus.subscribe();
         let backend = FakeBackend::merging(green_task("o/r#1"), "abc123");
 
-        run_attempt(&config, ticket(&ws, Some("abc123")), &backend).await;
+        run_attempt(
+            &config,
+            ticket(&ws, Some("abc123")),
+            &own_policy(),
+            &backend,
+        )
+        .await;
 
         assert!(
             backend.merges.lock().is_empty(),
@@ -806,7 +926,13 @@ mod tests {
         let config = config_with(&ws);
         let backend = FakeBackend::merging(green_task("o/r#1"), "def456");
 
-        run_attempt(&config, ticket(&ws, Some("abc123")), &backend).await;
+        run_attempt(
+            &config,
+            ticket(&ws, Some("abc123")),
+            &own_policy(),
+            &backend,
+        )
+        .await;
 
         assert_eq!(
             backend.merges.lock().as_slice(),
@@ -835,7 +961,7 @@ mod tests {
             ),
         );
 
-        run_attempt(&config, ticket(&ws, None), &backend).await;
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
 
         assert_eq!(
             config.poll.auto_merge.lock().latch(&ws.key),
@@ -872,7 +998,7 @@ mod tests {
             ),
         );
 
-        run_attempt(&config, ticket(&ws, None), &backend).await;
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
 
         // Latch released (not Blocked) so a still-green re-poll re-attempts.
         assert_eq!(
@@ -907,7 +1033,7 @@ mod tests {
         let config = config_with(&ws);
         let backend = FakeBackend::merging(green_task("o/r#1"), "abc123");
 
-        run_attempt(&config, ticket(&ws, None), &backend).await;
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
 
         assert!(backend.merges.lock().is_empty());
         assert_eq!(config.poll.auto_merge.lock().latch(&ws.key), None);
@@ -925,14 +1051,20 @@ mod tests {
             merges: parking_lot::Mutex::new(Vec::new()),
         };
 
-        run_attempt(&config, ticket(&ws, None), &backend).await;
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
         assert_eq!(
             config.poll.auto_merge.lock().latch(&ws.key),
             None,
             "a first attempt that never fetched releases for a clean retry"
         );
 
-        run_attempt(&config, ticket(&ws, Some("abc123")), &backend).await;
+        run_attempt(
+            &config,
+            ticket(&ws, Some("abc123")),
+            &own_policy(),
+            &backend,
+        )
+        .await;
         assert_eq!(
             config.poll.auto_merge.lock().latch(&ws.key),
             Some(&Latch::Blocked(Some("abc123".into()))),

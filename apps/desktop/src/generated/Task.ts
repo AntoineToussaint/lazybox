@@ -58,6 +58,9 @@ assignees: Array<string>,
  * Linear issue creator. Empty when the provider didn't supply one
  * (older snapshots, providers without an author concept).
  * `#[serde(default)]` so older persisted snapshots deserialize.
+ * Also read by merge-on-green's author allowlist so a green
+ * Dependabot/bot PR can auto-merge once opted in
+ * (`merge_on_green.allow_authors`).
  */
 author: string,
 /**

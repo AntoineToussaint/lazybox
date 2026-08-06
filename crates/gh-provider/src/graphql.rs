@@ -4222,6 +4222,15 @@ mod tests {
         assert!(task.recent_activity.is_empty());
     }
 
+    /// The PR author login is carried onto the Task so merge-on-green's
+    /// author allowlist can opt a bot in (issue #845).
+    #[test]
+    fn pr_to_task_carries_the_author_login() {
+        let pr = make_pr(1, "dependabot[bot]");
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(task.author, "dependabot[bot]");
+    }
+
     /// A realistic inbox-scan (`SEARCH_QUERY`) wire response, built
     /// to mirror exactly what GitHub returns for the *trimmed* query:
     /// the `comments(last: 1)` selection carries only `author` +

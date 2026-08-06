@@ -564,10 +564,17 @@ pub use lazybox_core::policy::merge_block_reason;
 /// Resolve the "auto-merge on green" toggle. Flips the workspace's
 /// persisted arm. Only meaningful on a workspace that has a PR — an
 /// issue-only or empty workspace has nothing to merge, so we surface
-/// a `Notice` instead of arming a flag that could never fire. The
-/// `Author`-scope / CI / conflict guards live in [`should_auto_merge`]
-/// (the trigger), not here — arming is cheap and reversible; the guards
-/// gate the actual fire.
+/// a `Notice` instead of arming a flag that could never fire.
+///
+/// Deliberately **config-agnostic**: every eligibility guard — the
+/// transient CI / conflict / review states *and* the durable author
+/// gate — is evaluated by the daemon, which holds the authoritative
+/// `merge_on_green.allow_authors` config. A client (especially a remote
+/// `--connect` session whose local config differs) must not pre-judge
+/// the author gate here, or it would refuse an arm the daemon would
+/// honor. Arming an ineligible PR is not silent: the daemon refuses the
+/// author gate at arm time (its `set_auto_merge_on_green`) and surfaces
+/// every transient stand-down through the merge attempt.
 pub fn resolve_toggle_auto_merge(workspace: Option<&Workspace>) -> Intent {
     let Some(ws) = workspace else {
         return Intent::NoOp;
@@ -1668,6 +1675,23 @@ mod tests {
         match resolve_toggle_auto_merge(Some(&ws)) {
             Intent::SetAutoMergeOnGreen { enabled, .. } => {
                 assert!(!enabled, "toggling an armed workspace disarms it");
+            }
+            other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
+        }
+    }
+
+    /// The toggle is deliberately config-agnostic: even a third party's
+    /// PR arms here (the daemon's `set_auto_merge_on_green` owns the
+    /// author-gate refusal against its authoritative config, so a remote
+    /// client can't wrongly pre-refuse it — issue #845).
+    #[test]
+    fn toggle_auto_merge_arms_a_non_own_pr_leaving_the_gate_to_the_daemon() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        ws.pr.as_mut().unwrap().role = TaskRole::Reviewer;
+        ws.pr.as_mut().unwrap().author = "dependabot[bot]".into();
+        match resolve_toggle_auto_merge(Some(&ws)) {
+            Intent::SetAutoMergeOnGreen { enabled, .. } => {
+                assert!(enabled, "arming is client-config-agnostic")
             }
             other => panic!("expected SetAutoMergeOnGreen, got {other:?}"),
         }

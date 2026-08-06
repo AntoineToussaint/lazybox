@@ -18,6 +18,13 @@ webview receives only repository metadata and the versioned desktop contract.
 
 ## Run from a clean checkout
 
+From the repo root, the Makefile wraps every command below — `make desktop`
+(Tauri dev against its own in-process daemon), `make desktop-preview`
+(frontend only), `make desktop-build` (the `.app` bundle), `make desktop-test`
+(the headless checks CI gates), `make desktop-contract` (regenerate
+`src/generated`). Each installs the npm deps first when the lockfile moved,
+and carries the pinned zig the Rust shell needs. The raw commands:
+
 On macOS with the Rust toolchain, Node 22, and Xcode command-line tools:
 
 ```sh

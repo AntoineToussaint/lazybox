@@ -12,9 +12,7 @@ you go — every fallback to the TUI is a line item here._
 Against its own in-process daemon (the default — no remote box involved):
 
 ```sh
-cd apps/desktop
-npm ci
-npm run tauri dev
+make desktop          # or, by hand: cd apps/desktop && npm ci && npm run tauri dev
 ```
 
 The Rust shell spawns `lazybox-server` through the shared `ClientRuntime`,
@@ -26,10 +24,7 @@ Headless verification of the same build (what CI gates, runnable without a
 GUI):
 
 ```sh
-cd apps/desktop
-npm test                                                    # frontend unit tests
-npm run build                                               # tsc + vite production build
-cargo test --manifest-path src-tauri/Cargo.toml --locked    # Rust shell + native integration test
+make desktop-test     # npm test + npm run build + cargo test on the Tauri shell
 ```
 
 The native integration test drives the real path end to end without a GitHub

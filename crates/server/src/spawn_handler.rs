@@ -4942,6 +4942,12 @@ async fn finish_terminal(
         .lock()
         .await
         .remove(&terminal_id);
+    config
+        .terminal
+        .reclassify_requests
+        .lock()
+        .await
+        .remove(&terminal_id);
     // Close the state owner's live-terminal ingress gate before dropping the
     // absorbing Exited tombstone. Reversing these two removals creates a
     // window where a delayed hook sees `(meta: live, state: None)` and
@@ -10243,8 +10249,13 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            poll_input_resolution(&mut rx, id, &input_resolved_states(), Duration::from_secs(1))
-                .await,
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_secs(1)
+            )
+            .await,
             InputPoll::Resolved
         ));
     }
@@ -10263,8 +10274,13 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            poll_input_resolution(&mut rx, id, &input_resolved_states(), Duration::from_millis(80))
-                .await,
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_millis(80)
+            )
+            .await,
             InputPoll::Tick
         ));
         drop(tx);
@@ -10281,8 +10297,13 @@ mod tests {
         })
         .unwrap();
         assert!(matches!(
-            poll_input_resolution(&mut rx, id, &input_resolved_states(), Duration::from_secs(1))
-                .await,
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_secs(1)
+            )
+            .await,
             InputPoll::Exited
         ));
     }
@@ -10506,7 +10527,9 @@ mod tests {
             }
         })
         .await
-        .expect("a deferred inject must deliver once a live re-read clears the gate — no keystroke");
+        .expect(
+            "a deferred inject must deliver once a live re-read clears the gate — no keystroke",
+        );
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while !config.spawn.pending_prompt_injections.lock().is_empty() {

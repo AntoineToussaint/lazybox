@@ -1227,18 +1227,23 @@ pub struct Model<T: TerminalAdapter> {
     /// scrollback (#432). On Up the whole span is extracted from
     /// libghostty's grid and copied to the host clipboard via OSC 52.
     terminal_drag: Option<TerminalDrag>,
-    /// `]]` escape from the terminal pane: first press of the escape
-    /// char arms; a second within the window arms the `]]` *leader*
-    /// (see `terminal_leader_armed`) instead of forwarding to the PTY.
+    /// `]]` escape latch: first press of the escape char arms; a second
+    /// within the window arms the `]]` *leader* (see `terminal_leader_armed`)
+    /// instead of forwarding to the PTY. Armed from the terminal pane and,
+    /// since #871, the sidebar too; because it's shared, a focus change
+    /// disarms it (`set_focus`) so a held `]` can't resolve in the pane you
+    /// moved to.
     escape_latch: crate::confirm_latch::DoubleTapLatch,
     /// Whether the `]]` leader is armed. Set when `]]` completes; the
-    /// *next* key selects a binding — a snippet key opens the picker, a
-    /// digit / `f` / `` ` `` jumps, a third escape char (`]]]`) leaves to
-    /// the sidebar, and Esc cancels back to the terminal. Deliberately
-    /// NOT timed (#252): a timed leave raced the user typing a snippet
-    /// key, so browsing snippets could silently drop them to the sidebar.
-    /// Cleared by the completing key, or on an abandonment signal (a
-    /// mouse click, via `cancel_leader_chords`).
+    /// *next* key selects a binding. Its meaning follows the pane it armed
+    /// in (#871): in the terminal it addresses the focused tile (snippets,
+    /// focus mode, tile management, digit jumps); in the sidebar it
+    /// addresses the cursor workspace's agent with the workspace-scoped
+    /// subset (`]]s`/`]]l`/`]]r`/`]]h`/`]]u`). Deliberately NOT timed
+    /// (#252): a timed leave raced the user typing a snippet key, so
+    /// browsing snippets could silently drop them to the sidebar. Cleared
+    /// by the completing key, or on an abandonment signal (a mouse click,
+    /// via `cancel_leader_chords`).
     terminal_leader_armed: bool,
     /// Highlighted row in the armed `]]` leader popup, or `None` for the
     /// direct-key default. `j` / `k` move it (arrows stay bound to tile /

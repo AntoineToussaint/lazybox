@@ -784,6 +784,68 @@ pub struct WorktreeConfig {
     /// behavior, `feature` yields `feature/issue-42` — and override
     /// per-repo via `repos.<owner/name>.branch_prefix`.
     pub branch_prefix: String,
+    /// Post-create workload bring-up hook run after mounts + setup
+    /// scripts. See [`WorktreeBringup`]. Overridable per repo via
+    /// `repos.<owner/name>.bringup`.
+    #[serde(default)]
+    pub bringup: Option<WorktreeBringup>,
+}
+
+/// Post-create "workload bring-up" hook: a command run inside a freshly
+/// checked-out worktree — after mounts and setup scripts — to stand the
+/// app stack up so a session lands ready. The canonical shape is a
+/// per-repo dev harness, e.g.
+/// `tools/local-dev/dev init "$LAZYBOX_PROFILE" && dev up "$LAZYBOX_PROFILE"`.
+///
+/// A session is not connectable until the workload reports healthy, so
+/// when `readiness` is set (e.g. `dev doctor`) the daemon polls it after
+/// `command` returns and only hands the worktree to the agent/shell once
+/// it exits 0 (or the poll times out, which proceeds with a warning).
+///
+/// Configured globally under `worktree.bringup` and overridable per repo
+/// under `repos.<owner/name>.bringup`; the per-repo entry replaces the
+/// global one wholesale (no field-level merge), which is how the profile
+/// switches per worktree (obin: robin / origination / fcs-workshop / …).
+///
+/// ```yaml
+/// worktree:
+///   bringup:
+///     command: tools/local-dev/dev init "$LAZYBOX_PROFILE" && tools/local-dev/dev up "$LAZYBOX_PROFILE"
+///     profile: robin
+///     readiness: tools/local-dev/dev doctor "$LAZYBOX_PROFILE"
+///     readiness_timeout_secs: 300
+///     readiness_interval_secs: 3
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeBringup {
+    /// Shell command run via `sh -c` in the worktree root. The chosen
+    /// `profile` is exported as `LAZYBOX_PROFILE` and also substituted
+    /// for any `{profile}` placeholder in the string.
+    pub command: String,
+    /// Workload profile passed to `command` / `readiness`. Empty when
+    /// the stack has no profile axis.
+    #[serde(default)]
+    pub profile: String,
+    /// Optional readiness probe, polled via `sh -c` until it exits 0.
+    /// Same `LAZYBOX_PROFILE` / `{profile}` substitution as `command`.
+    /// Absent → the session is connectable as soon as `command` returns.
+    #[serde(default)]
+    pub readiness: Option<String>,
+    /// How long to keep polling `readiness` before giving up and
+    /// proceeding with a warning, in seconds.
+    #[serde(default = "default_readiness_timeout_secs")]
+    pub readiness_timeout_secs: u64,
+    /// Delay between `readiness` polls, in seconds.
+    #[serde(default = "default_readiness_interval_secs")]
+    pub readiness_interval_secs: u64,
+}
+
+fn default_readiness_timeout_secs() -> u64 {
+    300
+}
+
+fn default_readiness_interval_secs() -> u64 {
+    3
 }
 
 /// `scan:` block — the canonical dev folders (`~/development`, `~/code`,
@@ -862,6 +924,11 @@ pub struct RepoConfig {
     /// prefix.
     #[serde(default)]
     pub branch_prefix: Option<String>,
+    /// Override for `worktree.bringup` on this repo's worktrees. `Some`
+    /// replaces the global hook wholesale (letting the profile switch
+    /// per repo); `None` (the default) falls back to the global hook.
+    #[serde(default)]
+    pub bringup: Option<WorktreeBringup>,
 }
 
 /// Serializable form of `lazybox_git_ops::Mount`. Kept separate so
@@ -2198,6 +2265,52 @@ repos:
         let reentry = reparsed.repos.get("acme/widget").unwrap();
         assert_eq!(reentry.env, entry.env);
         assert_eq!(reentry.mounts.len(), entry.mounts.len());
+    }
+
+    #[test]
+    fn worktree_bringup_parses_defaults_and_per_repo_override_wins() {
+        let yaml = r#"
+worktree:
+  bringup:
+    command: dev init "$LAZYBOX_PROFILE" && dev up "$LAZYBOX_PROFILE"
+    profile: robin
+    readiness: dev doctor "$LAZYBOX_PROFILE"
+repos:
+  obin-ai/origination:
+    bringup:
+      command: dev up "$LAZYBOX_PROFILE"
+      profile: origination
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+
+        let global = cfg.worktree.bringup.as_ref().expect("global bringup");
+        assert_eq!(global.profile, "robin");
+        assert_eq!(
+            global.readiness.as_deref(),
+            Some("dev doctor \"$LAZYBOX_PROFILE\"")
+        );
+        // Unspecified poll knobs fall back to the built-in defaults.
+        assert_eq!(global.readiness_timeout_secs, 300);
+        assert_eq!(global.readiness_interval_secs, 3);
+
+        let repo = cfg
+            .repos
+            .get("obin-ai/origination")
+            .and_then(|r| r.bringup.as_ref())
+            .expect("per-repo bringup");
+        assert_eq!(repo.profile, "origination");
+        // The per-repo entry replaces the global one wholesale, so its
+        // absent `readiness` does not inherit the global probe.
+        assert_eq!(repo.readiness, None);
+
+        // Round-trips through serde.
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.worktree.bringup, cfg.worktree.bringup);
+        assert_eq!(
+            reparsed.repos["obin-ai/origination"].bringup,
+            cfg.repos["obin-ai/origination"].bringup
+        );
     }
 
     #[test]

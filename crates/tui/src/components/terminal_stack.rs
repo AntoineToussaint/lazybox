@@ -2229,7 +2229,13 @@ impl TerminalStack {
     /// when the grid holds no URL (empty `Vec`) or its VT snapshot can't
     /// be read (also empty — we scanned, there was nothing to open).
     pub fn focused_urls(&mut self) -> Option<Vec<String>> {
-        let id = self.focused_terminal_id()?;
+        self.urls_for(self.focused_terminal_id()?)
+    }
+
+    /// Like [`Self::focused_urls`] but scans an explicit terminal — the
+    /// sidebar `]]u` scans the cursor workspace's terminal, which may not
+    /// be the focused tile (#871).
+    pub fn urls_for(&mut self, id: TerminalId) -> Option<Vec<String>> {
         let slot = self.terminals.get_mut(&id)?;
         // Reflect every byte received, not just what arrived on screen —
         // mirrors `visible_text` / `target_at`.
@@ -2705,7 +2711,16 @@ impl TerminalStack {
     /// picker. `None` when the focused terminal isn't an agent or has no
     /// history yet. Returns the terminal id so a re-send can target it.
     pub fn focused_prompt_history(&self) -> Option<(TerminalId, Vec<lazybox_ipc::UserPrompt>)> {
-        let id = self.focused_terminal_id()?;
+        self.prompt_history_for(self.focused_terminal_id()?)
+    }
+
+    /// Like [`Self::focused_prompt_history`] but for an explicit terminal —
+    /// the sidebar `]]h` addresses the cursor workspace's agent, which may
+    /// not be the focused tile (#871).
+    pub fn prompt_history_for(
+        &self,
+        id: TerminalId,
+    ) -> Option<(TerminalId, Vec<lazybox_ipc::UserPrompt>)> {
         let slot = self.terminals.get(&id)?;
         if !matches!(slot.kind, TerminalKind::Agent(_)) || slot.prompt_history.is_empty() {
             return None;
@@ -2722,7 +2737,13 @@ impl TerminalStack {
     /// nothing to recall. Both sources are restored from the daemon
     /// snapshot, so this works after a full restart (issue #373).
     pub fn recall_prompt(&mut self) -> Option<(TerminalId, String)> {
-        let id = self.focused_terminal_id()?;
+        self.recall_prompt_for(self.focused_terminal_id()?)
+    }
+
+    /// Like [`Self::recall_prompt`] but for an explicit terminal — the
+    /// sidebar `]]r` recalls into the cursor workspace's agent, which may
+    /// not be the focused tile (#871).
+    pub fn recall_prompt_for(&mut self, id: TerminalId) -> Option<(TerminalId, String)> {
         let slot = self.terminals.get_mut(&id)?;
         if !matches!(slot.kind, TerminalKind::Agent(_)) {
             return None;

@@ -49,12 +49,12 @@ impl<T: TerminalAdapter> Model<T> {
                 snippets: snippets(),
             },
             Id::SnippetPicker => PickFlow::Snippet {
-                terminal_id: self.terminals.active_terminal_id(),
+                terminal_id: self.picker_target_terminal(),
                 snippets: snippets(),
                 submit,
             },
             Id::SkillPicker => PickFlow::Skill {
-                terminal_id: self.terminals.active_terminal_id(),
+                terminal_id: self.picker_target_terminal(),
             },
             Id::PromptHistoryPicker => {
                 let terminal_id = match &self.modal_flow {

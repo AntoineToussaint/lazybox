@@ -35,8 +35,10 @@ const LINEAR_GRAPHQL: &str = "https://api.linear.app/graphql";
 
 /// Workspace-key prefix and credential scope this provider owns.
 /// Linear workspaces are keyed `"linear-<team>-<id>"`; the mutation
-/// router splits on `'-'` and matches the first segment.
-pub const SOURCE: &str = "linear";
+/// router splits on `'-'` and matches the first segment. The value comes
+/// from `lazybox_core` so config's snippet scoping and the UI can't drift
+/// from it.
+pub const SOURCE: &str = lazybox_core::LINEAR_SOURCE;
 
 /// Credential chain Linear uses: the `LINEAR_API_KEY` env var, then a
 /// fallback to `linear auth token` (the `schpet/linear-cli` binary,

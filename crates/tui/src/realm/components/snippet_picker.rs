@@ -643,6 +643,7 @@ mod tests {
             category: category.into(),
             body: body.into(),
             skill: None,
+            provider: None,
             origin,
         }
     }

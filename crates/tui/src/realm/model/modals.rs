@@ -2492,6 +2492,10 @@ impl<T: TerminalAdapter> Model<T> {
         if let Some(top) = self.modal_stack.last() {
             let _ = self.app.active(top);
         }
+        // A sidebar `]]` picker's retarget is scoped to that one picker
+        // (#871); once it closes, the next snippet/skill/history picker
+        // resolves fresh, falling back to the focused terminal.
+        self.leader_target = None;
         self.redraw = true;
     }
 }

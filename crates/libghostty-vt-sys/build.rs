@@ -15,6 +15,14 @@ fn zig_version() -> &'static str {
     ZIG_VERSION_RAW.trim()
 }
 
+/// The `major.minor` series of the pinned zig (e.g. `0.16` for `0.16.0`).
+/// Ghostty's `requireZig` accepts only the matching minor, and Homebrew
+/// names its keg-only formulae `zig@<major.minor>`.
+fn zig_minor_series() -> String {
+    let v = zig_version();
+    v.split('.').take(2).collect::<Vec<_>>().join(".")
+}
+
 fn main() {
     // docs.rs has no Zig toolchain. The checked-in bindings in src/bindings.rs
     // are enough for generating documentation, so skip the entire native
@@ -61,19 +69,21 @@ fn main() {
     // Build libghostty-vt via zig.
     let install_prefix = out_dir.join("ghostty-install");
 
-    // Ghostty's build.zig pins `minimum_zig_version = "0.15.2"` AND
-    // requires the same minor — newer zig (e.g. brew's default 0.16.x)
-    // fails at comptime. Resolve the right zig binary in order:
+    // Ghostty's build.zig pins a `minimum_zig_version` AND requires the
+    // same minor, so a zig from a different minor fails at comptime. The
+    // matching pin is in `.zig-version` (the single source of truth shared
+    // with the Makefile, bootstrap.sh, and CI). Resolve the right zig
+    // binary in order:
     //
     //   1. `LAZYBOX_ZIG_BIN` — explicit override, takes precedence.
     //   2. The worktree/shared cache populated by `make setup`.
     //   3. A compatible `zig` on PATH.
-    //   4. Homebrew's `zig@0.15` keg path — best-effort fallback so a
-    //      `brew install zig@0.15` (it's keg-only, doesn't link to
+    //   4. Homebrew's versioned keg path — best-effort fallback so a
+    //      `brew install zig@<minor>` (it's keg-only, doesn't link to
     //      /usr/local/bin) "just works" without the user editing PATH.
     //
     // The fallback only kicks in when the path exists, so non-mac CI
-    // and users with a system zig 0.15 stay on the PATH binary.
+    // and users with a matching system zig stay on the PATH binary.
     let zig_bin = resolve_zig_binary(&host);
     println!("cargo:rerun-if-env-changed=LAZYBOX_ZIG_BIN");
     let mut build = Command::new(&zig_bin);
@@ -108,7 +118,7 @@ fn main() {
     let zig_target = zig_target(&target);
     build.arg(format!("-Dtarget={zig_target}"));
 
-    // macOS 26 (Tahoe) SDK workaround. zig 0.15.2's bundled LLD can't follow
+    // macOS 26 (Tahoe) SDK workaround. The pinned zig's bundled LLD can't follow
     // the Tahoe `libSystem.tbd` reexport chain when linking in native mode,
     // so every libc symbol (_free, _malloc, _waitpid, _dispatch_*, …) comes
     // back undefined — this kills even zig's internal build *runner* before
@@ -230,7 +240,7 @@ fn link_libcpp_verbose_abort_shim() {
 /// Pick the right `zig` binary to invoke. See the call site for the
 /// resolution order. Returns either a LAZYBOX_ZIG_BIN override, the exact
 /// project-pinned binary prepared by `make setup`, a compatible system Zig,
-/// or Homebrew's `zig@0.15` keg path on macOS.
+/// or Homebrew's versioned keg path on macOS.
 fn resolve_zig_binary(host: &str) -> PathBuf {
     if let Ok(explicit) = env::var("LAZYBOX_ZIG_BIN") {
         return PathBuf::from(explicit);
@@ -283,29 +293,32 @@ fn resolve_zig_binary(host: &str) -> PathBuf {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string());
 
-    // Ghostty pins 0.15.x specifically; minor mismatch fails at
-    // comptime. Treat anything that doesn't start with "0.15." as
-    // wrong-minor.
+    // Ghostty pins one minor specifically; a mismatch fails at comptime.
+    // Derive the accepted prefix from `.zig-version` rather than hardcoding
+    // it, so a pin bump can't leave this accepting (or worse, actively
+    // selecting) the previous minor.
+    let pinned_minor = zig_minor_series();
     let system_is_compatible = system_ver
         .as_deref()
-        .map(|v| v.starts_with("0.15."))
+        .map(|v| v.starts_with(&format!("{pinned_minor}.")))
         .unwrap_or(false);
     if system_is_compatible {
         return PathBuf::from("zig");
     }
 
-    // macOS Homebrew fallback. The `zig@0.15` formula is keg-only
-    // so it won't appear on PATH after `brew install zig@0.15` —
-    // probe the well-known location directly. Tried after the PATH
-    // check so a user with a working zig 0.15 isn't second-guessed.
+    // macOS Homebrew fallback. The versioned formula is keg-only so it
+    // won't appear on PATH after `brew install zig@<minor>` — probe the
+    // well-known location directly. Tried after the PATH check so a user
+    // with a working pinned zig isn't second-guessed.
     let brew_paths = [
-        "/opt/homebrew/opt/zig@0.15/bin/zig", // Apple Silicon
-        "/usr/local/opt/zig@0.15/bin/zig",    // Intel Macs
+        format!("/opt/homebrew/opt/zig@{pinned_minor}/bin/zig"), // Apple Silicon
+        format!("/usr/local/opt/zig@{pinned_minor}/bin/zig"),    // Intel Macs
     ];
-    for candidate in brew_paths {
+    for candidate in &brew_paths {
         if std::path::Path::new(candidate).exists() {
             eprintln!(
-                "libghostty-vt-sys: system zig {} is incompatible with ghostty (needs 0.15.x); using brew zig@0.15 at {candidate}",
+                "libghostty-vt-sys: system zig {} is incompatible with ghostty \
+                 (needs {pinned_minor}.x); using brew zig@{pinned_minor} at {candidate}",
                 system_ver.as_deref().unwrap_or("?"),
             );
             return PathBuf::from(candidate);
@@ -514,7 +527,7 @@ fn macos_sdk_shim(zig_bin: &Path, out_dir: &Path) -> Option<PathBuf> {
             let shim_dir = out_dir.join("sdk-shim");
             write_xcrun_shim(&shim_dir, sdk)?;
             println!(
-                "cargo:warning=libghostty-vt: this macOS SDK won't link with zig 0.15.2 \
+                "cargo:warning=libghostty-vt: this macOS SDK won't link with the pinned zig \
                  (Tahoe libSystem reexport chain); routing zig at {} instead",
                 sdk.display()
             );
@@ -525,7 +538,7 @@ fn macos_sdk_shim(zig_bin: &Path, out_dir: &Path) -> Option<PathBuf> {
     // 3. Nothing linkable. Let the build proceed to zig's own (clearer)
     //    error, but leave an actionable breadcrumb first.
     println!(
-        "cargo:warning=libghostty-vt: native macOS SDK won't link with zig 0.15.2 and no older \
+        "cargo:warning=libghostty-vt: native macOS SDK won't link with the pinned zig and no older \
          linkable SDK was found. Install an older Command Line Tools SDK (e.g. MacOSX15.sdk) or \
          use a prebuilt lazybox release."
     );

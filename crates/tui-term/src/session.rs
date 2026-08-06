@@ -205,7 +205,11 @@ impl TermSession {
         let terminal = libghostty_vt::Terminal::new(libghostty_vt::TerminalOptions {
             cols: size.cols,
             rows: size.rows,
-            max_scrollback: 10_000,
+            // Lines are the policy; the byte figure is only a memory
+            // ceiling. Both must be set — a fresh terminal's default byte
+            // limit would otherwise cap this at a few hundred rows.
+            max_scrollback_lines: 10_000,
+            max_scrollback_bytes: Some(10_000 * 4096),
         })
         .map_err(|e| TermError::Terminal(e.to_string()))?;
 
@@ -339,7 +343,8 @@ mod tests {
         let terminal = Terminal::new(TerminalOptions {
             cols: 80,
             rows: 24,
-            max_scrollback: 100,
+            max_scrollback_lines: 100,
+            max_scrollback_bytes: None,
         })
         .expect("create terminal");
         (tx, TermState::new(rx, terminal))

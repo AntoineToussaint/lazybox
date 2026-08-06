@@ -16,7 +16,8 @@ fn viewport_stays_anchored_while_output_streams_in() {
     let mut t = Terminal::new(TerminalOptions {
         cols: 80,
         rows: 10,
-        max_scrollback: 1000,
+        max_scrollback_lines: 1000,
+        max_scrollback_bytes: None,
     })
     .expect("terminal");
     for i in 0..100 {

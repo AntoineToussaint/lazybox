@@ -55,7 +55,7 @@ tap = "AntoineToussaint/homebrew-lazybox"
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
 # Extra runner setup steps. libghostty-vt's build.rs invokes
-# `zig build` during compilation — every CI runner needs Zig 0.15.2+
+# `zig build` during compilation — every CI runner needs Zig 0.16.0+
 # on PATH. cargo-dist surfaces these to the generated workflow.
 github-build-setup = "../release-setup.yml"
 # Which actions to run on pull requests

@@ -36,7 +36,8 @@ fn active_rows(replay: &[u8], cols: u16, rows: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TerminalOptions {
         cols,
         rows,
-        max_scrollback: 10_000,
+        max_scrollback_lines: 10_000,
+        max_scrollback_bytes: None,
     })
     .expect("terminal");
     terminal.vt_write(replay);
@@ -1203,7 +1204,8 @@ async fn alt_screen_agent_retains_scrollable_history() {
         let mut terminal = Terminal::new(TerminalOptions {
             cols: 120,
             rows: 32,
-            max_scrollback: 10_000,
+            max_scrollback_lines: 10_000,
+            max_scrollback_bytes: None,
         })
         .expect("terminal");
         terminal.vt_write(&replay);
@@ -1224,7 +1226,8 @@ async fn alt_screen_agent_retains_scrollable_history() {
         let mut history = Terminal::new(TerminalOptions {
             cols: 120,
             rows: 32,
-            max_scrollback: 10_000,
+            max_scrollback_lines: 10_000,
+            max_scrollback_bytes: None,
         })
         .expect("history terminal");
         history.vt_write(&capture);

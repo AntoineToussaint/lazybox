@@ -18,7 +18,7 @@ For day-to-day development, the `Makefile` wraps the common flows.
 
 | Target | What it does |
 | --- | --- |
-| `make setup` | One-time online prep: fetch the checksum-verified pinned Zig 0.15.2 to `~/.cache/lazybox/zig/`, cache the Ghostty source and the locked Cargo graph, and prebuild the native terminal dependency so later builds run offline |
+| `make setup` | One-time online prep: fetch the checksum-verified pinned Zig 0.16.0 to `~/.cache/lazybox/zig/`, cache the Ghostty source and the locked Cargo graph, and prebuild the native terminal dependency so later builds run offline |
 | `make run` | Build and run lazybox |
 | `make build` | Build the workspace |
 | `make release` | Build in release mode |
@@ -38,7 +38,7 @@ For day-to-day development, the `Makefile` wraps the common flows.
 | `cargo nextest run --workspace` | Run all tests with the repository's per-test timeout policy |
 | `cargo clippy --workspace --all-targets -- -D warnings` | Lint, warnings as errors |
 
-If you build with cargo directly (no `make`), put Zig 0.15.2 on your `PATH`
+If you build with cargo directly (no `make`), put Zig 0.16.0 on your `PATH`
 first.
 
 ## `lazybox` run modes

@@ -68,7 +68,8 @@ pub use ffi::{SizeReportSize, TerminalScrollbar as Scrollbar};
 /// let mut terminal = Terminal::new(TerminalOptions {
 ///     cols: 80,
 ///     rows: 24,
-///     max_scrollback: 0,
+///     max_scrollback_lines: 0,
+///     max_scrollback_bytes: None,
 /// })?;
 ///
 /// // Set up a simple bell counter
@@ -113,24 +114,47 @@ pub struct Terminal<'alloc: 'cb, 'cb> {
 }
 
 /// Terminal initialization options.
+///
+/// Upstream dropped the creation-time options struct: `ghostty_terminal_new`
+/// now takes only `cols`/`rows`, and everything else is set afterwards through
+/// `ghostty_terminal_set`. This struct stays as the crate's own constructor
+/// argument — [`Terminal::new`] applies each field with the matching setter.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     /// Terminal width in cells. Must be greater than zero.
     pub cols: u16,
     /// Terminal height in cells. Must be greater than zero.
     pub rows: u16,
-    /// Maximum number of lines to keep in scrollback history.
-    pub max_scrollback: usize,
-}
-
-impl From<Options> for ffi::TerminalOptions {
-    fn from(value: Options) -> Self {
-        Self {
-            cols: value.cols,
-            rows: value.rows,
-            max_scrollback: value.max_scrollback,
-        }
-    }
+    /// Maximum scrollback to retain, in **physical lines**.
+    ///
+    /// This field replaces the old `max_scrollback`, which despite its name
+    /// bounded scrollback by *bytes* of page memory — the C header's "number
+    /// of lines" wording was wrong, and callers had to convert with a
+    /// width-dependent estimate. Upstream now exposes a real line limit
+    /// (`GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES`), so this means what it
+    /// says. The field is renamed rather than reused so every call site is
+    /// forced to reconsider its number: the same integer means something
+    /// ~1000x larger than it used to.
+    ///
+    /// Still an estimate in one direction only: libghostty prunes at page
+    /// granularity, so the retained line count is usually somewhat *higher*
+    /// than requested. Zero disables scrollback.
+    ///
+    /// NOTE: a new terminal ships with a *default byte limit* that applies
+    /// alongside this one, and whichever is reached first wins. Leaving
+    /// [`Options::max_scrollback_bytes`] at its default therefore caps
+    /// retention far below a large line count — see that field.
+    pub max_scrollback_lines: usize,
+    /// Memory backstop for the scrollback, in bytes, or [`None`] to remove
+    /// the byte limit entirely and let lines be the only bound.
+    ///
+    /// libghostty applies this *alongside* the line limit and prunes at
+    /// whichever is reached first. A fresh terminal carries a modest default
+    /// byte limit, so a caller that asks for a deep line count and leaves
+    /// this alone gets neither: measured on ghostty d5c7e54a, a 120-col
+    /// terminal retained ~613 rows whether it asked for 1_000 lines or
+    /// 67_000_000. Set it explicitly.
+    pub max_scrollback_bytes: Option<usize>,
 }
 
 impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
@@ -154,8 +178,39 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
 
     unsafe fn new_inner(alloc: *const ffi::Allocator, opts: Options) -> Result<Self> {
         let mut raw: ffi::Terminal = std::ptr::null_mut();
-        let result = unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.into()) };
+        let result =
+            unsafe { ffi::ghostty_terminal_new(alloc, &raw mut raw, opts.cols, opts.rows) };
         from_result(result)?;
+
+        // Options are post-creation setters upstream. Each takes a `size_t*`,
+        // so pass a pointer to the value — not the value. A NULL pointer
+        // removes that limit. The terminal is already allocated here, so a
+        // failing setter has to free it before bailing out, or it leaks.
+        //
+        // BOTH limits must be set: the byte limit has a default that would
+        // otherwise bind long before a large line count is reached.
+        let lines = opts.max_scrollback_lines;
+        let bytes = opts.max_scrollback_bytes;
+        let settings: [(ffi::TerminalOption::Type, *const std::ffi::c_void); 2] = [
+            (
+                ffi::TerminalOption::SCROLLBACK_MAX_LINES,
+                std::ptr::from_ref(&lines).cast(),
+            ),
+            (
+                ffi::TerminalOption::SCROLLBACK_MAX_BYTES,
+                bytes
+                    .as_ref()
+                    .map_or(std::ptr::null(), |b| std::ptr::from_ref(b).cast()),
+            ),
+        ];
+        for (option, value) in settings {
+            if let Err(err) = from_result(unsafe { ffi::ghostty_terminal_set(raw, option, value) })
+            {
+                unsafe { ffi::ghostty_terminal_free(raw) };
+                return Err(err);
+            }
+        }
+
         Ok(Self {
             inner: Object::new(raw)?,
             vtable: Box::new(VTable::default()),

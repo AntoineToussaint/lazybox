@@ -47,7 +47,8 @@ fn new_parser() -> vt::Terminal<'static, 'static> {
     vt::Terminal::new(vt::TerminalOptions {
         cols: COLS,
         rows: ROWS,
-        max_scrollback: 10_000,
+        max_scrollback_lines: 10_000,
+        max_scrollback_bytes: None,
     })
     .expect("libghostty-vt init")
 }

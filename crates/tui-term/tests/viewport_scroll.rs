@@ -29,7 +29,8 @@ fn rendered_frame_follows_delta_scroll() {
     let mut terminal = Terminal::new(TerminalOptions {
         cols: COLS,
         rows: ROWS,
-        max_scrollback: 10_000,
+        max_scrollback_lines: 10_000,
+        max_scrollback_bytes: None,
     })
     .unwrap();
     for i in 0..50 {

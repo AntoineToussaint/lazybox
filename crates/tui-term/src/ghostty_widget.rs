@@ -400,7 +400,8 @@ mod tests {
                 terminal: Terminal::new(TerminalOptions {
                     cols,
                     rows,
-                    max_scrollback: 100,
+                    max_scrollback_lines: 100,
+                    max_scrollback_bytes: None,
                 })
                 .unwrap(),
                 render_state: RenderState::new().unwrap(),

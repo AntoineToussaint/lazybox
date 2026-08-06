@@ -27,8 +27,16 @@ fn main() {
             .expect("workspace root must exist")
             .to_path_buf();
 
+        // Cargo keeps one build directory per configuration, and stale ones
+        // are never pruned — a checkout that has built more than one ghostty
+        // pin has several, each with a full set of headers. Taking the first
+        // match silently regenerates against whichever the filesystem
+        // happened to list first, which after a pin bump is usually the OLD
+        // one: the bindings come out unchanged and the mismatch only
+        // surfaces later as a confusing link or type error. Take the most
+        // recently modified instead, and say which one was used.
         let build_dir = workspace_root.join("target").join("debug").join("build");
-        let mut found = None;
+        let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&build_dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name();
@@ -39,12 +47,26 @@ fn main() {
                         .join("out")
                         .join("ghostty-install")
                         .join("include");
-                    if candidate.join("ghostty").join("vt.h").exists() {
-                        found = Some(candidate);
-                        break;
+                    let header = candidate.join("ghostty").join("vt.h");
+                    if let Ok(meta) = std::fs::metadata(&header)
+                        && let Ok(modified) = meta.modified()
+                    {
+                        candidates.push((modified, candidate));
                     }
                 }
             }
+        }
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        if candidates.len() > 1 {
+            eprintln!(
+                "note: {} candidate header sets found; using the newest. \
+                 Set GHOSTTY_INCLUDE_DIR to override.",
+                candidates.len()
+            );
+        }
+        let found = candidates.into_iter().next().map(|(_, path)| path);
+        if let Some(path) = &found {
+            eprintln!("note: generating bindings from {}", path.display());
         }
         found.unwrap_or_else(|| {
             panic!(

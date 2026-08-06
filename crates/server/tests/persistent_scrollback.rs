@@ -54,7 +54,8 @@ fn scrollback_rows(stream: &[u8]) -> usize {
     let mut term = Terminal::new(TerminalOptions {
         cols: COLS,
         rows: ROWS,
-        max_scrollback: MAX_SCROLLBACK,
+        max_scrollback_lines: MAX_SCROLLBACK,
+        max_scrollback_bytes: None,
     })
     .expect("vt init");
     term.vt_write(stream);

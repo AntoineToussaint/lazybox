@@ -87,7 +87,7 @@ attention:
 
 - **Windows**: 6 `TODO(windows)` markers across `platform.rs` + `transport.rs`. The Unix socket transport, `setsid()`-based detach, and OS notification glue all need Windows ports.
 - **Linear mutations**: `merge` for Linear (issue → state=done) not yet implemented. `add_assignees` works but needs display-name → UUID resolution.
-- **Vendored libghostty**: `crates/libghostty-vt-sys/build.rs` fetches a pinned ghostty commit at build time. Zig 0.15.2 is pinned because newer Zig breaks the upstream `requireZig` check.
+- **Vendored libghostty**: `crates/libghostty-vt-sys/build.rs` fetches a pinned ghostty commit at build time. Zig 0.16.0 is pinned because newer Zig breaks the upstream `requireZig` check.
 
 ## Where to get help
 

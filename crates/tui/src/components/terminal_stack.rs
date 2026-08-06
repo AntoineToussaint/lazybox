@@ -61,29 +61,35 @@ const DEFAULT_ROWS: u16 = 32;
 static CLIENT_SCROLLBACK_LINES: AtomicUsize =
     AtomicUsize::new(lazybox_config::DEFAULT_SCROLLBACK_LINES as usize);
 
-/// libghostty's `max_scrollback` bounds the scrollback by **bytes** of
-/// page memory, not line count (the C header's "number of lines" wording
-/// is misleading — memory is what it actually caps). ghostty stores each
-/// scrollback row as full-width cells plus page overhead, and that cost
-/// grows with the terminal's *width* — measured ~1.8 KB/row at 120 cols.
-/// Since the VT's `max_scrollback` is fixed at creation (before the real
-/// width is known) and libghostty can't resize it afterward, this per-line
-/// budget can't track width exactly; it is instead sized to cover a *wide*
-/// agent pane (up to ~275 cols) so the client still holds the configured
-/// line count there rather than silently retaining a fraction of it. A
-/// pane wider than that retains proportionally fewer lines — still far
-/// above the old flat `10_000` (~10 KB total, a few hundred rows). ghostty
-/// grows the page list lazily, so the larger ceiling costs an idle or
-/// narrow terminal ~nothing; a wide terminal that genuinely accrues deep
-/// history pays for holding exactly what it was asked to.
+/// The client VT's scrollback depth, in lines, for the current config.
+///
+/// This used to convert the line count into a *byte* budget with a
+/// width-dependent estimate (`4096` bytes/line, sized for a ~275-col pane),
+/// because libghostty's old `max_scrollback` capped page memory despite its
+/// "number of lines" documentation, and was fixed at creation before the
+/// real width was known. Upstream now takes a real line limit, so the
+/// estimate — and the silent width sensitivity it carried — is gone: a pane
+/// of any width retains the configured number of lines.
+fn client_scrollback_lines() -> usize {
+    CLIENT_SCROLLBACK_LINES.load(Ordering::Relaxed)
+}
+
+/// Memory backstop for the client VT, in bytes, paired with
+/// [`client_scrollback_lines`].
+///
+/// Lines are the *policy*; this is only a ceiling so a pathologically wide
+/// pane can't turn a line count into unbounded memory. It reuses the
+/// per-line figure the old byte budget was built on, which keeps the memory
+/// ceiling exactly where it already was while letting the line limit — not a
+/// width guess — decide retention at any normal width.
+///
+/// It must be set explicitly: a fresh libghostty terminal carries a small
+/// default byte limit that otherwise binds long before the line limit,
+/// capping a 50_000-line request at a few hundred rows.
 const CLIENT_SCROLLBACK_BYTES_PER_LINE: usize = 4096;
 
-/// The client VT's `max_scrollback` byte budget for the current
-/// configured line depth.
-fn client_scrollback_bytes() -> usize {
-    CLIENT_SCROLLBACK_LINES
-        .load(Ordering::Relaxed)
-        .saturating_mul(CLIENT_SCROLLBACK_BYTES_PER_LINE)
+fn client_scrollback_bytes() -> Option<usize> {
+    Some(client_scrollback_lines().saturating_mul(CLIENT_SCROLLBACK_BYTES_PER_LINE))
 }
 
 /// Cap for the per-terminal recent-output buffer.
@@ -1153,7 +1159,8 @@ impl TerminalVt {
         let terminal = vt::Terminal::new(vt::TerminalOptions {
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
-            max_scrollback: client_scrollback_bytes(),
+            max_scrollback_lines: client_scrollback_lines(),
+            max_scrollback_bytes: client_scrollback_bytes(),
         })
         .ok()?;
         let render_state = vt::RenderState::new().ok()?;
@@ -4162,10 +4169,10 @@ impl TerminalStack {
     ) {
         let _ = focused; // ghostty-vt doesn't render focus chrome itself
         if let Some(slot) = self.terminals.get_mut(&id) {
-            // Coming on screen: drain whatever arrived while hidden into
-            // the parser, then mark displayed so subsequent chunks feed
+            // Coming on screen: mark displayed so subsequent chunks feed
             // eagerly (this slot stays current as long as it's visible).
-            slot.flush_pending();
+            // The buffered bytes themselves are NOT fed yet — that waits
+            // until the VT has been sized to this frame's grid, below.
             slot.displayed = true;
             // Carve off the recap rows (see `recap_rows`): the recap
             // sits on row 0, row 1 stays blank so the agent output
@@ -4222,6 +4229,15 @@ impl TerminalStack {
                 body: rect,
             });
             slot.vt.ensure_size(grid.width, grid.height);
+            // Only now drain whatever arrived while this slot was hidden.
+            // Feeding before the resize would parse those bytes at the
+            // VT's default width and then reflow them to the real one —
+            // and reflow is not a faithful substitute for having wrapped
+            // at the right width to begin with. A reattaching client
+            // (whose entire replay arrives buffered) would land on a
+            // different grid than a live one fed the same bytes. See
+            // `fresh_and_reattach_reach_identical_scroll_state`.
+            slot.flush_pending();
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
             // and the bottom rows go blank as soon as the user scrolls

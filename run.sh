@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Dev-mode launcher for lazybox. Prepends the pinned zig 0.15.2 to PATH
-# (libghostty-vt's build.zig rejects newer zig) and forwards extra
-# args to the binary (e.g. `./run.sh --fresh`).
+# Dev-mode launcher for lazybox. Prepends the pinned zig (see
+# `.zig-version`) to PATH — libghostty-vt's build.zig requires that exact
+# minor — and forwards extra args to the binary (e.g. `./run.sh --fresh`).
 #
 # zig lives in a HOST-LEVEL cache (default ~/.cache/lazybox/zig, override
 # with LAZYBOX_ZIG_CACHE) shared by every clone and worktree, so a fresh
@@ -27,7 +27,11 @@ case "$(uname -m)" in
   *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
 esac
 
-slug="${arch}-${os}-0.15.2"
+# Read the pin from `.zig-version` — the same single source of truth the
+# Makefile and scripts/bootstrap.sh use. Hardcoding it here meant a version
+# bump left this launcher pointing at a cache directory that `make setup`
+# no longer populates, silently falling through to system zig.
+slug="${arch}-${os}-$(cat "${ROOT}/.zig-version")"
 # Resolve pinned zig from either a per-worktree local install or the
 # shared host-level cache. Local wins when present (lets a worktree pin
 # its own zig); otherwise fall back to the cache `make setup` populates

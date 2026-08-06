@@ -2,7 +2,7 @@
 # Bootstrap lazybox's build environment.
 #
 # Idempotent. Installs:
-#   - zig 0.15.2 to a HOST-LEVEL cache (default ~/.cache/lazybox/zig/,
+#   - zig 0.16.0 to a HOST-LEVEL cache (default ~/.cache/lazybox/zig/,
 #     override with LAZYBOX_ZIG_CACHE). Used by libghostty's build.zig
 #     (which rejects zig >= 0.16). The Makefile prepends this to PATH
 #     so any system zig is ignored. Caching outside the checkout means
@@ -62,7 +62,7 @@ case "$(uname -m)" in
 esac
 host="${arch}-${os}"
 
-# ── Install zig 0.15.2 ──────────────────────────────────────────────────
+# ── Install zig 0.16.0 ──────────────────────────────────────────────────
 zig_dir="${ZIG_CACHE}/${host}-${ZIG_VERSION}"
 zig_bin="${zig_dir}/zig"
 
@@ -87,7 +87,8 @@ else
   # replacing — yielding `${zig_dir}/zig-${host}-${ZIG_VERSION}/zig`
   # with no binary at the expected `${zig_bin}` path. The Makefile's
   # `$(PINNED_PATH)` then falls through to system zig, which on
-  # macOS Homebrew is 0.16 and rejects ghostty's `requireZig(0.15.2)`.
+  # macOS Homebrew may be a different minor and is rejected by ghostty's
+  # `requireZig`.
   rm -rf "${zig_dir}"
   mkdir -p "${ZIG_CACHE}"
   url="https://ziglang.org/download/${ZIG_VERSION}/zig-${arch}-${os}-${ZIG_VERSION}.tar.xz"

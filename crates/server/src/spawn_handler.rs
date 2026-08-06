@@ -1779,7 +1779,7 @@ async fn handle_spawn_inner(
                                 "working watchdog firing",
                             );
                         }
-                        watchdog_escape_working(
+                        watchdog_reverify_parked_turn(
                             agent_for_pump.as_ref(),
                             &state_buf,
                             last_chunk_len,
@@ -3394,7 +3394,7 @@ pub(crate) const PTY_QUIET_CLASSIFY_AFTER: Duration = Duration::from_secs(5);
 /// ([`lazybox_agents::detect::content_fingerprint`] — repaint churn
 /// doesn't reset it) and, once a `Working` terminal has shown none for
 /// this long, classifies the screen regardless of byte flow and forces
-/// the turn closed ([`watchdog_escape_working`]). Default; override
+/// the turn closed ([`watchdog_reverify_parked_turn`]). Default; override
 /// with `agent.working_watchdog_secs` (0 disables).
 pub(crate) const WORKING_WATCHDOG_AFTER: Duration = Duration::from_secs(15);
 
@@ -5280,7 +5280,7 @@ async fn classify_quiet_screen(
 /// followed, so the stale-buffer classify (which would re-raise the
 /// just-answered `?`) is skipped and the turn is settled `Done` directly.
 /// See the inline comment for why that can't pin `Working`.
-async fn watchdog_escape_working(
+async fn watchdog_reverify_parked_turn(
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     buf: &[u8],
     last_chunk_len: usize,
@@ -5338,11 +5338,18 @@ async fn watchdog_escape_working(
             state_machine,
         )
         .await;
-        if terminals.agent_states.lock().await.get(&id).copied()
-            != Some(lazybox_ipc::AgentState::Working)
-        {
-            return;
-        }
+    }
+    // Force the turn closed only while the terminal STILL reads `Working` —
+    // the stuck-status case the force exists for (a frozen status line, or a
+    // zero-output answer the `?` flip pinned at `Working`). A re-classify
+    // that already settled the turn, or an `InputNeeded` the answered-branch
+    // skipped past (a hook/answer race), is resolved and must not be
+    // force-closed: a `Done` from `InputNeeded` is rejected anyway, but this
+    // also stops the spurious "forcing the turn closed" log for it.
+    if terminals.agent_states.lock().await.get(&id).copied()
+        != Some(lazybox_ipc::AgentState::Working)
+    {
+        return;
     }
     tracing::info!(
         terminal_id = ?id,
@@ -7160,7 +7167,7 @@ async fn pump_recovered_session(
                 if working_watchdog.fire(tokio::time::Instant::now()).is_none() {
                     continue;
                 }
-                watchdog_escape_working(
+                watchdog_reverify_parked_turn(
                     agent.as_ref(),
                     &state_buf,
                     last_chunk_len,
@@ -14109,12 +14116,13 @@ mod tests {
                 .insert(self.id, std::time::Instant::now());
         }
 
-        /// The pump's Working watchdog fired — [`WORKING_WATCHDOG_AFTER`]
-        /// with no meaningful content change — so classify the screen and,
-        /// if still Working, force the turn closed; return the
-        /// `AgentState`s broadcast as a result.
+        /// The pump's content-stability watchdog fired —
+        /// [`WORKING_WATCHDOG_AFTER`] with no meaningful content change — so
+        /// re-classify the screen, force a still-`Working` turn closed, and
+        /// resolve a stale `InputNeeded`; return the `AgentState`s broadcast
+        /// as a result.
         async fn watchdog(&mut self) -> Vec<lazybox_ipc::AgentState> {
-            watchdog_escape_working(
+            watchdog_reverify_parked_turn(
                 Some(&self.agent),
                 &self.buf,
                 self.last_chunk_len,
@@ -15138,6 +15146,31 @@ mod tests {
             p.watchdog().await,
             Vec::<lazybox_ipc::AgentState>::new(),
             "a fresh hook keeps the `?` even when the screen looks resting",
+        );
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&InputNeeded),
+        );
+    }
+
+    /// The force-`Done` tail exists only for a stuck `Working` turn. A
+    /// pending answer reset latched while the terminal reads `InputNeeded`
+    /// (a hook/answer race) makes the watchdog skip the stale-buffer
+    /// re-classify — so the tail must NOT then force the turn closed and
+    /// must leave the `?` untouched (a `Done` from `InputNeeded` is rejected,
+    /// so the guard is what stops the spurious "forcing the turn closed").
+    #[tokio::test]
+    async fn watchdog_does_not_force_close_an_input_needed_with_a_latched_reset() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(PERMISSION_DIALOG.as_bytes()).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        p.terminals.agent_detect_resets.lock().await.insert(p.id);
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a latched reset must not force an InputNeeded turn to Done",
         );
         assert_eq!(
             p.terminals.agent_states.lock().await.get(&p.id),

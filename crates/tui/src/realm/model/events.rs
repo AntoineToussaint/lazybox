@@ -187,6 +187,15 @@ impl<T: TerminalAdapter> Model<T> {
     /// callable on its own for the rare re-fan with no focus change (initial
     /// mount, a pane-visibility toggle).
     pub(super) fn set_focus(&mut self, focus: PaneFocus) {
+        // A held single `]` (the escape latch) belongs to the pane it was
+        // pressed in. Both the terminal and the sidebar now arm it (#871),
+        // so a focus change must drop it — otherwise the held `]` resolves
+        // in the pane you moved to: a stray literal `]` into an agent, or a
+        // spurious snippet browser. Mirrors the original "focus left the
+        // terminal → drop the held `]`" rule, applied symmetrically.
+        if self.focus != focus {
+            self.escape_latch.disarm();
+        }
         self.focus = focus;
         self.set_focus_attr();
     }

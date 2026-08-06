@@ -681,15 +681,6 @@ impl<T: TerminalAdapter> Model<T> {
     /// Shared by the three release paths: a non-`]` key followed, the
     /// chord window lapsed and re-armed on another `]`, or the idle tick
     /// timed the chord out ([`Self::tick_terminal_leader`]).
-    /// Resolve a lone held sidebar `]` (#871): the escape char that turned
-    /// out NOT to start a `]]` chord opens the read-only snippet browser —
-    /// the `OpenSnippets` action's sidebar meaning. The terminal
-    /// counterpart flushes a literal `]`; the sidebar has no PTY, so a lone
-    /// `]` keeps its browse binding.
-    pub(super) fn resolve_held_sidebar_escape(&mut self) {
-        self.mount_snippet_browser();
-    }
-
     pub(super) fn flush_held_escape_char(&mut self) {
         let mut held_cmds: Vec<IpcCommand> = Vec::new();
         let held = crossterm::event::KeyEvent::new(
@@ -700,6 +691,15 @@ impl<T: TerminalAdapter> Model<T> {
         for cmd in held_cmds {
             self.send_cmd(cmd);
         }
+    }
+
+    /// Resolve a lone held sidebar `]` (#871): the escape char that turned
+    /// out NOT to start a `]]` chord opens the read-only snippet browser —
+    /// the `OpenSnippets` action's sidebar meaning. The terminal
+    /// counterpart flushes a literal `]`; the sidebar has no PTY, so a lone
+    /// `]` keeps its browse binding.
+    pub(super) fn resolve_held_sidebar_escape(&mut self) {
+        self.mount_snippet_browser();
     }
 
     /// The `]]` leader popup's rows in display order: the fixed command
@@ -843,8 +843,13 @@ impl<T: TerminalAdapter> Model<T> {
         };
         match self.sidebar.broadcast_terminal(&key) {
             Some((terminal_id, _)) => {
-                self.leader_target = Some(terminal_id);
                 self.mount_snippet_picker(String::new());
+                // Only claim the retarget once the picker actually opened —
+                // an empty library refuses to mount, and a leftover
+                // `leader_target` would then misdirect the next picker.
+                if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+                    self.leader_target = Some(terminal_id);
+                }
             }
             None if self.broadcast_can_spawn(&key) => self.mount_broadcast_picker_for(vec![key]),
             None => self.flash_info("no running session here — press w to start an agent"),
@@ -863,9 +868,14 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("no running agent here — press w to start one");
             return;
         };
-        self.leader_target = Some(terminal_id);
         let worktree = self.workspace_worktree(&key);
         self.mount_skill_picker_for(String::new(), terminal_id, worktree);
+        // Only claim the retarget once the picker actually opened — a shell,
+        // a remote client, or an empty skill set refuses to mount, and a
+        // leftover `leader_target` would then misdirect the next picker.
+        if matches!(self.modal_stack.last(), Some(Id::SkillPicker)) {
+            self.leader_target = Some(terminal_id);
+        }
     }
 
     /// `]]r` from the sidebar — recall the cursor workspace agent's last

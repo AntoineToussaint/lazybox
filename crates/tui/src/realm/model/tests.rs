@@ -4652,6 +4652,53 @@ snippets:
         );
     }
 
+    /// A lone `]` held in the sidebar is dropped the moment focus leaves —
+    /// it must not resolve in the pane you moved to (a stray literal `]`
+    /// flushed into an agent, or a spurious browser). Both panes arm the
+    /// shared escape latch now (#871), so this cross-pane leak is guarded
+    /// by disarming on any focus change.
+    #[test]
+    fn sidebar_held_bracket_is_dropped_on_focus_change() {
+        let mut m = model_two_agent_workspaces_sidebar("sidebar-focuschg");
+        m.dispatch_key(esc_key());
+        assert!(m.escape_latch.is_armed(), "the lone `]` is held");
+        assert!(
+            !m.terminal_leader_pending(),
+            "one `]` doesn't arm the leader"
+        );
+        m.set_focus(PaneFocus::Terminals);
+        assert!(
+            !m.escape_latch.is_armed(),
+            "a focus change drops the held `]` so it can't leak into the terminal",
+        );
+    }
+
+    /// A sidebar `]]l` on a workspace whose only terminal is a shell is
+    /// refused (skills need an agent). The refused mount must leave no
+    /// `leader_target` behind, or the next picker would misdirect.
+    #[test]
+    fn sidebar_skill_on_shell_leaves_no_stale_target() {
+        let mut m = model_with_active_terminal_and_snippet(
+            "sidebar-skill-shell",
+            "snippets:\n  rev:\n    description: d\n    body: b\n",
+            lazybox_ipc::TerminalKind::Shell,
+        );
+        m.modal_stack.clear();
+        let mut cmds = Vec::new();
+        m.run_sidebar_leader_cmd(
+            crate::realm::model::terminal_leader::LeaderCmd::Skills,
+            &mut cmds,
+        );
+        assert!(
+            !matches!(m.top_modal(), Some(Id::SkillPicker)),
+            "a shell workspace refuses the skill picker",
+        );
+        assert_eq!(
+            m.leader_target, None,
+            "a refused mount leaves no stale retarget",
+        );
+    }
+
     /// `]]<unbound>` — a key that isn't a leader command — cancels back
     /// to the terminal without opening the picker or leaving (#252). Only
     /// `s`/`f`/`q`/`x`/digit/`` ` ``/the split-and-arrow tile chords are

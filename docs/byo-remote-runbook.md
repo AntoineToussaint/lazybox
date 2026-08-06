@@ -40,6 +40,46 @@ lazybox --connect /tmp/lazybox.sock
 You get the full inbox, and every shell (`s`) and agent (`a c`, `w w`, …)
 you spawn runs **on the box** — its terminals stream back over the tunnel.
 
+### Let lazybox own the forward
+
+Rather than run the `ssh -L` yourself (and babysit it with `autossh`),
+declare the forward under `remote.tunnel` and `--connect` spawns and
+keepalive-supervises it for you before it dials:
+
+```yaml
+remote:
+  tunnel:
+    mode: ssh                                       # ssh | iap
+    host: user@box                                  # ssh destination
+    remote_socket: /home/user/.lazybox/run/daemon.sock
+    ports: [3000, 8082]                             # workload ports, localhost-bound
+```
+
+```sh
+lazybox --connect /tmp/lazybox.sock
+```
+
+The supervisor forwards the daemon socket (to the `--connect` path) **and**
+each workload port (`localhost:<p>` → `localhost:<p>` on the box), with SSH
+keepalive (`ServerAliveInterval`) and `ExitOnForwardFailure` so a dead link
+is detected and re-established on capped-exponential backoff — no external
+`autossh`. sshd does not expand `~`, so give `remote_socket` as an absolute
+path. Omit it to forward only the workload ports.
+
+For a box with no public IP, `mode: iap` runs the same SSH over GCP
+Identity-Aware Proxy (`gcloud compute ssh <instance> --tunnel-through-iap`):
+
+```yaml
+remote:
+  tunnel:
+    mode: iap
+    instance: my-box
+    zone: us-central1-a       # optional; falls back to gcloud's active zone
+    project: my-project       # optional; falls back to gcloud's active project
+    remote_socket: /home/user/.lazybox/run/daemon.sock
+    ports: [3000, 8082]
+```
+
 ### Reconnect is automatic
 
 A dropped socket — laptop sleep, wifi change, the SSH tunnel resetting — no
@@ -50,7 +90,9 @@ reconstructs without a manual restart. While it's re-dialing, a
 `⟳ daemon connection lost — reconnecting…` banner shows so an extended outage
 isn't a silent freeze; it clears the moment the link is back. Re-establish the
 `ssh -L` forward (or use an autossh/`ServerAliveInterval` keepalive) and the
-client reattaches as soon as the socket is back.
+client reattaches as soon as the socket is back — and with `remote.tunnel`
+above, lazybox re-establishes the forward itself, so the banner clears on its
+own without you touching the tunnel.
 
 A flapping endpoint (connects, then drops immediately) is backed off
 progressively instead of hammered, and if the box comes back on an

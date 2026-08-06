@@ -36,6 +36,7 @@ mod setup_persist;
 mod slack_init;
 mod slack_prune;
 mod test_mode;
+mod tunnel;
 mod worktree_gc;
 
 use lazybox_ipc::{channel, socket};
@@ -945,10 +946,68 @@ fn map_notifier_backend(
     }
 }
 
+/// Holds the tunnel supervisor task for the life of a `--connect`
+/// session. Dropping it aborts the supervisor, whose live child ssh /
+/// gcloud is killed on drop (`kill_on_drop`) — so the forward doesn't
+/// outlive the client that opened it.
+struct TunnelGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for TunnelGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Spawn the forward supervisor and block until the local socket the
+/// forward binds appears (or a bounded timeout elapses). Returns the guard
+/// that keeps the supervisor running for the session.
+async fn bring_up_tunnel(
+    cfg: lazybox_config::TunnelConfig,
+    socket_path: &std::path::Path,
+) -> anyhow::Result<TunnelGuard> {
+    let tunnel = tunnel::Tunnel::resolve(cfg, socket_path)
+        .map_err(|e| anyhow::anyhow!("remote.tunnel is misconfigured: {e}"))?;
+    // Wait only when the daemon socket is forwarded to the very path we're
+    // about to dial; a ports-only (or differently-pinned) tunnel never
+    // binds it, so waiting would just time out.
+    let should_wait = tunnel.forwards_socket() && tunnel.local_socket() == socket_path;
+    let (status_tx, _status_rx) = tokio::sync::watch::channel(tunnel::TunnelStatus::Starting);
+    let handle = tokio::spawn(tunnel::supervise(tunnel, status_tx));
+
+    if should_wait && !tunnel::wait_for_socket(socket_path, TUNNEL_STARTUP_TIMEOUT).await {
+        handle.abort();
+        anyhow::bail!(
+            "remote tunnel did not bind {} within {}s — check remote.tunnel host/credentials \
+             and that the daemon is running on the box (`lazybox server start`)",
+            socket_path.display(),
+            TUNNEL_STARTUP_TIMEOUT.as_secs()
+        );
+    }
+    Ok(TunnelGuard(handle))
+}
+
+/// How long to wait for the forward to bind the local socket on startup
+/// before giving up. Covers SSH auth + IAP handshake latency; a genuinely
+/// broken tunnel fails within this window rather than hanging the launch.
+const TUNNEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+
 async fn run_remote(
     socket_path: &std::path::Path,
     preselect: Option<lazybox_tui::realm::model::Preselect>,
 ) -> anyhow::Result<()> {
+    let config = lazybox_config::Config::load().ok();
+
+    // A configured `remote.tunnel` replaces the operator-run `autossh` of
+    // the BYO-remote runbook: bring the forward up (and keep it up) before
+    // dialing, so the socket the rest of this path expects exists. The
+    // guard keeps the supervisor alive for the session and kills the child
+    // ssh/gcloud on return. Once connected, a tunnel flap surfaces through
+    // the transport's own reconnect banner — the socket drops with it.
+    let _tunnel = match config.as_ref().and_then(|c| c.remote.tunnel.clone()) {
+        Some(cfg) => Some(bring_up_tunnel(cfg, socket_path).await?),
+        None => None,
+    };
+
     if !socket_path.exists() {
         anyhow::bail!(
             "no daemon socket at {}. Start one with `lazybox server start`.",
@@ -996,8 +1055,9 @@ async fn run_remote(
     // The remote path skips the full config application (the daemon
     // owns most of it), but notifications fire client-side — arm them
     // here too or `--connect` sessions would stay silent.
-    let attention = lazybox_config::Config::load()
-        .map(|c| c.attention)
+    let attention = config
+        .as_ref()
+        .map(|c| c.attention.clone())
         .unwrap_or_default();
     lazybox_tui::platform::set_notification_click_context(
         Some(socket_path.to_path_buf()),

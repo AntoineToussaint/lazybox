@@ -86,7 +86,7 @@ over stdin, then open that URL on your own machine:
 
 - `gcloud auth application-default login --no-launch-browser`
 - `gcloud auth login --no-launch-browser`
-- `gh auth login` → pick the device-code / "paste a token" path
+- `gh auth login` → pick the "Paste an authentication token" path
 - generally look for `--no-launch-browser`, `--no-browser`, or `--device-code`
 
 Press `]]u` to open the printed URL — it scans the visible terminal and opens
@@ -102,7 +102,8 @@ works; the browserless path is what you reach for on a remote or headless box.
 the daemon env, adding only `TERM=xterm-256color` / `COLORTERM=truecolor`; the
 tmux backend does the same through `-e`. Browser launching lives only host-side
 in the client (`browser_argv` / `open_url`, `crates/tui-core/src/editors.rs`),
-which `]]u` and the `o` shortcut drive — never inside the agent PTY.
+which `]]u` drives (and `g o` for a workspace's PR/issue page) — never inside
+the agent PTY.
 
 ### Test checklist
 - [ ] An interactive prompt (`read -p "x: " v`, a password) works in an embedded terminal.

@@ -268,7 +268,25 @@ into PR, `x z` long snooze, `x x` archive, `x c` close issue
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).
 `r` reply (works from the sidebar as well as the activity pane —
 it's a Workspace-section action). `v` multi-selects workspace
-rows (marks survive j/k; `Esc` clears) and `Shift-B` broadcasts one
+rows (marks survive j/k; `Esc` clears). A live multi-select makes
+**every bulk-appropriate workspace action** target the whole set
+instead of just the cursor row (#899): `w w` / `w S/M/L`, `w c`·`w x`,
+`a c`·`a x`·`a S/M/L` and `s` start (or continue) the contextual
+agent / shell on each selected workspace — heavy spawns gate behind
+one "start N agents?" confirm and inject into any workspace already
+running an agent; `g m` merge, `g u` update-branch, `z` snooze,
+`x x` archive, `m` mark-read, `g s` sync, and `g g` arm-auto-merge
+apply per target, running the eligible ones and summarizing what was
+skipped and why. Destructive bulk actions confirm with the count + an
+affected list + the eligible/skipped split (e.g. "Merge 3 of 5
+selected PRs?"), snapshotting the selection at mount so a poll under
+the modal can't redirect them. Inherently single-target actions stay
+focused-only: open editor (`e`), rename (`x R`), view diff, close
+issue (`x c`) / delete-or-close (`g d`), open-in-browser (`g o`),
+reviewers/assignees/labels, the policies menu (`g p`), notes, pin
+(`p`), move-to-Space (`x m`), and the on-main spawns (`b …`). The
+shared `resolve_targets` helper (selection-or-focused) means a new
+workspace action opts into bulk by reading it. `Shift-B` broadcasts one
 instruction to every selected workspace: a snippet picker (`Ctrl-F`
 skips it for free text) feeds a compose textarea pre-filled with the
 snippet body, and submit delivers per target — running agents via the

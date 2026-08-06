@@ -341,6 +341,11 @@ pub enum Id {
     /// in `ModalFlow::BroadcastConfirm` and mounts this rather than
     /// spawning silently; `Msg::Confirmed(true)` runs the fan-out.
     BroadcastConfirm,
+    /// Confirm gate shown before a bulk `w w` / spawn / shell over a `v`
+    /// multi-select starts new sessions (#899). The pre-computed plan
+    /// lives in `ModalFlow::BulkSpawnConfirm`; `Msg::Confirmed(true)`
+    /// emits the stashed commands.
+    BulkSpawnConfirm,
     /// Target picker for the agent-to-agent handoff flow (`x s`,
     /// issue #431) — pick the session the source agent's output should
     /// be injected into. Each row carries a [`ChoicePayload::Session`];
@@ -625,11 +630,24 @@ pub(crate) enum ModalFlow {
         session_key: lazybox_core::SessionKey,
         actions: Vec<lazybox_tui_core::action::Action>,
     },
-    /// Unified destructive-action confirm. Target resolved at mount
-    /// time so a cursor drift under the modal can't redirect it.
+    /// Unified destructive-action confirm. Targets resolved at mount
+    /// time so a cursor drift under the modal can't redirect it. Holds
+    /// a *set*: a single focused row, or every multi-selected row when
+    /// a `v` bulk selection is active (#899). `Msg::Confirmed(true)`
+    /// iterates the set, firing one command per target.
     ActionConfirm {
         action: lazybox_tui_core::action::Action,
-        target: ActionConfirmTarget,
+        targets: Vec<ActionConfirmTarget>,
+    },
+    /// Bulk agent/shell start over a `v` multi-selection (#899). The
+    /// plan — the exact spawn/inject commands and the outcome summary —
+    /// is computed and snapshotted at mount, so a daemon event that
+    /// reshuffles the sidebar under the confirm can't change who gets
+    /// started. `Msg::Confirmed(true)` emits the stashed commands.
+    BulkSpawnConfirm {
+        commands: Vec<lazybox_ipc::Command>,
+        summary: String,
+        follow: Option<lazybox_core::SessionKey>,
     },
     /// Action proposed by the Ask Lazybox help agent (#353). For
     /// `scaffold_skill`, `skill_root` is the destination repo resolved

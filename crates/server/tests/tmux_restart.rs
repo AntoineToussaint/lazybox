@@ -11,10 +11,14 @@
 //! so the test only runs where the backend would actually engage.
 
 use lazybox_core::{SessionKey, Workspace};
-use lazybox_ipc::{Command, Event, TerminalId, TerminalKind, TerminalSnapshot, channel};
+use lazybox_ipc::{
+    Command, Event, EventSender, TerminalId, TerminalKind, TerminalSnapshot, channel,
+};
 use lazybox_server::backend::tmux::modern_tmux_version;
 use lazybox_server::backend::{SessionBackend, TmuxBackend};
-use lazybox_server::spawn_handler::{handle_record_composing_buffer, snapshot_terminals};
+use lazybox_server::spawn_handler::{
+    handle_fetch_scrollback, handle_record_composing_buffer, snapshot_terminals,
+};
 use lazybox_server::{Server, ServerConfig};
 use lazybox_store::{MemoryStore, WorkspaceRecord};
 use libghostty_vt::terminal::{Point, PointCoordinate};
@@ -1237,6 +1241,189 @@ async fn alt_screen_agent_retains_scrollable_history() {
         );
 
         let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
+/// A pane stuck on the alternate screen — spawned on a stale/older-build
+/// tmux server that still allowed it — retains ZERO history and can't be
+/// pulled back out in place (tmux ignores rmcup while `alternate-screen
+/// off`). `history_disabled` must flag exactly that pane and not a healthy
+/// primary-screen session, and a scroll-up fetch on it must warn the
+/// client to reopen the session instead of silently serving nothing (#919).
+#[tokio::test]
+async fn zero_history_alt_pane_warns_client_to_reopen() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping zero-history warning test");
+        return;
+    }
+    let socket = format!("lazybox-test-altwarn-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let store = Arc::new(MemoryStore::new());
+        let backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
+
+        // A healthy full-screen agent: output scrolls into retained history.
+        let healthy_key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "for i in $(seq 1 60); do echo line-$i; done; exec sleep 300".to_string(),
+                ],
+                None,
+                &[],
+                "healthy",
+            )
+            .await
+            .expect("spawn healthy");
+
+        // A pane stuck on the alternate screen: re-allow the alt screen at
+        // the window level (simulating the pre-fix server config) so the
+        // program's smcup sticks and no history ever accumulates.
+        let alt_key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "sleep 1; printf '\\033[?1049h'; echo on-alt; exec sleep 300".to_string(),
+                ],
+                None,
+                &[],
+                "alt",
+            )
+            .await
+            .expect("spawn alt");
+        let allow = std::process::Command::new("tmux")
+            .args([
+                "-L",
+                &socket,
+                "set-option",
+                "-w",
+                "-t",
+                &alt_key,
+                "alternate-screen",
+                "on",
+            ])
+            .output()
+            .expect("re-allow alternate-screen");
+        assert!(allow.status.success(), "re-allow alternate-screen");
+
+        // Wait for the healthy pane's output and the alt pane's entry.
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let healthy_ready = String::from_utf8_lossy(
+                &backend
+                    .subscribe(&healthy_key)
+                    .await
+                    .expect("subscribe healthy")
+                    .replay,
+            )
+            .contains("line-60");
+            let alt_on = std::process::Command::new("tmux")
+                .args([
+                    "-L",
+                    &socket,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &alt_key,
+                    "#{alternate_on}",
+                ])
+                .output()
+                .expect("display-message");
+            let alt_ready = String::from_utf8_lossy(&alt_on.stdout).trim() == "1";
+            if healthy_ready && alt_ready {
+                break;
+            }
+            assert!(attempt < 100, "panes never reached the expected state");
+        }
+
+        // Direct backend classification: only the alt pane is broken.
+        assert!(
+            !backend.history_disabled(&healthy_key).await,
+            "a healthy primary-screen pane must not be flagged as history-disabled",
+        );
+        assert!(
+            backend.history_disabled(&alt_key).await,
+            "an alt-screen pane retains zero history and must be flagged",
+        );
+
+        // The fetch handler surfaces the reopen warning only for the broken pane.
+        let config = ServerConfig::with_store_and_backend(store.clone(), backend.clone());
+        let healthy_id = TerminalId(1);
+        let alt_id = TerminalId(2);
+        config
+            .terminal
+            .register_terminal(
+                healthy_id,
+                healthy_key.clone(),
+                SessionKey::from("healthy"),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        config
+            .terminal
+            .register_terminal(
+                alt_id,
+                alt_key.clone(),
+                SessionKey::from("alt"),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+
+        let drain = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>| {
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+            events
+        };
+        let warned = |events: &[Event], id: TerminalId| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    Event::RecoveredTerminalsRequireRestart { terminal_ids }
+                        if terminal_ids == &vec![id]
+                )
+            })
+        };
+
+        // Healthy pane: real scrollback served, no reopen warning.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_fetch_scrollback(&config, &EventSender::from_unbounded(tx), healthy_id).await;
+        let healthy_events = drain(&mut rx);
+        assert!(
+            healthy_events.iter().any(|event| matches!(
+                event,
+                Event::TerminalScrollback { terminal_id, .. } if *terminal_id == healthy_id
+            )),
+            "a healthy pane's fetch must serve its deep scrollback: {healthy_events:?}",
+        );
+        assert!(
+            !warned(&healthy_events, healthy_id),
+            "a healthy pane must not trigger the reopen warning",
+        );
+
+        // Alt pane: no grid-wiping capture, a reopen warning instead.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_fetch_scrollback(&config, &EventSender::from_unbounded(tx), alt_id).await;
+        let alt_events = drain(&mut rx);
+        assert!(
+            warned(&alt_events, alt_id),
+            "a zero-history alt pane's fetch must warn the client to reopen: {alt_events:?}",
+        );
+        assert!(
+            !alt_events
+                .iter()
+                .any(|event| matches!(event, Event::TerminalScrollback { .. })),
+            "a zero-history alt pane must not serve a grid-wiping one-screen capture",
+        );
+
+        let _ = backend.kill(&healthy_key).await;
+        let _ = backend.kill(&alt_key).await;
     })
     .await;
     kill_test_server(&socket);

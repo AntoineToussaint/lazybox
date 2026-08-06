@@ -5750,9 +5750,20 @@ pub async fn handle_fetch_scrollback(
                 seq,
             });
         }
-        // No history source (raw PTY) — the client's ring-fed
-        // scrollback is already everything there is.
-        Ok(None) => {}
+        // No history from the backend. Usually benign: a raw-PTY session's
+        // client already holds every byte in its ring. But a tmux pane
+        // stuck on the alternate screen — spawned on a stale/older-build
+        // server that still allowed it (#919) — retains ZERO history and
+        // can't be healed in place, so scroll-up would silently show
+        // nothing. Tell the client to reopen the session instead, reusing
+        // the older-build scrollback warning.
+        Ok(None) => {
+            if config.backend.history_disabled(&key).await {
+                let _ = tx.send(Event::RecoveredTerminalsRequireRestart {
+                    terminal_ids: vec![terminal_id],
+                });
+            }
+        }
         Err(e) => {
             tracing::debug!(key = %key, "backend scrollback fetch failed: {e}");
         }

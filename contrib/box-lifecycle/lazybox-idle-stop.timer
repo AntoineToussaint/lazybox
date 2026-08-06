@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic idle check for this lazybox box
+
+[Timer]
+# First check a few minutes after boot, then every 5 minutes. The script
+# itself decides when enough consecutive idle time has elapsed to stop.
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

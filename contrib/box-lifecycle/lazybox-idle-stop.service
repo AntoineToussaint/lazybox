@@ -1,0 +1,8 @@
+[Unit]
+Description=Stop this lazybox box when idle
+
+[Service]
+Type=oneshot
+# Tunables live in the env file (idle window, CPU floor, watched agents).
+EnvironmentFile=-/etc/lazybox/idle-stop.env
+ExecStart=/usr/local/bin/lazybox-idle-stop.sh

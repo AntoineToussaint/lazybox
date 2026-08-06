@@ -6744,7 +6744,15 @@ async fn handle_inject_prompt_inner(
         )
         .await
         {
-            Ok(true) => {
+            // The snippet MRU (`]N`) and prompt history record on DELIVERY,
+            // not on the submission-confirmation evidence. `Ok(false)` means
+            // the body was pasted and the submit keystroke written, but no
+            // `Working`/`UserPromptSubmit` proof arrived — a flaky signal
+            // (#869/#872) that must not gate the counter. Both `Ok` arms mean
+            // the snippet reached the agent's composer, so both record; a
+            // dropped inject (deferred past its deadline, or an initial-write
+            // failure) returns before this match and so never records.
+            Ok(_) => {
                 if let Some(snippet) = snippet_for_confirm {
                     let prompt = UserPrompt {
                         text: snippet.body.clone(),
@@ -6764,7 +6772,6 @@ async fn handle_inject_prompt_inner(
                     .await;
                 }
             }
-            Ok(false) => {}
             Err(PromptWriteError::Initial(e)) => {
                 tracing::warn!("inject_prompt: initial write failed: {e}");
                 let _ = bus.send(Event::TerminalInputRejected {
@@ -10798,6 +10805,106 @@ mod tests {
         })
         .await
         .expect("injection reservation released after terminal exit");
+    }
+
+    /// A snippet delivered to an agent records the `]N` MRU on DELIVERY, not
+    /// on the flaky submission-confirmation evidence (issue #921). The
+    /// broadcast/sidebar send path routes an agent snippet through the
+    /// settle-gated inject; when the paste + submit are written but no
+    /// `Working` proof arrives (`write_prompt_sequence` → `Ok(false)`), the
+    /// counter must still bump — the snippet reached the composer. Before the
+    /// fix the record fired only on `Ok(true)`, so an unconfirmed-but-delivered
+    /// inject left `sent_snippets` untouched even though shell targets updated.
+    #[tokio::test]
+    async fn snippet_to_agent_records_mru_even_when_submit_is_unconfirmed() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key: SessionKey = "github:o/r#921".into();
+        let workspace = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new(session_key.as_str().to_string()),
+            "main",
+            chrono::Utc::now(),
+        );
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace.key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .expect("save workspace");
+
+        let backend_key = mock
+            .spawn(&[], None, &[], "snippet-agent-record")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(921);
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
+        config.terminal.terminal_meta.lock().await.insert(
+            id,
+            (session_key.clone(), TerminalKind::Agent("claude".into())),
+        );
+        // A free-text prompt: the snippet delivers immediately (the #725 gate
+        // only lifts for FreeText), then the submit stays unconfirmed because
+        // no `Working` evidence ever arrives — the confirm loop breaks to
+        // `Ok(false)`. The MRU must record regardless.
+        config
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::InputNeeded);
+        config
+            .terminal
+            .input_needed_shapes
+            .lock()
+            .await
+            .insert(id, lazybox_agents::PromptShape::FreeText);
+
+        let mut events = config.bus.subscribe();
+        handle_deliver_snippet(
+            &config,
+            id,
+            "rev".into(),
+            "Review".into(),
+            "review the diff".into(),
+            true,
+        )
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if matches!(
+                    events.recv().await,
+                    Ok(Event::SnippetDelivered {
+                        terminal_id,
+                        ref snippet_key,
+                        ..
+                    }) if terminal_id == id && snippet_key == "rev"
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("an unconfirmed-but-delivered agent snippet must still record");
+
+        let record = config
+            .store
+            .get_workspace(&workspace.key)
+            .expect("load workspace")
+            .expect("workspace exists");
+        let recorded: lazybox_core::Workspace =
+            serde_json::from_str(record.workspace_json.as_deref().expect("json")).unwrap();
+        assert_eq!(
+            recorded.sent_snippets,
+            vec!["rev"],
+            "the `]N` MRU records on delivery, not on submission confirmation",
+        );
     }
 
     /// A hook-driven `InputNeeded` records the matching prompt shape before

@@ -967,18 +967,20 @@ async fn bring_up_tunnel(
 ) -> anyhow::Result<TunnelGuard> {
     let tunnel = tunnel::Tunnel::resolve(cfg, socket_path)
         .map_err(|e| anyhow::anyhow!("remote.tunnel is misconfigured: {e}"))?;
-    // Wait only when the daemon socket is forwarded to the very path we're
-    // about to dial; a ports-only (or differently-pinned) tunnel never
-    // binds it, so waiting would just time out.
-    let should_wait = tunnel.forwards_socket() && tunnel.local_socket() == socket_path;
+    // Wait for the path the forward actually binds (a ports-only tunnel
+    // binds no socket, so there's nothing to wait for). Capture it before
+    // the supervisor takes ownership of `tunnel`.
+    let readiness_path = tunnel.readiness_path().map(std::path::Path::to_path_buf);
     let handle = tokio::spawn(tunnel::supervise(tunnel));
 
-    if should_wait && !tunnel::wait_for_socket(socket_path, TUNNEL_STARTUP_TIMEOUT).await {
+    if let Some(path) = readiness_path
+        && !tunnel::wait_for_socket(&path, TUNNEL_STARTUP_TIMEOUT).await
+    {
         handle.abort();
         anyhow::bail!(
             "remote tunnel did not bind {} within {}s — check remote.tunnel host/credentials \
              and that the daemon is running on the box (`lazybox server start`)",
-            socket_path.display(),
+            path.display(),
             TUNNEL_STARTUP_TIMEOUT.as_secs()
         );
     }

@@ -141,6 +141,19 @@ impl Tunnel {
         self.remote_socket.is_some()
     }
 
+    /// The socket a caller should wait for before dialing: the path this
+    /// forward actually binds, or `None` when only ports are forwarded.
+    /// Callers wait on this rather than comparing against the `--connect`
+    /// path, so a socket spelled two equivalent ways (`/tmp/x` vs
+    /// `/tmp/./x`) doesn't skip the readiness gate.
+    pub fn readiness_path(&self) -> Option<&std::path::Path> {
+        if self.forwards_socket() {
+            Some(self.local_socket())
+        } else {
+            None
+        }
+    }
+
     /// `ssh -L` forward specs: the daemon socket first (Unix→Unix), then
     /// each workload port bound to `localhost` on both ends.
     fn forward_specs(&self) -> Vec<String> {
@@ -428,6 +441,33 @@ mod tests {
             Tunnel::resolve(bad_iap, std::path::Path::new("/tmp/lb.sock")).unwrap_err(),
             ResolveError::MissingInstance
         );
+    }
+
+    #[test]
+    fn readiness_path_is_the_bind_path_not_the_connect_arg() {
+        // A pinned local_socket spelled differently from the --connect arg
+        // must still be the path we wait on — the forward binds it, so
+        // gating on `local_socket == connect_arg` would wrongly skip the
+        // wait. Here the pinned path differs from the connect arg entirely.
+        let pinned = TunnelConfig {
+            local_socket: Some(PathBuf::from("/run/pinned.sock")),
+            ..ssh_cfg()
+        };
+        let tunnel = Tunnel::resolve(pinned, std::path::Path::new("/tmp/lb.sock")).unwrap();
+        assert_eq!(
+            tunnel.readiness_path(),
+            Some(std::path::Path::new("/run/pinned.sock"))
+        );
+
+        // A ports-only tunnel binds no socket, so there's nothing to wait on.
+        let ports_only = TunnelConfig {
+            mode: TunnelMode::Ssh,
+            host: Some("box".to_string()),
+            ports: vec![8082],
+            ..TunnelConfig::default()
+        };
+        let tunnel = Tunnel::resolve(ports_only, std::path::Path::new("/tmp/lb.sock")).unwrap();
+        assert_eq!(tunnel.readiness_path(), None);
     }
 
     #[test]

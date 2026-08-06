@@ -1033,6 +1033,9 @@ async fn run_embedded_realm(
 ) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
     let config = server_config_from_user()?;
+    // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
+    // once, before any spawn — never on the per-spawn hot path (#856).
+    lazybox_server::spawn_handler::ensure_stable_hook_exe();
     let update_check = tokio::spawn(build_guard::available_update(Some(config.store.clone())));
 
     let client_runtime = ClientRuntime::start(
@@ -1696,6 +1699,9 @@ async fn server_start() -> anyhow::Result<()> {
     let pid_file = lifecycle::pid_path();
 
     let config = server_config_from_user()?;
+    // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
+    // once, before any spawn — never on the per-spawn hot path (#856).
+    lazybox_server::spawn_handler::ensure_stable_hook_exe();
     let client_runtime = ClientRuntime::start(
         config.clone(),
         ClientRuntimeOptions {
@@ -1791,6 +1797,9 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
     }
 
     let config = server_config_from_user()?;
+    // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
+    // once, before any spawn — never on the per-spawn hot path (#856).
+    lazybox_server::spawn_handler::ensure_stable_hook_exe();
     let client_runtime = ClientRuntime::start(
         config.clone(),
         ClientRuntimeOptions {

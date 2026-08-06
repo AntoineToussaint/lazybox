@@ -46,7 +46,7 @@ LOCAL_ZIG_DIR := vendor/zig/$(ZIG_SLUG)
 ZIG_DIR := $(if $(wildcard $(LOCAL_ZIG_DIR)/zig),$(LOCAL_ZIG_DIR),$(CACHE_ZIG_DIR))
 PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
 
-.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh test lint clean distclean install help
+.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract test lint clean distclean install help
 
 # Side-by-side dev profile root. Picked up by `lazybox_core::paths`
 # everywhere — independent state.db, worktrees, daemon socket, tmux
@@ -107,6 +107,41 @@ dev: ## Run the dev build against $(LAZYBOX_DEV_HOME) — independent state from
 
 dev-fresh: ## Same as `dev` but wipes the dev state.db first.
 	@$(MAKE) dev ARGS="--fresh"
+
+# ── desktop (the Tauri client under apps/desktop) ────────────────────
+# The webview app speaks to the same daemon as the TUI over an
+# authenticated loopback gateway. Needs Node 22 + npm on top of the
+# usual toolchain; the Rust shell links libghostty-vt, so every recipe
+# that compiles Rust carries the pinned-zig PATH like the TUI targets.
+DESKTOP_DIR := apps/desktop
+DESKTOP_MANIFEST := $(DESKTOP_DIR)/src-tauri/Cargo.toml
+
+# `npm ci` only when the lockfile is newer than the install (or it's absent).
+$(DESKTOP_DIR)/node_modules: $(DESKTOP_DIR)/package-lock.json
+	@command -v npm >/dev/null || { echo "Error: npm not found. Install Node 22: https://nodejs.org"; exit 1; }
+	@cd $(DESKTOP_DIR) && npm ci
+	@touch $@
+
+desktop-deps: $(DESKTOP_DIR)/node_modules ## Install the desktop npm deps (npm ci) when the lockfile moved.
+
+desktop: desktop-deps ## Run the desktop app (Tauri dev) against its own in-process daemon.
+	@cd $(DESKTOP_DIR) && PATH="$(PINNED_PATH)" npm run tauri dev
+
+desktop-preview: desktop-deps ## Frontend only, on preview data — no daemon, no credentials.
+	@echo "▶ open http://localhost:1420/?preview"
+	@cd $(DESKTOP_DIR) && npm run dev
+
+desktop-build: desktop-deps ## Build the debug macOS bundle → apps/desktop/src-tauri/target/debug/bundle/macos/lazybox.app
+	@cd $(DESKTOP_DIR) && PATH="$(PINNED_PATH)" npm run tauri build -- --debug --bundles app
+
+desktop-test: desktop-deps ## Headless desktop checks, as CI gates them (frontend tests + build + Rust shell tests).
+	@cd $(DESKTOP_DIR) && npm test
+	@cd $(DESKTOP_DIR) && npm run build
+	@PATH="$(PINNED_PATH)" cargo test --manifest-path $(DESKTOP_MANIFEST) --locked
+
+desktop-contract: ## Regenerate apps/desktop/src/generated from the Rust desktop DTOs (CI fails on a diff).
+	@PATH="$(PINNED_PATH)" cargo run -p lazybox-server --features desktop-contract --bin generate-desktop-contract
+	@PATH="$(PINNED_PATH)" UPDATE_DESKTOP_CONTRACT=1 cargo test -p lazybox-server --test api_gateway desktop_compatibility_fixture_is_current -- --exact
 
 test: ## Run all tests (cargo-nextest enforces a 10s per-test deadline).
 	@PATH="$(PINNED_PATH)" cargo nextest run --workspace

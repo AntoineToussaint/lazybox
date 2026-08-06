@@ -125,6 +125,10 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ts-rs              = { version = "12", features = ["chrono-impl", "uuid-impl"] }
 crossterm          = { version = "0.29", features = ["event-stream"] }
+# Raw `sigaction` / `tcsetattr` / `write` for the fatal-signal terminal
+# restore. crossterm can't serve that path: its teardown locks stdout and
+# allocates, neither of which is legal inside a signal handler.
+libc               = "0.2"
 ratatui            = "0.30"
 tuirealm           = "4.1"
 tui-markdown       = "0.3"

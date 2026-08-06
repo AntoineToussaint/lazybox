@@ -1825,8 +1825,10 @@ dependencies = [
 name = "lazybox-ipc"
 version = "0.1.9"
 dependencies = [
+ "base64",
  "bincode",
  "chrono",
+ "getrandom 0.3.4",
  "lazybox-core",
  "proptest",
  "serde",

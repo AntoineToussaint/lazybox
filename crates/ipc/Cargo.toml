@@ -19,6 +19,8 @@ tokio               = { workspace = true }
 chrono              = { workspace = true }
 tracing             = { workspace = true }
 ts-rs               = { workspace = true, optional = true }
+base64              = "0.22"
+getrandom           = "0.3"
 
 [dev-dependencies]
 tokio      = { workspace = true, features = ["full", "test-util"] }

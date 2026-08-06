@@ -1982,12 +1982,48 @@ pub struct LinearConfig {
     /// ```
     #[serde(deserialize_with = "de_lenient_linear_scope")]
     pub scope: Vec<lazybox_core::LinearScope>,
+
+    /// Personal git handle for the `{handle}` branch token (e.g.
+    /// `antoine`). Unset falls back to the local git `user.name`.
+    #[serde(default)]
+    pub handle: Option<String>,
+
+    /// Linear team key → GitHub `owner/repo` to clone when working on
+    /// that team's issues. A Linear ticket's own `repo` is the synthetic
+    /// `linear/<team>`, never a clonable repo; an unmapped team fails
+    /// loudly rather than cloning it.
+    ///
+    /// ```yaml
+    /// providers:
+    ///   linear:
+    ///     teams:
+    ///       OBI: obin-ai/obin-platform
+    /// ```
+    #[serde(default)]
+    pub teams: std::collections::BTreeMap<String, String>,
+
+    /// Branch-name template for Linear work. Tokens: `{handle}`,
+    /// `{type}`, `{id}`, `{slug}`; empty tokens and their orphaned
+    /// separators collapse. Unset → the generic branchless naming
+    /// (`linear-<id>-<slug>`).
+    #[serde(default)]
+    pub branch_template: Option<String>,
+
+    /// Linear label name → commit-type token (`feat`/`fix`/`chore`/…)
+    /// for the `{type}` branch token. Multiple matching labels resolve
+    /// by a fixed precedence (`fix` > `feat` > `chore` > `docs`).
+    #[serde(default)]
+    pub label_types: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for LinearConfig {
     fn default() -> Self {
         Self {
             scope: lazybox_core::LinearScope::default_scopes(),
+            handle: None,
+            teams: std::collections::BTreeMap::new(),
+            branch_template: None,
+            label_types: std::collections::BTreeMap::new(),
         }
     }
 }

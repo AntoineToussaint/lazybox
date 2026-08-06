@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod autofix;
+pub mod branch_template;
 pub mod config;
 pub mod conventions;
 pub mod error_class;

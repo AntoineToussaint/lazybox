@@ -69,6 +69,13 @@ struct FixedCommandSpec {
     command: LeaderCmd,
     menu_label: &'static str,
     reference: &'static str,
+    /// Reachable from the sidebar `]]` leader too (#871): the command
+    /// is *workspace-addressed* — it acts on the cursor workspace's
+    /// agent, not on terminal-pane chrome — so it makes sense whether
+    /// the leader was armed from a terminal or from the sidebar. The
+    /// terminal-only commands (focus mode, tile splits, exit, layout
+    /// toggle, digit jumps) stay `false`.
+    sidebar: bool,
 }
 
 const FIXED_COMMANDS: &[FixedCommandSpec] = &[
@@ -77,72 +84,84 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         command: LeaderCmd::Snippets,
         menu_label: "snippets",
         reference: "Open the snippet picker (typing a full key auto-submits — `]]srev`)",
+        sidebar: true,
     },
     FixedCommandSpec {
         key: 'l',
         command: LeaderCmd::Skills,
         menu_label: "skills",
         reference: "Open the skills picker — trigger one of the focused agent's Claude Code skills explicitly (typing a full name auto-submits)",
+        sidebar: true,
     },
     FixedCommandSpec {
         key: 'r',
         command: LeaderCmd::RecallPrompt,
         menu_label: "recall prompt",
         reference: "Restore the in-flight draft, or the last submitted agent prompt, without sending it",
+        sidebar: true,
     },
     FixedCommandSpec {
         key: 'h',
         command: LeaderCmd::PromptHistory,
         menu_label: "prompt history",
         reference: "Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one",
+        sidebar: true,
     },
     FixedCommandSpec {
         key: 'u',
         command: LeaderCmd::OpenUrls,
         menu_label: "open url",
         reference: "Scan the visible terminal for URLs and open the picked one in the browser (a lone URL opens straight away)",
+        sidebar: true,
     },
     FixedCommandSpec {
         key: 'f',
         command: LeaderCmd::ToggleFocusMode,
         menu_label: "focus mode",
         reference: "Toggle focus mode",
+        sidebar: false,
     },
     FixedCommandSpec {
         key: 'q',
         command: LeaderCmd::ExitToSidebar,
         menu_label: "exit to sidebar",
         reference: "Exit to the sidebar",
+        sidebar: false,
     },
     FixedCommandSpec {
         key: '`',
         command: LeaderCmd::JumpPicker,
         menu_label: "jump to workspace",
         reference: "Open the fuzzy jump-to-workspace picker",
+        sidebar: false,
     },
     FixedCommandSpec {
         key: '|',
         command: LeaderCmd::SplitVertical,
         menu_label: "split right",
         reference: "Split the focused tile side-by-side (`]]\\` is an alias)",
+        sidebar: false,
     },
     FixedCommandSpec {
         key: '-',
         command: LeaderCmd::SplitHorizontal,
         menu_label: "split down",
         reference: "Split the focused tile stacked",
+        sidebar: false,
     },
     FixedCommandSpec {
         key: 'x',
         command: LeaderCmd::CloseTerminal,
         menu_label: "close terminal",
         reference: "Close the focused terminal (tile or active tab)",
+        sidebar: false,
     },
     FixedCommandSpec {
         key: 't',
         command: LeaderCmd::ToggleNewLayout,
         menu_label: "new shells",
         reference: "Toggle whether the next terminal opens as a split or a tab; persists `ui.terminal_new_layout`",
+        sidebar: false,
     },
 ];
 
@@ -227,6 +246,29 @@ impl LeaderCmd {
             rows.push((spec.key.to_string(), label.to_string()));
         }
         rows
+    }
+
+    /// Whether this command is reachable from the sidebar `]]` leader
+    /// (#871) — i.e. it targets the cursor workspace's agent rather than
+    /// terminal-pane chrome. Digit jumps and the terminal-only commands
+    /// resolve to `false`.
+    pub(super) fn available_in_sidebar(self) -> bool {
+        FIXED_COMMANDS
+            .iter()
+            .find(|spec| spec.command == self)
+            .is_some_and(|spec| spec.sidebar)
+    }
+
+    /// The which-key rows the sidebar `]]` leader advertises: only the
+    /// workspace-addressed commands, in the same order as the terminal
+    /// menu. No layout-dependent tile/tab rows and no digit roster — those
+    /// are terminal-pane concerns.
+    pub(super) fn sidebar_menu_rows() -> Vec<(String, String)> {
+        FIXED_COMMANDS
+            .iter()
+            .filter(|spec| spec.sidebar)
+            .map(|spec| (spec.key.to_string(), spec.menu_label.to_string()))
+            .collect()
     }
 
     /// Complete, layout-independent command list for generated docs.

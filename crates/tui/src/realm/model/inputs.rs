@@ -279,7 +279,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// agent: it must resolve to a repo/project scope. A fully repo-less,
     /// project-less workspace (a Slack DM, a scratch row) has nothing to
     /// spawn into, so it stays skipped (#836).
-    fn broadcast_can_spawn(&self, key: &lazybox_core::SessionKey) -> bool {
+    pub(super) fn broadcast_can_spawn(&self, key: &lazybox_core::SessionKey) -> bool {
         self.sidebar
             .workspace_by_key(key)
             .is_some_and(|w| w.worktree_scope().is_some())

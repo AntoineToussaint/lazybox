@@ -162,6 +162,12 @@ impl<T: TerminalAdapter> Model<T> {
         if self.terminal_leader_armed {
             self.redraw = true;
             use super::terminal_leader::LeaderCmd;
+            // The same `]]` leader now arms from the sidebar too (#871),
+            // where it addresses the cursor workspace's agent and offers
+            // only the workspace-scoped subset of commands. `sidebar`
+            // routes menu/dispatch to that variant; the terminal path is
+            // unchanged.
+            let sidebar = self.focus == PaneFocus::Sidebar;
             // `j` / `k` move a highlight through the popup and keep the
             // leader armed; `Enter` fires the highlighted command (#343).
             // Arrows stay bound to tile / tab movement (#286), so only
@@ -184,7 +190,11 @@ impl<T: TerminalAdapter> Model<T> {
                     .and_then(|c| LeaderCmd::from_key(Key::Char(c), KeyModifiers::empty()));
                 if let Some(cmd) = cmd {
                     let mut cmds = Vec::new();
-                    self.run_terminal_leader_cmd(cmd, &mut cmds);
+                    if sidebar {
+                        self.run_sidebar_leader_cmd(cmd, &mut cmds);
+                    } else {
+                        self.run_terminal_leader_cmd(cmd, &mut cmds);
+                    }
                     self.flush_dispatched_cmds(cmds);
                 }
                 return;
@@ -200,7 +210,16 @@ impl<T: TerminalAdapter> Model<T> {
             self.terminal_leader_highlight = None;
             let mut cmds = Vec::new();
             if let Some(cmd) = LeaderCmd::from_key(key.code, key.modifiers) {
-                self.run_terminal_leader_cmd(cmd, &mut cmds);
+                if sidebar {
+                    // Only the workspace-addressed subset resolves from the
+                    // sidebar; a terminal-only chord (`]]f`, `]]x`, …) is a
+                    // no-op cancel, matching the tmux-prefix convention.
+                    if cmd.available_in_sidebar() {
+                        self.run_sidebar_leader_cmd(cmd, &mut cmds);
+                    }
+                } else {
+                    self.run_terminal_leader_cmd(cmd, &mut cmds);
+                }
             }
             self.flush_dispatched_cmds(cmds);
             return;
@@ -452,6 +471,43 @@ impl<T: TerminalAdapter> Model<T> {
             self.flush_held_escape_char();
         }
 
+        // Sidebar `]]` leader (#871) — the terminal escape sequence made
+        // reachable where the cursor already is, so `]]s<key>` sends a
+        // snippet to the cursor workspace's agent without entering its
+        // terminal. `]` alone is the snippet *browser* (`OpenSnippets`)
+        // here, so — exactly like a literal `]` in the terminal — the
+        // first press is held back and only resolves once we know it's
+        // not the head of a `]]` chord:
+        //   - `]]` → arm the leader (next key picks a workspace command);
+        //   - a lone `]` then a non-`]` key, or the idle tick → open the
+        //     browser (`resolve_held_sidebar_escape`).
+        if self.focus == PaneFocus::Sidebar
+            && key.modifiers.is_empty()
+            && matches!(key.code, Key::Char(c) if c == self.ui_defaults.terminal_escape_char)
+        {
+            let was_armed = self.escape_latch.is_armed();
+            if self.escape_latch.tap(self.ui_defaults.escape_window) {
+                self.terminal_leader_armed = true;
+                self.terminal_leader_highlight = None;
+                self.redraw = true;
+                return;
+            }
+            // Window lapsed and `tap` re-armed for THIS `]`; the previously
+            // held `]` was a lone press → resolve it to browse.
+            if was_armed {
+                self.resolve_held_sidebar_escape();
+            }
+            return;
+        }
+        if self.focus == PaneFocus::Sidebar && self.escape_latch.is_armed() {
+            // A lone `]` followed by a non-`]` key: browse. The triggering
+            // key is consumed (not re-dispatched) so it can't also act as a
+            // sidebar shortcut on top of the just-opened browser.
+            self.escape_latch.disarm();
+            self.resolve_held_sidebar_escape();
+            return;
+        }
+
         // We have a typed key already; skip the synthetic Event
         // round-trip and call the pane wrappers' direct entry points.
         let ct = realm_key_to_crossterm(&key);
@@ -637,12 +693,26 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Resolve a lone held sidebar `]` (#871): the escape char that turned
+    /// out NOT to start a `]]` chord opens the read-only snippet browser —
+    /// the `OpenSnippets` action's sidebar meaning. The terminal
+    /// counterpart flushes a literal `]`; the sidebar has no PTY, so a lone
+    /// `]` keeps its browse binding.
+    pub(super) fn resolve_held_sidebar_escape(&mut self) {
+        self.mount_snippet_browser();
+    }
+
     /// The `]]` leader popup's rows in display order: the fixed command
     /// menu (tailored to the current tile / tab layout) followed by the
     /// agent-jump roster (`]]<digit>` → workspace name). The single
     /// source of truth for BOTH the popup renderer and highlight
     /// navigation, so the two can't drift (#343).
     pub(super) fn terminal_leader_menu_rows(&self) -> Vec<(String, String)> {
+        // Armed from the sidebar (#871): only the workspace-addressed
+        // subset, no tile/tab or digit-jump rows.
+        if self.focus == PaneFocus::Sidebar {
+            return super::terminal_leader::LeaderCmd::sidebar_menu_rows();
+        }
         let mut rows = super::terminal_leader::LeaderCmd::menu_rows(
             self.terminals.layout_is_splits(),
             self.terminals.visible_terminal_count(),
@@ -702,6 +772,10 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         use super::terminal_leader::LeaderCmd;
         use crate::components::terminal_stack::PendingSplit;
+        // The terminal leader always addresses the focused tile — clear
+        // any stale sidebar retarget so a picker opened here can't inherit
+        // a previous `]]s`-from-the-sidebar target (#871).
+        self.leader_target = None;
         match cmd {
             LeaderCmd::JumpAgent(n) => self.jump_to_agent_workspace(n),
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
@@ -718,6 +792,119 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
             LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(),
         }
+    }
+
+    /// Run a `]]` leader command armed from the *sidebar* (#871). Only the
+    /// workspace-addressed commands reach here (filtered on the keyboard by
+    /// `LeaderCmd::available_in_sidebar`); each targets the cursor
+    /// workspace's agent — resolved via the same
+    /// [`crate::realm::components::sidebar::Sidebar::broadcast_terminal`]
+    /// path `Shift-B` uses — rather than the focused terminal tile.
+    pub(super) fn run_sidebar_leader_cmd(
+        &mut self,
+        cmd: super::terminal_leader::LeaderCmd,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        use super::terminal_leader::LeaderCmd;
+        // Fresh target for this command; the picker-mounting arms set it
+        // to the resolved cursor-workspace terminal before mounting.
+        self.leader_target = None;
+        match cmd {
+            LeaderCmd::Snippets => self.sidebar_send_snippet(),
+            LeaderCmd::Skills => self.sidebar_send_skill(),
+            LeaderCmd::RecallPrompt => self.sidebar_recall_prompt(cmds),
+            LeaderCmd::PromptHistory => self.sidebar_prompt_history(),
+            LeaderCmd::OpenUrls => self.sidebar_open_urls(),
+            // Everything else is terminal-pane scoped and never offered in
+            // the sidebar menu; a stray resolution is a no-op.
+            _ => {}
+        }
+    }
+
+    /// The cursor workspace's delivery terminal for a sidebar `]]` command
+    /// — `(terminal_id, is_agent)`, agent-preferred — or `None` when the
+    /// workspace has no running session. Mirrors the broadcast target.
+    fn sidebar_leader_terminal(&self) -> Option<(lazybox_ipc::TerminalId, bool)> {
+        let key = self.sidebar.selected_workspace_key()?;
+        self.sidebar.broadcast_terminal(key)
+    }
+
+    /// `]]s` from the sidebar — send a snippet to the cursor workspace's
+    /// agent. A live session opens the snippet picker retargeted at it (the
+    /// pick delivers via `DeliverSnippet` + the settle-gated inject, exactly
+    /// as `]]s` inside the terminal). A session-less-but-spawnable workspace
+    /// falls back to the broadcast flow so the snippet can start the default
+    /// agent there (#836); a workspace with nothing to spawn into is named
+    /// in a notice.
+    fn sidebar_send_snippet(&mut self) {
+        let Some(key) = self.sidebar.selected_workspace_key().cloned() else {
+            self.flash_info("no workspace selected");
+            return;
+        };
+        match self.sidebar.broadcast_terminal(&key) {
+            Some((terminal_id, _)) => {
+                self.mount_snippet_picker(String::new());
+                // Only claim the retarget once the picker actually opened —
+                // an empty library refuses to mount, and a leftover
+                // `leader_target` would then misdirect the next picker.
+                if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+                    self.leader_target = Some(terminal_id);
+                }
+            }
+            None if self.broadcast_can_spawn(&key) => self.mount_broadcast_picker_for(vec![key]),
+            None => self.flash_info("no running session here — press w to start an agent"),
+        }
+    }
+
+    /// `]]l` from the sidebar — trigger one of the cursor workspace agent's
+    /// Claude Code skills. Retargets the skill picker at that agent and
+    /// discovers skills from its worktree.
+    fn sidebar_send_skill(&mut self) {
+        let Some(key) = self.sidebar.selected_workspace_key().cloned() else {
+            self.flash_info("no workspace selected");
+            return;
+        };
+        let Some((terminal_id, _)) = self.sidebar.broadcast_terminal(&key) else {
+            self.flash_info("no running agent here — press w to start one");
+            return;
+        };
+        let worktree = self.workspace_worktree(&key);
+        self.mount_skill_picker_for(String::new(), terminal_id, worktree);
+        // Only claim the retarget once the picker actually opened — a shell,
+        // a remote client, or an empty skill set refuses to mount, and a
+        // leftover `leader_target` would then misdirect the next picker.
+        if matches!(self.modal_stack.last(), Some(Id::SkillPicker)) {
+            self.leader_target = Some(terminal_id);
+        }
+    }
+
+    /// `]]r` from the sidebar — recall the cursor workspace agent's last
+    /// prompt back into its composer without submitting.
+    fn sidebar_recall_prompt(&mut self, cmds: &mut Vec<IpcCommand>) {
+        let target = self
+            .sidebar_leader_terminal()
+            .and_then(|(id, _)| self.terminals.recall_prompt_for(id));
+        self.emit_recall(target, cmds);
+    }
+
+    /// `]]h` from the sidebar — open the cursor workspace agent's prompt
+    /// history picker.
+    fn sidebar_prompt_history(&mut self) {
+        let Some((terminal_id, _)) = self.sidebar_leader_terminal() else {
+            self.flash_info("no running agent here — press w to start one");
+            return;
+        };
+        self.mount_prompt_history_picker_for(terminal_id);
+    }
+
+    /// `]]u` from the sidebar — scan the cursor workspace terminal for URLs
+    /// and open one.
+    fn sidebar_open_urls(&mut self) {
+        let Some((terminal_id, _)) = self.sidebar_leader_terminal() else {
+            self.flash_info("no running session here");
+            return;
+        };
+        self.open_terminal_urls_for(terminal_id);
     }
 
     /// `]]t` — flip the new-terminal layout preference live and persist
@@ -745,7 +932,20 @@ impl<T: TerminalAdapter> Model<T> {
     /// to a restart (issue #373). The daemon pastes without the settle-
     /// gated Enter (`submit: false`).
     fn recall_prompt(&mut self, cmds: &mut Vec<IpcCommand>) {
-        match self.terminals.recall_prompt() {
+        let target = self.terminals.recall_prompt();
+        self.emit_recall(target, cmds);
+    }
+
+    /// Drop a resolved `(terminal, prompt)` recall back into the agent's
+    /// composer without submitting (`submit: false`), mirroring it into
+    /// the composing buffer. Shared by the terminal `]]r` and its sidebar
+    /// counterpart (#871); `None` flashes the empty-recall hint.
+    fn emit_recall(
+        &mut self,
+        target: Option<(lazybox_ipc::TerminalId, String)>,
+        cmds: &mut Vec<IpcCommand>,
+    ) {
+        match target {
             Some((terminal_id, prompt)) => {
                 cmds.push(IpcCommand::InjectPrompt {
                     terminal_id,

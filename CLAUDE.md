@@ -277,7 +277,18 @@ workspaces that still have a repo scope get the default agent spawned
 with the message as its initial prompt (#836 — behind a "start N
 agents?" confirm since spawning is heavy); only repo-less, project-less
 workspaces (nothing to spawn into) are skipped and named in the summary
-notice. `Shift-U`
+notice. `]]` is a **sidebar leader** too (#871 — the terminal escape
+sequence made reachable where the cursor already is), addressing the
+**cursor workspace's** agent so a snippet reaches one workspace without
+entering its terminal or running the broadcast machinery: `]]s<key>`
+sends a snippet (same fast-path + settle-gated `DeliverSnippet` inject as
+inside the terminal — a session-less-but-spawnable workspace falls back
+to the broadcast spawn per #836), `]]l` a skill (#797), `]]r` recall,
+`]]h` history, `]]u` open-urls — the workspace-addressed subset only
+(terminal-pane chords like `]]f`/`]]x` are inert here). Because `]]`
+now shares the sidebar's `]` (browse), a lone `]` is held one
+`escape_window` and resolves to the browser on the next key or the idle
+tick, mirroring the terminal's held literal `]`. `Shift-U`
 bulk-updates the branch (rebase/merge base into head) of every
 selected PR that's behind `main` — one `UpdateBranch` per behind PR,
 up-to-date and non-PR selections skipped and counted (#484). `a` is a leader

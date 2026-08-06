@@ -216,6 +216,18 @@ impl Help {
         // Ask Lazybox search and the generated reference retain the detailed
         // terminal commands.
         {
+            // The same `]]` leader also arms from the sidebar (#871),
+            // where it addresses the cursor workspace's agent with the
+            // workspace-scoped subset (snippets, skills, recall, history,
+            // urls). Advertise the namespace once, mirroring the terminal
+            // entry below.
+            let sidebar = by_section
+                .entry(Section::Sidebar.order())
+                .or_insert_with(|| (Section::Sidebar.title(), Vec::new()));
+            sidebar.1.push(Binding {
+                keys: std::borrow::Cow::Owned(leader.clone()),
+                label: std::borrow::Cow::Borrowed("send to workspace agent (snippets, skills…)"),
+            });
             let terminal = by_section
                 .entry(Section::Terminal.order())
                 .or_insert_with(|| (Section::Terminal.title(), Vec::new()));

@@ -1491,6 +1491,12 @@ async fn handle_spawn_inner(
             // resync).
             let mut last_seq = sub.last_seq;
             let mut resync_unavailable_announced = false;
+            // On-demand reclassify poke (#869). A deferred prompt injection
+            // asks the pump to re-read the live screen so a stale
+            // `InputNeeded` — one whose gate already cleared without further
+            // output to re-arm the quiet timer — releases without waiting for
+            // a keystroke to drive the transition.
+            let reclassify = terminal_registry.register_reclassify(id_for_pump).await;
             loop {
                 let watchdog_due = working_watchdog
                     .prepare_select(tokio::time::Instant::now(), sub.live.len());
@@ -1791,6 +1797,37 @@ async fn handle_spawn_inner(
                             &mut state_machine,
                         )
                         .await;
+                    }
+                    // On-demand reclassify (#869): a deferred inject asks the
+                    // pump to re-read the resting screen NOW rather than wait
+                    // up to the quiet window — or forever, once that timer has
+                    // disarmed on a quiescent terminal. `force_reclassify_allowed`
+                    // gates it on a settled stream and a non-reset terminal so
+                    // the poke can't scrape a torn frame or preempt the
+                    // reset-latched settle with a spurious Done.
+                    _ = reclassify.notified() => {
+                        if force_reclassify_allowed(
+                            agent_for_pump.is_some(),
+                            last_output_at,
+                            &terminal_registry,
+                            id_for_pump,
+                        )
+                        .await
+                        {
+                            classify_quiet_screen(
+                                agent_for_pump.as_ref(),
+                                &state_buf,
+                                last_chunk_len,
+                                lazybox_agents::Liveness::Silent,
+                                &terminal_registry,
+                                &bus,
+                                state_durability_for_pump.as_ref(),
+                                id_for_pump,
+                                &session_key_for_pump,
+                                &mut state_machine,
+                            )
+                            .await;
+                        }
                     }
                 }
             }
@@ -4908,6 +4945,12 @@ async fn finish_terminal(
         .lock()
         .await
         .remove(&terminal_id);
+    config
+        .terminal
+        .reclassify_requests
+        .lock()
+        .await
+        .remove(&terminal_id);
     // Close the state owner's live-terminal ingress gate before dropping the
     // absorbing Exited tombstone. Reversing these two removals creates a
     // window where a delayed hook sees `(meta: live, state: None)` and
@@ -5791,6 +5834,45 @@ pub(crate) async fn handle_write_batch(
 /// prompt from leaking the waiter task indefinitely.
 const INJECT_INPUT_DEADLINE: Duration = Duration::from_secs(120);
 
+/// How long a deferred inject waits between forcing a live re-read of the
+/// agent's screen (issue #869). The loop is level-triggered: each tick pokes
+/// the PTY pump to reclassify and then re-checks the *fresh* cached state, so
+/// a quiescent-but-ready agent releases on its own rather than parking until a
+/// keystroke drives a transition. Short enough that the release feels
+/// immediate; long enough that a genuine gate isn't re-scraped in a busy loop.
+const INJECT_RECLASSIFY_POLL: Duration = Duration::from_millis(250);
+
+/// Minimum byte-quiet a forced reclassify requires before it scrapes the
+/// screen. A reclassify poke that lands mid-paint would read a torn frame;
+/// while bytes still flow the injection releases off the transitions that flow
+/// already produces, so the poke can safely no-op until the stream settles.
+const RECLASSIFY_MIN_QUIET: Duration = Duration::from_millis(150);
+
+/// Whether a pump should honor an on-demand reclassify poke (#869) and scrape
+/// the screen now. Shared by both PTY pumps' reclassify arms. Three conditions:
+///
+/// - only agent terminals have a detector to run;
+/// - the stream must have been byte-quiet for [`RECLASSIFY_MIN_QUIET`], else a
+///   mid-paint scrape reads a torn frame (the injection still releases off the
+///   transitions that live output produces);
+/// - the terminal must NOT be sitting on a just-answered prompt's reset. While
+///   that reset is latched, [`classify_quiet_screen`]'s reset branch
+///   force-settles `Done` on the stale pre-answer buffer — a settle the
+///   deliberate quiet/watchdog timers own only after a FULL window of silence.
+///   Firing it here (150ms after the optimistic `Working` flip, before the
+///   answer's first output clears the reset) would preempt that with a spurious
+///   `Done` that wakes polling and flickers the pill.
+async fn force_reclassify_allowed(
+    agent_present: bool,
+    last_output_at: tokio::time::Instant,
+    terminals: &TerminalRegistry,
+    id: TerminalId,
+) -> bool {
+    agent_present
+        && last_output_at.elapsed() >= RECLASSIFY_MIN_QUIET
+        && !terminals.agent_detect_resets.lock().await.contains(&id)
+}
+
 /// Base wait for proof an injected prompt's submit actually
 /// registered — a `UserPromptSubmit` hook or a `Working` transition.
 /// Claude fires `UserPromptSubmit` synchronously with the submit, so
@@ -6193,7 +6275,7 @@ async fn await_paste_settled(
 ///
 /// On a `Lagged` receiver the very `Working` transition may have been
 /// dropped, so the authoritative `states` map is consulted (mirroring
-/// [`wait_until_input_resolved`]) rather than ignoring the gap — an
+/// [`poll_input_resolution`]) rather than ignoring the gap — an
 /// unobserved flip must not trigger spurious Enter resends into an
 /// already-working agent. Only a cached `Working` counts as evidence:
 /// any resting state (`Idle`/`Done`) may simply predate the submit.
@@ -6234,24 +6316,30 @@ async fn await_submit_evidence(
     matches!(tokio::time::timeout(deadline, wait).await, Ok(true))
 }
 
-/// Park until the agent on `terminal_id` leaves `InputNeeded` — i.e. the
-/// permission gate / chooser / Y-N prompt it was blocked on has been
-/// answered and it's safe to deliver an injected prompt. Returns `true`
-/// once the agent reports any non-`InputNeeded` state, `false` if the
-/// terminal exits first or `deadline` elapses while still blocked.
-///
-/// `events` must be subscribed BEFORE the caller reads the current state
-/// so a transition that races the read isn't missed. On a `Lagged`
-/// receiver (the very transition may have been dropped) the authoritative
-/// `states` map is consulted rather than risk blocking to the deadline.
-async fn wait_until_input_resolved(
-    mut events: tokio::sync::broadcast::Receiver<Event>,
+/// Outcome of one level-triggered poll step in the deferred-inject loop.
+enum InputPoll {
+    /// A non-`InputNeeded` transition arrived (the gate cleared).
+    Resolved,
+    /// The terminal exited while still blocked.
+    Exited,
+    /// The poll interval elapsed with no transition — re-read the fresh
+    /// cached state, which the reclassify poke may have just refreshed.
+    Tick,
+}
+
+/// One step of the level-triggered deferred-inject wait (issue #869): wait up
+/// to `step` for a resolving state transition or a terminal exit, returning
+/// [`InputPoll::Tick`] when neither arrives in time so the caller can re-read
+/// the freshly-reclassified cached state rather than block on an event that a
+/// quiescent agent never emits.
+async fn poll_input_resolution(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
     terminal_id: TerminalId,
     states: &std::sync::Arc<
         tokio::sync::Mutex<std::collections::HashMap<TerminalId, lazybox_ipc::AgentState>>,
     >,
-    deadline: Duration,
-) -> bool {
+    step: Duration,
+) -> InputPoll {
     let wait = async {
         loop {
             match events.recv().await {
@@ -6261,25 +6349,25 @@ async fn wait_until_input_resolved(
                     ..
                 }) if tid == terminal_id => {
                     if state != lazybox_ipc::AgentState::InputNeeded {
-                        return true;
+                        return InputPoll::Resolved;
                     }
                 }
                 Ok(Event::TerminalExited {
                     terminal_id: tid, ..
-                }) if tid == terminal_id => return false,
+                }) if tid == terminal_id => return InputPoll::Exited,
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     if states.lock().await.get(&terminal_id)
                         != Some(&lazybox_ipc::AgentState::InputNeeded)
                     {
-                        return true;
+                        return InputPoll::Resolved;
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return false,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return InputPoll::Exited,
             }
         }
     };
-    matches!(tokio::time::timeout(deadline, wait).await, Ok(true))
+    (tokio::time::timeout(step, wait).await).unwrap_or(InputPoll::Tick)
 }
 
 /// Owns the single in-flight readiness-gated prompt injection for a terminal.
@@ -6497,9 +6585,7 @@ async fn handle_inject_prompt_inner(
         }
         while blocked {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero()
-                || !wait_until_input_resolved(events, id, &states, remaining).await
-            {
+            if remaining.is_zero() {
                 tracing::warn!(
                     terminal_id = ?id,
                     "inject_prompt: agent still blocked on input after {INJECT_INPUT_DEADLINE:?}; dropping injection rather than feeding it into the prompt"
@@ -6514,14 +6600,29 @@ async fn handle_inject_prompt_inner(
                 });
                 return;
             }
-            // The release may be the optimistic InputNeeded → Working
-            // flip from the user's keystroke, not a genuinely cleared
-            // prompt (the answer could re-render another chooser).
-            // Debounce, then re-check the cached state; if the prompt is
-            // back, go around again. Re-subscribe BEFORE the re-read so
-            // a transition racing the check isn't missed.
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            events = bus.subscribe();
+            // Level-triggered readiness poll (#869). Ask the PTY pump to
+            // re-read the live screen NOW, then wait a bounded step for the
+            // resulting transition before re-checking the fresh cached state.
+            // A quiescent agent whose gate already cleared releases here on
+            // its own — no keystroke to drive the transition — while a genuine
+            // gate re-scrapes as `InputNeeded` and stays parked. Without the
+            // poke the wait would block on a bus transition a resting agent
+            // never emits, so the injection sat until an inbound keystroke.
+            config_for_confirm.terminal.request_reclassify(id).await;
+            let step = INJECT_RECLASSIFY_POLL.min(remaining);
+            match poll_input_resolution(&mut events, id, &states, step).await {
+                // The terminal exited; fall through to `acquire_live`, which
+                // recognizes the gone terminal and returns quietly.
+                InputPoll::Exited => break,
+                // A transition arrived — possibly the optimistic
+                // InputNeeded → Working flip from a keystroke, or a just-
+                // answered gate re-rendering another chooser. Let that output
+                // settle before trusting the re-read.
+                InputPoll::Resolved => tokio::time::sleep(INJECT_RECLASSIFY_POLL).await,
+                // The step elapsed with no transition — the reclassify poke
+                // above may have refreshed the cache; re-read it directly.
+                InputPoll::Tick => {}
+            }
             blocked = inject_must_defer(&states, &shapes, id).await;
         }
         let Some(interaction) =
@@ -7001,6 +7102,7 @@ async fn pump_recovered_session(
         WorkingWatchdog::new(agent.as_ref().and(working_watchdog_after(&cfg)));
     let mut quiet_deadline = None;
     let mut last_chunk_len = 0;
+    let mut last_output_at = tokio::time::Instant::now();
     let mut auth_required_emitted = false;
 
     if !sub.replay.is_empty() {
@@ -7028,7 +7130,8 @@ async fn pump_recovered_session(
         )
         .await;
         if agent.is_some() {
-            quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
+            last_output_at = tokio::time::Instant::now();
+            quiet_deadline = Some(last_output_at + quiet_after);
         }
         let _ = config.bus.send(Event::TerminalOutput {
             terminal_id,
@@ -7040,6 +7143,9 @@ async fn pump_recovered_session(
 
     let mut last_seq = sub.last_seq;
     let mut resync_unavailable_announced = false;
+    // On-demand reclassify poke (#869): mirror the primary pump so a deferred
+    // inject into a recovered agent releases off a live re-read too.
+    let reclassify = config.terminal.register_reclassify(terminal_id).await;
     loop {
         let watchdog_due =
             working_watchdog.prepare_select(tokio::time::Instant::now(), sub.live.len());
@@ -7088,7 +7194,8 @@ async fn pump_recovered_session(
                     .await;
                     last_chunk_len = 0;
                     if agent.is_some() {
-                        quiet_deadline = Some(tokio::time::Instant::now() + quiet_after);
+                        last_output_at = tokio::time::Instant::now();
+                        quiet_deadline = Some(last_output_at + quiet_after);
                     }
                     let _ = config.bus.send(Event::TerminalResync {
                         terminal_id,
@@ -7131,6 +7238,7 @@ async fn pump_recovered_session(
                 last_chunk_len = chunk.bytes.len();
                 if agent.is_some() {
                     let now = tokio::time::Instant::now();
+                    last_output_at = now;
                     quiet_deadline = Some(now + quiet_after);
                     if progress {
                         working_watchdog.note_progress(now);
@@ -7179,6 +7287,30 @@ async fn pump_recovered_session(
                     &mut state_machine,
                 )
                 .await;
+            }
+            _ = reclassify.notified() => {
+                if force_reclassify_allowed(
+                    agent.is_some(),
+                    last_output_at,
+                    &config.terminal,
+                    terminal_id,
+                )
+                .await
+                {
+                    classify_quiet_screen(
+                        agent.as_ref(),
+                        &state_buf,
+                        last_chunk_len,
+                        lazybox_agents::Liveness::Silent,
+                        &config.terminal,
+                        &config.bus,
+                        durability,
+                        terminal_id,
+                        session_key,
+                        &mut state_machine,
+                    )
+                    .await;
+                }
             }
         }
     }
@@ -10153,8 +10285,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_until_input_resolved_releases_on_non_input_needed_state() {
-        let (tx, rx) = tokio::sync::broadcast::channel(16);
+    async fn poll_input_resolution_releases_on_non_input_needed_state() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let id = TerminalId(1);
         // A different terminal's transition is ignored; ours releases it.
         tx.send(Event::AgentState {
@@ -10169,34 +10301,47 @@ mod tests {
             state: lazybox_ipc::AgentState::Working,
         })
         .unwrap();
-        assert!(
-            wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_secs(1))
-                .await
-        );
+        assert!(matches!(
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_secs(1)
+            )
+            .await,
+            InputPoll::Resolved
+        ));
     }
 
     #[tokio::test]
-    async fn wait_until_input_resolved_gives_up_on_deadline_while_blocked() {
-        let (tx, rx) = tokio::sync::broadcast::channel(16);
+    async fn poll_input_resolution_ticks_when_still_blocked() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let id = TerminalId(1);
-        // Prompt stays up: only InputNeeded arrives, so the wait must
-        // time out rather than write into the live prompt.
+        // Prompt stays up: only InputNeeded arrives, so the step must time out
+        // into a Tick (re-read the freshly-reclassified cache) rather than
+        // write into the live prompt.
         tx.send(Event::AgentState {
             session_key: "ws:1".into(),
             terminal_id: id,
             state: lazybox_ipc::AgentState::InputNeeded,
         })
         .unwrap();
-        assert!(
-            !wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_millis(80))
-                .await
-        );
+        assert!(matches!(
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_millis(80)
+            )
+            .await,
+            InputPoll::Tick
+        ));
         drop(tx);
     }
 
     #[tokio::test]
-    async fn wait_until_input_resolved_returns_false_when_terminal_exits() {
-        let (tx, rx) = tokio::sync::broadcast::channel(16);
+    async fn poll_input_resolution_reports_terminal_exit() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let id = TerminalId(1);
         tx.send(Event::TerminalExited {
             terminal_id: id,
@@ -10204,9 +10349,65 @@ mod tests {
             last_output: None,
         })
         .unwrap();
+        assert!(matches!(
+            poll_input_resolution(
+                &mut rx,
+                id,
+                &input_resolved_states(),
+                Duration::from_secs(1)
+            )
+            .await,
+            InputPoll::Exited
+        ));
+    }
+
+    /// The reclassify poke's screen scrape (#869) must NOT fire while a
+    /// just-answered prompt's reset is latched. `classify_quiet_screen`'s reset
+    /// branch force-settles `Done` on the stale pre-answer buffer — a settle the
+    /// quiet/watchdog timers own only after a full window — so letting the poke
+    /// run there flickers a spurious `Done` right after the user answers a gate
+    /// with an inject pending. Also pins the byte-quiet and agent-only guards.
+    #[tokio::test]
+    async fn force_reclassify_is_blocked_by_a_latched_answer_reset() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(869);
+        let quiet = tokio::time::Instant::now() - (RECLASSIFY_MIN_QUIET * 2);
+
+        // Quiescent agent, no reset: the poke is honored.
         assert!(
-            !wait_until_input_resolved(rx, id, &input_resolved_states(), Duration::from_secs(1))
-                .await
+            force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "a settled agent terminal with no pending answer must reclassify",
+        );
+
+        // A non-agent (shell) terminal has no detector to run.
+        assert!(
+            !force_reclassify_allowed(false, quiet, &config.terminal, id).await,
+            "a non-agent terminal must never reclassify",
+        );
+
+        // Bytes still flowing (last output just now): scraping would read a
+        // torn mid-paint frame, so the poke no-ops until the stream settles.
+        assert!(
+            !force_reclassify_allowed(true, tokio::time::Instant::now(), &config.terminal, id)
+                .await,
+            "a mid-paint terminal must not be scraped",
+        );
+
+        // The user just answered a gate: the reset is latched until the
+        // answer's first output clears it. The poke must stand down.
+        config.terminal.agent_detect_resets.lock().await.insert(id);
+        assert!(
+            !force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "a latched answer reset must suppress the forced reclassify so it \
+             can't preempt the deliberate settle with a spurious Done",
+        );
+
+        // Once the reset clears (the answer's output arrived), the poke is
+        // honored again.
+        config.terminal.agent_detect_resets.lock().await.remove(&id);
+        assert!(
+            force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "clearing the reset must re-enable the forced reclassify",
         );
     }
 
@@ -10344,6 +10545,95 @@ mod tests {
 
         // The reservation is released after delivery, not held open by a
         // 30-second readiness waiter.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !config.spawn.pending_prompt_injections.lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("injection reservation released after delivery");
+    }
+
+    /// A deferred inject must release the instant a live re-read shows the
+    /// gate has cleared — driven by the loop's own reclassify poll, with no
+    /// inbound transition event (issue #869). Before the fix the waiter blocked
+    /// on a bus transition a quiescent agent never emits, so the snippet sat
+    /// until the user typed and their keystroke drove the flip. Here NO bus
+    /// event is ever sent: flipping only the cached state (exactly what the
+    /// pump's forced reclassify would commit) must be enough to deliver, and a
+    /// genuine gate that stays `InputNeeded` must keep deferring meanwhile.
+    #[tokio::test]
+    async fn deferred_injection_releases_via_live_state_poll_without_an_event() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "stale-input-needed")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(869);
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, backend_key.clone());
+        config.terminal.terminal_meta.lock().await.insert(
+            id,
+            (
+                SessionKey::new("stale-input-needed"),
+                TerminalKind::Agent("claude".into()),
+            ),
+        );
+        // A chooser gate: a pasted prompt would corrupt the choice, so the
+        // inject defers rather than delivering.
+        config
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::InputNeeded);
+        config
+            .terminal
+            .input_needed_shapes
+            .lock()
+            .await
+            .insert(id, lazybox_agents::PromptShape::Chooser);
+
+        handle_inject_prompt(&config, id, "deferred work", None, false).await;
+
+        // While the gate stands, the reservation is held and nothing is
+        // written into the live dialog — even though several poll ticks run.
+        assert_eq!(config.spawn.pending_prompt_injections.lock().len(), 1);
+        tokio::time::sleep(INJECT_RECLASSIFY_POLL * 2).await;
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "a genuine gate must keep deferring — nothing pasted into the dialog",
+        );
+
+        // The gate clears to a resting composer. In production the pump's
+        // forced reclassify refreshes this cache off a fresh screen read; here
+        // we set it directly and send NO bus event, proving the release is
+        // level-triggered off the poll rather than a keystroke transition.
+        config
+            .terminal
+            .agent_states
+            .lock()
+            .await
+            .insert(id, lazybox_ipc::AgentState::Idle);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let joined: Vec<u8> = mock.writes_for(&backend_key).await.concat();
+                if String::from_utf8_lossy(&joined).contains("deferred work") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect(
+            "a deferred inject must deliver once a live re-read clears the gate — no keystroke",
+        );
+
         tokio::time::timeout(Duration::from_secs(1), async {
             while !config.spawn.pending_prompt_injections.lock().is_empty() {
                 tokio::task::yield_now().await;

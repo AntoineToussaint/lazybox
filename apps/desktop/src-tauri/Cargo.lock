@@ -2088,8 +2088,10 @@ dependencies = [
 name = "lazybox-ipc"
 version = "0.1.9"
 dependencies = [
+ "base64 0.22.1",
  "bincode",
  "chrono",
+ "getrandom 0.3.4",
  "lazybox-core",
  "serde",
  "thiserror 2.0.19",

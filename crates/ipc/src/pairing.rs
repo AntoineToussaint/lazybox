@@ -41,8 +41,8 @@ pub enum PairingError {
     Base64(#[from] base64::DecodeError),
     #[error("pairing link payload could not be decoded")]
     Decode,
-    #[error("could not read system randomness: {0}")]
-    Random(#[from] getrandom::Error),
+    #[error("could not read system randomness")]
+    Random,
 }
 
 /// A one-time pairing code with an expiry. "One-time" is enforced by the box
@@ -67,7 +67,7 @@ impl PairingCode {
     /// Mint a fresh random code valid for `ttl` from `now`.
     pub fn generate(now: DateTime<Utc>, ttl: Duration) -> Result<Self, PairingError> {
         let mut seed = [0u8; 5];
-        getrandom::fill(&mut seed)?;
+        getrandom::fill(&mut seed).map_err(|_| PairingError::Random)?;
         Ok(Self::from_seed(seed, now + ttl))
     }
 

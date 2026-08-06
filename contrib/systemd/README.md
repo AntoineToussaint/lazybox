@@ -14,9 +14,11 @@ distinct `LAZYBOX_HOME` per user:
   the desktop/web clients reach over an SSH-forwarded port.
 
 Both are templated on the account name (`%i`), so one unit file serves every
-user on the box. Run either or both — the gateway does not bind the daemon
-socket, so they coexist against one home (at the cost of two poll loops over
-the same store).
+user on the box. Prefer running **one** per user: the gateway doesn't bind the
+daemon socket so the two *can* coexist against one home, but each spins its own
+poll loop and its own writer against the same `state.db`, so running both
+doubles the provider polling and risks SQLite write contention. Run
+`lazybox-api@` alone only if you don't also need the socket daemon.
 
 ## Install (golden image)
 
@@ -52,9 +54,15 @@ in the env file for a non-standard home.
 
 ```sh
 systemctl status lazybox-daemon@alice
-journalctl -u lazybox-daemon@alice -f      # logs (lazybox also writes /tmp/lazybox.log)
+journalctl -u lazybox-daemon@alice -f      # daemon stdout/warnings
 systemctl restart lazybox-daemon@alice
 ```
+
+`journalctl` shows the daemon's stdout; the detailed trace stream goes to
+`lazybox.log`, which under `PrivateTmp=true` lives in the service's private
+`/tmp` rather than the host's. For a host-visible per-user log, point
+`ui.log_path` at the user's home in their `config.yaml` (e.g.
+`/home/alice/.lazybox/lazybox.log`).
 
 ## Notes
 

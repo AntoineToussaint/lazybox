@@ -110,8 +110,7 @@ fn packaged_units_track_real_subcommands_and_hardening() {
             "{file}: Restart={restart} is not a restart-on-crash policy"
         );
 
-        // Distinct per-user LAZYBOX_HOME: either a template-scoped default
-        // baked in, or (at minimum) the per-user env file that carries it.
+        // Distinct per-user LAZYBOX_HOME, baked into the template via %i.
         let per_user_home = directives
             .get("Environment")
             .map(|vals| {
@@ -123,6 +122,22 @@ fn packaged_units_track_real_subcommands_and_hardening() {
             per_user_home,
             "{file}: expected a per-user Environment=LAZYBOX_HOME=…%i… so each \
              account gets a distinct home"
+        );
+
+        // Private /tmp: the daemon's default trace log is a fixed
+        // /tmp/lazybox.log opened 0600, and init_tracing aborts the daemon
+        // when that open fails. Without PrivateTmp two users race for the one
+        // path and the second fails to boot. See lazybox-daemon@.service.
+        let private_tmp = directives
+            .get("PrivateTmp")
+            .and_then(|v| v.first())
+            .map(|v| v == "true" || v == "yes" || v == "on")
+            .unwrap_or(false);
+        assert!(
+            private_tmp,
+            "{file}: expected PrivateTmp=true so per-user daemons don't collide \
+             on the shared /tmp/lazybox.log (the second to start would fail to \
+             open the first's 0600 log and abort at boot)"
         );
     }
 }

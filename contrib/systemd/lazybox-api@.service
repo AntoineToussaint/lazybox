@@ -14,6 +14,10 @@ Environment=LAZYBOX_HOME=/home/%i/.lazybox
 # without LAZYBOX_API_TOKEN, so a box missing the env file should fail
 # loudly at unit level rather than crash-loop the process.
 EnvironmentFile=/etc/lazybox/%i.env
+# Private /tmp per service — see lazybox-daemon@.service: the default
+# /tmp/lazybox.log is 0600, so a shared /tmp would let the second user's
+# daemon fail to open the first's log and abort at boot.
+PrivateTmp=true
 ExecStart=/usr/local/bin/lazybox server api
 Restart=on-failure
 RestartSec=2

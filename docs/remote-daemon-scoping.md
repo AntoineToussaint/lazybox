@@ -91,8 +91,9 @@ broadly:
   server wants it under a service unit with restart-on-crash and a boot hook.
   Packaged systemd units now ship in [`contrib/systemd/`][systemd] — templated
   per user (`lazybox-daemon@`, `lazybox-api@`), restart-on-crash, distinct
-  `LAZYBOX_HOME` each — so a box auto-starts the daemon unattended. Log
-  rotation still leans on journald plus lazybox's own `/tmp/lazybox.log`.
+  `LAZYBOX_HOME` each (and `PrivateTmp` so per-user daemons don't collide on
+  the shared `/tmp/lazybox.log`) — so a box auto-starts the daemon unattended.
+  Log rotation still leans on journald plus lazybox's own trace log.
 
 Sizing for the self-hosted path: **mostly documentation plus the small
 hardening/ops items above.** No new architecture.

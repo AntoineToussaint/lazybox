@@ -293,7 +293,9 @@ Remote & services:
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox serve --relay <a>   dial out to a rendezvous relay so clients can
                               reach this box's daemon (behind NAT, no ports;
-                              --account <id>, LAZYBOX_RELAY env)
+                              --account <id>, LAZYBOX_RELAY env). Needs
+                              --insecure-no-auth: the channel is not yet
+                              encrypted or authenticated
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
   lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots;

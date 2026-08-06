@@ -38,7 +38,6 @@ struct BoxHandle {
 
 /// Shared relay state. Cheap to clone (`Arc`-wrapped internally by
 /// [`Relay::serve`]).
-#[derive(Default)]
 pub struct Relay {
     boxes: Mutex<HashMap<String, BoxHandle>>,
     /// Clients parked awaiting their box's data connection, keyed by the
@@ -48,12 +47,22 @@ pub struct Relay {
     handshake_timeout: Duration,
 }
 
+/// Delegates to [`Relay::new`] rather than a derive: a derived `Default`
+/// would zero both timeouts, and a zero handshake timeout drops every
+/// connection on arrival — a functional relay must carry the real defaults.
+impl Default for Relay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Relay {
     pub fn new() -> Self {
         Self {
+            boxes: Mutex::default(),
+            pending: Mutex::default(),
             broker_timeout: DEFAULT_BROKER_TIMEOUT,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
-            ..Self::default()
         }
     }
 
@@ -177,7 +186,15 @@ impl Relay {
         let (data_tx, data_rx) = oneshot::channel::<TcpStream>();
         self.pending.lock().await.insert(session_id, data_tx);
 
-        if to_box.send(ToBox::NewClient { session_id }).await.is_err() {
+        // Bound the announce: a half-open box whose 16-slot channel has
+        // filled would otherwise wedge this task on `send` until TCP itself
+        // times out. Treat a stalled or closed channel as "box unreachable".
+        let announced = tokio::time::timeout(
+            self.broker_timeout,
+            to_box.send(ToBox::NewClient { session_id }),
+        )
+        .await;
+        if !matches!(announced, Ok(Ok(()))) {
             self.pending.lock().await.remove(&session_id);
             return Ok(());
         }
@@ -211,6 +228,17 @@ impl Relay {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn default_relay_is_functional() {
+        // `Default` must not zero the timeouts — a zero handshake timeout
+        // would drop every connection, a zero broker timeout fail every broker.
+        let relay = Relay::default();
+        assert!(relay.handshake_timeout > Duration::ZERO);
+        assert!(relay.broker_timeout > Duration::ZERO);
+        assert_eq!(relay.handshake_timeout, Relay::new().handshake_timeout);
+        assert_eq!(relay.broker_timeout, Relay::new().broker_timeout);
+    }
 
     #[tokio::test]
     async fn idle_connection_is_dropped_after_handshake_timeout() {

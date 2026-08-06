@@ -131,6 +131,35 @@ async fn forwards_arbitrary_bytes_untouched() {
 }
 
 #[tokio::test]
+async fn serve_box_returns_ok_on_clean_control_close() {
+    use lazybox_relay::protocol::{Ack, Hello, read_msg, write_msg};
+
+    // A fake relay that accepts the registration, acks it, then closes the
+    // control connection cleanly — the box should treat that as a normal
+    // reconnect trigger (Ok), not an error.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let _register: Hello = read_msg(&mut sock).await.unwrap();
+        write_msg(&mut sock, &Ack::Ok).await.unwrap();
+        // Drop `sock` → clean EOF on the box's control read.
+    });
+
+    let result = serve_box(
+        addr,
+        "box-clean".into(),
+        "acct".into(),
+        Arc::new(|_stream| Box::pin(async {})),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "a clean control-connection close must return Ok, got {result:?}",
+    );
+}
+
+#[tokio::test]
 async fn two_clients_share_one_box() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();

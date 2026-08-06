@@ -68,9 +68,13 @@ pub async fn serve_box(
     }
 
     loop {
-        // `read_msg` errors on EOF, which returns and lets the caller
-        // reconnect.
-        let ToBox::NewClient { session_id } = read_msg::<_, ToBox>(&mut control).await?;
+        let session_id = match read_msg::<_, ToBox>(&mut control).await {
+            Ok(ToBox::NewClient { session_id }) => session_id,
+            // A clean control-connection close is the normal reconnect
+            // trigger (relay restart, network blip), not a failure.
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e),
+        };
         let relay_addr = relay_addr.clone();
         let on_client = Arc::clone(&on_client);
         tokio::spawn(async move {

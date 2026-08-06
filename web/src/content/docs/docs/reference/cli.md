@@ -151,24 +151,32 @@ an unreadable row was preserved and omitted from the decoded workspace list.
 `lazybox serve` dials **out** to a rendezvous relay and holds the connection
 open, so clients can reach this box's daemon **behind NAT** — no inbound
 ports, DNS, or TLS certs. The relay brokers a client to the box by box-id and
-forwards **ciphertext only**; it executes nothing.
+forwards opaque bytes (ciphertext, once the E2E layer lands — see the note
+below); it executes nothing.
 
 ```bash
-lazybox serve --relay relay.example.com:9443
+lazybox serve --relay relay.example.com:9443 --insecure-no-auth
 ```
 
 | Option | Effect |
 | --- | --- |
 | `--relay <host:port>` | Relay address to dial (or the `LAZYBOX_RELAY` env var). Required. |
+| `--insecure-no-auth` | Acknowledge that the relay path is not yet encrypted or authenticated. **Required** — `serve` refuses to start without it. |
 | `--account <id>` | Account the box registers under (or `LAZYBOX_ACCOUNT`). Defaults to `self-hosted`; the relay records it for a future subscription gate. |
 | `--box-id <id>` | Override the box-id. By default a persistent id is generated on first run and stored at `~/.lazybox/v2/box-id`. |
 | `--socket <path>` | Local daemon socket to bridge to (defaults to the standard daemon socket). |
 
 Run the daemon (`lazybox server start`) alongside `serve`: each brokered
-client is bridged to that daemon over the local socket. The end-to-end
-encryption layer and QR pairing arrive in later milestones of the relay work;
-today the relay path carries the daemon's own framed protocol, so tunnel it
-over a trusted relay.
+client is bridged to that daemon over the local socket.
+
+The end-to-end encryption (#891) and per-device identity (#892) that make the
+relay blind and per-client authenticated are **not yet in the tree**. Until
+they land, the relay path carries the daemon's own framed protocol in the
+clear, and the daemon socket's only auth — a same-uid check — is satisfied by
+`serve` on behalf of every brokered client. So anyone who reaches the relay
+with your box-id gains full control of the daemon. `serve` therefore refuses
+to start without `--insecure-no-auth`; only use it against a relay you trust,
+on a network you trust, until the encryption layer ships.
 
 The relay itself is a separate deployable (`lazybox-relay`, in `crates/relay`)
 and is not part of the client installers.

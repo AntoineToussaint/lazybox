@@ -25,7 +25,7 @@ use std::time::Duration;
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpStream, UnixStream};
 
-use crate::{lifecycle, take_value};
+use crate::{lifecycle, take_flag, take_value};
 
 /// Backoff between control-connection reconnect attempts.
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
@@ -38,6 +38,7 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 /// for the future entitlement gate but brokers unconditionally today.
 pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
+    let insecure_no_auth = take_flag(&mut args, "--insecure-no-auth");
     let relay_addr = take_value(&mut args, "--relay")
         .or_else(|| std::env::var("LAZYBOX_RELAY").ok())
         .map(|s| s.trim().to_string())
@@ -57,6 +58,22 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
         Some(id) => id.trim().to_string(),
         None => load_or_create_box_id(&box_id_file())?,
     };
+
+    // The E2E channel (#891) and per-device identity (#892) are not in this
+    // build, so the relay path is plaintext and the daemon socket's only
+    // auth — a same-uid peer check — is satisfied by `serve` on behalf of
+    // every brokered client. Until those land, exposing the daemon is an
+    // explicit, acknowledged choice. `println` (not the anyhow error, which
+    // `init_tracing` redirects into the log) so the refusal is visible.
+    if let Err(refusal) = require_insecure_ack(insecure_no_auth) {
+        println!("refusing to serve: {refusal}");
+        return Err(refusal);
+    }
+    println!(
+        "WARNING: the relay path is unencrypted and unauthenticated \
+         (--insecure-no-auth); anyone who reaches the relay with box-id \
+         {box_id} can drive your daemon"
+    );
 
     if !socket_path.exists() {
         tracing::warn!(
@@ -110,6 +127,21 @@ async fn bridge_to_daemon(mut relay_stream: TcpStream, daemon_socket: &Path) {
     }
 }
 
+/// Gate on the caller acknowledging that the relay path is not yet secured.
+/// Without #891/#892 the channel is plaintext and the daemon is reachable by
+/// any brokered client, so `serve` only proceeds when the risk is opted into.
+fn require_insecure_ack(insecure_no_auth: bool) -> anyhow::Result<()> {
+    if insecure_no_auth {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "the relay path is currently unencrypted and unauthenticated — the E2E \
+         channel (#891) and per-device identity (#892) are not in this build, so \
+         anyone who reaches the relay with this box-id gains full control of your \
+         daemon. Re-run with --insecure-no-auth to proceed anyway."
+    )
+}
+
 /// `<profile>/v2/box-id` — the persistent box identity (superseded by the
 /// device-identity keypair in #892).
 fn box_id_file() -> PathBuf {
@@ -155,5 +187,14 @@ mod tests {
         std::fs::write(&path, "   \n").unwrap();
         let id = load_or_create_box_id(&path).unwrap();
         assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn refuses_to_serve_until_insecurity_is_acknowledged() {
+        assert!(
+            require_insecure_ack(false).is_err(),
+            "serve must not expose the daemon without an explicit acknowledgement",
+        );
+        assert!(require_insecure_ack(true).is_ok());
     }
 }

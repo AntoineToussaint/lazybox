@@ -5,6 +5,7 @@ members = [
     "crates/core",
     "crates/auth",
     "crates/entitlement",
+    "crates/identity",
     "crates/store",
     "crates/config",
     "crates/git-ops",
@@ -99,6 +100,7 @@ publish = false
 lazybox-core        = { path = "crates/core" }
 lazybox-auth        = { path = "crates/auth" }
 lazybox-entitlement = { path = "crates/entitlement" }
+lazybox-identity    = { path = "crates/identity" }
 lazybox-store       = { path = "crates/store" }
 lazybox-config      = { path = "crates/config" }
 lazybox-git-ops     = { path = "crates/git-ops" }

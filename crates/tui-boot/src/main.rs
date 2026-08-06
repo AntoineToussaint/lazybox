@@ -31,6 +31,7 @@
 // build-guard fetch (octocrab), provider detection, setup persistence,
 // the Slack CLI flows, and the test harness.
 mod build_guard;
+mod device_cli;
 mod serve;
 mod setup_detect;
 mod setup_persist;
@@ -382,6 +383,7 @@ async fn main() -> anyhow::Result<()> {
         Some("scan") => scan_subcommand(&args[1..]).await,
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
+        Some("device") => device_cli::device_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)

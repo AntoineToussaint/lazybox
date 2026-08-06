@@ -14,8 +14,8 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use lazybox_ipc::{
-    COMMAND_CHANNEL_CAPACITY, Command, Connection, EVENT_CHANNEL_CAPACITY, Event, TerminalId,
-    event_forward_channel,
+    COMMAND_CHANNEL_CAPACITY, Command, Connection, EVENT_CHANNEL_CAPACITY, Event, PrincipalId,
+    TerminalId, event_forward_channel,
 };
 use lazybox_store::StoreError;
 use serde::{Deserialize, Serialize};
@@ -1009,13 +1009,73 @@ pub fn check_bearer_token(
     let Some(expected_token) = expected_token else {
         return true;
     };
-    let Some(value) = authorization.and_then(|value| value.to_str().ok()) else {
-        return false;
-    };
-    let Some(token) = value.strip_prefix("Bearer ") else {
+    let Some(token) = bearer_token(authorization) else {
         return false;
     };
     constant_time_eq(token.as_bytes(), expected_token.as_bytes())
+}
+
+/// The token from an `Authorization: Bearer <token>` header, if present
+/// and well-formed.
+fn bearer_token(authorization: Option<&HeaderValue>) -> Option<&str> {
+    authorization
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+}
+
+/// Resolve a request's authenticated principal, or `None` when the
+/// request is unauthorized.
+///
+/// - No shared bearer configured → open mode: the single local operator
+///   (`local`), preserving the pre-device-identity behavior.
+/// - Bearer equals the shared token → `local` (the box owner / desktop).
+/// - Bearer matches a minted device credential → that device's
+///   principal (`device:<id>`), so its provider credentials are scoped
+///   to it rather than to `local`.
+/// - Anything else → unauthorized.
+pub fn authenticate_request(
+    device_registry: &lazybox_identity::DeviceRegistry,
+    authorization: Option<&HeaderValue>,
+    shared_bearer: Option<&str>,
+) -> Option<PrincipalId> {
+    let Some(shared) = shared_bearer else {
+        return Some(PrincipalId::local());
+    };
+    let token = bearer_token(authorization)?;
+    if constant_time_eq(token.as_bytes(), shared.as_bytes()) {
+        return Some(PrincipalId::local());
+    }
+    match device_registry.authenticate(token) {
+        Ok(Some(principal)) => Some(PrincipalId::new(principal)),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "device credential lookup failed");
+            None
+        }
+    }
+}
+
+/// Stamp the connection's authenticated principal onto the credential
+/// commands, overriding any client-supplied `principal_id` so a device
+/// can only read and write its own credentials. Every other command is
+/// unaffected.
+fn bind_principal(command: Command, principal: PrincipalId) -> Command {
+    match command {
+        Command::UpsertProviderCredential { credential, .. } => Command::UpsertProviderCredential {
+            principal_id: principal,
+            credential,
+        },
+        Command::RemoveProviderCredential { provider_id, .. } => {
+            Command::RemoveProviderCredential {
+                principal_id: principal,
+                provider_id,
+            }
+        }
+        Command::ListProviderCredentials { .. } => Command::ListProviderCredentials {
+            principal_id: principal,
+        },
+        other => other,
+    }
 }
 
 /// Constant-time byte comparison for the bearer token: fold the XOR of
@@ -1341,15 +1401,16 @@ where
         return api_client_response();
     }
 
-    if !check_bearer_token(
+    let Some(principal) = authenticate_request(
+        &config.device_registry,
         request.headers().get(AUTHORIZATION),
         options.bearer_token.as_deref(),
-    ) {
+    ) else {
         return json_response(
             StatusCode::UNAUTHORIZED,
             &serde_json::json!({ "error": "unauthorized" }),
         );
-    }
+    };
 
     if let Some(requested) = request.headers().get(PROTOCOL_VERSION_HEADER)
         && requested.as_bytes() != DESKTOP_PROTOCOL_VERSION.to_string().as_bytes()
@@ -1395,7 +1456,7 @@ where
             agent_output_response(config, &options, request.into_body()).await
         }
         (&Method::POST, "/v1/commands") => {
-            command_response(config, &options, request.into_body()).await
+            command_response(config, &options, principal, request.into_body()).await
         }
         (&Method::POST, "/v1/stream") => stream_command_response(config, request.into_body()),
         (&Method::POST, "/v1/terminal") => terminal_stream_response(config, request.into_body()),
@@ -1409,6 +1470,7 @@ where
 async fn command_response<B>(
     config: ServerConfig,
     options: &GatewayOptions,
+    principal: PrincipalId,
     body: B,
 ) -> Response<Body>
 where
@@ -1452,6 +1514,7 @@ where
     // the bridge; a slow mutation could be abandoned after the success reply.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_tx = lazybox_ipc::EventSender::from_unbounded(event_tx);
+    let command = bind_principal(command, principal);
     let mut task =
         tokio::spawn(async move { dispatch_one_shot_command(&config, &event_tx, command).await });
     match tokio::time::timeout(options.command_timeout, &mut task).await {
@@ -2293,3 +2356,102 @@ fn response_with_body(
 
 #[allow(dead_code)]
 fn _assert_http_body(_: Incoming) {}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use lazybox_identity::DeviceRegistry;
+
+    fn bearer(token: &str) -> HeaderValue {
+        HeaderValue::from_str(&format!("Bearer {token}")).unwrap()
+    }
+
+    #[test]
+    fn open_mode_resolves_to_local() {
+        let registry = DeviceRegistry::ephemeral();
+        // No shared bearer configured: any request is the local operator.
+        assert_eq!(
+            authenticate_request(&registry, None, None),
+            Some(PrincipalId::local())
+        );
+    }
+
+    #[test]
+    fn shared_bearer_resolves_to_local() {
+        let registry = DeviceRegistry::ephemeral();
+        assert_eq!(
+            authenticate_request(
+                &registry,
+                Some(&bearer("shared-secret")),
+                Some("shared-secret")
+            ),
+            Some(PrincipalId::local())
+        );
+    }
+
+    #[test]
+    fn missing_or_wrong_bearer_is_unauthorized_when_auth_required() {
+        let registry = DeviceRegistry::ephemeral();
+        assert_eq!(
+            authenticate_request(&registry, None, Some("shared-secret")),
+            None
+        );
+        assert_eq!(
+            authenticate_request(&registry, Some(&bearer("nope")), Some("shared-secret")),
+            None
+        );
+    }
+
+    #[test]
+    fn device_token_resolves_to_its_own_principal() {
+        let registry = DeviceRegistry::ephemeral();
+        let minted = registry.mint("iPhone").unwrap();
+        let principal = authenticate_request(
+            &registry,
+            Some(&bearer(&minted.token)),
+            Some("shared-secret"),
+        );
+        assert_eq!(
+            principal,
+            Some(PrincipalId::new(minted.record.principal_id))
+        );
+    }
+
+    #[test]
+    fn revoked_device_token_is_unauthorized() {
+        let registry = DeviceRegistry::ephemeral();
+        let minted = registry.mint("iPhone").unwrap();
+        registry.revoke(&minted.record.id).unwrap();
+        assert_eq!(
+            authenticate_request(
+                &registry,
+                Some(&bearer(&minted.token)),
+                Some("shared-secret")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn bind_principal_overrides_only_credential_commands() {
+        let authed = PrincipalId::new("device:abc");
+
+        // A client-supplied principal on a credential command is replaced.
+        let bound = bind_principal(
+            Command::ListProviderCredentials {
+                principal_id: PrincipalId::new("device:spoofed"),
+            },
+            authed.clone(),
+        );
+        match bound {
+            Command::ListProviderCredentials { principal_id } => {
+                assert_eq!(principal_id, authed);
+            }
+            other => panic!("expected ListProviderCredentials, got {other:?}"),
+        }
+
+        // A non-credential command is untouched.
+        let passthrough = bind_principal(Command::Subscribe, authed);
+        assert!(matches!(passthrough, Command::Subscribe));
+    }
+}

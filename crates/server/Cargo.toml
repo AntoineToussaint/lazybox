@@ -18,6 +18,7 @@ desktop-contract = [
 [dependencies]
 lazybox-core       = { workspace = true }
 lazybox-auth       = { workspace = true }
+lazybox-identity   = { workspace = true }
 lazybox-store      = { workspace = true }
 lazybox-config     = { workspace = true }
 lazybox-gh         = { workspace = true }

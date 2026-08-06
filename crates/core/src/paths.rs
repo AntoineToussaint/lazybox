@@ -103,6 +103,13 @@ pub fn config_yaml() -> PathBuf {
     home().join("config.yaml")
 }
 
+/// Box identity + per-device credential material. `<home>/v2/identity/`.
+/// Holds the box's Ed25519 keypair and the device registry
+/// (`devices.json`); on non-Apple hosts also the file keystore secrets.
+pub fn identity_dir() -> PathBuf {
+    state_root().join("identity")
+}
+
 /// Root for per-session agent credential homes. `<home>/v2/agent-homes/`.
 /// An agent kind that isolates its login (Codex → `CODEX_HOME`) gets a
 /// private directory per workspace here, seeded once from the machine-wide
@@ -295,6 +302,13 @@ mod tests {
             worktrees_root(),
             PathBuf::from("/tmp/lazybox-x/v2/worktrees")
         );
+    }
+
+    #[test]
+    fn identity_dir_lives_under_state_root() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-x");
+        assert_eq!(identity_dir(), PathBuf::from("/tmp/lazybox-x/v2/identity"));
     }
 
     #[test]

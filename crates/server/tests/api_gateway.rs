@@ -1573,6 +1573,66 @@ async fn command_route_returns_connection_scoped_handler_events() {
 }
 
 #[tokio::test]
+async fn device_bearer_scopes_credentials_to_its_own_principal() {
+    // A minted device credential authenticates as `device:<id>`; the
+    // gateway must ignore the client-supplied `principal_id` and scope
+    // the upsert to that device, not to the shared `local`.
+    let config = ServerConfig::in_memory();
+    let minted = config.device_registry.mint("iPhone").expect("mint device");
+    let options = GatewayOptions {
+        bearer_token: Some("shared-secret".into()),
+        ..GatewayOptions::default()
+    };
+
+    let frame = JsonClientFrame::Command(Command::UpsertProviderCredential {
+        principal_id: lazybox_ipc::PrincipalId::new("local"),
+        credential: lazybox_ipc::ProviderCredentialInput {
+            provider_id: "github".into(),
+            token: "ghp_secret".into(),
+            source: "test".into(),
+            scopes: vec![],
+            expires_at: None,
+        },
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .header(AUTHORIZATION, format!("Bearer {}", minted.token))
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response = api_gateway::handle_request(config, options, request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: CommandResponse = read_json(response).await;
+    match payload.events.as_slice() {
+        [Event::ProviderCredentialUpdated { principal_id, .. }] => {
+            assert_eq!(principal_id.as_str(), minted.record.principal_id);
+        }
+        other => panic!("expected a device-scoped credential update, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_bearer_is_rejected_when_auth_is_required() {
+    let options = GatewayOptions {
+        bearer_token: Some("shared-secret".into()),
+        ..GatewayOptions::default()
+    };
+    let frame = JsonClientFrame::Command(Command::ListProviderCredentials {
+        principal_id: lazybox_ipc::PrincipalId::local(),
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .header(AUTHORIZATION, "Bearer not-a-real-device-token")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response = api_gateway::handle_request(ServerConfig::in_memory(), options, request).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn command_route_returns_the_correlated_terminal_failure() {
     let frame = JsonClientFrame::Command(Command::Spawn {
         session_key: "desktop:missing-agent".into(),

@@ -2389,6 +2389,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_first_connection_keeps_its_backlog_but_a_reconnect_drains_it() {
+        // Bind then drop a listener so the port is definitely closed: every
+        // connect fails at the transport, after the drain gate has already
+        // decided whether to run. That isolates the `reconnect` flag from
+        // any body streaming.
+        let address = {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .expect("bind then release a closed port");
+            listener.local_addr().expect("closed port address")
+        };
+        let gateway = GatewayClient {
+            base_url: format!("http://{address}"),
+            bearer_token: String::new(),
+            client: Client::new(),
+        };
+        let (tx, rx) = mpsc::channel::<Bytes>(8);
+        let command_rx = Arc::new(Mutex::new(rx));
+        let (terminal_tx, _terminal_rx) = mpsc::channel(8);
+
+        tx.send(Bytes::from_static(b"queued"))
+            .await
+            .expect("seed backlog");
+
+        // The initial connection must preserve the backlog: dropping the
+        // caller's first keystrokes would be a regression in the other
+        // direction.
+        assert!(
+            stream_terminal_events_once(&gateway, command_rx.clone(), &terminal_tx, false)
+                .await
+                .is_err(),
+            "a closed gateway must fail the connect"
+        );
+        assert_eq!(
+            command_rx.lock().await.len(),
+            1,
+            "the first connection must not drain the backlog"
+        );
+
+        // A reconnect drains it before touching the network.
+        assert!(
+            stream_terminal_events_once(&gateway, command_rx.clone(), &terminal_tx, true)
+                .await
+                .is_err(),
+            "a closed gateway must fail the connect"
+        );
+        assert_eq!(
+            command_rx.lock().await.len(),
+            0,
+            "a reconnect must drain the backlog"
+        );
+    }
+
+    #[tokio::test]
     async fn credential_free_dogfood_flow_crosses_config_gateway_and_real_pty() {
         let directory = tempfile::tempdir().expect("temporary fixture directory");
         let config_path = directory.path().join("config.yaml");

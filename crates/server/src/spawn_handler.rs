@@ -5252,15 +5252,25 @@ async fn classify_quiet_screen(
     .await;
 }
 
-/// The Working watchdog fired (#398): [`WORKING_WATCHDOG_AFTER`] with
-/// no meaningful content change while the terminal reads `Working`.
-/// Classify the screen exactly as the quiet path would — this is how a
-/// parked prompt hidden behind spinner/status churn surfaces as `?`,
-/// since churn re-arms the quiet timer and `classify_quiet_screen`
-/// never runs on its own — and, if the terminal *still* reads
-/// `Working` afterwards (a frozen status line re-reads as `Working`;
-/// hookless agents have no other exit), force the turn closed with a
-/// clear `Done` reading.
+/// The content-stability watchdog fired (#398): [`WORKING_WATCHDOG_AFTER`]
+/// with no meaningful content change. Re-classify the screen exactly as the
+/// quiet path would — churn re-arms the byte-silence quiet timer so
+/// `classify_quiet_screen` never runs on its own — for the two states a
+/// content-stable screen can be wrong about:
+///
+///   - **`Working`** — a frozen status line that never settled. If it
+///     *still* reads `Working` afterwards (hookless agents have no other
+///     exit), force the turn closed with a clear `Done` reading.
+///   - **`InputNeeded`** — a stale `?` whose turn has actually ended. A
+///     finished agent that leaves a background shell running keeps the PTY
+///     emitting bytes, so the stream never goes byte-silent and the quiet
+///     timer can't reach it; only content-stability can notice the prompt
+///     is gone (#872). The re-classification is a *clear* reading, so a
+///     resting composer resolves the `?` while a genuinely live prompt
+///     re-reads `InputNeeded` and stays. Subject to the same hooks-primary
+///     gate as any PTY reading, so a fresh hook still owns the asking call
+///     (#62) — only a stale-hook / hookless `?` clears here. `Working` is
+///     the only state force-closed; a surviving `InputNeeded` is left as-is.
 ///
 /// The force commits through [`commit_pty_reading`]. Its
 /// [`Liveness::Watchdog`] evidence is authoritative while `Working`, so a
@@ -5291,9 +5301,10 @@ async fn watchdog_escape_working(
         );
         return;
     };
-    if terminals.agent_states.lock().await.get(&id).copied()
-        != Some(lazybox_ipc::AgentState::Working)
-    {
+    if !matches!(
+        terminals.agent_states.lock().await.get(&id).copied(),
+        Some(lazybox_ipc::AgentState::Working | lazybox_ipc::AgentState::InputNeeded)
+    ) {
         return;
     }
     // A pending answer reset normally vetoes the whole tick: the buffer
@@ -15031,6 +15042,106 @@ mod tests {
             p.watchdog().await,
             vec![InputNeeded],
             "the watchdog tick must surface the parked dialog, not claim Done",
+        );
+    }
+
+    /// The permission dialog and the resting composer that replaces it — the
+    /// #872 shape: a real prompt parks the agent at `?`, the turn ends, and
+    /// the composer is redrawn at rest with the prompt now scrollback.
+    const PERMISSION_DIALOG: &str = concat!(
+        "Do you want to proceed?\n",
+        "❯ 1. Yes\n",
+        "  2. No\n",
+        "Esc to cancel · Tab to amend · ctrl+e to explain",
+    );
+    const SETTLED_COMPOSER: &str = concat!(
+        "Final state: all checks pass — the PR is CLEAN.\n",
+        "\n",
+        "❯ \n",
+        "? for shortcuts",
+    );
+
+    /// #872: a finished agent that leaves a background shell running keeps
+    /// the PTY emitting bytes, so the byte-silence quiet timer never fires
+    /// and a stale `?` (a prompt the turn has since moved past) would pin
+    /// forever. The content-stability watchdog re-classifies the settled
+    /// screen — the prompt is gone — and the `?` resolves instead of
+    /// sticking.
+    #[tokio::test]
+    async fn watchdog_clears_a_stale_input_needed_when_the_turn_has_settled() {
+        use lazybox_ipc::AgentState::{Idle, InputNeeded, Working};
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(PERMISSION_DIALOG.as_bytes()).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+
+        // The turn ends: the composer is redrawn at rest above the now-stale
+        // prompt. As an ambiguous byte-flow reading this must NOT clear the
+        // `?` on its own (#374) — a stray repaint reads exactly the same.
+        assert_eq!(
+            p.feed(SETTLED_COMPOSER.as_bytes()).await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "an ambiguous reading must not un-ask a parked prompt",
+        );
+
+        // The watchdog fires on content-stability (a background shell's
+        // heartbeat keeps the stream alive, so the quiet timer can't) and
+        // re-classifies: the prompt is scrollback now, so the `?` clears.
+        assert_eq!(
+            p.watchdog().await,
+            vec![Idle],
+            "a settled resting composer must resolve a stale InputNeeded",
+        );
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&Idle),
+        );
+    }
+
+    /// The guard the #872 clear must keep: a prompt that is STILL on screen
+    /// when the watchdog fires re-reads `InputNeeded`, so the `?` stays. The
+    /// re-classification is affirmative evidence, not a blind timer, so it
+    /// never un-asks a live prompt.
+    #[tokio::test]
+    async fn watchdog_leaves_a_live_parked_prompt_asking() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(PERMISSION_DIALOG.as_bytes()).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a live prompt must survive the watchdog re-classification",
+        );
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&InputNeeded),
+        );
+    }
+
+    /// #62: while a lifecycle hook is fresh it owns the asking call, so the
+    /// watchdog's re-classification of a resting-looking screen must NOT
+    /// clear the `?` (the idle nudge raises it precisely at a ready
+    /// composer). Only a stale-hook / hookless `?` clears here — the
+    /// broken-hook case #872 is actually about.
+    #[tokio::test]
+    async fn watchdog_defers_to_a_fresh_hook_before_clearing_input_needed() {
+        use lazybox_ipc::AgentState::{InputNeeded, Working};
+
+        let mut p = PumpDriver::new(Duration::from_secs(8), Duration::from_secs(5));
+        assert_eq!(p.feed(PERMISSION_DIALOG.as_bytes()).await, vec![Working]);
+        assert_eq!(p.quiet().await, vec![InputNeeded]);
+        p.hook_now().await;
+        p.feed(SETTLED_COMPOSER.as_bytes()).await;
+        assert_eq!(
+            p.watchdog().await,
+            Vec::<lazybox_ipc::AgentState>::new(),
+            "a fresh hook keeps the `?` even when the screen looks resting",
+        );
+        assert_eq!(
+            p.terminals.agent_states.lock().await.get(&p.id),
+            Some(&InputNeeded),
         );
     }
 

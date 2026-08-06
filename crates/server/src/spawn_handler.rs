@@ -297,17 +297,20 @@ fn hook_command_placeholder(exe: &Path) -> String {
 /// hook command. The daemon's own `current_exe()` for a dev build is
 /// `<worktree>/target/debug/lazybox` — a path a `cargo clean`, a rebuild,
 /// worktree removal, or session transfer (PR #717) invalidates, after
-/// which every hook fires against a dead reference. So [`refresh_stable_exe`]
-/// copies that binary to the stable `<home>/bin/lazybox` (see
-/// [`lazybox_core::paths::stable_exe_path`]) and this bakes *that*: nothing
-/// under `<home>/bin` moves when a worktree does, and the copy keeps working
-/// even after the original `target/debug` artifact is cleaned.
+/// which every hook fires against a dead reference. So
+/// [`ensure_stable_hook_exe`] copies that binary to the stable
+/// `<home>/bin/lazybox` (see [`lazybox_core::paths::stable_exe_path`]) and
+/// this bakes *that*: nothing under `<home>/bin` moves when a worktree does,
+/// and the copy keeps working even after the original `target/debug`
+/// artifact is cleaned.
 ///
-/// This is a pure read — the copy lives in [`refresh_stable_exe`], which
-/// `handle_spawn` calls first — so it never writes to `<home>/bin` merely by
-/// resolving a path. Returns the stable copy when present; otherwise the
-/// raw `current_exe()` (still absolute, just less durable); or `None` when
-/// no executable resolves at all, and the spawn falls back to PTY detection.
+/// This is a pure read — the copy lives in [`ensure_stable_hook_exe`], which
+/// the daemon runs once at boot — so resolving a path here never writes to
+/// `<home>/bin` (which would block the spawn on an ~80 MB copy and, in the
+/// integration tests that don't isolate `LAZYBOX_HOME`, thrash the real
+/// home). Returns the stable copy when present; otherwise the raw
+/// `current_exe()` (still absolute, just less durable); or `None` when no
+/// executable resolves at all, and the spawn falls back to PTY detection.
 fn hook_exe() -> Option<PathBuf> {
     let stable = lazybox_core::paths::stable_exe_path();
     if stable.is_file() {
@@ -316,11 +319,18 @@ fn hook_exe() -> Option<PathBuf> {
     std::env::current_exe().ok().filter(|p| p.is_file())
 }
 
-/// Refresh the stable `<home>/bin/lazybox` copy from the running binary,
-/// best-effort. Called at the top of a spawn (real daemon work), never from
-/// [`hook_exe`], so path resolution stays side-effect-free for callers that
-/// only need to *read* the baked path (and for tests).
-fn refresh_stable_exe() {
+/// Copy the running binary to the stable `<home>/bin/lazybox` so agent
+/// hooks can bake a path that survives a rebuild / `cargo clean` / worktree
+/// removal. Best-effort and idempotent (a fresh copy is skipped by
+/// `stabilize_exe`'s freshness check).
+///
+/// The daemon calls this **once at boot**, never per spawn: the copy is an
+/// ~80 MB blocking `fs::copy` that would delay every `TerminalSpawned`, and
+/// integration tests drive `handle_spawn` directly against the real
+/// `LAZYBOX_HOME` — a per-spawn copy there raced dozens of test processes on
+/// one `~/.lazybox/bin/lazybox`. Doing it at boot keeps the hot path a pure
+/// `hook_exe` read and leaves tests (which never boot a daemon) untouched.
+pub fn ensure_stable_hook_exe() {
     if let Ok(current) = std::env::current_exe() {
         let _ = stabilize_exe(&current, &lazybox_core::paths::stable_exe_path());
     }
@@ -1252,12 +1262,11 @@ async fn handle_spawn_inner(
     // `write_hook_settings`). Skipped entirely when the running binary
     // is no longer on disk (`cargo clean` under a `cargo run` daemon):
     // hooks would be guaranteed to fail, so the session keeps PTY
-    // detection instead.
-    //
-    // Keep the stable `<home>/bin/lazybox` copy current before baking its
-    // path into the hook command, so a rebuilt/cleaned/removed worktree
-    // can't invalidate the reference (#856).
-    refresh_stable_exe();
+    // detection instead. The stable `<home>/bin/lazybox` copy that makes
+    // this path survive a rebuild/clean/worktree-removal (#856) is
+    // established once at daemon boot by `ensure_stable_hook_exe`, so this
+    // hot path only *reads* it — a per-spawn copy would block every
+    // `TerminalSpawned` on ~80 MB of IO.
     let exe = hook_exe();
     if exe.is_none() {
         tracing::warn!(

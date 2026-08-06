@@ -24,11 +24,17 @@ struct MockLinear {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     requests: Arc<AtomicUsize>,
+    /// Every request body received, in order — lets tests assert what
+    /// GraphQL query the client actually sent.
+    bodies: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl MockLinear {
     fn url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+    fn bodies(&self) -> Vec<String> {
+        self.bodies.lock().unwrap().clone()
     }
     async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown.take() {
@@ -43,6 +49,8 @@ async fn spawn_mock(responses: Vec<String>) -> MockLinear {
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let requests = Arc::new(AtomicUsize::new(0));
     let requests_c = requests.clone();
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let bodies_c = bodies.clone();
     let responses = Arc::new(responses);
 
     tokio::spawn(async move {
@@ -53,14 +61,23 @@ async fn spawn_mock(responses: Vec<String>) -> MockLinear {
                 accept = listener.accept() => {
                     let Ok((stream, _)) = accept else { continue };
                     let requests = requests_c.clone();
+                    let bodies = bodies_c.clone();
                     let responses = responses.clone();
                     tokio::spawn(async move {
                         let io = TokioIo::new(stream);
                         let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                             let requests = requests.clone();
+                            let bodies = bodies.clone();
                             let responses = responses.clone();
                             async move {
-                                let _ = req.into_body().collect().await;
+                                let collected = req.into_body().collect().await;
+                                if let Ok(collected) = collected {
+                                    let raw = collected.to_bytes();
+                                    bodies
+                                        .lock()
+                                        .unwrap()
+                                        .push(String::from_utf8_lossy(&raw).into_owned());
+                                }
                                 let idx = requests.fetch_add(1, Ordering::SeqCst);
                                 let body = responses
                                     .get(idx)
@@ -86,6 +103,7 @@ async fn spawn_mock(responses: Vec<String>) -> MockLinear {
         addr,
         shutdown: Some(shutdown_tx),
         requests,
+        bodies,
     }
 }
 
@@ -289,6 +307,75 @@ async fn fetch_all_single_page() {
 }
 
 #[tokio::test]
+async fn default_client_query_excludes_subscribers() {
+    // Regression for #862: the default Linear scope must request only
+    // assigned-to-me + created-by-me issues. Without this, Linear's
+    // aggressive auto-subscription floods the inbox with unrelated
+    // issues via the `subscribers.some.isMe` clause.
+    let mock = spawn_mock(vec![
+        viewer_response("me"),
+        issues_response(serde_json::json!([]), false, None),
+    ])
+    .await;
+
+    let client = LinearClient::with_key("k").with_endpoint(mock.url());
+    client.fetch_all().await.unwrap();
+
+    let issues_body = mock
+        .bodies()
+        .into_iter()
+        .find(|b| b.contains("issues("))
+        .expect("an issues query was sent");
+    // Match the filter clauses (`assignee: {`), not the bare words —
+    // `assignee`/`creator` also appear in the node selection, so a plain
+    // `contains` would pass even if the clause were dropped.
+    assert!(
+        issues_body.contains("assignee: {"),
+        "keeps the assigned-to-me clause: {issues_body}"
+    );
+    assert!(
+        issues_body.contains("creator: {"),
+        "keeps the created-by-me clause: {issues_body}"
+    );
+    assert!(
+        !issues_body.contains("subscribers"),
+        "default must not request the subscriber flood: {issues_body}"
+    );
+
+    mock.shutdown().await;
+}
+
+#[tokio::test]
+async fn subscribed_scope_opts_into_subscribers_clause() {
+    let mock = spawn_mock(vec![
+        viewer_response("me"),
+        issues_response(serde_json::json!([]), false, None),
+    ])
+    .await;
+
+    let client = LinearClient::with_key("k")
+        .with_endpoint(mock.url())
+        .with_scope(vec![
+            lazybox_core::LinearScope::Assigned,
+            lazybox_core::LinearScope::Created,
+            lazybox_core::LinearScope::Subscribed,
+        ]);
+    client.fetch_all().await.unwrap();
+
+    let issues_body = mock
+        .bodies()
+        .into_iter()
+        .find(|b| b.contains("issues("))
+        .expect("an issues query was sent");
+    assert!(
+        issues_body.contains("subscribers"),
+        "opt-in scope adds the subscriber clause: {issues_body}"
+    );
+
+    mock.shutdown().await;
+}
+
+#[tokio::test]
 async fn fetch_all_paginates() {
     let page1 = serde_json::json!([
         {
@@ -398,6 +485,7 @@ async fn spawn_status_mock(status: StatusCode, headers: Vec<(&'static str, Strin
         addr,
         shutdown: Some(shutdown_tx),
         requests,
+        bodies: Arc::new(std::sync::Mutex::new(Vec::new())),
     }
 }
 

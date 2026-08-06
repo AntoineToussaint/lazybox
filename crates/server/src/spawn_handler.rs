@@ -1801,15 +1801,18 @@ async fn handle_spawn_inner(
                     // On-demand reclassify (#869): a deferred inject asks the
                     // pump to re-read the resting screen NOW rather than wait
                     // up to the quiet window — or forever, once that timer has
-                    // disarmed on a quiescent terminal. Run the same
-                    // classification the quiet timer would, but only once the
-                    // stream has actually settled: forcing it mid-paint would
-                    // scrape a torn frame. While bytes still flow the injection
-                    // releases the normal way, off the transitions that flow
-                    // produces, so skipping here loses nothing.
+                    // disarmed on a quiescent terminal. `force_reclassify_allowed`
+                    // gates it on a settled stream and a non-reset terminal so
+                    // the poke can't scrape a torn frame or preempt the
+                    // reset-latched settle with a spurious Done.
                     _ = reclassify.notified() => {
-                        if agent_for_pump.is_some()
-                            && last_output_at.elapsed() >= RECLASSIFY_MIN_QUIET
+                        if force_reclassify_allowed(
+                            agent_for_pump.is_some(),
+                            last_output_at,
+                            &terminal_registry,
+                            id_for_pump,
+                        )
+                        .await
                         {
                             classify_quiet_screen(
                                 agent_for_pump.as_ref(),
@@ -5827,6 +5830,31 @@ const INJECT_RECLASSIFY_POLL: Duration = Duration::from_millis(250);
 /// already produces, so the poke can safely no-op until the stream settles.
 const RECLASSIFY_MIN_QUIET: Duration = Duration::from_millis(150);
 
+/// Whether a pump should honor an on-demand reclassify poke (#869) and scrape
+/// the screen now. Shared by both PTY pumps' reclassify arms. Three conditions:
+///
+/// - only agent terminals have a detector to run;
+/// - the stream must have been byte-quiet for [`RECLASSIFY_MIN_QUIET`], else a
+///   mid-paint scrape reads a torn frame (the injection still releases off the
+///   transitions that live output produces);
+/// - the terminal must NOT be sitting on a just-answered prompt's reset. While
+///   that reset is latched, [`classify_quiet_screen`]'s reset branch
+///   force-settles `Done` on the stale pre-answer buffer — a settle the
+///   deliberate quiet/watchdog timers own only after a FULL window of silence.
+///   Firing it here (150ms after the optimistic `Working` flip, before the
+///   answer's first output clears the reset) would preempt that with a spurious
+///   `Done` that wakes polling and flickers the pill.
+async fn force_reclassify_allowed(
+    agent_present: bool,
+    last_output_at: tokio::time::Instant,
+    terminals: &TerminalRegistry,
+    id: TerminalId,
+) -> bool {
+    agent_present
+        && last_output_at.elapsed() >= RECLASSIFY_MIN_QUIET
+        && !terminals.agent_detect_resets.lock().await.contains(&id)
+}
+
 /// Base wait for proof an injected prompt's submit actually
 /// registered — a `UserPromptSubmit` hook or a `Working` transition.
 /// Claude fires `UserPromptSubmit` synchronously with the submit, so
@@ -7243,7 +7271,14 @@ async fn pump_recovered_session(
                 .await;
             }
             _ = reclassify.notified() => {
-                if agent.is_some() && last_output_at.elapsed() >= RECLASSIFY_MIN_QUIET {
+                if force_reclassify_allowed(
+                    agent.is_some(),
+                    last_output_at,
+                    &config.terminal,
+                    terminal_id,
+                )
+                .await
+                {
                     classify_quiet_screen(
                         agent.as_ref(),
                         &state_buf,
@@ -10306,6 +10341,56 @@ mod tests {
             .await,
             InputPoll::Exited
         ));
+    }
+
+    /// The reclassify poke's screen scrape (#869) must NOT fire while a
+    /// just-answered prompt's reset is latched. `classify_quiet_screen`'s reset
+    /// branch force-settles `Done` on the stale pre-answer buffer — a settle the
+    /// quiet/watchdog timers own only after a full window — so letting the poke
+    /// run there flickers a spurious `Done` right after the user answers a gate
+    /// with an inject pending. Also pins the byte-quiet and agent-only guards.
+    #[tokio::test]
+    async fn force_reclassify_is_blocked_by_a_latched_answer_reset() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(869);
+        let quiet = tokio::time::Instant::now() - (RECLASSIFY_MIN_QUIET * 2);
+
+        // Quiescent agent, no reset: the poke is honored.
+        assert!(
+            force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "a settled agent terminal with no pending answer must reclassify",
+        );
+
+        // A non-agent (shell) terminal has no detector to run.
+        assert!(
+            !force_reclassify_allowed(false, quiet, &config.terminal, id).await,
+            "a non-agent terminal must never reclassify",
+        );
+
+        // Bytes still flowing (last output just now): scraping would read a
+        // torn mid-paint frame, so the poke no-ops until the stream settles.
+        assert!(
+            !force_reclassify_allowed(true, tokio::time::Instant::now(), &config.terminal, id)
+                .await,
+            "a mid-paint terminal must not be scraped",
+        );
+
+        // The user just answered a gate: the reset is latched until the
+        // answer's first output clears it. The poke must stand down.
+        config.terminal.agent_detect_resets.lock().await.insert(id);
+        assert!(
+            !force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "a latched answer reset must suppress the forced reclassify so it \
+             can't preempt the deliberate settle with a spurious Done",
+        );
+
+        // Once the reset clears (the answer's output arrived), the poke is
+        // honored again.
+        config.terminal.agent_detect_resets.lock().await.remove(&id);
+        assert!(
+            force_reclassify_allowed(true, quiet, &config.terminal, id).await,
+            "clearing the reset must re-enable the forced reclassify",
+        );
     }
 
     #[tokio::test]

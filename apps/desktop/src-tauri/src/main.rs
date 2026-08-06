@@ -1040,13 +1040,30 @@ async fn stream_terminal_events(
     command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_tx: mpsc::Sender<TerminalStreamItem>,
 ) {
+    let mut reconnect = false;
     loop {
         if let Err(error) =
-            stream_terminal_events_once(&gateway, command_rx.clone(), &terminal_tx).await
+            stream_terminal_events_once(&gateway, command_rx.clone(), &terminal_tx, reconnect).await
         {
             eprintln!("desktop terminal stream disconnected: {error}");
         }
+        reconnect = true;
         tokio::time::sleep(Duration::from_millis(750)).await;
+    }
+}
+
+/// Discard the terminal-input backlog that queued while the stream was
+/// down. Those frames predate the ring-buffer replay the reconnect's
+/// server-side `Subscribe` pulls, so forwarding them would fire stale
+/// keystrokes at freshly-authoritative terminal state. Draining a bounded
+/// snapshot of the queue — not a `while try_recv` loop — leaves any frame
+/// that races in *after* the reconnect untouched. Mirrors the socket
+/// client's reconnect drain (`crates/ipc/src/socket.rs`).
+fn drain_terminal_backlog(command_rx: &mut mpsc::Receiver<Bytes>) {
+    for _ in 0..command_rx.len() {
+        if command_rx.try_recv().is_err() {
+            break;
+        }
     }
 }
 
@@ -1054,7 +1071,11 @@ async fn stream_terminal_events_once(
     gateway: &GatewayClient,
     command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_tx: &mpsc::Sender<TerminalStreamItem>,
+    reconnect: bool,
 ) -> Result<(), String> {
+    if reconnect {
+        drain_terminal_backlog(&mut *command_rx.lock().await);
+    }
     let commands = futures_util::stream::unfold(command_rx, |command_rx| async move {
         let command = command_rx.lock().await.recv().await;
         command.map(|command| (Ok::<_, io::Error>(command), command_rx))
@@ -2340,6 +2361,31 @@ mod tests {
             .expect("second enqueue resumes")
             .expect("enqueue second frame");
         assert_eq!(rx.recv().await.as_deref(), Some(b"second".as_slice()));
+    }
+
+    #[tokio::test]
+    async fn reconnect_drains_the_stale_terminal_backlog() {
+        // Keystrokes queued during an outage predate the reconnect's
+        // ring-buffer replay; forwarding them would fire stale input at the
+        // resynced PTY. The reconnect must drop them.
+        let (tx, mut rx) = mpsc::channel::<Bytes>(8);
+        tx.send(Bytes::from_static(b"stale-1"))
+            .await
+            .expect("queue stale frame");
+        tx.send(Bytes::from_static(b"stale-2"))
+            .await
+            .expect("queue stale frame");
+        assert_eq!(rx.len(), 2);
+
+        drain_terminal_backlog(&mut rx);
+        assert_eq!(rx.len(), 0, "the outage backlog must be discarded");
+
+        // Input that arrives after the drain is genuine post-reconnect
+        // typing and must survive.
+        tx.send(Bytes::from_static(b"fresh"))
+            .await
+            .expect("queue post-reconnect frame");
+        assert_eq!(rx.recv().await.as_deref(), Some(b"fresh".as_slice()));
     }
 
     #[tokio::test]

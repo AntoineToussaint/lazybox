@@ -1,7 +1,5 @@
 [Unit]
 Description=Stop this lazybox box when idle
-# Only meaningful on the box itself; harmless elsewhere.
-ConditionVirtualization=kvm
 
 [Service]
 Type=oneshot

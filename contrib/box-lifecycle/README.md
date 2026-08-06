@@ -21,9 +21,11 @@ The box is idle when **both** hold:
   holding an `ssh -L` / IAP forward keeps an ESTABLISHED socket open, so a
   connected laptop always reads as active; and
 - **no agent working** — no watched agent CLI (`claude`, `codex`, … — see
-  `LAZYBOX_IDLE_AGENT_PROCS`) above the CPU floor. A detached agent still
-  churning through a task keeps the box alive until it settles, so
-  disconnecting mid-run never kills the work.
+  `LAZYBOX_IDLE_AGENT_PROCS`) that has consumed CPU since the previous tick.
+  Measuring CPU *used between ticks* — not an instantaneous or lifetime-average
+  reading — keeps a light-but-active agent (orchestrating `gh`, waiting on an
+  API between short bursts) from being mistaken for idle, so disconnecting
+  mid-run never kills the work.
 
 Idle is measured **across timer ticks**, not within one: the first idle tick
 stamps a marker, a busy tick clears it, and once the marker is older than
@@ -43,9 +45,10 @@ systemctl enable --now lazybox-idle-stop.timer
 
 The self-stop uses `gcloud compute instances stop` via the instance's attached
 service account (needs `compute.instances.stop` on itself); it discovers its own
-name and zone from the metadata server. Where `gcloud` isn't present it falls
-back to a guest `shutdown`, which GCE also records as a stop. Override the whole
-action with `LAZYBOX_IDLE_STOP_CMD`.
+name and zone from the metadata server. Where `gcloud` is absent — or the stop
+call is rejected (e.g. the SA lacks that permission) — it falls back to a guest
+`shutdown`, which GCE also records as a stop, so a misconfigured SA can't leave
+the box running forever. Override the whole action with `LAZYBOX_IDLE_STOP_CMD`.
 
 Tunables (all optional, all in `/etc/lazybox/idle-stop.env`) are listed in
 [`idle-stop.env.example`](idle-stop.env.example).

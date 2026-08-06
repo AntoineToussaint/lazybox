@@ -155,3 +155,184 @@ fn which_bash() -> Result<PathBuf, ()> {
     }
     Err(())
 }
+
+/// Behavioral checks that actually run `lazybox-idle-stop.sh` and assert on the
+/// idle decision path — the marker stamp/threshold logic, the CPU-delta agent
+/// detection that must not reap a working agent, and the shutdown fallback when
+/// a `gcloud … stop` is rejected. Unix-only: the script is bash, and the stop
+/// fallback needs executable command stubs on PATH.
+#[cfg(unix)]
+mod behavior {
+    use super::{lifecycle_dir, which_bash};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output, Stdio};
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    // Run the idle-stop script with a temp marker and a bogus SSH port so no
+    // real connection is ever counted as an active tunnel. `env` supplies the
+    // per-test knobs; `path_prefix` is prepended to PATH for command stubs.
+    fn run_idle(
+        bash: &Path,
+        marker: &Path,
+        env: &[(&str, &str)],
+        path_prefix: Option<&Path>,
+    ) -> Output {
+        let mut cmd = Command::new(bash);
+        cmd.arg(lifecycle_dir().join("lazybox-idle-stop.sh"));
+        cmd.env("LAZYBOX_IDLE_MARKER", marker);
+        cmd.env("LAZYBOX_IDLE_SSH_PORT", "65533");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        if let Some(prefix) = path_prefix {
+            let base = std::env::var("PATH").unwrap_or_default();
+            cmd.env("PATH", format!("{}:{}", prefix.display(), base));
+        }
+        cmd.output().expect("run lazybox-idle-stop.sh")
+    }
+
+    fn write_exec(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, body).expect("write stub");
+        let mut perm = fs::metadata(path).expect("stat stub").permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(path, perm).expect("chmod stub");
+    }
+
+    #[test]
+    fn idle_marker_stamps_then_stops_past_the_window() {
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("idle_threshold");
+        let marker = dir.join("idle-since");
+        let stopped = dir.join("STOPPED");
+        let stop_cmd = format!("touch {}", stopped.display());
+        let env = [
+            ("LAZYBOX_IDLE_AGENT_PROCS", "lazybox-absent-agent"),
+            ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
+        ];
+
+        // First idle tick stamps the marker but does not stop.
+        let out = run_idle(&bash, &marker, &env, None);
+        assert!(
+            out.status.success(),
+            "tick1: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(marker.exists(), "first idle tick should stamp the marker");
+        assert!(!stopped.exists(), "a fresh marker must not stop the box");
+
+        // Backdate the marker before the window; the next tick must stop.
+        fs::write(&marker, "1").expect("backdate marker");
+        let out = run_idle(&bash, &marker, &env, None);
+        assert!(
+            out.status.success(),
+            "tick2: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            stopped.exists(),
+            "a marker older than the idle window must stop the box"
+        );
+    }
+
+    #[test]
+    fn a_working_agent_is_not_reaped_mid_task() {
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("busy_agent");
+        let marker = dir.join("idle-since");
+        let stopped = dir.join("STOPPED");
+        let stop_cmd = format!("touch {}", stopped.display());
+        let token = "lazybox-test-working-agent";
+        let env = [
+            ("LAZYBOX_IDLE_AGENT_PROCS", token),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
+        ];
+
+        // A process spinning the CPU, its argv carrying the watched token.
+        let mut agent = Command::new(&bash)
+            .args(["-c", "while :; do :; done", token])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn busy agent");
+
+        // Tick 1 sees a newly-observed process → active, clears the stale marker.
+        fs::write(&marker, "1").expect("stale marker");
+        run_idle(&bash, &marker, &env, None);
+        let stopped_1 = stopped.exists();
+        let cleared_1 = !marker.exists();
+
+        // Tick 2 must keep it alive on the CPU *delta* (not newness): re-stale
+        // the marker, let the agent burn CPU, run again.
+        sleep(Duration::from_secs(3));
+        fs::write(&marker, "1").expect("stale marker");
+        run_idle(&bash, &marker, &env, None);
+        let stopped_2 = stopped.exists();
+        let cleared_2 = !marker.exists();
+
+        // Kill the spinner before asserting so a failure can't leak a busy loop.
+        let _ = agent.kill();
+        let _ = agent.wait();
+
+        assert!(!stopped_1, "a live agent must not be stopped");
+        assert!(
+            cleared_1,
+            "a newly-seen active agent clears the idle marker"
+        );
+        assert!(
+            !stopped_2,
+            "an agent burning CPU between ticks stays active"
+        );
+        assert!(
+            cleared_2,
+            "the CPU delta since the last tick must clear the idle marker"
+        );
+    }
+
+    #[test]
+    fn a_rejected_gcloud_stop_falls_back_to_shutdown() {
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("stop_fallback");
+        let bin = dir.join("bin");
+        fs::create_dir_all(&bin).expect("create bin");
+        let did_shutdown = dir.join("DID_SHUTDOWN");
+
+        // gcloud present but rejects the stop; metadata resolves; shutdown records.
+        write_exec(
+            &bin.join("gcloud"),
+            "#!/usr/bin/env bash\ncase \"$*\" in *'instances stop'*) exit 1;; esac\nexit 0\n",
+        );
+        write_exec(
+            &bin.join("curl"),
+            "#!/usr/bin/env bash\nfor a in \"$@\"; do case \"$a\" in */instance/name) echo test-box;; */instance/zone) echo projects/1/zones/z;; esac; done\n",
+        );
+        write_exec(
+            &bin.join("shutdown"),
+            &format!("#!/usr/bin/env bash\n: > {}\n", did_shutdown.display()),
+        );
+
+        let marker = dir.join("idle-since");
+        fs::write(&marker, "1").expect("stale marker"); // triggers the stop path
+        let env = [("LAZYBOX_IDLE_AGENT_PROCS", "lazybox-absent-agent")];
+        let out = run_idle(&bash, &marker, &env, Some(&bin));
+        assert!(
+            out.status.success(),
+            "idle-stop exited non-zero: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            did_shutdown.exists(),
+            "a rejected `gcloud … stop` must fall back to a guest shutdown, not leave the box running"
+        );
+    }
+}

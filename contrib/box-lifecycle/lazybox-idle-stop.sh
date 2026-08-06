@@ -5,8 +5,9 @@
 # "Idle" means no one is connected and no agent is working:
 #   - no established inbound SSH connection (the IAP/`ssh -L` tunnel a client
 #     holds open shows up as an ESTABLISHED socket on the SSH port), and
-#   - no agent CLI (claude/codex/…) burning CPU above LAZYBOX_IDLE_AGENT_CPU,
-#     so a detached agent still mid-task keeps the box alive until it settles.
+#   - no watched agent CLI (claude/codex/…) that has consumed CPU since the
+#     previous tick — so a detached agent still mid-task, even one mostly
+#     blocked on I/O between short bursts, keeps the box alive until it settles.
 #
 # Meant to run on a short timer (see lazybox-idle-stop.timer). Idle is measured
 # across ticks via a marker file rather than within one tick: the first idle
@@ -19,11 +20,16 @@ set -euo pipefail
 
 IDLE_MINUTES="${LAZYBOX_IDLE_MINUTES:-30}"
 SSH_PORT="${LAZYBOX_IDLE_SSH_PORT:-22}"
-AGENT_CPU="${LAZYBOX_IDLE_AGENT_CPU:-5}"
+AGENT_CPU_SECS="${LAZYBOX_IDLE_AGENT_CPU_SECS:-2}"
 AGENT_PROCS="${LAZYBOX_IDLE_AGENT_PROCS:-claude codex cursor-agent aider}"
 MARKER="${LAZYBOX_IDLE_MARKER:-/run/lazybox/idle-since}"
+SNAP="${MARKER}.agent-cpu"
 
 log() { echo "lazybox-idle-stop: $*" >&2; }
+
+# The marker and the per-process CPU snapshot both live here; create it before
+# any check so agent_busy can write the snapshot on the very first tick.
+mkdir -p "$(dirname "$MARKER")"
 
 # Count established connections on the SSH port. `ss` is present on any modern
 # systemd host; fall back to `netstat` where it is not.
@@ -38,20 +44,45 @@ ssh_connections() {
   fi
 }
 
-# True while any watched agent process is above the CPU floor. `ps` reports the
-# lifetime-average %CPU, which stays high for a process that is actually
-# working and decays for one parked at a prompt.
+# CPU-seconds a pid has used over its lifetime, from the portable, *cumulative*
+# `ps -o time=` (unlike `%cpu`, which is a lifetime average). Handles the
+# `[D-]HH:MM:SS` / `MM:SS` shapes ps emits. Empty if the pid is gone.
+cputime_secs() {
+  local t
+  t="$(ps -o time= -p "$1" 2>/dev/null | tr -d ' ')"
+  [ -n "$t" ] || return 0
+  awk -v t="$t" 'BEGIN {
+    d = 0; n = split(t, dp, "-"); if (n == 2) { d = dp[1]; t = dp[2] }
+    m = split(t, p, ":"); s = 0
+    for (i = 1; i <= m; i++) s = s * 60 + p[i]
+    print int(d * 86400 + s)
+  }'
+}
+
+# True while any watched agent has consumed CPU since the previous tick. We
+# diff each process's cumulative CPU time against a snapshot from the last tick
+# rather than reading an instantaneous or lifetime-average %CPU: a light-but-
+# active agent (orchestrating `gh`, waiting on an API between short bursts)
+# reliably accrues CPU across a 5-minute window, so it is not mistaken for idle
+# and reaped mid-task — only a process that does no work for the whole window
+# stops counting. A newly-seen process counts as active for its first tick.
 agent_busy() {
-  local name pids pid cpu
+  local name pid cur prev tmp active=1
+  tmp="${SNAP}.tmp"
+  : >"$tmp"
   for name in $AGENT_PROCS; do
-    pids="$(pgrep -f "$name" 2>/dev/null || true)"
-    for pid in $pids; do
-      cpu="$(ps -o %cpu= -p "$pid" 2>/dev/null | tr -d ' ')"
-      [ -n "$cpu" ] || continue
-      awk -v c="$cpu" -v f="$AGENT_CPU" 'BEGIN { exit !(c + 0 >= f + 0) }' && return 0
+    for pid in $(pgrep -f "$name" 2>/dev/null || true); do
+      cur="$(cputime_secs "$pid")"
+      [ -n "$cur" ] || continue
+      printf '%s %s\n' "$pid" "$cur" >>"$tmp"
+      prev="$(awk -v p="$pid" '$1 == p { print $2; exit }' "$SNAP" 2>/dev/null || true)"
+      if [ -z "$prev" ] || [ "$(( cur - prev ))" -ge "$AGENT_CPU_SECS" ]; then
+        active=0
+      fi
     done
   done
-  return 1
+  mv -f "$tmp" "$SNAP"
+  return "$active"
 }
 
 # Stop the instance. Prefer a self-`gcloud … stop` via the attached service
@@ -74,11 +105,17 @@ stop_box() {
     && zone="$(metadata zone)"; then
     zone="${zone##*/}"
     log "gcloud stop $name in $zone"
-    gcloud compute instances stop "$name" --zone "$zone" --quiet
+    if gcloud compute instances stop "$name" --zone "$zone" --quiet; then
+      return
+    fi
+    # A rejected stop (SA missing compute.instances.stop, transient API error)
+    # must not leave the box running forever — a guest shutdown needs no cloud
+    # permission and GCE still records it as a stop.
+    log "gcloud stop failed — falling back to guest shutdown"
   else
     log "gcloud/metadata unavailable — guest shutdown"
-    shutdown -h now
   fi
+  shutdown -h now
 }
 
 if [ "$(ssh_connections)" -gt 0 ]; then
@@ -91,7 +128,6 @@ if agent_busy; then
 fi
 
 now="$(date +%s)"
-mkdir -p "$(dirname "$MARKER")"
 if [ ! -f "$MARKER" ]; then
   echo "$now" >"$MARKER"
   log "idle since $now"

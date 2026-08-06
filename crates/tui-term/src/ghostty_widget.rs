@@ -94,6 +94,20 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
             Err(_) => return,
         };
 
+        // A resize invalidates the persistent cursor slots: the
+        // shadow's cached rows and `last_visible_cursor`'s coordinates
+        // were captured in the previous geometry and mean nothing in
+        // the new one. Detected once here so both are reset together —
+        // otherwise the #844 blink carve-out could anchor a hidden
+        // cursor to a stale cell after a resize.
+        let shadow_needs_init = match self.shadow.as_ref() {
+            Some(b) => b.area != area,
+            None => true,
+        };
+        if shadow_needs_init {
+            *self.last_visible_cursor = None;
+        }
+
         // Cursor position (pre-extracted so the cell loops don't
         // pay an Option-deref per cell). Applied at the end of
         // render — NOT written into the shadow — so a cursor move
@@ -141,12 +155,8 @@ impl Widget for GhosttyTerminal<'_, '_, '_> {
         // (region scrolls under-report all the way to `Clean`). The
         // shadow now only backs the per-row FFI-error fallback below,
         // holding the last good content for a row whose cell iterator
-        // transiently fails. Reset it on resize so the fallback never
-        // replays content sized for a different rect.
-        let shadow_needs_init = match self.shadow.as_ref() {
-            Some(b) => b.area != area,
-            None => true,
-        };
+        // transiently fails. Reset it on resize (detected above) so the
+        // fallback never replays content sized for a different rect.
         if shadow_needs_init {
             *self.shadow = Some(Buffer::empty(area));
         }
@@ -1188,6 +1198,127 @@ mod tests {
             any_reversed(&restored, area),
             Some(caret),
             "the block must return to the real caret, and only there",
+        );
+    }
+
+    /// A resize must invalidate the `last_visible_cursor` slot the #844
+    /// blink carve-out relies on: its coordinates were captured in the
+    /// old geometry. Otherwise a blinking cursor the app has hidden
+    /// (DECTCEM off) would be redrawn at that stale cell after the
+    /// viewport reflowed to a new size.
+    #[test]
+    fn resize_clears_stale_last_visible_cursor() {
+        let mut h = Harness::new(10, 1);
+        // Blinking block cursor (DECSCUSR 1) shown at column 5 in the
+        // pre-resize geometry, right after "abcde".
+        h.terminal.vt_write("\x1b[1 qabcde\x1b[?25h".as_bytes());
+        let wide = h.render(Rect::new(0, 0, 10, 1));
+        assert!(
+            wide[(5u16, 0u16)].modifier.contains(Modifier::REVERSED),
+            "the shown blinking cursor must be highlighted before resize",
+        );
+
+        // The app hides the cursor (a blink off-phase). Re-render at a
+        // narrower area: the slot captured for the old geometry must not
+        // anchor a stray block after the reflow.
+        h.terminal.vt_write(b"\x1b[?25l");
+        let narrow = h.render(Rect::new(0, 0, 8, 1));
+        assert_eq!(
+            any_reversed(&narrow, Rect::new(0, 0, 8, 1)),
+            None,
+            "a hidden blinking cursor must not redraw at the pre-resize cell",
+        );
+    }
+
+    fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
+        (0..area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    /// #874 regression: a full, faithful Claude composer redraw with an
+    /// inline autosuggestion (ghost text). This pins the whole family the
+    /// #844 fix belongs to against a *non-blinking* cursor — the style
+    /// real Claude actually uses (the #844 test drove a blinking one).
+    ///
+    /// Claude reserves vertical space for its multi-line input by emitting
+    /// a run of newlines (`\r\n`) and stepping back up (`ESC[nA`) on every
+    /// redraw — the "random new lines" the report describes. It lays out
+    /// the ghost-text suggestion by *hiding* the cursor (DECTCEM off),
+    /// parking it off-caret, painting the dim continuation, then moving
+    /// back to the caret and showing it. The rendered composer must have
+    /// the cursor inline at the caret with NO spurious blank lines: the
+    /// divider/footer rows below the prompt stay exactly where they were
+    /// (the reserve newlines must not scroll content or open gaps), and
+    /// the reversed block sits only at the caret — never a row below.
+    #[test]
+    fn claude_composer_with_ghost_text_renders_inline_without_blank_lines() {
+        let mut h = Harness::new(44, 8);
+        let area = Rect::new(0, 0, 44, 8);
+
+        // Resting composer after a finished turn. Divider-framed input on
+        // row 3, footer on row 5, prompt "> commit " with the caret after
+        // it. No DECSCUSR — the cursor is a steady (non-blinking) block.
+        let dash: String = "\u{2500}".repeat(44);
+        h.terminal.vt_write(b"\x1b[2J\x1b[H");
+        h.terminal.vt_write(b"\x1b[1;1H* Crunched for 1m 15s");
+        h.terminal.vt_write(format!("\x1b[3;1H{dash}").as_bytes());
+        h.terminal.vt_write(b"\x1b[4;1H> commit ");
+        h.terminal.vt_write(format!("\x1b[5;1H{dash}").as_bytes());
+        h.terminal.vt_write(b"\x1b[6;1H  ? for shortcuts");
+        h.terminal.vt_write(b"\x1b[4;10H\x1b[?25h");
+        let caret = (9u16, 3u16); // right after "> commit "
+
+        let resting = h.render(area);
+        assert_eq!(
+            any_reversed(&resting, area),
+            Some(caret),
+            "resting composer: the block must sit inline at the caret only",
+        );
+        assert_eq!(row_text(&resting, area, 4), dash, "bottom divider intact");
+        assert_eq!(row_text(&resting, area, 5), "  ? for shortcuts");
+
+        // Ghost-text layout, exactly as Claude drives it: hide the cursor,
+        // reserve four rows below the input with a `\r\n` run and step back
+        // up, then paint the dim suggestion continuation after the caret.
+        // Rendered mid-layout (cursor still hidden, parked at the end of the
+        // ghost text) NO block may show — the hidden park must not leak one.
+        h.terminal.vt_write(b"\x1b[?25l");
+        h.terminal.vt_write(b"\x1b[4;1H\r\r\n\r\n\r\n\r\n\x1b[4A");
+        h.terminal.vt_write(b"\x1b[4;10H\x1b[2mthe changes\x1b[0m");
+        let parked = h.render(area);
+        assert_eq!(
+            any_reversed(&parked, area),
+            None,
+            "mid-layout the hidden, parked cursor must not draw a stray block",
+        );
+
+        // Claude moves back to the caret and shows the cursor.
+        h.terminal.vt_write(b"\x1b[4;10H\x1b[?25h");
+        let shown = h.render(area);
+
+        assert_eq!(
+            any_reversed(&shown, area),
+            Some(caret),
+            "the block must land inline at the caret, never a row below",
+        );
+        // The suggestion is inline on the prompt row; the caret shares it.
+        assert_eq!(row_text(&shown, area, 3), "> commit the changes");
+        // No spurious blank lines: the reserve newlines must not have
+        // scrolled or gapped the frame — the rows below the prompt are the
+        // untouched divider and footer, not blanks.
+        assert_eq!(
+            row_text(&shown, area, 4),
+            dash,
+            "reserve newlines opened a spurious blank line below the prompt",
+        );
+        assert_eq!(row_text(&shown, area, 5), "  ? for shortcuts");
+        assert_eq!(
+            row_text(&shown, area, 0),
+            "* Crunched for 1m 15s",
+            "reserve newlines scrolled the finished-turn line off its row",
         );
     }
 }

@@ -3067,18 +3067,22 @@ fn derive_linear_branch(cfg: &lazybox_config::Config, task: &Task) -> Option<Str
         .filter(|h| !h.is_empty())
         .or_else(git_user_handle)
         .unwrap_or_default();
+    // Sanitize the configured type token the same way as every other
+    // token — a `label_types` value with spaces/case (`"hot fix"`) would
+    // otherwise inject an invalid git ref segment.
     let type_token = lazybox_core::branch_template::type_token_for_labels(
         task.labels.iter().map(|l| l.name.as_str()),
         &linear.label_types,
     )
-    .unwrap_or("");
+    .map(lazybox_core::slug::slugify)
+    .unwrap_or_default();
     let id = lazybox_core::slug::slugify(&task.id.key);
     let slug = lazybox_core::slug::slugify(&task.title);
     lazybox_core::branch_template::render_branch_template(
         template,
         &[
             ("handle", &handle),
-            ("type", type_token),
+            ("type", &type_token),
             ("id", &id),
             ("slug", &slug),
         ],
@@ -13584,6 +13588,25 @@ mod tests {
         assert_eq!(
             derive_linear_branch(&cfg, &t).as_deref(),
             Some("antoine/obi-1749-ship-it"),
+        );
+    }
+
+    /// A `label_types` value with stray whitespace/case is sanitized into
+    /// a valid ref segment rather than injecting an invalid git branch.
+    #[test]
+    fn derive_linear_branch_sanitizes_type_token() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers.linear.handle = Some("antoine".into());
+        cfg.providers.linear.branch_template = Some("{handle}/{type}/{id}-{slug}".into());
+        cfg.providers
+            .linear
+            .label_types
+            .insert("Bug".into(), "Hot Fix".into());
+        let mut t = titled_task("linear", "OBI-1749", "Ship it");
+        t.labels = vec![lazybox_core::Label::new("Bug")];
+        assert_eq!(
+            derive_linear_branch(&cfg, &t).as_deref(),
+            Some("antoine/hot-fix/obi-1749-ship-it"),
         );
     }
 

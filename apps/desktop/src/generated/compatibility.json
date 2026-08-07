@@ -204,6 +204,7 @@
             },
             "project_key": "github-o-r",
             "read_indices": [],
+            "remote": null,
             "schema": 2,
             "seen_count": 0,
             "sent_snippets": [],
@@ -277,6 +278,7 @@
         },
         "project_key": "github-o-r",
         "read_indices": [],
+        "remote": null,
         "schema": 2,
         "seen_count": 0,
         "sent_snippets": [],
@@ -402,6 +404,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 2102621284,
+  "protocol_fingerprint": 57593081,
   "protocol_version": 2
 }

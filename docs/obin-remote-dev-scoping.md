@@ -92,7 +92,9 @@ docs-only in #749).
   (`experiments/antoinetoussaint/obin-gce-box/`): gcloud/Terraform for the VM +
   SA, a startup-script that installs the toolchain and brings up `dev up`, a
   `connect.sh` IAP wrapper, and a golden image. **This is the demoable-tomorrow
-  slice** — no lazybox code required.
+  slice** — no lazybox code required. Follow-ons: `#901` (golden image /
+  instance template for fast per-user stamping) and `#902` (stop-on-idle +
+  lifecycle / cost control).
 - **Track B — lazybox ↔ box glue.** `#887` systemd daemon unit · `#888`
   remote-host targeting (a worktree's daemon lives on a provisioned box) · `#889`
   in-process tunnel supervisor (daemon + workload ports) · `#890` worktree
@@ -120,7 +122,7 @@ WorkOS-clean — until the relay (`#894`) replaces it.
 - The relay is a **service codefly hosts and operates**; `#648` licensing is not
   in-tree — that is the real weight of Track C, not the client code.
 - **Cost:** per-user always-on `e2-standard-8` adds up — Track A's image work must
-  include **stop-on-idle**.
+  include **stop-on-idle** (`#902`).
 - Per-user boxes share `platform-portal-dev` Firestore + one WorkOS app (fine —
   they already share dev), but every box's SA needs the cross-project grants.
 

@@ -46,6 +46,12 @@ pub struct Config {
     /// to live under `setup:` so every client reads the same configuration.
     #[serde(default)]
     pub desktop: DesktopConfig,
+    /// Client-side remote access: the in-process port-forward supervisor
+    /// `lazybox --connect` brings up so a remote session needs no separately
+    /// managed `autossh`. Omitted from a written config when unset. See
+    /// [`RemoteConfig`].
+    #[serde(default, skip_serializing_if = "RemoteConfig::is_empty")]
+    pub remote: RemoteConfig,
     /// Custom + override editor entries. Merged with builtins
     /// (Zed/VS Code/Cursor/…) at startup. `id` matches builtins
     /// to override; new ids extend.
@@ -170,6 +176,115 @@ pub struct RemoteGatewayConfig {
     /// the box). Empty when the gateway runs `--insecure-no-auth`.
     #[serde(default)]
     pub token: String,
+}
+
+/// `remote:` block — client-side remote-access wiring for
+/// `lazybox --connect`. Currently just the port-forward supervisor.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RemoteConfig {
+    /// In-process forward supervisor. When set, `--connect` spawns and
+    /// keepalive-supervises an SSH (or IAP-tunneled SSH) forward that
+    /// carries the daemon socket and the workload ports before it dials,
+    /// replacing the operator-run `autossh` of the BYO-remote runbook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel: Option<TunnelConfig>,
+}
+
+impl RemoteConfig {
+    /// True when nothing is configured — lets the whole block round-trip
+    /// out of a written config rather than serializing as `remote: {}`.
+    pub fn is_empty(&self) -> bool {
+        self.tunnel.is_none()
+    }
+}
+
+/// Transport for the forward supervisor: a direct SSH connection, or SSH
+/// tunneled through GCP Identity-Aware Proxy (no public IP on the box).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TunnelMode {
+    /// `ssh -N -L …` straight to `host`.
+    #[default]
+    Ssh,
+    /// `gcloud compute ssh <instance> --tunnel-through-iap -- -N -L …`.
+    /// SSH-over-IAP (not bare `start-iap-tunnel`, which forwards a single
+    /// TCP port and so can carry neither the daemon's Unix socket nor
+    /// several ports at once).
+    Iap,
+}
+
+/// A `remote.tunnel:` block. The forward carries the daemon Unix socket
+/// (`--connect`'s endpoint) plus any workload TCP ports, all bound to
+/// `localhost` on the client. Supervised with capped-backoff keepalive so
+/// a dropped link is re-established without operator intervention.
+///
+/// ```yaml
+/// remote:
+///   tunnel:
+///     mode: ssh              # ssh | iap
+///     host: me@box           # ssh destination (mode: ssh)
+///     remote_socket: /home/me/.lazybox/run/daemon.sock
+///     ports: [3000, 8082]    # workload TCP ports, localhost→localhost
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TunnelConfig {
+    pub mode: TunnelMode,
+    /// SSH destination (`user@host` or a `~/.ssh/config` alias) for
+    /// `mode: ssh`. Required in that mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// GCE instance name for `mode: iap`. Required in that mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    /// Login user for `mode: iap` (the instance's default OS-Login user
+    /// otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// GCE zone for `mode: iap` (falls back to gcloud's active zone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// GCP project for `mode: iap` (falls back to gcloud's active project).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// Absolute path of the daemon socket on the box. Forwarded to the
+    /// local `--connect` socket. Unset → only the workload ports are
+    /// forwarded. sshd does not expand `~`, so give an absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_socket: Option<String>,
+    /// Local socket the forward binds; defaults to the `--connect` path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_socket: Option<std::path::PathBuf>,
+    /// Workload TCP ports forwarded `localhost:<p>` → `localhost:<p>` on
+    /// the box (e.g. obin `:3000`, `:8082`). Empty by default —
+    /// source-agnostic, so the deployment names its own ports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+    /// SSH `ServerAliveInterval` — seconds of link idle before a keepalive
+    /// probe. With `server_alive_count_max`, bounds how fast a silently
+    /// dead link (laptop sleep, wifi change) is detected and torn down so
+    /// the supervisor can re-establish it.
+    pub server_alive_interval: u64,
+    pub server_alive_count_max: u64,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            mode: TunnelMode::default(),
+            host: None,
+            instance: None,
+            user: None,
+            zone: None,
+            project: None,
+            remote_socket: None,
+            local_socket: None,
+            ports: Vec::new(),
+            server_alive_interval: 15,
+            server_alive_count_max: 3,
+        }
+    }
 }
 
 /// One entry under `editors:`. Args support `{path}` for the
@@ -2003,6 +2118,34 @@ mod tests {
         let yaml = serde_yaml::to_string(&configured).expect("serialize configured desktop");
         let restored: DesktopConfig = serde_yaml::from_str(&yaml).expect("round-trip desktop");
         assert_eq!(restored.remote, configured.remote);
+    }
+
+    /// An unset `remote:` block must not serialize into a written config;
+    /// a configured tunnel round-trips intact through YAML.
+    #[test]
+    fn remote_tunnel_is_omitted_when_unset_and_round_trips_when_set() {
+        let default_yaml =
+            serde_yaml::to_string(&Config::default()).expect("serialize default config");
+        assert!(
+            !default_yaml.contains("remote"),
+            "unset remote must be omitted, got a `remote` key in:\n{default_yaml}"
+        );
+
+        let cfg: Config = Config::parse(
+            "remote:\n  tunnel:\n    mode: iap\n    instance: box-1\n    zone: us-central1-a\n    \
+             remote_socket: /home/me/.lazybox/run/daemon.sock\n    ports: [3000, 8082]\n",
+        )
+        .expect("parse remote.tunnel section");
+        let tunnel = cfg.remote.tunnel.clone().expect("tunnel present");
+        assert_eq!(tunnel.mode, TunnelMode::Iap);
+        assert_eq!(tunnel.instance.as_deref(), Some("box-1"));
+        assert_eq!(tunnel.ports, vec![3000, 8082]);
+        // Unspecified keepalive keeps the defaults.
+        assert_eq!(tunnel.server_alive_interval, 15);
+
+        let yaml = serde_yaml::to_string(&cfg.remote).expect("serialize configured remote");
+        let restored: RemoteConfig = serde_yaml::from_str(&yaml).expect("round-trip remote");
+        assert_eq!(restored.tunnel, cfg.remote.tunnel);
     }
 
     /// config.yaml can hold Slack tokens: every write path must land

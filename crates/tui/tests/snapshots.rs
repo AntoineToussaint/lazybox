@@ -105,6 +105,28 @@ fn render_to_string(component: &mut Sidebar, w: u16, h: u16, focused: bool) -> S
         .join("\n")
 }
 
+/// Display columns of every line on which `marker` appears, top to
+/// bottom. Char-based, not byte-based: `render_to_string` emits one
+/// entry per terminal cell, and the cursor prefix (`▶` vs a space) is a
+/// single cell either way, so the returned column is stable no matter
+/// which row the cursor rests on — a byte offset would shift by the
+/// multi-byte `▶` and make the assertion depend on cursor placement.
+fn title_columns(rendered: &str, marker: &str) -> Vec<usize> {
+    rendered
+        .lines()
+        .filter_map(|line| line.find(marker).map(|b| line[..b].chars().count()))
+        .collect()
+}
+
+/// The display column at which `marker` starts on the first line that
+/// contains it. See [`title_columns`] for why this is cursor-invariant.
+fn title_column(rendered: &str, marker: &str) -> usize {
+    title_columns(rendered, marker)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("no line contains {marker:?}\n{rendered}"))
+}
+
 #[test]
 fn sidebar_golden_render_focused() {
     let mut s = sidebar();
@@ -333,6 +355,185 @@ fn sidebar_golden_render_recent_pr_and_issue_mixed() {
     });
     let rendered = render_to_string(&mut s, 40, 12, true);
     insta::assert_snapshot!("sidebar_recent_pr_and_issue_mixed", rendered);
+}
+
+/// A Linear issue, in its own team group. Distinct source + `repo`
+/// from [`make_task`] so it forms a separate provider group in the
+/// sidebar; its key is the bare `TEAM-NNN` identifier (no `#`, so it
+/// carries no GitHub-style reference number) and it has no CI /
+/// review.
+fn make_linear_task(identifier: &str, team: &str, minutes_old: i64) -> Task {
+    let mut t = make_task(&format!("{team}-placeholder"), minutes_old);
+    t.id.source = "linear".into();
+    t.id.key = identifier.into();
+    t.url = format!("https://linear.app/{team}/issue/{identifier}");
+    t.repo = Some(format!("linear/{team}"));
+    t.title = format!("linear {identifier}");
+    t
+}
+
+/// Regression for issue #961: column sizing is per group, not global.
+/// A GitHub group (wide `#31000`, CI failure + review pending) and a
+/// Linear group (bare `OBI-NNN` identifiers, no CI / review) render
+/// side by side. Each group sizes its own reference and status columns:
+/// the GitHub group's 5-digit number and its status pills do NOT pad
+/// the Linear rows, and the Linear group reserves no CI / review column.
+/// The golden locks the mixed layout.
+#[test]
+fn sidebar_golden_render_mixed_github_linear_per_group_columns() {
+    use lazybox_tui::components::sidebar::SortMode;
+    let mut s = sidebar();
+    while s.sort_mode() != SortMode::Recent {
+        s.cycle_sort_mode();
+    }
+    let mut pr = make_task("owner/repo#31000", 5);
+    pr.url = "https://github.com/owner/repo/pull/31000".into();
+    pr.title = "fix parser".into();
+    pr.ci = CiStatus::Failure;
+    pr.review = ReviewStatus::Pending;
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(pr, fixed_time()),
+            Workspace::from_task(make_linear_task("OBI-2011", "OBI", 30), fixed_time()),
+            Workspace::from_task(make_linear_task("OBI-9", "OBI", 90), fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    let rendered = render_to_string(&mut s, 40, 12, true);
+    insta::assert_snapshot!("sidebar_mixed_github_linear_per_group_columns", rendered);
+}
+
+/// Companion assertion to the mixed golden: the Linear group renders
+/// identically whether or not a GitHub group with a wide reference
+/// number and status columns sits alongside it. This is the concrete
+/// statement of "each group aligns independently" (#961) — before the
+/// fix, the global pre-pass padded every Linear row's reference column
+/// to the GitHub group's 5-digit width and reserved its status columns.
+#[test]
+fn mixed_github_linear_groups_are_column_independent() {
+    use lazybox_tui::components::sidebar::SortMode;
+
+    let linear_a = make_linear_task("OBI-2011", "OBI", 30);
+    let linear_b = make_linear_task("OBI-9", "OBI", 90);
+
+    // Linear group alongside a wide-number GitHub group with status.
+    let mut mixed = sidebar();
+    while mixed.sort_mode() != SortMode::Recent {
+        mixed.cycle_sort_mode();
+    }
+    let mut pr = make_task("owner/repo#31000", 5);
+    pr.url = "https://github.com/owner/repo/pull/31000".into();
+    pr.ci = CiStatus::Failure;
+    pr.review = ReviewStatus::Pending;
+    mixed.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(pr, fixed_time()),
+            Workspace::from_task(linear_a.clone(), fixed_time()),
+            Workspace::from_task(linear_b.clone(), fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    // The same Linear group, on its own.
+    let mut linear_only = sidebar();
+    while linear_only.sort_mode() != SortMode::Recent {
+        linear_only.cycle_sort_mode();
+    }
+    linear_only.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(linear_a, fixed_time()),
+            Workspace::from_task(linear_b, fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    let mixed_render = render_to_string(&mut mixed, 40, 12, true);
+    let linear_render = render_to_string(&mut linear_only, 40, 12, true);
+
+    // The Linear title starts at the same column in both — the GitHub
+    // group's 5-digit reference did not push it right.
+    assert_eq!(
+        title_column(&mixed_render, "linear OBI-2011"),
+        title_column(&linear_render, "linear OBI-2011"),
+        "Linear row column position must not depend on a neighbouring GitHub group\nmixed:\n{mixed_render}\n\nlinear only:\n{linear_render}",
+    );
+}
+
+/// Regression for issue #961 in the one place the sidebar deliberately
+/// mixes providers: the `★ Focused` pin lifts starred rows across repos
+/// (and providers) into a single group. Column sizing must still be
+/// per-provider *within* that group — a starred GitHub PR's wide `#NNN`
+/// must not inflate a starred Linear row's reference column.
+#[test]
+fn focused_group_sizes_columns_per_provider() {
+    use lazybox_core::SessionKey;
+    use std::collections::BTreeSet;
+
+    fn star(s: &mut Sidebar, keys: Vec<SessionKey>) {
+        // `apply_config` sets the focus set without persisting to disk.
+        s.apply_config(
+            lazybox_config::AttentionConfig::default(),
+            BTreeSet::new(),
+            Vec::new(),
+            keys,
+            Vec::new(),
+            BTreeSet::new(),
+            None,
+            &lazybox_config::DisplayConfig::default(),
+        );
+    }
+
+    let mut pr = make_task("owner/repo#31000", 5);
+    pr.url = "https://github.com/owner/repo/pull/31000".into();
+    pr.ci = CiStatus::Failure;
+    pr.review = ReviewStatus::Pending;
+    let gh_ws = Workspace::from_task(pr, fixed_time());
+    let lin_ws = Workspace::from_task(make_linear_task("OBI-9", "OBI", 90), fixed_time());
+    let gh_key = SessionKey::from(gh_ws.key.as_str());
+    let lin_key = SessionKey::from(lin_ws.key.as_str());
+
+    // Both starred → they share the cross-provider ★ Focused group.
+    let mut focused = sidebar();
+    star(&mut focused, vec![gh_key, lin_key.clone()]);
+    focused.on_event(&Event::Snapshot {
+        workspaces: vec![gh_ws, lin_ws.clone()],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    // Baseline: the same Linear row in its own single-provider repo group,
+    // with no GitHub reference anywhere to inflate it.
+    let mut baseline = sidebar();
+    star(&mut baseline, vec![lin_key]);
+    baseline.on_event(&Event::Snapshot {
+        workspaces: vec![lin_ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    let focused_render = render_to_string(&mut focused, 40, 14, true);
+    let baseline_render = render_to_string(&mut baseline, 40, 14, true);
+
+    // The starred Linear row sits at the same column whether or not a
+    // starred GitHub PR shares its Focused group — per-provider sizing.
+    assert_eq!(
+        title_column(&focused_render, "linear OBI-9"),
+        title_column(&baseline_render, "linear OBI-9"),
+        "the ★ Focused group must size columns per provider — the GitHub PR must not inflate the Linear row\nfocused:\n{focused_render}\n\nbaseline:\n{baseline_render}"
+    );
 }
 
 /// Regression for issue #231: at a small terminal size the row's

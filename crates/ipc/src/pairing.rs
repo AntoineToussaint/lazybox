@@ -33,12 +33,21 @@ pub const DEFAULT_CODE_TTL_SECS: i64 = 120;
 /// screen and typed on another device is unambiguous.
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+/// Upper bound on a decoded pairing link. A real link is a short relay URL, a
+/// 32-byte key, and a tiny code — well under this. Bounding the bincode decode
+/// stops a crafted link (e.g. one whose `box_pubkey` length prefix claims
+/// gigabytes) from driving a huge allocation, matching the `with_limit`
+/// discipline the socket framing uses on untrusted input.
+const MAX_PAIRING_LINK_BYTES: usize = 4096;
+
 #[derive(Debug, thiserror::Error)]
 pub enum PairingError {
     #[error("not a lazybox pairing link")]
     BadScheme,
     #[error("pairing link payload is not valid base64url: {0}")]
     Base64(#[from] base64::DecodeError),
+    #[error("pairing link could not be encoded")]
+    Encode,
     #[error("pairing link payload could not be decoded")]
     Decode,
     #[error("could not read system randomness")]
@@ -106,29 +115,36 @@ pub struct PairingLink {
     /// lands with per-device identity (#892). The client pins the box to
     /// this key across the relay so a compromised relay cannot MITM.
     pub box_pubkey: Vec<u8>,
-    /// The one-time short-TTL code the client proves knowledge of.
-    pub code: PairingCode,
+    /// The one-time short-TTL code the client proves knowledge of. Just the
+    /// code string — the box holds the [`PairingCode`] (with its expiry) and
+    /// is the sole authority on validity, so the link carries no expiry the
+    /// client might be tempted to trust.
+    pub code: String,
 }
 
 impl PairingLink {
     /// Encode as `lazybox://pair#<base64url(bincode(self))>`.
     pub fn to_url(&self) -> Result<String, PairingError> {
-        let bytes = bincode::serde::encode_to_vec(self, bincode::config::standard())
-            .map_err(|_| PairingError::Decode)?;
+        let config = bincode::config::standard().with_limit::<MAX_PAIRING_LINK_BYTES>();
+        let bytes =
+            bincode::serde::encode_to_vec(self, config).map_err(|_| PairingError::Encode)?;
         Ok(format!(
             "{PAIRING_URL_PREFIX}{}",
             URL_SAFE_NO_PAD.encode(bytes)
         ))
     }
 
-    /// Parse a link produced by [`PairingLink::to_url`].
+    /// Parse a link produced by [`PairingLink::to_url`]. The decode is bounded
+    /// (see `MAX_PAIRING_LINK_BYTES`) so a crafted payload cannot force a
+    /// large allocation.
     pub fn from_url(url: &str) -> Result<Self, PairingError> {
         let payload = url
             .strip_prefix(PAIRING_URL_PREFIX)
             .ok_or(PairingError::BadScheme)?;
         let bytes = URL_SAFE_NO_PAD.decode(payload)?;
-        let (link, _) = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-            .map_err(|_| PairingError::Decode)?;
+        let config = bincode::config::standard().with_limit::<MAX_PAIRING_LINK_BYTES>();
+        let (link, _) =
+            bincode::serde::decode_from_slice(&bytes, config).map_err(|_| PairingError::Decode)?;
         Ok(link)
     }
 }
@@ -141,7 +157,7 @@ mod tests {
         PairingLink {
             relay_url: "wss://relay.lazybox.ai/box/abc123".to_string(),
             box_pubkey: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11],
-            code: PairingCode::from_seed([1, 2, 3, 4, 5], "2026-08-06T12:00:00Z".parse().unwrap()),
+            code: PairingCode::from_seed([1, 2, 3, 4, 5], Utc::now()).code,
         }
     }
 
@@ -216,5 +232,24 @@ mod tests {
         let mut url = sample_link().to_url().unwrap();
         url.push_str("!!!not-base64!!!");
         assert!(PairingLink::from_url(&url).is_err());
+    }
+
+    #[test]
+    fn from_url_rejects_an_oversized_payload() {
+        // Craft a link whose decoded payload exceeds the limit (a huge
+        // box_pubkey), encoding it with an *unbounded* config to bypass
+        // to_url's own limit. from_url's bounded decode must refuse it rather
+        // than allocate gigabytes.
+        let oversized = PairingLink {
+            relay_url: "wss://r".to_string(),
+            box_pubkey: vec![0u8; MAX_PAIRING_LINK_BYTES * 2],
+            code: "AAAAAAAA".to_string(),
+        };
+        let bytes = bincode::serde::encode_to_vec(&oversized, bincode::config::standard()).unwrap();
+        let url = format!("{PAIRING_URL_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes));
+        assert!(matches!(
+            PairingLink::from_url(&url),
+            Err(PairingError::Decode)
+        ));
     }
 }

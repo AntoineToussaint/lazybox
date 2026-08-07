@@ -43,6 +43,15 @@ const FRAME_BUFFER: usize = 256;
 /// Bytes read from a local socket per `Data` frame.
 const READ_CHUNK: usize = 16 * 1024;
 
+/// Per-stream inbound frames buffered toward the local socket. Bounded so a
+/// slow local consumer backpressures the shared reader (and thus the peer)
+/// instead of the client buffering a fast workload's whole response in memory.
+/// The cost is cross-stream head-of-line blocking — a stalled stream holds up
+/// the shared channel until its consumer drains or its socket closes; removing
+/// that needs per-stream flow-control windows (yamux/HTTP2-style), deferred
+/// until this mux carries live traffic.
+const INBOUND_BUFFER: usize = 64;
+
 /// One workload port to forward: the box dials `localhost:workload_port`,
 /// the client exposes it as `127.0.0.1:local_port`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,7 +86,7 @@ pub enum MuxFrame {
 /// the sink that feeds bytes arriving from the peer into the local socket.
 struct Mux {
     frame_tx: mpsc::Sender<MuxFrame>,
-    inbound: Mutex<HashMap<StreamId, mpsc::UnboundedSender<Vec<u8>>>>,
+    inbound: Mutex<HashMap<StreamId, mpsc::Sender<Vec<u8>>>>,
 }
 
 /// A `127.0.0.1` listener bound for one forwarded port, kept separate from
@@ -168,7 +177,11 @@ async fn accept_loop(port: BoundPort, mux: Arc<Mux>, next_stream: Arc<AtomicU64>
         // from the box is buffered rather than dropped. Open must be the
         // first frame for this stream, so enqueue it before spawning the
         // socket-reader that emits this stream's `Data`.
-        let inbound = register_stream(&mux, stream).await;
+        // Client ids are monotonic and never collide, so this is always
+        // `Some`; drop the connection rather than proceed without a sink.
+        let Some(inbound) = register_stream(&mux, stream).await else {
+            continue;
+        };
         if mux
             .frame_tx
             .send(MuxFrame::Open {
@@ -194,20 +207,27 @@ where
         match frame {
             MuxFrame::Open { stream, port } => {
                 let permitted = allowed_ports.as_ref().is_some_and(|a| a.contains(&port));
-                if permitted {
+                if !permitted {
+                    tracing::debug!(stream, port, "port-forward refused: port not in allowlist");
+                    let _ = mux.frame_tx.send(MuxFrame::Close { stream }).await;
+                } else if let Some(inbound) = register_stream(&mux, stream).await {
                     // Register the sink now — before the dial's network round
                     // trip — so `Data` frames racing in behind `Open` buffer
                     // instead of hitting a missing stream and being dropped.
-                    let inbound = register_stream(&mux, stream).await;
                     tokio::spawn(dial_and_attach(Arc::clone(&mux), stream, port, inbound));
                 } else {
-                    let _ = mux.frame_tx.send(MuxFrame::Close { stream }).await;
+                    // Duplicate live id from the peer — keep the existing
+                    // stream, ignore this Open (no second dial, no eviction).
+                    tracing::debug!(stream, "port-forward ignored duplicate stream id");
                 }
             }
             MuxFrame::Data { stream, data } => {
                 let sink = mux.inbound.lock().await.get(&stream).cloned();
                 if let Some(sink) = sink {
-                    let _ = sink.send(data);
+                    // Awaited send on a bounded channel: a slow local consumer
+                    // backpressures here, propagating flow control to the peer
+                    // rather than buffering the stream without limit.
+                    let _ = sink.send(data).await;
                 }
             }
             MuxFrame::Close { stream } => {
@@ -223,11 +243,12 @@ async fn dial_and_attach(
     mux: Arc<Mux>,
     stream: StreamId,
     port: u16,
-    inbound: mpsc::UnboundedReceiver<Vec<u8>>,
+    inbound: mpsc::Receiver<Vec<u8>>,
 ) {
     match TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await {
         Ok(tcp) => spawn_pumps(&mux, stream, tcp, inbound),
-        Err(_) => {
+        Err(err) => {
+            tracing::debug!(stream, port, %err, "port-forward dial to workload failed");
             mux.inbound.lock().await.remove(&stream);
             let _ = mux.frame_tx.send(MuxFrame::Close { stream }).await;
         }
@@ -235,15 +256,19 @@ async fn dial_and_attach(
 }
 
 /// Register a stream's inbound sink and hand back the receiver the socket's
-/// write half will drain. Inbound is unbounded on purpose: the reader loop
-/// must never block on one slow socket, or a full per-stream buffer would
-/// head-of-line-block every other stream on the shared channel. Depth is
-/// bounded in practice by the peer's TCP receive window on a loopback
-/// workload.
-async fn register_stream(mux: &Arc<Mux>, stream: StreamId) -> mpsc::UnboundedReceiver<Vec<u8>> {
-    let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    mux.inbound.lock().await.insert(stream, in_tx);
-    in_rx
+/// write half will drain. Returns `None` if the id is already live: the peer
+/// chooses stream ids, and honoring a duplicate would evict the first stream's
+/// sink and misroute its bytes — so we refuse it and leave the existing stream
+/// intact. The insert is guarded under a single lock hold, so the check and
+/// insert cannot race.
+async fn register_stream(mux: &Arc<Mux>, stream: StreamId) -> Option<mpsc::Receiver<Vec<u8>>> {
+    let mut inbound = mux.inbound.lock().await;
+    if inbound.contains_key(&stream) {
+        return None;
+    }
+    let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(INBOUND_BUFFER);
+    inbound.insert(stream, in_tx);
+    Some(in_rx)
 }
 
 /// Spawn the two pumps for a live socket: peer bytes → socket write half, and
@@ -252,7 +277,7 @@ fn spawn_pumps(
     mux: &Arc<Mux>,
     stream: StreamId,
     tcp: TcpStream,
-    mut inbound: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut inbound: mpsc::Receiver<Vec<u8>>,
 ) {
     let (mut rd, mut wr) = tcp.into_split();
 
@@ -439,5 +464,57 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(n, 0, "off-allowlist stream must be closed, not forwarded");
+    }
+
+    #[tokio::test]
+    async fn forwards_a_large_payload_through_bounded_buffers() {
+        let workload = spawn_echo().await;
+        let addrs = forward(
+            vec![PortMap {
+                workload_port: workload,
+                local_port: 0,
+            }],
+            vec![workload],
+        )
+        .await;
+        let client = TcpStream::connect(addrs[0]).await.unwrap();
+        let (mut rd, mut wr) = client.into_split();
+
+        // Larger than INBOUND_BUFFER * READ_CHUNK, so the bounded per-stream
+        // buffer must backpressure and drain repeatedly — every byte must
+        // still arrive intact (a broken bounded send would drop or corrupt).
+        // Read concurrently with writing so the echo can't deadlock.
+        let total = 2 * 1024 * 1024;
+        let writer = tokio::spawn(async move {
+            wr.write_all(&vec![0xA5u8; total]).await.unwrap();
+        });
+        let mut got = vec![0u8; total];
+        timeout(Duration::from_secs(30), rd.read_exact(&mut got))
+            .await
+            .unwrap()
+            .unwrap();
+        writer.await.unwrap();
+        assert!(got.iter().all(|&b| b == 0xA5), "all forwarded bytes intact");
+    }
+
+    #[tokio::test]
+    async fn register_stream_refuses_a_duplicate_id() {
+        let (frame_tx, _frame_rx) = mpsc::channel(FRAME_BUFFER);
+        let mux = Arc::new(Mux {
+            frame_tx,
+            inbound: Mutex::new(HashMap::new()),
+        });
+        assert!(
+            register_stream(&mux, 7).await.is_some(),
+            "first use of an id registers"
+        );
+        assert!(
+            register_stream(&mux, 7).await.is_none(),
+            "a duplicate id is refused, leaving the first stream intact"
+        );
+        assert!(
+            register_stream(&mux, 8).await.is_some(),
+            "a fresh id still registers"
+        );
     }
 }

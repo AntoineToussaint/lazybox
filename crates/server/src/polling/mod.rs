@@ -2018,6 +2018,38 @@ pub async fn rescope_with_state(
                     );
                     continue;
                 }
+                // A live worktree on disk is user work exactly like a
+                // session record is (issue #924). The session guards
+                // above key off the workspace's `sessions` vec, but a
+                // record whose session was lost (state desync, partial
+                // recovery) can still have a provisioned worktree —
+                // deleting the row here orphans it. Switching GitHub
+                // identity is one trigger: the other account's poll
+                // omits the PR, so the workspace falls out of scope
+                // with its worktree (and any tmux/agent session) intact.
+                // Session worktrees are UUID-named, so we can't derive
+                // the path from the workspace; ask git which managed
+                // worktrees are checked out on this branch (the same
+                // lookup spawn uses to reclaim an untracked worktree).
+                // Any hit → preserve as out-of-scope/inactive, adoptable,
+                // rather than reap. An inspect error yields no evidence,
+                // so it falls through to the prior delete behaviour.
+                if let Some((owner, repo)) = fresh_workspace
+                    .primary_task()
+                    .and_then(|t| t.repo.as_deref())
+                    .and_then(|r| r.split_once('/'))
+                    && config
+                        .worktree_manager()
+                        .managed_worktrees_for_branch(owner, repo, &fresh_workspace.branch)
+                        .await
+                        .is_ok_and(|worktrees| !worktrees.is_empty())
+                {
+                    tracing::info!(
+                        workspace_key = %r.key,
+                        "rescope: preserving out-of-scope workspace with a worktree still on disk"
+                    );
+                    continue;
+                }
                 // Reap the workspace's worktrees BEFORE the row goes
                 // away — once it's deleted, `collect_tracked_sessions`
                 // can never find the paths again and the dirs leak
@@ -4617,6 +4649,213 @@ mod rescope_collapse_tests {
             source_scopes,
             all_full: true,
         }
+    }
+
+    /// Regression for #924: switching GitHub identity re-scopes the
+    /// poll to the new account, so the previous account's PRs vanish
+    /// from the fetch. A **provider-derived** (`local = false`) workspace
+    /// that still holds a session must survive that poll miss — the
+    /// reconcile sweep keeps it out-of-scope/inactive rather than
+    /// pruning it and orphaning the live tmux/agent session.
+    #[tokio::test]
+    async fn identity_switch_preserves_other_accounts_session_bearing_pr() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        // Account A's PR workspace with a live session (provider-derived).
+        let a_pr = gh_task(
+            "o/r#100",
+            "https://github.com/o/r/pull/100",
+            TaskState::Open,
+            vec![],
+        );
+        let mut a_ws = Workspace::from_task(a_pr, Utc::now());
+        assert!(!a_ws.local, "a provider PR workspace is local=false");
+        let session = WorkspaceSession::new(
+            a_ws.key.clone(),
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        );
+        let sid = session.id;
+        a_ws.add_session(session);
+        let a_key = a_ws.key.clone();
+        seed(&store, &a_ws);
+
+        // Switch to account B: the poll now returns only B's PR in the
+        // same repo. A's PR is absent from the (exhaustive) fetch.
+        let b_pr = gh_task(
+            "o/r#200",
+            "https://github.com/o/r/pull/200",
+            TaskState::Open,
+            vec![],
+        );
+        let b_ws = Workspace::from_task(b_pr, Utc::now());
+        let b_key = b_ws.key.clone();
+        seed(&store, &b_ws);
+
+        let outcome = exhaustive_github_tick(vec![b_key.clone()]);
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        let after = load_workspace(&config, &a_key)
+            .expect("account A's session-bearing PR workspace must survive the identity switch");
+        assert!(
+            after.sessions.iter().any(|s| s.id == sid),
+            "the orphaned session must be preserved, not pruned"
+        );
+    }
+
+    /// Regression for #924: even when the workspace record has lost its
+    /// session (state desync / partial recovery), a provisioned worktree
+    /// still on disk is user work — the sweep must not prune the row and
+    /// orphan the directory. Session worktrees are UUID-named, so the
+    /// guard finds them by branch via `git worktree list`; this test
+    /// provisions a real bare clone + worktree checked out on the
+    /// workspace's branch, exactly the runtime shape.
+    #[tokio::test]
+    async fn out_of_scope_workspace_with_worktree_on_disk_survives() {
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let ok = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .status()
+                .expect("run git")
+                .success();
+            assert!(ok, "git {args:?} failed in {}", dir.display());
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+
+        // Upstream repo carrying a `feat` branch.
+        let upstream = root.join("upstream");
+        std::fs::create_dir_all(&upstream).unwrap();
+        git(&upstream, &["init", "-q"]);
+        git(&upstream, &["config", "user.email", "t@e.st"]);
+        git(&upstream, &["config", "user.name", "t"]);
+        git(&upstream, &["commit", "--allow-empty", "-q", "-m", "init"]);
+        git(&upstream, &["branch", "feat"]);
+
+        // Bare clone at the manager's canonical repo path, plus a
+        // UUID-named worktree checked out on `feat` under the managed
+        // worktrees root — the shape the daemon provisions at runtime.
+        let bare = root.join("repos").join("o").join("r.git");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(
+            &bare,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+        );
+        git(
+            &bare,
+            &["fetch", "-q", "origin", "+feat:refs/remotes/origin/feat"],
+        );
+        let wt = root.join("worktrees").join("session-uuid");
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feat",
+                &wt.to_string_lossy(),
+                "refs/remotes/origin/feat",
+            ],
+        );
+
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store.clone(),
+            Arc::new(crate::backend::MockBackend::new()),
+            root.to_path_buf(),
+        );
+
+        // Provider PR workspace on branch `feat`, NO session record.
+        let pr = gh_task(
+            "o/r#100",
+            "https://github.com/o/r/pull/100",
+            TaskState::Open,
+            vec![],
+        );
+        let ws = Workspace::from_task(pr, Utc::now());
+        assert!(ws.sessions.is_empty(), "seeded without a session record");
+        assert_eq!(ws.branch, "feat", "workspace tracks the worktree's branch");
+        let ws_key = ws.key.clone();
+        seed(&store, &ws);
+
+        // Another PR is the only thing in scope this tick.
+        let other = gh_task(
+            "o/r#200",
+            "https://github.com/o/r/pull/200",
+            TaskState::Open,
+            vec![],
+        );
+        let other_ws = Workspace::from_task(other, Utc::now());
+        let other_key = other_ws.key.clone();
+        seed(&store, &other_ws);
+
+        let outcome = exhaustive_github_tick(vec![other_key.clone()]);
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        assert!(
+            load_workspace(&config, &ws_key).is_some(),
+            "a workspace with a worktree still on disk (found by branch) must not be pruned"
+        );
+    }
+
+    /// Counterpart to the worktree-on-disk guard: a genuinely empty
+    /// out-of-scope workspace (no session, no notes, no worktree on
+    /// disk) is still reaped, so the guard doesn't wedge stale rows.
+    #[tokio::test]
+    async fn out_of_scope_workspace_without_worktree_is_reaped() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let pr = gh_task(
+            "o/r#100",
+            "https://github.com/o/r/pull/100",
+            TaskState::Open,
+            vec![],
+        );
+        let ws = Workspace::from_task(pr, Utc::now());
+        let ws_key = ws.key.clone();
+        seed(&store, &ws);
+
+        let other = gh_task(
+            "o/r#200",
+            "https://github.com/o/r/pull/200",
+            TaskState::Open,
+            vec![],
+        );
+        let other_ws = Workspace::from_task(other, Utc::now());
+        let other_key = other_ws.key.clone();
+        seed(&store, &other_ws);
+
+        let outcome = exhaustive_github_tick(vec![other_key.clone()]);
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        assert!(
+            load_workspace(&config, &ws_key).is_none(),
+            "a session-less, worktree-less out-of-scope workspace is still reaped"
+        );
     }
 
     /// Regression for #202: a PR merges and GitHub auto-closes its

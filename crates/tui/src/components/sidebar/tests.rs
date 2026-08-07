@@ -2546,6 +2546,82 @@ mod broadcast_select_tests {
         );
     }
 
+    /// #932: a Shift-arrow sweep builds a contiguous selection from the
+    /// cursor, and reversing direction shrinks it back to the anchor.
+    #[test]
+    fn range_select_sweeps_a_contiguous_run() {
+        let mut sb = sidebar_with_issues(&[
+            ("1", "Alpha"),
+            ("2", "Beta"),
+            ("3", "Gamma"),
+            ("4", "Delta"),
+        ]);
+        let keys: Vec<SessionKey> = sb
+            .visible_rows()
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        // Anchor on the first workspace row, then sweep down two rows.
+        assert!(sb.focus_workspace_key(&keys[0]));
+        assert_eq!(sb.extend_selection(1), Some(2));
+        assert_eq!(sb.extend_selection(1), Some(3));
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            keys[0..3].to_vec(),
+            "three contiguous rows selected from the anchor",
+        );
+        // Reversing direction shrinks the range back toward the anchor.
+        assert_eq!(sb.extend_selection(-1), Some(2));
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            keys[0..2].to_vec(),
+            "reversing deselects the row that left the range",
+        );
+    }
+
+    /// #932: a Shift-arrow sweep unions with (never clobbers) marks the
+    /// user toggled with `v` beforehand, and a plain `v` toggle ends the
+    /// sweep so the next Shift-arrow re-anchors with that toggle folded in.
+    #[test]
+    fn range_select_composes_with_v_toggles() {
+        let mut sb = sidebar_with_issues(&[
+            ("1", "Alpha"),
+            ("2", "Beta"),
+            ("3", "Gamma"),
+            ("4", "Delta"),
+        ]);
+        let keys: Vec<SessionKey> = sb
+            .visible_rows()
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        // Toggle the last row on, independent of any sweep.
+        assert!(sb.focus_workspace_key(&keys[3]));
+        sb.toggle_broadcast_select();
+        // Now anchor on the first row and sweep down one — the pre-existing
+        // mark on the last row survives.
+        assert!(sb.focus_workspace_key(&keys[0]));
+        sb.extend_selection(1);
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            vec![keys[0].clone(), keys[1].clone(), keys[3].clone()],
+            "sweep unions with the standalone v mark",
+        );
+        // A discrete v toggle ends the sweep and acts on the cursor row
+        // (now keys[1], where the sweep left it), toggling it back off.
+        sb.toggle_broadcast_select();
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            vec![keys[0].clone(), keys[3].clone()],
+        );
+    }
+
     /// A removed workspace drops out of the selection so a later
     /// broadcast can't target a ghost.
     #[test]

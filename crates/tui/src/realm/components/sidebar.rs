@@ -278,6 +278,16 @@ impl Sidebar {
         self.inner.toggle_broadcast_select()
     }
 
+    /// See `Sidebar::extend_selection`.
+    pub fn extend_selection(&mut self, delta: isize) -> Option<usize> {
+        self.inner.extend_selection(delta)
+    }
+
+    /// See `Sidebar::shift_click_select`.
+    pub fn shift_click_select(&mut self, area: Rect, row: u16) -> bool {
+        self.inner.shift_click_select(area, row)
+    }
+
     /// See `Sidebar::selected_broadcast_keys`.
     pub fn selected_broadcast_keys(&self) -> Vec<lazybox_core::SessionKey> {
         self.inner.selected_broadcast_keys()

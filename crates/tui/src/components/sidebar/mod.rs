@@ -277,11 +277,22 @@ pub struct Sidebar {
     /// search is in flight; `Some` while the `/` input bar is open or
     /// a query stays applied after `Enter`. See [`SearchState`].
     search: Option<SearchState>,
-    /// Workspace rows the user multi-selected with `v` — the targets a
-    /// broadcast (`Shift-B`) fans out to. Keys, not row indices, so the
-    /// marks survive re-sorts and j/k navigation; pruned when a
+    /// Workspace rows the user multi-selected with `v` — the set every
+    /// bulk-appropriate action (`Model::resolve_targets`) fans out to
+    /// (and a `Shift-B` broadcast delivers to). Keys, not row indices, so
+    /// the marks survive re-sorts and j/k navigation; pruned when a
     /// workspace is removed and cleared by Esc or a successful send.
     broadcast_selected: std::collections::HashSet<SessionKey>,
+    /// Anchor row (index into `visible`) of an in-progress Shift-arrow
+    /// range sweep, plus the selection as it stood when the sweep began.
+    /// `extend_selection` recomputes `broadcast_selected` as
+    /// `range_base ∪ range(anchor, cursor)` on each Shift-arrow, so the
+    /// sweep grows *and* shrinks contiguously (Excel-style) without
+    /// clobbering rows the user toggled with `v` beforehand. Cleared by
+    /// any explicit cursor move, a `v` toggle, or an Esc clear, so the
+    /// next sweep re-anchors fresh.
+    range_anchor: Option<usize>,
+    range_base: std::collections::HashSet<SessionKey>,
     /// Mirror of `ui.keep_awake` as loaded at startup. When set, the
     /// header paints a small "awake" badge while any agent is
     /// `Working` — the same condition under which the daemon holds
@@ -348,6 +359,8 @@ impl Sidebar {
             now_override: None,
             search: None,
             broadcast_selected: std::collections::HashSet::new(),
+            range_anchor: None,
+            range_base: std::collections::HashSet::new(),
             keep_awake: false,
             show_agent_model: true,
         }
@@ -701,11 +714,58 @@ impl Sidebar {
     /// cursor isn't on a workspace / session row.
     pub fn toggle_broadcast_select(&mut self) -> Option<bool> {
         let key = self.selected_session_key()?.clone();
+        // A discrete `v` toggle ends any range sweep; a following
+        // Shift-arrow then re-anchors with this toggle folded into the
+        // base, so the two gestures compose instead of fighting.
+        self.end_range_select();
         if self.broadcast_selected.insert(key.clone()) {
             Some(true)
         } else {
             self.broadcast_selected.remove(&key);
             Some(false)
+        }
+    }
+
+    /// Extend the multi-select range by one row toward `delta`
+    /// (`-1` = up, `+1` = down) — the Shift-arrow spreadsheet sweep
+    /// (#932). The first call of a sweep anchors on the cursor and
+    /// snapshots the current selection; each call moves the cursor and
+    /// re-derives `broadcast_selected` as that snapshot unioned with the
+    /// inclusive range of workspace rows between the anchor and the
+    /// cursor. Reversing direction therefore shrinks the range back to
+    /// the anchor while leaving pre-sweep (`v`-toggled) marks intact.
+    /// Returns the new count of visible marked rows, or `None` when the
+    /// list is empty.
+    pub fn extend_selection(&mut self, delta: isize) -> Option<usize> {
+        self.scroll_detached = false;
+        if self.visible.is_empty() {
+            return None;
+        }
+        if self.range_anchor.is_none() {
+            self.range_anchor = Some(self.cursor);
+            self.range_base = self.broadcast_selected.clone();
+        }
+        // Move the cursor one row (headers included, matching j/k) so a
+        // sweep can cross repo/space headers without the range leaking
+        // marks onto them — the range fill below only marks workspaces.
+        let target = (self.cursor as isize + delta).clamp(0, self.visible.len() as isize - 1);
+        self.cursor = target as usize;
+        self.apply_range_fill();
+        Some(self.visible_broadcast_selected_count())
+    }
+
+    /// Recompute `broadcast_selected` for the active sweep: the base
+    /// snapshot unioned with every workspace row in the inclusive range
+    /// between the anchor and the current cursor. Headers in the span are
+    /// skipped, so a range that crosses one still marks only workspaces.
+    fn apply_range_fill(&mut self) {
+        let anchor = self.range_anchor.unwrap_or(self.cursor);
+        let (lo, hi) = (anchor.min(self.cursor), anchor.max(self.cursor));
+        self.broadcast_selected = self.range_base.clone();
+        for row in &self.visible[lo..=hi] {
+            if let VisibleRow::Workspace(key) = row {
+                self.broadcast_selected.insert(key.clone());
+            }
         }
     }
 
@@ -756,6 +816,7 @@ impl Sidebar {
     pub fn clear_broadcast_selection(&mut self) -> bool {
         let had = !self.broadcast_selected.is_empty();
         self.broadcast_selected.clear();
+        self.end_range_select();
         had
     }
 
@@ -876,36 +937,58 @@ impl Sidebar {
         row == rect.y && col >= rect.x && col < rect.x + rect.width
     }
 
-    pub fn click_to_select(&mut self, area: Rect, click_row: u16) -> bool {
+    /// Map a click's screen row to an index into `visible`, or `None`
+    /// when it falls on the header chrome or past the last row. Shared by
+    /// plain and Shift-click selection so the two agree on which row a
+    /// pixel names.
+    fn row_to_visible_index(&self, area: Rect, click_row: u16) -> Option<usize> {
         // Mirror the constants from `render`.
         const HEADER_HEIGHT: u16 = 5;
         if click_row < area.y + HEADER_HEIGHT {
-            return false;
+            return None;
         }
         // Add the scroll offset the renderer applied so a click lands
         // on the row actually drawn under the cursor — `rendered_scroll`,
         // not `scroll`, because a wheel notch dispatched after the last
         // frame may have moved `scroll` past what's on screen.
         let idx = (click_row - area.y - HEADER_HEIGHT) as usize + self.rendered_scroll;
-        match self.visible.get(idx) {
-            // Headers ARE selectable now (post-Stage-4): the user
-            // needs to land cursor on a project header to fire
-            // `n` (new workspace) against that project, or to
-            // `Space`-toggle the repo's collapsed state. Without
-            // this a newly-created local project was unreachable
-            // via mouse — the user had to keyboard-navigate j/k
-            // through every workspace above it.
-            Some(VisibleRow::Workspace(_))
-            | Some(VisibleRow::Session { .. })
-            | Some(VisibleRow::FocusedHeader)
-            | Some(VisibleRow::SpaceHeader(_))
-            | Some(VisibleRow::RepoHeader(_))
-            | Some(VisibleRow::KindHeader(_)) => {
+        (idx < self.visible.len()).then_some(idx)
+    }
+
+    pub fn click_to_select(&mut self, area: Rect, click_row: u16) -> bool {
+        // Headers ARE selectable (post-Stage-4): the user needs to land
+        // the cursor on a project header to fire `n` (new workspace)
+        // against that project, or to `Space`-toggle the repo's
+        // collapsed state. Without this a newly-created local project
+        // was unreachable via mouse — the user had to keyboard-navigate
+        // j/k through every workspace above it.
+        match self.row_to_visible_index(area, click_row) {
+            Some(idx) => {
                 self.set_cursor(idx);
                 true
             }
             None => false,
         }
+    }
+
+    /// Shift-click: extend the multi-select from the range anchor (the
+    /// row focused before the click) to the clicked row — the mouse
+    /// counterpart of the Shift-arrow sweep (#932). Anchors on first use
+    /// like [`extend_selection`](Self::extend_selection) and shares its
+    /// base snapshot, so a Shift-click then Shift-arrow keeps sweeping
+    /// from the same origin. Returns whether a real row was hit.
+    pub fn shift_click_select(&mut self, area: Rect, click_row: u16) -> bool {
+        let Some(idx) = self.row_to_visible_index(area, click_row) else {
+            return false;
+        };
+        if self.range_anchor.is_none() {
+            self.range_anchor = Some(self.cursor);
+            self.range_base = self.broadcast_selected.clone();
+        }
+        self.cursor = idx;
+        self.scroll_detached = false;
+        self.apply_range_fill();
+        true
     }
 
     /// Explicit-navigation cursor assignment (keys, clicks, jump
@@ -916,6 +999,18 @@ impl Sidebar {
     fn set_cursor(&mut self, idx: usize) {
         self.cursor = idx;
         self.scroll_detached = false;
+        // Any explicit navigation ends an in-progress range sweep, so the
+        // next Shift-arrow re-anchors from wherever the cursor now sits.
+        self.end_range_select();
+    }
+
+    /// Drop the range-sweep anchor + base snapshot. A sweep is only the
+    /// run of consecutive Shift-arrows; every other selection or cursor
+    /// change ends it. `extend_selection` writes `self.cursor` directly
+    /// (not via `set_cursor`) so it never clears its own anchor.
+    fn end_range_select(&mut self) {
+        self.range_anchor = None;
+        self.range_base.clear();
     }
 
     /// Re-anchor a wheel-detached viewport: the next render clamps
@@ -2386,20 +2481,13 @@ impl Sidebar {
         let is_ready = self.merge_target_for_cursor().is_some();
         let mut actions: Vec<Action> = Vec::with_capacity(6);
 
-        // A live multi-select makes the broadcast THE next action —
-        // surface it first so the `v` marks visibly lead somewhere.
-        // When any marked row is a PR behind its base, the bulk
-        // update-branch rides alongside it.
+        // A live multi-select makes every workspace action target the
+        // whole set (#932). The normal action cells below now fan out on
+        // their own, so the only selection-specific affordance to surface
+        // is the broadcast (compose a new free-text message to all) —
+        // shown first so the `v` marks visibly lead somewhere.
         if !self.broadcast_selected.is_empty() {
             actions.push(Action::BroadcastToSelected);
-            if self
-                .broadcast_selected
-                .iter()
-                .filter_map(|k| self.workspace_by_key(k))
-                .any(|w| w.pr.as_ref().is_some_and(|p| p.is_behind_base))
-            {
-                actions.push(Action::UpdateBranchSelected);
-            }
         }
 
         // A PR behind its base can update its branch (the `g u` /

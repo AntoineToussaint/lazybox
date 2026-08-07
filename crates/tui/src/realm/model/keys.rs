@@ -367,6 +367,32 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 return;
             }
+            // Shift-Up/Down extend the sidebar multi-select from the
+            // cursor — the Excel-style range sweep (#932). Selection is
+            // now the primary path for acting on many workspaces, so it
+            // wins the vertical-arrow chord over splitter resize while
+            // the sidebar is focused; Shift-Left/Right still resize (the
+            // arm below), and vertical resize stays available by drag or
+            // from another pane.
+            Key::Up | Key::Down
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && self.focus == PaneFocus::Sidebar =>
+            {
+                self.q_latch.disarm();
+                let delta = if key.code == Key::Up { -1 } else { 1 };
+                if let Some(n) = self.sidebar.extend_selection(delta) {
+                    if n == 0 {
+                        self.flash_hint("selection empty");
+                    } else {
+                        self.flash_hint(format!("{n} selected · any action applies to all"));
+                    }
+                }
+                // The sweep moved the cursor; keep the right pane +
+                // terminals following the focused row, exactly as j/k do.
+                self.sync_panes();
+                self.redraw = true;
+                return;
+            }
             // Shift-arrows: resize splitters. Disabled inside a
             // terminal so the shell can still bind them.
             Key::Left | Key::Right | Key::Up | Key::Down
@@ -1721,6 +1747,21 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
                 if let Some(focus) = target {
+                    // Shift-left-click on a sidebar row extends the
+                    // multi-select from the anchor to the clicked row —
+                    // the mouse twin of the Shift-arrow range sweep
+                    // (#932). Handled before the plain-click branch so it
+                    // never collapses the sweep to a single row.
+                    if focus == PaneFocus::Sidebar
+                        && matches!(button, crossterm::event::MouseButton::Left)
+                        && m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
+                        && self.sidebar.shift_click_select(sidebar_rect, m.row)
+                    {
+                        self.last_click = None;
+                        self.sync_panes();
+                        self.redraw = true;
+                        return;
+                    }
                     if focus == PaneFocus::Sidebar {
                         // Try the header chips first (filter, then
                         // sort); if neither hit, fall through to row
@@ -2280,7 +2321,6 @@ pub(super) fn action_from_kind(
         ActionKind::ToggleFocusWorkspace => Action::ToggleFocusWorkspace,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
-        ActionKind::UpdateBranchSelected => Action::UpdateBranchSelected,
         ActionKind::OpenHelp => Action::OpenHelp,
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,

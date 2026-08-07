@@ -1199,7 +1199,8 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // `g u` / `Shift-U` reached GitHub and the branch was updated.
+        // `g u` (single or over the selection) reached GitHub and the
+        // branch was updated.
         // The BEHIND tag clears on the next poll (which the handler
         // woke), so flash a notice now so the keypress reads as done.
         if let IpcEvent::BranchUpdated {

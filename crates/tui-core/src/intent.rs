@@ -114,11 +114,6 @@ pub enum Intent {
         optimistic: bool,
         notice: Option<String>,
     },
-    /// Update every selected PR that is behind its base.
-    UpdateSelectedBranches {
-        workspace_keys: Vec<WorkspaceKey>,
-        selected_count: usize,
-    },
     /// Fold an issue-only workspace into the PR that claims it.
     CollapseIntoPr { issue_workspace_key: SessionKey },
     /// Mount the handoff target picker with the source agent's captured
@@ -751,22 +746,6 @@ pub fn resolve_mark_read_targets(
     Intent::MarkAllRead { session_key }
 }
 
-/// Resolve bulk branch updates over the current sidebar multi-selection.
-pub fn resolve_update_branch_selected(
-    selected_count: usize,
-    selected_workspaces: &[&Workspace],
-) -> Intent {
-    let workspace_keys = selected_workspaces
-        .iter()
-        .filter(|workspace| workspace.pr.as_ref().is_some_and(|pr| pr.is_behind_base))
-        .map(|workspace| workspace.key.clone())
-        .collect();
-    Intent::UpdateSelectedBranches {
-        workspace_keys,
-        selected_count,
-    }
-}
-
 /// Resolve issue-to-PR collapse by finding a locally-synced PR that claims
 /// the focused issue.
 pub fn resolve_collapse_into_pr(
@@ -830,27 +809,6 @@ pub fn pending_notice(intent: &Intent, workspace: Option<&Workspace>) -> Option<
     match intent {
         Intent::MergePr { .. } => Some(format!("merging PR{}…", task_number_suffix())),
         Intent::UpdateBranch { .. } => Some(format!("updating branch PR{}…", task_number_suffix())),
-        Intent::UpdateSelectedBranches {
-            workspace_keys,
-            selected_count,
-        } => {
-            if workspace_keys.is_empty() {
-                Some(if *selected_count == 0 {
-                    "update branches: nothing selected".to_string()
-                } else {
-                    "update branches: no selected PR is behind base".to_string()
-                })
-            } else {
-                let count = workspace_keys.len();
-                let skipped = selected_count.saturating_sub(count);
-                let plural = if count == 1 { "" } else { "es" };
-                Some(if skipped == 0 {
-                    format!("updating {count} branch{plural}…")
-                } else {
-                    format!("updating {count} branch{plural} ({skipped} skipped)…")
-                })
-            }
-        }
         Intent::CollapseIntoPr { .. } => Some("joining into PR…".to_string()),
         _ => None,
     }
@@ -1977,28 +1935,6 @@ mod tests {
             resolve_mark_read_targets(Some(&ws), &[], None),
             Intent::MarkAllRead { .. }
         ));
-    }
-
-    #[test]
-    fn update_branch_selected_filters_and_formats_the_plan() {
-        let mut behind = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
-        behind.pr.as_mut().expect("pr").is_behind_base = true;
-        let current = pr("o/r#2", CiStatus::Success, ReviewStatus::Approved);
-        let selected = [&behind, &current];
-
-        let intent = resolve_update_branch_selected(3, &selected);
-
-        assert!(matches!(
-            &intent,
-            Intent::UpdateSelectedBranches {
-                workspace_keys,
-                selected_count: 3,
-            } if workspace_keys == &[behind.key.clone()]
-        ));
-        assert_eq!(
-            pending_notice(&intent, None).as_deref(),
-            Some("updating 1 branch (2 skipped)…")
-        );
     }
 
     #[test]

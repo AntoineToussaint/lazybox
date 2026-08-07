@@ -6655,9 +6655,11 @@ mod merge_focus_follow_tests {
         )
     }
 
-    /// `Shift-U` on a multi-select fans out one `UpdateBranch` per
-    /// selected PR that's actually behind its base; up-to-date PRs are
-    /// skipped, and the selection clears afterward.
+    /// `g u` on a multi-select fans out one `UpdateBranch` per selected
+    /// PR that's actually behind its base; up-to-date PRs are skipped,
+    /// and the selection clears afterward. The retired `Shift-U` used to
+    /// carry this — it's now just the normal update-branch key applied to
+    /// the selection (#932).
     #[test]
     fn bulk_update_branch_fans_out_over_behind_prs_only() {
         use lazybox_tui_core::action::Action;
@@ -6684,7 +6686,7 @@ mod merge_focus_follow_tests {
         }
         assert_eq!(m.sidebar.broadcast_selected_count(), 3);
 
-        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
 
         let targets: Vec<lazybox_core::WorkspaceKey> = cmds
             .into_iter()
@@ -6703,8 +6705,8 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// `Shift-U` with no behind-base PR selected fires nothing and
-    /// leaves the selection intact for another action.
+    /// `g u` with no behind-base PR selected fires nothing and leaves the
+    /// selection intact for another action.
     #[test]
     fn bulk_update_branch_with_no_behind_pr_is_noop() {
         use lazybox_tui_core::action::Action;
@@ -6716,12 +6718,58 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
         m.sidebar.toggle_broadcast_select();
 
-        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
         assert!(cmds.is_empty(), "no behind PR → no command");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
             "selection survives a no-op bulk update",
+        );
+    }
+
+    /// #932: Shift-↓ under sidebar focus extends the multi-select by one
+    /// row through the real key path (`handle_pane_key`) — the Excel-style
+    /// range sweep — rather than resizing a splitter. Sweeping from the top
+    /// grabs a contiguous run, and a normal action then fans out over it.
+    #[test]
+    fn shift_down_range_selects_then_a_normal_action_fans_out() {
+        use lazybox_tui_core::action::Action;
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let mut m = build_model();
+        let mut a = workspace("owner/repo#1", true, Duration::hours(1));
+        a.pr.as_mut().unwrap().is_behind_base = true;
+        let mut b = workspace("owner/repo#2", true, Duration::hours(2));
+        b.pr.as_mut().unwrap().is_behind_base = true;
+        let mut c = workspace("owner/repo#3", true, Duration::hours(3));
+        c.pr.as_mut().unwrap().is_behind_base = true;
+        let all: std::collections::HashSet<SessionKey> = [&a, &b, &c]
+            .iter()
+            .map(|w| SessionKey::from(&w.key))
+            .collect();
+        for ws in [a, b, c] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        }
+
+        m.set_focus(PaneFocus::Sidebar);
+        // The cursor lands on the first workspace row by default; sweep
+        // down two rows to grab the full contiguous run.
+        m.dispatch_key(RealmKey::new(Key::Down, RealmMods::SHIFT));
+        m.dispatch_key(RealmKey::new(Key::Down, RealmMods::SHIFT));
+
+        let selected: std::collections::HashSet<SessionKey> =
+            m.sidebar.selected_broadcast_keys().into_iter().collect();
+        assert_eq!(
+            selected, all,
+            "the sweep selected all three contiguous rows"
+        );
+
+        // A normal action (g u) now fans out one op per selected PR.
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
+        assert_eq!(
+            cmds.len(),
+            3,
+            "normal update-branch fires N ops for the N selected",
         );
     }
 

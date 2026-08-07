@@ -1373,6 +1373,20 @@ async fn zero_history_alt_pane_warns_client_to_reopen() {
                 TerminalKind::Agent("claude".into()),
             )
             .await;
+        // A SHELL viewing the same zero-history alt pane. A shell's alt
+        // screen is transient (it recovers when its full-screen program
+        // exits), so "reopen the session" is wrong advice — the fetch must
+        // stay silent for it even though the pane reports no history.
+        let shell_id = TerminalId(3);
+        config
+            .terminal
+            .register_terminal(
+                shell_id,
+                alt_key.clone(),
+                SessionKey::from("shell"),
+                TerminalKind::Shell,
+            )
+            .await;
 
         let drain = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>| {
             let mut events = Vec::new();
@@ -1420,6 +1434,16 @@ async fn zero_history_alt_pane_warns_client_to_reopen() {
                 .iter()
                 .any(|event| matches!(event, Event::TerminalScrollback { .. })),
             "a zero-history alt pane must not serve a grid-wiping one-screen capture",
+        );
+
+        // Shell on that same zero-history pane: no reopen warning, because a
+        // shell's alt screen self-heals — only agents stay alt for good.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        handle_fetch_scrollback(&config, &EventSender::from_unbounded(tx), shell_id).await;
+        let shell_events = drain(&mut rx);
+        assert!(
+            !warned(&shell_events, shell_id),
+            "a shell's zero-history fetch must not warn to reopen: {shell_events:?}",
         );
 
         let _ = backend.kill(&healthy_key).await;

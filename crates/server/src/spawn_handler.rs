@@ -5757,8 +5757,24 @@ pub async fn handle_fetch_scrollback(
         // can't be healed in place, so scroll-up would silently show
         // nothing. Tell the client to reopen the session instead, reusing
         // the older-build scrollback warning.
+        //
+        // Gate on an AGENT terminal: only a full-screen agent stays on the
+        // alternate screen for its whole life, so its history is gone for
+        // good and "reopen the session" is the real remedy. A shell is alt
+        // only while a full-screen program (vim, less) runs and recovers
+        // history when it exits — even on a stale server, where the alt
+        // screen is allowed, so is the rmcup that leaves it — so warning it
+        // to reopen would be both wrong and self-resolving. This also keeps
+        // the reused `RecoveredTerminalsRequireRestart` honest: it now names
+        // only recovered *agent* terminals, and the client is asking to
+        // scroll THIS terminal, so it provably holds it — the event's "never
+        // warn about a terminal the client wasn't given" guarantee stands.
         Ok(None) => {
-            if config.backend.history_disabled(&key).await {
+            let is_agent = matches!(
+                config.terminal.terminal_meta_for(terminal_id).await,
+                Some((_, TerminalKind::Agent(_)))
+            );
+            if is_agent && config.backend.history_disabled(&key).await {
                 let _ = tx.send(Event::RecoveredTerminalsRequireRestart {
                     terminal_ids: vec![terminal_id],
                 });

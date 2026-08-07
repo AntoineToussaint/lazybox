@@ -2020,6 +2020,10 @@ function initActivitySplitter(): void {
     event.preventDefault();
     rightPaneSplitter.classList.add("dragging");
     const onMove = (move: MouseEvent) => {
+      if (move.buttons === 0) {
+        onUp();
+        return;
+      }
       const rect = rightPane.getBoundingClientRect();
       const max = Math.max(rect.height - TERMINAL_MIN_PX, ACTIVITY_MIN_PX);
       const height = Math.min(

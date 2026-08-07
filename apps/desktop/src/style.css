@@ -178,6 +178,9 @@ textarea:focus-visible {
   flex: 0 0 auto;
   height: var(--activity-height, 42%);
   min-height: 120px;
+  /* Cap so a stored/dragged height can never starve the terminal below its
+     minimum (160px terminal + 6px splitter) when the pane shrinks. */
+  max-height: calc(100% - 166px);
 }
 
 .right-pane .terminal-panel {

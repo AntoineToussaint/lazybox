@@ -1168,19 +1168,17 @@ pub struct Model<T: TerminalAdapter> {
     synthesized_projects: std::collections::BTreeSet<lazybox_core::ProjectKey>,
     /// IPC client for forwarding pane-emitted commands to the daemon.
     pub client: Client,
-    /// Additional daemon connections to configured remote daemons
-    /// ("boxes"), keyed by the remote's config name (Design A: the
-    /// client holds N daemon connections). Built at boot from
-    /// `config.remotes` via the same `socket::connect_reconnecting`
-    /// transport `--connect` uses. An `r`-prefixed spawn routes its
-    /// command to one of these instead of `client`, and every remote's
-    /// event stream is merged into the model's pump (see
-    /// `helpers::drain_daemon_events`). Empty when no remotes are
-    /// configured — the local-only path is entirely unchanged.
+    /// Connections to remote boxes, keyed by the box's display name
+    /// (Design A: the client holds N daemon connections). The boot crate
+    /// builds these from the `sandbox:` config: each is an in-process
+    /// `Client` whose far end is a lazy worker that owns the box lifecycle
+    /// (ensure/wake/connect on the first `r`-spawn) — so the transport is
+    /// derived internally, never configured. An `r`-prefixed spawn routes
+    /// its command here instead of `client`. Empty when no `sandbox:` box
+    /// is configured — the local-only path is entirely unchanged.
     pub remote_clients: std::collections::BTreeMap<String, Client>,
-    /// The remote an unqualified `r`-spawn targets: the config-flagged
-    /// `default`, else the first configured remote (BTreeMap order).
-    /// `None` when no remotes are configured.
+    /// The remote an unqualified `r`-spawn targets — today the single
+    /// `sandbox:` box. `None` when no box is configured.
     default_remote: Option<String>,
     /// True when this client is attached to a standalone daemon over a
     /// socket (`--connect`) rather than the in-process embedded daemon.
@@ -2123,12 +2121,11 @@ impl<T: TerminalAdapter> Model<T> {
         self
     }
 
-    /// Attach connections to configured remote daemons ("boxes") — the
-    /// Design-A multi-client transport. `default` names the remote an
-    /// unqualified `r`-spawn targets (the config-flagged default, else
-    /// the first). Rebuilds the catalog so the `r <agent>` chords appear
-    /// once there is at least one remote. The boot crate builds the
-    /// clients (it owns the socket transport) and hands them here.
+    /// Attach connections to remote boxes — the Design-A multi-client
+    /// transport. `default` names the box an unqualified `r`-spawn targets.
+    /// Rebuilds the catalog so the `r <agent>` chords appear once there is
+    /// at least one box. The boot crate builds the clients from the
+    /// `sandbox:` config (it owns the box lifecycle) and hands them here.
     pub fn with_remote_clients(
         mut self,
         clients: std::collections::BTreeMap<String, Client>,

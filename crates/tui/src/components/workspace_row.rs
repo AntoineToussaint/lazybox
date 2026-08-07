@@ -870,9 +870,9 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ])
 }
 
-/// The `⇅ <remote>` badge: this workspace's sessions run on a remote daemon
-/// (`config.remotes.<name>`, spawned via the `r`-prefix), not the local
-/// in-process daemon. The network glyph + remote name make "this runs on the
+/// The `⇅ <remote>` badge: this workspace's sessions run on a remote box
+/// (the `sandbox:` box, spawned via the `r`-prefix), not the local
+/// in-process daemon. The network glyph + box name make "this runs on the
 /// box" legible at a glance. Passive info, packed into the shared badge
 /// cluster like `⎇ local`; renders nothing when the workspace is local.
 fn cell_remote(ctx: &WorkspaceRowCtx<'_>) -> Cell {

@@ -69,14 +69,13 @@ pub enum Action {
     /// / `a M` chords. Like [`Action::SpawnAgent`] on the default agent
     /// but carrying the picked tier alias.
     SpawnTier(String),
-    /// Spawn a specific agent by id on a **remote daemon** ("box")
-    /// instead of the local daemon — the `r c` / `r x` / `r u` leader
-    /// chords. Same spawn as [`Action::SpawnAgent`], but the command is
-    /// routed to the chosen remote client (see `config.remotes`) and the
-    /// workspace gets a remote indicator in the sidebar. The id is
-    /// dynamic because the agent registry is config-driven; the remote is
-    /// resolved at dispatch (the flagged `default`, else the first
-    /// configured). Generated only when at least one remote is configured.
+    /// Spawn a specific agent by id on a **remote box** instead of the
+    /// local daemon — the `r c` / `r x` / `r u` leader chords. Same spawn
+    /// as [`Action::SpawnAgent`], but the command is routed to the remote
+    /// box's client (lazybox owns the box lifecycle from the `sandbox:`
+    /// config) and the workspace gets a remote indicator in the sidebar.
+    /// The id is dynamic because the agent registry is config-driven.
+    /// Generated only when a box is configured.
     SpawnAgentRemote(String),
     /// Spawn a shell in the focused workspace's worktree.
     SpawnShell,
@@ -1020,7 +1019,7 @@ impl ActionDef {
                 // multi-agent form.
                 default_keys: "r c / r x / r u",
                 label: "spawn agent on remote",
-                describe: "Open a new agent terminal on a configured remote daemon (a \"box\") instead of the local one — the `r`-prefixed chords. The session runs on the remote; the sidebar row shows a remote indicator. Requires a `remotes:` entry in the config.",
+                describe: "Open a new agent terminal on a remote box instead of the local daemon — the `r`-prefixed chords. lazybox ensures/wakes/connects the box automatically; the session runs on it and the sidebar row shows a remote indicator. Requires a `sandbox:` block in the config.",
                 section: Section::Workspace,
             },
             ActionKind::SpawnShell => &Self {
@@ -2222,13 +2221,11 @@ impl ActionDef {
     }
 
     /// [`ActionDef::catalog_with_tiers`] plus the remote-spawn chords:
-    /// one `r <agent-key>` row per enabled agent, generated only when at
-    /// least one remote daemon is configured (`remotes` non-empty). The
-    /// row's semantics don't name a specific remote at the chord level —
-    /// dispatch resolves the chosen remote (the flagged `default`, else
-    /// the first configured) — so a single `r <agent>` family serves
-    /// however many boxes are configured, mirroring how the tier chords
-    /// stay agent-agnostic.
+    /// one `r <agent-key>` row per enabled agent, generated only when a
+    /// remote box is configured (`remotes` non-empty). The row's semantics
+    /// don't name a specific box at the chord level — dispatch resolves the
+    /// box (today the single `sandbox:` one) — so a single `r <agent>`
+    /// family serves it, mirroring how the tier chords stay agent-agnostic.
     pub fn catalog_full(
         agents: &[String],
         overrides: &std::collections::BTreeMap<String, String>,
@@ -3302,6 +3299,7 @@ mod tests {
         // Presentation-only `default_keys` — no parseable chord.
         let presentation = [
             "a c / a x / a u",
+            "r c / r x / r u",
             "w c / w x / w u",
             "b c / b x / b u",
             "g/G",

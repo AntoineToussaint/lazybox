@@ -151,7 +151,11 @@ textarea:focus-visible {
 .workspace-grid {
   display: grid;
   min-height: 0;
-  grid-template-columns: minmax(270px, 0.78fr) minmax(0, 1fr);
+  /* Content-independent tracks: the sidebar is a fixed pixel width (driven by
+     the column splitter, persisted in main.ts) and the right pane is
+     minmax(0, 1fr). A `0` — not px — minimum keeps long titles / terminal
+     lines from expanding a track and silently re-distributing widths. */
+  grid-template-columns: var(--sidebar-width, 360px) 6px minmax(0, 1fr);
 }
 
 .inbox-panel,
@@ -161,8 +165,15 @@ textarea:focus-visible {
   min-height: 0;
 }
 
-.inbox-panel {
-  border-right: 1px solid #273039;
+.column-splitter {
+  border-left: 1px solid #273039;
+  background: #10151b;
+  cursor: col-resize;
+}
+
+.column-splitter:hover,
+.column-splitter.dragging {
+  background: var(--theme-accent, #82d8bd);
 }
 
 /* Right column: activity stacked above the terminal, mirroring the TUI
@@ -1155,6 +1166,7 @@ h2 {
 
 .workspace-grid.focus-mode .inbox-panel,
 .workspace-grid.focus-mode .activity-panel,
+.workspace-grid.focus-mode .column-splitter,
 .workspace-grid.focus-mode .right-pane-splitter {
   display: none;
 }
@@ -1532,7 +1544,7 @@ dialog::backdrop {
 
 @media (max-width: 1120px) {
   .workspace-grid {
-    grid-template-columns: 270px minmax(0, 1fr);
+    grid-template-columns: 270px 6px minmax(0, 1fr);
   }
 }
 

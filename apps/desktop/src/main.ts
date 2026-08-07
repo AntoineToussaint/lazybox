@@ -278,9 +278,13 @@ const terminalState = element<HTMLSpanElement>("terminal-state");
 const workspaceGrid = document.querySelector<HTMLElement>(".workspace-grid")!;
 const rightPane = document.querySelector<HTMLElement>(".right-pane")!;
 const rightPaneSplitter = element<HTMLDivElement>("right-pane-splitter");
+const columnSplitter = element<HTMLDivElement>("column-splitter");
 const ACTIVITY_MIN_PX = 120;
 const TERMINAL_MIN_PX = 160;
 const ACTIVITY_HEIGHT_KEY = "lazybox.activityHeight";
+const SIDEBAR_MIN_PX = 240;
+const RIGHT_MIN_PX = 360;
+const SIDEBAR_WIDTH_KEY = "lazybox.sidebarWidth";
 const connectionDot = element<HTMLSpanElement>("connection-dot");
 const connectionLabel = element<HTMLSpanElement>("connection-label");
 const statusMessage = element<HTMLSpanElement>("status-message");
@@ -573,8 +577,12 @@ setupDialog.addEventListener("cancel", (event) => {
   }
 });
 
-window.addEventListener("resize", () => scheduleResize());
+window.addEventListener("resize", () => {
+  reclampSidebarWidth();
+  scheduleResize();
+});
 window.addEventListener("keydown", handleKeyboard);
+initColumnSplitter();
 initActivitySplitter();
 
 void boot();
@@ -2004,6 +2012,80 @@ function scheduleResize(): void {
       );
     }
   }, 80);
+}
+
+/**
+ * Clamp a desired sidebar width so the right pane always keeps at least
+ * RIGHT_MIN_PX. When the grid has no measured width yet (some environments
+ * report 0 before first layout) only the lower bound applies; the resize
+ * handler re-clamps once the grid has a real width.
+ */
+function clampSidebarWidth(width: number): number {
+  const gridWidth = workspaceGrid.getBoundingClientRect().width;
+  const max =
+    gridWidth > 0
+      ? Math.max(gridWidth - RIGHT_MIN_PX, SIDEBAR_MIN_PX)
+      : Infinity;
+  return Math.round(Math.min(Math.max(width, SIDEBAR_MIN_PX), max));
+}
+
+/**
+ * Re-apply the clamp to the live (dragged or restored) width. A window that
+ * shrinks below the persisted sidebar width would otherwise starve the right
+ * pane, since neither restore nor a bare `resize` runs the drag-time clamp.
+ * Only the live CSS value is adjusted — the stored preference is left intact so
+ * a later, larger window restores it.
+ */
+function reclampSidebarWidth(): void {
+  const current = workspaceGrid.style.getPropertyValue("--sidebar-width");
+  if (current.endsWith("px")) {
+    workspaceGrid.style.setProperty(
+      "--sidebar-width",
+      `${clampSidebarWidth(parseInt(current, 10))}px`,
+    );
+  }
+}
+
+/**
+ * Drag the divider between the inbox and the right pane to resize the sidebar
+ * column. The width persists as `--sidebar-width` on `.workspace-grid` and in
+ * localStorage so columns move only on user drag — never from content growth
+ * or a terminal fit pass.
+ */
+function initColumnSplitter(): void {
+  const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+  if (Number.isFinite(stored) && stored >= SIDEBAR_MIN_PX) {
+    workspaceGrid.style.setProperty(
+      "--sidebar-width",
+      `${clampSidebarWidth(stored)}px`,
+    );
+  }
+  columnSplitter.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    columnSplitter.classList.add("dragging");
+    const onMove = (move: MouseEvent) => {
+      if (move.buttons === 0) {
+        onUp();
+        return;
+      }
+      const rect = workspaceGrid.getBoundingClientRect();
+      const width = clampSidebarWidth(move.clientX - rect.left);
+      workspaceGrid.style.setProperty("--sidebar-width", `${width}px`);
+      scheduleResize();
+    };
+    const onUp = () => {
+      columnSplitter.classList.remove("dragging");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const current = workspaceGrid.style.getPropertyValue("--sidebar-width");
+      if (current.endsWith("px")) {
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(parseInt(current, 10)));
+      }
+      scheduleResize();
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
 }
 
 /**

@@ -1128,6 +1128,12 @@ impl RightPane {
     ///   ticket's attachment, before any collapse), reading `PR: #N` with
     ///   a derived GitHub PR URL.
     ///
+    /// Known limitation (#922): a PR whose Linear ticket has been matched
+    /// only by identifier (`pr.linked_tasks`), not yet fetched/folded,
+    /// shows no counterpart row — a Linear URL can't be derived from the
+    /// `ENG-123` identifier alone (it needs the workspace slug the fetched
+    /// ticket carries). The row appears once the ticket is folded in.
+    ///
     /// `None` for a workspace with no tracked counterpart.
     fn originating_issue(&self) -> Option<(String, String, String)> {
         let ws = self.workspace.as_ref()?;

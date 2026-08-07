@@ -2219,7 +2219,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         additions: pr.additions,
         deletions: pr.deletions,
         closes_issues: extract_closes_issues(pr, &repo),
-        linked_tasks: extract_linear_refs(&pr.head_ref_name, &pr.title, pr.body.as_deref()),
+        linked_tasks: extract_linear_refs(&pr.head_ref_name, &pr.title),
         kind: Some(lazybox_core::TaskKind::Pr),
         priority: None,
         state_label: None,
@@ -2227,17 +2227,22 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
 }
 
 /// Cross-provider links (#922): the Linear ticket(s) a PR references,
-/// mined from the PR's branch name, title, and body. Linear's GitHub
-/// integration names branches `<user>/<team>-<n>-<slug>` and links via
-/// magic words (`Fixes ENG-123`), so the ticket identifier is almost
-/// always present in one of the three. Returns `{linear, ENG-123}`
-/// `TaskId`s — the exact id the Linear provider mints — deduped in
-/// discovery order (branch, then title, then body).
+/// mined from the PR's branch name and title only. Linear's GitHub
+/// integration names branches `<user>/<team>-<n>-<slug>`, so the ticket
+/// identifier is almost always in the branch, and a title is one line of
+/// user intent. Returns `{linear, ENG-123}` `TaskId`s — the exact id the
+/// Linear provider mints — deduped in discovery order (branch, then
+/// title).
 ///
-/// This is the branch/identifier fallback signal; the authoritative
-/// signal is Linear's own attachment (see the Linear provider), matched
-/// separately in the poller.
-fn extract_linear_refs(branch: &str, title: &str, body: Option<&str>) -> Vec<TaskId> {
+/// The PR **body** is deliberately NOT scanned. `<TEAM>-<n>` collides
+/// with ordinary technical prose (`UTF-8`, `SHA-256`, `ISO-8601`,
+/// `CVE-2021-1234`), so scanning arbitrary body text would mint bogus
+/// links and, worse, silently collapse an unrelated ticket whose
+/// identifier coincidentally matched. This mirrors `extract_closes_issues`,
+/// which refuses to parse the body for the same reason. A body-only
+/// reference is still covered by Linear's authoritative attachment signal
+/// (see the Linear provider), matched separately in the poller.
+fn extract_linear_refs(branch: &str, title: &str) -> Vec<TaskId> {
     let mut out: Vec<TaskId> = Vec::new();
     let mut push = |ident: String| {
         let id = TaskId {
@@ -2253,11 +2258,6 @@ fn extract_linear_refs(branch: &str, title: &str, body: Option<&str>) -> Vec<Tas
     }
     for ident in parse_linear_identifiers(title) {
         push(ident);
-    }
-    if let Some(body) = body {
-        for ident in parse_linear_identifiers(body) {
-            push(ident);
-        }
     }
     out
 }
@@ -3834,6 +3834,39 @@ mod tests {
         pr.head_ref_name = "alice/plain-branch".into();
         pr.title = "feat: nothing linear here".into();
         pr.body = Some("just a normal PR".into());
+        assert!(pr_to_task(&pr, "alice").linked_tasks.is_empty());
+    }
+
+    #[test]
+    fn pr_to_task_ignores_linear_lookalikes_in_body() {
+        // REGRESSION (#922): `<TEAM>-<n>` collides with ordinary technical
+        // prose. The PR body must NOT be scanned — otherwise a body
+        // mentioning `SHA-256` / `UTF-8` mints bogus `{linear, SHA-256}`
+        // links and can silently collapse an unrelated ticket whose
+        // identifier coincidentally matches. Branch + title are clean here,
+        // so the only possible source of a link is the body.
+        let mut pr = make_pr(5, "alice");
+        pr.head_ref_name = "alice/plain-branch".into();
+        pr.title = "feat: hashing overhaul".into();
+        pr.body = Some("Switch to SHA-256 and UTF-8; see CVE-2021-1234.".into());
+        assert!(
+            pr_to_task(&pr, "alice").linked_tasks.is_empty(),
+            "body-only lookalike tokens must not produce cross-provider links",
+        );
+    }
+
+    #[test]
+    fn pr_to_task_ignores_real_linear_ref_confined_to_body() {
+        // The flip side of the safety trade-off: a genuine `ENG-123`
+        // appearing ONLY in the body is deliberately not matched here (the
+        // body is unscannable). Such a reference is instead covered by
+        // Linear's authoritative attachment signal. Pinning this documents
+        // the intentional boundary so a future "just also scan the body"
+        // change has to reckon with the false-positive test above.
+        let mut pr = make_pr(5, "alice");
+        pr.head_ref_name = "alice/plain-branch".into();
+        pr.title = "feat: nothing linear in the title".into();
+        pr.body = Some("Fixes ENG-123.".into());
         assert!(pr_to_task(&pr, "alice").linked_tasks.is_empty());
     }
 

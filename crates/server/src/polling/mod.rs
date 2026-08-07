@@ -3347,6 +3347,13 @@ async fn merge_closing_issue_workspaces(
         // their dead-but-recoverable records) move onto the PR here;
         // `commit_merge` saves the PR and deletes the issue row in one
         // transaction, then its commit owner publishes removal.
+        // Capture the link source before `issue_ws` is consumed below: a
+        // Linear ticket workspace is a cross-provider (#922) match, which
+        // is neither GitHub's `closingIssuesReferences` nor the branch-name
+        // fallback.
+        let is_cross_provider = issue_ws
+            .primary_task()
+            .is_some_and(|task| task.id.source == "linear");
         let issue_label = workspace_label_for(&issue_ws, &issue_key);
         let pr_label = workspace_label_for(workspace, &workspace.key);
         let moved_session_ids = absorb_issue_workspace(workspace, issue_ws);
@@ -3357,7 +3364,9 @@ async fn merge_closing_issue_workspaces(
             moved_session_ids,
         });
 
-        let link_source = if closes_keys.contains(issue_key.as_str()) {
+        let link_source = if is_cross_provider {
+            "cross-provider link"
+        } else if closes_keys.contains(issue_key.as_str()) {
             "closingIssuesReferences"
         } else {
             "branch-name inference"

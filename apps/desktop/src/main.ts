@@ -577,7 +577,10 @@ setupDialog.addEventListener("cancel", (event) => {
   }
 });
 
-window.addEventListener("resize", () => scheduleResize());
+window.addEventListener("resize", () => {
+  reclampSidebarWidth();
+  scheduleResize();
+});
 window.addEventListener("keydown", handleKeyboard);
 initColumnSplitter();
 initActivitySplitter();
@@ -2012,6 +2015,38 @@ function scheduleResize(): void {
 }
 
 /**
+ * Clamp a desired sidebar width so the right pane always keeps at least
+ * RIGHT_MIN_PX. When the grid has no measured width yet (some environments
+ * report 0 before first layout) only the lower bound applies; the resize
+ * handler re-clamps once the grid has a real width.
+ */
+function clampSidebarWidth(width: number): number {
+  const gridWidth = workspaceGrid.getBoundingClientRect().width;
+  const max =
+    gridWidth > 0
+      ? Math.max(gridWidth - RIGHT_MIN_PX, SIDEBAR_MIN_PX)
+      : Infinity;
+  return Math.round(Math.min(Math.max(width, SIDEBAR_MIN_PX), max));
+}
+
+/**
+ * Re-apply the clamp to the live (dragged or restored) width. A window that
+ * shrinks below the persisted sidebar width would otherwise starve the right
+ * pane, since neither restore nor a bare `resize` runs the drag-time clamp.
+ * Only the live CSS value is adjusted — the stored preference is left intact so
+ * a later, larger window restores it.
+ */
+function reclampSidebarWidth(): void {
+  const current = workspaceGrid.style.getPropertyValue("--sidebar-width");
+  if (current.endsWith("px")) {
+    workspaceGrid.style.setProperty(
+      "--sidebar-width",
+      `${clampSidebarWidth(parseInt(current, 10))}px`,
+    );
+  }
+}
+
+/**
  * Drag the divider between the inbox and the right pane to resize the sidebar
  * column. The width persists as `--sidebar-width` on `.workspace-grid` and in
  * localStorage so columns move only on user drag — never from content growth
@@ -2020,7 +2055,10 @@ function scheduleResize(): void {
 function initColumnSplitter(): void {
   const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
   if (Number.isFinite(stored) && stored >= SIDEBAR_MIN_PX) {
-    workspaceGrid.style.setProperty("--sidebar-width", `${stored}px`);
+    workspaceGrid.style.setProperty(
+      "--sidebar-width",
+      `${clampSidebarWidth(stored)}px`,
+    );
   }
   columnSplitter.addEventListener("mousedown", (event) => {
     event.preventDefault();
@@ -2031,12 +2069,8 @@ function initColumnSplitter(): void {
         return;
       }
       const rect = workspaceGrid.getBoundingClientRect();
-      const max = Math.max(rect.width - RIGHT_MIN_PX, SIDEBAR_MIN_PX);
-      const width = Math.min(
-        Math.max(move.clientX - rect.left, SIDEBAR_MIN_PX),
-        max,
-      );
-      workspaceGrid.style.setProperty("--sidebar-width", `${Math.round(width)}px`);
+      const width = clampSidebarWidth(move.clientX - rect.left);
+      workspaceGrid.style.setProperty("--sidebar-width", `${width}px`);
       scheduleResize();
     };
     const onUp = () => {

@@ -96,6 +96,39 @@ describe("workspace column splitter", () => {
     expect(grid().style.getPropertyValue("--sidebar-width")).toBe("1040px");
     expect(localStorage.getItem("lazybox.sidebarWidth")).toBe("1040");
   });
+
+  it("clamps a persisted width wider than the viewport on load", async () => {
+    // Restore must not apply a width persisted on a larger monitor verbatim —
+    // it would starve the right pane before the user touches anything.
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 1000, height: 800 }) as DOMRect;
+    try {
+      localStorage.setItem("lazybox.sidebarWidth", "5000");
+      await import("./main");
+      // Displayed width clamps to viewport (1000 - 360 right-min = 640)…
+      expect(grid().style.getPropertyValue("--sidebar-width")).toBe("640px");
+      // …but the preferred width is preserved for a later, larger window.
+      expect(localStorage.getItem("lazybox.sidebarWidth")).toBe("5000");
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = original;
+    }
+  });
+
+  it("re-clamps a too-wide sidebar when the window shrinks, without persisting", async () => {
+    await import("./main");
+    // A wide sidebar set on a large window (e.g. a prior drag while maximized).
+    grid().style.setProperty("--sidebar-width", "900px");
+    stubGridRect(1000);
+
+    window.dispatchEvent(new Event("resize"));
+
+    // Shrinking the window alone re-clamps the live width so the right pane
+    // keeps its minimum (1000 - 360 = 640)…
+    expect(grid().style.getPropertyValue("--sidebar-width")).toBe("640px");
+    // …and this transient clamp never overwrites the stored preference.
+    expect(localStorage.getItem("lazybox.sidebarWidth")).toBeNull();
+  });
 });
 
 function loadDocument(): void {

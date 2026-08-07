@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Startup script for a lazybox GCP sandbox box. Rendered by Terraform
+# (templatefile) with the deployment's packages / repo / bring-up command.
+#
+# Idempotent: it may re-run on every boot (GCE re-executes the startup
+# script), so each step guards against a re-run.
+set -euo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+%{ if length(packages) > 0 ~}
+apt-get update -y
+apt-get install -y ${join(" ", packages)}
+%{ endif ~}
+
+%{ if repo != "" ~}
+# Clone the workload repo once, into the login user's home.
+CLONE_DIR="/opt/lazybox/workload"
+if [ ! -d "$CLONE_DIR/.git" ]; then
+  mkdir -p "$(dirname "$CLONE_DIR")"
+  case "${repo}" in
+    *://*) git clone "${repo}" "$CLONE_DIR" ;;
+    *)     git clone "https://github.com/${repo}.git" "$CLONE_DIR" ;;
+  esac
+fi
+%{ endif ~}
+
+%{ if bringup != "" ~}
+# Bring the workload up. Runs from the cloned repo when there is one.
+cd /opt/lazybox/workload 2>/dev/null || cd /
+${bringup}
+%{ endif ~}

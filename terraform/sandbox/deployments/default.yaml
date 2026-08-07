@@ -1,0 +1,41 @@
+# Generic sandbox deployment — base toolchain, blank workspace.
+#
+# This is the recipe lazybox ships and embeds (crate `lazybox-sandbox`
+# includes it via `include_str!`). A project overrides it with a thin
+# overlay deep-merged on top (see `obin.yaml`); only the changed keys need
+# to appear in the overlay.
+name: default
+
+# Placement / size (the "GCP" dimension defaults; a spec may still pin
+# region/zone independently).
+machine_type: e2-standard-4
+image_family: debian-12
+image_project: debian-cloud
+disk_size_gb: 100
+
+# Firewall/network tags applied to the instance; the IAP SSH allow rule
+# keys off this tag.
+network_tags:
+  - lazybox-sandbox
+
+# A box with no external IP still needs egress for package installs and
+# image pulls, so a Cloud NAT is attached by default.
+enable_nat: true
+
+# The base service account gets no extra project grants; a project overlay
+# adds the cross-project roles its workload needs.
+service_account_roles: []
+
+# Ports the client forwards. Only SSH is needed for the generic box; a
+# project overlay lists its web/workload ports.
+workload_ports: []
+
+# Base toolchain installed on first boot.
+packages:
+  - git
+  - curl
+  - build-essential
+
+# No repo and no bring-up: the generic box is a blank workspace.
+repo: null
+bringup: null

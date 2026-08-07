@@ -1941,6 +1941,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazybox-sandbox"
+version = "0.1.9"
+dependencies = [
+ "chrono",
+ "lazybox-store",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.19",
+ "tokio",
+]
+
+[[package]]
 name = "lazybox-server"
 version = "0.1.9"
 dependencies = [
@@ -2048,6 +2061,7 @@ dependencies = [
  "lazybox-ipc",
  "lazybox-linear",
  "lazybox-relay",
+ "lazybox-sandbox",
  "lazybox-server",
  "lazybox-slack",
  "lazybox-store",

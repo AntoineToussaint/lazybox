@@ -705,6 +705,94 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Consume one event belonging to the "Ask about this PR" run
+    /// (#945), feeding the shared `pr_chat_convo` the `PrChat` modal
+    /// renders. Correlates like [`Self::handle_help_agent_event`] but has
+    /// no proposed-action layer — this chat only reads and explains.
+    fn handle_pr_chat_agent_event(&mut self, event: &IpcEvent) -> bool {
+        match event {
+            IpcEvent::AgentRunStarted {
+                request_id, run_id, ..
+            } if self.pr_chat_request.as_ref() == Some(request_id) => {
+                self.pr_chat_request = None;
+                self.pr_chat_run = Some(*run_id);
+                for question in std::mem::take(&mut self.pr_chat_pending) {
+                    self.send_cmd(lazybox_ipc::Command::SendAgentInput {
+                        run_id: *run_id,
+                        message: lazybox_ipc::AgentInputMessage {
+                            text: Some(question),
+                            json: None,
+                        },
+                    });
+                }
+                self.redraw = true;
+                true
+            }
+            IpcEvent::AgentAssistantTextDelta { run_id, delta }
+                if Some(*run_id) == self.pr_chat_run =>
+            {
+                if let Some(turn) = self.pr_chat_convo_mut().streaming_turn_mut() {
+                    turn.answer.push_str(delta);
+                }
+                self.redraw = true;
+                true
+            }
+            IpcEvent::AgentTurnFinished {
+                run_id,
+                result,
+                error,
+                ..
+            } if Some(*run_id) == self.pr_chat_run => {
+                let mut convo = self.pr_chat_convo_mut();
+                if let Some(turn) = convo.streaming_turn_mut() {
+                    if let Some(result) = result.as_deref().filter(|r| !r.trim().is_empty()) {
+                        turn.answer = result.to_string();
+                    }
+                    turn.done = true;
+                }
+                if let Some(error) = error {
+                    convo.notice = Some(error.clone());
+                }
+                drop(convo);
+                self.redraw = true;
+                true
+            }
+            IpcEvent::AgentRunFinished { run_id, error, .. }
+                if Some(*run_id) == self.pr_chat_run =>
+            {
+                self.pr_chat_run = None;
+                self.pr_chat_request = None;
+                let mut convo = self.pr_chat_convo_mut();
+                let unanswered = convo.close_open_turns();
+                convo.deactivate_thread();
+                if let Some(error) = error {
+                    convo.notice = Some(format!("assistant exited: {error}"));
+                } else if unanswered {
+                    convo.notice =
+                        Some("assistant exited before answering — ask again to restart it".into());
+                }
+                drop(convo);
+                self.redraw = true;
+                true
+            }
+            IpcEvent::AgentRunStartFailed {
+                request_id,
+                message,
+            } if self.pr_chat_request.as_ref() == Some(request_id) => {
+                self.pr_chat_request = None;
+                self.pr_chat_pending.clear();
+                let mut convo = self.pr_chat_convo_mut();
+                convo.close_open_turns();
+                convo.deactivate_thread();
+                convo.notice = Some(format!("assistant unavailable — {message}"));
+                drop(convo);
+                self.redraw = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Run the deferred `sync_panes` if any event in this drain batch
     /// asked for one. A no-op when nothing pane-affecting was seen, so
     /// the run loop can call it unconditionally after every drain.
@@ -772,6 +860,9 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         if self.handle_help_agent_event(&event) {
+            return;
+        }
+        if self.handle_pr_chat_agent_event(&event) {
             return;
         }
         if let IpcEvent::WorkspaceFocusRequested { session_key } = &event {
@@ -2029,6 +2120,26 @@ impl<T: TerminalAdapter> Model<T> {
         // the inspector stays open across edits.
         if let IpcEvent::WorktreesInspected { inspections } = &event {
             self.mount_inspect_list(inspections.clone());
+        }
+        // PR-chat's diff read (#945) rides the same event but a separate
+        // correlation field, so it coexists with the diff-review consumer
+        // below. Once it lands, release the opening question it was holding.
+        if let IpcEvent::WorkspaceDiffInspected {
+            workspace_key,
+            target,
+            diff,
+            ..
+        } = &event
+            && self.pr_chat_diff_target.as_ref() == Some(&(workspace_key.clone(), target.clone()))
+        {
+            self.pr_chat_diff_target = None;
+            self.pr_chat_diff = Some(diff.clone());
+            if let Some((question, _)) = self.pr_chat_held_question.take()
+                && let Some(cmd) = self.start_pr_chat_run(&question)
+            {
+                self.send_cmd(cmd);
+            }
+            self.redraw = true;
         }
         if let IpcEvent::WorkspaceDiffInspected {
             workspace_key,

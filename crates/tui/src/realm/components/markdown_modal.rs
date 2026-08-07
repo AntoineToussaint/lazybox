@@ -160,7 +160,7 @@ impl Component for MarkdownModal {
         );
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "↑/↓ · PgUp/PgDn scroll · click links · Esc close",
+                "↑/↓ · PgUp/PgDn scroll · click links · a ask · Esc close",
                 theme.hint(),
             ))),
             hint_area,
@@ -193,6 +193,10 @@ impl AppComponent<Msg, UserEvent> for MarkdownModal {
                         None
                     }
                     Key::Esc | Key::Char('q') | Key::Enter => Some(Msg::ModalDismissed),
+                    // Escalate this description into a chat about the
+                    // focused PR/issue (#945). The model resolves the
+                    // subject and no-ops with a notice if there is none.
+                    Key::Char('a') => Some(Msg::AskAboutPr),
                     // Reading surface: unknown keys are inert, never an
                     // accidental dismiss.
                     _ => None,

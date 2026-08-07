@@ -791,6 +791,205 @@ showing keybinding search only",
         interrupt.into_iter().collect()
     }
 
+    /// Open the "Ask about this PR" chat (#945) for the focused
+    /// workspace's PR (or, failing that, its first issue). Snapshots the
+    /// task + activity, tears down any prior PR-chat thread, kicks off
+    /// the worktree-diff read that grounds answers, and mounts the modal.
+    pub(super) fn open_pr_chat(&mut self) {
+        use super::PrChatSubject;
+        use lazybox_ipc::WorkspaceDiffTarget;
+
+        let Some(workspace) = self.sidebar.selected_workspace() else {
+            self.flash_hint("no workspace focused to ask about");
+            return;
+        };
+        let Some(task) = workspace
+            .pr
+            .as_ref()
+            .or_else(|| workspace.gh_issues.first())
+            .or_else(|| workspace.linear_issues.first())
+        else {
+            self.flash_hint("this workspace has no PR or issue to ask about");
+            return;
+        };
+        let label = task.id.key.clone();
+        let task = task.clone();
+        let activity = workspace.activity.clone();
+        let workspace_key = workspace.key.clone();
+        // Diff-first grounding: prefer a session worktree, else a linked
+        // checkout. Neither → no worktree, answered from metadata alone.
+        let target = workspace
+            .default_session()
+            .map(|session| WorkspaceDiffTarget::Session(session.id))
+            .or_else(|| {
+                workspace
+                    .linked_checkout
+                    .as_ref()
+                    .map(|_| WorkspaceDiffTarget::LinkedCheckout)
+            });
+        let has_worktree = target.is_some();
+
+        // Tear down any prior PR-chat run and thread before rebinding.
+        if let Some(run_id) = self.pr_chat_run.take() {
+            self.send_cmd(IpcCommand::InterruptAgentRun { run_id });
+        }
+        self.pr_chat_request = None;
+        self.pr_chat_pending.clear();
+        self.pr_chat_held_question = None;
+        *self.pr_chat_convo_mut() = Default::default();
+
+        self.pr_chat_subject = Some(PrChatSubject {
+            task,
+            activity,
+            has_worktree,
+        });
+        let grounding = if has_worktree {
+            "Grounded in the PR's metadata, activity, and local worktree diff.".to_string()
+        } else {
+            "No worktree checked out — grounded in the PR's metadata and activity only.".to_string()
+        };
+        if let Some(target) = target {
+            self.pr_chat_diff = None;
+            self.pr_chat_diff_target = Some((workspace_key.clone(), target.clone()));
+            self.send_cmd(IpcCommand::InspectWorkspaceDiff {
+                workspace_key,
+                target,
+            });
+        } else {
+            // Nothing to inspect — resolve immediately so the first
+            // question starts without waiting for a reply that never comes.
+            self.pr_chat_diff = Some(None);
+            self.pr_chat_diff_target = None;
+        }
+
+        self.mount_modal(
+            Id::PrChat,
+            crate::realm::components::pr_chat::PrChat::new(
+                self.pr_chat_convo.clone(),
+                label,
+                grounding,
+            ),
+        );
+        self.redraw = true;
+    }
+
+    /// A question submitted from the `PrChat` modal. Mirrors
+    /// [`Self::handle_help_question`]: follow-ups ride the live run, new
+    /// questions reset the thread. The opening question is held until the
+    /// diff reply lands so it enters the run's context-bearing first turn.
+    pub fn handle_pr_chat_question(
+        &mut self,
+        question: String,
+        kind: HelpQuestionKind,
+    ) -> Vec<IpcCommand> {
+        use lazybox_ipc::AgentInputMessage;
+
+        let question = question.trim().to_string();
+        if question.is_empty() {
+            return Vec::new();
+        }
+        let mut cmds = if kind == HelpQuestionKind::NewQuestion {
+            self.reset_pr_chat_run()
+        } else {
+            Vec::new()
+        };
+        {
+            let mut convo = self.pr_chat_convo_mut();
+            convo.notice = None;
+            convo
+                .turns
+                .push(crate::realm::components::help_ask::HelpTurn {
+                    question: question.clone(),
+                    ..Default::default()
+                });
+            convo.activate_thread();
+        }
+        self.redraw = true;
+        if let Some(run_id) = self.pr_chat_run {
+            cmds.push(IpcCommand::SendAgentInput {
+                run_id,
+                message: AgentInputMessage {
+                    text: Some(question),
+                    json: None,
+                },
+            });
+            return cmds;
+        }
+        if self.pr_chat_request.is_some() {
+            self.pr_chat_pending.push(question);
+            return cmds;
+        }
+        // Opening question: hold it until the diff read resolves, so it
+        // rides the run's first turn (the only one that carries context).
+        if self.pr_chat_diff.is_none() {
+            self.pr_chat_held_question = Some((question, kind));
+            return cmds;
+        }
+        if let Some(cmd) = self.start_pr_chat_run(&question) {
+            cmds.push(cmd);
+        }
+        cmds
+    }
+
+    pub(super) fn start_pr_chat_run(&mut self, question: &str) -> Option<IpcCommand> {
+        use lazybox_ipc::{AgentInputMessage, AgentRunAccess, AgentRuntimeMode};
+        use lazybox_tui_core::help::{HELP_AGENT_PREFERENCE, select_help_agent};
+        use lazybox_tui_core::pr_chat::{PR_CHAT_SESSION_KEY, PrDiff, pr_context};
+
+        let subject = self.pr_chat_subject.as_ref()?;
+        let Some(agent) = select_help_agent(&self.agents, Some(self.sidebar.default_agent()))
+        else {
+            self.pr_chat_pending.clear();
+            let mut convo = self.pr_chat_convo_mut();
+            convo.close_open_turns();
+            convo.deactivate_thread();
+            convo.notice = Some(format!(
+                "Ask about this PR needs a structured agent ({}) enabled",
+                HELP_AGENT_PREFERENCE.join(" or ")
+            ));
+            return None;
+        };
+        let diff = match &self.pr_chat_diff {
+            Some(Some(dto)) => PrDiff::Available(dto),
+            Some(None) if subject.has_worktree => PrDiff::Unreadable,
+            _ => PrDiff::NoWorktree,
+        };
+        let context = pr_context(&subject.task, &subject.activity, diff);
+        let request_id =
+            lazybox_ipc::AgentRunRequestId(uuid::Uuid::new_v4().hyphenated().to_string());
+        self.pr_chat_request = Some(request_id.clone());
+        Some(IpcCommand::StartAgentRun {
+            request_id,
+            session_key: lazybox_core::SessionKey::new(PR_CHAT_SESSION_KEY),
+            session_id: None,
+            source_terminal_id: None,
+            agent: agent.to_string(),
+            mode: AgentRuntimeMode::StreamJson,
+            cwd: None,
+            initial_input: Some(AgentInputMessage {
+                text: Some(format!("{context}\n\n# Question\n\n{question}")),
+                json: None,
+            }),
+            resume_latest: false,
+            access: AgentRunAccess::ReadOnly,
+        })
+    }
+
+    /// Interrupt the live PR-chat run and clear the thread, keeping the
+    /// subject + diff so the next question starts a fresh run with the
+    /// same context.
+    fn reset_pr_chat_run(&mut self) -> Vec<IpcCommand> {
+        let interrupt = self
+            .pr_chat_run
+            .take()
+            .map(|run_id| IpcCommand::InterruptAgentRun { run_id });
+        self.pr_chat_request = None;
+        self.pr_chat_pending.clear();
+        self.pr_chat_held_question = None;
+        *self.pr_chat_convo_mut() = Default::default();
+        interrupt.into_iter().collect()
+    }
+
     /// Route a Choice modal pick through the pure tui-core resolver,
     /// then apply its typed outcome.
     ///

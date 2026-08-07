@@ -339,7 +339,13 @@ code, images) — preview, or clicking `+N more lines`, opens the full
 body in a scrollable markdown reader modal (#448: proper
 headings/lists/code/links/tables, `j/k`·PgUp/PgDn·wheel to scroll,
 click a link to open it, `Esc` to close; the header hint reads
-`d · read full` when `d` will open it, `d · collapse` otherwise),
+`d · read full` when `d` will open it, `d · collapse` otherwise);
+`a` in the reader opens **Ask about this PR** (#945) — a streamed
+chat scoped to the focused PR/issue, reusing the Ask Lazybox
+agent-piggyback with a PR-scoped context (metadata + activity + the
+worktree diff when a checkout exists; degrades to metadata-only with
+a note when none is), follow-ups keep context (`Tab` toggles
+follow-up / new question), `Esc` returns to the reader.
 `m` mark the focused row read, `z` undo mark-read, `r` reply.
 
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable

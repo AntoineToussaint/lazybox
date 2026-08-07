@@ -6629,6 +6629,7 @@ mod merge_focus_follow_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -10342,6 +10343,7 @@ mod destructive_confirm_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };
@@ -11722,6 +11724,7 @@ mod focus_mode_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };
@@ -12041,6 +12044,7 @@ mod jump_to_workspace_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -13618,6 +13622,7 @@ mod merge_latch_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };
@@ -16915,6 +16920,7 @@ mod spawn_focus_steal_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };
@@ -17040,6 +17046,7 @@ mod repo_labels_failure_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }
@@ -17418,6 +17425,7 @@ mod keybinding_audit_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         };
@@ -18524,6 +18532,7 @@ mod optimistic_mutation_tests {
             deletions: 0,
             kind: None,
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }

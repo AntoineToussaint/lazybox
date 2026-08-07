@@ -71,6 +71,7 @@ fn make_task(repo: &str, key: &str, updated: DateTime<Utc>) -> Task {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        linked_tasks: vec![],
         priority: None,
         state_label: None,
     }

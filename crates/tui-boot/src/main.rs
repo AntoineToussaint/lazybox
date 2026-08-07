@@ -16,6 +16,9 @@
 //!   lazybox workspace create --name N   create a taskless pre-PR workspace via
 //!                                  the daemon socket (--project/--repo or
 //!                                  inferred from cwd; --agent spawns into it)
+//!   lazybox sandbox ensure          provision a remote dev box (terraform);
+//!                                  wake/sleep/status/connect/destroy manage
+//!                                  its lifecycle (GCP; per-worktree handle)
 //!   lazybox slack init              interactive Slack token setup wizard
 //!   lazybox slack doctor            read-only validation of an existing setup
 //!   lazybox slack prune             archive stale per-(session, agent) channels
@@ -32,6 +35,7 @@
 // the Slack CLI flows, and the test harness.
 mod build_guard;
 mod device_cli;
+mod sandbox;
 mod serve;
 mod setup_detect;
 mod setup_persist;
@@ -384,6 +388,7 @@ async fn main() -> anyhow::Result<()> {
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
         Some("device") => device_cli::device_subcommand(&args[1..]).await,
+        Some("sandbox") => sandbox::sandbox_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args
                 .get(1)

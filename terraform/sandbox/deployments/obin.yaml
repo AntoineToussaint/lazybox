@@ -1,0 +1,29 @@
+# obin deployment — the box we already built, as an overlay on the
+# generic default.
+#
+# Deep-merged on top of `default.yaml`: only the keys obin changes appear
+# here. Everything else (image, disk, base packages, NAT) inherits.
+name: obin
+
+# obin's multi-service Next.js + FastAPI + Python-agent stack wants more
+# cores than the generic box.
+machine_type: e2-standard-8
+
+# The obin web app (:3000), harness (:8082), and JSON gateway (:8787) are
+# forwarded to localhost so WorkOS login stays a clean localhost:3000.
+workload_ports:
+  - 3000
+  - 8082
+  - 8787
+
+# Cross-project grants the box's service account needs (Vertex, Firestore
+# on platform-portal-dev, GCS skills, run.invoker on dev tools).
+service_account_roles:
+  - roles/aiplatform.user
+  - roles/datastore.user
+  - roles/storage.objectViewer
+  - roles/run.invoker
+
+# The stack repo, cloned on first boot, then brought up.
+repo: obin-ai/obin-platform
+bringup: tools/local-dev/dev up portal

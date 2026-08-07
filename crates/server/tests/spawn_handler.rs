@@ -3586,6 +3586,7 @@ fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> laz
         deletions: 0,
         kind: None,
         closes_issues: closes,
+        linked_tasks: vec![],
         priority: None,
         state_label: None,
     }

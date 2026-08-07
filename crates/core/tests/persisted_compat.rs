@@ -110,6 +110,10 @@ fn maximal_pr_task() -> Task {
             source: "github".into(),
             key: "acme/widget#3".into(),
         }],
+        linked_tasks: vec![TaskId {
+            source: "linear".into(),
+            key: "ENG-42".into(),
+        }],
         priority: None,
         state_label: None,
     }

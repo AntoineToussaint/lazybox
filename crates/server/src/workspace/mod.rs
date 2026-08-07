@@ -1432,6 +1432,7 @@ mod set_auto_merge_on_green_tests {
             deletions: 0,
             kind: Some(TaskKind::Pr),
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }

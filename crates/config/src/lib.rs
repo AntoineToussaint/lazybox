@@ -52,6 +52,12 @@ pub struct Config {
     /// [`RemoteConfig`].
     #[serde(default, skip_serializing_if = "RemoteConfig::is_empty")]
     pub remote: RemoteConfig,
+    /// Remote dev-box lifecycle (#931): the GCP project/placement, the
+    /// Terraform module + deployment overlay, and the socket the connect
+    /// forward carries. Read by `lazybox sandbox …`. Empty by default. See
+    /// [`SandboxConfig`].
+    #[serde(default, skip_serializing_if = "SandboxConfig::is_empty")]
+    pub sandbox: SandboxConfig,
     /// Custom + override editor entries. Merged with builtins
     /// (Zed/VS Code/Cursor/…) at startup. `id` matches builtins
     /// to override; new ids extend.
@@ -253,6 +259,66 @@ impl RemoteConfig {
     /// out of a written config rather than serializing as `remote: {}`.
     pub fn is_empty(&self) -> bool {
         self.tunnel.is_none() && self.host.is_none()
+    }
+}
+
+/// `sandbox:` block — remote dev-box lifecycle wiring for
+/// `lazybox sandbox <ensure|wake|sleep|status|connect|destroy>` (#931).
+/// Names the GCP project/placement, the Terraform module + deployment
+/// overlay, and the socket the connect forward carries. Every field is
+/// optional so the block round-trips out of a written config when unset,
+/// and each command's flags override what is set here.
+///
+/// ```yaml
+/// sandbox:
+///   provider: gcp
+///   project: my-proj
+///   region: us-central1
+///   zone: us-central1-a
+///   terraform_dir: ./terraform/sandbox/gcp
+///   deployment: ./terraform/sandbox/deployments/obin.yaml
+///   remote_socket: /home/me/.lazybox/run/daemon.sock
+///   ports: [3000, 8082, 8787]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// Provider id; only `gcp` is implemented today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// Path to the Terraform module `ensure`/`destroy` run against
+    /// (`terraform/sandbox/gcp`); a project override points at its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terraform_dir: Option<PathBuf>,
+    /// Path to a deployment overlay YAML deep-merged onto the embedded
+    /// default; unset → the generic default recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<PathBuf>,
+    /// SSH/gcloud login user for the IAP connect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    /// Absolute daemon-socket path on the box the connect forward carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_socket: Option<String>,
+    /// Local socket the forward binds; defaults to the `--connect` path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_socket: Option<PathBuf>,
+    /// Workload TCP ports the connect forward carries (obin `:3000` …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<u16>,
+}
+
+impl SandboxConfig {
+    /// True when nothing is configured — lets the whole block round-trip
+    /// out of a written config rather than serializing as `sandbox: {}`.
+    pub fn is_empty(&self) -> bool {
+        *self == SandboxConfig::default()
     }
 }
 

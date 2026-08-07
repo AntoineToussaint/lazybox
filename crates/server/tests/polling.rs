@@ -19,8 +19,8 @@
 
 use chrono::Utc;
 use lazybox_core::{
-    Activity, ActivityKind, CiStatus, ProviderConfig, ReviewStatus, Task, TaskId, TaskRole,
-    TaskState,
+    Activity, ActivityKind, CiStatus, ProviderConfig, ReviewStatus, Task, TaskId, TaskKind,
+    TaskRole, TaskState,
 };
 use lazybox_ipc::{Command, Event, TerminalInputIntent, channel};
 use lazybox_server::backend::{MockBackend, SessionBackend};
@@ -196,6 +196,7 @@ fn make_task(key: &str) -> Task {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        linked_tasks: vec![],
         priority: None,
         state_label: None,
     }
@@ -2813,6 +2814,152 @@ async fn pr_polled_after_issue_collapses_them_into_one_row() {
         "silent merges must emit WorkspaceMerged for the footer notice",
     );
 }
+// ── Linear ticket ↔ PR collapsing (cross-provider, #922) ────────────
+
+/// A Linear ticket task (source `linear`, issue kind), optionally
+/// carrying GitHub PR links from its attachment (`linked_tasks`).
+fn make_linear_ticket(ident: &str, linked_prs: &[&str]) -> Task {
+    let mut t = make_task("o/r#1");
+    t.id = TaskId {
+        source: "linear".into(),
+        key: ident.into(),
+    };
+    t.title = format!("Ticket {ident}");
+    t.url = format!("https://linear.app/acme/issue/{ident}");
+    t.repo = Some("linear/ENG".into());
+    t.kind = Some(TaskKind::Issue);
+    t.linked_tasks = linked_prs
+        .iter()
+        .map(|k| TaskId {
+            source: "github".into(),
+            key: (*k).into(),
+        })
+        .collect();
+    t
+}
+
+/// A GitHub PR that references Linear ticket(s) via `linked_tasks` —
+/// what the GitHub provider mints after parsing a Linear identifier out
+/// of the branch/title/body.
+fn make_pr_linking_linear(pr_key: &str, idents: &[&str]) -> Task {
+    let mut t = make_task(pr_key);
+    t.linked_tasks = idents
+        .iter()
+        .map(|i| TaskId {
+            source: "linear".into(),
+            key: (*i).into(),
+        })
+        .collect();
+    t
+}
+
+fn workspace_keys(config: &ServerConfig) -> Vec<String> {
+    config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect()
+}
+
+fn sole_workspace(config: &ServerConfig) -> lazybox_core::Workspace {
+    let mut rows = config.store.list_workspaces().unwrap();
+    assert_eq!(rows.len(), 1, "expected exactly one workspace row");
+    serde_json::from_str(&rows.pop().unwrap().workspace_json.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn pr_with_linear_identifier_collapses_onto_linear_ticket() {
+    // Linear-first: ticket exists, then a PR whose branch carries the
+    // Linear identifier (`ENG-123`) shows up. The ticket folds into the
+    // PR workspace, mirroring the GitHub issue → PR collapse.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_linear_ticket("ENG-123", &[])).await;
+    polling::upsert(&config, make_pr_linking_linear("o/r#5", &["ENG-123"])).await;
+
+    let keys = workspace_keys(&config);
+    assert_eq!(
+        keys.len(),
+        1,
+        "ticket + PR must collapse to one row, got {keys:?}"
+    );
+    let ws = sole_workspace(&config);
+    assert!(ws.pr.is_some(), "the surviving row is the PR workspace");
+    assert_eq!(
+        ws.linear_issues
+            .iter()
+            .map(|t| t.id.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ENG-123"],
+        "the Linear ticket must surface inside the PR workspace",
+    );
+}
+
+#[tokio::test]
+async fn linear_attachment_collapses_ticket_onto_pr() {
+    // Attachment signal: the ticket (polled first) carries the PR link
+    // from Linear's GitHub integration; the PR itself has no branch
+    // reference. The PR poll still folds the ticket via the reverse
+    // attachment scan.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_linear_ticket("ENG-9", &["o/r#5"])).await;
+    polling::upsert(&config, make_task("o/r#5")).await;
+
+    let keys = workspace_keys(&config);
+    assert_eq!(
+        keys.len(),
+        1,
+        "attachment-linked pair must collapse, got {keys:?}"
+    );
+    let ws = sole_workspace(&config);
+    assert!(ws.pr.is_some(), "the surviving row is the PR workspace");
+    assert_eq!(
+        ws.linear_issues
+            .iter()
+            .map(|t| t.id.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ENG-9"],
+    );
+}
+
+#[tokio::test]
+async fn linear_attachment_routes_ticket_into_existing_pr() {
+    // PR-first: the PR workspace already exists; a ticket polled with an
+    // attachment link routes straight into it without minting a
+    // standalone ticket row first.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#5")).await;
+    polling::upsert(&config, make_linear_ticket("ENG-9", &["o/r#5"])).await;
+
+    let keys = workspace_keys(&config);
+    assert_eq!(
+        keys.len(),
+        1,
+        "ticket must route into the PR row, got {keys:?}"
+    );
+    let ws = sole_workspace(&config);
+    assert!(ws.pr.is_some());
+    assert_eq!(ws.linear_issues.len(), 1);
+    assert_eq!(ws.linear_issues[0].id.key, "ENG-9");
+}
+
+#[tokio::test]
+async fn unmatched_linear_and_pr_stay_separate() {
+    // No shared identifier and no attachment → two independent rows.
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_linear_ticket("ENG-999", &[])).await;
+    polling::upsert(&config, make_task("o/r#8")).await;
+
+    let mut keys = workspace_keys(&config);
+    keys.sort();
+    assert_eq!(
+        keys.len(),
+        2,
+        "unmatched ticket + PR must stay separate, got {keys:?}"
+    );
+}
+
 /// `make_activity` with a deterministic timestamp so newest-first
 /// ordering (and therefore index-based read marks) is stable across
 /// the merge these tests exercise.

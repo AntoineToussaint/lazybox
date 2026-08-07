@@ -69,7 +69,10 @@ impl UpsertContext {
                 let Some(pr) = &ws.pr else {
                     continue;
                 };
-                for id in &pr.closes_issues {
+                // `closes_issues` (GitHub same-provider) plus `linked_tasks`
+                // (the Linear identifier a PR carries in its branch/title/body,
+                // #922) both claim their referent for routing.
+                for id in pr.closes_issues.iter().chain(pr.linked_tasks.iter()) {
                     closes_index
                         .entry(id.clone())
                         .or_insert_with(|| ws.key.clone());
@@ -106,7 +109,7 @@ pub(super) async fn upsert_with_context(
         // claims those issues for the rest of this batch, so an issue
         // task later in the same tick routes into this PR workspace
         // instead of building a standalone row.
-        for id in &task.closes_issues {
+        for id in task.closes_issues.iter().chain(task.linked_tasks.iter()) {
             ctx.closes_index
                 .entry(id.clone())
                 .or_insert_with(|| WorkspaceKey::new(candidate_key.clone()));
@@ -130,6 +133,20 @@ pub(super) async fn upsert_with_context(
                 issue = %task.id,
                 pr_workspace = %pr_key,
                 "routing issue upsert into PR workspace (closingIssuesReferences)"
+            );
+            return upsert_into_workspace_key(config, &pr_key, task).await;
+        }
+        // Cross-provider attachment signal (#922): a Linear ticket whose
+        // GitHub attachment names a PR routes into that PR's workspace —
+        // the link lives on the ticket, not the PR, so `closes_index`
+        // (built from PR-side references) can't carry it.
+        if !already_standalone
+            && let Some(pr_key) = pr_workspace_for_linked_tasks(config, &task.linked_tasks)
+        {
+            tracing::info!(
+                ticket = %task.id,
+                pr_workspace = %pr_key,
+                "routing Linear ticket upsert into PR workspace (attachment link)"
             );
             return upsert_into_workspace_key(config, &pr_key, task).await;
         }
@@ -984,6 +1001,28 @@ fn project_record_for_workspace(
         project_json: Some(json),
     };
     Ok(Some((project, record)))
+}
+
+/// The workspace key of an existing PR workspace referenced by a Linear
+/// ticket's `linked_tasks` (a GitHub PR id parsed from the ticket's
+/// attachment, #922). Returns the first GitHub link whose deterministic
+/// workspace key holds an actual PR. `None` when no link points at a
+/// materialized PR workspace yet — the PR poll's own merge pass folds
+/// the ticket once it lands.
+fn pr_workspace_for_linked_tasks(
+    config: &ServerConfig,
+    linked_tasks: &[lazybox_core::TaskId],
+) -> Option<WorkspaceKey> {
+    for id in linked_tasks {
+        if id.source != lazybox_gh::SOURCE {
+            continue;
+        }
+        let pr_key = super::issue_id_to_workspace_key(id);
+        if load_workspace(config, &pr_key).is_some_and(|ws| ws.pr.is_some()) {
+            return Some(pr_key);
+        }
+    }
+    None
 }
 
 /// Heuristic for "is this Task the PR side of a PR/issue pair?".

@@ -1669,10 +1669,18 @@ pub enum Event {
     /// branch protection, required checks, review required, conflict,
     /// permissions) rather than a self-fading flash. The PR stays
     /// Open/actionable.
+    ///
+    /// `conflict` marks the specific case where a user-initiated `g m`
+    /// was rejected because the branch has merge conflicts (issue #947).
+    /// The TUI then offers a one-key resolve flow (spawn/attach the
+    /// agent + inject the conflict-resolution prompt) instead of a
+    /// dead-end error. The background auto-merge path always leaves this
+    /// false — it never pops an unprompted modal.
     PrMergeFailed {
         workspace_key: lazybox_core::WorkspaceKey,
         pr_label: String,
         reason: String,
+        conflict: bool,
     },
     /// The issue for `workspace_key` was just closed via
     /// `Command::CloseIssue`. The local Task still reads `Open` until

@@ -131,6 +131,7 @@ pub(crate) fn occurrence_from_event(
             workspace_key,
             pr_label,
             reason,
+            ..
         } => Some(occurrence(
             "github",
             "permanent",
@@ -330,6 +331,7 @@ mod tests {
                 workspace_key: WorkspaceKey::new("github:o/r#1"),
                 pr_label: "o/r#1".into(),
                 reason: "rate limited".into(),
+                conflict: false,
             },
             at(),
         )
@@ -339,6 +341,7 @@ mod tests {
                 workspace_key: WorkspaceKey::new("github:o/r#2"),
                 pr_label: "o/r#2".into(),
                 reason: "rate limited".into(),
+                conflict: false,
             },
             at(),
         )

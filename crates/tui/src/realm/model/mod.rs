@@ -249,6 +249,11 @@ pub enum Id {
     /// modals (MergePrConfirm, the kill latch, …) — one modal id,
     /// one Yes-handler, one place to remember.
     ActionConfirm,
+    /// Merge-conflict resolve prompt (issue #947). Offered when a `g m`
+    /// merge is blocked (or rejected) by conflicts: `Msg::Confirmed(true)`
+    /// spawns/attaches the workspace's agent with the conflict-resolution
+    /// prompt. The target workspace lives in `ModalFlow::ConflictResolve`.
+    ConflictResolve,
     /// Snippet picker mounted from the terminal pane on `]]s<key>`.
     /// Filter input + scrollable snippet list. `Msg::ChoicePicked`
     /// resolves the picked row to a snippet body, which the
@@ -685,6 +690,11 @@ pub(crate) enum ModalFlow {
         summary: String,
         follow: Option<lazybox_core::SessionKey>,
     },
+    /// Merge-conflict resolve prompt (issue #947). Workspace resolved at
+    /// mount time so a cursor drift under the modal can't redirect the
+    /// resolve to the wrong PR. `Msg::Confirmed(true)` runs the
+    /// FixConflict work flow against this workspace.
+    ConflictResolve { workspace: lazybox_core::SessionKey },
     /// Action proposed by the Ask Lazybox help agent (#353). For
     /// `scaffold_skill`, `skill_root` is the destination repo resolved
     /// and shown to the user at propose time; apply writes there rather

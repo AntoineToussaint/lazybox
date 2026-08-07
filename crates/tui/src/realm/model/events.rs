@@ -1281,12 +1281,22 @@ impl<T: TerminalAdapter> Model<T> {
             workspace_key,
             pr_label,
             reason,
+            conflict,
         } = &event
         {
-            self.flash_action_error(
-                workspace_key,
-                action_failure_notice("merge", pr_label, reason),
-            );
+            if *conflict {
+                // Conflict is a branch in the road, not a wall (#947):
+                // offer the one-key resolve flow instead of a dead-end
+                // red error. The daemon corrected the cached mergeable
+                // state before this event, so the CONFLICT pill is
+                // already accurate.
+                self.mount_conflict_resolve(workspace_key, pr_label);
+            } else {
+                self.flash_action_error(
+                    workspace_key,
+                    action_failure_notice("merge", pr_label, reason),
+                );
+            }
             self.redraw = true;
             return;
         }

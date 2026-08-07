@@ -471,6 +471,12 @@ pub async fn run_attempt<B: MergeBackend>(
                 workspace_key: key.clone(),
                 pr_label,
                 reason: super::handlers::humanize_mutation_failure("auto-merge", &e),
+                // Background path: `commit_fresh_task` below already
+                // persists the re-fetched mergeable state, and an
+                // unprompted resolve modal would yank focus (#947). Keep
+                // the quiet loud-error surface; the resolve flow is a
+                // manual-`g m` affordance only.
+                conflict: false,
             });
             commit_fresh_task(config, key, fresh).await;
         }

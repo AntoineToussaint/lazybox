@@ -2335,6 +2335,15 @@ impl Sidebar {
     }
 
     fn recompute_visible_inner(&mut self, preserve_header_park: bool) {
+        // A rebuild replaces `visible`, so the range-sweep anchor (an
+        // index into the OLD list) no longer names the row it did — a
+        // stale index would make `apply_range_fill` slice out of bounds
+        // and panic, or select a shifted range. End the sweep; the next
+        // Shift-arrow re-anchors from the (key-preserved) cursor, and the
+        // already-marked rows persist in `broadcast_selected`. The cursor
+        // repark below writes `self.cursor` directly (not via
+        // `set_cursor`), so it can't clear the anchor for us.
+        self.end_range_select();
         // Snapshot cursor anchors before the rebuild so we can
         // restore the user's focused row when the new visible list
         // is in place. Two anchors: (a) parked-on-header preserves

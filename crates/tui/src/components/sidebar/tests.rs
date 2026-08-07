@@ -2622,6 +2622,46 @@ mod broadcast_select_tests {
         );
     }
 
+    /// #932 regression: a `visible` rebuild mid-sweep (here a workspace
+    /// removed by a poll) must end the sweep — the anchor was an index
+    /// into the OLD list, so a stale one would make the next Shift-arrow
+    /// slice out of bounds and panic. After the rebuild the sweep starts
+    /// fresh and already-marked rows persist; no crash.
+    #[test]
+    fn rebuild_mid_sweep_ends_the_range_without_panicking() {
+        let mut sb = sidebar_with_issues(&[
+            ("1", "Alpha"),
+            ("2", "Beta"),
+            ("3", "Gamma"),
+            ("4", "Delta"),
+        ]);
+        let keys: Vec<SessionKey> = sb
+            .visible_rows()
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        // Anchor on the LAST row (a high index) and sweep up one.
+        assert!(sb.focus_workspace_key(&keys[3]));
+        sb.extend_selection(-1);
+        assert_eq!(sb.selected_broadcast_keys(), keys[2..4].to_vec());
+        // A poll removes the FIRST workspace: the list shrinks and the
+        // cursor reparks by key WITHOUT clearing the anchor index.
+        sb.on_event(&Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
+            keys[0].as_str(),
+        )));
+        // The next sweep must NOT panic; it re-anchors from the current
+        // cursor and the earlier marks stay put.
+        let n = sb.extend_selection(-1);
+        assert!(n.is_some(), "sweep resolved without panicking");
+        assert!(
+            sb.is_broadcast_selected(&keys[2]) && sb.is_broadcast_selected(&keys[3]),
+            "rows marked before the rebuild persist",
+        );
+    }
+
     /// A removed workspace drops out of the selection so a later
     /// broadcast can't target a ghost.
     #[test]

@@ -1281,10 +1281,14 @@ pub struct Model<T: TerminalAdapter> {
     /// inside the terminal pane do lazybox-side text selection.
     #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
-    /// Most recent crossterm mouse event received while capture was
-    /// requested. Old evidence expires so a host that stops forwarding
-    /// events cannot remain verified indefinitely.
-    mouse_input_observed_at: Option<Instant>,
+    /// Set once a crossterm mouse event arrives while capture is on —
+    /// proof the host is forwarding mouse reports. Does NOT decay on idle:
+    /// a still pointer legitimately sends no events, and expiring on that
+    /// basis is the #949 false-positive. Re-armed to `false` only on a
+    /// state change that can genuinely reset host reporting — a capture
+    /// toggle or a focus regain — after which the next mouse event
+    /// re-verifies silently.
+    host_mouse_verified: bool,
     mouse_unverified_logged: bool,
     mouse_capture_requested_at: Instant,
     /// Host-terminal I/O boundary. The real model writes crossterm's
@@ -1901,7 +1905,7 @@ impl<T: TerminalAdapter> Model<T> {
             daemon_disconnect_notified: false,
             daemon_reconnecting_notified: false,
             mouse_capture_on: true,
-            mouse_input_observed_at: None,
+            host_mouse_verified: false,
             mouse_unverified_logged: false,
             mouse_capture_requested_at: Instant::now(),
             mouse_capture_requester,

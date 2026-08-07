@@ -1704,7 +1704,8 @@ mod host_event_redraw_tests {
     #[test]
     fn focus_gained_forces_redraw() {
         let mut m = build_model();
-        m.mouse_input_observed_at = Some(std::time::Instant::now());
+        m.host_mouse_verified = true;
+        m.status.notice = None;
         m.mouse_capture_requested_at =
             std::time::Instant::now() - std::time::Duration::from_secs(3);
         let previous_request = m.mouse_capture_requested_at;
@@ -1716,7 +1717,11 @@ mod host_event_redraw_tests {
         );
         assert!(
             !m.mouse_input_verified(),
-            "focus regain must require fresh evidence of host mouse reporting"
+            "focus regain must re-arm verification so genuinely broken host reporting re-surfaces"
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "focus regain must re-arm SILENTLY — the alarming 'waiting for host reporting' flash was the #949 bug"
         );
         assert!(
             m.mouse_capture_requested_at > previous_request,

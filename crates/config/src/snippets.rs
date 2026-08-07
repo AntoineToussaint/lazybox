@@ -591,6 +591,24 @@ impl Snippets {
                 ),
             ),
             (
+                "freshen".to_string(),
+                entry(
+                    "Git & PR",
+                    "Make the PR mergeable: update from main, resolve, verify, push",
+                    "The PR won't merge because the branch is behind `main` (GitHub \
+                     reports the required checks as \"expected\"). Bring it fully current: \
+                     update from the latest `main` — rebase for clean history, or merge \
+                     if the branch is shared or already pushed widely — and resolve every \
+                     conflict by understanding both sides, preserving the intent of each \
+                     change rather than blindly taking one side. After resolving, re-run \
+                     the build, tests, and linter to confirm the merge didn't break \
+                     anything, then push (`--force-with-lease` if you rebased) so CI \
+                     re-runs and the required status checks report against an up-to-date \
+                     head. Report what conflicted, how you resolved each, and confirm the \
+                     branch is now mergeable.",
+                ),
+            ),
+            (
                 "push".to_string(),
                 entry(
                     "Git & PR",
@@ -1568,6 +1586,21 @@ snippets:
                 .body
                 .contains("git fetch origin main")
         );
+    }
+
+    /// `freshen` is the one-shot "make it actually mergeable" flow for the
+    /// #1 cause of failing-on-green merges — a branch behind `main` (#929).
+    /// It ships as a Git & PR built-in and encodes the full discipline:
+    /// understand both sides, re-verify, `--force-with-lease` after a
+    /// rebase.
+    #[test]
+    fn builtin_ships_freshen() {
+        let b = Snippets::builtin();
+        let s = b.get("freshen").expect("`freshen` ships built-in");
+        assert_eq!(s.category, "Git & PR");
+        assert_eq!(s.origin, SnippetOrigin::BuiltIn);
+        assert!(s.body.contains("--force-with-lease"));
+        assert!(s.body.contains("required status checks"));
     }
 
     #[test]

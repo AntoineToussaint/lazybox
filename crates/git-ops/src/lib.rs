@@ -498,6 +498,18 @@ impl WorktreeManager {
             .join(format!("{owner}-{repo}-{safe_branch}"))
     }
 
+    /// Whether a lazybox-provisioned worktree currently exists on disk
+    /// for `owner/repo` on `branch`. A single `stat` on the
+    /// deterministic worktree path — no git subprocess. The reconcile
+    /// sweep consults this to refuse pruning a workspace whose worktree
+    /// is still live on disk even after the workspace record has lost
+    /// its session (issue #924).
+    pub async fn worktree_exists(&self, owner: &str, repo: &str, branch: &str) -> bool {
+        tokio::fs::try_exists(self.worktree_path(owner, repo, branch))
+            .await
+            .unwrap_or(false)
+    }
+
     /// Ensure a healthy bare clone exists at the canonical path,
     /// cloning if needed. Caller must hold the repo lock.
     ///
@@ -4174,6 +4186,27 @@ mod health_probe_tests {
         assert!(
             bare_repo_health(default_git_runner(), &file).await.is_err(),
             "a probe that couldn't run must propagate an error, not condemn the repo"
+        );
+    }
+
+    /// `worktree_exists` is a cheap existence probe on the deterministic
+    /// per-workspace path, and slash-bearing branches map to the same
+    /// dash-safed directory the provisioner writes.
+    #[tokio::test]
+    async fn worktree_exists_reflects_the_deterministic_path() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        assert!(!mgr.worktree_exists("acme", "widgets", "feat").await);
+
+        std::fs::create_dir_all(mgr.worktree_path("acme", "widgets", "feat"))
+            .expect("mkdir worktree");
+        assert!(mgr.worktree_exists("acme", "widgets", "feat").await);
+
+        std::fs::create_dir_all(mgr.worktree_path("acme", "widgets", "feat/slash"))
+            .expect("mkdir slash worktree");
+        assert!(
+            mgr.worktree_exists("acme", "widgets", "feat/slash").await,
+            "a slash-bearing branch resolves to its dash-safed dir"
         );
     }
 

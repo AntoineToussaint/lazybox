@@ -1610,9 +1610,11 @@ describe("credential-free desktop workflow", () => {
   it("stacks activity above the terminal in a resizable right column (#936)", async () => {
     const grid = document.querySelector(".workspace-grid")!;
     const rightPane = document.querySelector<HTMLElement>(".right-pane")!;
-    // Two columns — sidebar (inbox) + right pane — not three.
+    // Two columns — sidebar (inbox) + right pane — not three, with a draggable
+    // splitter between them (#958).
     expect([...grid.children].map((el) => el.className)).toEqual([
       "inbox-panel",
+      "column-splitter",
       "right-pane",
     ]);
     // The right column stacks activity above the terminal, split by the divider.

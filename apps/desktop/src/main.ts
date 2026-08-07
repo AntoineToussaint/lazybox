@@ -278,9 +278,13 @@ const terminalState = element<HTMLSpanElement>("terminal-state");
 const workspaceGrid = document.querySelector<HTMLElement>(".workspace-grid")!;
 const rightPane = document.querySelector<HTMLElement>(".right-pane")!;
 const rightPaneSplitter = element<HTMLDivElement>("right-pane-splitter");
+const columnSplitter = element<HTMLDivElement>("column-splitter");
 const ACTIVITY_MIN_PX = 120;
 const TERMINAL_MIN_PX = 160;
 const ACTIVITY_HEIGHT_KEY = "lazybox.activityHeight";
+const SIDEBAR_MIN_PX = 240;
+const RIGHT_MIN_PX = 360;
+const SIDEBAR_WIDTH_KEY = "lazybox.sidebarWidth";
 const connectionDot = element<HTMLSpanElement>("connection-dot");
 const connectionLabel = element<HTMLSpanElement>("connection-label");
 const statusMessage = element<HTMLSpanElement>("status-message");
@@ -575,6 +579,7 @@ setupDialog.addEventListener("cancel", (event) => {
 
 window.addEventListener("resize", () => scheduleResize());
 window.addEventListener("keydown", handleKeyboard);
+initColumnSplitter();
 initActivitySplitter();
 
 void boot();
@@ -2004,6 +2009,49 @@ function scheduleResize(): void {
       );
     }
   }, 80);
+}
+
+/**
+ * Drag the divider between the inbox and the right pane to resize the sidebar
+ * column. The width persists as `--sidebar-width` on `.workspace-grid` and in
+ * localStorage so columns move only on user drag — never from content growth
+ * or a terminal fit pass.
+ */
+function initColumnSplitter(): void {
+  const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+  if (Number.isFinite(stored) && stored >= SIDEBAR_MIN_PX) {
+    workspaceGrid.style.setProperty("--sidebar-width", `${stored}px`);
+  }
+  columnSplitter.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    columnSplitter.classList.add("dragging");
+    const onMove = (move: MouseEvent) => {
+      if (move.buttons === 0) {
+        onUp();
+        return;
+      }
+      const rect = workspaceGrid.getBoundingClientRect();
+      const max = Math.max(rect.width - RIGHT_MIN_PX, SIDEBAR_MIN_PX);
+      const width = Math.min(
+        Math.max(move.clientX - rect.left, SIDEBAR_MIN_PX),
+        max,
+      );
+      workspaceGrid.style.setProperty("--sidebar-width", `${Math.round(width)}px`);
+      scheduleResize();
+    };
+    const onUp = () => {
+      columnSplitter.classList.remove("dragging");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const current = workspaceGrid.style.getPropertyValue("--sidebar-width");
+      if (current.endsWith("px")) {
+        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(parseInt(current, 10)));
+      }
+      scheduleResize();
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
 }
 
 /**

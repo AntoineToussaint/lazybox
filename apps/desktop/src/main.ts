@@ -276,6 +276,11 @@ const terminalEmpty = element<HTMLDivElement>("terminal-empty");
 const terminalTitle = element<HTMLHeadingElement>("terminal-title");
 const terminalState = element<HTMLSpanElement>("terminal-state");
 const workspaceGrid = document.querySelector<HTMLElement>(".workspace-grid")!;
+const rightPane = document.querySelector<HTMLElement>(".right-pane")!;
+const rightPaneSplitter = element<HTMLDivElement>("right-pane-splitter");
+const ACTIVITY_MIN_PX = 120;
+const TERMINAL_MIN_PX = 160;
+const ACTIVITY_HEIGHT_KEY = "lazybox.activityHeight";
 const connectionDot = element<HTMLSpanElement>("connection-dot");
 const connectionLabel = element<HTMLSpanElement>("connection-label");
 const statusMessage = element<HTMLSpanElement>("status-message");
@@ -570,6 +575,7 @@ setupDialog.addEventListener("cancel", (event) => {
 
 window.addEventListener("resize", () => scheduleResize());
 window.addEventListener("keydown", handleKeyboard);
+initActivitySplitter();
 
 void boot();
 
@@ -1998,6 +2004,44 @@ function scheduleResize(): void {
       );
     }
   }, 80);
+}
+
+/**
+ * Drag the divider between the activity pane and the terminal to resize the
+ * split, mirroring the TUI RightPane. The chosen activity height persists as a
+ * CSS pixel value on `.right-pane` and in localStorage across launches.
+ */
+function initActivitySplitter(): void {
+  const stored = Number(localStorage.getItem(ACTIVITY_HEIGHT_KEY));
+  if (Number.isFinite(stored) && stored >= ACTIVITY_MIN_PX) {
+    rightPane.style.setProperty("--activity-height", `${stored}px`);
+  }
+  rightPaneSplitter.addEventListener("mousedown", (event) => {
+    event.preventDefault();
+    rightPaneSplitter.classList.add("dragging");
+    const onMove = (move: MouseEvent) => {
+      const rect = rightPane.getBoundingClientRect();
+      const max = Math.max(rect.height - TERMINAL_MIN_PX, ACTIVITY_MIN_PX);
+      const height = Math.min(
+        Math.max(move.clientY - rect.top, ACTIVITY_MIN_PX),
+        max,
+      );
+      rightPane.style.setProperty("--activity-height", `${Math.round(height)}px`);
+      scheduleResize();
+    };
+    const onUp = () => {
+      rightPaneSplitter.classList.remove("dragging");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      const current = rightPane.style.getPropertyValue("--activity-height");
+      if (current.endsWith("px")) {
+        localStorage.setItem(ACTIVITY_HEIGHT_KEY, String(parseInt(current, 10)));
+      }
+      scheduleResize();
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  });
 }
 
 function isFocusModeShortcut(event: KeyboardEvent): boolean {

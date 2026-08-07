@@ -151,7 +151,7 @@ textarea:focus-visible {
 .workspace-grid {
   display: grid;
   min-height: 0;
-  grid-template-columns: minmax(270px, 0.78fr) minmax(330px, 1fr) minmax(410px, 1.48fr);
+  grid-template-columns: minmax(270px, 0.78fr) minmax(0, 1fr);
 }
 
 .inbox-panel,
@@ -161,9 +161,40 @@ textarea:focus-visible {
   min-height: 0;
 }
 
-.inbox-panel,
-.activity-panel {
+.inbox-panel {
   border-right: 1px solid #273039;
+}
+
+/* Right column: activity stacked above the terminal, mirroring the TUI
+   RightPane. The splitter drives --activity-height (see main.ts). */
+.right-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.right-pane .activity-panel {
+  flex: 0 0 auto;
+  height: var(--activity-height, 42%);
+  min-height: 120px;
+}
+
+.right-pane .terminal-panel {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.right-pane-splitter {
+  flex: 0 0 6px;
+  border-top: 1px solid #273039;
+  background: #10151b;
+  cursor: row-resize;
+}
+
+.right-pane-splitter:hover,
+.right-pane-splitter.dragging {
+  background: var(--theme-accent, #82d8bd);
 }
 
 .inbox-panel {
@@ -1120,7 +1151,8 @@ h2 {
 }
 
 .workspace-grid.focus-mode .inbox-panel,
-.workspace-grid.focus-mode .activity-panel {
+.workspace-grid.focus-mode .activity-panel,
+.workspace-grid.focus-mode .right-pane-splitter {
   display: none;
 }
 
@@ -1497,7 +1529,7 @@ dialog::backdrop {
 
 @media (max-width: 1120px) {
   .workspace-grid {
-    grid-template-columns: 270px minmax(300px, 0.9fr) minmax(390px, 1.15fr);
+    grid-template-columns: 270px minmax(0, 1fr);
   }
 }
 

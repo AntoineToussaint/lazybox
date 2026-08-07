@@ -1607,6 +1607,39 @@ describe("credential-free desktop workflow", () => {
     expect(element("terminal").classList.contains("focus-only")).toBe(false);
   });
 
+  it("stacks activity above the terminal in a resizable right column (#936)", async () => {
+    const grid = document.querySelector(".workspace-grid")!;
+    const rightPane = document.querySelector<HTMLElement>(".right-pane")!;
+    // Two columns — sidebar (inbox) + right pane — not three.
+    expect([...grid.children].map((el) => el.className)).toEqual([
+      "inbox-panel",
+      "right-pane",
+    ]);
+    // The right column stacks activity above the terminal, split by the divider.
+    expect([...rightPane.children].map((el) => el.className)).toEqual([
+      "activity-panel",
+      "right-pane-splitter",
+      "terminal-panel",
+    ]);
+
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    const splitter = element("right-pane-splitter");
+    splitter.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(splitter.classList.contains("dragging")).toBe(true);
+    window.dispatchEvent(new MouseEvent("mousemove", { clientY: 240 }));
+    expect(rightPane.style.getPropertyValue("--activity-height")).toMatch(
+      /^\d+px$/,
+    );
+    window.dispatchEvent(new MouseEvent("mouseup"));
+    expect(splitter.classList.contains("dragging")).toBe(false);
+  });
+
   it("re-focusing the already-focused tile does no layout/resize work", async () => {
     mockDaemon();
     vi.resetModules();

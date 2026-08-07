@@ -24,6 +24,18 @@ use crate::take_value;
 const DEFAULT_LOCAL_SOCKET: &str = "/tmp/lazybox.sock";
 
 pub async fn sandbox_subcommand(args: &[String]) -> anyhow::Result<()> {
+    // `init_tracing` redirects process stderr into the log file before any
+    // subcommand runs, so a returned error (terraform/gcloud failures land
+    // here) would vanish from the terminal. Echo it on stdout, which is not
+    // redirected, so a failed `lazybox sandbox …` says why.
+    let result = dispatch(args).await;
+    if let Err(err) = &result {
+        println!("sandbox: {err:#}");
+    }
+    result
+}
+
+async fn dispatch(args: &[String]) -> anyhow::Result<()> {
     let (verb, rest) = args
         .split_first()
         .map(|(v, r)| (v.as_str(), r))
@@ -44,20 +56,56 @@ pub async fn sandbox_subcommand(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// The per-worktree key a handle is stored under: `--worktree`, else the
-/// current directory (a box is stamped per worktree, #931).
-fn worktree_key(args: &mut Vec<String>) -> anyhow::Result<String> {
+/// **git worktree root** (a box is stamped per worktree, #931). Resolving
+/// to the worktree root — not the raw cwd — means `ensure` from the repo
+/// root and `wake` from a subdirectory address the same box instead of two
+/// unrelated keys.
+async fn worktree_key(args: &mut Vec<String>) -> anyhow::Result<String> {
     if let Some(k) = take_value(args, "--worktree") {
         return Ok(k);
     }
     let cwd =
         std::env::current_dir().map_err(|e| anyhow::anyhow!("resolve current directory: {e}"))?;
-    Ok(cwd.display().to_string())
+    // Fall back to the cwd itself when not inside a git checkout.
+    let root = git_worktree_root(&cwd).await.unwrap_or(cwd);
+    Ok(root.display().to_string())
+}
+
+/// The `git rev-parse --show-toplevel` for `cwd`, or `None` when `cwd` is
+/// not inside a git worktree.
+async fn git_worktree_root(cwd: &std::path::Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
+/// A stable 8-hex-digit digest of `s`, used to disambiguate box identities
+/// that would otherwise collide on a shared basename. Computed once at
+/// `ensure` and then carried in the persisted handle, so cross-release
+/// hasher drift never matters (later ops read `handle.id`, they don't
+/// recompute it).
+fn short_hash(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:08x}", h.finish() as u32)
 }
 
 /// Derive the GCE instance name: `--name` verbatim (already sanitized by
-/// the caller), else a `lazybox-sbx-<slug>` built from the worktree key.
-/// The `lazybox-sbx-` prefix guarantees the leading-letter + lowercase GCE
-/// naming rule regardless of the worktree path.
+/// the caller), else `lazybox-sbx-<slug>-<hash>` built from the worktree
+/// key. The `lazybox-sbx-` prefix guarantees the leading-letter + lowercase
+/// GCE naming rule regardless of the worktree path, and the trailing hash
+/// keeps two worktrees that share a basename (e.g. `issue-931` in two repos)
+/// from colliding on one box.
 fn instance_name(explicit: Option<String>, worktree: &str) -> String {
     if let Some(name) = explicit
         .map(|n| n.trim().to_string())
@@ -75,9 +123,21 @@ fn instance_name(explicit: Option<String>, worktree: &str) -> String {
     } else {
         slug
     };
-    // GCE caps instance names at 63 chars; keep the prefix + a bounded slug.
-    let slug: String = slug.chars().take(48).collect();
-    format!("lazybox-sbx-{slug}")
+    // GCE caps instance names at 63 chars: 12 (prefix) + slug + 1 (`-`) + 8
+    // (hash) must fit, so bound the slug to 36.
+    let slug: String = slug.chars().take(36).collect();
+    format!("lazybox-sbx-{slug}-{}", short_hash(worktree))
+}
+
+/// This box's isolated Terraform state file, under
+/// `~/.lazybox/v2/sandbox/<hash>/terraform.tfstate` — one per worktree key,
+/// out of the shared module source tree, so two worktrees never share
+/// state.
+fn state_file_for(worktree: &str) -> PathBuf {
+    lazybox_core::paths::state_root()
+        .join("sandbox")
+        .join(short_hash(worktree))
+        .join("terraform.tfstate")
 }
 
 /// Parse `--ports 3000,8082`, falling back to the configured ports.
@@ -95,8 +155,13 @@ fn resolve_ports(raw: Option<String>, cfg: &[u16]) -> anyhow::Result<Vec<u16>> {
         .collect()
 }
 
-/// Build the provider from config + flags. Only `gcp` is implemented.
-fn resolve_provider(sc: &SandboxConfig, args: &mut Vec<String>) -> anyhow::Result<GcpProvider> {
+/// Build the provider from config + flags, with this worktree's isolated
+/// Terraform state. Only `gcp` is implemented.
+fn resolve_provider(
+    sc: &SandboxConfig,
+    args: &mut Vec<String>,
+    worktree: &str,
+) -> anyhow::Result<GcpProvider> {
     let provider = take_value(args, "--provider")
         .or_else(|| sc.provider.clone())
         .unwrap_or_else(|| "gcp".to_string());
@@ -115,6 +180,7 @@ fn resolve_provider(sc: &SandboxConfig, args: &mut Vec<String>) -> anyhow::Resul
         .unwrap_or_else(|| PathBuf::from(DEFAULT_LOCAL_SOCKET));
     Ok(GcpProvider {
         terraform_dir,
+        state_file: state_file_for(worktree),
         user,
         // Absent until connect needs it; connect validates it is set.
         remote_socket: remote_socket.unwrap_or_default(),
@@ -175,11 +241,16 @@ fn load_handle_or_bail(store: &dyn Store, worktree: &str) -> anyhow::Result<BoxH
 
 async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args)?;
-    let provider = resolve_provider(&config.sandbox, args)?;
+    let worktree = worktree_key(args).await?;
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let spec = resolve_spec(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
 
+    // Terraform's `-state=<path>` writes the file but not its parent dir.
+    if let Some(parent) = provider.state_file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow::anyhow!("create sandbox state dir {}: {e}", parent.display()))?;
+    }
     println!("Provisioning box {} (terraform apply)…", spec.name);
     let handle = provider.ensure(&spec).await?;
     persist::save_handle(store.as_ref(), &worktree, &handle)?;
@@ -192,8 +263,8 @@ async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args)?;
-    let provider = resolve_provider(&config.sandbox, args)?;
+    let worktree = worktree_key(args).await?;
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
 
@@ -207,8 +278,8 @@ async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args)?;
-    let provider = resolve_provider(&config.sandbox, args)?;
+    let worktree = worktree_key(args).await?;
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
 
@@ -222,8 +293,8 @@ async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args)?;
-    let provider = resolve_provider(&config.sandbox, args)?;
+    let worktree = worktree_key(args).await?;
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
 
@@ -245,10 +316,10 @@ async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args)?;
+    let worktree = worktree_key(args).await?;
     let print_only = crate::take_flag(args, "--print");
     let ports = resolve_ports(take_value(args, "--ports"), &config.sandbox.ports)?;
-    let provider = resolve_provider(&config.sandbox, args)?;
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     if provider.remote_socket.is_empty() {
         anyhow::bail!(
             "no remote socket: set sandbox.remote_socket or pass --remote-socket \
@@ -293,7 +364,7 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args)?;
+    let worktree = worktree_key(args).await?;
     // Destroying a box is irreversible, so it is gated behind an explicit
     // opt-in rather than run on a bare `destroy`.
     if !crate::take_flag(args, "--yes") {
@@ -301,7 +372,7 @@ async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
             "refusing to destroy without --yes (this tears the box down via `terraform destroy`)"
         );
     }
-    let provider = resolve_provider(&config.sandbox, args)?;
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let handle = load_handle_or_bail(store.as_ref(), &worktree)?;
 
@@ -322,12 +393,20 @@ mod tests {
             instance_name(Some("my-box".into()), "/home/me/wt"),
             "my-box"
         );
-        assert_eq!(
-            instance_name(None, "/home/me/worktrees/Issue 931 Feature/"),
-            "lazybox-sbx-issue-931-feature"
-        );
+        // Basename slug plus a stable hash suffix of the full key.
+        let name = instance_name(None, "/home/me/worktrees/Issue 931 Feature/");
+        assert!(name.starts_with("lazybox-sbx-issue-931-feature-"), "{name}");
         // A pathological worktree still yields a GCE-legal name.
-        assert_eq!(instance_name(None, "///"), "lazybox-sbx-box");
+        assert!(instance_name(None, "///").starts_with("lazybox-sbx-box-"));
+    }
+
+    #[test]
+    fn instance_name_disambiguates_same_basename_across_worktrees() {
+        // Two worktrees named `issue-931` in different repos must not
+        // collide on one box.
+        let a = instance_name(None, "/repos/foo/issue-931");
+        let b = instance_name(None, "/repos/bar/issue-931");
+        assert_ne!(a, b, "same basename, different key → different box");
     }
 
     #[test]
@@ -359,7 +438,7 @@ mod tests {
             ..SandboxConfig::default()
         };
         let mut args = vec![];
-        assert!(resolve_provider(&sc, &mut args).is_err());
+        assert!(resolve_provider(&sc, &mut args, "/wt").is_err());
     }
 
     #[test]
@@ -375,11 +454,27 @@ mod tests {
             "--user".into(),
             "dev".into(),
         ];
-        let p = resolve_provider(&sc, &mut args).unwrap();
+        let p = resolve_provider(&sc, &mut args, "/home/me/wt").unwrap();
         assert_eq!(p.terraform_dir, PathBuf::from("/flag/tf"));
         assert_eq!(p.user.as_deref(), Some("dev"));
         // Config fills what the flags did not.
         assert_eq!(p.remote_socket, "/cfg.sock");
+        // State is isolated per worktree, under the lazybox state root.
+        assert!(
+            p.state_file.ends_with("terraform.tfstate"),
+            "{:?}",
+            p.state_file
+        );
+        assert!(p.state_file.starts_with(lazybox_core::paths::state_root()));
+    }
+
+    #[test]
+    fn state_file_is_isolated_per_worktree_key() {
+        assert_ne!(
+            state_file_for("/repos/foo/wt"),
+            state_file_for("/repos/bar/wt")
+        );
+        assert!(state_file_for("/wt").ends_with("terraform.tfstate"));
     }
 
     #[test]
@@ -400,7 +495,7 @@ mod tests {
         assert_eq!(spec.project, "proj");
         assert_eq!(spec.region, "us-central1");
         assert_eq!(spec.zone, "us-central1-a");
-        assert_eq!(spec.name, "lazybox-sbx-wt");
+        assert!(spec.name.starts_with("lazybox-sbx-wt-"), "{}", spec.name);
         // No overlay → the generic default recipe.
         assert_eq!(spec.deployment.config.name, "default");
     }

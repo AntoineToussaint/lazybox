@@ -26,14 +26,26 @@ use crate::{BoxHandle, BoxStatus, PowerState, SandboxSpec};
 /// in-process supervisor so all three damp on the same schedule.
 const SERVER_ALIVE_INTERVAL: u64 = 30;
 const SERVER_ALIVE_COUNT_MAX: u64 = 3;
+/// Seconds the reachability probe's SSH waits before declaring the box
+/// unreachable — short so `status` stays snappy.
+const PROBE_CONNECT_TIMEOUT: u64 = 8;
 
 /// Driver for boxes on Google Compute Engine.
 #[derive(Debug, Clone)]
 pub struct GcpProvider {
     /// The `terraform/sandbox/gcp` module directory `ensure`/`destroy`
     /// runs against. A project override (obin) points this at its own
-    /// module.
+    /// module. The module source is read-only and shared across boxes;
+    /// per-box state lives in [`state_file`], not here.
+    ///
+    /// [`state_file`]: Self::state_file
     pub terraform_dir: PathBuf,
+    /// The Terraform state file for *this* box, isolated per worktree and
+    /// kept out of the module source tree. Without this every worktree
+    /// would share the module dir's default `terraform.tfstate`, so a
+    /// second box's `apply` — same resource addresses, different
+    /// `instance_name` — would replace the first box in place.
+    pub state_file: PathBuf,
     /// SSH/gcloud user for the IAP connect; `None` uses gcloud's default.
     pub user: Option<String>,
     /// Absolute daemon-socket path on the box that `connect` forwards.
@@ -43,17 +55,35 @@ pub struct GcpProvider {
 }
 
 impl GcpProvider {
+    /// `terraform -chdir=<dir> init -input=false` — prepare the module's
+    /// providers/backend. Run before the first `apply`; a fresh module dir
+    /// has no `.terraform/`, so `apply` alone would hard-fail with "please
+    /// run terraform init". Idempotent, so it is cheap to run every time.
+    fn init_command(&self) -> (String, Vec<String>) {
+        (
+            "terraform".to_string(),
+            vec![
+                format!("-chdir={}", self.terraform_dir.display()),
+                "init".to_string(),
+                "-input=false".to_string(),
+            ],
+        )
+    }
+
     /// The `terraform -chdir=<dir> <action> …` invocation for `ensure`
     /// (`apply`) / `destroy`. `apply` passes the full deployment vars;
     /// `destroy` passes only the identity vars recovered from the handle
     /// (the module's other variables carry defaults, so state teardown
-    /// needs no deployment recipe).
+    /// needs no deployment recipe). `-state` pins this box's isolated
+    /// state file so two worktrees driving the same module dir never share
+    /// state and clobber each other.
     fn terraform_command(&self, action: &str, vars: &[String]) -> (String, Vec<String>) {
         let mut args = vec![
             format!("-chdir={}", self.terraform_dir.display()),
             action.to_string(),
             "-auto-approve".to_string(),
             "-input=false".to_string(),
+            format!("-state={}", self.state_file.display()),
         ];
         for v in vars {
             args.push("-var".to_string());
@@ -64,6 +94,7 @@ impl GcpProvider {
 
     /// `terraform output -json` — read the applied module's outputs
     /// (instance name + zone) back so the handle addresses the real box.
+    /// Reads the same isolated `-state` the matching `apply` wrote.
     fn output_command(&self) -> (String, Vec<String>) {
         (
             "terraform".to_string(),
@@ -71,6 +102,7 @@ impl GcpProvider {
                 format!("-chdir={}", self.terraform_dir.display()),
                 "output".to_string(),
                 "-json".to_string(),
+                format!("-state={}", self.state_file.display()),
             ],
         )
     }
@@ -114,6 +146,37 @@ impl GcpProvider {
                 format!("--zone={}", handle.zone),
                 format!("--project={}", handle.project),
                 "--format=value(status)".to_string(),
+            ],
+        )
+    }
+
+    /// A one-shot IAP SSH that runs `true` with a short connect timeout —
+    /// the reachability probe. It succeeds only when SSH-over-IAP actually
+    /// completes, which is what distinguishes a box that is `Running` but
+    /// not yet reachable (the wake→sshd window) from one that is.
+    fn reachable_probe_command(&self, handle: &BoxHandle) -> (String, Vec<String>) {
+        let dest = match &self.user {
+            Some(u) => format!("{u}@{}", handle.id),
+            None => handle.id.clone(),
+        };
+        (
+            "gcloud".to_string(),
+            vec![
+                "compute".to_string(),
+                "ssh".to_string(),
+                dest,
+                "--quiet".to_string(),
+                format!("--zone={}", handle.zone),
+                format!("--project={}", handle.project),
+                "--tunnel-through-iap".to_string(),
+                "--command=true".to_string(),
+                "--".to_string(),
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
+                "-o".to_string(),
+                format!("ConnectTimeout={PROBE_CONNECT_TIMEOUT}"),
             ],
         )
     }
@@ -227,12 +290,27 @@ async fn run(program: &str, args: &[String]) -> Result<String, SandboxError> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+impl GcpProvider {
+    /// Read the box's power state (describe only — no reachability probe),
+    /// shared by `status` and the `connect` wake decision so the latter
+    /// doesn't pay for a reachability round-trip it doesn't need.
+    async fn power(&self, handle: &BoxHandle) -> Result<PowerState, SandboxError> {
+        let (prog, args) = Self::describe_command(handle);
+        Ok(parse_power_state(&run(&prog, &args).await?))
+    }
+}
+
 impl SandboxProvider for GcpProvider {
     fn id(&self) -> &str {
         "gcp"
     }
 
     async fn ensure(&self, spec: &SandboxSpec) -> Result<BoxHandle, SandboxError> {
+        // Init first: a fresh module dir has no providers, so a bare
+        // `apply` would fail before touching any infrastructure.
+        let (prog, args) = self.init_command();
+        run(&prog, &args).await?;
+
         let (prog, args) = self.terraform_command("apply", &spec.tf_vars());
         run(&prog, &args).await?;
 
@@ -263,22 +341,24 @@ impl SandboxProvider for GcpProvider {
     }
 
     async fn status(&self, handle: &BoxHandle) -> Result<BoxStatus, SandboxError> {
-        let (prog, args) = Self::describe_command(handle);
-        let out = run(&prog, &args).await?;
-        let power = parse_power_state(&out);
-        Ok(BoxStatus {
-            power,
-            // A deeper SSH round-trip probe is a follow-up; a box is
-            // reachable exactly when it is fully running.
-            reachable: power.is_running(),
-        })
+        let power = self.power(handle).await?;
+        // A stopped box is never reachable, and probing it would just
+        // block on a doomed SSH; only probe when it claims to be running.
+        let reachable = if power.is_running() {
+            let (prog, args) = self.reachable_probe_command(handle);
+            run(&prog, &args).await.is_ok()
+        } else {
+            false
+        };
+        Ok(BoxStatus { power, reachable })
     }
 
     async fn connect(&self, handle: &BoxHandle, ports: &[u16]) -> Result<Tunnel, SandboxError> {
         // Wake-on-connect: a stopped box is started before the forward is
-        // handed back. The client's keepalive supervisor retries the
-        // forward until SSH comes up, so connect need not block on it here.
-        if !self.status(handle).await?.power.is_running() {
+        // handed back. Only the power state matters here — the client's
+        // keepalive supervisor retries the forward until SSH comes up, so
+        // connect need not pay for the reachability probe.
+        if !self.power(handle).await?.is_running() {
             self.start(handle).await?;
         }
         Ok(self.connect_tunnel(handle, ports))
@@ -297,6 +377,7 @@ mod tests {
     fn provider() -> GcpProvider {
         GcpProvider {
             terraform_dir: PathBuf::from("/repo/terraform/sandbox/gcp"),
+            state_file: PathBuf::from("/state/lazybox-sbx-abc/terraform.tfstate"),
             user: Some("me".into()),
             remote_socket: "/home/me/.lazybox/run/daemon.sock".into(),
             local_socket: PathBuf::from("/tmp/lazybox.sock"),
@@ -326,6 +407,45 @@ mod tests {
         // Each var is a `-var k=v` pair.
         let i = args.iter().position(|a| a == "-var").expect("a -var flag");
         assert_eq!(args[i + 1], "project=proj");
+    }
+
+    #[test]
+    fn terraform_ops_pin_the_isolated_state_file() {
+        // apply, destroy, and output must all target this box's own state,
+        // or two worktrees sharing a module dir clobber each other.
+        let p = provider();
+        let state = "-state=/state/lazybox-sbx-abc/terraform.tfstate".to_string();
+        for (_, args) in [
+            p.terraform_command("apply", &[]),
+            p.terraform_command("destroy", &[]),
+            p.output_command(),
+        ] {
+            assert!(args.contains(&state), "missing isolated -state: {args:?}");
+        }
+    }
+
+    #[test]
+    fn init_runs_against_the_module_dir() {
+        // ensure() inits before apply so a fresh module dir with no
+        // providers doesn't hard-fail. init carries no -state/-var.
+        let (prog, args) = provider().init_command();
+        assert_eq!(prog, "terraform");
+        assert_eq!(&args[0], "-chdir=/repo/terraform/sandbox/gcp");
+        assert!(args.contains(&"init".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("-state=")), "{args:?}");
+        assert!(!args.contains(&"-var".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn reachability_probe_is_a_bounded_iap_ssh() {
+        let (prog, args) = provider().reachable_probe_command(&handle());
+        assert_eq!(prog, "gcloud");
+        assert_eq!(args[..3], ["compute", "ssh", "me@lazybox-sbx-abc"]);
+        assert!(args.contains(&"--tunnel-through-iap".to_string()));
+        // Runs a trivial command and caps the wait so `status` stays snappy.
+        assert!(args.contains(&"--command=true".to_string()));
+        assert!(args.contains(&format!("ConnectTimeout={PROBE_CONNECT_TIMEOUT}")));
+        assert!(args.contains(&"BatchMode=yes".to_string()));
     }
 
     #[test]

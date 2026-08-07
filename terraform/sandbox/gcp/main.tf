@@ -59,7 +59,11 @@ resource "google_compute_router_nat" "sandbox" {
 
 # ── Service account ────────────────────────────────────────────────────
 resource "google_service_account" "sandbox" {
-  account_id   = substr("${var.instance_name}-sa", 0, 30)
+  # account_id must match [a-z]([-a-z0-9]*[a-z0-9]), 6-30 chars — so it can
+  # neither exceed 30 nor end in a hyphen. Truncating "${instance_name}-sa"
+  # could do both for a long name; a stable "lazybox-sbx-" + 12 hex digest
+  # is always valid and still identifies the box.
+  account_id   = "lazybox-sbx-${substr(md5(var.instance_name), 0, 12)}"
   display_name = "lazybox sandbox ${var.instance_name}"
 }
 

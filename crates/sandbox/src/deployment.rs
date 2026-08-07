@@ -51,13 +51,11 @@ fn default_true() -> bool {
     true
 }
 
-/// A resolved deployment: its typed [`DeploymentConfig`] plus the merged
-/// YAML it came from (kept so a provider can pass through overlay keys the
-/// typed view does not model without a schema change).
-#[derive(Debug, Clone, PartialEq)]
+/// A resolved deployment: the typed [`DeploymentConfig`] a base + overlay
+/// deep-merge produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Deployment {
     pub config: DeploymentConfig,
-    pub merged: Value,
 }
 
 impl Deployment {
@@ -80,9 +78,9 @@ impl Deployment {
             }
             None => base,
         };
-        let config: DeploymentConfig = serde_yaml::from_value(merged.clone())
+        let config: DeploymentConfig = serde_yaml::from_value(merged)
             .map_err(|e| SandboxError::Deployment(format!("resolved recipe: {e}")))?;
-        Ok(Self { config, merged })
+        Ok(Self { config })
     }
 
     /// The generic default overlaid with a project override.

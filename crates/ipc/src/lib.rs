@@ -24,6 +24,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod channel;
+pub mod pairing;
+pub mod port_forward;
 pub mod socket;
 pub mod transport;
 

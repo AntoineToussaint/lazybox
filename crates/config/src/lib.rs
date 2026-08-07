@@ -254,18 +254,35 @@ pub struct RemoteGatewayConfig {
 ///
 /// ```yaml
 /// remotes:
-///   devbox:
-///     socket: /Users/me/.lazybox/remotes/devbox.sock
+///   obin:
+///     provider: gcp
+///     spec:
+///       terraform: ../../obin/.lazybox/sandbox/terraform
 ///     default: true
 /// ```
+///
+/// The declarative form (`provider` + `spec`) is the product surface:
+/// lazybox owns the box's lifecycle — create it if missing, start/wake it,
+/// and connect — so a socket/tunnel is never something the user writes. The
+/// low-level `socket` field remains as the internal transport the provider
+/// dials once the box is up (and as a manual bridge until the provider
+/// engine lands).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct RemoteDaemonConfig {
-    /// Absolute path to the daemon's Unix socket as reachable from THIS
-    /// machine — typically an SSH-forwarded loopback socket the operator
-    /// (or a `remote.tunnel`) binds locally. Dialed with the same
-    /// self-healing transport `--connect` uses. Omitted from a written
-    /// config when unset.
+    /// The sandbox provider that owns this remote's lifecycle — creating,
+    /// starting, and connecting the box (e.g. `gcp`). When set, lazybox
+    /// provisions/connects from `spec`; the transport socket is derived
+    /// internally, never hand-written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Provider-specific spec describing the box — e.g. a Terraform module
+    /// lazybox applies (via the `SandboxProvider`) to ensure the box exists.
+    #[serde(default, skip_serializing_if = "RemoteSpec::is_empty")]
+    pub spec: RemoteSpec,
+    /// (internal / bridge) Absolute path to the daemon's Unix socket as
+    /// reachable from THIS machine — the transport the provider dials once
+    /// the box is up. Omitted from a written config when unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket: Option<PathBuf>,
     /// An API gateway fronting the daemon, as an alternative/adjunct to a
@@ -285,6 +302,29 @@ impl RemoteDaemonConfig {
     /// The socket path this remote is dialed at, if any is configured.
     pub fn socket_path(&self) -> Option<&Path> {
         self.socket.as_deref()
+    }
+}
+
+/// Provider-specific description of the box behind a `remotes.<name>`. Today
+/// just a Terraform module path; lazybox's `SandboxProvider` applies it to
+/// create/find the box, then connects. Kept a struct (not a bare path) so
+/// providers can add fields (image, machine type, region) without a breaking
+/// config change.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RemoteSpec {
+    /// Path to a Terraform module that defines the box, relative to the
+    /// config/repo. The obin box points this at obin-platform's
+    /// `.lazybox/sandbox/terraform`. Omitted from a written config when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terraform: Option<PathBuf>,
+}
+
+impl RemoteSpec {
+    /// True when nothing is declared — lets `remotes` entries that only set a
+    /// `socket` (the bridge form) omit `spec` entirely from a written config.
+    pub fn is_empty(&self) -> bool {
+        self.terraform.is_none()
     }
 }
 

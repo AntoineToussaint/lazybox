@@ -410,7 +410,16 @@ pub(super) fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderEr
         }
     } else {
         let raw = err.user_message();
-        humanize_branch_protection(&raw).unwrap_or(raw)
+        // Branch-protection rejections only reach a merge (`g m` / auto-merge /
+        // bulk). Every message this humanizer emits is merge-phrased, and its
+        // matches are generic enough ("not authorized", "write access to") to
+        // fire on an unrelated failure — a reply or label mutation returning a
+        // permission error must NOT be relabeled "Can't merge …". Gate on op.
+        if op.contains("merge") {
+            humanize_branch_protection(&raw).unwrap_or(raw)
+        } else {
+            raw
+        }
     }
 }
 
@@ -504,9 +513,17 @@ fn humanize_branch_protection(msg: &str) -> Option<String> {
 /// "`<n> of <m> required status checks …`" (returns `m`), or the lone
 /// number in "at least `N` approving review(s)". `None` when the message
 /// carries no number (a bare "review is required").
+///
+/// Anchored to the "required status check" clause when present so a digit
+/// GitHub might append later in the sentence (a check name, a trailing
+/// "(run 42)") can't be mistaken for the total; the review path has no
+/// such clause, so it scans the whole message.
 fn required_check_count(lower: &str) -> Option<u32> {
-    lower
-        .split(|c: char| !c.is_ascii_digit())
+    let scan = match lower.find("required status check") {
+        Some(idx) => &lower[..idx],
+        None => lower,
+    };
+    scan.split(|c: char| !c.is_ascii_digit())
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse::<u32>().ok())
         .next_back()
@@ -5051,6 +5068,39 @@ mod mutation_retry_tests {
         );
     }
 
+    /// Branch-protection humanization is merge-only: the messages are all
+    /// merge-phrased and the matches ("not authorized", "write access to")
+    /// are generic enough to fire on an unrelated op. A non-merge mutation
+    /// (reply, labels, reviewers) that fails with such a message must keep
+    /// its raw provider text, not get relabeled "Can't merge …".
+    #[test]
+    fn non_merge_op_is_not_relabeled_as_a_merge_rejection() {
+        let err = lazybox_core::ProviderError::permanent(
+            "github",
+            "GraphQL error: You're not authorized to push to this branch.",
+        );
+        for op in ["reply", "labels", "reviewers", "assignees", "close-pr"] {
+            let reason = humanize_mutation_failure(op, &err);
+            assert!(
+                !reason.contains("Can't merge"),
+                "op `{op}` must not be relabeled as a merge rejection: {reason}"
+            );
+            assert!(
+                reason.contains("not authorized"),
+                "op `{op}` keeps its raw provider text: {reason}"
+            );
+        }
+
+        // The merge family still translates the same message.
+        for op in ["merge", "auto-merge"] {
+            let reason = humanize_mutation_failure(op, &err);
+            assert!(
+                reason.contains("Can't merge"),
+                "op `{op}` should humanize: {reason}"
+            );
+        }
+    }
+
     #[test]
     fn required_check_count_takes_the_total_required() {
         assert_eq!(
@@ -5063,6 +5113,12 @@ mod mutation_retry_tests {
         );
         assert_eq!(required_check_count("at least 1 approving review"), Some(1));
         assert_eq!(required_check_count("review is required"), None);
+        // A digit appended after the status-check clause must not be read as
+        // the total — the count stays anchored to "<n> of <m> required …".
+        assert_eq!(
+            required_check_count("10 of 10 required status checks are expected (run 42)"),
+            Some(10)
+        );
     }
 
     #[test]

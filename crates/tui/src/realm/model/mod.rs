@@ -53,7 +53,7 @@ pub fn terminal_leader_reference_rows() -> Vec<(String, String)> {
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
     emit_clipboard_copy, find_action_for_seq, find_action_for_stroke, key_event_to_stroke,
-    paint_selection, rect_contains, seq_continuations, split_for_footer,
+    paint_selection, rect_contains, section_rank, seq_continuations, split_for_footer,
 };
 
 use crate::PaneId;

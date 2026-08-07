@@ -3,7 +3,8 @@
 //! Reached with `a` from the description reader modal (#448). It is the
 //! same streamed-answer chat as Ask Lazybox (`help_ask`), scoped to the
 //! focused PR/issue instead of to lazybox itself: it reuses
-//! [`HelpConvo`]/[`HelpTurn`] for the transcript and rides the same
+//! [`HelpConvo`](super::help_ask::HelpConvo) /
+//! [`HelpTurn`](super::help_ask::HelpTurn) for the transcript and rides the same
 //! headless `Command::StartAgentRun` (StreamJson, read-only). The
 //! difference is the context document the `Model` feeds the run — PR
 //! metadata + activity + the local diff (`lazybox_tui_core::pr_chat`) —

@@ -2642,6 +2642,7 @@ mod tests {
                 lazybox_core::TaskKind::Issue
             }),
             closes_issues: vec![],
+            linked_tasks: vec![],
             priority: None,
             state_label: None,
         }

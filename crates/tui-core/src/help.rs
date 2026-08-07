@@ -301,6 +301,46 @@ fn section_scope(section: crate::action::Section) -> &'static str {
     }
 }
 
+/// Append the generated marker/pill reference: the sidebar status
+/// pills, the per-session agent-state glyph, and the passive row badges,
+/// each from `crate::markers` so a new marker is documented the moment
+/// it ships — the same "derived from code" guarantee the action catalog
+/// gives keybindings (#883). This is why Ask Lazybox can explain a pill
+/// like `CHANGES` without anyone hand-writing it into the prose docs.
+fn push_markers(out: &mut String) {
+    use crate::markers::{MarkerDoc, agent_state_docs, row_badge_docs, status_pill_docs};
+
+    fn write_group(out: &mut String, docs: &[MarkerDoc]) {
+        for doc in docs {
+            out.push_str(&format!(
+                "- `{}` — {} {}\n",
+                doc.label, doc.meaning, doc.when
+            ));
+        }
+    }
+
+    out.push_str(
+        "\n# Sidebar markers and pills\n\n\
+Every marker a workspace row can carry, and what it means. These are generated from the code, \
+so they always match what's on screen.\n\n\
+## Status pills\n\nThe right-side pill(s) on a PR row — one review pill and one CI pill; a \
+terminal/blocker state (merged, closed, conflict, …) overrides both. Most severe wins:\n",
+    );
+    write_group(out, &status_pill_docs());
+
+    out.push_str(
+        "\n## Agent state\n\nThe per-session glyph on a workspace row (and the terminal tab \
+badge) showing what the workspace's agent is doing:\n",
+    );
+    write_group(out, &agent_state_docs());
+
+    out.push_str(
+        "\n## Row badges\n\nPassive badges packed to the right of the title, before the status \
+pills:\n",
+    );
+    write_group(out, row_badge_docs());
+}
+
 /// Build the help agent's first message: instructions plus the full
 /// generated reference — this user's effective keybindings (grouped
 /// by scope, leader menus included) and the embedded docs. Sent once
@@ -470,6 +510,8 @@ char `{escape_char}`, doubled), then choose:\n\
 `Esc` or any unbound key cancels back to the terminal.\n"
     ));
 
+    push_markers(&mut out);
+
     out.push_str("\n# Documentation\n");
     for (title, body) in DOCS {
         out.push_str(&format!("\n---\n\n## Doc: {title}\n\n{body}\n"));
@@ -566,6 +608,52 @@ fallback shouldn't resurrect it)",
         );
         assert!(ctx.contains("`}}s<snippet key>` — send a saved snippet"));
         assert!(ctx.contains("`}}|` / `}}-` — split right / down"));
+    }
+
+    /// The generated marker registry rides along: Ask Lazybox can now
+    /// explain `CHANGES` (the #883 quick win) and every other pill,
+    /// agent-state glyph, and row badge without any hand-written prose.
+    #[test]
+    fn agent_context_includes_generated_markers() {
+        let ctx = agent_context(&catalog(), ']');
+        assert!(ctx.contains("# Sidebar markers and pills"));
+        // The motivating bug: CHANGES was undocumented, so the agent
+        // couldn't explain it. It now comes straight from the code.
+        assert!(
+            ctx.contains("`CHANGES` — A reviewer requested changes"),
+            "CHANGES pill must be explained from the generated registry"
+        );
+        // A sampling of the other generated sources.
+        assert!(ctx.contains("## Status pills"));
+        assert!(ctx.contains("`CI OK`"));
+        assert!(ctx.contains("`CONFLICT`"));
+        assert!(ctx.contains("## Agent state"));
+        assert!(ctx.contains("Working"));
+        assert!(ctx.contains("## Row badges"));
+        assert!(ctx.contains("`ARM`"));
+        assert!(ctx.contains("`FIX`"));
+    }
+
+    /// Every status pill and agent state reaches the generated context —
+    /// the drift guard at the help-surface level, on top of the
+    /// compile-time exhaustive matches in `crate::markers`.
+    #[test]
+    fn agent_context_documents_every_pill_and_state() {
+        let ctx = agent_context(&catalog(), ']');
+        for doc in crate::markers::status_pill_docs() {
+            assert!(
+                ctx.contains(doc.meaning),
+                "status pill {} missing from context",
+                doc.label
+            );
+        }
+        for doc in crate::markers::agent_state_docs() {
+            assert!(
+                ctx.contains(doc.meaning),
+                "agent state {} missing from context",
+                doc.label
+            );
+        }
     }
 
     /// The embedded docs ride along — the snippets doc is the agent's

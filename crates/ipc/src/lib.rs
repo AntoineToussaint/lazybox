@@ -331,6 +331,23 @@ pub enum AgentState {
     LimitReached,
 }
 
+impl AgentState {
+    /// Every variant, for the Ask-Lazybox marker registry
+    /// (`lazybox_tui_core::markers`), so the per-session state glyph and
+    /// tab badge are always documented (#883). `Exited` carries a field,
+    /// so this can't be a discriminant-sized array; the
+    /// `agent_state_all_is_exhaustive` test fails the build if a variant
+    /// is added without extending it.
+    pub const ALL: &'static [AgentState] = &[
+        AgentState::Working,
+        AgentState::InputNeeded,
+        AgentState::Idle,
+        AgentState::Done,
+        AgentState::Exited { code: None },
+        AgentState::LimitReached,
+    ];
+}
+
 /// A normalized lifecycle hook fired by an agent, decoupled from the
 /// agent's wire JSON. Claude Code emits these via configured hooks
 /// (`Stop`, `Notification`, `PreToolUse`, …); lazybox injects a hook
@@ -3613,5 +3630,30 @@ mod transport_admission_tests {
                 .parse::<u32>()
                 .expect("build.rs emits a decimal u32"),
         );
+    }
+}
+
+#[cfg(test)]
+mod agent_state_tests {
+    use super::*;
+
+    /// [`AgentState::ALL`] must list every variant — the marker registry
+    /// and Ask Lazybox iterate it (#883). The exhaustive match fails the
+    /// build if a variant is added, and the count guards against a
+    /// variant being added to the match but not to `ALL`.
+    #[test]
+    fn agent_state_all_is_exhaustive() {
+        for state in AgentState::ALL {
+            // Adding a variant makes this match non-exhaustive → build error.
+            match state {
+                AgentState::Working
+                | AgentState::InputNeeded
+                | AgentState::Idle
+                | AgentState::Done
+                | AgentState::Exited { .. }
+                | AgentState::LimitReached => {}
+            }
+        }
+        assert_eq!(AgentState::ALL.len(), 6);
     }
 }

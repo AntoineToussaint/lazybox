@@ -40,6 +40,27 @@ const LINEAR_GRAPHQL: &str = "https://api.linear.app/graphql";
 /// from it.
 pub const SOURCE: &str = lazybox_core::LINEAR_SOURCE;
 
+/// Prefix marking a [`Task::repo`] that is a Linear **grouping label**
+/// (`linear/<team-key>`), not a clonable GitHub `owner/name`. A Linear
+/// ticket has no git repository of its own; this string exists only to
+/// group its rows under a sidebar header. Workspace provisioning must
+/// route it to a real repo (`providers.linear.team_repo`) instead of
+/// handing it to git-ops, which would otherwise try — and 404 — cloning
+/// `github.com/linear/<team>.git`.
+pub const GROUPING_LABEL_PREFIX: &str = "linear/";
+
+/// Build the sidebar grouping label for a Linear team key.
+pub fn grouping_label(team_key: &str) -> String {
+    format!("{GROUPING_LABEL_PREFIX}{team_key}")
+}
+
+/// The Linear team key inside a grouping label, or `None` when `repo`
+/// isn't one (e.g. a real GitHub `owner/name`).
+pub fn team_key_from_grouping_label(repo: &str) -> Option<&str> {
+    repo.strip_prefix(GROUPING_LABEL_PREFIX)
+        .filter(|key| !key.is_empty())
+}
+
 /// Credential chain Linear uses: the `LINEAR_API_KEY` env var, then a
 /// fallback to `linear auth token` (the `schpet/linear-cli` binary,
 /// which stores its token in the system keyring). This mirrors the
@@ -390,6 +411,22 @@ mod tests {
     /// setup detection and poll. Ignored by default because it needs a
     /// real `linear` login on the machine; run with
     /// `cargo test -p lazybox-linear -- --ignored linear_cli_auth`.
+    #[test]
+    fn grouping_label_round_trips_the_team_key() {
+        let label = grouping_label("OBI");
+        assert_eq!(label, "linear/OBI");
+        assert_eq!(team_key_from_grouping_label(&label), Some("OBI"));
+    }
+
+    #[test]
+    fn team_key_from_grouping_label_rejects_non_labels() {
+        // A real GitHub `owner/name` must never be mistaken for a Linear
+        // grouping label — otherwise routing would strip its owner.
+        assert_eq!(team_key_from_grouping_label("obin-ai/obin-platform"), None);
+        // The bare prefix carries no team.
+        assert_eq!(team_key_from_grouping_label("linear/"), None);
+    }
+
     #[tokio::test]
     #[ignore = "requires a local `linear auth login`"]
     async fn linear_cli_auth_resolves_through_credential_chain() {

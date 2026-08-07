@@ -2998,6 +2998,12 @@ fn repo_for_workspace_provision(
     cfg: &lazybox_config::Config,
 ) -> Result<Option<String>, crate::ServerError> {
     match workspace.primary_task() {
+        // A Linear ticket's `repo` is a sidebar grouping label
+        // (`linear/<team>`), never a clone target — route it to a real
+        // repo instead of handing the label to git-ops.
+        Some(task) if task.id.source == lazybox_linear::SOURCE => {
+            Ok(Some(route_linear_repo(task, cfg)?))
+        }
         Some(task) => Ok(task.repo.clone()),
         None if lazybox_core::workspace_project_key(workspace)
             .is_some_and(|key| key.source_prefix() == "github") =>
@@ -3011,6 +3017,45 @@ fn repo_for_workspace_provision(
         }
         None => Ok(None),
     }
+}
+
+/// Resolve the real GitHub `owner/repo` a Linear ticket's workspace
+/// should be provisioned in. A Linear [`Task::repo`] is only a sidebar
+/// grouping label (`linear/<team>`); a ticket carries no git repository
+/// of its own, so provisioning must map it to a real repo via
+/// `providers.linear.team_repo`. An unmapped team is a hard, actionable
+/// error — never a fabricated `github.com/linear/<team>.git` clone.
+fn route_linear_repo(
+    task: &Task,
+    cfg: &lazybox_config::Config,
+) -> Result<String, crate::ServerError> {
+    let team = task
+        .repo
+        .as_deref()
+        .and_then(lazybox_linear::team_key_from_grouping_label)
+        .ok_or_else(|| {
+            crate::ServerError::Workspace(format!(
+                "Linear ticket {} has no team to route to a repo",
+                task.id.key
+            ))
+        })?;
+    cfg.providers
+        .linear
+        .team_repo
+        .get(team)
+        .cloned()
+        .ok_or_else(|| {
+            crate::ServerError::Workspace(format!(
+                "Linear ticket {key} (team {team}) has no repo to work in — a Linear \
+                 ticket has no git repository of its own. Map the team to a GitHub \
+                 repo under providers.linear.team_repo in ~/.lazybox/config.yaml:\n\
+                 \x20 providers:\n\
+                 \x20   linear:\n\
+                 \x20     team_repo:\n\
+                 \x20       {team}: owner/repo",
+                key = task.id.key
+            ))
+        })
 }
 
 /// `owner/repo` for a workspace with no linked task, recovered from its
@@ -13555,6 +13600,50 @@ mod tests {
         assert_eq!(
             clonable_repo_from_project(&config, &ws, None).unwrap(),
             "AntoineToussaint/lazybox"
+        );
+    }
+
+    /// A Linear ticket's `repo` is a sidebar grouping label
+    /// (`linear/<team>`), not a clone target. Provisioning must route it
+    /// through `providers.linear.team_repo` to a real GitHub repo — never
+    /// split the label and hand `linear` / `<team>` to git-ops (#944).
+    #[test]
+    fn repo_for_workspace_provision_routes_linear_ticket_via_config() {
+        let config = ServerConfig::in_memory();
+        let mut task = task_for(lazybox_linear::SOURCE, "OBI-123");
+        task.repo = Some(lazybox_linear::grouping_label("OBI"));
+        let ws = Workspace::from_task(task, Utc::now());
+
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers
+            .linear
+            .team_repo
+            .insert("OBI".into(), "obin-ai/obin-platform".into());
+
+        assert_eq!(
+            repo_for_workspace_provision(&config, &ws, &cfg).unwrap(),
+            Some("obin-ai/obin-platform".to_string())
+        );
+    }
+
+    /// An unmapped Linear team is an actionable error pointing at the
+    /// config key — never the old fabricated `github.com/linear/<team>.git`
+    /// clone that 404s (#944).
+    #[test]
+    fn repo_for_workspace_provision_errors_on_unmapped_linear_team() {
+        let config = ServerConfig::in_memory();
+        let mut task = task_for(lazybox_linear::SOURCE, "OBI-123");
+        task.repo = Some(lazybox_linear::grouping_label("OBI"));
+        let ws = Workspace::from_task(task, Utc::now());
+
+        let cfg = lazybox_config::Config::default();
+        let msg = repo_for_workspace_provision(&config, &ws, &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("team_repo"), "guides to the config key: {msg}");
+        assert!(
+            !msg.contains("linear/OBI"),
+            "the grouping label must not be surfaced as a clone target: {msg}"
         );
     }
 

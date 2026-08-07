@@ -257,7 +257,10 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         checks: vec![],
         unread_count: 0,
         url: issue.url.clone(),
-        repo: issue.team.as_ref().map(|t| format!("linear/{}", t.key)),
+        // A sidebar grouping label, NOT a clone target — see
+        // [`crate::grouping_label`]. Workspace provisioning routes it to a
+        // real repo via `providers.linear.team_repo`.
+        repo: issue.team.as_ref().map(|t| crate::grouping_label(&t.key)),
         branch: None,
         base_branch: None,
         updated_at: issue.updated_at,

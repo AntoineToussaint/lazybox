@@ -1916,12 +1916,27 @@ pub struct LinearConfig {
     /// ```
     #[serde(deserialize_with = "de_lenient_linear_scope")]
     pub scope: Vec<lazybox_core::LinearScope>,
+    /// Maps a Linear team key (`OBI`, `ENG`, …) to the GitHub
+    /// `owner/repo` its tickets' workspaces are provisioned in. A Linear
+    /// ticket has no git repository of its own, so `w w` on one has no
+    /// clone target until it's routed here. Without a matching entry,
+    /// provisioning fails with guidance rather than fabricating and
+    /// 404ing on `github.com/linear/<team>.git`.
+    ///
+    /// ```yaml
+    /// providers:
+    ///   linear:
+    ///     team_repo:
+    ///       OBI: obin-ai/obin-platform
+    /// ```
+    pub team_repo: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for LinearConfig {
     fn default() -> Self {
         Self {
             scope: lazybox_core::LinearScope::default_scopes(),
+            team_repo: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -2562,6 +2577,39 @@ repos:
         assert_eq!(
             round_tripped.providers.linear.scope,
             vec![LinearScope::Assigned, LinearScope::Subscribed]
+        );
+    }
+
+    #[test]
+    fn linear_team_repo_defaults_empty_and_parses() {
+        // Unset → no mappings (a Linear ticket then fails to route with
+        // guidance rather than fabricating a clone).
+        let default_config = Config::parse("").expect("parse defaults");
+        assert!(default_config.providers.linear.team_repo.is_empty());
+
+        let configured = Config::parse(
+            "providers:\n  linear:\n    team_repo:\n      OBI: obin-ai/obin-platform\n",
+        )
+        .expect("parse linear team_repo");
+        assert_eq!(
+            configured
+                .providers
+                .linear
+                .team_repo
+                .get("OBI")
+                .map(String::as_str),
+            Some("obin-ai/obin-platform")
+        );
+        let serialized = serde_yaml::to_string(&configured).expect("serialize");
+        let round_tripped = Config::parse(&serialized).expect("parse serialized");
+        assert_eq!(
+            round_tripped
+                .providers
+                .linear
+                .team_repo
+                .get("OBI")
+                .map(String::as_str),
+            Some("obin-ai/obin-platform")
         );
     }
 

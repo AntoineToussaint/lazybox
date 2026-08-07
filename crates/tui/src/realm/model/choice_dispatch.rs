@@ -371,6 +371,14 @@ impl<T: TerminalAdapter> Model<T> {
                 action,
             } => {
                 if self.sidebar.focus_workspace_key(&session_key) {
+                    // A right-click action names one explicit row. Drop any
+                    // ambient `v` multi-select first so a bulk-destructive
+                    // action (merge / archive / long-snooze) can't fan out
+                    // over the whole selection instead of the clicked row
+                    // (#899's `resolve_confirm_targets` reads that selection).
+                    if super::dispatch::is_bulk_destructive(&action) {
+                        self.sidebar.clear_broadcast_selection();
+                    }
                     cmds.extend(self.dispatch_action(&action));
                 } else {
                     self.flash_info("workspace is gone — action dropped");

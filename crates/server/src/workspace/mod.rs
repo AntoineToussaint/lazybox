@@ -828,6 +828,23 @@ async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspac
         reclaimed.worktrees += 1;
         reclaimed.bytes += size;
     }
+
+    // Tear down any remote box stamped for this worktree (#888).
+    // Best-effort and a no-op unless `remote.host.enabled` — the local
+    // path provisions nothing, so `from_config` returns `None` and this
+    // is free. The persisted handle is keyed by the workspace key, so a
+    // teardown after a daemon restart still finds the box — and the
+    // provision-on-open path (deferred) must key `ensure` by this same
+    // workspace key or the handle recorded there won't match here.
+    let user_config = lazybox_config::Config::load().unwrap_or_default();
+    if let Some(host_cfg) = user_config.remote.host.as_ref()
+        && let Some(remote) =
+            crate::remote::RemoteHostManager::from_config(host_cfg, config.store.clone())
+        && let Err(error) = remote.teardown(workspace.key.as_str()).await
+    {
+        tracing::warn!(%error, workspace = workspace.key.as_str(), "remote box teardown failed");
+    }
+
     reclaimed
 }
 

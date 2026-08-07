@@ -39,6 +39,7 @@ which is the canonical source of truth for defaults and field names.
 | [`merge_on_green`](#merge_on_green) | Opt bot authors into merge-on-green |
 | [`conventions`](#conventions) | Commit / PR conventions injected into the agent-work brief |
 | [`shell`](#shell) | Shell command for the `s` spawn |
+| [`remote`](#remote) | Remote-access wiring: per-worktree host targeting (`remote.host`) |
 
 Snippet workflows are **not** part of `config.yaml` — they live in their own
 files: `~/.lazybox/snippets.yaml` (global) and
@@ -569,3 +570,35 @@ keeps running its current process, so close that terminal and open a fresh one
 to pick up the new command. Older generated configs may contain
 `command: bash`; lazybox treats that former default as automatic. Use an
 explicit path such as `/bin/bash` to select Bash intentionally.
+
+## `remote`
+
+Remote-access wiring. The block is omitted from a written config when unset.
+
+### `remote.host`
+
+Target a provisioned remote box per worktree instead of running the worktree on
+the daemon host. Off by default; when enabled, lazybox stamps a box from a
+golden image for a remote worktree, reuses it across sessions, and tears it down
+on cleanup.
+
+```yaml
+remote:
+  host:
+    enabled: true
+    project: internal-robin-dev
+    zone: us-central1-a
+    machine_type: e2-standard-8
+    source_image: projects/internal-robin-dev/global/machineImages/lazybox-golden
+    instance_prefix: lazybox
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Master switch. While off, every worktree runs on the daemon host and no box is ever provisioned. |
+| `project` | string | _(unset)_ | GCP project the box lives in. |
+| `zone` | string | _(unset)_ | GCE zone the box is created in (e.g. `us-central1-a`). |
+| `machine_type` | string | `e2-standard-8` | Machine type for a freshly stamped box. |
+| `source_image` | string | _(unset)_ | A `--source-machine-image` to stamp from. Ignored when `instance_template` is set. |
+| `instance_template` | string | _(unset)_ | A `--source-instance-template` to stamp from. Wins over `source_image` when both are present. |
+| `instance_prefix` | string | `lazybox` | Prefix for the per-worktree instance name; the worktree's stable identifier is appended and sanitized to GCE's naming rules. |

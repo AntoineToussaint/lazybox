@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+pub mod remote;
+
 mod inspect;
 pub use inspect::{
     DiffFile, DiffHunk, DiffLine, DiffLineKind, DiscoveredCheckout, OrphanReason, TrackedSession,

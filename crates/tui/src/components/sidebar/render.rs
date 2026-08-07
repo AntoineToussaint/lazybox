@@ -974,11 +974,60 @@ impl Sidebar {
     }
 
     /// Lay out one group of workspace rows (given by their visible-list
-    /// indices) in a single `render_table` pass and write each resulting
-    /// Line into its slot in `out`. The reference-column width and every
-    /// status column are sized over only this group's rows (issue #961).
+    /// indices), sizing columns per provider. A repo group is a single
+    /// provider (one pass), but the `★ Focused` pin lifts starred rows
+    /// across providers into one group — GitHub's `#NNN` / CI / review
+    /// columns must not size against a Linear row there either, so the
+    /// group is sub-partitioned by provider before the column pre-pass
+    /// (issue #961).
     #[allow(clippy::too_many_arguments)]
     fn render_workspace_group(
+        &self,
+        indices: &[usize],
+        agent_numbers: &std::collections::HashMap<SessionKey, usize>,
+        row_budget: usize,
+        theme: &crate::theme::Theme,
+        now: chrono::DateTime<chrono::Utc>,
+        focused: bool,
+        out: &mut [Option<Line<'static>>],
+    ) {
+        // Bucket the group's rows by provider (`task.id.source`), keeping
+        // first-seen order; a task-less scratch row keys as `None`. Each
+        // bucket gets its own column pass so unlike providers can't
+        // distort one another's reference / status columns.
+        let mut buckets: Vec<(Option<&str>, Vec<usize>)> = Vec::new();
+        for &i in indices {
+            let provider = match &self.visible[i] {
+                VisibleRow::Workspace(k) => self
+                    .workspaces
+                    .get(k)
+                    .and_then(|w| w.primary_task())
+                    .map(|t| t.id.source.as_str()),
+                _ => None,
+            };
+            match buckets.iter_mut().find(|(p, _)| *p == provider) {
+                Some((_, rows)) => rows.push(i),
+                None => buckets.push((provider, vec![i])),
+            }
+        }
+        for (_, bucket) in &buckets {
+            self.render_provider_bucket(
+                bucket,
+                agent_numbers,
+                row_budget,
+                theme,
+                now,
+                focused,
+                out,
+            );
+        }
+    }
+
+    /// Lay out one single-provider bucket of workspace rows in a single
+    /// `render_table` pass, sizing the reference and status columns over
+    /// only these rows, and write each Line into its slot in `out`.
+    #[allow(clippy::too_many_arguments)]
+    fn render_provider_bucket(
         &self,
         indices: &[usize],
         agent_numbers: &std::collections::HashMap<SessionKey, usize>,
@@ -991,14 +1040,14 @@ impl Sidebar {
         if indices.is_empty() {
             return;
         }
-        // Widest `NNN` within this group so every row in it pads to the
+        // Widest `NNN` within this bucket so every row in it pads to the
         // same reference column. Width is the digit count of `n` (no `#`
         // prefix — issue #67; the type glyph carries the issue-vs-PR
         // signal), via `ilog10` so the hot path doesn't allocate. The
         // column is Fixed and LEFT-aligned, so the deficit pads on the
         // right and the number stays flush off the glyph on every row
-        // (issues #42/#65). Scoping the max to the group is #961: a
-        // wide `#NNN` in another repo no longer inflates this one.
+        // (issues #42/#65). Scoping the max to the bucket is #961: a
+        // wide `#NNN` in another repo/provider no longer inflates this one.
         let max_pr_num_width = indices
             .iter()
             .filter_map(|&i| match &self.visible[i] {
@@ -1013,6 +1062,11 @@ impl Sidebar {
             .max()
             .unwrap_or(1);
         let columns = crate::components::workspace_row::build_columns(max_pr_num_width);
+        // Track the source index for each built row so the rendered Lines
+        // scatter back to the exact visible positions they came from —
+        // never a positional `zip` against `indices`, which would silently
+        // misalign every following row if one index were ever skipped.
+        let mut row_indices: Vec<usize> = Vec::with_capacity(indices.len());
         let mut rows: Vec<TableRow> = Vec::with_capacity(indices.len());
         for &i in indices {
             let VisibleRow::Workspace(key) = &self.visible[i] else {
@@ -1063,10 +1117,11 @@ impl Sidebar {
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.len()),
             };
+            row_indices.push(i);
             rows.push(build_workspace_row(&ctx));
         }
         let lines = crate::components::table::render_table(&rows, &columns, row_budget);
-        for (&i, line) in indices.iter().zip(lines) {
+        for (i, line) in row_indices.into_iter().zip(lines) {
             out[i] = Some(line);
         }
     }

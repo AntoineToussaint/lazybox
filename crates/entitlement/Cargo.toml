@@ -1,0 +1,16 @@
+[package]
+name = "lazybox-entitlement"
+description = "Entitlement gate for the relay broker — the subscription check before a connection is brokered."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[lints]
+workspace = true

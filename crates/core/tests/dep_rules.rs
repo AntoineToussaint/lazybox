@@ -46,6 +46,10 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ("lazybox-auth", set(&[])),
         ("lazybox-config", set(&["lazybox-core"])),
         ("lazybox-core", set(&[])),
+        // The relay's entitlement gate (#895): a standalone seam with no
+        // internal deps yet. The relay (#893) will hold it and real
+        // licensing (#648) will back it — both add edges deliberately then.
+        ("lazybox-entitlement", set(&[])),
         ("lazybox-gh", set(&["lazybox-auth", "lazybox-core"])),
         ("lazybox-git-ops", set(&["lazybox-core"])),
         ("lazybox-ipc", set(&["lazybox-core"])),

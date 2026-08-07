@@ -367,6 +367,27 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
                 return;
             }
+            // Shift-↑/↓ in the sidebar extend the multi-select from the
+            // cursor (spreadsheet-style range grab, #932), composing with
+            // `v` and Esc. This reclaims Shift-↑/↓ from splitter-resize
+            // *only while the sidebar is focused*: Shift-←/→ still resize
+            // horizontally everywhere, and Shift-↑/↓ keep resizing the
+            // vertical splitter from any other pane, so resize stays
+            // reachable.
+            Key::Up | Key::Down
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    && self.focus == PaneFocus::Sidebar =>
+            {
+                self.q_latch.disarm();
+                let dir = if matches!(key.code, Key::Up) { -1 } else { 1 };
+                let n = self.sidebar.extend_selection(dir);
+                if n > 0 {
+                    self.flash_info(format!("{n} selected — actions apply to all · Esc clears"));
+                }
+                self.sync_panes();
+                self.redraw = true;
+                return;
+            }
             // Shift-arrows: resize splitters. Disabled inside a
             // terminal so the shell can still bind them.
             Key::Left | Key::Right | Key::Up | Key::Down
@@ -1722,6 +1743,18 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 if let Some(focus) = target {
                     if focus == PaneFocus::Sidebar {
+                        // Shift + left-click extends the multi-select to
+                        // the clicked row (spreadsheet range grab, #932),
+                        // composing with `v` and the Shift-↑/↓ sweep.
+                        if matches!(button, crossterm::event::MouseButton::Left)
+                            && m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT)
+                            && self.sidebar.extend_selection_to(sidebar_rect, m.row)
+                        {
+                            self.set_focus(PaneFocus::Sidebar);
+                            self.sync_panes();
+                            self.redraw = true;
+                            return;
+                        }
                         // Try the header chips first (filter, then
                         // sort); if neither hit, fall through to row
                         // selection. All three outcomes update the
@@ -2280,7 +2313,6 @@ pub(super) fn action_from_kind(
         ActionKind::ToggleFocusWorkspace => Action::ToggleFocusWorkspace,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
-        ActionKind::UpdateBranchSelected => Action::UpdateBranchSelected,
         ActionKind::OpenHelp => Action::OpenHelp,
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,

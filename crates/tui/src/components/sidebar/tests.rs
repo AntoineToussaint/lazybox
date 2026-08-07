@@ -2627,6 +2627,78 @@ mod broadcast_select_tests {
         );
     }
 
+    /// `extend_selection` (Shift-↑/↓) sweeps a contiguous range from the
+    /// cursor: at every step the marked set is a top-anchored prefix of
+    /// the visible workspace order — never a gap — and a full downward
+    /// sweep grabs every row (#932).
+    #[test]
+    fn extend_selection_sweeps_a_contiguous_range() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta"), ("3", "Gamma")]);
+        let order: Vec<SessionKey> = sb
+            .visible_rows()
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order.len(), 3);
+
+        // Cursor on the first workspace row, nothing marked yet.
+        assert!(sb.focus_workspace_key(&order[0]));
+        assert!(sb.selected_broadcast_keys().is_empty());
+
+        // One visible row at a time; the selection stays a contiguous
+        // top prefix, even across the KindHeader rows in between.
+        let steps = sb.visible_rows().len();
+        for _ in 0..steps {
+            sb.extend_selection(1);
+            let sel = sb.selected_broadcast_keys();
+            assert_eq!(
+                sel,
+                order[..sel.len()].to_vec(),
+                "selection stays a contiguous top prefix",
+            );
+        }
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            order,
+            "a full sweep ends with every row selected",
+        );
+    }
+
+    /// Shift-click (`extend_selection_to`) marks every workspace row
+    /// between the cursor and the clicked row, inclusive (#932).
+    #[test]
+    fn extend_selection_to_grabs_the_clicked_range() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta"), ("3", "Gamma")]);
+        let order: Vec<SessionKey> = sb
+            .visible_rows()
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        let last_ws_idx = sb
+            .visible_rows()
+            .iter()
+            .rposition(|r| matches!(r, VisibleRow::Workspace(_)))
+            .expect("a workspace row");
+
+        // Cursor on the first workspace, Shift-click the last row.
+        assert!(sb.focus_workspace_key(&order[0]));
+        // Mirror `click_to_select`'s row math (HEADER_HEIGHT = 5).
+        let area = Rect::new(0, 0, 40, 40);
+        let click_row = area.y + 5 + last_ws_idx as u16;
+        assert!(sb.extend_selection_to(area, click_row));
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            order,
+            "the whole cursor→click range is marked",
+        );
+    }
+
     /// A removed workspace drops out of the selection so a later
     /// broadcast can't target a ghost.
     #[test]

@@ -812,6 +812,7 @@ pub struct WorktreeConfig {
 ///   bringup:
 ///     command: tools/local-dev/dev init "$LAZYBOX_PROFILE" && tools/local-dev/dev up "$LAZYBOX_PROFILE"
 ///     profile: robin
+///     command_timeout_secs: 600
 ///     readiness: tools/local-dev/dev doctor "$LAZYBOX_PROFILE"
 ///     readiness_timeout_secs: 300
 ///     readiness_interval_secs: 3
@@ -826,6 +827,12 @@ pub struct WorktreeBringup {
     /// the stack has no profile axis.
     #[serde(default)]
     pub profile: String,
+    /// How long to let `command` run before giving up, killing it, and
+    /// proceeding with a warning, in seconds. Bounds a bring-up that
+    /// hangs (a foreground dev server, a build waiting on stdin) so it
+    /// can't wedge the spawn forever.
+    #[serde(default = "default_command_timeout_secs")]
+    pub command_timeout_secs: u64,
     /// Optional readiness probe, polled via `sh -c` until it exits 0.
     /// Same `LAZYBOX_PROFILE` / `{profile}` substitution as `command`.
     /// Absent → the session is connectable as soon as `command` returns.
@@ -838,6 +845,10 @@ pub struct WorktreeBringup {
     /// Delay between `readiness` polls, in seconds.
     #[serde(default = "default_readiness_interval_secs")]
     pub readiness_interval_secs: u64,
+}
+
+fn default_command_timeout_secs() -> u64 {
+    600
 }
 
 fn default_readiness_timeout_secs() -> u64 {
@@ -2290,6 +2301,7 @@ repos:
             Some("dev doctor \"$LAZYBOX_PROFILE\"")
         );
         // Unspecified poll knobs fall back to the built-in defaults.
+        assert_eq!(global.command_timeout_secs, 600);
         assert_eq!(global.readiness_timeout_secs, 300);
         assert_eq!(global.readiness_interval_secs, 3);
 

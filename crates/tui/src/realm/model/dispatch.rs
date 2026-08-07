@@ -122,7 +122,7 @@ fn bulk_agent_confirm_prompt(plan: &BulkAgentPlan) -> String {
 /// set [`bulk_confirm_prompt`] and [`bulk_confirmed_verb`] must render
 /// copy for. Adding an action here without adding its copy there falls
 /// through to a neutral prompt, never a wrong one.
-fn is_bulk_destructive(action: &lazybox_tui_core::action::Action) -> bool {
+pub(super) fn is_bulk_destructive(action: &lazybox_tui_core::action::Action) -> bool {
     use lazybox_tui_core::action::Action;
     matches!(
         action,
@@ -704,7 +704,12 @@ impl<T: TerminalAdapter> Model<T> {
                 cmds.extend(produced);
             }
         }
-        self.sidebar.clear_broadcast_selection();
+        // Preserve the marks when nothing acted (every target had
+        // regressed / gone ineligible under the modal) so the user can
+        // retry — the same no-op-survives rule `bulk_dispatch` follows.
+        if acted > 0 {
+            self.sidebar.clear_broadcast_selection();
+        }
         self.flash_bulk_summary(bulk_confirmed_verb(action), "ineligible", acted, &skipped);
         self.redraw = true;
         cmds

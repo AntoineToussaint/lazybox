@@ -8280,6 +8280,92 @@ mod merge_focus_follow_tests {
         assert_eq!(m.sidebar.broadcast_selected_count(), 0);
     }
 
+    /// A right-click "Merge" acts on the clicked row even with a `v`
+    /// multi-select active: the ambient selection is cleared so a
+    /// bulk-destructive context action can't fan out over the whole set
+    /// instead of the explicit row (review follow-up).
+    #[test]
+    fn context_menu_bulk_action_targets_clicked_row_not_selection() {
+        use super::super::ChoicePayload;
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let wk_a = a.key.clone();
+        let key_a = SessionKey::from(&a.key);
+        seed_and_select(&mut m, vec![a, b]);
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // Right-click "Merge" on row A only.
+        m.modal_flow = Some(ModalFlow::SidebarContext {
+            session_key: key_a.clone(),
+            actions: vec![Action::MergePr],
+        });
+        m.modal_stack.push(Id::SidebarContext);
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(0)]);
+        assert!(cmds.is_empty(), "merge gates on confirm");
+
+        // Single-target confirm for the clicked row — not a bulk set.
+        match &m.modal_flow {
+            Some(ModalFlow::ActionConfirm {
+                action: Action::MergePr,
+                targets,
+            }) => {
+                assert_eq!(targets.len(), 1, "only the clicked row is targeted");
+                match &targets[0] {
+                    ActionConfirmTarget::Workspace(k) => assert_eq!(k, &key_a),
+                    other => panic!("expected the clicked workspace, got {other:?}"),
+                }
+            }
+            other => panic!("expected a single-row merge confirm, got {other:?}"),
+        }
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "the explicit right-click cleared the ambient multi-select",
+        );
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            matches!(cmds.as_slice(), [IpcCommand::MergePr { workspace_key }] if workspace_key == &wk_a),
+            "only the clicked row merges: {cmds:?}",
+        );
+    }
+
+    /// When every stashed target regresses before Yes, nothing acts and
+    /// the marks survive so the user can retry — the no-op-survives rule
+    /// `bulk_dispatch` already follows, now honored on the confirmed
+    /// destructive path too (review follow-up).
+    #[test]
+    fn bulk_merge_keeps_selection_when_all_targets_regress() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let mut a_red = a.clone();
+        a_red.pr.as_mut().unwrap().ci = lazybox_core::CiStatus::Failure;
+        let mut b_red = b.clone();
+        b_red.pr.as_mut().unwrap().ci = lazybox_core::CiStatus::Failure;
+        seed_and_select(&mut m, vec![a, b]);
+
+        assert!(m.dispatch_action(&Action::MergePr).is_empty());
+
+        // Both stashed PRs regress under the modal.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(a_red)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(b_red)));
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.is_empty(),
+            "nothing merges when every stashed PR regressed"
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "the selection survives a no-op bulk merge",
+        );
+    }
+
     /// A bulk `a c` spawn gates behind a "start N agents?" confirm (#836);
     /// confirming emits the snapshotted spawns (acceptance #4).
     #[test]

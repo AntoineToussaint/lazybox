@@ -160,6 +160,7 @@ fn make_issue(
         labels: Some(Labels {
             nodes: vec![Label { name: "bug".into() }],
         }),
+        attachments: None,
     }
 }
 

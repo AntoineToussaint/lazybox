@@ -60,6 +60,7 @@ function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
     additions: 0,
     deletions: 0,
     closes_issues: [],
+    linked_tasks: [],
     kind: "Pr",
     priority: null,
     state_label: null,

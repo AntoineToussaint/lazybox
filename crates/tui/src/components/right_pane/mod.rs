@@ -1114,29 +1114,66 @@ impl RightPane {
         self.feed.clear_selection();
     }
 
-    /// The originating issue for a PR workspace — the one the PR was
-    /// created from / closes — as `(label, url)`. `None` for issue
-    /// workspaces and PRs with no tracked issue link.
+    /// The counterpart-link row for the header — the task this workspace
+    /// is paired with — as `(prefix, label, url)`. Bidirectional and
+    /// provider-aware (#567, #922):
     ///
-    /// Prefers a folded-in issue `Task` (`gh_issues` / `linear_issues`,
-    /// carrying a real provider URL); falls back to the PR's
-    /// `closes_issues` reference, whose `owner/repo#N` key yields a
-    /// derived GitHub issue URL (#567).
-    fn originating_issue(&self) -> Option<(String, String)> {
+    /// - **PR primary** → its originating issue / ticket. A folded-in
+    ///   `Task` (`gh_issues` / `linear_issues`, carrying a real provider
+    ///   URL) wins; a GitHub issue reads `Issue: #N`, a Linear ticket
+    ///   `Linear: ENG-123`. Falls back to the PR's `closes_issues`
+    ///   reference, whose `owner/repo#N` key yields a derived GitHub issue
+    ///   URL.
+    /// - **Linear ticket primary** → its linked GitHub PR (from the
+    ///   ticket's attachment, before any collapse), reading `PR: #N` with
+    ///   a derived GitHub PR URL.
+    ///
+    /// Known limitation (#922): a PR whose Linear ticket has been matched
+    /// only by identifier (`pr.linked_tasks`), not yet fetched/folded,
+    /// shows no counterpart row — a Linear URL can't be derived from the
+    /// `ENG-123` identifier alone (it needs the workspace slug the fetched
+    /// ticket carries). The row appears once the ticket is folded in.
+    ///
+    /// `None` for a workspace with no tracked counterpart.
+    fn originating_issue(&self) -> Option<(String, String, String)> {
         let ws = self.workspace.as_ref()?;
-        let pr = ws.pr.as_ref()?;
-        if let Some(issue) = ws.gh_issues.iter().chain(ws.linear_issues.iter()).next() {
-            return Some((task_ref_label(issue), issue.url.clone()));
+        if let Some(pr) = ws.pr.as_ref() {
+            if let Some(issue) = ws.gh_issues.iter().chain(ws.linear_issues.iter()).next() {
+                let prefix = if issue.id.source == "linear" {
+                    "Linear"
+                } else {
+                    "Issue"
+                };
+                return Some((prefix.into(), task_ref_label(issue), issue.url.clone()));
+            }
+            let issue_id = pr.closes_issues.first()?;
+            let (repo, number) = issue_id.key.rsplit_once('#')?;
+            return Some((
+                "Issue".into(),
+                format!("#{number}"),
+                format!("https://github.com/{repo}/issues/{number}"),
+            ));
         }
-        let issue_id = pr.closes_issues.first()?;
-        let (repo, number) = issue_id.key.rsplit_once('#')?;
+        // Ticket / issue primary (no PR yet): surface its linked GitHub PR.
+        let primary = ws.primary_task()?;
+        let pr_id = primary
+            .linked_tasks
+            .iter()
+            .find(|id| id.source == "github")?;
+        let (repo, number) = pr_id.key.rsplit_once('#')?;
         Some((
+            "PR".into(),
             format!("#{number}"),
-            format!("https://github.com/{repo}/issues/{number}"),
+            format!("https://github.com/{repo}/pull/{number}"),
         ))
     }
 
-    fn render_header(&mut self, area: Rect, frame: &mut Frame, origin: Option<(String, String)>) {
+    fn render_header(
+        &mut self,
+        area: Rect,
+        frame: &mut Frame,
+        origin: Option<(String, String, String)>,
+    ) {
         self.click_hits.header_title = None;
         self.click_hits.header_issue = None;
         let theme = crate::theme::current();
@@ -1301,13 +1338,13 @@ impl RightPane {
         // from the title link above (row-granular hit-testing). The
         // click target is only registered when the row is inside the
         // header area (see the title line above).
-        if let Some((label, url)) = origin {
+        if let Some((prefix, label, url)) = origin {
             let issue_row = area.y + lines.len() as u16;
             if issue_row < area.bottom() {
                 self.click_hits.header_issue = Some((issue_row, url));
             }
             lines.push(Line::from(vec![
-                Span::styled("Issue: ", Style::default().fg(theme.text_dim)),
+                Span::styled(format!("{prefix}: "), Style::default().fg(theme.text_dim)),
                 Span::styled(
                     label,
                     Style::default()

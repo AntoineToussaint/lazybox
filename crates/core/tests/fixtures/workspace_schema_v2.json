@@ -135,6 +135,12 @@
         "key": "acme/widget#3"
       }
     ],
+    "linked_tasks": [
+      {
+        "source": "linear",
+        "key": "ENG-42"
+      }
+    ],
     "kind": "Pr",
     "priority": null,
     "state_label": null
@@ -196,6 +202,12 @@
       "additions": 120,
       "deletions": 45,
       "closes_issues": [],
+      "linked_tasks": [
+        {
+          "source": "linear",
+          "key": "ENG-42"
+        }
+      ],
       "kind": "Issue",
       "priority": null,
       "state_label": null
@@ -258,6 +270,12 @@
       "additions": 120,
       "deletions": 45,
       "closes_issues": [],
+      "linked_tasks": [
+        {
+          "source": "linear",
+          "key": "ENG-42"
+        }
+      ],
       "kind": "Issue",
       "priority": null,
       "state_label": null

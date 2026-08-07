@@ -61,6 +61,7 @@ fn make_task(key: &str) -> Task {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        linked_tasks: vec![],
         priority: None,
         state_label: None,
     }

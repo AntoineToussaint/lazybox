@@ -999,6 +999,7 @@ fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> lazybox_core::
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        linked_tasks: vec![],
         priority: None,
         state_label: None,
     }
@@ -1263,6 +1264,7 @@ fn task_with_pr(key: &str) -> lazybox_core::Task {
         deletions: 0,
         kind: None,
         closes_issues: vec![],
+        linked_tasks: vec![],
         priority: None,
         state_label: None,
     }

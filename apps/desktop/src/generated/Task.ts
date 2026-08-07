@@ -123,6 +123,18 @@ deletions: number,
  */
 closes_issues: Array<TaskId>,
 /**
+ * Cross-provider counterpart links — a Linear ticket ↔ its GitHub
+ * PR. Unlike [`Task::closes_issues`] (GitHub's authoritative
+ * same-provider `closingIssuesReferences`), this bridges providers:
+ * the Linear provider fills it from an issue's GitHub attachments
+ * (the linked PR URL), and the GitHub provider fills it from a
+ * Linear identifier (`ENG-123`) parsed out of a PR's branch / title
+ * / body. The poller reads it to collapse the matched ticket + PR
+ * into one workspace and to render the link both ways, mirroring
+ * `closes_issues`.
+ */
+linked_tasks: Array<TaskId>,
+/**
  * Authoritative PR-vs-issue discriminator, set by the provider that
  * built this task. `None` only for legacy persisted snapshots that
  * predate the field; [`Task::is_pr`] falls back to the URL heuristic

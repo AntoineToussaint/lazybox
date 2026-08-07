@@ -2219,10 +2219,93 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         additions: pr.additions,
         deletions: pr.deletions,
         closes_issues: extract_closes_issues(pr, &repo),
+        linked_tasks: extract_linear_refs(&pr.head_ref_name, &pr.title),
         kind: Some(lazybox_core::TaskKind::Pr),
         priority: None,
         state_label: None,
     }
+}
+
+/// Cross-provider links (#922): the Linear ticket(s) a PR references,
+/// mined from the PR's branch name and title only. Linear's GitHub
+/// integration names branches `<user>/<team>-<n>-<slug>`, so the ticket
+/// identifier is almost always in the branch, and a title is one line of
+/// user intent. Returns `{linear, ENG-123}` `TaskId`s — the exact id the
+/// Linear provider mints — deduped in discovery order (branch, then
+/// title).
+///
+/// The PR **body** is deliberately NOT scanned. `<TEAM>-<n>` collides
+/// with ordinary technical prose (`UTF-8`, `SHA-256`, `ISO-8601`,
+/// `CVE-2021-1234`), so scanning arbitrary body text would mint bogus
+/// links and, worse, silently collapse an unrelated ticket whose
+/// identifier coincidentally matched. This mirrors `extract_closes_issues`,
+/// which refuses to parse the body for the same reason. A body-only
+/// reference is still covered by Linear's authoritative attachment signal
+/// (see the Linear provider), matched separately in the poller.
+fn extract_linear_refs(branch: &str, title: &str) -> Vec<TaskId> {
+    let mut out: Vec<TaskId> = Vec::new();
+    let mut push = |ident: String| {
+        let id = TaskId {
+            source: "linear".into(),
+            key: ident,
+        };
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    };
+    for ident in parse_linear_identifiers(branch) {
+        push(ident);
+    }
+    for ident in parse_linear_identifiers(title) {
+        push(ident);
+    }
+    out
+}
+
+/// Scan `text` for Linear issue identifiers — `<TEAM>-<number>`, where
+/// TEAM is 1+ ASCII letters and number is 1+ digits (`ENG-123`,
+/// `PLAT-7`). Case-insensitive on the team key, normalized to
+/// upper-case so `eng-123` in a branch matches the ticket's `ENG-123`
+/// identifier. Boundary-checked on both sides so `v2-3` (leading digit),
+/// `foo-eng-1` (letters run into the team), and `ENG-1x` (trailing
+/// alphanumeric) don't false-match. Returns identifiers in scan order,
+/// deduped.
+fn parse_linear_identifiers(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Find the start of a letter run whose left boundary is a
+        // non-alphanumeric (so a team key can't begin mid-word).
+        if !bytes[i].is_ascii_alphabetic() || (i > 0 && bytes[i - 1].is_ascii_alphanumeric()) {
+            i += 1;
+            continue;
+        }
+        let team_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'-' {
+            continue;
+        }
+        let dash = i;
+        let num_start = dash + 1;
+        let mut j = num_start;
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
+            j += 1;
+        }
+        // Need at least one digit, and the right boundary must not be an
+        // alphanumeric (`ENG-1x` is not an identifier).
+        if j > num_start && (j >= bytes.len() || !bytes[j].is_ascii_alphanumeric()) {
+            let team = text[team_start..dash].to_ascii_uppercase();
+            let ident = format!("{team}-{}", &text[num_start..j]);
+            if !out.contains(&ident) {
+                out.push(ident);
+            }
+        }
+        i = j;
+    }
+    out
 }
 
 /// Build the `closes_issues` list for a PR Task. Three sources,
@@ -3118,6 +3201,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         additions: 0,
         deletions: 0,
         closes_issues: vec![],
+        linked_tasks: vec![],
         kind: Some(lazybox_core::TaskKind::Issue),
         priority: None,
         state_label: None,
@@ -3694,6 +3778,96 @@ mod tests {
     fn issues_query_body_includes_after_when_set() {
         let body = issues_query_body("test", Some("cursor-abc"));
         assert_eq!(body["variables"]["after"], "cursor-abc");
+    }
+
+    #[test]
+    fn parse_linear_identifiers_reads_branch_and_title_shapes() {
+        // Linear branch shape `<user>/<team>-<n>-<slug>`.
+        assert_eq!(
+            parse_linear_identifiers("antoine/eng-123-fix-the-thing"),
+            vec!["ENG-123".to_string()],
+        );
+        // Magic-word title reference.
+        assert_eq!(
+            parse_linear_identifiers("Fixes ENG-7: crash on boot"),
+            vec!["ENG-7".to_string()],
+        );
+        // Multi-letter team, deduped.
+        assert_eq!(
+            parse_linear_identifiers("PLAT-9 and PLAT-9 again"),
+            vec!["PLAT-9".to_string()],
+        );
+    }
+
+    #[test]
+    fn parse_linear_identifiers_respects_boundaries() {
+        // A digit-led team (`v2-3`) and a trailing alphanumeric
+        // (`ENG-1x`) must NOT match — the team is letters only and the
+        // number must end at a non-alphanumeric.
+        assert!(parse_linear_identifiers("v2-3").is_empty());
+        assert!(parse_linear_identifiers("ENG-1x").is_empty());
+        // A bare number with no team is not an identifier.
+        assert!(parse_linear_identifiers("-42").is_empty());
+    }
+
+    #[test]
+    fn pr_to_task_links_linear_ticket_from_branch() {
+        // #922: the Linear identifier in the PR branch becomes a
+        // cross-provider link on the PR task.
+        let mut pr = make_pr(5, "alice");
+        pr.head_ref_name = "alice/eng-123-fix".into();
+        pr.title = "feat: fix the thing".into();
+        pr.body = None;
+        let task = pr_to_task(&pr, "alice");
+        assert_eq!(
+            task.linked_tasks,
+            vec![TaskId {
+                source: "linear".into(),
+                key: "ENG-123".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn pr_to_task_has_no_linear_link_without_identifier() {
+        let mut pr = make_pr(5, "alice");
+        pr.head_ref_name = "alice/plain-branch".into();
+        pr.title = "feat: nothing linear here".into();
+        pr.body = Some("just a normal PR".into());
+        assert!(pr_to_task(&pr, "alice").linked_tasks.is_empty());
+    }
+
+    #[test]
+    fn pr_to_task_ignores_linear_lookalikes_in_body() {
+        // REGRESSION (#922): `<TEAM>-<n>` collides with ordinary technical
+        // prose. The PR body must NOT be scanned — otherwise a body
+        // mentioning `SHA-256` / `UTF-8` mints bogus `{linear, SHA-256}`
+        // links and can silently collapse an unrelated ticket whose
+        // identifier coincidentally matches. Branch + title are clean here,
+        // so the only possible source of a link is the body.
+        let mut pr = make_pr(5, "alice");
+        pr.head_ref_name = "alice/plain-branch".into();
+        pr.title = "feat: hashing overhaul".into();
+        pr.body = Some("Switch to SHA-256 and UTF-8; see CVE-2021-1234.".into());
+        assert!(
+            pr_to_task(&pr, "alice").linked_tasks.is_empty(),
+            "body-only lookalike tokens must not produce cross-provider links",
+        );
+    }
+
+    #[test]
+    fn pr_to_task_ignores_real_linear_ref_confined_to_body() {
+        // The flip side of the safety trade-off: a genuine `ENG-123`
+        // appearing ONLY in the body is deliberately not matched here (the
+        // body is unscannable). Such a reference is instead covered by
+        // Linear's authoritative attachment signal. Pinning this documents
+        // the intentional boundary so a future "just also scan the body"
+        // change has to reckon with the false-positive test above.
+        let mut pr = make_pr(5, "alice");
+        pr.head_ref_name = "alice/plain-branch".into();
+        pr.title = "feat: nothing linear in the title".into();
+        pr.body = Some("Fixes ENG-123.".into());
+        assert!(pr_to_task(&pr, "alice").linked_tasks.is_empty());
     }
 
     #[test]

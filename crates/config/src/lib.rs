@@ -58,6 +58,14 @@ pub struct Config {
     /// [`SandboxConfig`].
     #[serde(default, skip_serializing_if = "SandboxConfig::is_empty")]
     pub sandbox: SandboxConfig,
+    /// Named remote daemons ("boxes") this client can spawn sessions on
+    /// in addition to the local daemon. Keyed by a user-chosen name that
+    /// shows up in the sidebar's remote indicator. Each entry describes
+    /// how to reach that daemon (a forwarded Unix socket and/or an API
+    /// gateway). Empty by default; the whole block round-trips out of a
+    /// written config when unset. See [`RemoteDaemonConfig`].
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub remotes: std::collections::BTreeMap<String, RemoteDaemonConfig>,
     /// Custom + override editor entries. Merged with builtins
     /// (Zed/VS Code/Cursor/…) at startup. `id` matches builtins
     /// to override; new ids extend.
@@ -234,6 +242,50 @@ pub struct RemoteGatewayConfig {
     /// the box). Empty when the gateway runs `--insecure-no-auth`.
     #[serde(default)]
     pub token: String,
+}
+
+/// A `remotes.<name>:` block — a named remote daemon ("box") this
+/// client can spawn sessions on, alongside the local daemon. Generic:
+/// a box is just a named daemon endpoint, reached the same way
+/// `lazybox --connect` reaches one (a forwarded Unix socket) and/or an
+/// API gateway. At least one of `socket` / `gateway` should be set; the
+/// socket path is the transport lazybox dials today (the same
+/// `socket::connect_reconnecting` path `--connect` uses).
+///
+/// ```yaml
+/// remotes:
+///   devbox:
+///     socket: /Users/me/.lazybox/remotes/devbox.sock
+///     default: true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RemoteDaemonConfig {
+    /// Absolute path to the daemon's Unix socket as reachable from THIS
+    /// machine — typically an SSH-forwarded loopback socket the operator
+    /// (or a `remote.tunnel`) binds locally. Dialed with the same
+    /// self-healing transport `--connect` uses. Omitted from a written
+    /// config when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<PathBuf>,
+    /// An API gateway fronting the daemon, as an alternative/adjunct to a
+    /// forwarded socket (loopback-only + SSH-forwarded, like
+    /// `desktop.remote`). Reserved for a gateway transport; the socket is
+    /// what lazybox dials today. Omitted from a written config when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<RemoteGatewayConfig>,
+    /// When several remotes are configured, the one flagged `default`
+    /// receives an `r`-prefixed spawn that doesn't name a remote. With no
+    /// flag set, the first remote (BTreeMap order) is the default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
+}
+
+impl RemoteDaemonConfig {
+    /// The socket path this remote is dialed at, if any is configured.
+    pub fn socket_path(&self) -> Option<&Path> {
+        self.socket.as_deref()
+    }
 }
 
 /// `remote:` block — client-side remote-access wiring for
@@ -2383,6 +2435,44 @@ mod tests {
         let yaml = serde_yaml::to_string(&cfg.remote).expect("serialize configured remote");
         let restored: RemoteConfig = serde_yaml::from_str(&yaml).expect("round-trip remote");
         assert_eq!(restored.tunnel, cfg.remote.tunnel);
+    }
+
+    #[test]
+    fn remotes_are_omitted_when_unset_and_round_trip_when_set() {
+        let default_yaml =
+            serde_yaml::to_string(&Config::default()).expect("serialize default config");
+        assert!(
+            !default_yaml.contains("remotes:"),
+            "unset remotes must be omitted, got a `remotes` key in:\n{default_yaml}"
+        );
+
+        let cfg: Config = Config::parse(
+            "remotes:\n  devbox:\n    socket: /home/me/.lazybox/remotes/devbox.sock\n    \
+             default: true\n  ci:\n    socket: /home/me/.lazybox/remotes/ci.sock\n",
+        )
+        .expect("parse remotes section");
+        assert_eq!(cfg.remotes.len(), 2);
+        let devbox = cfg.remotes.get("devbox").expect("devbox remote present");
+        assert_eq!(
+            devbox.socket_path(),
+            Some(Path::new("/home/me/.lazybox/remotes/devbox.sock"))
+        );
+        assert!(devbox.default, "devbox is flagged default");
+        assert!(
+            !cfg.remotes.get("ci").expect("ci remote present").default,
+            "ci remote defaults to non-default"
+        );
+
+        let yaml = serde_yaml::to_string(&cfg.remotes).expect("serialize configured remotes");
+        let restored: std::collections::BTreeMap<String, RemoteDaemonConfig> =
+            serde_yaml::from_str(&yaml).expect("round-trip remotes");
+        assert_eq!(restored, cfg.remotes);
+        // A non-default remote omits the `default: false` noise.
+        let ci_yaml = serde_yaml::to_string(cfg.remotes.get("ci").unwrap()).unwrap();
+        assert!(
+            !ci_yaml.contains("default"),
+            "default:false must be omitted, got:\n{ci_yaml}"
+        );
     }
 
     /// config.yaml can hold Slack tokens: every write path must land

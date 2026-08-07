@@ -898,6 +898,42 @@ impl<T: TerminalAdapter> Model<T> {
                     });
                 }
             }
+            // Remote-spawn variant (`r c` / `r x` / `r u`): the same
+            // agent spawn as `a c`, but routed to a configured remote
+            // daemon's client (Design A) instead of `self.client`, and
+            // the workspace gets a sidebar remote indicator. The chord
+            // doesn't name a remote, so we target the resolved default
+            // (config-flagged, else first connected). The command is sent
+            // directly to the remote client here rather than returned in
+            // `cmds` — those flush to the LOCAL daemon.
+            Action::SpawnAgentRemote(agent_id) => {
+                let Some(remote) = self.default_remote().map(str::to_string) else {
+                    self.flash_error(
+                        "no remote daemon configured — add a `remotes:` entry to spawn on a box",
+                    );
+                    return cmds;
+                };
+                if let Some(sk) = session_key {
+                    let spawn = IpcCommand::Spawn {
+                        model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
+                        session_key: sk.clone(),
+                        session_id,
+                        client_request_id: None,
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: false,
+                    };
+                    self.send_to_remote(&remote, spawn);
+                    // Optimistic client-side tag so the sidebar row shows
+                    // the remote indicator immediately — client-local UI
+                    // state that survives local-daemon snapshots (which
+                    // don't know about the box).
+                    self.sidebar.mark_remote(sk, remote);
+                    self.redraw = true;
+                }
+            }
             // Main-checkout variants (`b c` / `b s`, confirm-guarded):
             // same spawn, but `on_main` tells the daemon to land in the
             // repo's shared main checkout instead of an isolated

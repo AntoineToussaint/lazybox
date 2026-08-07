@@ -85,6 +85,23 @@ impl<T: TerminalAdapter> Model<T> {
             let direct = rfocus.zip(stroke).and_then(|(rf, s)| {
                 find_action_for_seq(&prefix, &s, rf, &self.catalog).and_then(action_from_entry)
             });
+            // Same-key double-tap fires the shadowed direct action (`r r`
+            // → Reply): only reached when the leader stashed one at arm
+            // time, i.e. a key that carries both a direct action and a
+            // leader family. Checked before the continuation resolution so
+            // it can't be mistaken for an `r <agent>` chord.
+            if direct.is_none()
+                && stroke == Some(prefix)
+                && let Some(action) = self.leader_fallback.take()
+            {
+                self.leader.take();
+                self.leader_highlight = None;
+                self.q_latch.disarm();
+                let cmds = self.dispatch_action(&action);
+                self.flush_dispatched_cmds(cmds);
+                self.sync_panes();
+                return;
+            }
             if direct.is_none() {
                 // Not a direct hit — arrow / `j` / `k` move a highlight
                 // through the popup and keep the leader armed; `Enter`
@@ -110,6 +127,7 @@ impl<T: TerminalAdapter> Model<T> {
                 {
                     self.leader.take();
                     self.leader_highlight = None;
+                    self.leader_fallback = None;
                     self.q_latch.disarm();
                     let cmds = self.dispatch_action(&action);
                     self.flush_dispatched_cmds(cmds);
@@ -124,6 +142,7 @@ impl<T: TerminalAdapter> Model<T> {
             // (#165) — a mistyped `g x` still runs `x`'s own action.
             self.leader.take();
             self.leader_highlight = None;
+            self.leader_fallback = None;
             if let Some(action) = direct {
                 self.q_latch.disarm();
                 let cmds = self.dispatch_action(&action);
@@ -548,14 +567,21 @@ impl<T: TerminalAdapter> Model<T> {
             // the catalog — arming on it (reachable from an empty
             // terminal pane, where the quit branch is skipped) would
             // show a popup whose completion goes nowhere.
-            let opens_leader = action.is_none()
-                && seq_continuations(&stroke, rfocus, &self.catalog)
-                    .iter()
-                    .any(|(_, entry)| action_from_entry(entry).is_some());
+            let opens_leader = seq_continuations(&stroke, rfocus, &self.catalog)
+                .iter()
+                .any(|(_, entry)| action_from_entry(entry).is_some());
             if opens_leader {
                 self.q_latch.disarm();
                 self.leader.arm(stroke);
                 self.leader_highlight = None;
+                // A key that opens a leader family AND has a direct action
+                // of its own (today only `r`: Reply + the `r <agent>`
+                // remote-spawn chords) stashes that direct action so a
+                // same-key double-tap (`r r`) still fires it — the leader
+                // never *removes* a binding, it layers a family on top.
+                // Dedicated leaders (`g`, `a`, `w`, `b`) have no direct
+                // action, so this stays `None` and nothing changes for them.
+                self.leader_fallback = action;
                 self.redraw = true;
                 return;
             }
@@ -2185,6 +2211,9 @@ pub(super) fn action_from_entry(
     match (entry.kind, entry.param.as_ref()) {
         (ActionKind::SpawnAgent, Some(Param::Agent(id))) => {
             return Some(Action::SpawnAgent(id.clone()));
+        }
+        (ActionKind::SpawnAgentRemote, Some(Param::Agent(id))) => {
+            return Some(Action::SpawnAgentRemote(id.clone()));
         }
         (ActionKind::SpawnAgent, Some(Param::Tier(alias))) => {
             return Some(Action::SpawnTier(alias.clone()));

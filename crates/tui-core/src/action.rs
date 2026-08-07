@@ -69,6 +69,15 @@ pub enum Action {
     /// / `a M` chords. Like [`Action::SpawnAgent`] on the default agent
     /// but carrying the picked tier alias.
     SpawnTier(String),
+    /// Spawn a specific agent by id on a **remote daemon** ("box")
+    /// instead of the local daemon — the `r c` / `r x` / `r u` leader
+    /// chords. Same spawn as [`Action::SpawnAgent`], but the command is
+    /// routed to the chosen remote client (see `config.remotes`) and the
+    /// workspace gets a remote indicator in the sidebar. The id is
+    /// dynamic because the agent registry is config-driven; the remote is
+    /// resolved at dispatch (the flagged `default`, else the first
+    /// configured). Generated only when at least one remote is configured.
+    SpawnAgentRemote(String),
     /// Spawn a shell in the focused workspace's worktree.
     SpawnShell,
     /// Spawn a specific agent on the repo's shared **main checkout**
@@ -430,6 +439,7 @@ pub enum ActionKind {
     Work,
     WorkWith,
     SpawnAgent,
+    SpawnAgentRemote,
     SpawnShell,
     SpawnAgentOnMain,
     SpawnShellOnMain,
@@ -559,6 +569,7 @@ impl ActionKind {
         Self::Work,
         Self::WorkWith,
         Self::SpawnAgent,
+        Self::SpawnAgentRemote,
         Self::SpawnShell,
         Self::SpawnAgentOnMain,
         Self::SpawnShellOnMain,
@@ -671,6 +682,7 @@ impl Action {
             Action::Work => ActionKind::Work,
             Action::WorkWith(_) => ActionKind::WorkWith,
             Action::SpawnAgent(_) => ActionKind::SpawnAgent,
+            Action::SpawnAgentRemote(_) => ActionKind::SpawnAgentRemote,
             // Tier variants reuse the parent leader group so the
             // which-key popup / footer / help treat `w S` as part of
             // the `w` "work" group and `a S` as part of the `a` "agent"
@@ -764,6 +776,7 @@ impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Action::SpawnAgent(id) => write!(f, "spawn {id}"),
+            Action::SpawnAgentRemote(id) => write!(f, "spawn {id} on remote"),
             Action::WorkWith(id) => write!(f, "work in {id}"),
             other => f.write_str(ActionDef::for_kind(other.kind()).label),
         }
@@ -997,6 +1010,17 @@ impl ActionDef {
                 default_keys: "a c / a x / a u",
                 label: "spawn agent",
                 describe: "Open a new agent terminal (claude / codex / cursor / …) in the workspace.",
+                section: Section::Workspace,
+            },
+            ActionKind::SpawnAgentRemote => &Self {
+                kind: ActionKind::SpawnAgentRemote,
+                // Per-agent binding generated in `catalog()` (`r c` /
+                // `r x` / `r u`), only when a remote is configured; this
+                // placeholder gives the help panel a row with the literal
+                // multi-agent form.
+                default_keys: "r c / r x / r u",
+                label: "spawn agent on remote",
+                describe: "Open a new agent terminal on a configured remote daemon (a \"box\") instead of the local one — the `r`-prefixed chords. The session runs on the remote; the sidebar row shows a remote indicator. Requires a `remotes:` entry in the config.",
                 section: Section::Workspace,
             },
             ActionKind::SpawnShell => &Self {
@@ -1857,6 +1881,7 @@ impl ActionKind {
             ActionKind::Work => "work",
             ActionKind::WorkWith => "work_with",
             ActionKind::SpawnAgent => "spawn_agent",
+            ActionKind::SpawnAgentRemote => "spawn_agent_remote",
             ActionKind::SpawnShell => "spawn_shell",
             ActionKind::SpawnAgentOnMain => "spawn_agent_on_main",
             ActionKind::SpawnShellOnMain => "spawn_shell_on_main",
@@ -2125,6 +2150,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::OpenInBrowser
         | ActionKind::DeleteOrClose => Some("github"),
         ActionKind::SpawnAgent => Some("agent"),
+        ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
         ActionKind::NewWorkspace
@@ -2149,7 +2175,14 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
 /// compact index, generated docs, and help-agent context all teach the same
 /// mental model: do work, choose an agent, use main deliberately, operate on
 /// GitHub, then manage the workspace itself.
-pub const LEADER_GROUP_ORDER: &[&str] = &["work", "agent", "main branch", "github", "workspace"];
+pub const LEADER_GROUP_ORDER: &[&str] = &[
+    "work",
+    "agent",
+    "remote",
+    "main branch",
+    "github",
+    "workspace",
+];
 
 pub fn leader_group_rank(label: &str) -> usize {
     LEADER_GROUP_ORDER
@@ -2185,6 +2218,23 @@ impl ActionDef {
         overrides: &std::collections::BTreeMap<String, String>,
         tiers: &[lazybox_core::ModelTier],
     ) -> Vec<CatalogEntry> {
+        Self::catalog_full(agents, overrides, tiers, &[])
+    }
+
+    /// [`ActionDef::catalog_with_tiers`] plus the remote-spawn chords:
+    /// one `r <agent-key>` row per enabled agent, generated only when at
+    /// least one remote daemon is configured (`remotes` non-empty). The
+    /// row's semantics don't name a specific remote at the chord level —
+    /// dispatch resolves the chosen remote (the flagged `default`, else
+    /// the first configured) — so a single `r <agent>` family serves
+    /// however many boxes are configured, mirroring how the tier chords
+    /// stay agent-agnostic.
+    pub fn catalog_full(
+        agents: &[String],
+        overrides: &std::collections::BTreeMap<String, String>,
+        tiers: &[lazybox_core::ModelTier],
+        remotes: &[String],
+    ) -> Vec<CatalogEntry> {
         let mut out: Vec<CatalogEntry> = Vec::new();
         for def in ActionDef::all() {
             // The static SpawnAgent / WorkWith / SpawnAgentOnMain rows
@@ -2193,7 +2243,10 @@ impl ActionDef {
             // stays.)
             if matches!(
                 def.kind,
-                ActionKind::SpawnAgent | ActionKind::WorkWith | ActionKind::SpawnAgentOnMain
+                ActionKind::SpawnAgent
+                    | ActionKind::SpawnAgentRemote
+                    | ActionKind::WorkWith
+                    | ActionKind::SpawnAgentOnMain
             ) {
                 continue;
             }
@@ -2291,6 +2344,58 @@ impl ActionDef {
                     keys_display,
                     config_key,
                 });
+            }
+        }
+        // Remote-spawn agent rows: `r <agent-key>` (e.g. `r c` / `r x` /
+        // `r u`). Generated only when a remote daemon is configured, so
+        // the `r` leader never arms on a machine with no boxes. The
+        // leader is the first key of whatever `spawn_agent_remote`
+        // resolves to (its default `r`, honoring a remap), and the
+        // second key is the agent's own default shortcut — the same
+        // shape as the `w`/`b` families.
+        if !remotes.is_empty() {
+            let remote = ActionDef::for_kind(ActionKind::SpawnAgentRemote);
+            let remote_leader: Option<KeyStroke> = remote
+                .effective_chords(overrides)
+                .into_iter()
+                .find_map(|c| match c {
+                    Chord::Seq(keys) => keys.first().copied(),
+                    Chord::Key(k) => Some(k),
+                })
+                // The placeholder default (`r c / r x / r u`) doesn't parse
+                // to a chord, so fall back to a literal `r` leader.
+                .or(Some(KeyStroke::new(
+                    false,
+                    false,
+                    false,
+                    ChordCode::Char('r'),
+                )));
+            if let Some(leader) = remote_leader {
+                for id in agents {
+                    let Some(key) = agent_default_key(id) else {
+                        continue;
+                    };
+                    let second = KeyStroke::new(false, false, false, ChordCode::Char(key));
+                    let seq = Chord::Seq(vec![leader, second]);
+                    let keys_display = std::borrow::Cow::Owned(format!(
+                        "{} {}",
+                        leader.display(),
+                        second.display()
+                    ));
+                    let config_key = format!("spawn_agent_remote.{id}");
+                    let (chords, keys_display) =
+                        generated_row_chords(overrides, &config_key, (vec![seq], keys_display));
+                    out.push(CatalogEntry {
+                        kind: ActionKind::SpawnAgentRemote,
+                        param: Some(Param::Agent(id.clone())),
+                        section: remote.section,
+                        label: std::borrow::Cow::Owned(format!("{id} on remote")),
+                        describe: remote.describe,
+                        chords,
+                        keys_display,
+                        config_key,
+                    });
+                }
             }
         }
         // Scoped "spawn on main" agent rows: `<main-leader> <agent-key>`
@@ -2593,6 +2698,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // the workspace's existence. These all need a target.
         ActionKind::OpenWorkspace
         | ActionKind::SpawnAgent
+        // Remote spawn needs a target workspace like SpawnAgent; the `r`
+        // rows only exist in the catalog when a remote is configured, so
+        // gating on the workspace alone can never surface an unusable chord.
+        | ActionKind::SpawnAgentRemote
         | ActionKind::MarkAllRead
         // Rename targets any workspace's display label — even a
         // session-less/empty one — so gate purely on a workspace

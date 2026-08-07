@@ -1168,6 +1168,20 @@ pub struct Model<T: TerminalAdapter> {
     synthesized_projects: std::collections::BTreeSet<lazybox_core::ProjectKey>,
     /// IPC client for forwarding pane-emitted commands to the daemon.
     pub client: Client,
+    /// Additional daemon connections to configured remote daemons
+    /// ("boxes"), keyed by the remote's config name (Design A: the
+    /// client holds N daemon connections). Built at boot from
+    /// `config.remotes` via the same `socket::connect_reconnecting`
+    /// transport `--connect` uses. An `r`-prefixed spawn routes its
+    /// command to one of these instead of `client`, and every remote's
+    /// event stream is merged into the model's pump (see
+    /// `helpers::drain_daemon_events`). Empty when no remotes are
+    /// configured — the local-only path is entirely unchanged.
+    pub remote_clients: std::collections::BTreeMap<String, Client>,
+    /// The remote an unqualified `r`-spawn targets: the config-flagged
+    /// `default`, else the first configured remote (BTreeMap order).
+    /// `None` when no remotes are configured.
+    default_remote: Option<String>,
     /// True when this client is attached to a standalone daemon over a
     /// socket (`--connect`) rather than the in-process embedded daemon.
     /// The `Client` transport is deliberately opaque, so the entrypoint
@@ -1211,6 +1225,16 @@ pub struct Model<T: TerminalAdapter> {
     /// continuation. Reset whenever the leader (re)arms or disarms so the
     /// highlight never outlives its popup (#343).
     leader_highlight: Option<usize>,
+    /// Direct single-key action shadowed by an armed leader on the same
+    /// stroke. Most leaders (`g`, `a`, `w`) are dedicated keys with no
+    /// bare-key action, so this stays `None`. It's `Some` only when a key
+    /// that already had a direct action (e.g. `r` → Reply) also gains a
+    /// leader family (the `r <agent>` remote-spawn chords, present only
+    /// when a remote is configured): arming the leader stashes the
+    /// direct action here, and completing the leader with the SAME
+    /// stroke (`r r`) fires it — the same double-tap escape `q q` uses,
+    /// so the shadowed action stays reachable without a timed leader.
+    leader_fallback: Option<lazybox_tui_core::action::Action>,
     /// Last left-click position + timestamp. A second left-click on
     /// the same row within `DOUBLE_CLICK_WINDOW` is treated as a
     /// double-click; the right pane's double-click handler then
@@ -1878,6 +1902,8 @@ impl<T: TerminalAdapter> Model<T> {
             projects: std::collections::BTreeMap::new(),
             synthesized_projects: std::collections::BTreeSet::new(),
             client,
+            remote_clients: std::collections::BTreeMap::new(),
+            default_remote: None,
             event_backlog: helpers::BacklogMonitor::default(),
             remote: false,
             redraw: true,
@@ -1887,6 +1913,7 @@ impl<T: TerminalAdapter> Model<T> {
             q_latch: crate::confirm_latch::DoubleTapLatch::new(),
             leader: crate::confirm_latch::LeaderLatch::new(),
             leader_highlight: None,
+            leader_fallback: None,
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
             terminal_leader_armed: false,
             terminal_leader_highlight: None,
@@ -2094,6 +2121,52 @@ impl<T: TerminalAdapter> Model<T> {
     pub fn with_remote(mut self) -> Self {
         self.remote = true;
         self
+    }
+
+    /// Attach connections to configured remote daemons ("boxes") — the
+    /// Design-A multi-client transport. `default` names the remote an
+    /// unqualified `r`-spawn targets (the config-flagged default, else
+    /// the first). Rebuilds the catalog so the `r <agent>` chords appear
+    /// once there is at least one remote. The boot crate builds the
+    /// clients (it owns the socket transport) and hands them here.
+    pub fn with_remote_clients(
+        mut self,
+        clients: std::collections::BTreeMap<String, Client>,
+        default: Option<String>,
+    ) -> Self {
+        self.default_remote = default.or_else(|| clients.keys().next().cloned());
+        self.remote_clients = clients;
+        self.rebuild_catalog();
+        self
+    }
+
+    /// The remote name an `r`-spawn targets when the chord doesn't name
+    /// one — the configured default, else the first connected remote.
+    pub(crate) fn default_remote(&self) -> Option<&str> {
+        self.default_remote.as_deref()
+    }
+
+    /// Forward a command to a named remote daemon's client. Mirrors
+    /// [`Model::send_cmd`]'s failure handling so a dead remote link
+    /// raises the same congestion / disconnect signal. No-op with a
+    /// warning when the remote isn't connected.
+    pub(crate) fn send_to_remote(&self, remote: &str, cmd: IpcCommand) {
+        let Some(client) = self.remote_clients.get(remote) else {
+            tracing::warn!("remote spawn to unknown/unconnected remote {remote:?} dropped");
+            self.cmd_send_failed.set(true);
+            return;
+        };
+        if let Err(e) = client.send(cmd) {
+            tracing::warn!("ipc send to remote {remote:?} failed: {e}");
+            match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    self.cmd_send_overloaded.set(true);
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    self.cmd_send_failed.set(true);
+                }
+            }
+        }
     }
 
     /// Install the on-setup-complete hook before the main loop
@@ -3009,10 +3082,14 @@ impl<T: TerminalAdapter> Model<T> {
             .get(self.sidebar.default_agent())
             .map(|m| m.tiers.as_slice())
             .unwrap_or(&[]);
-        self.catalog = lazybox_tui_core::action::ActionDef::catalog_with_tiers(
+        // Remote names gate the `r <agent>` chords — no remotes, no `r`
+        // leader (the default keymap is byte-for-byte unchanged).
+        let remotes: Vec<String> = self.remote_clients.keys().cloned().collect();
+        self.catalog = lazybox_tui_core::action::ActionDef::catalog_full(
             &self.agents,
             &self.action_key_overrides,
             tiers,
+            &remotes,
         );
     }
 

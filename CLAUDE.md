@@ -229,7 +229,9 @@ toggle focus mode (near-fullscreen agent terminal behind a slim event
 header; from inside a terminal use `]]f`, and `]]q` exits),
 `]]<digit>` jump the focused terminal straight to the Nth agent
 workspace (sidebar order; the number rides a badge on each agent row
-and the `]]` leader popup), `Shift-arrows` resize splitters, `F8` /
+and the `]]` leader popup), `Shift-arrows` resize splitters
+(`Shift-←/→` everywhere; `Shift-↑/↓` too, except in the sidebar where
+they extend the multi-select instead — #932), `F8` /
 `Alt-s` / `Ctrl-Alt-s` toggle mouse capture (host-native text
 selection), mouse-click any pane to focus it, mouse-drag splitters to
 resize.
@@ -267,10 +269,14 @@ into PR, `x z` long snooze, `x x` archive, `x c` close issue
 (as not-planned, upstream; issue workspaces only, confirmed first) —
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).
 `r` reply (works from the sidebar as well as the activity pane —
-it's a Workspace-section action). `v` multi-selects workspace
-rows (marks survive j/k; `Esc` clears). A live multi-select makes
-**every bulk-appropriate workspace action** target the whole set
-instead of just the cursor row (#899): `w w` / `w S/M/L`, `w c`·`w x`,
+it's a Workspace-section action). `v` multi-selects the cursor
+workspace; `Shift-↑`/`Shift-↓` extend the selection from the cursor
+(spreadsheet-style contiguous sweep, #932) and `Shift-click` extends
+it to the clicked row (marks survive j/k; `Esc` clears). A live
+multi-select makes **every bulk-appropriate workspace action** target
+the whole set instead of just the cursor row — selection is the
+primary path, not a special broadcast mode (#932, mechanism from
+#899): `w w` / `w S/M/L`, `w c`·`w x`,
 `a c`·`a x`·`a S/M/L` and `s` start (or continue) the contextual
 agent / shell on each selected workspace — heavy spawns gate behind
 one "start N agents?" confirm and inject into any workspace already
@@ -286,10 +292,13 @@ issue (`x c`) / delete-or-close (`g d`), open-in-browser (`g o`),
 reviewers/assignees/labels, the policies menu (`g p`), notes, pin
 (`p`), move-to-Space (`x m`), and the on-main spawns (`b …`). The
 shared `resolve_targets` helper (selection-or-focused) means a new
-workspace action opts into bulk by reading it. `Shift-B` broadcasts one
-instruction to every selected workspace: a snippet picker (`Ctrl-F`
-skips it for free text) feeds a compose textarea pre-filled with the
-snippet body, and submit delivers per target — running agents via the
+workspace action opts into bulk by reading it. `Shift-B` is the one
+**broadcast-only** flow that survives selection-first (#932): free
+text — optionally seeded from a snippet — sent to every selected
+workspace, which no single-row action key expresses. A snippet picker
+(`Ctrl-F` skips it for free text) feeds a compose textarea pre-filled
+with the snippet body, and submit delivers per target — running agents
+via the
 settle-gated inject, plain shells via a direct write, and session-less
 workspaces that still have a repo scope get the default agent spawned
 with the message as its initial prompt (#836 — behind a "start N
@@ -306,10 +315,9 @@ to the broadcast spawn per #836), `]]l` a skill (#797), `]]r` recall,
 (terminal-pane chords like `]]f`/`]]x` are inert here). Because `]]`
 now shares the sidebar's `]` (browse), a lone `]` is held one
 `escape_window` and resolves to the browser on the next key or the idle
-tick, mirroring the terminal's held literal `]`. `Shift-U`
-bulk-updates the branch (rebase/merge base into head) of every
-selected PR that's behind `main` — one `UpdateBranch` per behind PR,
-up-to-date and non-PR selections skipped and counted (#484). `a` is a leader
+tick, mirroring the terminal's held literal `]`. (The dedicated
+`Shift-U` bulk-update-branch key is retired — `g u` under a selection
+already updates every behind PR in the set, #484/#932.) `a` is a leader
 for the **agent** group (which-key popup): `a c` claude, `a x` codex,
 `a u` cursor — no top-level `c`/`x`/`u` aliases (re-add via
 `ui.action_keys`, keyed `spawn_agent.<id>`). Both the `w` and `a`

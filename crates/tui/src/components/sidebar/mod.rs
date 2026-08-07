@@ -277,10 +277,12 @@ pub struct Sidebar {
     /// search is in flight; `Some` while the `/` input bar is open or
     /// a query stays applied after `Enter`. See [`SearchState`].
     search: Option<SearchState>,
-    /// Workspace rows the user multi-selected with `v` — the targets a
-    /// broadcast (`Shift-B`) fans out to. Keys, not row indices, so the
-    /// marks survive re-sorts and j/k navigation; pruned when a
-    /// workspace is removed and cleared by Esc or a successful send.
+    /// Workspace rows the user multi-selected with `v` (or swept with
+    /// Shift-↑/↓). While non-empty, every bulk-appropriate workspace
+    /// action targets this whole set instead of the cursor row (#932) —
+    /// broadcast (`Shift-B`) is only one such consumer. Keys, not row
+    /// indices, so the marks survive re-sorts and j/k navigation; pruned
+    /// when a workspace is removed and cleared by Esc or a successful send.
     broadcast_selected: std::collections::HashSet<SessionKey>,
     /// Mirror of `ui.keep_awake` as loaded at startup. When set, the
     /// header paints a small "awake" badge while any agent is
@@ -707,6 +709,58 @@ impl Sidebar {
             self.broadcast_selected.remove(&key);
             Some(false)
         }
+    }
+
+    /// Extend the multi-select by one row in `dir` (−1 up, +1 down),
+    /// spreadsheet-style: mark the workspace under the cursor, step the
+    /// cursor one visible row, and mark whatever workspace it lands on.
+    /// Additive — it never deselects, so it composes with `v` toggles
+    /// (and Esc to clear), and a sustained press sweeps a contiguous
+    /// range. Returns the count that's currently visible-and-selected,
+    /// for the footer notice (#932).
+    pub fn extend_selection(&mut self, dir: isize) -> usize {
+        if let Some(key) = self.selected_session_key().cloned() {
+            self.broadcast_selected.insert(key);
+        }
+        self.move_cursor_by(dir);
+        if let Some(key) = self.selected_session_key().cloned() {
+            self.broadcast_selected.insert(key);
+        }
+        self.visible_broadcast_selected_count()
+    }
+
+    /// Shift-click range extend: mark every workspace row between the
+    /// current cursor and the clicked row (inclusive) and move the
+    /// cursor there. Row math mirrors [`click_to_select`](Self::click_to_select).
+    /// Additive, like [`extend_selection`](Self::extend_selection).
+    /// Returns whether the click landed on a real row (#932).
+    pub fn extend_selection_to(&mut self, area: Rect, click_row: u16) -> bool {
+        const HEADER_HEIGHT: u16 = 5;
+        if click_row < area.y + HEADER_HEIGHT {
+            return false;
+        }
+        let idx = (click_row - area.y - HEADER_HEIGHT) as usize + self.rendered_scroll;
+        if idx >= self.visible.len() {
+            return false;
+        }
+        let (lo, hi) = if idx >= self.cursor {
+            (self.cursor, idx)
+        } else {
+            (idx, self.cursor)
+        };
+        for row in &self.visible[lo..=hi] {
+            match row {
+                VisibleRow::Workspace(k) => {
+                    self.broadcast_selected.insert(k.clone());
+                }
+                VisibleRow::Session { workspace, .. } => {
+                    self.broadcast_selected.insert(workspace.clone());
+                }
+                _ => {}
+            }
+        }
+        self.set_cursor(idx);
+        true
     }
 
     /// The multi-selected workspaces, in sidebar (visible) order — the
@@ -2386,20 +2440,12 @@ impl Sidebar {
         let is_ready = self.merge_target_for_cursor().is_some();
         let mut actions: Vec<Action> = Vec::with_capacity(6);
 
-        // A live multi-select makes the broadcast THE next action —
-        // surface it first so the `v` marks visibly lead somewhere.
-        // When any marked row is a PR behind its base, the bulk
-        // update-branch rides alongside it.
+        // A live multi-select means every normal Workspace action now
+        // targets the whole set (#932); surface the free-text broadcast
+        // first as the one selection-only action that has no single-row
+        // equivalent.
         if !self.broadcast_selected.is_empty() {
             actions.push(Action::BroadcastToSelected);
-            if self
-                .broadcast_selected
-                .iter()
-                .filter_map(|k| self.workspace_by_key(k))
-                .any(|w| w.pr.as_ref().is_some_and(|p| p.is_behind_base))
-            {
-                actions.push(Action::UpdateBranchSelected);
-            }
         }
 
         // A PR behind its base can update its branch (the `g u` /

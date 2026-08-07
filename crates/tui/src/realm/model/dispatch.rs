@@ -220,19 +220,6 @@ impl<T: TerminalAdapter> Model<T> {
                     })
                     .collect()
             }
-            Intent::UpdateSelectedBranches {
-                workspace_keys,
-                selected_count: _,
-            } => {
-                if !workspace_keys.is_empty() {
-                    self.sidebar.clear_broadcast_selection();
-                    self.redraw = true;
-                }
-                workspace_keys
-                    .into_iter()
-                    .map(|workspace_key| IpcCommand::UpdateBranch { workspace_key })
-                    .collect()
-            }
             Intent::CollapseIntoPr {
                 issue_workspace_key,
             } => vec![IpcCommand::CollapseIntoPr {
@@ -1050,7 +1037,6 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::Unsnooze { .. }
                     | Intent::MarkAllRead { .. }
                     | Intent::MarkActivitiesRead { .. }
-                    | Intent::UpdateSelectedBranches { .. }
                     | Intent::CollapseIntoPr { .. }
                     | Intent::MountHandoffPicker { .. } => {}
                 }
@@ -1154,7 +1140,6 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::Unsnooze { .. }
                     | Intent::MarkAllRead { .. }
                     | Intent::MarkActivitiesRead { .. }
-                    | Intent::UpdateSelectedBranches { .. }
                     | Intent::CollapseIntoPr { .. }
                     | Intent::MountHandoffPicker { .. } => {}
                 }
@@ -1217,9 +1202,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::UpdateBranch => {
                 // Non-destructive (Guard::None), so it fires straight
                 // through here. A `v` multi-select updates every behind
-                // PR in the set (#899 — converges `g u` with the
-                // `Shift-U` bulk path); otherwise re-resolve against the
-                // live focused selection.
+                // PR in the set (#899); this bulk fan-out fully replaces
+                // the retired `Shift-U` key (#932). Otherwise re-resolve
+                // against the live focused selection.
                 if self.bulk_active() {
                     return self.bulk_dispatch("updating branch of", "not behind base", |ws| {
                         ws.pr.as_ref().filter(|pr| pr.is_behind_base).map(|_| {
@@ -1232,15 +1217,6 @@ impl<T: TerminalAdapter> Model<T> {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 let intent = crate::intent::resolve_update_branch(workspace.as_ref());
                 cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
-            }
-            Action::UpdateBranchSelected => {
-                let keys = self.sidebar.selected_broadcast_keys();
-                let selected = keys
-                    .iter()
-                    .filter_map(|key| self.sidebar.workspace_by_key(key))
-                    .collect::<Vec<_>>();
-                let intent = crate::intent::resolve_update_branch_selected(keys.len(), &selected);
-                cmds.extend(self.execute_dispatch_intent(intent, None));
             }
             Action::ToggleAutoMerge => {
                 // Bulk (#899): arm auto-merge-on-green across every
@@ -1294,7 +1270,6 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::Unsnooze { .. }
                     | Intent::MarkAllRead { .. }
                     | Intent::MarkActivitiesRead { .. }
-                    | Intent::UpdateSelectedBranches { .. }
                     | Intent::CollapseIntoPr { .. }
                     | Intent::MountHandoffPicker { .. } => {}
                 }
@@ -1370,7 +1345,6 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::Unsnooze { .. }
                     | Intent::MarkAllRead { .. }
                     | Intent::MarkActivitiesRead { .. }
-                    | Intent::UpdateSelectedBranches { .. }
                     | Intent::CollapseIntoPr { .. }
                     | Intent::MountHandoffPicker { .. } => {}
                 }
@@ -1700,15 +1674,11 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::SelectWorkspace => {
-                // Toggle the cursor row's broadcast mark. The notice
-                // names the running count + the broadcast key so the
-                // marks visibly lead somewhere.
+                // Toggle the cursor row's selection mark. The notice
+                // names the running count and reminds that normal
+                // actions now fan out over the whole selection (#932).
                 if let Some(now_selected) = self.sidebar.toggle_broadcast_select() {
                     let n = self.sidebar.broadcast_selected_count();
-                    let keys = lazybox_tui_core::action::ActionDef::for_kind(
-                        lazybox_tui_core::action::ActionKind::BroadcastToSelected,
-                    )
-                    .effective_keys_display(&self.action_key_overrides);
                     let verb = if now_selected {
                         "selected"
                     } else {
@@ -1717,7 +1687,9 @@ impl<T: TerminalAdapter> Model<T> {
                     if n == 0 {
                         self.flash_info(format!("{verb} — selection empty"));
                     } else {
-                        self.flash_info(format!("{verb} — {n} marked · {keys} to broadcast"));
+                        self.flash_info(format!(
+                            "{verb} — {n} selected · actions apply to all · Esc clears"
+                        ));
                     }
                     self.redraw = true;
                 }

@@ -234,22 +234,18 @@ pub enum Action {
     /// together at the top. The focus set persists across restarts.
     ToggleFocusWorkspace,
     /// Toggle the focused workspace row in/out of the sidebar's
-    /// multi-select set — the targets a broadcast
-    /// ([`Action::BroadcastToSelected`]) fans out to. Selection
-    /// survives j/k navigation; Esc clears it.
+    /// multi-select set. While it's non-empty every normal Workspace
+    /// action targets the whole set (#932); Shift-↑/↓ extend it from the
+    /// cursor. Selection survives j/k navigation; Esc clears it.
     SelectWorkspace,
     /// Send one instruction — a snippet, free text, or both — to every
     /// multi-selected workspace in one shot ("merge when green" to N
-    /// PRs at once). Each target's running agent gets the settle-gated
+    /// PRs at once). The one broadcast-only flow that survives the
+    /// selection-first move (#932): free-text-to-many has no single-row
+    /// equivalent. Each target's running agent gets the settle-gated
     /// inject; a plain shell gets a direct write; workspaces with no
     /// session are skipped and reported.
     BroadcastToSelected,
-    /// Update the branch (merge base into head) of every multi-selected
-    /// workspace whose PR is behind its base — the bulk fan-out of
-    /// [`Action::UpdateBranch`] over the sidebar's multi-select set. Each
-    /// behind PR gets its own `Command::UpdateBranch`; up-to-date or
-    /// non-PR selections are skipped and reported.
-    UpdateBranchSelected,
 
     // ── Activity pane (right) ──────────────────────────────────────
     /// Toggle the activity-section collapse on the focused workspace.
@@ -474,7 +470,6 @@ pub enum ActionKind {
     ToggleFocusWorkspace,
     SelectWorkspace,
     BroadcastToSelected,
-    UpdateBranchSelected,
     // Activity
     ToggleActivity,
     ToggleRow,
@@ -609,7 +604,6 @@ impl ActionKind {
         Self::FocusPaneRight,
         Self::SelectWorkspace,
         Self::BroadcastToSelected,
-        Self::UpdateBranchSelected,
         // Activity
         Self::ToggleActivity,
         Self::ToggleRow,
@@ -719,7 +713,6 @@ impl Action {
             Action::ToggleFocusWorkspace => ActionKind::ToggleFocusWorkspace,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
-            Action::UpdateBranchSelected => ActionKind::UpdateBranchSelected,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
             Action::ActivityTop => ActionKind::ActivityTop,
@@ -959,7 +952,7 @@ impl ActionDef {
                 kind: ActionKind::ResizeSplitter,
                 default_keys: "Shift-Arrows",
                 label: "resize splitters",
-                describe: "Grow / shrink the focused splitter.",
+                describe: "Grow / shrink the focused splitter. Shift-←/→ resize horizontally from any pane; Shift-↑/↓ resize vertically too, except in the sidebar where they extend the multi-select instead (#932).",
                 section: Section::Global,
             },
             // ── Workspace ───────────────────────────────────────────
@@ -1290,21 +1283,14 @@ impl ActionDef {
                 kind: ActionKind::SelectWorkspace,
                 default_keys: "v",
                 label: "select",
-                describe: "Toggle the focused workspace in/out of the multi-select set. Selected rows are the targets Shift-B broadcasts to; Esc clears the selection.",
+                describe: "Toggle the focused workspace in/out of the multi-select set. While a selection is live, every normal Workspace action applies to all selected rows (N selected → the action fires N times). Shift-↑/↓ extend the selection from the cursor; Esc clears it.",
                 section: Section::Sidebar,
             },
             ActionKind::BroadcastToSelected => &Self {
                 kind: ActionKind::BroadcastToSelected,
                 default_keys: "Shift-B",
                 label: "broadcast",
-                describe: "Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. Running agents get the prompt injected; plain shells get a direct write; workspaces with no session are skipped and reported.",
-                section: Section::Sidebar,
-            },
-            ActionKind::UpdateBranchSelected => &Self {
-                kind: ActionKind::UpdateBranchSelected,
-                default_keys: "Shift-U",
-                label: "update branches",
-                describe: "Update the branch of every multi-selected PR that's behind its base, in one shot — the bulk \"Update branch\". Up-to-date or non-PR selections are skipped and reported.",
+                describe: "Send one free-text instruction — optionally seeded from a snippet — to every multi-selected workspace at once. The one broadcast-only flow (free-text-to-many has no single-row action key). Running agents get the prompt injected; plain shells get a direct write; workspaces with no session are skipped and reported.",
                 section: Section::Sidebar,
             },
             // ── Activity ────────────────────────────────────────────
@@ -1899,7 +1885,6 @@ impl ActionKind {
             ActionKind::ToggleFocusWorkspace => "toggle_focus_workspace",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
-            ActionKind::UpdateBranchSelected => "update_branch_selected",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
             ActionKind::ActivityTop => "activity_top",
@@ -2648,10 +2633,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // can't see), so the dispatcher gates on it and surfaces a
         // footer nudge when nothing is selected.
         ActionKind::SelectWorkspace => has_ws,
-        // The bulk update-branch acts on the selection set (which the
-        // catalog can't see), so the dispatcher gates on it and surfaces
-        // a footer nudge when nothing behind-base is selected.
-        ActionKind::BroadcastToSelected | ActionKind::UpdateBranchSelected => true,
+        // The broadcast acts on the selection set (which the catalog
+        // can't see), so the dispatcher gates on it and surfaces a
+        // footer nudge when nothing is selected.
+        ActionKind::BroadcastToSelected => true,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject

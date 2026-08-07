@@ -6667,9 +6667,10 @@ mod merge_focus_follow_tests {
         )
     }
 
-    /// `Shift-U` on a multi-select fans out one `UpdateBranch` per
-    /// selected PR that's actually behind its base; up-to-date PRs are
-    /// skipped, and the selection clears afterward.
+    /// `g u` on a multi-select fans out one `UpdateBranch` per selected
+    /// PR that's actually behind its base; up-to-date PRs are skipped,
+    /// and the selection clears afterward. (The retired `Shift-U` key's
+    /// bulk behavior now lives entirely on `g u` — #932.)
     #[test]
     fn bulk_update_branch_fans_out_over_behind_prs_only() {
         use lazybox_tui_core::action::Action;
@@ -6696,7 +6697,7 @@ mod merge_focus_follow_tests {
         }
         assert_eq!(m.sidebar.broadcast_selected_count(), 3);
 
-        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
 
         let targets: Vec<lazybox_core::WorkspaceKey> = cmds
             .into_iter()
@@ -6715,7 +6716,7 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// `Shift-U` with no behind-base PR selected fires nothing and
+    /// `g u` with no behind-base PR selected fires nothing and
     /// leaves the selection intact for another action.
     #[test]
     fn bulk_update_branch_with_no_behind_pr_is_noop() {
@@ -6728,13 +6729,57 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
         m.sidebar.toggle_broadcast_select();
 
-        let cmds = m.dispatch_action(&Action::UpdateBranchSelected);
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
         assert!(cmds.is_empty(), "no behind PR → no command");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
             "selection survives a no-op bulk update",
         );
+    }
+
+    /// End-to-end selection-first (#932): Shift-↑/↓ in the sidebar sweep
+    /// a contiguous multi-select through the real key handler, and a
+    /// normal action then fans out one op per selected row.
+    #[test]
+    fn shift_arrow_sweep_selects_range_and_action_fans_out() {
+        use lazybox_tui_core::action::Action;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let mut a = workspace("owner/repo#1", true, Duration::hours(1));
+        a.pr.as_mut().unwrap().is_behind_base = true;
+        let mut b = workspace("owner/repo#2", true, Duration::hours(2));
+        b.pr.as_mut().unwrap().is_behind_base = true;
+        let mut c = workspace("owner/repo#3", true, Duration::hours(3));
+        c.pr.as_mut().unwrap().is_behind_base = true;
+        for ws in [a, b, c] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        }
+
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+
+        // Sweep up to the top, then back down: the additive extend marks
+        // every workspace row the cursor passes, regardless of start row
+        // or the repo/kind headers between rows.
+        for _ in 0..8 {
+            m.dispatch_key(KeyEvent::new(Key::Up, KeyModifiers::SHIFT));
+        }
+        for _ in 0..8 {
+            m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::SHIFT));
+        }
+
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            3,
+            "the Shift-arrow sweep grabs all three contiguous rows",
+        );
+
+        // A normal, un-prefixed action now fans out across the whole
+        // selection — no Shift-U detour (#932).
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
+        assert_eq!(cmds.len(), 3, "one UpdateBranch per selected PR");
     }
 
     #[test]
@@ -8183,10 +8228,11 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// `g u` update-branch over a selection converges with `Shift-U`:
-    /// only behind-base PRs fan out.
+    /// `g u` update-branch over a selection fans out only the
+    /// behind-base PRs — the sole bulk path now that `Shift-U` is
+    /// retired (#932).
     #[test]
-    fn bulk_update_branch_via_g_u_matches_shift_u() {
+    fn bulk_update_branch_via_g_u_fans_out_behind_prs() {
         use lazybox_tui_core::action::Action;
         let mut m = build_model();
         let mut behind = workspace("owner/repo#1", true, Duration::hours(1));

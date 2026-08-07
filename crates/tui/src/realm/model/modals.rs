@@ -1395,7 +1395,7 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn mount_action_confirm(
         &mut self,
         action: lazybox_tui_core::action::Action,
-        target: super::ActionConfirmTarget,
+        targets: Vec<super::ActionConfirmTarget>,
         override_prompt: Option<String>,
     ) {
         use crate::realm::components::confirm::Confirm;
@@ -1421,7 +1421,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .confirm_default
                 .destructive_shortcut
                 .is_yes();
-        self.set_modal_flow(ModalFlow::ActionConfirm { action, target });
+        self.set_modal_flow(ModalFlow::ActionConfirm { action, targets });
         let modal = Confirm::new(&prompt);
         let modal = if default_yes {
             modal.default_yes()

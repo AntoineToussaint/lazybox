@@ -1022,8 +1022,16 @@ showing keybinding search only",
                 // have drifted while the modal was up). No / Esc →
                 // drop the stash silently.
                 let pending = self.modal_flow.take();
-                if yes && let Some(ModalFlow::ActionConfirm { action, target }) = pending {
-                    cmds.extend(self.dispatch_action_confirmed(&action, &target));
+                if yes && let Some(ModalFlow::ActionConfirm { action, targets }) = pending {
+                    // A single target keeps the exact per-target path (and
+                    // its focused-notice UX); a bulk set iterates the
+                    // snapshot, one command per target, with an aggregate
+                    // summary (#899).
+                    if targets.len() > 1 {
+                        cmds.extend(self.dispatch_action_confirmed_bulk(&action, &targets));
+                    } else if let Some(target) = targets.first() {
+                        cmds.extend(self.dispatch_action_confirmed(&action, target));
+                    }
                     self.redraw = true;
                 }
             }
@@ -1078,6 +1086,30 @@ showing keybinding search only",
                         cmds.extend(self.run_broadcast(&targets, snippet_key.as_deref(), &body));
                     } else {
                         self.flash_info("broadcast cancelled");
+                    }
+                }
+            }
+            Some(Id::BulkSpawnConfirm) => {
+                // Bulk `w w` / spawn / shell would start new agents (#899,
+                // #836); yes runs the plan snapshotted at mount, no drops
+                // it. The steps stay inert until run here, so a cancel
+                // records nothing into any terminal's recap.
+                if let Some(ModalFlow::BulkSpawnConfirm {
+                    steps,
+                    summary,
+                    follow,
+                }) = self.modal_flow.take()
+                {
+                    if yes {
+                        self.sidebar.clear_broadcast_selection();
+                        if let Some(target) = follow {
+                            self.spawn_follow_to = Some(target);
+                        }
+                        self.flash_info(summary);
+                        self.redraw = true;
+                        cmds.extend(self.run_bulk_agent_steps(steps));
+                    } else {
+                        self.flash_info("cancelled");
                     }
                 }
             }

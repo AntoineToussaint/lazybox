@@ -1887,7 +1887,9 @@ mod effects_tests {
         let mut m = build_model();
         m.mount_action_confirm(
             Action::Archive,
-            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            vec![super::super::ActionConfirmTarget::Workspace(
+                SessionKey::from("github:o/r#1"),
+            )],
             None,
         );
         assert!(
@@ -1907,7 +1909,9 @@ mod effects_tests {
         m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
         m.mount_action_confirm(
             Action::Archive,
-            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            vec![super::super::ActionConfirmTarget::Workspace(
+                SessionKey::from("github:o/r#1"),
+            )],
             None,
         );
         assert!(
@@ -1929,7 +1933,9 @@ mod effects_tests {
         m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
         m.mount_action_confirm(
             Action::SpawnAgentOnMain("claude".into()),
-            super::super::ActionConfirmTarget::Workspace(SessionKey::from("github:o/r#1")),
+            vec![super::super::ActionConfirmTarget::Workspace(
+                SessionKey::from("github:o/r#1"),
+            )],
             None,
         );
         assert!(
@@ -8029,6 +8035,425 @@ mod merge_focus_follow_tests {
             "a mouse click must cancel the armed work leader",
         );
     }
+
+    // ── #899: multi-select honored across workspace actions ─────────
+
+    /// Seed `keys` as workspaces and mark every one in the `v`
+    /// multi-select set, leaving the cursor on the last.
+    fn seed_and_select(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        rows: Vec<Workspace>,
+    ) -> Vec<SessionKey> {
+        let keys: Vec<SessionKey> = rows.iter().map(|w| SessionKey::from(&w.key)).collect();
+        for ws in rows {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        }
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
+        keys
+    }
+
+    /// A non-empty selection resolves to every marked row; an empty
+    /// selection falls back to the focused row (acceptance #1).
+    #[test]
+    fn resolve_targets_is_selection_or_focused() {
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let key_a = SessionKey::from(&a.key);
+        let key_b = SessionKey::from(&b.key);
+
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(a)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(b)));
+
+        // Empty selection, cursor on b → just b.
+        assert!(m.sidebar.focus_workspace_key(&key_b));
+        assert_eq!(m.resolve_targets(), vec![key_b.clone()]);
+
+        // Mark both → the whole set regardless of cursor.
+        for key in [&key_a, &key_b] {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
+        let targets = m.resolve_targets();
+        assert_eq!(targets.len(), 2);
+        assert!(targets.contains(&key_a) && targets.contains(&key_b));
+    }
+
+    /// `g s` sync fans out one `SyncWorkspace` per selected row and
+    /// clears the selection (acceptance #6).
+    #[test]
+    fn bulk_sync_fans_out_over_selection() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert_eq!(cmds.len(), 2, "one SyncWorkspace per selected PR");
+        assert!(
+            cmds.iter()
+                .all(|c| matches!(c, IpcCommand::SyncWorkspace { .. }))
+        );
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0, "selection clears");
+        let _ = keys;
+    }
+
+    /// `m` mark-read fans out one `MarkRead` per selected workspace.
+    #[test]
+    fn bulk_mark_read_fans_out() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        let cmds = m.dispatch_action(&Action::MarkAllRead);
+        assert_eq!(cmds.len(), 2);
+        assert!(
+            cmds.iter()
+                .all(|c| matches!(c, IpcCommand::MarkRead { .. }))
+        );
+    }
+
+    /// `z` snooze toggles each selected row against its own state. From
+    /// the Inbox the selectable rows are all awake, so every one snoozes;
+    /// the toggle still keys off each row's own state (a snoozed row,
+    /// reachable from the Snoozed mailbox, would wake instead).
+    #[test]
+    fn bulk_snooze_toggles_each_against_its_state() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+
+        let cmds = m.dispatch_action(&Action::ToggleSnooze);
+        assert_eq!(cmds.len(), 2);
+        assert!(
+            cmds.iter().all(|c| matches!(c, IpcCommand::Snooze { .. })),
+            "awake rows snooze",
+        );
+    }
+
+    /// `g g` arms auto-merge on every selected PR; a non-PR row (issue)
+    /// is skipped and counted (acceptance #6).
+    #[test]
+    fn bulk_auto_merge_arms_prs_and_skips_issues() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", false, Duration::hours(2)),
+                workspace("owner/repo#3", true, Duration::hours(3)),
+            ],
+        );
+        let cmds = m.dispatch_action(&Action::ToggleAutoMerge);
+        assert_eq!(cmds.len(), 2, "only the two PRs arm");
+        assert!(
+            cmds.iter()
+                .all(|c| matches!(c, IpcCommand::SetAutoMergeOnGreen { enabled: true, .. }))
+        );
+    }
+
+    /// `g u` update-branch over a selection converges with `Shift-U`:
+    /// only behind-base PRs fan out.
+    #[test]
+    fn bulk_update_branch_via_g_u_matches_shift_u() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let mut behind = workspace("owner/repo#1", true, Duration::hours(1));
+        behind.pr.as_mut().unwrap().is_behind_base = true;
+        let up_to_date = workspace("owner/repo#2", true, Duration::hours(2));
+        seed_and_select(&mut m, vec![behind, up_to_date]);
+
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
+        assert_eq!(cmds.len(), 1, "only the behind PR updates");
+        assert!(matches!(cmds[0], IpcCommand::UpdateBranch { .. }));
+    }
+
+    /// An empty selection leaves single-row behavior untouched: `g s`
+    /// syncs just the focused workspace (acceptance: empty unchanged).
+    #[test]
+    fn empty_selection_syncs_only_focused_row() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let key_b = SessionKey::from(&b.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(a)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(b)));
+        assert!(m.sidebar.focus_workspace_key(&key_b));
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert_eq!(cmds.len(), 1, "no selection → focused row only");
+    }
+
+    /// `g m` merge over a selection stashes the whole set in the confirm
+    /// flow; iterating it fires one `MergePr` per merge-ready PR and
+    /// skips the ineligible (acceptance #2, #5, #6).
+    #[test]
+    fn bulk_merge_confirms_the_set_and_skips_ineligible() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let ready = workspace("owner/repo#1", true, Duration::hours(1));
+        let mut blocked = workspace("owner/repo#2", true, Duration::hours(2));
+        blocked.pr.as_mut().unwrap().review = lazybox_core::ReviewStatus::ChangesRequested;
+        let ready_key = ready.key.clone();
+        seed_and_select(&mut m, vec![ready, blocked]);
+
+        let pending = m.dispatch_action(&Action::MergePr);
+        assert!(pending.is_empty(), "merge gates on confirm first");
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        match &m.modal_flow {
+            Some(ModalFlow::ActionConfirm {
+                action: Action::MergePr,
+                targets,
+            }) => assert_eq!(targets.len(), 2, "the whole selection is stashed"),
+            other => panic!("expected a bulk merge confirm, got {other:?}"),
+        }
+
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 1, "only the merge-ready PR fires");
+        match &cmds[0] {
+            IpcCommand::MergePr { workspace_key } => assert_eq!(workspace_key, &ready_key),
+            other => panic!("expected MergePr for the ready PR, got {other:?}"),
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
+    /// `x x` archive over a selection confirms with the count, then kills
+    /// each snapshot target — even one removed under the open modal is
+    /// simply skipped, never redirecting onto a drifted cursor
+    /// (acceptance #2, #5).
+    #[test]
+    fn bulk_archive_iterates_snapshot() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let first = workspace("owner/repo#1", true, Duration::hours(1));
+        let gone = first.key.clone();
+        seed_and_select(
+            &mut m,
+            vec![first, workspace("owner/repo#2", true, Duration::hours(2))],
+        );
+
+        assert!(m.dispatch_action(&Action::Archive).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+
+        // A daemon event removes one target while the confirm is up.
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(gone));
+
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(
+            cmds.len(),
+            1,
+            "the surviving target is killed; the gone one skipped"
+        );
+        assert!(matches!(cmds[0], IpcCommand::Kill { .. }));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
+    /// A bulk `a c` spawn gates behind a "start N agents?" confirm (#836);
+    /// confirming emits the snapshotted spawns (acceptance #4).
+    #[test]
+    fn bulk_spawn_agent_gates_behind_confirm() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+
+        let pending = m.dispatch_action(&Action::SpawnAgent("claude".into()));
+        assert!(pending.is_empty(), "spawning many agents gates on confirm");
+        assert_eq!(m.modal_stack.last(), Some(&Id::BulkSpawnConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 2, "one spawn per selected workspace");
+        assert!(cmds.iter().all(|c| matches!(
+            c,
+            IpcCommand::Spawn {
+                kind: lazybox_ipc::TerminalKind::Agent(_),
+                ..
+            }
+        )));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
+    /// A bulk `w w` with no live agents plans a contextual spawn per row
+    /// and gates behind the same confirm (acceptance #4).
+    #[test]
+    fn bulk_work_plans_contextual_spawns() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::BulkSpawnConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds.iter().all(|c| matches!(
+            c,
+            IpcCommand::Spawn {
+                kind: lazybox_ipc::TerminalKind::Agent(_),
+                ..
+            }
+        )));
+    }
+
+    /// #899 regression: an inherently single-target destructive action
+    /// (`x c` close-issue) must stay focused-only even under a `v`
+    /// selection — before the fix it swept the whole set behind the
+    /// generic "Archive N workspaces?" prompt and closed every marked
+    /// issue.
+    #[test]
+    fn close_issue_under_selection_stays_focused_only() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", false, Duration::hours(1));
+        let focus_key = SessionKey::from(&a.key);
+        seed_and_select(
+            &mut m,
+            vec![a, workspace("owner/repo#2", false, Duration::hours(2))],
+        );
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+        assert!(m.sidebar.focus_workspace_key(&focus_key));
+
+        assert!(m.dispatch_action(&Action::CloseIssue).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        match &m.modal_flow {
+            Some(ModalFlow::ActionConfirm {
+                action: Action::CloseIssue,
+                targets,
+            }) => assert_eq!(
+                targets.as_slice(),
+                [ActionConfirmTarget::Workspace(focus_key.clone())],
+                "close-issue targets the focused row only, never the selection",
+            ),
+            other => panic!("expected a single-target close-issue confirm, got {other:?}"),
+        }
+    }
+
+    /// #899 regression: on-main spawn (`b c`) is inherently single-target
+    /// too — a `v` selection must not fan it out or mislabel it as an
+    /// archive.
+    #[test]
+    fn on_main_spawn_under_selection_stays_focused_only() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let focus_key = SessionKey::from(&a.key);
+        seed_and_select(
+            &mut m,
+            vec![a, workspace("owner/repo#2", true, Duration::hours(2))],
+        );
+        assert!(m.sidebar.focus_workspace_key(&focus_key));
+
+        assert!(
+            m.dispatch_action(&Action::SpawnAgentOnMain("claude".into()))
+                .is_empty()
+        );
+        match &m.modal_flow {
+            Some(ModalFlow::ActionConfirm {
+                action: Action::SpawnAgentOnMain(_),
+                targets,
+            }) => assert_eq!(
+                targets.as_slice(),
+                [ActionConfirmTarget::Workspace(focus_key.clone())],
+                "on-main spawn stays focused-only under a selection",
+            ),
+            other => panic!("expected a single-target on-main confirm, got {other:?}"),
+        }
+    }
+
+    /// #899 regression: a bulk `w w` over a *mixed* selection (one live
+    /// agent → inject, one no-agent → spawn) gates behind the spawn
+    /// confirm. Cancelling must record NOTHING into the live agent's
+    /// recap — before the fix the inject's `record_pty_write` ran at
+    /// plan-build time, leaving a phantom prompt the user never sent.
+    #[test]
+    fn cancelled_bulk_work_records_no_phantom_prompt() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        // A row with a live agent (will be an inject target) …
+        let live = workspace("owner/repo#1", true, Duration::hours(1));
+        let live_sk: SessionKey = (&live.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(live)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(7),
+            session_key: live_sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        // … and a row with no agent (a spawn target), so `spawned > 0`
+        // forces the confirm gate.
+        let fresh = workspace("owner/repo#2", true, Duration::hours(2));
+        let fresh_sk: SessionKey = (&fresh.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(fresh)));
+
+        for key in [&live_sk, &fresh_sk] {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
+
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::BulkSpawnConfirm),
+            "a spawn in the mix gates the fan-out",
+        );
+
+        // Cancel: nothing runs, so nothing is recorded.
+        let cmds = m.handle_confirmed(false);
+        assert!(cmds.is_empty(), "cancel emits no commands");
+        assert!(
+            m.terminals.prompt_history_for(TerminalId(7)).is_none(),
+            "cancelling must not leave a phantom prompt in the live agent's recap",
+        );
+
+        // Confirming instead does record + inject.
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "confirm injects into the live agent",
+        );
+        assert!(
+            m.terminals.prompt_history_for(TerminalId(7)).is_some(),
+            "confirm records the prompt it actually delivered",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -10107,8 +10532,11 @@ mod destructive_confirm_tests {
         match &m.modal_flow {
             Some(ModalFlow::ActionConfirm {
                 action: Action::MergePr,
-                target: ActionConfirmTarget::Workspace(k),
-            }) => assert_eq!(k, &sk),
+                targets,
+            }) => assert_eq!(
+                targets.as_slice(),
+                [ActionConfirmTarget::Workspace(sk.clone())]
+            ),
             other => panic!("expected a stashed MergePr aimed at the menu's row, got {other:?}"),
         }
     }

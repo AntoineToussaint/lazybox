@@ -341,6 +341,11 @@ pub enum Id {
     /// in `ModalFlow::BroadcastConfirm` and mounts this rather than
     /// spawning silently; `Msg::Confirmed(true)` runs the fan-out.
     BroadcastConfirm,
+    /// Confirm gate shown before a bulk `w w` / spawn / shell over a `v`
+    /// multi-select starts new sessions (#899). The pre-computed plan
+    /// lives in `ModalFlow::BulkSpawnConfirm`; `Msg::Confirmed(true)`
+    /// emits the stashed commands.
+    BulkSpawnConfirm,
     /// Target picker for the agent-to-agent handoff flow (`x s`,
     /// issue #431) — pick the session the source agent's output should
     /// be injected into. Each row carries a [`ChoicePayload::Session`];
@@ -461,6 +466,20 @@ pub(crate) enum ActionConfirmTarget {
     Workspace(lazybox_core::SessionKey),
     /// A project header — `Archive` here deletes the whole project.
     Project(lazybox_core::ProjectKey),
+}
+
+/// One step of a bulk `w w` / spawn / shell fan-out (#899), kept inert
+/// until the plan runs. A `Spawn` is a pure `Command`; an `Inject`
+/// carries only the target terminal + body, so the recap-mutating
+/// delivery ([`Model::deliver_prompt`]) happens at run time, not when
+/// the plan is built — cancelling the confirm then records nothing.
+#[derive(Debug, Clone)]
+pub(crate) enum BulkAgentStep {
+    Spawn(lazybox_ipc::Command),
+    Inject {
+        terminal_id: lazybox_ipc::TerminalId,
+        body: String,
+    },
 }
 
 /// A validated `edit_config` edit (#353), derived by
@@ -625,11 +644,28 @@ pub(crate) enum ModalFlow {
         session_key: lazybox_core::SessionKey,
         actions: Vec<lazybox_tui_core::action::Action>,
     },
-    /// Unified destructive-action confirm. Target resolved at mount
-    /// time so a cursor drift under the modal can't redirect it.
+    /// Unified destructive-action confirm. Targets resolved at mount
+    /// time so a cursor drift under the modal can't redirect it. Holds
+    /// a *set*: a single focused row, or every multi-selected row when
+    /// a `v` bulk selection is active (#899). `Msg::Confirmed(true)`
+    /// iterates the set, firing one command per target.
     ActionConfirm {
         action: lazybox_tui_core::action::Action,
-        target: ActionConfirmTarget,
+        targets: Vec<ActionConfirmTarget>,
+    },
+    /// Bulk agent/shell start over a `v` multi-selection (#899). The
+    /// plan — the ordered spawn/inject *steps* and the outcome summary —
+    /// is snapshotted at mount, so a daemon event that reshuffles the
+    /// sidebar under the confirm can't change who gets started. The steps
+    /// stay inert until `Msg::Confirmed(true)` runs them: an inject only
+    /// records into a terminal's recap when it actually fires, so
+    /// cancelling leaves no phantom prompt behind (unlike stashing
+    /// already-built inject commands, which would have recorded at mount
+    /// time).
+    BulkSpawnConfirm {
+        steps: Vec<BulkAgentStep>,
+        summary: String,
+        follow: Option<lazybox_core::SessionKey>,
     },
     /// Action proposed by the Ask Lazybox help agent (#353). For
     /// `scaffold_skill`, `skill_root` is the destination repo resolved

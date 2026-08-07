@@ -20,6 +20,142 @@ fn task_number_suffix(task_key: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Which contextual/agent operation a bulk `v`-selection fan-out runs
+/// (#899). Tiers ride alongside as a separate `model_alias`.
+enum BulkAgentOp {
+    /// `w w`: continue the contextual agent per workspace, else spawn it.
+    Work,
+    /// `w c` / `w x` / `w u`: same, but force a specific agent id.
+    WorkWith(String),
+    /// `a c` / `a x` / `a u` / `a S`: always spawn a fresh agent.
+    SpawnAgent(String),
+    /// `s`: always spawn a shell.
+    SpawnShell,
+}
+
+/// The pre-computed result of a bulk agent fan-out: the ordered,
+/// side-effect-free steps to run, the spawn/inject/skip tallies driving
+/// the confirm copy and summary, and the workspace focus should follow
+/// to. The steps stay inert (no recap mutation) until run.
+#[derive(Default)]
+struct BulkAgentPlan {
+    steps: Vec<super::BulkAgentStep>,
+    spawned: usize,
+    injected: usize,
+    skipped: Vec<String>,
+    follow: Option<lazybox_core::SessionKey>,
+}
+
+/// Build a bulk spawn `Command` with the shared defaults every bulk
+/// start uses (`session_id`/`cwd` unset, `on_main` false).
+fn bulk_spawn_command(
+    session_key: lazybox_core::SessionKey,
+    kind: lazybox_ipc::TerminalKind,
+    initial_prompt: Option<String>,
+    model_alias: Option<String>,
+) -> IpcCommand {
+    IpcCommand::Spawn {
+        session_key,
+        session_id: None,
+        client_request_id: None,
+        kind,
+        cwd: None,
+        initial_prompt,
+        on_main: false,
+        model_alias,
+        access: lazybox_ipc::AgentRunAccess::Default,
+    }
+}
+
+/// "started N agents · continued M · K skipped (…)" — the outcome
+/// notice a bulk agent fan-out flashes once it runs.
+fn bulk_agent_summary(plan: &BulkAgentPlan) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut parts: Vec<String> = Vec::new();
+    if plan.spawned > 0 {
+        parts.push(format!(
+            "started {} agent{}",
+            plan.spawned,
+            plural(plan.spawned)
+        ));
+    }
+    if plan.injected > 0 {
+        parts.push(format!("continued {}", plan.injected));
+    }
+    if !plan.skipped.is_empty() {
+        parts.push(format!(
+            "{} skipped: {}",
+            plan.skipped.len(),
+            truncate_affected_list(&plan.skipped),
+        ));
+    }
+    if parts.is_empty() {
+        "nothing to work on".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// The "start N agents?" confirm copy shown before a bulk fan-out spins
+/// up new sessions (#836): names the spawn count plus any live-agent
+/// continues and skips, so it isn't a blind "Y".
+fn bulk_agent_confirm_prompt(plan: &BulkAgentPlan) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut prompt = format!("Start {} new agent{}", plan.spawned, plural(plan.spawned));
+    if plan.injected > 0 {
+        prompt.push_str(&format!(" (and continue {} live)", plan.injected));
+    }
+    if !plan.skipped.is_empty() {
+        prompt.push_str(&format!(
+            ", skipping {} ({})",
+            plan.skipped.len(),
+            truncate_affected_list(&plan.skipped),
+        ));
+    }
+    prompt.push('?');
+    prompt
+}
+
+/// The destructive actions a `v` multi-selection fans out over. Every
+/// other destructive action stays focused-only even under a selection
+/// (see [`Model::resolve_confirm_targets`]) — so this is also the exact
+/// set [`bulk_confirm_prompt`] and [`bulk_confirmed_verb`] must render
+/// copy for. Adding an action here without adding its copy there falls
+/// through to a neutral prompt, never a wrong one.
+fn is_bulk_destructive(action: &lazybox_tui_core::action::Action) -> bool {
+    use lazybox_tui_core::action::Action;
+    matches!(
+        action,
+        Action::Archive | Action::MergePr | Action::LongSnooze
+    )
+}
+
+/// Past-tense verb for the bulk-confirmed summary notice, per action.
+/// Only the [`is_bulk_destructive`] actions reach this; the neutral
+/// fallback is a safety net, not a lie about what happened.
+fn bulk_confirmed_verb(action: &lazybox_tui_core::action::Action) -> &'static str {
+    use lazybox_tui_core::action::Action;
+    match action {
+        Action::Archive => "archived",
+        Action::MergePr => "merged",
+        Action::LongSnooze => "snoozed",
+        _ => "applied to",
+    }
+}
+
+/// Render an affected-workspace list for bulk confirm copy: the first
+/// few names inline, the remainder collapsed to `+N more` so a large
+/// selection can't overflow the modal.
+fn truncate_affected_list(names: &[String]) -> String {
+    const SHOWN: usize = 5;
+    if names.len() <= SHOWN {
+        names.join(", ")
+    } else {
+        let head = names[..SHOWN].join(", ");
+        format!("{head}, +{} more", names.len() - SHOWN)
+    }
+}
+
 /// Cap a task title for confirm-modal copy (same 80-char convention
 /// as the removal prompts) so a long title can't blow up the modal.
 fn truncate_title(title: &str) -> String {
@@ -153,35 +289,50 @@ impl<T: TerminalAdapter> Model<T> {
         // destructive variants — there's no way to fire one
         // without the user confirming.
         if ActionDef::for_action(action).is_destructive() {
-            // Resolve the concrete target NOW, while the selection
-            // is the row the user acted on. The confirm fires
-            // against this stash — see `ModalFlow::ActionConfirm`.
-            let Some(target) = self.resolve_action_confirm_target() else {
+            // Resolve the concrete target set NOW, while the selection
+            // is what the user acted on. A `v` multi-selection targets
+            // every marked row *only for the bulk-appropriate destructive
+            // actions* (archive / merge / long-snooze); the inherently
+            // single-target ones (close-issue, delete-or-close, on-main
+            // spawn) stay on the focused row even under a selection, so
+            // pressing `x c` with rows marked closes the focused issue,
+            // not the whole set (#899). The confirm fires against this
+            // stash — see `ModalFlow::ActionConfirm` — never the live
+            // selection, so a cursor drift under the modal can't redirect
+            // it.
+            let targets = self.resolve_confirm_targets(action);
+            if targets.is_empty() {
                 // Nothing focused to act on. The catalog's
                 // availability gate keeps surfaces from offering the
                 // action here; drop silently like the unchecked path
                 // would have.
                 return Vec::new();
-            };
+            }
             // Archive is the only destructive action that applies to a
             // project header (it deletes the project + cascades). Any
             // other — e.g. `x z` long-snooze pressed while the
             // cursor sits on a project header with no workspace
             // selected — has nothing to act on, so drop it silently
-            // rather than mount a confirm that would no-op on Yes.
-            if matches!(target, ActionConfirmTarget::Project(_))
+            // rather than mount a confirm that would no-op on Yes. A
+            // project header never lands in a multi-select set, so this
+            // only fires on the single focused-header case.
+            if targets
+                .iter()
+                .all(|t| matches!(t, ActionConfirmTarget::Project(_)))
                 && !matches!(action, lazybox_tui_core::action::Action::Archive)
             {
                 return Vec::new();
             }
-            // Project-header focused Archive deletes the whole
-            // project (cascading to its workspaces) — the default
-            // confirm prompt assumes a workspace target, which would
-            // be a confusing lie. Compute a tailored prompt for that
-            // case and let the rest fall through to the static
-            // catalog prompt.
-            let custom_prompt = self.action_confirm_override(action);
-            self.mount_action_confirm(action.clone(), target, custom_prompt);
+            // Single target keeps its context-sensitive copy (project
+            // archive, delete/close naming its exact issue/PR); a bulk
+            // set renders the count + affected list + eligible/skipped
+            // split. Falls back to the static catalog prompt otherwise.
+            let custom_prompt = if targets.len() > 1 {
+                Some(self.bulk_confirm_prompt(action, &targets))
+            } else {
+                self.action_confirm_override(action)
+            };
+            self.mount_action_confirm(action.clone(), targets, custom_prompt);
             return Vec::new();
         }
         self.dispatch_action_unchecked(action)
@@ -197,6 +348,127 @@ impl<T: TerminalAdapter> Model<T> {
         self.sidebar
             .focused_project_key()
             .map(ActionConfirmTarget::Project)
+    }
+
+    /// The one shared target-resolution helper every bulk-capable
+    /// workspace action reads (#899): a non-empty `v` multi-selection
+    /// resolves to all marked rows (sidebar order), else the focused
+    /// row. Empty when neither is present. A new workspace action opts
+    /// into multi-select for free by resolving its targets here.
+    pub(super) fn resolve_targets(&self) -> Vec<lazybox_core::SessionKey> {
+        let selected = self.sidebar.selected_broadcast_keys();
+        if !selected.is_empty() {
+            return selected;
+        }
+        self.sidebar
+            .selected_workspace_key()
+            .cloned()
+            .into_iter()
+            .collect()
+    }
+
+    /// The target *set* a destructive action fires against: every
+    /// `v`-marked row when a multi-selection is active **and the action
+    /// is bulk-appropriate** ([`is_bulk_destructive`]), else the single
+    /// focused row / project header. Sidebar (visible) order (#899).
+    /// Gating on `is_bulk_destructive` keeps the inherently single-target
+    /// destructive actions (close-issue, delete-or-close, on-main spawn)
+    /// focused-only even under a selection — a bulk set would otherwise
+    /// reach them with the generic archive prompt and fire them across
+    /// the whole selection.
+    fn resolve_confirm_targets(
+        &self,
+        action: &lazybox_tui_core::action::Action,
+    ) -> Vec<ActionConfirmTarget> {
+        if is_bulk_destructive(action) {
+            let selected = self.sidebar.selected_broadcast_keys();
+            if !selected.is_empty() {
+                return selected
+                    .into_iter()
+                    .map(ActionConfirmTarget::Workspace)
+                    .collect();
+            }
+        }
+        self.resolve_action_confirm_target().into_iter().collect()
+    }
+
+    /// Whether a `v` multi-selection is active — the signal every
+    /// bulk-capable action reads to decide selection-or-focused. Marks
+    /// on rows hidden by the current mailbox / filter don't count, so
+    /// this stays in lockstep with the on-screen gutter (#786).
+    pub(super) fn bulk_active(&self) -> bool {
+        !self.sidebar.selected_broadcast_keys().is_empty()
+    }
+
+    /// Display name for a workspace key, for bulk summaries and the
+    /// affected-list in confirm copy. Falls back to the raw key when the
+    /// row has gone.
+    fn workspace_display_name(&self, key: &lazybox_core::SessionKey) -> String {
+        self.sidebar
+            .workspace_by_key(key)
+            .map(|w| crate::util::notice_slug(&w.name).into_owned())
+            .unwrap_or_else(|| key.to_string())
+    }
+
+    /// Compose the confirm-modal prompt for a bulk destructive action:
+    /// count + a truncated list of what will be affected, and (where an
+    /// eligibility gate applies, e.g. merge) the "N will run, M skipped"
+    /// split so a bulk destructive action isn't a blind "Y" (#899).
+    fn bulk_confirm_prompt(
+        &self,
+        action: &lazybox_tui_core::action::Action,
+        targets: &[ActionConfirmTarget],
+    ) -> String {
+        use lazybox_tui_core::action::Action;
+        let names: Vec<String> = targets
+            .iter()
+            .map(|t| match t {
+                ActionConfirmTarget::Workspace(k) => self.workspace_display_name(k),
+                ActionConfirmTarget::Project(k) => k.as_str().to_string(),
+            })
+            .collect();
+        let n = names.len();
+        let list = truncate_affected_list(&names);
+        match action {
+            Action::MergePr => {
+                let ready = targets
+                    .iter()
+                    .filter(|t| match t {
+                        ActionConfirmTarget::Workspace(k) => {
+                            self.sidebar.workspace_by_key(k).is_some_and(|w| {
+                                matches!(
+                                    crate::intent::resolve_merge(Some(w)),
+                                    crate::intent::Intent::MergePr { .. }
+                                )
+                            })
+                        }
+                        ActionConfirmTarget::Project(_) => false,
+                    })
+                    .count();
+                let skipped = n - ready;
+                if ready == 0 {
+                    format!(
+                        "None of the {n} selected PRs are merge-ready — merge anyway is a no-op. {list}"
+                    )
+                } else if skipped == 0 {
+                    format!("Merge {ready} PRs? {list}")
+                } else {
+                    format!(
+                        "Merge {ready} of {n} selected PRs? {skipped} will be skipped (not merge-ready). {list}"
+                    )
+                }
+            }
+            Action::LongSnooze => {
+                format!("Snooze {n} workspaces for a long time? {list}")
+            }
+            Action::Archive => {
+                format!("Archive {n} workspaces? Any running sessions are killed. {list}")
+            }
+            // Only the `is_bulk_destructive` actions reach a bulk confirm;
+            // a neutral fallback keeps a future mis-wiring from lying
+            // ("Archive N…") about what a different action does.
+            _ => format!("Apply this action to {n} workspaces? {list}"),
+        }
     }
 
     /// Carry out a destructive action the user just confirmed,
@@ -386,6 +658,97 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Carry out a confirmed destructive action over a bulk target set
+    /// (#899). Each target runs through the per-target
+    /// `dispatch_action_confirmed`, so its eligibility re-check and
+    /// optimistic UI are unchanged; a target that yields no command
+    /// (gone, or no longer eligible — merged, conflicted) is counted as
+    /// skipped. The multi-select is cleared and a single aggregate
+    /// summary replaces the per-target chatter. Iterates the *snapshot*
+    /// captured at mount, never the live selection.
+    pub(crate) fn dispatch_action_confirmed_bulk(
+        &mut self,
+        action: &lazybox_tui_core::action::Action,
+        targets: &[ActionConfirmTarget],
+    ) -> Vec<IpcCommand> {
+        let mut cmds = Vec::new();
+        let mut acted = 0usize;
+        let mut skipped: Vec<String> = Vec::new();
+        for target in targets {
+            let produced = self.dispatch_action_confirmed(action, target);
+            if produced.is_empty() {
+                skipped.push(match target {
+                    ActionConfirmTarget::Workspace(k) => self.workspace_display_name(k),
+                    ActionConfirmTarget::Project(k) => k.as_str().to_string(),
+                });
+            } else {
+                acted += 1;
+                cmds.extend(produced);
+            }
+        }
+        self.sidebar.clear_broadcast_selection();
+        self.flash_bulk_summary(bulk_confirmed_verb(action), "ineligible", acted, &skipped);
+        self.redraw = true;
+        cmds
+    }
+
+    /// Fan a per-workspace IPC command over the active `v` multi-select
+    /// (#899). `build` yields the command for an eligible workspace or
+    /// `None` to skip it; the shared loop collects commands, clears the
+    /// selection when anything acted, and flashes a
+    /// "<done> N · M skipped (<why>)" summary. Only called when
+    /// [`bulk_active`](Self::bulk_active) — the single-row path stays in
+    /// each action's own arm so its bespoke UX (pickers, optimistic
+    /// redraws) is unchanged.
+    fn bulk_dispatch<F>(&mut self, done: &str, why_skip: &str, build: F) -> Vec<IpcCommand>
+    where
+        F: Fn(&lazybox_core::Workspace) -> Option<IpcCommand>,
+    {
+        let keys = self.resolve_targets();
+        let mut cmds = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        for key in &keys {
+            // A row that vanished between mark and fire is dropped
+            // silently — there's nothing to name in the summary.
+            if let Some(ws) = self.sidebar.workspace_by_key(key) {
+                match build(ws) {
+                    Some(cmd) => cmds.push(cmd),
+                    None => skipped.push(crate::util::notice_slug(&ws.name).into_owned()),
+                }
+            }
+        }
+        let acted = cmds.len();
+        if acted > 0 {
+            self.sidebar.clear_broadcast_selection();
+        }
+        self.flash_bulk_summary(done, why_skip, acted, &skipped);
+        self.redraw = true;
+        cmds
+    }
+
+    /// Flash the shared bulk outcome notice: "<done> N workspaces · M
+    /// skipped (<why>): a, b". Empty when nothing at all happened.
+    fn flash_bulk_summary(&mut self, done: &str, why_skip: &str, acted: usize, skipped: &[String]) {
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        let mut parts: Vec<String> = Vec::new();
+        if acted > 0 {
+            parts.push(format!("{done} {acted} workspace{}", plural(acted)));
+        }
+        if !skipped.is_empty() {
+            parts.push(format!(
+                "{} skipped ({why_skip}): {}",
+                skipped.len(),
+                truncate_affected_list(skipped),
+            ));
+        }
+        let summary = if parts.is_empty() {
+            format!("nothing to {done}")
+        } else {
+            parts.join(" · ")
+        };
+        self.flash_info(summary);
+    }
+
     /// Internal: actually carry out an action without checking the
     /// destructive flag. Public `dispatch_action` gates on
     /// `is_destructive` and routes through the Confirm modal for
@@ -476,6 +839,9 @@ impl<T: TerminalAdapter> Model<T> {
         let session_id = self.sidebar.selected_session_id();
         match action {
             Action::SpawnShell => {
+                if self.bulk_active() {
+                    return self.dispatch_bulk_agent(BulkAgentOp::SpawnShell, None);
+                }
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         model_alias: None,
@@ -491,6 +857,10 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::SpawnAgent(agent_id) => {
+                if self.bulk_active() {
+                    return self
+                        .dispatch_bulk_agent(BulkAgentOp::SpawnAgent(agent_id.clone()), None);
+                }
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         model_alias: None,
@@ -549,12 +919,21 @@ impl<T: TerminalAdapter> Model<T> {
                 // Several running conversations → ask which one (#418).
                 // The scoped `w c` / `w x` chords (Action::WorkWith) force
                 // a specific agent.
+                if self.bulk_active() {
+                    return self.dispatch_bulk_agent(BulkAgentOp::Work, None);
+                }
                 self.dispatch_work(session_id, None, &mut cmds);
             }
             Action::WorkWith(agent_id) => {
+                if self.bulk_active() {
+                    return self.dispatch_bulk_agent(BulkAgentOp::WorkWith(agent_id.clone()), None);
+                }
                 self.dispatch_work_with(agent_id, session_id, None, &mut cmds);
             }
             Action::WorkTier(alias) => {
+                if self.bulk_active() {
+                    return self.dispatch_bulk_agent(BulkAgentOp::Work, Some(alias.clone()));
+                }
                 // Flat `w S`: work on the same contextual target agent as
                 // `w w`, but launch it at the picked model tier. The
                 // alias is resolved against the target agent's menu daemon-
@@ -564,6 +943,11 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::SpawnTier(alias) => {
                 // `a S`: spawn the default agent at the picked tier.
+                if self.bulk_active() {
+                    let agent = self.sidebar.default_agent().to_string();
+                    return self
+                        .dispatch_bulk_agent(BulkAgentOp::SpawnAgent(agent), Some(alias.clone()));
+                }
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
                         session_key: sk,
@@ -678,6 +1062,17 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_add_scan_root_input();
             }
             Action::MarkAllRead => {
+                // A sidebar multi-select marks every selected workspace
+                // read at once (#899); the per-activity selection is a
+                // right-pane concern and only applies to the single
+                // focused row, so bulk wins when it's active.
+                if self.bulk_active() {
+                    return self.bulk_dispatch("marked read", "n/a", |ws| {
+                        Some(IpcCommand::MarkRead {
+                            session_key: lazybox_core::SessionKey::from(&ws.key),
+                        })
+                    });
+                }
                 let workspace = self.sidebar.selected_workspace().cloned();
                 let selected = self.right.selected_activity_indices();
                 let cursor = (self.focus == PaneFocus::Right)
@@ -755,6 +1150,22 @@ impl<T: TerminalAdapter> Model<T> {
                 // pick something meaningful instead of paying the
                 // YAML default every time.
                 let now = chrono::Utc::now();
+                // Bulk (#899): toggle each selected row against its own
+                // current state — snooze the awake, wake the snoozed —
+                // so a mixed selection resolves per-row without a picker.
+                if self.bulk_active() {
+                    let until = now
+                        + chrono::Duration::from_std(self.ui_defaults.short_snooze)
+                            .unwrap_or_else(|_| chrono::Duration::hours(4));
+                    return self.bulk_dispatch("updated snooze on", "n/a", move |ws| {
+                        let session_key = lazybox_core::SessionKey::from(&ws.key);
+                        Some(if ws.is_snoozed(now) {
+                            IpcCommand::Unsnooze { session_key }
+                        } else {
+                            IpcCommand::Snooze { session_key, until }
+                        })
+                    });
+                }
                 let Some(workspace) = self.sidebar.selected_workspace().cloned() else {
                     return cmds;
                 };
@@ -782,9 +1193,19 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::UpdateBranch => {
                 // Non-destructive (Guard::None), so it fires straight
-                // through here. Re-resolve against the live selection —
-                // the catalog availability gate already keeps the action
-                // off non-behind PRs, so this mostly names the target.
+                // through here. A `v` multi-select updates every behind
+                // PR in the set (#899 — converges `g u` with the
+                // `Shift-U` bulk path); otherwise re-resolve against the
+                // live focused selection.
+                if self.bulk_active() {
+                    return self.bulk_dispatch("updating branch of", "not behind base", |ws| {
+                        ws.pr.as_ref().filter(|pr| pr.is_behind_base).map(|_| {
+                            IpcCommand::UpdateBranch {
+                                workspace_key: ws.key.clone(),
+                            }
+                        })
+                    });
+                }
                 let workspace = self.sidebar.selected_workspace().cloned();
                 let intent = crate::intent::resolve_update_branch(workspace.as_ref());
                 cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
@@ -799,6 +1220,18 @@ impl<T: TerminalAdapter> Model<T> {
                 cmds.extend(self.execute_dispatch_intent(intent, None));
             }
             Action::ToggleAutoMerge => {
+                // Bulk (#899): arm auto-merge-on-green across every
+                // selected PR (disarm stays a single-row toggle — the
+                // useful bulk gesture is "arm all these"). Non-PR rows
+                // are skipped and counted.
+                if self.bulk_active() {
+                    return self.bulk_dispatch("armed auto-merge on", "no PR", |ws| {
+                        ws.pr.as_ref().map(|_| IpcCommand::SetAutoMergeOnGreen {
+                            session_key: lazybox_core::SessionKey::from(&ws.key),
+                            enabled: true,
+                        })
+                    });
+                }
                 let workspace = self.sidebar.selected_workspace().cloned();
                 // Explicit variant list — a new Intent variant must be
                 // triaged here at compile time, not silently dropped.
@@ -1130,6 +1563,18 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::SyncWorkspace => {
+                // Bulk (#899): re-poll every selected PR / issue at once;
+                // rows with nothing to sync (no PR, no issue) are skipped
+                // and counted.
+                if self.bulk_active() {
+                    return self.bulk_dispatch("synced", "nothing to sync", |ws| {
+                        (ws.pr.is_some() || !ws.gh_issues.is_empty()).then(|| {
+                            IpcCommand::SyncWorkspace {
+                                workspace_key: ws.key.clone(),
+                            }
+                        })
+                    });
+                }
                 // Targeted re-poll of just this workspace's PR / issue —
                 // cheaper than the global refresh when you're waiting on
                 // one PR's CI. The daemon deep-fetches the entity and
@@ -1329,6 +1774,189 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         cmds
+    }
+
+    /// Fan a bulk `w w` / spawn / shell over the active `v` multi-select
+    /// (#899). Builds the full spawn/inject plan up front; when it would
+    /// start no new sessions (only injects into live agents) it runs
+    /// immediately, otherwise it gates behind a `Confirm` that names the
+    /// count — spawning N agents is heavy (#836) — snapshotting the plan
+    /// so a poll under the modal can't change who starts.
+    fn dispatch_bulk_agent(
+        &mut self,
+        op: BulkAgentOp,
+        model_alias: Option<String>,
+    ) -> Vec<IpcCommand> {
+        let plan = self.build_bulk_agent_plan(&op, model_alias);
+        let summary = bulk_agent_summary(&plan);
+        if plan.spawned == 0 {
+            // No heavy spawns — run the plan (injects, or nothing) now.
+            if plan.injected > 0 {
+                self.sidebar.clear_broadcast_selection();
+            }
+            if let Some(follow) = plan.follow {
+                self.spawn_follow_to = Some(follow);
+            }
+            self.flash_info(summary);
+            self.redraw = true;
+            return self.run_bulk_agent_steps(plan.steps);
+        }
+        let prompt = bulk_agent_confirm_prompt(&plan);
+        self.set_modal_flow(super::ModalFlow::BulkSpawnConfirm {
+            steps: plan.steps,
+            summary,
+            follow: plan.follow,
+        });
+        let modal = crate::realm::components::confirm::Confirm::new(&prompt).default_yes();
+        self.mount_modal(super::Id::BulkSpawnConfirm, modal);
+        Vec::new()
+    }
+
+    /// Run a snapshotted bulk agent plan: emit each spawn and deliver
+    /// each inject (the recap-mutating [`deliver_prompt`] fires here, at
+    /// run time — never at plan-build time). Shared by the immediate
+    /// (`spawned == 0`) path and the post-confirm handler so both
+    /// materialize the plan identically.
+    pub(super) fn run_bulk_agent_steps(
+        &mut self,
+        steps: Vec<super::BulkAgentStep>,
+    ) -> Vec<IpcCommand> {
+        let mut cmds = Vec::new();
+        for step in steps {
+            match step {
+                super::BulkAgentStep::Spawn(cmd) => cmds.push(cmd),
+                super::BulkAgentStep::Inject { terminal_id, body } => {
+                    self.deliver_prompt(
+                        terminal_id,
+                        true,
+                        &body,
+                        lazybox_ipc::PromptSource::Typed,
+                        &mut cmds,
+                    );
+                }
+            }
+        }
+        cmds
+    }
+
+    /// Build the spawn/inject step plan for a bulk agent op over the
+    /// current multi-select, in sidebar order. Each target either injects
+    /// the contextual work prompt into its live agent, spawns a fresh
+    /// session, or is skipped (session-less scratch row, or a
+    /// merged/finished workspace that steers to cleanup instead). Takes
+    /// `&self` and produces only inert steps — nothing is delivered or
+    /// recorded here, so a plan the user later cancels leaves no trace.
+    ///
+    /// A workspace running *several* agents (`WorkTarget::Choose`, #418)
+    /// can't raise its per-row chooser mid-fan-out, so bulk work targets
+    /// its first live agent — the deliberate "resolve per target, don't
+    /// prompt N times" bulk trade-off.
+    fn build_bulk_agent_plan(
+        &self,
+        op: &BulkAgentOp,
+        model_alias: Option<String>,
+    ) -> BulkAgentPlan {
+        use crate::components::sidebar::WorkTarget;
+        let keys = self.resolve_targets();
+        let default_agent = self.sidebar.default_agent().to_string();
+        let mut plan = BulkAgentPlan::default();
+        for key in &keys {
+            let Some(ws) = self.sidebar.workspace_by_key(key) else {
+                continue;
+            };
+            let name = crate::util::notice_slug(&ws.name).into_owned();
+            let spawnable = ws.worktree_scope().is_some();
+            match op {
+                // Plain spawns always start a fresh session — a repo-less,
+                // project-less row (a Slack DM, scratch) has nothing to
+                // spawn into (#836), so it's skipped and named.
+                BulkAgentOp::SpawnShell | BulkAgentOp::SpawnAgent(_) => {
+                    if !spawnable {
+                        plan.skipped.push(name);
+                        continue;
+                    }
+                    let kind = match op {
+                        BulkAgentOp::SpawnShell => lazybox_ipc::TerminalKind::Shell,
+                        BulkAgentOp::SpawnAgent(agent) => {
+                            lazybox_ipc::TerminalKind::Agent(agent.clone())
+                        }
+                        _ => unreachable!(),
+                    };
+                    plan.steps
+                        .push(super::BulkAgentStep::Spawn(bulk_spawn_command(
+                            key.clone(),
+                            kind,
+                            None,
+                            model_alias.clone(),
+                        )));
+                    plan.spawned += 1;
+                    plan.follow.get_or_insert_with(|| key.clone());
+                }
+                // Contextual work: continue a live agent, else start one.
+                BulkAgentOp::Work | BulkAgentOp::WorkWith(_) => {
+                    let target = match op {
+                        BulkAgentOp::WorkWith(agent) => {
+                            self.sidebar.work_target_for_agent(key, agent)
+                        }
+                        _ => self.sidebar.work_target(key, &default_agent),
+                    };
+                    let agent_id = match &target {
+                        WorkTarget::Spawn(agent) => agent.clone(),
+                        WorkTarget::Running(running) => running.agent_id.clone(),
+                        WorkTarget::Choose(targets) => targets
+                            .first()
+                            .map(|t| t.agent_id.clone())
+                            .unwrap_or_else(|| default_agent.clone()),
+                    };
+                    let running_terminal = match &target {
+                        WorkTarget::Running(running) => Some(running.terminal_id),
+                        WorkTarget::Choose(targets) => targets.first().map(|t| t.terminal_id),
+                        WorkTarget::Spawn(_) => None,
+                    };
+                    let intent = crate::intent::resolve_work(
+                        Some(ws),
+                        &[],
+                        &agent_id,
+                        self.sidebar.conventions(),
+                    );
+                    match intent {
+                        crate::intent::Intent::SpawnAgent {
+                            workspace_key,
+                            agent_id,
+                            prompt,
+                        } => match (running_terminal, prompt) {
+                            // A live agent + fresh instructions → inject.
+                            // Recorded as an inert step: the recap-mutating
+                            // delivery runs only when the plan does, so
+                            // cancelling the spawn confirm records nothing.
+                            (Some(terminal_id), Some(body)) => {
+                                plan.steps
+                                    .push(super::BulkAgentStep::Inject { terminal_id, body });
+                                plan.injected += 1;
+                            }
+                            // A live agent but nothing new to say (a scratch
+                            // row already being worked) → leave it be.
+                            (Some(_), None) => plan.skipped.push(name),
+                            // No live agent → spawn one with the prompt.
+                            (None, body) => {
+                                plan.steps
+                                    .push(super::BulkAgentStep::Spawn(bulk_spawn_command(
+                                        (&workspace_key).into(),
+                                        lazybox_ipc::TerminalKind::Agent(agent_id),
+                                        body,
+                                        model_alias.clone(),
+                                    )));
+                                plan.spawned += 1;
+                                plan.follow.get_or_insert_with(|| (&workspace_key).into());
+                            }
+                        },
+                        // Merged / closed workspace steers to cleanup.
+                        _ => plan.skipped.push(name),
+                    }
+                }
+            }
+        }
+        plan
     }
 
     /// Resolve and fire `w w` (or a `w S` tier chord) on the selected

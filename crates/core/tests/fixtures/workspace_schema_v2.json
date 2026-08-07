@@ -1,5 +1,5 @@
 {
-  "schema": 2,
+  "schema": 3,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
@@ -115,6 +115,12 @@
       "carol",
       "team/platform"
     ],
+    "reviews": [
+      {
+        "login": "dave",
+        "state": "Approved"
+      }
+    ],
     "assignees": [
       "alice"
     ],
@@ -187,6 +193,12 @@
         "carol",
         "team/platform"
       ],
+      "reviews": [
+        {
+          "login": "dave",
+          "state": "Approved"
+        }
+      ],
       "assignees": [
         "alice"
       ],
@@ -254,6 +266,12 @@
       "reviewers": [
         "carol",
         "team/platform"
+      ],
+      "reviews": [
+        {
+          "login": "dave",
+          "state": "Approved"
+        }
       ],
       "assignees": [
         "alice"
@@ -329,8 +347,8 @@
   ],
   "seen_count": 1,
   "read_indices": [
-    2,
-    0
+    0,
+    2
   ],
   "snoozed_until": "2026-03-14T18:00:00Z",
   "auto_merge_on_green": true,

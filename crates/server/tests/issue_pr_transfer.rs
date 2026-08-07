@@ -151,6 +151,7 @@ fn gh_task(key: &str, is_pr: bool, branch: Option<&str>, closes: Vec<TaskId>) ->
         closed_at: None,
         labels: vec![],
         reviewers: vec![],
+        reviews: vec![],
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,

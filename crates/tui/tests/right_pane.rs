@@ -48,6 +48,7 @@ fn make_task(key: &str) -> Task {
         closed_at: None,
         labels: vec![],
         reviewers: vec!["alice".into(), "bob".into()],
+        reviews: vec![],
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,

@@ -162,7 +162,8 @@ pub enum CleanupPrompt {
 ///   `#[serde(default)]`).
 /// - 1: the `schema` field itself.
 /// - 2: `Session::worktree_branch`.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 2;
+/// - 3: `Task::reviews` (submitted reviewers + state).
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 3;
 
 /// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT
 /// version on save, regardless of what version the row was loaded at.
@@ -1084,11 +1085,13 @@ fn upsert_by_id(list: &mut Vec<Task>, mut task: Task) {
 }
 
 /// Preserve fields whose canonical value can be absent from a given
-/// inbox-scan response — today just `checks` (from
-/// `statusCheckRollup.contexts`, which the inbox query drops
-/// entirely). It's also populated by the lazy `PR_DETAILS_QUERY`;
-/// without this preservation, a poll carrying the empty value would
-/// clobber the stored one and the per-check sidebar would flicker off.
+/// inbox-scan response — `checks` (from `statusCheckRollup.contexts`,
+/// which the inbox query drops entirely) and `reviews` (the reviews
+/// connection, likewise lazy-only). Both are also populated by the lazy
+/// `PR_DETAILS_QUERY`; without this preservation, a poll carrying the
+/// empty value would clobber the stored one and the per-check sidebar
+/// would flicker off / the "Reviewers" line would fall back to "none"
+/// on a PR whose reviewers all already reviewed (#960).
 ///
 /// `closes_issues` is deliberately NOT preserved: every PR-producing
 /// query (inbox scan, single-PR, hot-tasks, lazy details) selects
@@ -1114,6 +1117,15 @@ fn upsert_by_id(list: &mut Vec<Task>, mut task: Task) {
 fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
     if incoming.checks.is_empty() && !existing.checks.is_empty() {
         incoming.checks = existing.checks.clone();
+    }
+    // Reviews come from the lazy PR-details fetch — the inbox scan drops
+    // the reviews connection, so a poll always carries an empty list.
+    // Without this, every poll would clobber the detail-fetched
+    // reviewers and the "Reviewers" line would flip back to "none" until
+    // the next focus (#960). The detail fetch is the only authoritative
+    // clear (it overwrites unconditionally in `merge_pr_details`).
+    if incoming.reviews.is_empty() && !existing.reviews.is_empty() {
+        incoming.reviews = existing.reviews.clone();
     }
     if incoming.mergeable == crate::Mergeable::Unknown
         && existing.mergeable != crate::Mergeable::Unknown
@@ -1772,6 +1784,7 @@ mod tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -1983,6 +1996,34 @@ mod tests {
             "checks must survive an inbox-scan-shaped re-poll",
         );
         assert_eq!(pr_ref.checks[0].name, "lint");
+    }
+
+    /// Regression for #960: `reviews` is lazy-only (the inbox scan drops
+    /// the reviews connection), so a poll always carries an empty list.
+    /// It must not clobber the detail-fetched reviewers, or an approved
+    /// PR's "Reviewers" line flips back to "none" on the next poll.
+    #[test]
+    fn attach_pr_preserves_reviews_when_incoming_is_empty() {
+        let mut first = pr("o/r#1");
+        first.reviews = vec![crate::Reviewer {
+            login: "alice".into(),
+            state: crate::ReviewState::Approved,
+        }];
+        let mut ws = Workspace::from_task(first, now());
+
+        // Subsequent poll: same PR id, empty reviews (inbox-scan shape).
+        let next = pr("o/r#1");
+        ws.attach_task(next);
+
+        let pr_ref = ws.pr.as_ref().unwrap();
+        assert_eq!(
+            pr_ref.reviews,
+            vec![crate::Reviewer {
+                login: "alice".into(),
+                state: crate::ReviewState::Approved,
+            }],
+            "submitted reviews must survive an inbox-scan-shaped re-poll",
+        );
     }
 
     /// Regression for #581: every PR-producing query selects

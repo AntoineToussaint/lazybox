@@ -210,6 +210,31 @@ pub enum ReviewStatus {
     ChangesRequested,
 }
 
+/// A single reviewer's latest state on a PR. Mirrors the subset of
+/// GitHub's `PullRequestReviewState` that the Reviewers line surfaces —
+/// [`Pending`](ReviewState::Pending) is lazybox's own marker for a
+/// requested-but-not-yet-submitted review (GitHub carries that in
+/// `reviewRequests`, not the reviews list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum ReviewState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Pending,
+}
+
+/// A person on a PR's Reviewers list: either someone who has submitted
+/// a review (with their latest [`ReviewState`]) or a still-pending
+/// requested reviewer. `login` is a user login or a `team/<name>`
+/// pseudo-login for a requested team.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct Reviewer {
+    pub login: String,
+    pub state: ReviewState,
+}
+
 /// Whether a PR's branch can merge cleanly into its base. Tristate
 /// because GitHub computes the field lazily — `Unknown` means
 /// "GitHub hasn't computed yet" and is observably different from
@@ -393,9 +418,21 @@ pub struct Task {
     /// field) still deserializes — mirrors `reviewers` / `assignees`.
     #[serde(default)]
     pub labels: Vec<Label>,
-    /// Requested reviewers (user logins or team names).
+    /// Requested reviewers (user logins or team names) whose review is
+    /// still pending. GitHub drops a user from this list the moment
+    /// they submit a review, so on its own it reads "none" for a PR
+    /// where everyone has already reviewed — [`Task::reviewer_summary`]
+    /// merges it with `reviews` for display.
     #[serde(default)]
     pub reviewers: Vec<String>,
+    /// Reviewers who have actually submitted a review, with their
+    /// latest state. This is the only record of who reviewed and how,
+    /// since GitHub removes them from `reviewers` once they submit.
+    /// Lazy-fetched via the PR-details query (the inbox scan omits the
+    /// reviews connection), so empty until the workspace is opened.
+    /// `#[serde(default)]` for older snapshots.
+    #[serde(default)]
+    pub reviews: Vec<Reviewer>,
     /// Assignees (user logins).
     #[serde(default)]
     pub assignees: Vec<String>,
@@ -539,6 +576,25 @@ impl Task {
     /// `created_at`.
     pub fn opened_at(&self) -> DateTime<Utc> {
         self.created_at.unwrap_or(self.updated_at)
+    }
+
+    /// The PR's Reviewers list as GitHub shows it: everyone who has
+    /// submitted a review (with their latest state), followed by anyone
+    /// whose requested review is still pending. A login present in both
+    /// lists (a re-request after a prior review) keeps only its
+    /// submitted entry. Empty only when nobody has reviewed and nothing
+    /// is pending — the caller's cue to show "none".
+    pub fn reviewer_summary(&self) -> Vec<Reviewer> {
+        let mut out = self.reviews.clone();
+        for login in &self.reviewers {
+            if !out.iter().any(|r| &r.login == login) {
+                out.push(Reviewer {
+                    login: login.clone(),
+                    state: ReviewState::Pending,
+                });
+            }
+        }
+        out
     }
 }
 
@@ -848,6 +904,7 @@ mod status_tag_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -865,6 +922,61 @@ mod status_tag_tests {
             priority: None,
             state_label: None,
         }
+    }
+
+    #[test]
+    fn reviewer_summary_merges_submitted_reviews_with_pending_requests() {
+        let mut t = base();
+        // alice already reviewed (approved); carol is still requested.
+        // GitHub drops alice from `reviewers` once she submits, so only
+        // carol remains there.
+        t.reviews = vec![Reviewer {
+            login: "alice".into(),
+            state: ReviewState::Approved,
+        }];
+        t.reviewers = vec!["carol".into()];
+
+        let summary = t.reviewer_summary();
+        assert_eq!(
+            summary,
+            vec![
+                Reviewer {
+                    login: "alice".into(),
+                    state: ReviewState::Approved,
+                },
+                Reviewer {
+                    login: "carol".into(),
+                    state: ReviewState::Pending,
+                },
+            ],
+            "submitted reviews come first, then still-pending requests",
+        );
+    }
+
+    #[test]
+    fn reviewer_summary_dedupes_a_re_requested_reviewer_to_its_submitted_state() {
+        // A reviewer who approved and was then re-requested appears in
+        // both lists; the summary keeps only the submitted entry so the
+        // person isn't listed twice.
+        let mut t = base();
+        t.reviews = vec![Reviewer {
+            login: "alice".into(),
+            state: ReviewState::ChangesRequested,
+        }];
+        t.reviewers = vec!["alice".into()];
+
+        assert_eq!(
+            t.reviewer_summary(),
+            vec![Reviewer {
+                login: "alice".into(),
+                state: ReviewState::ChangesRequested,
+            }],
+        );
+    }
+
+    #[test]
+    fn reviewer_summary_is_empty_only_with_no_reviews_and_no_requests() {
+        assert!(base().reviewer_summary().is_empty());
     }
 
     #[test]

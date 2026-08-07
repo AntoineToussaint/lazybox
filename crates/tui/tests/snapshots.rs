@@ -52,6 +52,7 @@ fn make_task(key: &str, minutes_old: i64) -> Task {
         closed_at: None,
         labels: vec![],
         reviewers: vec![],
+        reviews: vec![],
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,

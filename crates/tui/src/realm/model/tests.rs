@@ -10379,14 +10379,14 @@ mod terminal_url_mouse_tests {
 
         let host_mode = rendered_model(&mut model);
         assert!(host_mode.contains("F8"));
-        assert!(host_mode.contains("]]u"));
+        assert!(host_mode.contains("links off"));
         assert!(host_mode.contains("]] menu"));
 
         model.mouse_capture_on = true;
         model.host_mouse_verified = false;
         let unverified = rendered_model(&mut model);
         assert!(unverified.contains("mouse ?"));
-        assert!(unverified.contains("]]u"));
+        assert!(unverified.contains("host reporting"));
 
         model.handle_mouse(MouseEvent {
             kind: MouseEventKind::Moved,
@@ -10397,7 +10397,7 @@ mod terminal_url_mouse_tests {
         let verified = rendered_model(&mut model);
         assert!(verified.contains("]] menu"));
         assert!(!verified.contains("mouse ?"));
-        assert!(!verified.contains("]]u"));
+        assert!(!verified.contains("host reporting"));
         assert!(!verified.contains("Ctrl-c"));
     }
 
@@ -10437,7 +10437,62 @@ mod terminal_url_mouse_tests {
     }
 
     #[test]
-    fn terminal_click_opens_url_even_when_verification_was_reset() {
+    fn focus_regain_does_not_flash_waiting_notice() {
+        // The precise #949 repro: capture on, terminal focused, mouse not
+        // yet re-verified — the exact state the old `host_focus_gained`
+        // flashed "mouse: waiting for host reporting" on. Refocus must be
+        // silent.
+        let (mut model, _server, _opened) = build_model(1);
+        model.host_mouse_verified = false;
+        model.status.notice = None;
+
+        model.host_focus_gained();
+
+        assert!(
+            model.status.notice.is_none(),
+            "refocus must not flash a 'waiting for host reporting' notice (#949)"
+        );
+    }
+
+    #[test]
+    fn focus_regain_re_arms_verification_then_re_verifies_silently() {
+        // Finding #1: verification must NOT be sticky-forever. A focus
+        // regain (display sleep/wake, tmux re-attach) re-arms it so a
+        // genuinely broken emulator re-surfaces the hint — but silently,
+        // and the next mouse event re-verifies on a working emulator.
+        let (mut model, _server, _opened) = build_model(1);
+        model.host_mouse_verified = true;
+        model.status.notice = None;
+
+        model.host_focus_gained();
+        assert!(
+            !model.mouse_input_verified(),
+            "focus regain must re-arm verification (not stay sticky-true)"
+        );
+        assert!(model.status.notice.is_none(), "re-arm must be silent");
+
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 80,
+            row: 20,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            model.mouse_input_verified(),
+            "the next mouse event must re-verify on a working emulator"
+        );
+        assert!(
+            model.status.notice.is_none(),
+            "silent re-verification must not flash a notice"
+        );
+    }
+
+    #[test]
+    fn terminal_click_opens_url_after_focus_regain_reset() {
+        // Acceptance #5: a click on a URL cell opens even when the
+        // verification flag was reset — here by a real focus regain, the
+        // path that clears it. The click is ungated, so it opens on the
+        // first try and self-verifies.
         let (mut model, _server, opened) = build_model(1);
         model
             .terminals
@@ -10448,10 +10503,13 @@ mod terminal_url_mouse_tests {
         let pane = render(&mut model);
         let (x, y) = body_origin(&model, pane, 1);
 
-        // Verification stale/reset (e.g. a focus regain used to clear it).
-        // The click itself proves the host reports mouse, so it must both
-        // verify and open the link on the first try (#949).
-        model.host_mouse_verified = false;
+        model.host_mouse_verified = true;
+        model.host_focus_gained();
+        assert!(
+            !model.mouse_input_verified(),
+            "sanity: focus regain reset the verification flag"
+        );
+
         modifier_left_click(&mut model, x + 4, y, KeyModifiers::ALT);
 
         assert_eq!(opened_urls(&opened), vec![url]);
@@ -10459,35 +10517,6 @@ mod terminal_url_mouse_tests {
             model.mouse_input_verified(),
             "the arriving click must itself verify host mouse reporting"
         );
-    }
-
-    #[test]
-    fn focus_regain_preserves_click_to_open() {
-        let (mut model, _server, opened) = build_model(1);
-        model
-            .terminals
-            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
-        render(&mut model);
-        let url = "https://after-refocus.example.com/path";
-        feed(&mut model, 1, format!("see {url}\r\n").into_bytes());
-        let pane = render(&mut model);
-        let (x, y) = body_origin(&model, pane, 1);
-
-        model.host_mouse_verified = true;
-        model.status.notice = None;
-        model.host_focus_gained();
-
-        assert!(
-            model.mouse_input_verified(),
-            "refocusing the window must not disable click-to-open (#949)"
-        );
-        assert!(
-            model.status.notice.is_none(),
-            "refocus must not flash a 'waiting for host reporting' notice"
-        );
-
-        modifier_left_click(&mut model, x + 4, y, KeyModifiers::ALT);
-        assert_eq!(opened_urls(&opened), vec![url]);
     }
 
     #[test]

@@ -112,20 +112,25 @@ impl<T: TerminalAdapter> Model<T> {
         if !self.mouse_capture_on {
             return;
         }
-        // Reassert capture so the host re-arms mouse reporting after the
-        // focus change, but preserve verification: a working emulator
-        // doesn't stop forwarding mouse events just because the window
-        // lost and regained focus. Dropping verification here used to
-        // re-flash a confusing "waiting for host reporting" notice and
-        // gate click-to-open mid-task on a mere refocus (#949).
+        // A focus change can mean the host terminal was re-initialized —
+        // display sleep/wake, a window restore, a tmux/screen re-attach —
+        // any of which can silently stop the emulator forwarding mouse
+        // reports. Re-arm verification so a genuinely broken emulator
+        // re-surfaces the `]]u` hint instead of lazybox claiming mouse
+        // works forever (idle, by contrast, is NOT re-armed — that
+        // heuristic false-flagged a still pointer, which is the #949 bug).
+        // Re-arm SILENTLY: the next mouse event re-verifies within
+        // milliseconds on a working emulator, and click-to-open is never
+        // gated on the flag, so no first action is blocked. The old code
+        // additionally flashed a confusing "waiting for host reporting"
+        // notice here — that flash was the visible symptom of #949.
+        self.host_mouse_verified = false;
+        self.mouse_unverified_logged = false;
         if let Err(e) = self.request_host_mouse_capture(true) {
             tracing::warn!("mouse capture reassert failed on focus regain: {e}");
             self.flash_error(format!("mouse mode failed: {e}"));
         } else {
-            tracing::info!(
-                verified = self.host_mouse_verified,
-                "mouse capture reasserted on focus regain"
-            );
+            tracing::info!("mouse capture reasserted on focus regain");
         }
     }
 

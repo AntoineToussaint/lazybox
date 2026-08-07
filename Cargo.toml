@@ -12,6 +12,7 @@ members = [
     "crates/slack-provider",
     "crates/tui-term",
     "crates/ipc",
+    "crates/e2e-channel",
     "crates/server",
     "crates/agents",
     "crates/linear-provider",

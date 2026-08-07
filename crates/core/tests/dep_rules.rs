@@ -46,6 +46,10 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ("lazybox-auth", set(&[])),
         ("lazybox-config", set(&["lazybox-core"])),
         ("lazybox-core", set(&[])),
+        // The E2E channel crate (Noise/X25519) wraps a bare async byte
+        // stream; it speaks no lazybox wire types, so it carries no
+        // internal deps.
+        ("lazybox-e2e-channel", set(&[])),
         // The relay's entitlement gate (#895): a standalone seam with no
         // internal deps yet. The relay (#893) will hold it and real
         // licensing (#648) will back it — both add edges deliberately then.

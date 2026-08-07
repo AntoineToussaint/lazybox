@@ -84,8 +84,7 @@ Manage the sidebar list itself — only while the sidebar has focus.
 | `*` | focus | Star or unstar the cursor's workspace, lifting it into a ★ Focused section at the very top of the sidebar — a hand-picked shortlist of PRs/issues across repos, kept together above the repo groups. |
 | `Right \| l` | focus right | Move focus one pane to the right — from the sidebar to the activity pane, or straight to the terminal when the activity pane is hidden. |
 | `v` | select | Toggle the focused workspace in/out of the multi-select set. |
-| `Shift-B` | broadcast | Send one instruction — a snippet, free text, or both — to every multi-selected workspace at once. |
-| `Shift-U` | update branches | Update the branch of every multi-selected PR that's behind its base, in one shot — the bulk "Update branch". |
+| `Shift-B` | broadcast | Broadcast one free-text instruction — a snippet, typed text, or both — to every multi-selected workspace at once. |
 
 `j` / `k` (or arrows) move the cursor; `Esc` clears a `v` multi-selection. See [Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/) for the complete broadcast workflow: cross-repo selection, target recap, snippet and free-text compose, delivery, skips, and history.
 

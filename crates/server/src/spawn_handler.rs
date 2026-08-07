@@ -3410,6 +3410,40 @@ async fn apply_worktree_setup(
     {
         tracing::warn!("apply_scripts for {mount_label} failed: {e}");
     }
+
+    // Workload bring-up: the per-repo override replaces the global hook
+    // wholesale (so the profile can switch per worktree), else the
+    // global one runs. This gates the setup step — the agent/shell isn't
+    // handed the worktree until `command` returns and, if configured, the
+    // readiness probe passes (or the poll times out).
+    let bringup = repo_key
+        .and_then(|k| cfg.repos.get(k))
+        .and_then(|r| r.bringup.clone())
+        .or_else(|| cfg.worktree.bringup.clone());
+    if let Some(bringup) = bringup {
+        let repo_env = repo_key.map(|k| env_for_repo(&cfg, k)).unwrap_or_default();
+        let outcome = execute_worktree_bringup(&worktree.path, &bringup, &repo_env, |line| {
+            emit_worktree_progress(
+                config,
+                session_key,
+                WorktreeStep::Setup,
+                WorktreeStepStatus::Progress(line),
+                origin,
+            );
+        })
+        .await;
+        if let Some(note) = outcome.warning() {
+            tracing::warn!("worktree bring-up for {mount_label} degraded: {note}");
+            emit_worktree_progress(
+                config,
+                session_key,
+                WorktreeStep::Setup,
+                WorktreeStepStatus::Warned(note),
+                origin,
+            );
+        }
+    }
+
     emit_worktree_progress(
         config,
         session_key,
@@ -3417,6 +3451,144 @@ async fn apply_worktree_setup(
         WorktreeStepStatus::Done,
         origin,
     );
+}
+
+/// Result of a workload bring-up run. A degraded outcome ([`Self::warning`]
+/// non-`None`) never aborts the spawn — mirroring the best-effort
+/// mounts/scripts phases — but it does surface a note the user must
+/// acknowledge so a failed `dev up` / never-ready `dev doctor` isn't
+/// invisible behind a handed-off session.
+#[derive(Debug, PartialEq, Eq)]
+enum BringupOutcome {
+    /// `command` succeeded and (if configured) the readiness probe passed.
+    Ready,
+    /// `command` failed to start or exited non-zero.
+    CommandFailed(String),
+    /// `command` succeeded but the readiness probe never passed before
+    /// the timeout.
+    NotReady(String),
+}
+
+impl BringupOutcome {
+    fn warning(&self) -> Option<String> {
+        match self {
+            Self::Ready => None,
+            Self::CommandFailed(m) | Self::NotReady(m) => Some(m.clone()),
+        }
+    }
+}
+
+/// Substitute the chosen profile for a `{profile}` placeholder. The
+/// profile is also exported as `LAZYBOX_PROFILE`, so a command can pick
+/// whichever form reads better.
+fn substitute_profile(command: &str, profile: &str) -> String {
+    command.replace("{profile}", profile)
+}
+
+/// Build the `sh -c <script>` child every bring-up phase runs. Common to
+/// the bring-up command and the readiness probe so both share the same
+/// lifecycle guarantees:
+///   * `kill_on_drop` — provisioning is raced against `CancelSpawn`
+///     ([`handle_spawn`]'s `select!`); an Esc-cancel drops this future,
+///     and without kill-on-drop the `dev up` would run on detached and
+///     later spawns would collide with the half-built stack (issue #403).
+///   * stdio null — the in-process daemon shares the TUI's tty; inherited
+///     stdout/stderr would splatter over the alternate screen, and an
+///     inherited stdin lets a prompting command block forever.
+///   * the worktree's repo env — so bring-up sees the same
+///     `repos.<owner/name>.env` the agent/shell that follows will.
+fn bringup_command(
+    worktree_path: &Path,
+    script: &str,
+    profile: &str,
+    repo_env: &[(String, String)],
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(script)
+        .current_dir(worktree_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    for (k, v) in repo_env {
+        cmd.env(k, v);
+    }
+    // Set last so a bring-up-owned profile wins over any repo-env collision.
+    cmd.env("LAZYBOX_PROFILE", profile);
+    cmd
+}
+
+/// Run a [`WorktreeBringup`] in `worktree_path`: the bring-up command
+/// (bounded by `command_timeout_secs`), then (if set) poll the readiness
+/// probe until it exits 0 or `readiness_timeout_secs` elapses. Both
+/// phases inherit `repo_env` and run through [`bringup_command`], so a
+/// dropped/cancelled spawn never leaves a child running. `on_progress`
+/// feeds a line per phase into the worktree-progress event stream
+/// (consumed by the JSON API gateway and the log; the TUI modal renders
+/// the Setup row as a spinner).
+async fn execute_worktree_bringup(
+    worktree_path: &Path,
+    bringup: &lazybox_config::WorktreeBringup,
+    repo_env: &[(String, String)],
+    mut on_progress: impl FnMut(String),
+) -> BringupOutcome {
+    let command = substitute_profile(&bringup.command, &bringup.profile);
+    on_progress("running workload bring-up".to_string());
+    let mut cmd = bringup_command(worktree_path, &command, &bringup.profile, repo_env);
+    let status = match tokio::time::timeout(
+        Duration::from_secs(bringup.command_timeout_secs),
+        cmd.status(),
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(_) => {
+            return BringupOutcome::CommandFailed(format!(
+                "bring-up command timed out after {}s",
+                bringup.command_timeout_secs
+            ));
+        }
+    };
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            return BringupOutcome::CommandFailed(match s.code() {
+                Some(code) => format!("bring-up command exited with status {code}"),
+                None => "bring-up command terminated by signal".to_string(),
+            });
+        }
+        Err(e) => {
+            return BringupOutcome::CommandFailed(format!("bring-up command failed to start: {e}"));
+        }
+    }
+
+    let Some(readiness) = bringup.readiness.as_deref() else {
+        return BringupOutcome::Ready;
+    };
+    let readiness = substitute_profile(readiness, &bringup.profile);
+    let interval = Duration::from_secs(bringup.readiness_interval_secs.max(1));
+    let poll = async {
+        loop {
+            on_progress("waiting for workload readiness".to_string());
+            let ready = bringup_command(worktree_path, &readiness, &bringup.profile, repo_env)
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ready {
+                break;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(bringup.readiness_timeout_secs), poll).await {
+        Ok(()) => BringupOutcome::Ready,
+        Err(_) => BringupOutcome::NotReady(format!(
+            "workload not ready after {}s — proceeding anyway",
+            bringup.readiness_timeout_secs
+        )),
+    }
 }
 
 /// Convert per-config `MountSpec` → git-ops `Mount`, expanding a
@@ -10007,6 +10179,7 @@ mod tests {
                 mounts: vec![],
                 scripts: vec![],
                 branch_prefix: None,
+                bringup: None,
             },
         );
 
@@ -13142,6 +13315,7 @@ mod tests {
                 mounts: vec![],
                 scripts: vec![],
                 branch_prefix: None,
+                bringup: None,
             },
         );
         // Different case should miss.
@@ -16172,5 +16346,99 @@ mod tests {
             terminals.terminal_models.lock().await.get(&id).is_none(),
             "no reading means no cache write",
         );
+    }
+
+    fn bringup(command: &str, readiness: Option<&str>) -> lazybox_config::WorktreeBringup {
+        lazybox_config::WorktreeBringup {
+            command: command.to_string(),
+            profile: "robin".to_string(),
+            command_timeout_secs: 30,
+            readiness: readiness.map(str::to_string),
+            readiness_timeout_secs: 2,
+            readiness_interval_secs: 1,
+        }
+    }
+
+    #[test]
+    fn substitute_profile_replaces_the_placeholder() {
+        assert_eq!(
+            substitute_profile("dev up {profile}", "robin"),
+            "dev up robin"
+        );
+        assert_eq!(substitute_profile("dev up", "robin"), "dev up");
+    }
+
+    #[tokio::test]
+    async fn bringup_runs_command_in_the_worktree_with_the_profile() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The command records both its cwd-relative write and the exported
+        // profile, proving it ran inside the worktree with LAZYBOX_PROFILE set.
+        let spec = bringup("printf '%s' \"$LAZYBOX_PROFILE\" > marker", None);
+        let outcome = execute_worktree_bringup(dir.path(), &spec, &[], |_| {}).await;
+        assert_eq!(outcome, BringupOutcome::Ready);
+        let marker = std::fs::read_to_string(dir.path().join("marker")).expect("marker written");
+        assert_eq!(marker, "robin");
+    }
+
+    #[tokio::test]
+    async fn bringup_injects_the_repo_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // The repo env must reach the bring-up command, same as it reaches
+        // the agent/shell PTY that follows.
+        let spec = bringup("printf '%s' \"$DATABASE_URL\" > marker", None);
+        let env = vec![(
+            "DATABASE_URL".to_string(),
+            "postgres://localhost/dev".to_string(),
+        )];
+        let outcome = execute_worktree_bringup(dir.path(), &spec, &env, |_| {}).await;
+        assert_eq!(outcome, BringupOutcome::Ready);
+        let marker = std::fs::read_to_string(dir.path().join("marker")).expect("marker written");
+        assert_eq!(marker, "postgres://localhost/dev");
+    }
+
+    #[tokio::test]
+    async fn bringup_reports_a_nonzero_command_as_degraded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = bringup("exit 3", None);
+        let outcome = execute_worktree_bringup(dir.path(), &spec, &[], |_| {}).await;
+        assert!(matches!(outcome, BringupOutcome::CommandFailed(_)));
+        assert!(outcome.warning().is_some());
+    }
+
+    #[tokio::test]
+    async fn bringup_command_timeout_kills_the_child_and_degrades() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A command that would touch `marker` only after a long sleep. The
+        // 1s command timeout must fire first and — via kill_on_drop —
+        // actually kill the child, so `marker` is never written even after
+        // we wait past the sleep. Without the timeout this wedges forever;
+        // without kill_on_drop the orphaned `sh` still writes `marker`.
+        let mut spec = bringup("sleep 30 && touch marker", None);
+        spec.command_timeout_secs = 1;
+        let outcome = execute_worktree_bringup(dir.path(), &spec, &[], |_| {}).await;
+        assert!(matches!(outcome, BringupOutcome::CommandFailed(_)));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !dir.path().join("marker").exists(),
+            "timed-out bring-up child must be killed, not left to finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn bringup_gates_on_readiness_until_the_probe_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // command drops a `ready` file; readiness passes only once it exists,
+        // so a passing probe short-circuits the poll immediately.
+        let spec = bringup("touch ready", Some("test -f ready"));
+        let outcome = execute_worktree_bringup(dir.path(), &spec, &[], |_| {}).await;
+        assert_eq!(outcome, BringupOutcome::Ready);
+    }
+
+    #[tokio::test]
+    async fn bringup_times_out_when_readiness_never_passes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spec = bringup("true", Some("false"));
+        let outcome = execute_worktree_bringup(dir.path(), &spec, &[], |_| {}).await;
+        assert!(matches!(outcome, BringupOutcome::NotReady(_)));
     }
 }

@@ -10,16 +10,25 @@
 //! engine — [`connect_box`] does ensure (create if missing) → connect
 //! (wake + build the IAP forward) — supervises the forward in-process, dials
 //! the box's daemon over the **internally derived** socket, and forwards
-//! that command (and every one after) to it; the box's events flow back
-//! through the pair to the `Model`. No socket or tunnel is ever configured
-//! or shown — the whole transport is derived from `{project, deployment}`.
+//! that command (and every one after) to it. No socket or tunnel is ever
+//! configured or shown — the whole transport is derived from
+//! `{project, deployment}`.
+//!
+//! This is the **command path**: an `r`-spawn reaches the box and the box
+//! runs the session. Rendering the box's *own* terminal/session state back
+//! into this `Model` is deliberately **not** wired — a second daemon's
+//! `Event::Snapshot` is authoritative in the shared event handler and would
+//! prune the local inbox (`events.rs`), so merging two daemons' state is a
+//! follow-up, not a drop-in drain. The worker therefore drains the box
+//! link's events only to keep it healthy, and discards them.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use lazybox_config::SandboxConfig;
-use lazybox_ipc::{Client, Command, Event, socket};
+use lazybox_ipc::{Client, Command, socket};
 use lazybox_sandbox::gcp::GcpProvider;
 use lazybox_sandbox::{SandboxSpec, connect_box, persist};
 use lazybox_store::Store;
@@ -27,9 +36,18 @@ use tokio::sync::mpsc;
 
 use crate::sandbox::{resolve_provider, resolve_spec};
 
-/// Bound on the in-process command/event channels bridging the `Model` to
-/// this worker — the same order as the IPC transport's own channels.
+/// Bound on the in-process command channel bridging the `Model` to this
+/// worker — the same order as the IPC transport's own channels.
 const CHANNEL_CAPACITY: usize = 256;
+
+/// How many times to retry a box bring-up for the command that triggered
+/// it before giving up. A transient IAP/ssh/handshake failure on the first
+/// `r`-spawn must not silently drop that spawn.
+const MAX_BRINGUP_ATTEMPTS: usize = 3;
+
+/// Delay between bring-up attempts. Short — the slow part (Terraform, wake)
+/// is inside `bring_up`; this only spaces out a flaky connect/handshake.
+const BRINGUP_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 /// The single shared `r`-spawn box's stable identity — a fixed key, not a
 /// worktree, so the instance name and persisted handle are the same across
@@ -95,13 +113,18 @@ pub fn setup(sandbox: &SandboxConfig, store: Arc<dyn Store>) -> Option<RemoteBox
         .map_err(|e| tracing::info!("no r-spawn box: {e:#}"))
         .ok()?;
     let name = spec.deployment.config.name.clone();
-    // A plain channel pair, not `channel::pair()`: that one needs a
+    // A plain channel, not `channel::pair()`: that one needs a
     // server-driven event forwarder. The worker owns the far end and
-    // relays to/from the box directly.
+    // relays commands to the box directly. The event half is left
+    // unwired — the `Model` never drains a remote client's events (and
+    // draining the box's would clobber the local inbox, see the module
+    // doc), so the box→`Model` render is a follow-up. `evt_rx` exists
+    // only because the `Client` constructor needs one; dropping the
+    // sender leaves it permanently empty, which is exactly right.
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
-    let (evt_tx, evt_rx) = mpsc::channel::<Event>(CHANNEL_CAPACITY);
+    let (_box_events_tx, evt_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let client = Client::from_bounded_channels(cmd_tx, evt_rx);
-    tokio::spawn(run(provider, spec, store, cmd_rx, evt_tx));
+    tokio::spawn(run(provider, spec, store, cmd_rx));
     Some(RemoteBox { name, client })
 }
 
@@ -142,8 +165,40 @@ async fn bring_up(
             CONNECT_TIMEOUT.as_secs()
         );
     }
-    let (client, _peer) = socket::connect_reconnecting(&local_socket).await?;
-    Ok((client, supervisor))
+    // Abort the forward on a failed dial too, or the supervisor task
+    // outlives this failed attempt and races the next one over the socket.
+    match socket::connect_reconnecting(&local_socket).await {
+        Ok((client, _peer)) => Ok((client, supervisor)),
+        Err(e) => {
+            supervisor.abort();
+            Err(e.into())
+        }
+    }
+}
+
+/// Retry `op` up to `attempts` times, spacing failures by `backoff`.
+/// Returns the first success or the last error. Used to keep a transient
+/// bring-up failure (flaky connect/handshake) from silently dropping the
+/// `r`-spawn that triggered it.
+async fn with_retries<T, F, Fut>(attempts: usize, backoff: Duration, mut op: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = anyhow::Result<T>>,
+{
+    let mut last_err = None;
+    for attempt in 1..=attempts {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(e) => {
+                tracing::warn!("r-spawn box bring-up attempt {attempt}/{attempts} failed: {e:#}");
+                last_err = Some(e);
+                if attempt < attempts {
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
+    }
+    Err(last_err.expect("attempts >= 1 always records an error on the failure path"))
 }
 
 /// Workload ports the box forwards alongside the daemon socket — the
@@ -152,52 +207,83 @@ fn spec_ports(spec: &SandboxSpec) -> Vec<u16> {
     spec.deployment.config.workload_ports.clone()
 }
 
+/// Abort a forward supervisor. Dropping the `JoinHandle` only **detaches**
+/// the task — the `gcloud`/`ssh` forward would keep running and the next
+/// bring-up would spawn a second one racing it over the same local socket.
+/// Aborting stops it (and, via `kill_on_drop`, its child).
+fn stop_forward(supervisor: tokio::task::JoinHandle<()>) {
+    supervisor.abort();
+}
+
+/// What the worker's select resolved to when a box link is live.
+enum Step {
+    /// A `Model` command to forward to the box.
+    Forward(Command),
+    /// The `Model` dropped its client — the worker should exit.
+    ModelGone,
+    /// The box link closed terminally — tear it down and re-bring-up next.
+    BoxClosed,
+    /// A box event was drained (and discarded — see the module doc).
+    Drained,
+}
+
 /// The worker loop: hold the box link once up, relaying the `Model`'s
-/// commands to it and its events back. Idle (no GCP) until the first
-/// command; a failed bring-up drops that command and waits for the next to
-/// retry, so a transient failure doesn't permanently disable the box.
-/// Draining the box link's events into `evt_tx` also keeps that link from
-/// backing up (the `Model`-side render of those events is a follow-up).
+/// commands to it. Idle (no GCP) until the first command; a failed bring-up
+/// (after bounded retries) drops that command and waits for the next to
+/// retry, so a transient failure doesn't permanently disable the box. The
+/// box link's events are drained to keep it from backing up, then discarded
+/// (rendering them is a follow-up — see the module doc).
 async fn run(
     provider: GcpProvider,
     spec: SandboxSpec,
     store: Arc<dyn Store>,
     mut cmd_rx: mpsc::Receiver<Command>,
-    evt_tx: mpsc::Sender<Event>,
 ) {
     let mut connected: Option<(Client, tokio::task::JoinHandle<()>)> = None;
     loop {
-        if let Some((box_client, _guard)) = &mut connected {
-            tokio::select! {
+        if let Some((mut box_client, supervisor)) = connected.take() {
+            let step = tokio::select! {
                 cmd = cmd_rx.recv() => match cmd {
-                    // Model gone → tear down (dropping the guard kills the forward).
-                    None => break,
-                    Some(cmd) => {
-                        if let Err(e) = box_client.send(cmd) {
-                            tracing::warn!("r-spawn: send to box failed: {e}");
-                        }
-                    }
+                    None => Step::ModelGone,
+                    Some(cmd) => Step::Forward(cmd),
                 },
                 evt = box_client.rx.recv() => match evt {
-                    // Box link closed → drop it; the next command re-brings-up.
-                    None => connected = None,
-                    Some(evt) => {
-                        let _ = evt_tx.try_send(evt);
-                    }
+                    None => Step::BoxClosed,
+                    Some(_evt) => Step::Drained,
                 },
+            };
+            match step {
+                Step::Forward(cmd) => {
+                    if let Err(e) = box_client.send(cmd) {
+                        tracing::warn!("r-spawn: send to box failed: {e}");
+                    }
+                    connected = Some((box_client, supervisor));
+                }
+                Step::Drained => connected = Some((box_client, supervisor)),
+                // Terminal link close → abort the forward before re-bringing
+                // up, or two supervisors race the socket.
+                Step::BoxClosed => stop_forward(supervisor),
+                Step::ModelGone => {
+                    stop_forward(supervisor);
+                    break;
+                }
             }
         } else {
             let Some(cmd) = cmd_rx.recv().await else {
                 break;
             };
-            match bring_up(&provider, &spec, store.as_ref()).await {
-                Ok((client, guard)) => {
+            match with_retries(MAX_BRINGUP_ATTEMPTS, BRINGUP_RETRY_BACKOFF, || {
+                bring_up(&provider, &spec, store.as_ref())
+            })
+            .await
+            {
+                Ok((client, supervisor)) => {
                     if let Err(e) = client.send(cmd) {
                         tracing::warn!("r-spawn: send to box failed: {e}");
                     }
-                    connected = Some((client, guard));
+                    connected = Some((client, supervisor));
                 }
-                Err(e) => tracing::warn!("r-spawn box bring-up failed: {e:#}"),
+                Err(e) => tracing::warn!("r-spawn box bring-up failed after retries: {e:#}"),
             }
         }
     }
@@ -259,5 +345,70 @@ mod tests {
         let store = Arc::new(lazybox_store::MemoryStore::new());
         let rb = setup(&sc, store).expect("a configured box yields a RemoteBox");
         assert_eq!(rb.name, "default");
+    }
+
+    #[tokio::test]
+    async fn stop_forward_aborts_the_supervisor_not_just_detaches_it() {
+        // The leak this guards: a mere `drop` of the JoinHandle detaches the
+        // task, leaving the `gcloud`/`ssh` forward running to race the next
+        // bring-up. `stop_forward` must abort it.
+        let supervisor = tokio::spawn(async {
+            // Only an abort ends this; a detach would leave it running.
+            loop {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            }
+        });
+        let probe = supervisor.abort_handle();
+        assert!(!probe.is_finished(), "task is live before teardown");
+        stop_forward(supervisor);
+        for _ in 0..100 {
+            if probe.is_finished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            probe.is_finished(),
+            "stop_forward must abort the supervisor, not detach it"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_retries_recovers_from_a_transient_failure() {
+        // A bring-up that fails twice then succeeds must not drop the
+        // triggering command — with_retries keeps trying to the cap.
+        use std::cell::Cell;
+        let calls = Cell::new(0usize);
+        let out = with_retries(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            let n = calls.get();
+            async move {
+                if n < 3 {
+                    anyhow::bail!("transient")
+                } else {
+                    Ok(n)
+                }
+            }
+        })
+        .await
+        .expect("succeeds on the third attempt");
+        assert_eq!(out, 3);
+        assert_eq!(calls.get(), 3, "retried until success");
+    }
+
+    #[tokio::test]
+    async fn with_retries_gives_up_at_the_attempt_cap() {
+        use std::cell::Cell;
+        let calls = Cell::new(0usize);
+        let result: anyhow::Result<()> = with_retries(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            async { anyhow::bail!("always fails") }
+        })
+        .await;
+        assert!(
+            result.is_err(),
+            "a permanent failure surfaces the last error"
+        );
+        assert_eq!(calls.get(), 3, "bounded — stops at the cap, not forever");
     }
 }

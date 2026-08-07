@@ -1245,10 +1245,12 @@ pub struct Model<T: TerminalAdapter> {
     /// inside the terminal pane do lazybox-side text selection.
     #[allow(dead_code)] // accessed indirectly via the toggle handler
     mouse_capture_on: bool,
-    /// Most recent crossterm mouse event received while capture was
-    /// requested. Old evidence expires so a host that stops forwarding
-    /// events cannot remain verified indefinitely.
-    mouse_input_observed_at: Option<Instant>,
+    /// Set once a crossterm mouse event arrives while capture is on —
+    /// proof the host is forwarding mouse reports. Sticky for the life of
+    /// the capture session: a working emulator doesn't stop reporting, so
+    /// verification never decays on idle or resets on focus regain (#949).
+    /// Cleared only when capture is toggled, which starts a fresh session.
+    host_mouse_verified: bool,
     mouse_unverified_logged: bool,
     mouse_capture_requested_at: Instant,
     /// Host-terminal I/O boundary. The real model writes crossterm's
@@ -1838,7 +1840,7 @@ impl<T: TerminalAdapter> Model<T> {
             daemon_disconnect_notified: false,
             daemon_reconnecting_notified: false,
             mouse_capture_on: true,
-            mouse_input_observed_at: None,
+            host_mouse_verified: false,
             mouse_unverified_logged: false,
             mouse_capture_requested_at: Instant::now(),
             mouse_capture_requester,
@@ -4517,9 +4519,9 @@ impl<T: TerminalAdapter> Model<T> {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
             let toggle = ActionDef::for_kind(ActionKind::ToggleMouseCapture);
             let label = if self.mouse_capture_on {
-                "mouse ? · re-toggle / host reporting"
+                "mouse ? · ]]u opens links"
             } else {
-                "links off · enable"
+                "host selection · ]]u opens links"
             };
             globals.insert(
                 0,

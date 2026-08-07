@@ -10379,14 +10379,14 @@ mod terminal_url_mouse_tests {
 
         let host_mode = rendered_model(&mut model);
         assert!(host_mode.contains("F8"));
-        assert!(host_mode.contains("links off"));
+        assert!(host_mode.contains("]]u"));
         assert!(host_mode.contains("]] menu"));
 
         model.mouse_capture_on = true;
-        model.mouse_input_observed_at = None;
+        model.host_mouse_verified = false;
         let unverified = rendered_model(&mut model);
         assert!(unverified.contains("mouse ?"));
-        assert!(unverified.contains("host reporting"));
+        assert!(unverified.contains("]]u"));
 
         model.handle_mouse(MouseEvent {
             kind: MouseEventKind::Moved,
@@ -10421,17 +10421,73 @@ mod terminal_url_mouse_tests {
     }
 
     #[test]
-    fn stale_mouse_reporting_evidence_restores_actionable_guidance() {
+    fn verified_mouse_reporting_does_not_decay_on_idle() {
         let (mut model, _server, _opened) = build_model(1);
-        model.mouse_input_observed_at =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(11));
-        model.mouse_capture_requested_at = std::time::Instant::now();
+        model.host_mouse_verified = true;
+        model.mouse_capture_requested_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(30);
 
+        // A long idle stretch (no fresh mouse events) must not expire
+        // verification — a working emulator doesn't stop reporting (#949).
         model.tick_mouse_capture();
 
+        assert!(model.mouse_input_verified());
         let rendered = rendered_model(&mut model);
-        assert!(rendered.contains("mouse ?"));
-        assert!(rendered.contains("host reporting"));
+        assert!(!rendered.contains("mouse ?"));
+    }
+
+    #[test]
+    fn terminal_click_opens_url_even_when_verification_was_reset() {
+        let (mut model, _server, opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = "https://reset-flag.example.com/path";
+        feed(&mut model, 1, format!("see {url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        // Verification stale/reset (e.g. a focus regain used to clear it).
+        // The click itself proves the host reports mouse, so it must both
+        // verify and open the link on the first try (#949).
+        model.host_mouse_verified = false;
+        modifier_left_click(&mut model, x + 4, y, KeyModifiers::ALT);
+
+        assert_eq!(opened_urls(&opened), vec![url]);
+        assert!(
+            model.mouse_input_verified(),
+            "the arriving click must itself verify host mouse reporting"
+        );
+    }
+
+    #[test]
+    fn focus_regain_preserves_click_to_open() {
+        let (mut model, _server, opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = "https://after-refocus.example.com/path";
+        feed(&mut model, 1, format!("see {url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        model.host_mouse_verified = true;
+        model.status.notice = None;
+        model.host_focus_gained();
+
+        assert!(
+            model.mouse_input_verified(),
+            "refocusing the window must not disable click-to-open (#949)"
+        );
+        assert!(
+            model.status.notice.is_none(),
+            "refocus must not flash a 'waiting for host reporting' notice"
+        );
+
+        modifier_left_click(&mut model, x + 4, y, KeyModifiers::ALT);
+        assert_eq!(opened_urls(&opened), vec![url]);
     }
 
     #[test]

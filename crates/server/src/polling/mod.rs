@@ -2027,16 +2027,22 @@ pub async fn rescope_with_state(
                 // identity is one trigger: the other account's poll
                 // omits the PR, so the workspace falls out of scope
                 // with its worktree (and any tmux/agent session) intact.
-                // Preserve — it stays out-of-scope/inactive, adoptable —
-                // rather than reap.
+                // Session worktrees are UUID-named, so we can't derive
+                // the path from the workspace; ask git which managed
+                // worktrees are checked out on this branch (the same
+                // lookup spawn uses to reclaim an untracked worktree).
+                // Any hit → preserve as out-of-scope/inactive, adoptable,
+                // rather than reap. An inspect error yields no evidence,
+                // so it falls through to the prior delete behaviour.
                 if let Some((owner, repo)) = fresh_workspace
                     .primary_task()
                     .and_then(|t| t.repo.as_deref())
                     .and_then(|r| r.split_once('/'))
                     && config
                         .worktree_manager()
-                        .worktree_exists(owner, repo, &fresh_workspace.branch)
+                        .managed_worktrees_for_branch(owner, repo, &fresh_workspace.branch)
                         .await
+                        .is_ok_and(|worktrees| !worktrees.is_empty())
                 {
                     tracing::info!(
                         workspace_key = %r.key,
@@ -4703,13 +4709,82 @@ mod rescope_collapse_tests {
     /// Regression for #924: even when the workspace record has lost its
     /// session (state desync / partial recovery), a provisioned worktree
     /// still on disk is user work — the sweep must not prune the row and
-    /// orphan the directory. Here the out-of-scope provider workspace has
-    /// no session record, no notes, no live terminal, but its worktree
-    /// dir exists; it must survive.
+    /// orphan the directory. Session worktrees are UUID-named, so the
+    /// guard finds them by branch via `git worktree list`; this test
+    /// provisions a real bare clone + worktree checked out on the
+    /// workspace's branch, exactly the runtime shape.
     #[tokio::test]
     async fn out_of_scope_workspace_with_worktree_on_disk_survives() {
+        fn git(dir: &std::path::Path, args: &[&str]) {
+            let ok = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .status()
+                .expect("run git")
+                .success();
+            assert!(ok, "git {args:?} failed in {}", dir.display());
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+
+        // Upstream repo carrying a `feat` branch.
+        let upstream = root.join("upstream");
+        std::fs::create_dir_all(&upstream).unwrap();
+        git(&upstream, &["init", "-q"]);
+        git(&upstream, &["config", "user.email", "t@e.st"]);
+        git(&upstream, &["config", "user.name", "t"]);
+        git(&upstream, &["commit", "--allow-empty", "-q", "-m", "init"]);
+        git(&upstream, &["branch", "feat"]);
+
+        // Bare clone at the manager's canonical repo path, plus a
+        // UUID-named worktree checked out on `feat` under the managed
+        // worktrees root — the shape the daemon provisions at runtime.
+        let bare = root.join("repos").join("o").join("r.git");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(
+            &bare,
+            &[
+                "config",
+                "remote.origin.fetch",
+                "+refs/heads/*:refs/remotes/origin/*",
+            ],
+        );
+        git(
+            &bare,
+            &["fetch", "-q", "origin", "+feat:refs/remotes/origin/feat"],
+        );
+        let wt = root.join("worktrees").join("session-uuid");
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feat",
+                &wt.to_string_lossy(),
+                "refs/remotes/origin/feat",
+            ],
+        );
+
         let store = Arc::new(lazybox_store::MemoryStore::new());
-        let config = ServerConfig::with_store(store.clone());
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store.clone(),
+            Arc::new(crate::backend::MockBackend::new()),
+            root.to_path_buf(),
+        );
 
         // Provider PR workspace on branch `feat`, NO session record.
         let pr = gh_task(
@@ -4720,16 +4795,9 @@ mod rescope_collapse_tests {
         );
         let ws = Workspace::from_task(pr, Utc::now());
         assert!(ws.sessions.is_empty(), "seeded without a session record");
+        assert_eq!(ws.branch, "feat", "workspace tracks the worktree's branch");
         let ws_key = ws.key.clone();
         seed(&store, &ws);
-
-        // Materialize the deterministic worktree dir on disk under the
-        // config's worktree root: `<root>/worktrees/<owner>-<repo>-<branch>`.
-        let wt = config
-            .worktree_root_path()
-            .join("worktrees")
-            .join("o-r-feat");
-        std::fs::create_dir_all(&wt).expect("create worktree dir");
 
         // Another PR is the only thing in scope this tick.
         let other = gh_task(
@@ -4748,7 +4816,7 @@ mod rescope_collapse_tests {
 
         assert!(
             load_workspace(&config, &ws_key).is_some(),
-            "a workspace with a worktree still on disk must not be pruned"
+            "a workspace with a worktree still on disk (found by branch) must not be pruned"
         );
     }
 

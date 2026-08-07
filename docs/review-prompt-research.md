@@ -32,35 +32,36 @@ the end.
 The strongest prompts name severity tiers explicitly and pair them with an
 *asymmetric loss function* that biases toward silence over noise.
 
-- Anthropic's `/security-review` prompt hard-codes tiers and a suppression
-  rule: **"Focus on HIGH and MEDIUM findings only. Better to miss some
-  theoretical issues than flood the report with false positives,"** plus an
-  explicit *exclusion list* (DoS, rate-limiting, "If there isn't a proven
-  problem… don't report it"). [1]
+- Anthropic's `/security-review` prompt hard-codes tiers (`HIGH`/`MEDIUM`/
+  `LOW`) and a suppression rule: **"Focus on HIGH and MEDIUM findings
+  only"** and **"Better to miss some theoretical issues than flood the
+  report with false positives,"** alongside an explicit exclusion list
+  (DoS, rate-limiting, resource exhaustion). [1]
 - The Claude Code code-review plugin: **"Flag only significant bugs; ignore
-  nitpicks and likely false positives"** with a dedicated false-positive
-  list including **"Pedantic nitpicks that a senior engineer would not
-  flag."** [2]
-- Cursor Bugbot focuses **"exclusively on catching real bugs … while
-  intentionally ignoring formatting, style, and low-severity concerns,"**
-  because **"the cost of a false positive (eroded trust, wasted time)
-  vastly exceeds the cost of a false negative."** [3]
+  nitpicks"** with a dedicated false-positive list including **"Pedantic
+  nitpicks that a senior engineer would not flag,"** and the rationale
+  **"False positives erode trust and waste reviewer time."** [2]
+- Cursor Bugbot suppresses noise structurally rather than by instruction:
+  **"running multiple bug-finding passes in parallel and combining their
+  results with majority voting,"** each pass seeing a different diff
+  ordering, keeping only bugs that recur across passes. [3]
 
 **Why it works:** a named tier list plus a "do-not-report" catalog turns a
 fuzzy "be thorough" into a per-finding decision rule, and the stated loss
-asymmetry tells the model which way to round when unsure.
+asymmetry ("better to miss a theoretical issue than post a false positive")
+tells the model which way to round when unsure.
 
 ### 2. Refute-don't-confirm — adversarial by construction
 
 Treat each candidate finding as a hypothesis that must survive a disproof
 attempt; treat the safe-looking default as the thing to disprove.
 
-- The code-review plugin encodes a kill-gate: findings must be confirmed
-  **"truly real with high confidence before inclusion,"** and **"If you are
-  not certain an issue is real, do not flag it."** [2]
-- Greptile v3 raises **"an increased threshold for 'sureness' … since v3 can
-  challenge its own hypothesis more strongly,"** so lower-confidence
-  comments can be eliminated for higher signal. [4]
+- The code-review plugin encodes a kill-gate: **"validate that the stated
+  issue is truly an issue with high confidence,"** and **"If you are not
+  certain an issue is real, do not flag it."** [2]
+- Greptile v3 raises **"an increased threshold for 'sureness' since v3 can
+  challenge its own hypothesis more strongly,"** which means **"lower
+  confidence comments can be safely eliminated."** [4]
 - awesome-cursorrules' anti-sycophancy rule is adversarial toward
   *reassurance itself*: **"If the user pushes back on a technically sound
   recommendation, hold the position. Update only on new evidence,"** and
@@ -79,11 +80,14 @@ Ban vague worries; demand a specific path from input to wrong result.
   actual exploitability,"** every finding carries an `exploit_scenario`
   (a literal payload, e.g. `'1; DROP TABLE users--'`), and confidence
   <0.7 → **"Don't report (too speculative)."** [1]
-- The code-review plugin flags only code that **"will definitely produce
-  wrong results regardless of inputs (clear logic errors)"** and asks for a
-  concrete trigger otherwise. [2]
-- awesome-prompts' security reviewer requires a `RISK:` line stating
-  **"what an attacker can achieve if this is exploited."** [6]
+- awesome-prompts' security reviewer requires, per finding, a
+  **"RISK: [What an attacker can achieve if this is exploited]"** line. [6]
+- The inverse also holds: the code-review plugin, a low-interaction PR bot,
+  *suppresses* what it can't ground — **"Do NOT flag: Potential issues that
+  depend on specific inputs or state."** Our snippets run interactively in
+  the worktree, so they take the opposite tack — name the input rather than
+  drop the finding — but both agree an ungrounded worry has no place in the
+  output. [2]
 
 **Why it works:** requiring a concrete trigger makes the claim testable, so
 the model self-filters anything it can't instantiate — and, symmetrically,
@@ -93,14 +97,14 @@ can't dismiss a finding without naming the input that makes it a non-issue.
 
 - OpenAI's GPT-4.1 guide: the highest-impact lever is a *persistence*
   reminder — **"keep going until the user's query is completely resolved,
-  before ending your turn"** — which made the model **"eager"** rather than
-  chatbot-like and lifted their internal SWE-bench score. [7]
+  before ending your turn and yielding back to the user"** — which
+  **"increased our internal SWE-bench Verified score by close to 20%."** [7]
 - Anthropic's prompt-engineering guide names the exact failure mode of soft
   fix prompts: **"If you say 'can you suggest some changes,' Claude will
   sometimes provide suggestions rather than implementing them … For Claude
   to take action, be more explicit."** [8]
-- The code-review plugin makes fixes *complete*: **"Never post suggestions
-  unless committing them fully resolves the issue."** [2]
+- The code-review plugin makes fixes *complete*: **"Never post a committable
+  suggestion UNLESS committing the suggestion fixes the issue entirely."** [2]
 
 **Why it works:** instruction-following models default to the lower-risk
 "describe" action unless the imperative to *edit and finish* is explicit
@@ -113,9 +117,9 @@ and the yield condition is "problem solved," not "options presented."
 - Anthropic security-review sets a calibration bar that kills hedged
   findings: **"Each finding should be something a security engineer would
   confidently raise in a PR review."** [1]
-- awesome-cursorrules PR review: **"Be specific with evidence, not vague
-  assertions,"** ending each angle in a hard verdict (safe to merge / needs
-  changes / reject). [9]
+- awesome-cursorrules PR review: **"Be specific. 'This looks risky' is not a
+  finding; [specific example] is,"** ending each angle in a hard verdict —
+  **"Safe to merge | needs changes | reject."** [9]
 
 **Why it works:** replacing hedge-friendly output slots with a forced
 verdict plus a required evidence citation removes the linguistic room where
@@ -208,8 +212,12 @@ Semgrep Assistant
 (<https://semgrep.dev/blog/2025/announcing-ai-noise-filtering-and-triage-memories/>),
 Graphite Diamond (<https://graphite.com/features/ai-reviews>).
 
-*Verification note:* the Anthropic prompt files, the OpenAI/Anthropic
-guides, and the vendor blogs above were confirmed firsthand during
-research. One future-dated arXiv preprint surfaced during the pass but
-could not be independently verified, so it is deliberately omitted rather
-than cited.
+*Verification note:* citations were gathered by an automated research pass
+and then every quoted string above was re-fetched and checked verbatim
+against the primary source at [1]–[9] before publication. Two quotes the
+research pass attributed to "Building Bugbot" (a false-positive/false-
+negative cost comparison and an "exclusively on catching real bugs" line)
+were **not** in that source and have been removed; Bugbot is now cited only
+for its verified majority-voting mechanism. One future-dated arXiv preprint
+the pass surfaced could not be verified and is deliberately omitted. The
+CodeRabbit / Semgrep / Graphite links are supporting reading, not quoted.

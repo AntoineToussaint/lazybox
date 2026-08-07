@@ -409,8 +409,112 @@ pub(super) fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderEr
             _ => format!("GitHub is rate-limiting {op} — try again shortly"),
         }
     } else {
-        err.user_message()
+        let raw = err.user_message();
+        humanize_branch_protection(&raw).unwrap_or(raw)
     }
+}
+
+/// GitHub's branch-protection merge rejections arrive as raw GraphQL
+/// strings — opaque, and worded as if the merge is broken when it's
+/// usually a "not ready yet" state ("N of N required status checks are
+/// expected"). The merge gate deliberately doesn't fetch protection
+/// rules (`crates/core/src/policy.rs`), so translating GitHub's own
+/// rejection is where the human guidance has to live. Map the common
+/// ones to a plain-English notice that names the concrete next step
+/// (wait for CI, `g s` sync, `g u` update branch, get an approval).
+/// Returns `None` for anything unrecognized so the caller falls back to
+/// the raw provider message rather than mistranslating it.
+fn humanize_branch_protection(msg: &str) -> Option<String> {
+    let lower = msg.to_ascii_lowercase();
+
+    if lower.contains("required status check") {
+        let required = required_check_count(&lower);
+        if lower.contains("expected") {
+            let checks = match required {
+                Some(n) => format!("GitHub requires {n} status check{}", plural(n)),
+                None => "GitHub's required status checks".to_string(),
+            };
+            return Some(format!(
+                "Can't merge yet — {checks} but none have reported for this commit. \
+                 Wait for CI to run (or re-trigger it), then merge once it's green — `g s` re-syncs this PR."
+            ));
+        }
+        if lower.contains("pending") {
+            return Some(
+                "Can't merge yet — required status checks are still running. \
+                 Wait for CI to finish and go green, then merge — `g s` re-syncs this PR."
+                    .to_string(),
+            );
+        }
+        // "have not succeeded" / "failing" — checks ran but didn't pass.
+        return Some(
+            "Can't merge — required status checks haven't passed. \
+             Fix or re-run the failing checks, then merge — `g s` re-syncs this PR."
+                .to_string(),
+        );
+    }
+
+    if lower.contains("changes requested") {
+        return Some(
+            "Can't merge — a reviewer requested changes. \
+             Address the feedback and get an approving review, then merge."
+                .to_string(),
+        );
+    }
+
+    if lower.contains("approving review") || lower.contains("review is required") {
+        let reviews = required_check_count(&lower);
+        let need = match reviews {
+            Some(n) => format!("at least {n} approving review{}", plural(n)),
+            None => "an approving review".to_string(),
+        };
+        return Some(format!(
+            "Can't merge yet — branch protection needs {need}. Get the required approval, then merge."
+        ));
+    }
+
+    if lower.contains("base branch was modified") {
+        return Some(
+            "Can't merge — the base branch moved since the merge started. \
+             Re-sync (`g s`) and try the merge again."
+                .to_string(),
+        );
+    }
+
+    if lower.contains("out of date") || lower.contains("not up to date") {
+        return Some(
+            "Can't merge — the branch is out of date with its base. \
+             Update it (`g u`), let the checks re-run, then merge."
+                .to_string(),
+        );
+    }
+
+    if lower.contains("not authorized") || lower.contains("write access to") {
+        return Some(
+            "Can't merge — you're not authorized to merge into this protected branch. \
+             It may require admin rights or a different account."
+                .to_string(),
+        );
+    }
+
+    None
+}
+
+/// Pull the count out of a branch-protection message — the total in
+/// "`<n> of <m> required status checks …`" (returns `m`), or the lone
+/// number in "at least `N` approving review(s)". `None` when the message
+/// carries no number (a bare "review is required").
+fn required_check_count(lower: &str) -> Option<u32> {
+    lower
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<u32>().ok())
+        .next_back()
+        .filter(|n| *n > 0)
+}
+
+fn plural(n: u32) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 /// Run a user-initiated mutation as a **daemon-owned** task, detached from
@@ -4851,6 +4955,114 @@ mod mutation_retry_tests {
             !reason.contains('{'),
             "footer reason stays JSON-free: {reason}"
         );
+    }
+
+    /// The headline case (#927): GitHub's "N of N required status checks
+    /// are expected" branch-protection rejection must not leak raw — it's
+    /// a "CI hasn't reported yet" state, so translate it into plain,
+    /// actionable guidance instead of the GraphQL string.
+    #[test]
+    fn required_status_checks_expected_is_humanized() {
+        let err = lazybox_core::ProviderError::permanent(
+            "github",
+            "GraphQL error: 10 of 10 required status checks are expected.",
+        );
+        let reason = humanize_mutation_failure("merge", &err);
+
+        assert!(
+            !reason.contains("status checks are expected"),
+            "raw GraphQL string leaked: {reason}"
+        );
+        assert!(reason.contains("Can't merge yet"), "got {reason}");
+        assert!(
+            reason.contains("10 status checks"),
+            "names the required count: {reason}"
+        );
+        assert!(
+            reason.contains("Wait for CI"),
+            "suggests the next step: {reason}"
+        );
+        assert!(!reason.contains('{'), "JSON-free: {reason}");
+    }
+
+    #[test]
+    fn common_branch_protection_rejections_are_humanized() {
+        let cases = [
+            (
+                "GraphQL error: 3 of 5 required status checks are expected.",
+                "Wait for CI",
+            ),
+            (
+                "GraphQL error: 2 of 5 required status checks are pending.",
+                "still running",
+            ),
+            (
+                "GraphQL error: 1 of 5 required status checks have not succeeded.",
+                "haven't passed",
+            ),
+            (
+                "GraphQL error: At least 1 approving review is required by reviewers with write access.",
+                "approving review",
+            ),
+            (
+                "GraphQL error: Changes requested by reviewers who have write access.",
+                "requested changes",
+            ),
+            (
+                "GraphQL error: Base branch was modified. Review and try the merge again.",
+                "base branch moved",
+            ),
+            (
+                "GraphQL error: Head branch is out of date. Review and try the merge again.",
+                "out of date",
+            ),
+            (
+                "GraphQL error: You're not authorized to push to this branch.",
+                "not authorized",
+            ),
+        ];
+
+        for (raw, needle) in cases {
+            let err = lazybox_core::ProviderError::permanent("github", raw);
+            let reason = humanize_mutation_failure("merge", &err);
+            assert!(
+                reason.contains(needle),
+                "message `{raw}` should humanize to contain `{needle}`, got: {reason}"
+            );
+            assert!(
+                !reason.contains("GraphQL"),
+                "raw GraphQL string leaked for `{raw}`: {reason}"
+            );
+        }
+    }
+
+    /// An unrecognized rejection is not mistranslated — it falls through
+    /// to the provider's own (already-terse) user message.
+    #[test]
+    fn unrecognized_rejection_falls_through_to_raw_message() {
+        let err = lazybox_core::ProviderError::permanent(
+            "github",
+            "GraphQL error: Pull request is not mergeable",
+        );
+        let reason = humanize_mutation_failure("merge", &err);
+        assert!(
+            reason.contains("Pull request is not mergeable"),
+            "got {reason}"
+        );
+    }
+
+    #[test]
+    fn required_check_count_takes_the_total_required() {
+        assert_eq!(
+            required_check_count("10 of 10 required status checks"),
+            Some(10)
+        );
+        assert_eq!(
+            required_check_count("2 of 5 required status checks"),
+            Some(5)
+        );
+        assert_eq!(required_check_count("at least 1 approving review"), Some(1));
+        assert_eq!(required_check_count("review is required"), None);
     }
 
     #[test]

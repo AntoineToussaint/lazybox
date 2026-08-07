@@ -1,24 +1,41 @@
 # Linear "work on" → repo routing, branch/PR conventions
 
-Status: **draft spec** (pre-implementation). Owner: TBD.
+Status: **partially shipped.** The dogfoodable core (repo routing +
+branch template + prompt injection) landed in **#905/#918**; this doc is
+kept as the design record, with the multi-repo router (§2/§3, phase 5)
+still pre-implementation. Owner: TBD.
 
-## Problem
+> **Update (#905/#918).** Problems #1–#3 below are the *original*
+> pre-implementation state — they were fixed by the merge that precedes
+> this doc, not still-open bugs. What shipped: team→repo resolution in
+> `repo_for_workspace_provision` (errors loudly on an unmapped ticket
+> instead of cloning `linear/<team>`), the `{handle}/{type}/{id}-{slug}`
+> branch-template engine, and a real Linear work prompt via a new
+> `ImplementLinear` classification. Still deferred: multi-repo fan-out,
+> the LLM router, and auto-`about` ingestion (phases 4–5). See "Phased
+> implementation" for the shipped/deferred split.
 
-Working on a **Linear** issue (`w`) is currently broken and convention-less:
+## Problem (original, pre-#905)
+
+Before #905, working on a **Linear** issue (`w`) was broken and
+convention-less:
 
 1. **No repo mapping.** A Linear task's `repo` is the synthetic string
    `linear/<team>` (e.g. `linear/OBI`) — not a real GitHub repo. So
    `provision_worktree` would try to clone `git@github.com:linear/OBI.git`
    (`spawn_handler.rs`, `git-ops/src/lib.rs`). A Linear ticket has no idea
-   which GitHub repo the work belongs in.
+   which GitHub repo the work belongs in. *(Fixed: `repo_for_workspace_provision`
+   now maps `providers.linear.teams` → repo and errors on an unmapped ticket.)*
 2. **No naming convention.** For a branchless task, lazybox derives a
    generic `linear-<identifier>-<slug>` (`derive_branch_for_branchless`,
-   `spawn_handler.rs:2646`). It ignores Linear's own `gitBranchName` and
-   does not match the obin house convention (below).
-3. **No prompt.** A Linear-only workspace classifies as `StartHere`
-   (`tui-core/src/intent.rs:291`), so `w` spawns a **bare agent with no
-   prompt** — none of the GitHub `Closes #N` / PR-title guidance is
-   injected for Linear.
+   `spawn_handler.rs`). It ignores Linear's own `gitBranchName` and
+   does not match the obin house convention (below). *(Fixed: a
+   `branch_template` engine renders the house convention below.)*
+3. **No prompt.** A Linear-only workspace classified as `StartHere`
+   (`tui-core/src/intent.rs`), so `w` spawned a **bare agent with no
+   prompt** — none of the GitHub `Closes #N` / PR-title guidance was
+   injected for Linear. *(Fixed: Linear tickets now classify
+   `ImplementLinear` and get a real prompt.)*
 
 ## What obin actually does (the convention to honor)
 
@@ -74,11 +91,36 @@ rather than use it verbatim.
 
 ### 1. Config: Linear team → repo set (+ per-repo `about`)
 
+This is the **target** multi-repo shape. What shipped in #905/#918 is
+the single-repo subset: `providers.linear.teams` is a flat
+`team → owner/repo` map (`BTreeMap<String, String>`), and the label→type
+map is keyed `label_types` (not `type_from_label`). The `repos:`-list
+form and per-repo `about` below are the deferred multi-repo design, not
+yet deserializable — see the phased split.
+
+Shipped today:
+
+```yaml
+providers:
+  linear:
+    handle: antoine
+    branch_template: "{handle}/{type}/{id}-{slug}"
+    teams:
+      OBI: obin-ai/obin-platform      # one repo per team
+    label_types:
+      Bug: fix
+      Feature: feat
+      Improvement: feat
+      Tech Debt: chore
+```
+
+Deferred multi-repo target:
+
 ```yaml
 providers:
   linear:
     handle: antoine                     # {handle} for branch names
-    type_from_label:                    # {type} mapping, optional
+    label_types:                        # {type} mapping, optional
       Bug: fix
       Feature: feat
       Improvement: feat
@@ -111,7 +153,7 @@ w on OBI-1964
   │        (your "always-show, pre-picked" choice; high confidence may auto-accept)
   ├─ 4. PROVISION worktree(s), one per chosen repo
   │        branch = branch_template filled (id, slug, handle, type)
-  └─ 5. WORK AGENT prompt (today: nothing) per worktree:
+  └─ 5. WORK AGENT prompt (shipped single-repo; sibling-repo lines deferred) per worktree:
            ticket body + this repo's `about` + sibling repos
            + convention: "branch <…>; PR title `[<area>] <summary>`;
              body starts `Fixes OBI-1964`; link <issue url>."
@@ -143,20 +185,20 @@ the box for this repo, overridable everywhere.
 
 ## Phased implementation
 
-1. **Config + repo resolution.** `LinearConfig` (handle, teams→repos,
-   template, label map). Replace the `linear/<team>` repo with the mapped
-   GitHub repo in `repo_for_workspace_provision`. Single-repo, default
-   repo, no router yet. *Dogfoodable: `w` a Linear ticket → correct repo,
-   correct branch name.*
-2. **Naming.** Branch-template engine (tokens) + label→type. Regression
-   tests against the obin examples in this doc.
-3. **Prompt injection.** Give Linear `w` a real prompt (ticket + repo
-   `about` + convention). Route Linear through a Linear-specific prompt
-   builder instead of `StartHere`/None.
-4. **Repo `about` ingestion.** CLAUDE.md→README digest, cached.
-5. **Router + multi-select modal.** Headless structured run → pre-checked
-   multi-select. This is the last, highest-risk phase; ship 1–4 first so
-   the feature is useful even before inference lands.
+1. **Config + repo resolution.** ✅ Shipped (#905/#918). `LinearConfig`
+   (handle, teams→repo, template, label map). Replaced the `linear/<team>`
+   repo with the mapped GitHub repo in `repo_for_workspace_provision`.
+   Single-repo, no router yet. *Dogfoodable: `w` a Linear ticket → correct
+   repo, correct branch name.*
+2. **Naming.** ✅ Shipped (#905/#918). Branch-template engine (tokens) +
+   label→type, with regression tests against the obin examples in this doc.
+3. **Prompt injection.** ✅ Shipped (#905/#918). Linear `w` gets a real
+   prompt (ticket + convention) via a new `ImplementLinear` classification
+   instead of `StartHere`/None. (Repo `about` not yet folded in — see 4.)
+4. **Repo `about` ingestion.** ⏳ Deferred. CLAUDE.md→README digest, cached.
+5. **Router + multi-select modal.** ⏳ Deferred. Headless structured run →
+   pre-checked multi-select. The last, highest-risk phase; 1–3 shipped
+   first so the feature is useful even before inference lands.
 
 ## Open questions
 

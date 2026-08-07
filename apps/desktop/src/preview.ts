@@ -51,6 +51,7 @@ export function loadPreview(): PreviewState {
       closed_at: null,
       labels: [],
       reviewers: [],
+      reviews: [],
       assignees: [],
       author: "mira",
       auto_merge_enabled: false,

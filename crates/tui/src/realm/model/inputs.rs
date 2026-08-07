@@ -803,12 +803,10 @@ showing keybinding search only",
             self.flash_hint("no workspace focused to ask about");
             return;
         };
-        let Some(task) = workspace
-            .pr
-            .as_ref()
-            .or_else(|| workspace.gh_issues.first())
-            .or_else(|| workspace.linear_issues.first())
-        else {
+        // Target the same task the reader renders — `primary_task()`
+        // (PR, else first issue) — so the chat is always about what the
+        // user was reading, and the two can't drift apart.
+        let Some(task) = workspace.primary_task() else {
             self.flash_hint("this workspace has no PR or issue to ask about");
             return;
         };
@@ -830,13 +828,9 @@ showing keybinding search only",
         let has_worktree = target.is_some();
 
         // Tear down any prior PR-chat run and thread before rebinding.
-        if let Some(run_id) = self.pr_chat_run.take() {
-            self.send_cmd(IpcCommand::InterruptAgentRun { run_id });
+        for cmd in self.reset_pr_chat_run() {
+            self.send_cmd(cmd);
         }
-        self.pr_chat_request = None;
-        self.pr_chat_pending.clear();
-        self.pr_chat_held_question = None;
-        *self.pr_chat_convo_mut() = Default::default();
 
         self.pr_chat_subject = Some(PrChatSubject {
             task,

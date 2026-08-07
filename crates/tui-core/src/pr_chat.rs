@@ -25,6 +25,15 @@ pub const PR_CHAT_SESSION_KEY: &str = "lazybox:pr-chat";
 /// can't blow the prompt. Past it the diff is cut with a note.
 const DIFF_CHAR_BUDGET: usize = 60_000;
 
+/// Upper bound on the description body folded into the context. A
+/// pathologically long body (pasted logs, generated changelogs) is cut
+/// with a note rather than shipped whole.
+const BODY_CHAR_BUDGET: usize = 20_000;
+
+/// Most-recent activity entries kept. The feed is newest-first, so the
+/// oldest are the ones dropped; the count of any drop is disclosed.
+const ACTIVITY_LIMIT: usize = 40;
+
 /// What code context is available for the chat, driving both what the
 /// document includes and the honest "what I couldn't see" disclosure
 /// the acceptance criteria ask for.
@@ -110,10 +119,7 @@ cannot see here, say so plainly rather than guessing.\n\
         .map(str::trim)
         .filter(|b| !b.is_empty())
     {
-        Some(body) => {
-            out.push_str(body);
-            out.push('\n');
-        }
+        Some(body) => push_capped(&mut out, body, BODY_CHAR_BUDGET, "description"),
         None => out.push_str("_(no description)_\n"),
     }
 
@@ -122,13 +128,31 @@ cannot see here, say so plainly rather than guessing.\n\
     out
 }
 
+/// Append `text`, truncated to `budget` chars on a char boundary with a
+/// disclosure note when it overruns, so an over-long field can't blow
+/// the prompt or silently read as complete.
+fn push_capped(out: &mut String, text: &str, budget: usize, what: &str) {
+    if text.len() <= budget {
+        out.push_str(text);
+        out.push('\n');
+        return;
+    }
+    let end = (0..=budget)
+        .rev()
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(0);
+    out.push_str(&text[..end]);
+    out.push_str(&format!("\n\n_({what} truncated to fit.)_\n"));
+}
+
 fn push_activity(out: &mut String, activity: &[Activity]) {
     out.push_str("\n## Activity (newest first)\n\n");
     if activity.is_empty() {
         out.push_str("_(no comments or reviews)_\n");
         return;
     }
-    for act in activity {
+    let shown = activity.len().min(ACTIVITY_LIMIT);
+    for act in &activity[..shown] {
         let kind = match act.kind {
             ActivityKind::Comment => "comment",
             ActivityKind::Review => "review",
@@ -150,6 +174,17 @@ fn push_activity(out: &mut String, activity: &[Activity]) {
             out.push_str(&body.replace('\n', " "));
             out.push('\n');
         }
+    }
+    if activity.len() > shown {
+        out.push_str(&format!(
+            "\n_({} older entr{} omitted.)_\n",
+            activity.len() - shown,
+            if activity.len() - shown == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        ));
     }
 }
 
@@ -426,6 +461,31 @@ mod tests {
         };
         let ctx = pr_context(&task, &[], PrDiff::Available(&empty));
         assert!(ctx.contains("no uncommitted changes"));
+    }
+
+    #[test]
+    fn long_body_is_truncated_with_a_note() {
+        let mut task = pr_task();
+        task.body = Some("x".repeat(BODY_CHAR_BUDGET + 5_000));
+        let ctx = pr_context(&task, &[], PrDiff::NoWorktree);
+        assert!(ctx.contains("_(description truncated to fit.)_"));
+        // The whole oversized body is not shipped.
+        assert!(ctx.len() < BODY_CHAR_BUDGET + 4_000);
+    }
+
+    #[test]
+    fn activity_feed_is_capped_and_the_drop_disclosed() {
+        let task = pr_task();
+        let activity: Vec<Activity> = (0..ACTIVITY_LIMIT + 3)
+            .map(|i| comment("bot", &format!("comment {i}")))
+            .collect();
+        let ctx = pr_context(&task, &activity, PrDiff::NoWorktree);
+        assert!(ctx.contains("comment 0"), "newest entries kept");
+        assert!(
+            !ctx.contains(&format!("comment {}", ACTIVITY_LIMIT + 2)),
+            "oldest entries dropped"
+        );
+        assert!(ctx.contains("3 older entries omitted."));
     }
 
     #[test]

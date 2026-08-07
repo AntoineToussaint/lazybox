@@ -56,6 +56,9 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ("lazybox-entitlement", set(&[])),
         ("lazybox-gh", set(&["lazybox-auth", "lazybox-core"])),
         ("lazybox-git-ops", set(&["lazybox-core"])),
+        // Per-device identity is a leaf like auth: box keypair, device
+        // registry, and OS keystore, all in terms of plain strings.
+        ("lazybox-identity", set(&[])),
         ("lazybox-ipc", set(&["lazybox-core"])),
         ("lazybox-linear", set(&["lazybox-auth", "lazybox-core"])),
         // The rendezvous relay is a standalone, codefly-hosted deployable
@@ -71,6 +74,7 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-core",
                 "lazybox-gh",
                 "lazybox-git-ops",
+                "lazybox-identity",
                 "lazybox-ipc",
                 "lazybox-linear",
                 "lazybox-slack",
@@ -113,6 +117,7 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-core",
                 "lazybox-gh",
                 "lazybox-git-ops",
+                "lazybox-identity",
                 "lazybox-ipc",
                 "lazybox-linear",
                 "lazybox-relay",

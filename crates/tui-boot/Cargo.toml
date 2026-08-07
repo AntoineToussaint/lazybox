@@ -47,6 +47,7 @@ lazybox-gh       = { workspace = true }
 lazybox-slack    = { workspace = true }
 lazybox-linear   = { workspace = true }
 lazybox-ipc      = { workspace = true }
+lazybox-identity = { workspace = true }
 lazybox-relay    = { workspace = true }
 lazybox-agents   = { workspace = true }
 lazybox-server   = { path = "../server" }

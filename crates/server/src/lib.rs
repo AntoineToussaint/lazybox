@@ -331,6 +331,12 @@ pub struct ServerConfig {
     /// Local/dev fallback principal. API auth can replace this with a
     /// per-connection principal later.
     pub default_principal_id: lazybox_ipc::PrincipalId,
+    /// Revocable per-device credentials. The gateway resolves a device
+    /// token bearer to that device's `PrincipalId` here so a paired
+    /// device's provider credentials are scoped to its own principal,
+    /// not the shared `local`. Disk-backed in production (shared with
+    /// the `lazybox device` CLI); ephemeral (in-memory) by default.
+    pub device_registry: Arc<lazybox_identity::DeviceRegistry>,
     /// Cross-tick provider state, caches, and wake coordination.
     pub poll: PollState,
     /// Workspace keys whose deletion began in this process (single delete,
@@ -432,6 +438,12 @@ impl ServerConfig {
             WorktreeRoot::persistent(lazybox_core::paths::state_root()),
         );
         config.agents = registry_from_config(&user_config);
+        let identity_dir = lazybox_core::paths::identity_dir();
+        let keystore = lazybox_identity::default_keystore(&identity_dir);
+        config.device_registry = Arc::new(lazybox_identity::DeviceRegistry::open(
+            identity_dir,
+            keystore,
+        ));
         Ok(config)
     }
 
@@ -486,6 +498,7 @@ impl ServerConfig {
             next_agent_run_id: Arc::new(AtomicU64::new(1)),
             credential_store: Arc::new(auth::MemoryCredentialStore::new()),
             default_principal_id: lazybox_ipc::PrincipalId::local(),
+            device_registry: Arc::new(lazybox_identity::DeviceRegistry::ephemeral()),
             poll: PollState::default(),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),

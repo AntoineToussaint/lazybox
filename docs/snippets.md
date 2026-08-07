@@ -320,12 +320,25 @@ snippets:
       Review the current diff (`git diff` against the base branch) for
       correctness bugs: logic errors, off-by-one mistakes, missing error
       handling, broken edge cases, and anything that wouldn't survive a
-      careful review. Report findings as a list ranked by severity, each
-      with a `file:line` anchor and a one-line explanation of what breaks
-      and when. Look only at the changed lines and the code they directly
-      touch, not the whole file. If the diff is clean, say so plainly
-      rather than inventing nits.
+      careful review. Read adversarially: treat each changed line as guilty
+      until you can trace why it's safe, and treat a safe-looking default —
+      an early return, a fallback, a delete-on-missing — as a footgun to
+      disprove, not a comfort. Report findings ranked by severity, each with
+      a `file:line` anchor and the concrete input or state that triggers the
+      wrong result — a falsifiable failure, not a vague worry. Look only at
+      the changed lines and the code they directly touch, not the whole
+      file. Call a line clean only after you've actually traced it, not as a
+      shortcut — but if it genuinely is, say so plainly rather than inventing
+      nits.
 ```
+
+Review, fix, and security bodies go a step further — they are written to
+**bias toward action**: a finding is real until a specific, falsifiable
+reason refutes it, a safe-looking default is a claim to *disprove* rather
+than a resting place, and `fixall` implements the findings instead of
+curating reasons to skip them. See
+[review-prompt-research.md](review-prompt-research.md) for the cited
+patterns behind that house style.
 
 > **Not yet supported:** placeholder / variable interpolation in bodies
 > (e.g. injecting the selected file or a typed argument). Bodies are

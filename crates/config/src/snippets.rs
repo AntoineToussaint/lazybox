@@ -306,11 +306,16 @@ impl Snippets {
                     "Review the current diff (`git diff` against the base branch) for \
                      correctness bugs: logic errors, off-by-one mistakes, missing error \
                      handling, broken edge cases, and anything that wouldn't survive a \
-                     careful review. Report findings as a list ranked by severity, each \
-                     with a `file:line` anchor and a one-line explanation of what breaks \
-                     and when. Look only at the changed lines and the code they directly \
-                     touch, not the whole file. If the diff is clean, say so plainly \
-                     rather than inventing nits.",
+                     careful review. Read adversarially: treat each changed line as guilty \
+                     until you can trace why it's safe, and treat a safe-looking default — \
+                     an early return, a fallback, a delete-on-missing — as a footgun to \
+                     disprove, not a comfort. Report findings ranked by severity, each with \
+                     a `file:line` anchor and the concrete input or state that triggers the \
+                     wrong result — a falsifiable failure, not a vague worry. Look only at \
+                     the changed lines and the code they directly touch, not the whole \
+                     file. Call a line clean only after you've actually traced it, not as a \
+                     shortcut — but if it genuinely is, say so plainly rather than inventing \
+                     nits.",
                 ),
             ),
             (
@@ -323,7 +328,11 @@ impl Snippets {
                     "Deep review: design, stress, blast radius (flagship)",
                     "Review the current diff (`git diff` against the base branch) as a \
                      skeptical senior engineer — deeper than surface bugs, in three \
-                     passes. Design: are the abstractions, boundaries, and ownership \
+                     passes. Assume every finding is real until a specific, falsifiable \
+                     reason refutes it, and treat a safe-looking default as the thing to \
+                     disprove — \"it degrades safely to the old behavior\" is the exact \
+                     reasoning that ships silent data loss, not a reason to wave a risk \
+                     through. Design: are the abstractions, boundaries, and ownership \
                      right; does it fit the patterns already in this codebase; is there a \
                      materially simpler shape that does the same job? Correctness under \
                      stress: trace the real code path and enumerate the edge cases, error \
@@ -351,7 +360,9 @@ impl Snippets {
                      reviewer down. Keep every suggestion small, mechanical, and \
                      behavior-preserving, each with a `file:line` anchor. This is polish \
                      only — if you spot an actual correctness or design problem, flag it \
-                     separately rather than burying it as a nit.",
+                     separately and loudly rather than downgrading it to a nit to keep the \
+                     pass tidy; a real bug filed as style is how it survives review. If the \
+                     diff is already clean, say so instead of inventing nits to look busy.",
                 ),
             ),
             (
@@ -360,14 +371,16 @@ impl Snippets {
                     "Review",
                     "Self-review before pushing",
                     "Self-review this branch as a skeptical reviewer seeing it for the \
-                     first time. Read the full diff against the base branch, then call \
+                     first time — assume it's not ready until you've tried to break it, \
+                     not the reverse. Read the full diff against the base branch, then call \
                      out anything that isn't obviously correct, any missing or weak \
                      tests, any leftover debug code or stray TODOs, any change that's out \
                      of scope for this branch's purpose (drive-by refactors, reformatting, \
                      unrelated edits), and anything you'd be \
-                     asked to change in review. List concrete items with `file:line` \
-                     anchors so I can fix them before pushing. If it's genuinely ready, \
-                     say so.",
+                     asked to change in review. For each correctness item give the concrete \
+                     input or state that breaks it, not a hunch. List items with `file:line` \
+                     anchors so I can fix them before pushing. Call it ready only after \
+                     you've genuinely tried and failed to find a problem — then say so.",
                 ),
             ),
             (
@@ -376,7 +389,10 @@ impl Snippets {
                     "Review",
                     "Full pre-ship review: correctness, design, security, perf, tests",
                     "Give the current diff (`git diff` against the base branch) the full \
-                     pre-ship review, one lens at a time. Correctness: logic errors, \
+                     pre-ship review, one lens at a time, reviewing adversarially — each \
+                     finding is real until you refute it with a concrete input that proves \
+                     it can't happen, and a safe-looking default is a claim to disprove, \
+                     not a resting place. Correctness: logic errors, \
                      off-by-one, unhandled errors and edge cases. Design: are the \
                      boundaries and abstractions right, does it fit the surrounding code, \
                      is there a simpler shape. Security: untrusted input crossing a trust \
@@ -386,7 +402,8 @@ impl Snippets {
                      its failure paths. For each finding, trace the real code path and \
                      give a concrete failure scenario — the input or state that produces \
                      the wrong result — with a `file:line` anchor, ranked by severity. If \
-                     a lens is clean, say so in one line rather than padding the list.",
+                     a lens is genuinely clean, say so in one line rather than padding the \
+                     list.",
                 ),
             ),
             (
@@ -400,7 +417,10 @@ impl Snippets {
                      ownership right, or does it add coupling that will bite later? Is \
                      there a materially simpler shape that does the same job? What's the \
                      blast radius, and the rollback story if it's wrong? Judge it against \
-                     the patterns already in this codebase, not an ideal in the abstract. \
+                     the patterns already in this codebase, not an ideal in the abstract — \
+                     but \"it matches the existing pattern\" and \"it degrades safely\" are \
+                     not defenses; a safe-looking default can hide a footgun, so name what \
+                     specifically makes each choice safe or don't accept it. \
                      End with a one-word verdict — ship, reshape, or rethink — and the \
                      two or three highest-leverage changes, each with a `file:line` \
                      anchor and the reasoning. If the design is sound, say so and name \
@@ -420,11 +440,13 @@ impl Snippets {
                      clones added inside a loop, N+1 queries or repeated I/O, an \
                      accidental O(n²) from a nested scan, eager work that could be \
                      deferred, and blocking calls or locks added to a latency-sensitive \
-                     path. For each, give the `file:line`, the input scale at which it \
-                     starts to hurt, and the concrete cost — measured or estimated, not \
-                     hand-waved — ranked by impact. Suggest a fix only where the win is \
-                     real and the code stays readable. If the diff has no hot-path \
-                     impact, say so plainly instead of inventing concerns.",
+                     path. Assume each added cost matters until the input scale proves it \
+                     doesn't — \"probably negligible\" is a claim you back with a number, \
+                     not a dismissal. For each, give the `file:line`, the input scale at \
+                     which it starts to hurt, and the concrete cost — measured or \
+                     estimated, not hand-waved — ranked by impact. Suggest a fix only \
+                     where the win is real and the code stays readable. If the diff has no \
+                     hot-path impact, say so plainly instead of inventing concerns.",
                 ),
             ),
             (
@@ -432,21 +454,28 @@ impl Snippets {
                 entry(
                     "Review",
                     "Apply the review findings you just produced",
-                    "Take the findings from the review you just produced and work through \
-                     them end to end. Go in severity order — highest first — and for each \
+                    "Take the findings from the review you just produced and *implement* \
+                     them — the deliverable is a clean, tested diff, not a curated list of \
+                     reasons not to act. Go in severity order, highest first, and for each \
                      finding fix the *real cause* at the `file:line` it names, not the \
-                     surface symptom. If a finding is wrong, already handled, or not worth \
-                     acting on, skip it and say so in one line rather than forcing a change \
-                     you don't believe in. Whenever a fix changes behavior, add or adjust \
-                     the test that would have caught the original problem. When you're \
+                     surface symptom. Default to fixing: a finding stays unfixed only when \
+                     you can refute it with a specific, falsifiable reason — a concrete \
+                     input or state that proves it can't happen. \"Not worth the \
+                     complexity,\" \"degrades safely to the prior behavior,\" \"out of \
+                     scope,\" and \"not a change I believe in\" are not reasons; they're the \
+                     reflex that ships bugs — one such \"the safe default is fine\" call \
+                     silently deleted real user data. Treat the safe-looking default as the \
+                     thing to disprove, and when you're unsure, fix it. Whenever a fix \
+                     changes behavior, add or adjust the test that would have caught the \
+                     original problem. When you're \
                      done, re-run the build, tests, and linter to confirm the tree is \
                      green, and stay strictly in scope — fix only the findings, and don't \
                      refactor, reformat, or clean up anything they didn't call out. Commit \
                      the fixes \
                      with a clear message that says what was wrong and why the change is \
                      the real fix, staging only the files you touched. Finish with a short \
-                     summary: what you fixed, what you deliberately left and why, and \
-                     anything you noticed in the code that the review missed.",
+                     summary: what you fixed, each finding you left with its falsifiable \
+                     reason, and anything you noticed in the code that the review missed.",
                 ),
             ),
             (
@@ -845,8 +874,10 @@ impl Snippets {
                     "Run the project's test suite. If anything fails, fix the root cause \
                      in the code — not the test, and not by loosening an assertion — then \
                      re-run until green. Report what failed, why, and what you changed. \
-                     If a test is genuinely wrong, say so explicitly and explain before \
-                     you touch it.",
+                     \"The test is flaky\" or \"it's testing the wrong thing\" is a claim \
+                     you prove with a specific reason before you weaken or delete it, never \
+                     a quick way out of a real failure. If a test is genuinely wrong, say \
+                     so explicitly and explain before you touch it.",
                 ),
             ),
             (
@@ -894,10 +925,13 @@ impl Snippets {
                     "Root-cause the failure",
                     "Investigate the failure I'm about to describe. Find the root cause \
                      before proposing any fix — trace the actual code path and confirm \
-                     the mechanism, don't guess or pattern-match. Once you can explain \
+                     the mechanism, don't guess or pattern-match. A plausible-but-unconfirmed \
+                     cause is a hypothesis, not a diagnosis: prove it by making the bug \
+                     appear and vanish on command. Once you can explain \
                      exactly why it happens, write a failing regression test, then fix \
                      the underlying cause (never the symptom) and confirm the test goes \
-                     green. Report the mechanism, the fix, and why it's the real cause.",
+                     green — a fix you can't back with that red-then-green test isn't done. \
+                     Report the mechanism, the fix, and why it's the real cause.",
                 ),
             ),
             (
@@ -1033,7 +1067,11 @@ impl Snippets {
                     "Security review of the diff",
                     "Review the current diff for security issues: injection, missing \
                      authz/authn checks, unsafe deserialization, path traversal, secret \
-                     handling, SSRF, and unchecked input crossing a trust boundary. For \
+                     handling, SSRF, and unchecked input crossing a trust boundary. Review \
+                     adversarially: assume every input is hostile and every check is \
+                     bypassable until you trace why it isn't, and don't retire a finding as \
+                     \"probably not exploitable\" without the specific reason the exploit \
+                     fails. For \
                      each finding give the `file:line`, the concrete exploit path, and \
                      the fix, ranked by exploitability. If the diff introduces no \
                      security-relevant change, say so rather than padding the list.",
@@ -1047,8 +1085,10 @@ impl Snippets {
                     "Audit the project's dependencies for known vulnerabilities and \
                      unmaintained packages using the ecosystem's audit tool. Propose safe \
                      upgrades, call out breaking changes from each changelog, and don't \
-                     bump anything without checking what changed. Report findings by \
-                     severity with the fixed version for each.",
+                     bump anything without checking what changed. Don't dismiss an advisory \
+                     as \"not exploitable here\" unless you've traced that the vulnerable \
+                     path is genuinely unreachable — assume it's reachable until proven \
+                     dead. Report findings by severity with the fixed version for each.",
                 ),
             ),
             (
@@ -1062,8 +1102,10 @@ impl Snippets {
                      committed secrets: API keys, tokens, private keys, passwords, \
                      connection strings. For anything found, flag it clearly with \
                      `file:line`, treat it as already compromised, and advise on rotation \
-                     and scrubbing it from history. Don't echo the full secret value \
-                     back.",
+                     and scrubbing it from history. Don't downgrade a match to \"probably a \
+                     test fixture or example key\" unless you've confirmed it isn't a live \
+                     credential — assume real until proven otherwise. Don't echo the full \
+                     secret value back.",
                 ),
             ),
             // ── Docs ────────────────────────────────────────────────
@@ -1122,8 +1164,11 @@ impl Snippets {
                     "Diagnose and fix failing CI",
                     "CI is failing. Pull the failing job's logs (`gh run view \
                      --log-failed`), find the real cause rather than the surface error, \
-                     and fix it locally. Re-run the equivalent check here to confirm it \
-                     passes before pushing, and report what was actually broken.",
+                     and fix it locally. Don't write a failure off as a flake or \
+                     \"unrelated\" without re-running to prove it — a green-on-retry is \
+                     evidence, a guess is an excuse to skip the work. Re-run the equivalent \
+                     check here to confirm it passes before pushing, and report what was \
+                     actually broken.",
                 ),
             ),
             (
@@ -1531,6 +1576,60 @@ snippets:
         assert!(
             s.body.contains("file:line"),
             "`fixall` fixes findings at their `file:line` anchor",
+        );
+    }
+
+    /// The review/fix/security built-ins bias toward action and refuse the
+    /// soft escape hatches that let an agent rationalize *not* doing the work
+    /// (#935). Each carries an adversarial/falsifiable anchor so the toughening
+    /// can't silently regress to "degrades safely / not worth the complexity."
+    #[test]
+    fn review_and_fix_bodies_are_adversarial() {
+        let b = Snippets::builtin();
+        for (key, anchor) in [
+            ("rev", "adversarially"),
+            ("deepreview", "falsifiable"),
+            ("nit", "downgrading it to a nit"),
+            ("selfrev", "tried to break it"),
+            ("audit", "adversarially"),
+            ("arch", "footgun"),
+            ("hotpath", "input scale proves"),
+            ("fixall", "falsifiable"),
+            ("sec", "adversarially"),
+            ("deps", "reachable until proven"),
+            ("leaks", "proven otherwise"),
+            ("bug", "hypothesis, not a diagnosis"),
+            ("ci", "green-on-retry"),
+            ("test", "weaken or delete it"),
+        ] {
+            let body = &b
+                .get(key)
+                .unwrap_or_else(|| panic!("`{key}` ships built-in"))
+                .body;
+            assert!(
+                body.contains(anchor),
+                "built-in `{key}` lost its anti-hedging anchor `{anchor}` — the \
+                 review/fix prompts must keep biasing toward action (#935)",
+            );
+        }
+    }
+
+    /// `fixall` is the apply step (#838); #935 flips its default from
+    /// "skip if not worth it" to "implement unless you can falsifiably refute
+    /// the finding." Guard both the new imperative and the removal of the old
+    /// soft escape, which is exactly the reasoning that shipped #924's data
+    /// loss.
+    #[test]
+    fn fixall_defaults_to_implementing_not_skipping() {
+        let b = Snippets::builtin();
+        let fixall = &b.get("fixall").expect("fixall").body;
+        assert!(
+            fixall.contains("Default to fixing"),
+            "fixall must default to fixing findings, not curating skips",
+        );
+        assert!(
+            !fixall.contains("not worth acting on"),
+            "fixall must not offer the old 'not worth acting on' escape hatch",
         );
     }
 

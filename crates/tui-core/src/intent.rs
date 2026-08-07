@@ -168,6 +168,10 @@ pub enum WorkPriority {
     /// Issue-only workspace (no PR yet). Agent gets an "implement
     /// this issue" prompt.
     ImplementIssue,
+    /// Linear-ticket-only workspace (no PR, no GitHub issue). Agent gets
+    /// an "implement this Linear ticket" prompt (`Fixes OBI-N` close, the
+    /// house branch convention) rather than the bare `StartHere` spawn.
+    ImplementLinear,
     /// Empty / scratch workspace (no PR, no issue, not terminal). `w`
     /// still spawns the default agent — bare, no fabricated prompt — so
     /// a blank workspace isn't a silent no-op (issue #557). The old
@@ -193,6 +197,7 @@ impl WorkPriority {
             Self::ReviewCode => "review",
             Self::WorkOnPr => "work on this",
             Self::ImplementIssue => "implement",
+            Self::ImplementLinear => "implement",
             Self::StartHere => "start",
             Self::TidyUp => "archive",
         }
@@ -284,6 +289,9 @@ pub fn classify_work(
     }
     if !ws.gh_issues.is_empty() {
         return Some(WorkPriority::ImplementIssue);
+    }
+    if !ws.linear_issues.is_empty() {
+        return Some(WorkPriority::ImplementLinear);
     }
     // A real but empty/scratch workspace: `w` still spawns the default
     // agent (bare) rather than silently dropping the keypress (issue
@@ -378,6 +386,12 @@ fn prompt_for_priority(
         WorkPriority::ImplementIssue => match ws.gh_issues.first() {
             Some(issue) => {
                 lazybox_core::prompts::build_implement_issue_prompt_with(issue, conventions)
+            }
+            None => fallback(ws),
+        },
+        WorkPriority::ImplementLinear => match ws.linear_issues.first() {
+            Some(ticket) => {
+                lazybox_core::prompts::build_implement_linear_prompt_with(ticket, conventions)
             }
             None => fallback(ws),
         },
@@ -974,6 +988,23 @@ mod tests {
         Workspace::empty(WorkspaceKey::new("k"), "main", Utc::now())
     }
 
+    fn linear(key: &str) -> Workspace {
+        let mut t = pr(&format!("o/r#{key}"), CiStatus::None, ReviewStatus::None);
+        let mut task = t.pr.take().unwrap();
+        task.id = TaskId {
+            source: "linear".into(),
+            key: key.into(),
+        };
+        task.repo = Some(format!(
+            "linear/{}",
+            key.split_once('-').map_or(key, |(t, _)| t)
+        ));
+        task.branch = None;
+        task.url = format!("https://linear.app/team/issue/{key}");
+        t.attach_task(task);
+        t
+    }
+
     #[test]
     fn work_with_no_workspace_is_noop() {
         assert_eq!(
@@ -1204,6 +1235,12 @@ mod tests {
                 ),
                 ("issue", Some(WorkPriority::ImplementIssue), issue, &[][..]),
                 (
+                    "linear ticket",
+                    Some(WorkPriority::ImplementLinear),
+                    linear("OBI-1749"),
+                    &[][..],
+                ),
+                (
                     "comments selected",
                     Some(WorkPriority::AddressComments),
                     commented,
@@ -1254,6 +1291,7 @@ mod tests {
             WorkPriority::ReviewCode,
             WorkPriority::WorkOnPr,
             WorkPriority::ImplementIssue,
+            WorkPriority::ImplementLinear,
             WorkPriority::StartHere,
             WorkPriority::TidyUp,
         ] {

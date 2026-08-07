@@ -2987,6 +2987,10 @@ fn isolated_branch_for_workspace(
     }
     let prefix = resolve_branch_prefix(cfg, repo_key);
     match workspace.primary_task() {
+        // A Linear ticket honors the house branch template when one is
+        // configured, falling back to the generic branchless naming.
+        Some(task) if task.id.source == "linear" => derive_linear_branch(cfg, task)
+            .unwrap_or_else(|| derive_branch_for_branchless(prefix, task)),
         Some(task) => derive_branch_for_branchless(prefix, task),
         None => derive_branch_for_workspace(prefix, workspace),
     }
@@ -2998,6 +3002,10 @@ fn repo_for_workspace_provision(
     cfg: &lazybox_config::Config,
 ) -> Result<Option<String>, crate::ServerError> {
     match workspace.primary_task() {
+        // A Linear ticket's `repo` is the synthetic `linear/<team>`, never
+        // a clonable GitHub repo — resolve the real one from the team map
+        // (or fail loudly) instead of returning `task.repo` verbatim.
+        Some(task) if task.id.source == "linear" => linear_repo_for_task(cfg, task).map(Some),
         Some(task) => Ok(task.repo.clone()),
         None if lazybox_core::workspace_project_key(workspace)
             .is_some_and(|key| key.source_prefix() == "github") =>
@@ -3011,6 +3019,89 @@ fn repo_for_workspace_provision(
         }
         None => Ok(None),
     }
+}
+
+/// Resolve the real GitHub `owner/repo` a Linear ticket should be worked
+/// in, from `providers.linear.teams`. A Linear task's own `repo` is the
+/// synthetic `linear/<team>` (never clonable), so a teamless or unmapped
+/// ticket is a hard error: cloning `linear/<team>` or silently
+/// `git init`-ing a standalone worktree would both be wrong (issue #905).
+fn linear_repo_for_task(
+    cfg: &lazybox_config::Config,
+    task: &Task,
+) -> Result<String, crate::ServerError> {
+    let team = task
+        .repo
+        .as_deref()
+        .and_then(|r| r.strip_prefix("linear/"))
+        .filter(|t| !t.is_empty());
+    let Some(team) = team else {
+        return Err(crate::ServerError::Workspace(
+            "this Linear ticket has no team — cannot resolve a repo to work in".into(),
+        ));
+    };
+    cfg.providers
+        .linear
+        .teams
+        .get(team)
+        .cloned()
+        .ok_or_else(|| {
+            crate::ServerError::Workspace(format!(
+                "Linear team `{team}` has no repo mapping — set \
+                 providers.linear.teams.{team} in ~/.lazybox/config.yaml"
+            ))
+        })
+}
+
+/// Branch name for a Linear ticket from the configured
+/// `providers.linear.branch_template`. `None` when no template is set
+/// (the caller falls back to the generic branchless naming) or the
+/// rendered template collapses to nothing.
+fn derive_linear_branch(cfg: &lazybox_config::Config, task: &Task) -> Option<String> {
+    let linear = &cfg.providers.linear;
+    let template = linear.branch_template.as_deref()?;
+    let handle = linear
+        .handle
+        .as_deref()
+        .map(lazybox_core::slug::slugify)
+        .filter(|h| !h.is_empty())
+        .or_else(git_user_handle)
+        .unwrap_or_default();
+    // Sanitize the configured type token the same way as every other
+    // token — a `label_types` value with spaces/case (`"hot fix"`) would
+    // otherwise inject an invalid git ref segment.
+    let type_token = lazybox_core::branch_template::type_token_for_labels(
+        task.labels.iter().map(|l| l.name.as_str()),
+        &linear.label_types,
+    )
+    .map(lazybox_core::slug::slugify)
+    .unwrap_or_default();
+    let id = lazybox_core::slug::slugify(&task.id.key);
+    let slug = lazybox_core::slug::slugify(&task.title);
+    lazybox_core::branch_template::render_branch_template(
+        template,
+        &[
+            ("handle", &handle),
+            ("type", &type_token),
+            ("id", &id),
+            ("slug", &slug),
+        ],
+    )
+}
+
+/// The local git `user.name`, slugified, as the `{handle}` fallback when
+/// `providers.linear.handle` is unset. `None` when git has no configured
+/// name or the command can't run.
+fn git_user_handle() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["config", "user.name"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let handle = lazybox_core::slug::slugify(String::from_utf8_lossy(&out.stdout).trim());
+    (!handle.is_empty()).then_some(handle)
 }
 
 /// `owner/repo` for a workspace with no linked task, recovered from its
@@ -13455,6 +13546,104 @@ mod tests {
             derive_branch_for_branchless("", &t),
             "linear-eng-456-ship-it"
         );
+    }
+
+    /// A configured `providers.linear.branch_template` renders the house
+    /// convention (`{handle}/{type}/{id}-{slug}`), resolving `{type}` from
+    /// the ticket's labels and lowercasing the ticket id.
+    #[test]
+    fn derive_linear_branch_renders_house_convention() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers.linear.handle = Some("antoine".into());
+        cfg.providers.linear.branch_template = Some("{handle}/{type}/{id}-{slug}".into());
+        cfg.providers
+            .linear
+            .label_types
+            .insert("Feature".into(), "feat".into());
+        let mut t = titled_task("linear", "OBI-1749", "Template SA seam");
+        t.labels = vec![lazybox_core::Label::new("Feature")];
+        assert_eq!(
+            derive_linear_branch(&cfg, &t).as_deref(),
+            Some("antoine/feat/obi-1749-template-sa-seam"),
+        );
+    }
+
+    /// No template configured → `None`, so the caller falls back to the
+    /// generic branchless naming.
+    #[test]
+    fn derive_linear_branch_without_template_is_none() {
+        let cfg = lazybox_config::Config::default();
+        let t = titled_task("linear", "OBI-1749", "Ship it");
+        assert_eq!(derive_linear_branch(&cfg, &t), None);
+    }
+
+    /// An unmapped `{type}` (no matching label) collapses out of the
+    /// branch rather than leaving an orphaned `//` separator.
+    #[test]
+    fn derive_linear_branch_collapses_unmapped_type() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers.linear.handle = Some("antoine".into());
+        cfg.providers.linear.branch_template = Some("{handle}/{type}/{id}-{slug}".into());
+        let t = titled_task("linear", "OBI-1749", "Ship it");
+        assert_eq!(
+            derive_linear_branch(&cfg, &t).as_deref(),
+            Some("antoine/obi-1749-ship-it"),
+        );
+    }
+
+    /// A `label_types` value with stray whitespace/case is sanitized into
+    /// a valid ref segment rather than injecting an invalid git branch.
+    #[test]
+    fn derive_linear_branch_sanitizes_type_token() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers.linear.handle = Some("antoine".into());
+        cfg.providers.linear.branch_template = Some("{handle}/{type}/{id}-{slug}".into());
+        cfg.providers
+            .linear
+            .label_types
+            .insert("Bug".into(), "Hot Fix".into());
+        let mut t = titled_task("linear", "OBI-1749", "Ship it");
+        t.labels = vec![lazybox_core::Label::new("Bug")];
+        assert_eq!(
+            derive_linear_branch(&cfg, &t).as_deref(),
+            Some("antoine/hot-fix/obi-1749-ship-it"),
+        );
+    }
+
+    /// A mapped Linear team resolves to its real GitHub repo — never the
+    /// synthetic `linear/<team>`.
+    #[test]
+    fn linear_repo_for_task_resolves_mapped_team() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers
+            .linear
+            .teams
+            .insert("OBI".into(), "obin-ai/obin-platform".into());
+        let mut t = task_for("linear", "OBI-1749");
+        t.repo = Some("linear/OBI".into());
+        assert_eq!(
+            linear_repo_for_task(&cfg, &t).unwrap(),
+            "obin-ai/obin-platform",
+        );
+    }
+
+    /// An unmapped team is a hard error, not a clone of `linear/<team>`.
+    #[test]
+    fn linear_repo_for_task_unmapped_team_errors() {
+        let cfg = lazybox_config::Config::default();
+        let mut t = task_for("linear", "OBI-1749");
+        t.repo = Some("linear/OBI".into());
+        let err = linear_repo_for_task(&cfg, &t).unwrap_err();
+        assert!(err.to_string().contains("OBI"), "{err}");
+    }
+
+    /// A Linear ticket with no team at all is likewise a hard error.
+    #[test]
+    fn linear_repo_for_task_teamless_errors() {
+        let cfg = lazybox_config::Config::default();
+        let mut t = task_for("linear", "OBI-1749");
+        t.repo = None;
+        assert!(linear_repo_for_task(&cfg, &t).is_err());
     }
 
     /// A non-numeric GitHub key (no `#`) falls through to the

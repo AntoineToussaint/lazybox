@@ -126,6 +126,69 @@ pub fn build_implement_issue_prompt_with(issue: &Task, conventions: &Conventions
     )
 }
 
+/// Prompt for "implement this Linear ticket". The Linear counterpart of
+/// [`build_implement_issue_prompt_with`]: the ticket is identified by its
+/// Linear key (`OBI-1749`) rather than a GitHub number, and the auto-close
+/// mechanism is Linear's `Fixes OBI-N` PR-body magic word (which closes the
+/// ticket when the linked PR merges) rather than `Closes #N`. The worktree
+/// and its house-convention branch are already provisioned server-side, so
+/// the agent is told to work in place and open the PR — not to name a repo
+/// or invent a branch.
+pub fn build_implement_linear_prompt_with(ticket: &Task, conventions: &Conventions) -> String {
+    let key = &ticket.id.key;
+    let body_block = match ticket
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(body) => format!(
+            "\n\nTicket description:\n{}\n",
+            untrusted_block("linear ticket body (third-party authored)", body)
+        ),
+        None => String::new(),
+    };
+    let closes_clause = if conventions.include_closes {
+        format!(
+            " Include `Fixes {key}` in the PR description so Linear closes the \
+             ticket when the PR merges."
+        )
+    } else {
+        String::new()
+    };
+    // The shared preamble tells the agent to open the PR body with a
+    // `Closes #N.` line — GitHub-specific and inapplicable here (a Linear
+    // ticket has no GitHub issue number). Left standing, the agent can
+    // invent a `Closes #N` that auto-closes an unrelated GitHub issue on
+    // merge, so countermand it unconditionally; the `Fixes {key}` clause
+    // above (or the manual note below) is the Linear-native replacement.
+    let notes = notes_block(&[
+        Some(
+            "There is no GitHub issue number for a Linear ticket — disregard the \
+             `Closes #N` PR-body guidance in the principles above."
+                .to_string(),
+        ),
+        (!conventions.include_closes).then(|| {
+            "Do NOT reference `Fixes <ticket>` in the PR either — this workspace \
+             closes Linear tickets manually."
+                .to_string()
+        }),
+        conventions.commit_override(),
+    ]);
+    format!(
+        "{preamble}\n\n---\n\n\
+         ## Task\n\n\
+         Implement Linear ticket {key}. A git worktree on a fresh branch (named \
+         per this repo's branch convention) is already checked out here — work in \
+         place; do not create another branch.\n\n\
+         Ticket title:\n{title_block}\
+         {body_block}\
+         \nWhen the change is ready, open a PR from this branch.{closes_clause}{notes}",
+        preamble = AGENT_WORK_PREAMBLE.trim_end(),
+        title_block = untrusted_block("linear ticket title (third-party authored)", &ticket.title),
+    )
+}
+
 /// Join zero or more convention-override notes into trailing
 /// paragraphs (each prefixed with a blank line), skipping the ones that
 /// are `None`. Empty when the default (Conventional Commits, closes on)
@@ -775,5 +838,77 @@ mod tests {
         assert!(prompt.contains("prioritized findings"));
         assert!(prompt.contains("<untrusted-content source=\"agent-authored session handoff\">"));
         assert!(prompt.contains("Implemented parser"));
+    }
+
+    fn linear_ticket(key: &str, title: &str, body: Option<&str>) -> Task {
+        let mut t = issue("linear/OBI", 0, title, body);
+        t.id = TaskId {
+            source: "linear".into(),
+            key: key.into(),
+        };
+        t.repo = Some("linear/OBI".into());
+        t.url = format!("https://linear.app/team/issue/{key}");
+        t
+    }
+
+    #[test]
+    fn linear_prompt_names_ticket_and_uses_fixes_close() {
+        let prompt = build_implement_linear_prompt_with(
+            &linear_ticket("OBI-1749", "Template SA seam", Some("Extract the seam")),
+            &Conventions::default(),
+        );
+        assert!(prompt.contains("Linear ticket OBI-1749"));
+        // Linear's close mechanism, not GitHub's.
+        let task = &prompt[prompt.find("## Task").expect("task section")..];
+        assert!(task.contains("Fixes OBI-1749"));
+        // The only `Closes #N` mention in the task is the explicit
+        // countermand of the preamble's GitHub-specific guidance — never a
+        // positive instruction to add one (which could auto-close an
+        // unrelated GitHub issue on merge).
+        assert!(task.contains("disregard the `Closes #N`"));
+        // The branch is server-provisioned — the agent is told to work in
+        // place, not to create one.
+        assert!(prompt.contains("already checked out"));
+        // Principles precede the task.
+        let task_at = prompt.find("## Task").expect("task section");
+        let scope_at = prompt.find("## Scope").expect("scope section");
+        assert!(scope_at < task_at);
+    }
+
+    #[test]
+    fn linear_prompt_fences_title_and_body_as_untrusted() {
+        let prompt = build_implement_linear_prompt_with(
+            &linear_ticket("OBI-1749", "Template SA seam", Some("Extract the seam")),
+            &Conventions::default(),
+        );
+        let title_open = pos(
+            &prompt,
+            "<untrusted-content source=\"linear ticket title (third-party authored)\">",
+        );
+        let body_open = pos(
+            &prompt,
+            "<untrusted-content source=\"linear ticket body (third-party authored)\">",
+        );
+        assert!(title_open < pos(&prompt, "Template SA seam"));
+        assert!(body_open < pos(&prompt, "Extract the seam"));
+        assert_eq!(
+            prompt.matches("<untrusted-content source=").count(),
+            prompt.matches("</untrusted-content>").count(),
+        );
+    }
+
+    #[test]
+    fn linear_prompt_drops_fixes_when_closes_disabled() {
+        let conv = Conventions {
+            include_closes: false,
+            ..Default::default()
+        };
+        let prompt =
+            build_implement_linear_prompt_with(&linear_ticket("OBI-1749", "Ship it", None), &conv);
+        assert!(!prompt.contains("Include `Fixes OBI-1749`"));
+        assert!(prompt.contains("closes Linear tickets manually"));
+        // The preamble's `Closes #N` is countermanded regardless of the
+        // close mode.
+        assert!(prompt.contains("disregard the `Closes #N`"));
     }
 }

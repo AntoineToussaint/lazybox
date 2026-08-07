@@ -1,0 +1,32 @@
+[package]
+name = "lazybox-relay"
+description = "Rendezvous relay: brokers client↔box by box-id and forwards ciphertext only."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+# The relay is a separate codefly-hosted deployable, not part of the
+# `lazybox` client installers. Keep cargo-dist's brew/shell installers
+# from bundling it.
+[package.metadata.dist]
+dist = false
+
+[[bin]]
+name = "lazybox-relay"
+path = "src/bin/lazybox-relay.rs"
+
+[dependencies]
+serde              = { workspace = true }
+bincode            = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid               = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

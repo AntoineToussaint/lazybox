@@ -47,6 +47,7 @@ lazybox-gh       = { workspace = true }
 lazybox-slack    = { workspace = true }
 lazybox-linear   = { workspace = true }
 lazybox-ipc      = { workspace = true }
+lazybox-relay    = { workspace = true }
 lazybox-agents   = { workspace = true }
 lazybox-server   = { path = "../server" }
 
@@ -63,6 +64,7 @@ octocrab           = { workspace = true }
 tempfile           = "3"
 which              = "8"
 rpassword          = "7.5.4"
+uuid               = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"

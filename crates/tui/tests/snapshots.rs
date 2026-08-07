@@ -335,6 +335,127 @@ fn sidebar_golden_render_recent_pr_and_issue_mixed() {
     insta::assert_snapshot!("sidebar_recent_pr_and_issue_mixed", rendered);
 }
 
+/// A Linear issue, in its own team group. Distinct source + `repo`
+/// from [`make_task`] so it forms a separate provider group in the
+/// sidebar; its key is the bare `TEAM-NNN` identifier (no `#`, so it
+/// carries no GitHub-style reference number) and it has no CI /
+/// review.
+fn make_linear_task(identifier: &str, team: &str, minutes_old: i64) -> Task {
+    let mut t = make_task(&format!("{team}-placeholder"), minutes_old);
+    t.id.source = "linear".into();
+    t.id.key = identifier.into();
+    t.url = format!("https://linear.app/{team}/issue/{identifier}");
+    t.repo = Some(format!("linear/{team}"));
+    t.title = format!("linear {identifier}");
+    t
+}
+
+/// Regression for issue #961: column sizing is per group, not global.
+/// A GitHub group (wide `#31000`, CI failure + review pending) and a
+/// Linear group (bare `OBI-NNN` identifiers, no CI / review) render
+/// side by side. Each group sizes its own reference and status columns:
+/// the GitHub group's 5-digit number and its status pills do NOT pad
+/// the Linear rows, and the Linear group reserves no CI / review column.
+/// The golden locks the mixed layout.
+#[test]
+fn sidebar_golden_render_mixed_github_linear_per_group_columns() {
+    use lazybox_tui::components::sidebar::SortMode;
+    let mut s = sidebar();
+    while s.sort_mode() != SortMode::Recent {
+        s.cycle_sort_mode();
+    }
+    let mut pr = make_task("owner/repo#31000", 5);
+    pr.url = "https://github.com/owner/repo/pull/31000".into();
+    pr.title = "fix parser".into();
+    pr.ci = CiStatus::Failure;
+    pr.review = ReviewStatus::Pending;
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(pr, fixed_time()),
+            Workspace::from_task(make_linear_task("OBI-2011", "OBI", 30), fixed_time()),
+            Workspace::from_task(make_linear_task("OBI-9", "OBI", 90), fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    let rendered = render_to_string(&mut s, 40, 12, true);
+    insta::assert_snapshot!("sidebar_mixed_github_linear_per_group_columns", rendered);
+}
+
+/// Companion assertion to the mixed golden: the Linear group renders
+/// identically whether or not a GitHub group with a wide reference
+/// number and status columns sits alongside it. This is the concrete
+/// statement of "each group aligns independently" (#961) — before the
+/// fix, the global pre-pass padded every Linear row's reference column
+/// to the GitHub group's 5-digit width and reserved its status columns.
+#[test]
+fn mixed_github_linear_groups_are_column_independent() {
+    use lazybox_tui::components::sidebar::SortMode;
+
+    fn linear_title_column(rendered: &str, marker: &str) -> usize {
+        let line = rendered
+            .lines()
+            .find(|l| l.contains(marker))
+            .unwrap_or_else(|| panic!("no line contains {marker:?}\n{rendered}"));
+        line.char_indices()
+            .find_map(|(i, _)| line[i..].starts_with(marker).then_some(i))
+            .expect("marker present")
+    }
+
+    let linear_a = make_linear_task("OBI-2011", "OBI", 30);
+    let linear_b = make_linear_task("OBI-9", "OBI", 90);
+
+    // Linear group alongside a wide-number GitHub group with status.
+    let mut mixed = sidebar();
+    while mixed.sort_mode() != SortMode::Recent {
+        mixed.cycle_sort_mode();
+    }
+    let mut pr = make_task("owner/repo#31000", 5);
+    pr.url = "https://github.com/owner/repo/pull/31000".into();
+    pr.ci = CiStatus::Failure;
+    pr.review = ReviewStatus::Pending;
+    mixed.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(pr, fixed_time()),
+            Workspace::from_task(linear_a.clone(), fixed_time()),
+            Workspace::from_task(linear_b.clone(), fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    // The same Linear group, on its own.
+    let mut linear_only = sidebar();
+    while linear_only.sort_mode() != SortMode::Recent {
+        linear_only.cycle_sort_mode();
+    }
+    linear_only.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(linear_a, fixed_time()),
+            Workspace::from_task(linear_b, fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    let mixed_render = render_to_string(&mut mixed, 40, 12, true);
+    let linear_render = render_to_string(&mut linear_only, 40, 12, true);
+
+    // The Linear title starts at the same column in both — the GitHub
+    // group's 5-digit reference did not push it right.
+    assert_eq!(
+        linear_title_column(&mixed_render, "linear OBI-2011"),
+        linear_title_column(&linear_render, "linear OBI-2011"),
+        "Linear row column position must not depend on a neighbouring GitHub group\nmixed:\n{mixed_render}\n\nlinear only:\n{linear_render}",
+    );
+}
+
 /// Regression for issue #231: at a small terminal size the row's
 /// horizontal budget goes to content, not to empty gutters. The
 /// selection marker is a single shared column (lpad + `▶`), so the

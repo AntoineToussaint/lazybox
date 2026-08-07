@@ -510,56 +510,17 @@ impl Sidebar {
         };
 
         let row_budget = inner_width as usize;
-        // Pre-pass: compute the widest `NNN` across visible workspace
-        // rows so every row pads to the same column. Without this,
-        // `#7204 R` and `#31 R` had different role-letter positions
-        // and the whole column visibly jittered.
-        //
-        // Width is the digit count of `n` (no `#` prefix — issue #67;
-        // the type glyph in column 1 now carries the issue-vs-PR
-        // signal), computed via `ilog10` so the hot path doesn't
-        // allocate a String per row. The natural width is the floor —
-        // no extra "separator" padding (issue #42). Flush spacing on
-        // EVERY row (`⇄18`, not `⇄  18`) is then a property of the
-        // column being LEFT-aligned: the deficit pads on the right,
-        // after the number, so the glyph never gets a leading gap
-        // regardless of digit count. A right-aligned column padded the
-        // short rows on the left and reopened that gap — issue #65. The
-        // role cell that follows brings its own leading space.
-        let max_pr_num_width = self
-            .visible
-            .iter()
-            .filter_map(|row| match row {
-                VisibleRow::Workspace(k) => self
-                    .workspaces
-                    .get(k)
-                    .and_then(|w| w.primary_task())
-                    .and_then(crate::components::task_label::pr_number)
-                    .map(|n| 1 + n.checked_ilog10().unwrap_or(0) as usize),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(1);
-        // Column spec for workspace rows — built once per render
-        // (max_pr_num_width is fixed across rows in this pass).
-        let workspace_columns = crate::components::workspace_row::build_columns(max_pr_num_width);
-
-        // Workspace rows go through ONE `render_table` call so
-        // `Column::max(0)` sees every row's natural cell width and
-        // picks a single column width for all of them. When each
-        // row was rendered solo, an empty status / badge cell
-        // collapsed THAT row's column to 0 while a sibling row kept
-        // its full width — the `C` badge visibly drifted between
-        // lines and the title flex absorbed different amounts per
-        // row.
-        let mut rendered_workspace_lines = self.prebuild_workspace_lines(
-            &workspace_columns,
-            max_pr_num_width,
-            row_budget,
-            theme,
-            now,
-            focused,
-        );
+        // Workspace rows are laid out per group, not globally: each repo /
+        // provider group runs its own column pre-pass over just its own
+        // rows. GitHub's `#NNN` and Linear's `TEAM-NNNN` are different
+        // shapes, and their status columns differ (GitHub has CI / review,
+        // Linear doesn't) — a single global layout let one provider's
+        // widest reference bloat the other's column and reserved
+        // provider-specific status columns for groups that never fill them.
+        // Sizing within a group keeps alignment clean where the eye
+        // actually scans (issue #961).
+        let mut rendered_workspace_lines =
+            self.prebuild_workspace_lines(row_budget, theme, now, focused);
 
         let lines: Vec<Line> = self
             .visible
@@ -940,9 +901,8 @@ impl Sidebar {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
-    /// Build & lay out every visible workspace row in one
-    /// `render_table` pass, then scatter the resulting Lines back to
-    /// the visible-list indices they belong to.
+    /// Build & lay out every visible workspace row and scatter the
+    /// resulting Lines back to the visible-list indices they belong to.
     ///
     /// The returned `Vec<Option<Line>>` has `self.visible.len()`
     /// slots, with `Some(line)` at every `VisibleRow::Workspace`
@@ -950,24 +910,21 @@ impl Sidebar {
     /// each Line as it walks `self.visible`, so every Line is moved
     /// exactly once.
     ///
-    /// This is what fixes issue #22's column-drift: each `Max`
-    /// column in `workspace_columns` picks one width across all
-    /// rows in this call, instead of collapsing per-row whenever a
-    /// row happened to have an empty cell there.
+    /// Rows are laid out **per group** — one `render_table` pass per
+    /// repo / provider group rather than one global pass. Each group's
+    /// pass fixes issue #22's column-drift *within* the group (each
+    /// `Max` column picks one width across the group's rows instead of
+    /// collapsing per-row on an empty cell), while keeping providers
+    /// with different columns from distorting one another (issue #961):
+    /// GitHub's `#NNN` and CI/review columns size only over GitHub
+    /// groups; a Linear group reserves neither.
     fn prebuild_workspace_lines(
         &self,
-        workspace_columns: &[crate::components::table::Column],
-        max_pr_num_width: usize,
         row_budget: usize,
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
     ) -> Vec<Option<Line<'static>>> {
-        let workspace_count = self
-            .visible
-            .iter()
-            .filter(|r| matches!(r, VisibleRow::Workspace(_)))
-            .count();
         // 1-based jump numbers for the first nine agent workspaces, in
         // sidebar order — the badge that pairs with the `]]<digit>`
         // jump. Past the ninth there's no single-digit key, so it gets
@@ -979,10 +936,86 @@ impl Sidebar {
             .enumerate()
             .map(|(i, k)| (k, i + 1))
             .collect();
-        let mut positions: Vec<usize> = Vec::with_capacity(workspace_count);
-        let mut rows: Vec<TableRow> = Vec::with_capacity(workspace_count);
+        let mut out: Vec<Option<Line<'static>>> = vec![None; self.visible.len()];
+        // Partition workspace rows into groups delimited by their
+        // top-level container header — a repo group, or the synthetic
+        // Focused pin. A `KindHeader` (PRs vs Issues) doesn't split the
+        // group: it stays within one repo, so one provider. Session
+        // sub-rows are skipped and don't break the run.
+        let mut group: Vec<usize> = Vec::new();
         for (i, row) in self.visible.iter().enumerate() {
-            let VisibleRow::Workspace(key) = row else {
+            match row {
+                VisibleRow::FocusedHeader | VisibleRow::RepoHeader(_) => {
+                    self.render_workspace_group(
+                        &group,
+                        &agent_numbers,
+                        row_budget,
+                        theme,
+                        now,
+                        focused,
+                        &mut out,
+                    );
+                    group.clear();
+                }
+                VisibleRow::Workspace(_) => group.push(i),
+                _ => {}
+            }
+        }
+        self.render_workspace_group(
+            &group,
+            &agent_numbers,
+            row_budget,
+            theme,
+            now,
+            focused,
+            &mut out,
+        );
+        out
+    }
+
+    /// Lay out one group of workspace rows (given by their visible-list
+    /// indices) in a single `render_table` pass and write each resulting
+    /// Line into its slot in `out`. The reference-column width and every
+    /// status column are sized over only this group's rows (issue #961).
+    #[allow(clippy::too_many_arguments)]
+    fn render_workspace_group(
+        &self,
+        indices: &[usize],
+        agent_numbers: &std::collections::HashMap<SessionKey, usize>,
+        row_budget: usize,
+        theme: &crate::theme::Theme,
+        now: chrono::DateTime<chrono::Utc>,
+        focused: bool,
+        out: &mut [Option<Line<'static>>],
+    ) {
+        if indices.is_empty() {
+            return;
+        }
+        // Widest `NNN` within this group so every row in it pads to the
+        // same reference column. Width is the digit count of `n` (no `#`
+        // prefix — issue #67; the type glyph carries the issue-vs-PR
+        // signal), via `ilog10` so the hot path doesn't allocate. The
+        // column is Fixed and LEFT-aligned, so the deficit pads on the
+        // right and the number stays flush off the glyph on every row
+        // (issues #42/#65). Scoping the max to the group is #961: a
+        // wide `#NNN` in another repo no longer inflates this one.
+        let max_pr_num_width = indices
+            .iter()
+            .filter_map(|&i| match &self.visible[i] {
+                VisibleRow::Workspace(k) => self
+                    .workspaces
+                    .get(k)
+                    .and_then(|w| w.primary_task())
+                    .and_then(crate::components::task_label::pr_number)
+                    .map(|n| 1 + n.checked_ilog10().unwrap_or(0) as usize),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(1);
+        let columns = crate::components::workspace_row::build_columns(max_pr_num_width);
+        let mut rows: Vec<TableRow> = Vec::with_capacity(indices.len());
+        for &i in indices {
+            let VisibleRow::Workspace(key) = &self.visible[i] else {
                 continue;
             };
             let workspace = self.workspaces.get(key);
@@ -1030,14 +1063,11 @@ impl Sidebar {
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.len()),
             };
-            positions.push(i);
             rows.push(build_workspace_row(&ctx));
         }
-        let lines = crate::components::table::render_table(&rows, workspace_columns, row_budget);
-        let mut out: Vec<Option<Line<'static>>> = vec![None; self.visible.len()];
-        for (i, line) in positions.into_iter().zip(lines) {
+        let lines = crate::components::table::render_table(&rows, &columns, row_budget);
+        for (&i, line) in indices.iter().zip(lines) {
             out[i] = Some(line);
         }
-        out
     }
 }

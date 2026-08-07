@@ -239,9 +239,10 @@ against the desktop's two command channels. "DC" = a `DesktopCommand`
 | OpenErrorInbox | Global | durable error store absent |
 | InspectNotice | Global | full-text notice detail absent |
 
-**Action tally:** ~35 at parity, ~5 partial, **~32 missing** (of which the
-Workspace-section CRUD trio — reviewers/assignees/labels — and the
-multi-select/broadcast pair are the most user-visible).
+**Action tally (of 83 `ActionKind`s):** 44 at parity, 6 partial, **33
+missing** (44 + 6 + 33 = 83). Of the missing, the Workspace-section CRUD
+trio — reviewers/assignees/labels — and the multi-select/broadcast pair
+are the most user-visible.
 
 ---
 

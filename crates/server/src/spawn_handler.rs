@@ -3022,14 +3022,27 @@ fn repo_for_workspace_provision(
 }
 
 /// Resolve the real GitHub `owner/repo` a Linear ticket should be worked
-/// in, from `providers.linear.teams`. A Linear task's own `repo` is the
-/// synthetic `linear/<team>` (never clonable), so a teamless or unmapped
-/// ticket is a hard error: cloning `linear/<team>` or silently
-/// `git init`-ing a standalone worktree would both be wrong (issue #905).
+/// in. A Linear task's own `repo` is the synthetic `linear/<team>` (never
+/// clonable), so it is routed, in preference order:
+///
+/// 1. A linked GitHub PR — the authoritative answer. Linear's GitHub
+///    integration records the PR as an attachment; `#922` parses it into
+///    a `github` `TaskId` (`owner/repo#N`) on `linked_tasks`. This lands
+///    the workspace in the exact repo the work already lives in, even for
+///    a team with no config mapping (or one that spans several repos).
+/// 2. The `providers.linear.teams` map (team key → `owner/repo`).
+///
+/// A ticket that resolves through neither — no linked PR and a teamless
+/// or unmapped ticket — is a hard error: cloning `linear/<team>` or
+/// silently `git init`-ing a standalone worktree would both be wrong
+/// (issues #905, #944).
 fn linear_repo_for_task(
     cfg: &lazybox_config::Config,
     task: &Task,
 ) -> Result<String, crate::ServerError> {
+    if let Some(repo) = linked_github_repo(task) {
+        return Ok(repo);
+    }
     let team = task
         .repo
         .as_deref()
@@ -3037,7 +3050,9 @@ fn linear_repo_for_task(
         .filter(|t| !t.is_empty());
     let Some(team) = team else {
         return Err(crate::ServerError::Workspace(
-            "this Linear ticket has no team — cannot resolve a repo to work in".into(),
+            "this Linear ticket has no team and no linked GitHub PR — \
+             cannot resolve a repo to work in"
+                .into(),
         ));
     };
     cfg.providers
@@ -3047,10 +3062,21 @@ fn linear_repo_for_task(
         .cloned()
         .ok_or_else(|| {
             crate::ServerError::Workspace(format!(
-                "Linear team `{team}` has no repo mapping — set \
-                 providers.linear.teams.{team} in ~/.lazybox/config.yaml"
+                "Linear team `{team}` has no repo mapping and the ticket has \
+                 no linked GitHub PR — set providers.linear.teams.{team} in \
+                 ~/.lazybox/config.yaml"
             ))
         })
+}
+
+/// The `owner/repo` of a Linear ticket's linked GitHub PR, if any. The
+/// linked ids are GitHub PR `TaskId`s (`owner/repo#N`); a ticket can link
+/// PRs across repos, so we take the first (the earliest-attached).
+fn linked_github_repo(task: &Task) -> Option<String> {
+    task.linked_tasks
+        .iter()
+        .filter(|id| id.source == "github")
+        .find_map(|id| id.key.split_once('#').map(|(repo, _)| repo.to_string()))
 }
 
 /// Branch name for a Linear ticket from the configured
@@ -13644,6 +13670,61 @@ mod tests {
         let mut t = task_for("linear", "OBI-1749");
         t.repo = None;
         assert!(linear_repo_for_task(&cfg, &t).is_err());
+    }
+
+    /// A linked GitHub PR is authoritative: the ticket routes to that PR's
+    /// repo even when the team has no config mapping (#944).
+    #[test]
+    fn linear_repo_for_task_prefers_linked_pr() {
+        let cfg = lazybox_config::Config::default();
+        let mut t = task_for("linear", "OBI-1749");
+        t.repo = Some("linear/OBI".into());
+        t.linked_tasks = vec![lazybox_core::TaskId {
+            source: "github".into(),
+            key: "obin-ai/obin-platform#42".into(),
+        }];
+        assert_eq!(
+            linear_repo_for_task(&cfg, &t).unwrap(),
+            "obin-ai/obin-platform",
+        );
+    }
+
+    /// The linked PR wins over the config map when both resolve — it names
+    /// the exact repo the work already lives in.
+    #[test]
+    fn linear_repo_for_task_linked_pr_beats_team_map() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers
+            .linear
+            .teams
+            .insert("OBI".into(), "obin-ai/some-other-repo".into());
+        let mut t = task_for("linear", "OBI-1749");
+        t.repo = Some("linear/OBI".into());
+        t.linked_tasks = vec![lazybox_core::TaskId {
+            source: "github".into(),
+            key: "obin-ai/obin-platform#42".into(),
+        }];
+        assert_eq!(
+            linear_repo_for_task(&cfg, &t).unwrap(),
+            "obin-ai/obin-platform",
+        );
+    }
+
+    /// A linked PR resolves an unmapped, teamless ticket that would
+    /// otherwise be a hard error.
+    #[test]
+    fn linear_repo_for_task_linked_pr_resolves_teamless() {
+        let cfg = lazybox_config::Config::default();
+        let mut t = task_for("linear", "OBI-1749");
+        t.repo = None;
+        t.linked_tasks = vec![lazybox_core::TaskId {
+            source: "github".into(),
+            key: "obin-ai/obin-platform#42".into(),
+        }];
+        assert_eq!(
+            linear_repo_for_task(&cfg, &t).unwrap(),
+            "obin-ai/obin-platform",
+        );
     }
 
     /// A non-numeric GitHub key (no `#`) falls through to the

@@ -1198,6 +1198,21 @@ impl SessionBackend for TmuxBackend {
         })
     }
 
+    fn history_disabled<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            // Only the alternate screen is a PERMANENT zero-history state:
+            // tmux retains no history for an alt pane, and under
+            // `alternate-screen off` won't even honor the rmcup that would
+            // let it leave. An empty-but-primary pane (`history_size == 0`)
+            // is a healthy fresh session that simply hasn't scrolled yet,
+            // so it must not be reported as broken.
+            matches!(self.pane_history_state(key).await, Some((true, _)))
+        })
+    }
+
     fn wait_exit<'a>(
         &'a self,
         key: &'a str,

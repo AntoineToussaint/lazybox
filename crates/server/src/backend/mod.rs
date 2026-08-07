@@ -260,6 +260,30 @@ pub trait SessionBackend: Send + Sync + 'static {
         Box::pin(async { Ok(None) })
     }
 
+    /// Whether the session's scrollback history is PERMANENTLY
+    /// unavailable — the pane is stuck on the alternate screen, so the
+    /// backend retains zero history for it and always will. Under
+    /// lazybox's `alternate-screen off` model no healthy pane is ever
+    /// alternate; a `true` here means the pane was created on a
+    /// stale/older-build tmux server that still allowed the alt screen
+    /// (issue #919). Such a pane cannot be pulled back out in place (tmux
+    /// ignores the program's rmcup while `alternate-screen off`), so only
+    /// reopening the session on a correctly-configured server restores
+    /// history — the caller surfaces that to the user rather than silently
+    /// serving nothing on scroll-up.
+    ///
+    /// Distinct from `scrollback` returning `Ok(None)`: a raw-PTY backend
+    /// has no deep history source at all, yet its scrollback is NOT broken
+    /// — the client's ring already holds every byte — so the default is
+    /// `false`.
+    fn history_disabled<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        let _ = key;
+        Box::pin(async { false })
+    }
+
     /// Wait for the session to exit. Returns the exit code if known.
     /// Implementations should be safe to call repeatedly; subsequent
     /// calls return the cached code.

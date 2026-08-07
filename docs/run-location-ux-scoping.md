@@ -77,13 +77,31 @@ sessions run," a **sidebar badge** (`⎇ local`), and a **terminal-tab badge**
 (`⎇ main`). Run location is the third axis in that family.
 
 **Model.** A new `run_location` field on `Workspace` (`Local | Sandbox {
-deployment }`), persisted in the `workspace:<key>` row. Because
+deployment }`), persisted in the `workspace:<key>` row. It cannot be *derived*
+from the presence of a `remote-host:<worktree-key>` handle
+(`crates/server/src/remote.rs:20-22`): provision-on-open is deferred
+(`crates/server/src/workspace/mod.rs:836-838`), so a workspace the user *chose*
+as Sandbox but hasn't started yet has no handle — indistinguishable from Local.
+The choice is user intent recorded at create, which the handle only later
+realizes; hence a persisted field, not an inference. Because
 `absorb_user_state_from` destructures `Workspace { … }` exhaustively
 (`crates/core/src/workspace.rs:755-793`), the field is a compile error until
-classified — here it is **identity/structure** (set at create, not merged from a
-provider poll), so it destructures to `_`. Adding it bumps
-`WORKSPACE_SCHEMA_VERSION` (currently `2`, `crates/core/src/workspace.rs:165`);
-the lenient decoder treats an absent field as `Local` for existing rows.
+classified — here it is **identity/structure** (that function is the
+transfer/collapse path, e.g. an issue→PR fold; run location belongs to the
+*destination* row's identity, like `local`/`linked_checkout`, so a fold never
+overwrites it), so it destructures to `_`. Provider polling mutates the
+existing row in place rather than reconstructing through `absorb_*`, so the
+field is never dropped by a sync.
+
+The field is **additive and `#[serde(default)]`** (absent → `Local`), which the
+lenient decoder round-trips losslessly — so per the schema-version convention
+(`crates/core/src/workspace.rs:150-165`) it **does not** warrant a
+`WORKSPACE_SCHEMA_VERSION` bump, and it must not get one: `decode_persisted`
+(`crates/core/src/workspace.rs:377-382`) *refuses* rows stamped newer than the
+running build, so a gratuitous bump to `3` would make any row the new build
+writes unreadable to an older daemon or `--connect` client still at `2`
+(`WorkspaceDecodeError::NewerSchema`). Bump only if the field is ever retyped or
+renamed later.
 
 **Create-time choice (v1).** Extend `Command::CreateWorkspace`
 (`crates/ipc/src/lib.rs:916-931`), `create_empty_workspace`
@@ -148,7 +166,9 @@ let me reach one from here." Both, per the issue's own conclusion.
 (`crates/server/src/remote.rs:20-22`) — and enrich each with a live power state
 from `GcloudProvisioner::status` → `HostState`
 (`crates/git-ops/src/remote.rs:227-231, 65-74`). Rows show: name, provider,
-power state (`Running` / `💤 Stopped|Suspended`, from `HostState`), what's on it
+power state (`Running` / `💤` for the not-running states `HostState::needs_start`
+covers — `Stopped | Suspended | Terminated`, `crates/git-ops/src/remote.rs:89-92`
+— and `Provisioning`/`Stopping` as transient), what's on it
 (the workspace(s) keyed to that handle), and last-active. `#931` should expose
 this as a daemon list command so the client stays store-free per the dep rules.
 
@@ -305,8 +325,9 @@ against `#931`.**
 
 Ranked, each a tight PR once the backend trait lands:
 
-1. **`run_location` on `Workspace`** — the field, schema bump, create-command
-   plumbing, default `Local`. The foundation; everything else reads it.
+1. **`run_location` on `Workspace`** — the additive `#[serde(default)]` field
+   (no schema bump — see §2), create-command plumbing, default `Local`. The
+   foundation; everything else reads it.
    (`workspace.rs`, `ipc/src/lib.rs`, `server/src/workspace/mod.rs`,
    `tui-boot/src/main.rs`.)
 2. **Locality badges** — `cell_sandbox` in the sidebar row + the terminal-tab

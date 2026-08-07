@@ -1033,6 +1033,13 @@ fn bearer_token(authorization: Option<&HeaderValue>) -> Option<&str> {
 ///   principal (`device:<id>`), so its provider credentials are scoped
 ///   to it rather than to `local`.
 /// - Anything else → unauthorized.
+///
+/// The resolved principal scopes credential *storage* (which
+/// `CredentialStore` bucket a device reads and writes), not
+/// authorization: like any bearer holder, an authenticated device can
+/// still drive the daemon (spawn agents, shells, workspace mutations).
+/// That matches the single-trusted-operator model of BYOR (#749); this
+/// is device identity, not a capability sandbox.
 pub fn authenticate_request(
     device_registry: &lazybox_identity::DeviceRegistry,
     authorization: Option<&HeaderValue>,
@@ -2253,6 +2260,17 @@ async fn send_command_line(line: &[u8], command_tx: &mpsc::Sender<Command>) {
                 "api gateway: terminal command rejected from JSON stream; use /v1/terminal"
             );
         }
+        // The streaming endpoint has no per-connection principal binding, so
+        // a credential command here would run with its client-supplied
+        // `principal_id` — letting an authenticated device write another
+        // principal's credentials. Credential mutations must go through
+        // `/v1/commands`, where `bind_principal` stamps the authenticated
+        // principal onto them.
+        Ok(command) if is_credential_command(&command) => {
+            tracing::warn!(
+                "api gateway: credential command rejected from JSON stream; use /v1/commands"
+            );
+        }
         Ok(command) => {
             if command_tx.send(command).await.is_err() {
                 tracing::warn!("api gateway: command stream closed");
@@ -2272,6 +2290,18 @@ fn is_binary_terminal_command(command: &Command) -> bool {
             | Command::RequestTerminalResync { .. }
             | Command::Close { .. }
             | Command::FetchScrollback { .. }
+    )
+}
+
+/// The per-principal credential mutations. These are only trustworthy when
+/// dispatched through `/v1/commands`, where `bind_principal` overrides the
+/// `principal_id` with the connection's authenticated one.
+fn is_credential_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::UpsertProviderCredential { .. }
+            | Command::RemoveProviderCredential { .. }
+            | Command::ListProviderCredentials { .. }
     )
 }
 
@@ -2453,5 +2483,38 @@ mod auth_tests {
         // A non-credential command is untouched.
         let passthrough = bind_principal(Command::Subscribe, authed);
         assert!(matches!(passthrough, Command::Subscribe));
+    }
+
+    #[tokio::test]
+    async fn stream_drops_credential_commands_but_forwards_others() {
+        // The stream endpoint has no principal binding, so a credential
+        // command with a spoofed `principal_id` must be dropped here rather
+        // than reach the dispatcher — otherwise it would bypass the
+        // `/v1/commands` scoping and write another principal's credentials.
+        let (tx, mut rx) = mpsc::channel::<Command>(4);
+
+        let spoofed = serde_json::to_vec(&JsonClientFrame::Command(
+            Command::UpsertProviderCredential {
+                principal_id: PrincipalId::new("local"),
+                credential: lazybox_ipc::ProviderCredentialInput {
+                    provider_id: "github".into(),
+                    token: "attacker".into(),
+                    source: "stream".into(),
+                    scopes: vec![],
+                    expires_at: None,
+                },
+            },
+        ))
+        .unwrap();
+        send_command_line(&spoofed, &tx).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "a credential command must not reach the dispatcher via /v1/stream"
+        );
+
+        // A normal command still flows through the stream unchanged.
+        let refresh = serde_json::to_vec(&JsonClientFrame::Command(Command::Refresh)).unwrap();
+        send_command_line(&refresh, &tx).await;
+        assert!(matches!(rx.try_recv(), Ok(Command::Refresh)));
     }
 }

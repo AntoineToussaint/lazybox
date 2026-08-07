@@ -15,6 +15,10 @@ use sha2::{Digest, Sha256};
 const PRIVATE_KEY_FILE: &str = "box_ed25519";
 const PUBLIC_KEY_FILE: &str = "box_ed25519.pub";
 
+/// Per-(process, call) disambiguator for the seed temp file, so racing
+/// threads within one process don't collide on the same temp path.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Debug, thiserror::Error)]
 pub enum BoxIdentityError {
     #[error("box identity io at `{path}`: {source}")]
@@ -47,12 +51,39 @@ impl BoxIdentity {
         })?;
         let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
         let seed_hex = hex::encode(signing_key.to_bytes());
-        write_owner_only(&private_path, seed_hex.as_bytes()).map_err(|source| {
+
+        // Publish the seed atomically: write the full contents to a private
+        // temp file, then hard-link it into place. `link` fails with
+        // `AlreadyExists` when another first-run already created the seed,
+        // so a loser adopts a *complete* file rather than clobbering it or
+        // reading the empty window a bare `create_new` would expose between
+        // file creation and the content write. The temp name is unique per
+        // (process, call) so racing threads/processes don't collide on it.
+        let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp_path = dir.join(format!(
+            ".{PRIVATE_KEY_FILE}.{}.{seq}.tmp",
+            std::process::id()
+        ));
+        write_new_owner_only(&tmp_path, seed_hex.as_bytes()).map_err(|source| {
             BoxIdentityError::Io {
-                path: private_path.clone(),
+                path: tmp_path.clone(),
                 source,
             }
         })?;
+        let link_result = std::fs::hard_link(&tmp_path, &private_path);
+        let _ = std::fs::remove_file(&tmp_path);
+        match link_result {
+            Ok(()) => {}
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {
+                return Self::load(&private_path);
+            }
+            Err(source) => {
+                return Err(BoxIdentityError::Io {
+                    path: private_path.clone(),
+                    source,
+                });
+            }
+        }
         let public_path = dir.join(PUBLIC_KEY_FILE);
         let public_hex = hex::encode(signing_key.verifying_key().to_bytes());
         std::fs::write(&public_path, format!("{public_hex}\n")).map_err(|source| {
@@ -119,10 +150,13 @@ pub fn verify(public_key_hex: &str, message: &[u8], signature: &Signature) -> bo
     key.verify(message, signature).is_ok()
 }
 
-fn write_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Create a new file exclusively (`O_EXCL`, mode `0600`) and write
+/// `bytes`: fails with `AlreadyExists` rather than truncating an
+/// existing file.
+fn write_new_owner_only(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use io::Write;
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -149,6 +183,29 @@ mod tests {
         assert_eq!(second.public_key_hex(), pubkey);
         assert_eq!(pubkey.len(), 64);
         assert_eq!(id.len(), 32);
+    }
+
+    #[test]
+    fn concurrent_first_run_converges_on_one_key() {
+        use std::sync::Arc;
+        // Many processes hitting a fresh box at once must all end up with the
+        // same persisted key; the `create_new` + reload-on-conflict path is
+        // what guarantees it (a truncating write would let them diverge).
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(dir.path().to_path_buf());
+        let ids: Vec<String> = (0..8)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                std::thread::spawn(move || BoxIdentity::load_or_generate(&*path).unwrap().box_id())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(
+            ids.iter().all(|id| *id == ids[0]),
+            "racing first-runs must adopt one key, got {ids:?}"
+        );
     }
 
     #[test]

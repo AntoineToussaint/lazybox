@@ -123,11 +123,20 @@ impl DeviceRegistry {
             revoked_at: None,
         };
 
+        let token = format!("{id}.{secret}");
+        // Store the secret *before* persisting the record. A persisted
+        // record authenticates off its hash alone (the keystore isn't
+        // consulted on the auth path), so a record must never outlive a
+        // failed keystore write — that would be a live device whose token
+        // was never delivered to anyone. If the save then fails, roll the
+        // secret back so neither store keeps an orphan.
+        self.keystore.set(&id, &token)?;
         let mut records = self.load()?;
         records.push(record.clone());
-        self.save(&records)?;
-        let token = format!("{id}.{secret}");
-        self.keystore.set(&id, &token)?;
+        if let Err(error) = self.save(&records) {
+            let _ = self.keystore.delete(&id);
+            return Err(error);
+        }
         Ok(MintedDevice { record, token })
     }
 
@@ -267,6 +276,40 @@ mod tests {
         let keystore = Box::new(MemoryKeystore::new());
         let registry = DeviceRegistry::open(dir.path(), keystore);
         (dir, registry)
+    }
+
+    /// A keystore whose `set` always fails — stands in for a locked
+    /// Keychain or an unwritable file fallback.
+    struct FailingKeystore;
+    impl DeviceKeystore for FailingKeystore {
+        fn set(&self, _key: &str, _secret: &str) -> Result<(), crate::keystore::KeystoreError> {
+            Err(crate::keystore::KeystoreError::Backend(
+                "keystore is sealed".into(),
+            ))
+        }
+        fn get(&self, key: &str) -> Result<String, crate::keystore::KeystoreError> {
+            Err(crate::keystore::KeystoreError::NotFound(key.into()))
+        }
+        fn delete(&self, _key: &str) -> Result<(), crate::keystore::KeystoreError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mint_persists_nothing_when_the_keystore_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = DeviceRegistry::open(dir.path(), Box::new(FailingKeystore));
+
+        // The keystore write fails, so mint must error and leave no record
+        // behind — otherwise a phantom device would authenticate off its
+        // hash while its token was never delivered to anyone.
+        assert!(registry.mint("iPhone").is_err());
+        assert!(registry.list().unwrap().is_empty());
+        // The devices file, if written at all, holds no record.
+        let devices = dir.path().join("devices.json");
+        if devices.exists() {
+            assert_eq!(std::fs::read_to_string(devices).unwrap().trim(), "[]");
+        }
     }
 
     #[test]

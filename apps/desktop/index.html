@@ -147,7 +147,8 @@
           ></div>
         </aside>
 
-        <section class="activity-panel" aria-label="Task activity">
+        <div class="right-pane">
+          <section class="activity-panel" aria-label="Task activity">
           <div id="workspace-empty" class="empty-state">
             <span class="empty-glyph" aria-hidden="true">↳</span>
             <h2>Choose a workspace</h2>
@@ -295,7 +296,15 @@
           </div>
         </section>
 
-        <section class="terminal-panel" aria-label="Live terminal">
+          <div
+            id="right-pane-splitter"
+            class="right-pane-splitter"
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize activity and terminal"
+          ></div>
+
+          <section class="terminal-panel" aria-label="Live terminal">
           <div class="terminal-heading">
             <div>
               <p class="eyebrow">Live daemon PTY</p>
@@ -331,7 +340,8 @@
               aria-label="Interactive workspace terminals"
             ></div>
           </div>
-        </section>
+          </section>
+        </div>
       </main>
 
       <footer class="statusbar">

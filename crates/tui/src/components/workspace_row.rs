@@ -861,12 +861,32 @@ fn pack_badges(cells: impl IntoIterator<Item = Cell>) -> Cell {
 /// the sum of every badge type's widest cell across the whole table.
 fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     pack_badges([
+        cell_remote(ctx),
         cell_linked(ctx),
         cell_notes(ctx),
         cell_snippet(ctx),
         cell_track_main(ctx),
         cell_fix(ctx),
     ])
+}
+
+/// The `⇅ <remote>` badge: this workspace's sessions run on a remote daemon
+/// (`config.remotes.<name>`, spawned via the `r`-prefix), not the local
+/// in-process daemon. The network glyph + remote name make "this runs on the
+/// box" legible at a glance. Passive info, packed into the shared badge
+/// cluster like `⎇ local`; renders nothing when the workspace is local.
+fn cell_remote(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    let Some(name) = ctx.workspace.and_then(|w| w.remote.as_deref()) else {
+        return Cell::empty();
+    };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.warn)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(format!(" ⇅ {name} "), style))
 }
 
 /// The merge-arm badge cluster (#813): ` ARM ` (lazybox client-side

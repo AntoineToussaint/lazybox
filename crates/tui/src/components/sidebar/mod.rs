@@ -573,6 +573,18 @@ impl Sidebar {
         }
     }
 
+    /// Optimistically tag a workspace's row as running on a remote daemon
+    /// (client-side UI state) so the sidebar's remote indicator shows
+    /// immediately, before the local daemon's snapshot — which doesn't know
+    /// about the box — catches up. `remote` is the `config.remotes.<name>`
+    /// this session was spawned on; `None` clears the tag.
+    pub fn mark_remote(&mut self, sk: SessionKey, remote: String) {
+        if let Some(workspace) = self.workspaces.get_mut(&sk) {
+            workspace.remote = Some(remote);
+            self.recompute_visible();
+        }
+    }
+
     /// Toggle whether merged + closed PRs surface in the Inbox view.
     /// Wired from `DisplayConfig::show_inactive_in_inbox`; idempotent
     /// — calling with the current value is a no-op so a YAML hot-

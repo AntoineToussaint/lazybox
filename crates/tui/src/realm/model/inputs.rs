@@ -921,8 +921,15 @@ showing keybinding search only",
         }
         // Opening question: hold it until the diff read resolves, so it
         // rides the run's first turn (the only one that carries context).
+        // A second question asked during that window can't overwrite the
+        // first — it queues as a follow-up the run flushes once started,
+        // mirroring the `pr_chat_request` window above.
         if self.pr_chat_diff.is_none() {
-            self.pr_chat_held_question = Some((question, kind));
+            if self.pr_chat_held_question.is_none() {
+                self.pr_chat_held_question = Some((question, kind));
+            } else {
+                self.pr_chat_pending.push(question);
+            }
             return cmds;
         }
         if let Some(cmd) = self.start_pr_chat_run(&question) {

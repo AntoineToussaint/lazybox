@@ -65,12 +65,11 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         // and a dumb ciphertext forwarder — it depends on no internal
         // crate so it can build and deploy on its own.
         ("lazybox-relay", set(&[])),
-        // The remote-box lifecycle crate (#931): it speaks core key types
-        // and persists a `BoxHandle` through the store's kv table, so it
-        // depends on core + store (store → core only, so no cycle). It is
-        // the first crate below the client to touch the store directly and
-        // stay off the provider graph.
-        ("lazybox-sandbox", set(&["lazybox-core", "lazybox-store"])),
+        // The remote-box lifecycle crate (#931): it persists a `BoxHandle`
+        // through the store's kv table, so it depends on store (store →
+        // core only, so no cycle). It is the first crate below the client
+        // to touch the store directly and stay off the provider graph.
+        ("lazybox-sandbox", set(&["lazybox-store"])),
         (
             "lazybox-server",
             set(&[

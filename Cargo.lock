@@ -1945,14 +1945,12 @@ name = "lazybox-sandbox"
 version = "0.1.9"
 dependencies = [
  "chrono",
- "lazybox-core",
  "lazybox-store",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.19",
  "tokio",
- "tracing",
 ]
 
 [[package]]

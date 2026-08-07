@@ -53,8 +53,9 @@ a lazybox differentiator; it's convergent. The difference is the thesis on top.
    See [`positioning.md`](../positioning.md).
 2. **Borrow the plugin polish, not the thesis.** Their adapter seams are a good
    model for tightening our provider/agent registry and `GenericCli` story.
-3. **A coordinator session, if we build it, is garnish** on the control
-   surface — a named home for the coordinate-via-separate-workspace pattern we
-   already run by hand — not a pivot to autopilot.
+3. **A [coordinator session](../coordinator-session.md), if we build it, is
+   garnish** on the control surface — a named home for the
+   coordinate-via-separate-workspace pattern we already run by hand — not a
+   pivot to autopilot.
 4. **Lead with breadth they don't have**: remote multi-client reach (one daemon
    → TUI + desktop + iPhone) and the depth of the control layer.

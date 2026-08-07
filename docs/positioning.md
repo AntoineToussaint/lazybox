@@ -65,7 +65,8 @@ agents needs a hand; the control layer lets you give it in one or two keys.**
 
 lazybox already supports the orchestration *pattern* by hand — a coordinator
 workspace whose agent directs others via `send-to-session` and broadcast. If we
-ever first-class it (see the coordinator-session sketch), it should feel like
+ever first-class it (see the [coordinator-session sketch](coordinator-session.md)),
+it should feel like
 *"the control surface got a memory"* — a named home for the coordinator
 workspace you already run — **not** *"lazybox became an orchestrator."* The
 control surface stays the thesis; a coordinator session is garnish on top of

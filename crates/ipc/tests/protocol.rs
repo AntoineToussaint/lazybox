@@ -543,6 +543,7 @@ fn all_events() -> Vec<Event> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             pr_label: "o/r#2".into(),
             reason: "required review".into(),
+            conflict: false,
         },
         Event::IssueClosed {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),

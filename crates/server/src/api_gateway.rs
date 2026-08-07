@@ -909,6 +909,7 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             workspace_key,
             pr_label,
             reason,
+            ..
         } => Some(DesktopEvent::WorkspaceActionOutcome {
             workspace_key,
             ok: false,

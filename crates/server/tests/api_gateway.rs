@@ -494,6 +494,7 @@ fn desktop_boundary_forwards_workspace_mutation_outcomes() {
         workspace_key: key.clone(),
         pr_label: "o/r#42".into(),
         reason: "not mergeable".into(),
+        conflict: false,
     });
     match failed {
         Some(DesktopEvent::WorkspaceActionOutcome {

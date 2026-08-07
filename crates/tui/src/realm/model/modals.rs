@@ -1431,6 +1431,34 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::ActionConfirm, modal);
     }
 
+    /// Offer the one-key merge-conflict resolve flow (issue #947).
+    /// Mounted when `g m` is blocked (or GitHub-rejected) by conflicts:
+    /// instead of a dead-end error, prompt to spawn/attach the agent
+    /// with the conflict-resolution flow. The target workspace is
+    /// stashed at mount time so a cursor drift under the prompt can't
+    /// redirect the resolve to another PR. No-op if the workspace has
+    /// been retired since the merge attempt.
+    pub(super) fn mount_conflict_resolve(
+        &mut self,
+        workspace: &lazybox_core::WorkspaceKey,
+        pr_label: &str,
+    ) {
+        use crate::realm::components::confirm::Confirm;
+        let session_key = lazybox_core::SessionKey::from(workspace);
+        if self.sidebar.workspace_by_key(&session_key).is_none() {
+            return;
+        }
+        let prompt = format!(
+            "{pr_label} has merge conflicts — resolve them?\n\n\
+             [Y] spawns an agent in the worktree to bring the branch current \
+             with its base and fix the conflicts. Esc dismisses."
+        );
+        self.set_modal_flow(ModalFlow::ConflictResolve {
+            workspace: session_key,
+        });
+        self.mount_modal(Id::ConflictResolve, Confirm::new(prompt).default_yes());
+    }
+
     /// Turn an action the help agent proposed (#353) into a
     /// confirm-with-preview. Validates the payload at this boundary —
     /// a bad snippet key/body or an off-allowlist config edit is

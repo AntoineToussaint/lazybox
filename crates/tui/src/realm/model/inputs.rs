@@ -1035,6 +1035,17 @@ showing keybinding search only",
                     self.redraw = true;
                 }
             }
+            Some(Id::ConflictResolve) => {
+                // `g m` resolve prompt (#947). Yes → spawn/attach the
+                // agent with the conflict-resolution flow against the
+                // stashed workspace. No / Esc → drop the stash silently.
+                if let Some(ModalFlow::ConflictResolve { workspace }) = self.modal_flow.take()
+                    && yes
+                {
+                    cmds.extend(self.dispatch_conflict_resolve(&workspace));
+                    self.redraw = true;
+                }
+            }
             Some(Id::CleanWorktreesConfirm) => {
                 if yes {
                     cmds.push(IpcCommand::CleanWorktrees);

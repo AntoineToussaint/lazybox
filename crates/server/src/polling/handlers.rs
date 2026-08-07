@@ -506,7 +506,24 @@ fn humanize_branch_protection(msg: &str) -> Option<String> {
         );
     }
 
+    if is_merge_conflict(&lower) {
+        return Some(
+            "Can't merge — the branch has merge conflicts with its base. \
+             Press w to have an agent bring it current and resolve them, then merge."
+                .to_string(),
+        );
+    }
+
     None
+}
+
+/// True when a merge rejection is GitHub's "has merge conflicts" case —
+/// the raw GraphQL string is `Pull Request has merge conflicts` (issue
+/// #947). Takes an already-lowercased message. Used both to humanize the
+/// footer copy and to flag `Event::PrMergeFailed` so the TUI can offer
+/// the one-key resolve flow.
+fn is_merge_conflict(lower: &str) -> bool {
+    lower.contains("merge conflict") || lower.contains("has conflicts")
 }
 
 /// Pull the count out of a branch-protection message — the total in
@@ -624,10 +641,25 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
         let label = pr_label
             .clone()
             .unwrap_or_else(|| workspace_key.as_str().to_string());
+        let conflict =
+            !e.is_retryable() && is_merge_conflict(&e.user_message().to_ascii_lowercase());
+        // GitHub just told us the branch conflicts, so our cached
+        // `mergeable` was stale (a sibling of #144). Correct it to
+        // `Conflicting` — and broadcast the corrected task BEFORE the
+        // failure event — so the CONFLICT pill is accurate and the TUI's
+        // resolve flow classifies the conflict prompt off fresh state.
+        if conflict
+            && let Some(mut pr) = ws.pr.clone()
+            && !pr.mergeable.is_conflicting()
+        {
+            pr.mergeable = lazybox_core::Mergeable::Conflicting;
+            super::upsert(config, pr).await;
+        }
         let _ = config.bus.send(Event::PrMergeFailed {
             workspace_key: workspace_key.clone(),
             pr_label: label,
             reason: humanize_mutation_failure("merge", &e),
+            conflict,
         });
         return;
     }
@@ -5045,6 +5077,10 @@ mod mutation_retry_tests {
                 "GraphQL error: You're not authorized to push to this branch.",
                 "not authorized",
             ),
+            (
+                "GraphQL error: Pull Request has merge conflicts",
+                "merge conflicts",
+            ),
         ];
 
         for (raw, needle) in cases {
@@ -5074,6 +5110,24 @@ mod mutation_retry_tests {
             reason.contains("Pull request is not mergeable"),
             "got {reason}"
         );
+    }
+
+    /// Issue #947: GitHub's raw "Pull Request has merge conflicts" is
+    /// detected as a conflict (so `Event::PrMergeFailed.conflict` flags
+    /// the resolve flow) and humanized to a plain-English notice.
+    #[test]
+    fn merge_conflict_rejection_is_detected_and_humanized() {
+        assert!(is_merge_conflict("pull request has merge conflicts"));
+        assert!(is_merge_conflict("the branch has conflicts"));
+        assert!(!is_merge_conflict("head branch is out of date"));
+
+        let err = lazybox_core::ProviderError::permanent(
+            "github",
+            "GraphQL error: Pull Request has merge conflicts",
+        );
+        let reason = humanize_mutation_failure("merge", &err);
+        assert!(reason.contains("merge conflicts"), "got {reason}");
+        assert!(!reason.contains("GraphQL"), "raw string leaked: {reason}");
     }
 
     /// Branch-protection humanization is merge-only: the messages are all

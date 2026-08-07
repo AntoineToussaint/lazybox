@@ -749,6 +749,7 @@ mod effects_tests {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             pr_label: "o/r#1".into(),
             reason: "Required status check \"ci\" is expected".into(),
+            conflict: false,
         });
 
         let n = m.status.notice.as_ref().expect("merge-failed banner set");
@@ -789,6 +790,7 @@ mod effects_tests {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             pr_label: "o/r#1".into(),
             reason: "A merge is already in progress [at mergePullRequest]".into(),
+            conflict: false,
         });
 
         let n = m.status.notice.as_ref().expect("merge-failed banner");
@@ -819,6 +821,7 @@ mod effects_tests {
             workspace_key: ws.clone(),
             pr_label: "o/r#1".into(),
             reason: "base branch was modified".into(),
+            conflict: false,
         });
         assert!(m.status.notice.is_some(), "error banner is up");
 
@@ -852,6 +855,7 @@ mod effects_tests {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             pr_label: "o/r#1".into(),
             reason: "not mergeable".into(),
+            conflict: false,
         });
 
         // A different PR merges.
@@ -879,6 +883,7 @@ mod effects_tests {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             pr_label: "o/r#1".into(),
             reason: "not mergeable".into(),
+            conflict: false,
         };
 
         m.handle_daemon_event(fail());
@@ -907,6 +912,7 @@ mod effects_tests {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             pr_label: "o/r#1".into(),
             reason: "Required status check \"ci\" is expected".into(),
+            conflict: false,
         };
 
         m.handle_daemon_event(fail());
@@ -941,6 +947,7 @@ mod effects_tests {
             workspace_key: ws.clone(),
             pr_label: "o/r#1".into(),
             reason: "Required status check \"ci\" is expected".into(),
+            conflict: false,
         });
         m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
         assert!(m.status.notice.is_none(), "first reason dismissed");
@@ -950,6 +957,7 @@ mod effects_tests {
             workspace_key: ws,
             pr_label: "o/r#1".into(),
             reason: "base branch was modified".into(),
+            conflict: false,
         });
         let n = m
             .status
@@ -978,6 +986,7 @@ mod effects_tests {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             pr_label: "o/r#1".into(),
             reason: "not mergeable".into(),
+            conflict: false,
         };
 
         m.handle_daemon_event(fail());
@@ -1015,6 +1024,7 @@ mod effects_tests {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             pr_label: "o/r#1".into(),
             reason: "not mergeable".into(),
+            conflict: false,
         };
 
         m.handle_daemon_event(fail());
@@ -1042,6 +1052,7 @@ mod effects_tests {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             pr_label: "o/r#1".into(),
             reason: "not mergeable".into(),
+            conflict: false,
         };
 
         m.handle_daemon_event(fail());
@@ -8452,6 +8463,170 @@ mod merge_focus_follow_tests {
         assert!(
             m.terminals.prompt_history_for(TerminalId(7)).is_some(),
             "confirm records the prompt it actually delivered",
+        );
+    }
+
+    fn conflicting_pr(key: &str) -> Workspace {
+        let mut ws = workspace(key, true, Duration::hours(1));
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+        ws
+    }
+
+    /// Issue #947: `g m` on a PR lazybox already knows is conflicting is
+    /// a doomed dispatch. Instead of a merge confirm that can only fail,
+    /// route straight to the one-key resolve prompt — no `MergePr`
+    /// command leaves.
+    #[test]
+    fn g_m_on_a_conflicting_pr_offers_the_resolve_prompt() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let ws = conflicting_pr("owner/repo#1");
+        let sk: SessionKey = (&ws.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::MergePr);
+        assert!(
+            cmds.is_empty(),
+            "a doomed merge must not dispatch: {cmds:?}",
+        );
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::ConflictResolve),
+            "the resolve prompt is offered instead of a merge confirm",
+        );
+        assert!(matches!(
+            m.modal_flow,
+            Some(ModalFlow::ConflictResolve { ref workspace }) if *workspace == sk,
+        ));
+    }
+
+    /// Issue #947: a merge that GitHub rejected for conflicts surfaces as
+    /// the actionable resolve prompt, not a dead-end red error.
+    #[test]
+    fn pr_merge_failed_with_conflict_offers_resolve() {
+        let mut m = build_model();
+        let ws = conflicting_pr("owner/repo#1");
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key,
+            pr_label: "owner/repo#1".into(),
+            reason: "Can't merge — the branch has merge conflicts with its base.".into(),
+            conflict: true,
+        });
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::ConflictResolve),
+            "a conflict failure offers the resolve prompt",
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "no dead-end error banner when we can offer a resolve",
+        );
+    }
+
+    /// Issue #947: a non-conflict merge failure keeps the existing
+    /// persistent-error surface — the resolve prompt is conflict-only.
+    #[test]
+    fn pr_merge_failed_without_conflict_still_errors() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#1", true, Duration::hours(1));
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key,
+            pr_label: "owner/repo#1".into(),
+            reason: "changes were requested".into(),
+            conflict: false,
+        });
+
+        assert!(
+            m.top_modal().is_none(),
+            "a non-conflict failure never opens the resolve prompt",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("merge failed")),
+            "the persistent error still surfaces",
+        );
+    }
+
+    /// Issue #947: accepting the resolve prompt spawns/attaches the
+    /// agent with the conflict-resolution prompt and re-syncs the PR so
+    /// a stale CONFLICT can't strand the user (ties #144).
+    #[test]
+    fn confirming_resolve_spawns_conflict_agent_and_syncs() {
+        let mut m = build_model();
+        let ws = conflicting_pr("owner/repo#1");
+        let key = ws.key.clone();
+        let sk: SessionKey = (&key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key.clone(),
+            pr_label: "owner/repo#1".into(),
+            reason: "merge conflicts".into(),
+            conflict: true,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::ConflictResolve));
+
+        let cmds = m.handle_confirmed(true);
+
+        let spawned = cmds.iter().find_map(|c| match c {
+            IpcCommand::Spawn {
+                session_key,
+                initial_prompt: Some(prompt),
+                ..
+            } => Some((session_key.clone(), prompt.clone())),
+            _ => None,
+        });
+        let (spawn_key, prompt) = spawned.expect("resolve spawns an agent with a prompt");
+        assert_eq!(spawn_key, sk, "the spawn targets the conflicting workspace");
+        assert!(
+            prompt.contains("conflict"),
+            "the injected prompt is the conflict-resolution flow: {prompt}",
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, IpcCommand::SyncWorkspace { workspace_key } if *workspace_key == key)),
+            "the resolve path re-syncs the PR's mergeable state (#144): {cmds:?}",
+        );
+    }
+
+    /// Issues #947 + #899: a bulk `g m` over a `v`-selection must NOT be
+    /// hijacked into the single-workspace resolve prompt just because the
+    /// cursor row is conflicting — it belongs to the bulk fan-out, which
+    /// reports conflicting PRs as skipped. The resolve prompt is a
+    /// single-target affordance only.
+    #[test]
+    fn bulk_g_m_with_conflicting_cursor_row_does_not_hijack_into_resolve() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        // Cursor lands on the conflicting row (seeded last).
+        seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                conflicting_pr("owner/repo#2"),
+            ],
+        );
+
+        assert!(m.dispatch_action(&Action::MergePr).is_empty());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ActionConfirm),
+            "a bulk merge routes to the bulk confirm, not the resolve prompt",
+        );
+        assert!(
+            !matches!(m.modal_flow, Some(ModalFlow::ConflictResolve { .. })),
+            "the single-target resolve prompt must not preempt a bulk merge",
         );
     }
 }

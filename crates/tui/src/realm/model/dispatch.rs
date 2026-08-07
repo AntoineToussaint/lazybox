@@ -280,7 +280,25 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         action: &lazybox_tui_core::action::Action,
     ) -> Vec<IpcCommand> {
-        use lazybox_tui_core::action::ActionDef;
+        use lazybox_tui_core::action::{Action, ActionDef};
+        // `g m` on a single PR lazybox already knows is conflicting is a
+        // doomed dispatch — GitHub would only reject it. Skip straight to
+        // the one-key resolve prompt rather than a merge confirm that can
+        // only fail (#947). Only the single-target case: a `v` bulk merge
+        // (#899) falls through to the fan-out, which already reports each
+        // conflicting PR as skipped in its confirm split.
+        if matches!(action, Action::MergePr) && !self.bulk_active() {
+            let conflict_target = self.sidebar.selected_workspace().and_then(|ws| {
+                ws.pr
+                    .as_ref()
+                    .filter(|pr| pr.mergeable.is_conflicting())
+                    .map(|pr| (ws.key.clone(), pr.id.key.clone()))
+            });
+            if let Some((workspace, pr_label)) = conflict_target {
+                self.mount_conflict_resolve(&workspace, &pr_label);
+                return Vec::new();
+            }
+        }
         // Destructive gate, type-system enforced via the catalog.
         // Every destructive action is routed through the unified
         // Confirm modal first; the pending action lives in
@@ -1967,6 +1985,38 @@ impl<T: TerminalAdapter> Model<T> {
     /// - several live conversations → mount the chooser instead of
     ///   silently guessing, including when several use the same agent;
     /// - none → fresh spawn of the configured default.
+    /// Carry out the merge-conflict resolve the user accepted at the
+    /// `g m` resolve prompt (#947). Focus the stashed target so
+    /// `dispatch_work` resolves against the right PR (a daemon event
+    /// may have drifted the cursor while the prompt was up), clear any
+    /// activity selection so the FixConflict classification wins over
+    /// AddressComments, spawn/attach the agent with the
+    /// conflict-resolution prompt, and re-sync the PR so a stale
+    /// CONFLICT can't strand the user and the pill reflects reality
+    /// (ties #144).
+    pub(crate) fn dispatch_conflict_resolve(
+        &mut self,
+        workspace: &lazybox_core::SessionKey,
+    ) -> Vec<IpcCommand> {
+        let mut cmds = Vec::new();
+        let Some(workspace_key) = self
+            .sidebar
+            .workspace_by_key(workspace)
+            .map(|ws| ws.key.clone())
+        else {
+            self.flash_info("workspace is gone — nothing to resolve");
+            return cmds;
+        };
+        if !self.sidebar.reveal_workspace_key(workspace) {
+            self.flash_info("workspace is gone — nothing to resolve");
+            return cmds;
+        }
+        self.right.clear_activity_selection();
+        self.dispatch_work(None, None, &mut cmds);
+        cmds.push(IpcCommand::SyncWorkspace { workspace_key });
+        cmds
+    }
+
     fn dispatch_work(
         &mut self,
         session_id: Option<lazybox_core::SessionId>,

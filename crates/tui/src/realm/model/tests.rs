@@ -15548,6 +15548,314 @@ mod help_ask_tests {
 }
 
 #[cfg(test)]
+mod pr_chat_tests {
+    //! Effect contracts for "Ask about this PR" (#945): the opening
+    //! question is held for the worktree-diff read, the started run's
+    //! context carries the PR metadata + diff, and streamed deltas land
+    //! in the shared conversation the `PrChat` modal renders.
+
+    use super::super::*;
+    use crate::realm::HelpQuestionKind;
+    use chrono::Utc;
+    use lazybox_core::{
+        Activity, ActivityKind, CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskKind,
+        TaskRole, TaskState, Workspace, WorkspaceKey,
+    };
+    use lazybox_ipc::Event as IpcEvent;
+    use lazybox_ipc::{
+        AgentRunId, Command as IpcCommand, DiffFileDto, DiffHunkDto, DiffLineDto, DiffLineKindDto,
+        WorkspaceDiffDto, WorkspaceDiffTarget, channel,
+    };
+    use std::path::PathBuf;
+
+    fn build() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        let model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model init");
+        (model, server)
+    }
+
+    fn pr_task() -> Task {
+        Task {
+            author: "octocat".into(),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            },
+            title: "Add retry to the poller".into(),
+            body: Some("Retries transient poll failures.".into()),
+            state: TaskState::Open,
+            role: TaskRole::Reviewer,
+            ci: CiStatus::Failure,
+            review: ReviewStatus::ChangesRequested,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat/retry".into()),
+            base_branch: Some("main".into()),
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Conflicting,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 4,
+            deletions: 0,
+            kind: Some(TaskKind::Pr),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    /// A PR workspace with a linked checkout, so `open_pr_chat` requests
+    /// a diff (`WorkspaceDiffTarget::LinkedCheckout`).
+    fn seed_pr_workspace(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> WorkspaceKey {
+        let mut ws = Workspace::from_task(pr_task(), Utc::now());
+        ws.key = WorkspaceKey::new("github:o/r#1");
+        ws.linked_checkout = Some(PathBuf::from("/tmp/o-r"));
+        ws.activity = vec![Activity {
+            author: "reviewer1".into(),
+            body: "Needs a test.".into(),
+            created_at: Utc::now(),
+            kind: ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        }];
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        key
+    }
+
+    fn sample_diff() -> WorkspaceDiffDto {
+        WorkspaceDiffDto {
+            status: vec![],
+            stat: vec![" src/poll.rs | 4 ++++".into()],
+            files: vec![DiffFileDto {
+                old_path: None,
+                path: "src/poll.rs".into(),
+                headers: vec![],
+                hunks: vec![DiffHunkDto {
+                    header: "@@ -1,1 +1,2 @@".into(),
+                    old_start: 1,
+                    new_start: 1,
+                    lines: vec![DiffLineDto {
+                        kind: DiffLineKindDto::Addition,
+                        text: "    retry(3);".into(),
+                        old_line: None,
+                        new_line: Some(2),
+                    }],
+                }],
+            }],
+            truncated: false,
+        }
+    }
+
+    fn drain(server: &mut lazybox_ipc::Connection) -> Vec<IpcCommand> {
+        std::iter::from_fn(|| server.rx.try_recv().ok()).collect()
+    }
+
+    /// `a` from the reader opens the chat scoped to the focused PR and
+    /// fires the diff read that grounds it.
+    #[test]
+    fn open_mounts_the_modal_and_requests_the_diff() {
+        let (mut m, mut server) = build();
+        let key = seed_pr_workspace(&mut m);
+        let _ = drain(&mut server);
+
+        m.open_pr_chat();
+        assert_eq!(m.modal_stack.last(), Some(&Id::PrChat));
+        let inspected = drain(&mut server).into_iter().any(|cmd| {
+            matches!(
+                cmd,
+                IpcCommand::InspectWorkspaceDiff { workspace_key, target }
+                    if workspace_key == key && target == WorkspaceDiffTarget::LinkedCheckout
+            )
+        });
+        assert!(inspected, "opening must request the worktree diff");
+    }
+
+    /// The opening question waits for the diff, then starts a run whose
+    /// context carries the PR metadata AND the diff hunks; a streamed
+    /// delta and the final result land in the shared conversation.
+    #[test]
+    fn opening_question_waits_for_diff_then_streams_answer() {
+        let (mut m, mut server) = build();
+        seed_pr_workspace(&mut m);
+        let _ = drain(&mut server);
+        m.open_pr_chat();
+        let _ = drain(&mut server);
+
+        // Diff still pending → the question is held, no run yet.
+        let cmds = m.handle_pr_chat_question("what changed?".into(), HelpQuestionKind::NewQuestion);
+        assert!(cmds.is_empty(), "question must wait for the diff");
+        assert!(m.pr_chat_held_question.is_some());
+        assert!(m.pr_chat_run.is_none());
+
+        // Diff lands → the held question starts the run.
+        m.handle_daemon_event(IpcEvent::WorkspaceDiffInspected {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+            target: WorkspaceDiffTarget::LinkedCheckout,
+            agent_terminal_ids: vec![],
+            diff: Some(sample_diff()),
+            error: None,
+        });
+        let start = drain(&mut server)
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                IpcCommand::StartAgentRun { initial_input, .. } => initial_input,
+                _ => None,
+            })
+            .expect("diff reply must start the run");
+        let context = start.text.expect("run carries a text turn");
+        assert!(
+            context.contains("Add retry to the poller"),
+            "PR title in context"
+        );
+        assert!(context.contains("CI: failing"), "PR metadata in context");
+        assert!(context.contains("reviewer1 (comment): Needs a test."));
+        assert!(context.contains("+    retry(3);"), "diff hunk in context");
+        assert!(context.contains("# Question\n\nwhat changed?"));
+
+        // The run comes up and streams its answer into the transcript.
+        let request_id = m.pr_chat_request.clone().expect("start request pending");
+        m.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(7),
+            session_key: lazybox_core::SessionKey::new(
+                lazybox_tui_core::pr_chat::PR_CHAT_SESSION_KEY,
+            ),
+            session_id: None,
+            agent: "claude".into(),
+            mode: lazybox_ipc::AgentRuntimeMode::StreamJson,
+        });
+        assert_eq!(m.pr_chat_run, Some(AgentRunId(7)));
+
+        m.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(7),
+            delta: "The poller now ".into(),
+        });
+        assert_eq!(m.pr_chat_convo_mut().turns[0].answer, "The poller now ");
+
+        m.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(7),
+            result: Some("The poller now retries transient failures — `src/poll.rs:2`.".into()),
+            session_id: None,
+            error: None,
+        });
+        let convo = m.pr_chat_convo_mut();
+        assert!(convo.turns[0].done);
+        assert!(convo.turns[0].answer.contains("src/poll.rs:2"));
+    }
+
+    /// A second question asked while the opening one is still held for
+    /// the diff must not clobber it: the first stays the context-bearing
+    /// turn, the second queues and is flushed as a follow-up once the run
+    /// starts. (Regression: a lone `held_question` slot dropped the first.)
+    #[test]
+    fn second_question_during_diff_wait_queues_instead_of_clobbering() {
+        let (mut m, mut server) = build();
+        seed_pr_workspace(&mut m);
+        let _ = drain(&mut server);
+        m.open_pr_chat();
+        let _ = drain(&mut server);
+
+        let _ = m.handle_pr_chat_question("what changed?".into(), HelpQuestionKind::NewQuestion);
+        let _ = m.handle_pr_chat_question("and why?".into(), HelpQuestionKind::FollowUp);
+        assert_eq!(m.pr_chat_convo_mut().turns.len(), 2);
+
+        m.handle_daemon_event(IpcEvent::WorkspaceDiffInspected {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+            target: WorkspaceDiffTarget::LinkedCheckout,
+            agent_terminal_ids: vec![],
+            diff: Some(sample_diff()),
+            error: None,
+        });
+        // The held (first) question opens the run with the context.
+        let start = drain(&mut server)
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                IpcCommand::StartAgentRun { initial_input, .. } => initial_input,
+                _ => None,
+            })
+            .expect("held question starts the run");
+        assert!(start.text.unwrap().contains("# Question\n\nwhat changed?"));
+
+        // Bringing the run up flushes the queued second question as input.
+        let request_id = m.pr_chat_request.clone().expect("start request");
+        m.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(9),
+            session_key: lazybox_core::SessionKey::new(
+                lazybox_tui_core::pr_chat::PR_CHAT_SESSION_KEY,
+            ),
+            session_id: None,
+            agent: "claude".into(),
+            mode: lazybox_ipc::AgentRuntimeMode::StreamJson,
+        });
+        let sent_follow_up = drain(&mut server).into_iter().any(|cmd| {
+            matches!(
+                cmd,
+                IpcCommand::SendAgentInput { message, .. }
+                    if message.text.as_deref() == Some("and why?")
+            )
+        });
+        assert!(sent_follow_up, "queued question must flush as a follow-up");
+    }
+
+    /// Follow-ups ride the live run rather than restarting it.
+    #[test]
+    fn follow_up_sends_input_to_the_live_run() {
+        let (mut m, mut server) = build();
+        seed_pr_workspace(&mut m);
+        let _ = drain(&mut server);
+        m.open_pr_chat();
+        m.pr_chat_diff = Some(Some(sample_diff()));
+        let _ = m.handle_pr_chat_question("first?".into(), HelpQuestionKind::NewQuestion);
+        let request_id = m.pr_chat_request.clone().expect("start request");
+        m.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(3),
+            session_key: lazybox_core::SessionKey::new(
+                lazybox_tui_core::pr_chat::PR_CHAT_SESSION_KEY,
+            ),
+            session_id: None,
+            agent: "claude".into(),
+            mode: lazybox_ipc::AgentRuntimeMode::StreamJson,
+        });
+
+        let cmds = m.handle_pr_chat_question("and why?".into(), HelpQuestionKind::FollowUp);
+        assert!(matches!(
+            cmds.as_slice(),
+            [IpcCommand::SendAgentInput { run_id, .. }] if *run_id == AgentRunId(3)
+        ));
+        assert_eq!(m.pr_chat_convo_mut().turns.len(), 2);
+    }
+}
+
+#[cfg(test)]
 mod dismiss_and_messages_tests {
     //! #309: every footer notice is dismissable with one key (Esc, the
     //! catalog `DismissNotice` binding) regardless of severity, and

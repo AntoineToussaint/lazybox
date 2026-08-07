@@ -398,6 +398,11 @@ pub enum Id {
     DescriptionModal,
     /// Navigable local worktree diff with an inline review draft.
     DiffReview,
+    /// "Ask about this PR" chat (#945), opened with `a` from the
+    /// description reader. Streamed Q&A about the focused PR/issue,
+    /// sharing the `Model::pr_chat_convo` state so daemon-event handlers
+    /// stream the answer in without remounting.
+    PrChat,
 }
 
 impl Id {
@@ -433,6 +438,19 @@ impl Id {
     pub(crate) fn consumes_scroll(&self) -> bool {
         matches!(self, Id::DescriptionModal)
     }
+}
+
+/// The PR/issue an open "Ask about this PR" chat is about (#945),
+/// snapshotted when the modal opens. Holding the task + activity here
+/// (rather than re-reading the focused workspace when the diff reply
+/// lands, or on each question) keeps the context stable if focus moves
+/// while the chat is open.
+pub(crate) struct PrChatSubject {
+    task: lazybox_core::Task,
+    activity: Vec<lazybox_core::Activity>,
+    /// A worktree (or linked checkout) exists, so a diff was requested
+    /// and the chat should wait for it before starting the run.
+    has_worktree: bool,
 }
 
 /// Why a workspace-removal confirm prompt is being shown. Both
@@ -805,6 +823,14 @@ pub enum Msg {
     HelpAsked(String, HelpQuestionKind),
     /// Spinner heartbeat from the `HelpAsk` modal.
     HelpSpinnerTick,
+    /// `a` pressed in the description reader — open the "Ask about this
+    /// PR" chat for the focused workspace's PR/issue (#945).
+    AskAboutPr,
+    /// Question submitted from the `PrChat` modal. The modal stays
+    /// mounted; the answer streams back into `Model::pr_chat_convo`.
+    PrChatAsked(String, HelpQuestionKind),
+    /// Spinner heartbeat from the `PrChat` modal.
+    PrChatSpinnerTick,
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
@@ -1585,6 +1611,33 @@ pub struct Model<T: TerminalAdapter> {
     /// Fresh-thread question waiting for the old in-flight start to
     /// reveal its run id so it can be interrupted first.
     help_restart_question: Option<String>,
+    /// "Ask about this PR" conversation (#945), shared with a mounted
+    /// `PrChat` modal via `Arc` — same streaming contract as
+    /// [`Self::help_convo`], scoped to one PR/issue.
+    pub(crate) pr_chat_convo: crate::realm::components::help_ask::SharedHelpConvo,
+    /// Run id of the live PR-chat run, captured from the
+    /// `AgentRunStarted` carrying [`Self::pr_chat_request`].
+    pr_chat_run: Option<lazybox_ipc::AgentRunId>,
+    /// Request id between dispatching the PR-chat `StartAgentRun` and its
+    /// correlated success/failure event. Follow-ups asked in that window
+    /// queue in `pr_chat_pending` rather than double-starting the run.
+    pr_chat_request: Option<lazybox_ipc::AgentRunRequestId>,
+    pr_chat_pending: Vec<String>,
+    /// The PR/issue the open PR-chat is about — snapshotted at open so a
+    /// later focus change or diff reply still builds the right context.
+    pr_chat_subject: Option<PrChatSubject>,
+    /// The worktree diff for the subject, once `InspectWorkspaceDiff`
+    /// replied. `Ready(None)` means "no worktree / unreadable"; `None`
+    /// (the outer option) means the reply is still pending.
+    pr_chat_diff: Option<Option<lazybox_ipc::WorkspaceDiffDto>>,
+    /// Correlates the pending `WorkspaceDiffInspected` reply to this
+    /// PR-chat (kept separate from `pending_diff_session`, which drives
+    /// the diff-review modal). `None` once resolved, or when no worktree
+    /// exists to inspect.
+    pr_chat_diff_target: Option<(lazybox_core::WorkspaceKey, lazybox_ipc::WorkspaceDiffTarget)>,
+    /// The first question, held until the diff reply lands so it enters
+    /// the run's opening (and only context-bearing) turn.
+    pr_chat_held_question: Option<(String, HelpQuestionKind)>,
     /// Agent id the active `DefaultModelPicker` persists against —
     /// stashed at mount so a pick can't land on a drifted default.
     pub(crate) default_model_agent: Option<String>,
@@ -1905,6 +1958,14 @@ impl<T: TerminalAdapter> Model<T> {
             help_pending_questions: Vec::new(),
             help_interrupt_on_start: false,
             help_restart_question: None,
+            pr_chat_convo: Default::default(),
+            pr_chat_run: None,
+            pr_chat_request: None,
+            pr_chat_pending: Vec::new(),
+            pr_chat_subject: None,
+            pr_chat_diff: None,
+            pr_chat_diff_target: None,
+            pr_chat_held_question: None,
             default_model_agent: None,
             auto_tour_pending: false,
             tips_enabled: false,
@@ -3708,6 +3769,17 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Lock the shared PR-chat conversation (#945). Recovers from a
+    /// poisoned lock, mirroring [`Self::help_convo_mut`].
+    pub(crate) fn pr_chat_convo_mut(
+        &self,
+    ) -> std::sync::MutexGuard<'_, crate::realm::components::help_ask::HelpConvo> {
+        match self.pr_chat_convo.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// Override the initial sidebar / right-top split percentages
     /// from `~/.lazybox/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
@@ -4942,6 +5014,16 @@ impl<T: TerminalAdapter> Model<T> {
                 self.dispatch_cmds(cmds);
             }
             Msg::HelpSpinnerTick => {}
+            Msg::AskAboutPr => {
+                self.open_pr_chat();
+            }
+            Msg::PrChatAsked(question, kind) => {
+                // The PrChat modal stays mounted — the answer streams
+                // back into `pr_chat_convo`.
+                let cmds = self.handle_pr_chat_question(question, kind);
+                self.dispatch_cmds(cmds);
+            }
+            Msg::PrChatSpinnerTick => {}
             // Polling outcomes — surface as footer notices, never
             // as full-screen modals. Permanent + auth errors are
             // sticky; retryable ones (which shouldn't reach here)

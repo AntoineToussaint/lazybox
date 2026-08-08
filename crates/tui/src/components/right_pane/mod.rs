@@ -1361,19 +1361,37 @@ impl RightPane {
         // *issues* don't get the hint for reviewers (issues have no
         // reviewers on GitHub), but they DO get the assignees hint.
         let is_pr = task.is_pr();
-        if !task.reviewers.is_empty() {
-            let mut spans: Vec<Span> = Vec::with_capacity(task.reviewers.len() * 2 + 1);
+        let reviewer_summary = task.reviewer_summary();
+        if !reviewer_summary.is_empty() {
+            use lazybox_core::ReviewState;
+            let mut spans: Vec<Span> = Vec::with_capacity(reviewer_summary.len() * 3 + 1);
             spans.push(Span::styled(
                 "Reviewers: ",
                 Style::default().fg(theme.text_dim),
             ));
-            for (i, login) in task.reviewers.iter().enumerate() {
+            for (i, reviewer) in reviewer_summary.iter().enumerate() {
                 if i > 0 {
                     spans.push(Span::styled(" ", Style::default()));
                 }
+                // A state glyph precedes each reviewer so an approved PR
+                // reads as approved at a glance — pending reviewers keep
+                // the bare `@login` styling for continuity with the old
+                // requested-only line.
+                let (glyph, color) = match reviewer.state {
+                    ReviewState::Approved => (Some("✓"), theme.success),
+                    ReviewState::ChangesRequested => (Some("✗"), theme.error),
+                    ReviewState::Commented => (Some(icons::COMMENT), theme.text_dim),
+                    ReviewState::Pending => (None, theme.hover),
+                };
+                if let Some(glyph) = glyph {
+                    spans.push(Span::styled(
+                        format!("{glyph} "),
+                        Style::default().fg(color),
+                    ));
+                }
                 spans.push(Span::styled(
-                    format!("@{login}"),
-                    Style::default().fg(theme.hover),
+                    format!("@{}", reviewer.login),
+                    Style::default().fg(color),
                 ));
             }
             lines.push(Line::from(spans));

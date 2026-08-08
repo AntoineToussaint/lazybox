@@ -162,6 +162,7 @@ mod tests {
             closed_at: None,
             labels,
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,

@@ -130,6 +130,7 @@ fn github_task(
         closed_at: None,
         labels: Vec::new(),
         reviewers: Vec::new(),
+        reviews: vec![],
         assignees: Vec::new(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,

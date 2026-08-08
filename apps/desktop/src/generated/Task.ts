@@ -6,6 +6,7 @@ import type { Label } from "./Label";
 import type { Mergeable } from "./Mergeable";
 import type { Priority } from "./Priority";
 import type { ReviewStatus } from "./ReviewStatus";
+import type { Reviewer } from "./Reviewer";
 import type { TaskId } from "./TaskId";
 import type { TaskKind } from "./TaskKind";
 import type { TaskRole } from "./TaskRole";
@@ -46,9 +47,22 @@ closed_at: string | null,
  */
 labels: Array<Label>,
 /**
- * Requested reviewers (user logins or team names).
+ * Requested reviewers (user logins or team names) whose review is
+ * still pending. GitHub drops a user from this list the moment
+ * they submit a review, so on its own it reads "none" for a PR
+ * where everyone has already reviewed — [`Task::reviewer_summary`]
+ * merges it with `reviews` for display.
  */
 reviewers: Array<string>,
+/**
+ * Reviewers who have actually submitted a review, with their
+ * latest state. This is the only record of who reviewed and how,
+ * since GitHub removes them from `reviewers` once they submit.
+ * Lazy-fetched via the PR-details query (the inbox scan omits the
+ * reviews connection), so empty until the workspace is opened.
+ * `#[serde(default)]` for older snapshots.
+ */
+reviews: Array<Reviewer>,
 /**
  * Assignees (user logins).
  */

@@ -1502,6 +1502,10 @@ fn merge_pr_details_into_workspace(ws: &mut Workspace, details: lazybox_gh::PrDe
     }
     pr.ci = details.ci;
     pr.review = details.review;
+    // The lazy query always fetches the reviews connection, so it is
+    // authoritative for who has reviewed — overwrite even when empty
+    // (a PR with no reviews yet must clear a stale list).
+    pr.reviews = details.reviews;
     pr.role = details.role;
     pr.needs_reply = details.needs_reply;
     pr.last_commenter = details.last_commenter;
@@ -1537,6 +1541,7 @@ mod merge_pr_details_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -1563,6 +1568,7 @@ mod merge_pr_details_tests {
             checks: vec![],
             ci: lazybox_core::CiStatus::None,
             review: lazybox_core::ReviewStatus::None,
+            reviews: vec![],
             role: TaskRole::Author,
             needs_reply: false,
             last_commenter: None,
@@ -2740,6 +2746,7 @@ mod github_target_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -2813,6 +2820,7 @@ mod prefetch_score_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -3081,6 +3089,7 @@ mod inspect_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -3526,6 +3535,7 @@ mod inspect_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -3588,6 +3598,7 @@ mod inspect_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -3645,6 +3656,7 @@ mod inspect_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -4527,6 +4539,7 @@ mod inspect_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,

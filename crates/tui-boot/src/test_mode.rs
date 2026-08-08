@@ -131,6 +131,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         closed_at: None,
         labels: vec![lazybox_core::Label::new("test")],
         reviewers: vec![],
+        reviews: vec![],
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,

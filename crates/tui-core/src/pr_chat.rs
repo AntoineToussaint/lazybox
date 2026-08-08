@@ -351,6 +351,7 @@ mod tests {
             closed_at: None,
             labels: vec![Label::new("bug")],
             reviewers: vec!["reviewer1".into()],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,

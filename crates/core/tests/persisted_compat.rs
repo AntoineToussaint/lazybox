@@ -19,9 +19,9 @@
 use chrono::{DateTime, TimeZone, Utc};
 use lazybox_core::{
     Activity, ActivityKind, AutoFixKind, CheckRun, CiStatus, CleanupPrompt, Label, Mergeable,
-    PolicyArm, ReviewStatus, SessionId, SessionKind, SessionLayout, SessionRunState, Task, TaskId,
-    TaskKind, TaskRole, TaskState, TileTree, WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceKey,
-    WorkspaceSession,
+    PolicyArm, ReviewState, ReviewStatus, Reviewer, SessionId, SessionKind, SessionLayout,
+    SessionRunState, Task, TaskId, TaskKind, TaskRole, TaskState, TileTree,
+    WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceKey, WorkspaceSession,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -94,6 +94,10 @@ fn maximal_pr_task() -> Task {
             color: "d73a4a".into(),
         }],
         reviewers: vec!["carol".into(), "team/platform".into()],
+        reviews: vec![Reviewer {
+            login: "dave".into(),
+            state: ReviewState::Approved,
+        }],
         assignees: vec!["alice".into()],
         auto_merge_enabled: true,
         is_in_merge_queue: true,
@@ -272,6 +276,21 @@ fn pr_row_without_author_field_deserializes_as_empty() {
     let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
         .expect("a pre-author PR row remains readable");
     assert_eq!(ws.pr.expect("pr present").author, "");
+}
+
+/// A PR row persisted before `Task::reviews` existed (#960) has no
+/// `reviews` key; it must read back with an empty reviews list, never
+/// fail to decode.
+#[test]
+fn pr_row_without_reviews_field_deserializes_as_empty() {
+    let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
+    legacy["pr"]
+        .as_object_mut()
+        .expect("pr object")
+        .remove("reviews");
+    let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
+        .expect("a pre-reviews PR row remains readable");
+    assert!(ws.pr.expect("pr present").reviews.is_empty());
 }
 
 /// Schema v1 sessions predate the persisted worktree branch. They remain

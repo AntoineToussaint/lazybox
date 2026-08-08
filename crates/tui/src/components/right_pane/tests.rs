@@ -763,6 +763,7 @@ mod has_visible_content_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -859,6 +860,7 @@ mod summary_render_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -982,6 +984,7 @@ mod mark_workspace_merged_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -1076,6 +1079,7 @@ mod description_expand_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -1310,6 +1314,39 @@ mod description_expand_tests {
     }
 
     #[test]
+    fn approved_pr_renders_reviewers_not_none() {
+        // #960: a PR whose requested reviewers all reviewed carries an
+        // empty `reviewers` (GitHub dropped them) but a populated
+        // `reviews`. The header must show the approvers, not "none".
+        let mut task = task_with_body("body");
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task.url = "https://github.com/o/r/pull/1".into();
+        task.reviewers = vec![];
+        task.reviews = vec![
+            lazybox_core::Reviewer {
+                login: "alice".into(),
+                state: lazybox_core::ReviewState::Approved,
+            },
+            lazybox_core::Reviewer {
+                login: "carol".into(),
+                state: lazybox_core::ReviewState::ChangesRequested,
+            },
+        ];
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            text.contains("Reviewers:") && text.contains("@alice") && text.contains("@carol"),
+            "an approved PR must list its actual reviewers: {text}",
+        );
+        assert!(
+            !text.contains("g r to request"),
+            "the empty-reviewers hint must not show when reviewers exist: {text}",
+        );
+    }
+
+    #[test]
     fn preview_header_hint_matches_what_d_does() {
         // Plain short body: `d` collapses, so the hint must say collapse.
         let mut plain = pane_showing("just one short line");
@@ -1431,6 +1468,7 @@ mod linked_issue_modal_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
@@ -1552,6 +1590,7 @@ mod originating_issue_header_tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,

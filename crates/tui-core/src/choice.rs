@@ -760,6 +760,7 @@ mod tests {
             closed_at: None,
             assignees: vec![],
             reviewers: vec![],
+            reviews: vec![],
             labels: vec![],
             mergeable: lazybox_core::Mergeable::Mergeable,
             auto_merge_enabled: false,

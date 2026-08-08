@@ -1337,6 +1337,11 @@ pub struct PrDetails {
     /// `reviewDecision`-derived review status with reviews-list
     /// fallback for the no-required-reviewer case.
     pub review: ReviewStatus,
+    /// Reviewers who have submitted a review, with their latest state —
+    /// the data the inbox scan drops. Spliced onto `Task::reviews` so
+    /// the Reviewers line shows who actually reviewed, not just who's
+    /// still pending.
+    pub reviews: Vec<Reviewer>,
     /// Role derived from the full reviews list — corrects the
     /// inbox-scan approximation (which had to use `reviewDecision`
     /// as a proxy for "I approved").
@@ -1440,6 +1445,7 @@ pub fn pr_details_to_details(node: &GqlPrDetailsNode, my_username: &str) -> PrDe
         checks: extract_check_runs_inner(&node.commits),
         ci: extract_ci_status_inner(&node.commits),
         review: derive_review_status_inner(&node.reviews.nodes, node.review_decision.as_deref()),
+        reviews: submitted_reviewers(&node.reviews.nodes),
         role: derive_role_inner(
             &node.reviews.nodes,
             my_username,
@@ -2182,6 +2188,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
                 GqlRequestedReviewer::Other(_) => None,
             })
             .collect(),
+        reviews: submitted_reviewers(&pr.reviews.nodes),
         assignees: pr.assignees.nodes.iter().map(|a| a.login.clone()).collect(),
         author: pr
             .author
@@ -2816,6 +2823,67 @@ fn derive_role_inner(
     TaskRole::Mentioned
 }
 
+/// The submitted reviews collapsed to one entry per reviewer, latest
+/// state wins — GitHub's Reviewers section. A decisive review
+/// (`APPROVED` / `CHANGES_REQUESTED`) outranks a later `COMMENTED` from
+/// the same person, matching how GitHub keeps showing the approval when
+/// a reviewer follows up with a plain comment. `PENDING` (an unsubmitted
+/// draft) and `DISMISSED` reviews contribute nothing. Reviewers keep the
+/// order in which they first submitted. Empty on the inbox-scan path
+/// (the reviews connection is lazy-only) — back-filled on workspace open.
+fn submitted_reviewers(reviews: &[GqlReview]) -> Vec<Reviewer> {
+    use std::collections::HashMap;
+    struct Agg {
+        decisive: Option<(Option<DateTime<Utc>>, ReviewState)>,
+        commented: bool,
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut by: HashMap<String, Agg> = HashMap::new();
+    for r in reviews {
+        let Some(author) = r.author.as_ref() else {
+            continue;
+        };
+        let when = r.submitted_at.or(r.created_at);
+        let agg = by.entry(author.login.clone()).or_insert_with(|| {
+            order.push(author.login.clone());
+            Agg {
+                decisive: None,
+                commented: false,
+            }
+        });
+        match r.state.as_str() {
+            "APPROVED" | "CHANGES_REQUESTED" => {
+                let state = if r.state == "APPROVED" {
+                    ReviewState::Approved
+                } else {
+                    ReviewState::ChangesRequested
+                };
+                let supersedes = match &agg.decisive {
+                    Some((prev_when, _)) => when >= *prev_when,
+                    None => true,
+                };
+                if supersedes {
+                    agg.decisive = Some((when, state));
+                }
+            }
+            "COMMENTED" => agg.commented = true,
+            _ => {} // PENDING, DISMISSED — no contribution
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|login| {
+            let agg = by.get(&login)?;
+            let state = match agg.decisive {
+                Some((_, s)) => s,
+                None if agg.commented => ReviewState::Commented,
+                None => return None,
+            };
+            Some(Reviewer { login, state })
+        })
+        .collect()
+}
+
 /// Review-status derivation. `reviewDecision` covers the common case
 /// (branch protection / CODEOWNERS); when it's null (no required
 /// review configured) we fall back to walking the reviews list — but
@@ -3179,6 +3247,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
             })
             .collect(),
         reviewers: vec![],
+        reviews: vec![],
         assignees: issue
             .assignees
             .nodes
@@ -4876,6 +4945,105 @@ mod tests {
             nodes: vec![review("alice", "APPROVED")],
         };
         assert_eq!(pr_to_task(&pr, "alice").role, TaskRole::Mentioned);
+    }
+
+    /// #960: on a PR where every requested reviewer has already reviewed,
+    /// GitHub empties `reviewRequests` — the reviewers must still surface
+    /// from the reviews list with their state, not read "none".
+    #[test]
+    fn pr_to_task_reviews_populate_reviewers_when_requests_are_empty() {
+        let review = |login: &str, state: &str| GqlReview {
+            author: Some(GqlAuthor {
+                login: login.into(),
+            }),
+            body: None,
+            state: state.into(),
+            submitted_at: Some(chrono::Utc::now()),
+            id: None,
+            created_at: None,
+        };
+        let mut pr = make_pr(20, "bob");
+        pr.review_decision = Some("APPROVED".into());
+        pr.review_requests = GqlReviewRequests { nodes: vec![] };
+        pr.reviews = GqlReviews {
+            nodes: vec![
+                review("claude", "APPROVED"),
+                review("lukazhupa", "APPROVED"),
+            ],
+        };
+
+        let task = pr_to_task(&pr, "bob");
+        assert!(
+            task.reviewers.is_empty(),
+            "no pending requests once everyone reviewed",
+        );
+        assert_eq!(
+            task.reviewer_summary(),
+            vec![
+                Reviewer {
+                    login: "claude".into(),
+                    state: ReviewState::Approved,
+                },
+                Reviewer {
+                    login: "lukazhupa".into(),
+                    state: ReviewState::Approved,
+                },
+            ],
+            "the reviewers line renders the approvers, not \"none\"",
+        );
+    }
+
+    /// A later `COMMENTED` review must not downgrade an earlier decisive
+    /// state — GitHub keeps showing the approval when a reviewer follows
+    /// up with a plain comment. A comment-only reviewer shows `Commented`.
+    #[test]
+    fn submitted_reviewers_decisive_state_outranks_later_comment() {
+        let review = |login: &str, state: &str, at: DateTime<Utc>| GqlReview {
+            author: Some(GqlAuthor {
+                login: login.into(),
+            }),
+            body: None,
+            state: state.into(),
+            submitted_at: Some(at),
+            id: None,
+            created_at: None,
+        };
+        let out = submitted_reviewers(&[
+            review("alice", "APPROVED", ts(0)),
+            review("alice", "COMMENTED", ts(10)),
+            review("bob", "COMMENTED", ts(5)),
+        ]);
+        assert_eq!(
+            out,
+            vec![
+                Reviewer {
+                    login: "alice".into(),
+                    state: ReviewState::Approved,
+                },
+                Reviewer {
+                    login: "bob".into(),
+                    state: ReviewState::Commented,
+                },
+            ],
+        );
+    }
+
+    /// A reviewer whose only review is `PENDING` (an unsubmitted draft)
+    /// or `DISMISSED` contributes nothing to the reviewers list.
+    #[test]
+    fn submitted_reviewers_skips_pending_and_dismissed() {
+        let review = |login: &str, state: &str| GqlReview {
+            author: Some(GqlAuthor {
+                login: login.into(),
+            }),
+            body: None,
+            state: state.into(),
+            submitted_at: Some(chrono::Utc::now()),
+            id: None,
+            created_at: None,
+        };
+        let out = submitted_reviewers(&[review("alice", "PENDING"), review("bob", "DISMISSED")]);
+        assert!(out.is_empty());
     }
 
     /// Regression (#800, finding 5): my *latest* decisive review wins.

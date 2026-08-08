@@ -296,6 +296,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         closed_at: None,
         labels,
         reviewers: vec![],
+        reviews: vec![],
         assignees,
         author: issue
             .creator

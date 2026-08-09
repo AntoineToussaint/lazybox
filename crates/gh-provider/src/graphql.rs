@@ -400,6 +400,16 @@ pub struct GqlPr {
     /// open or via the post-tick prefetch.
     #[serde(default)]
     pub reviews: GqlReviews,
+    /// Latest APPROVED / CHANGES_REQUESTED per reviewer — GitHub's own
+    /// per-author collapse, so it never misses a verdict older than a
+    /// `reviews(first: N)` slice would reach. Drives the Reviewers
+    /// line's ✓/✗ state. Lazy-only (absent from the inbox scan).
+    #[serde(default, rename = "latestOpinionatedReviews")]
+    pub latest_opinionated_reviews: GqlLatestReviews,
+    /// Latest review per reviewer regardless of verdict — used only to
+    /// surface comment-only reviewers on the Reviewers line. Lazy-only.
+    #[serde(default, rename = "latestReviews")]
+    pub latest_reviews: GqlLatestReviews,
     /// Inline review-thread comments. Lazy-fetched per PR via
     /// `Command::FetchPrDetails` (see `PR_DETAILS_QUERY`) instead of
     /// being pulled on every poll cycle.
@@ -610,6 +620,24 @@ pub struct GqlReactionView {
 #[derive(Deserialize, Debug, Default)]
 pub struct GqlReviews {
     pub nodes: Vec<GqlReview>,
+}
+
+/// GitHub's per-author-collapsed review connections
+/// (`latestReviews` / `latestOpinionatedReviews`): exactly one node per
+/// reviewer, so — unlike a `first: N` slice of the full `reviews`
+/// history — they cannot drop a reviewer's latest verdict behind the
+/// cap. Only login + state are selected; the Reviewers line needs no
+/// body or timestamp.
+#[derive(Deserialize, Debug, Default)]
+pub struct GqlLatestReviews {
+    #[serde(default)]
+    pub nodes: Vec<GqlReviewerVerdict>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlReviewerVerdict {
+    pub author: Option<GqlAuthor>,
+    pub state: String, // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
 }
 
 #[derive(Deserialize, Debug)]
@@ -1224,6 +1252,18 @@ query($id: ID!) {
           createdAt
         }
       }
+      latestOpinionatedReviews(first: 30) {
+        nodes {
+          author { login }
+          state
+        }
+      }
+      latestReviews(first: 30) {
+        nodes {
+          author { login }
+          state
+        }
+      }
       closingIssuesReferences(first: 10) {
         nodes {
           number
@@ -1306,6 +1346,10 @@ pub struct GqlPrDetailsNode {
     pub comments: GqlComments,
     #[serde(default)]
     pub reviews: GqlReviews,
+    #[serde(default, rename = "latestOpinionatedReviews")]
+    pub latest_opinionated_reviews: GqlLatestReviews,
+    #[serde(default, rename = "latestReviews")]
+    pub latest_reviews: GqlLatestReviews,
     #[serde(default, rename = "closingIssuesReferences")]
     pub closing_issues_references: Option<GqlClosingIssues>,
     #[serde(default, rename = "reviewThreads")]
@@ -1445,7 +1489,10 @@ pub fn pr_details_to_details(node: &GqlPrDetailsNode, my_username: &str) -> PrDe
         checks: extract_check_runs_inner(&node.commits),
         ci: extract_ci_status_inner(&node.commits),
         review: derive_review_status_inner(&node.reviews.nodes, node.review_decision.as_deref()),
-        reviews: submitted_reviewers(&node.reviews.nodes),
+        reviews: submitted_reviewers(
+            &node.latest_opinionated_reviews.nodes,
+            &node.latest_reviews.nodes,
+        ),
         role: derive_role_inner(
             &node.reviews.nodes,
             my_username,
@@ -1575,6 +1622,18 @@ query($owner: String!, $name: String!, $number: Int!) {
           state
           submittedAt
           createdAt
+        }
+      }
+      latestOpinionatedReviews(first: 30) {
+        nodes {
+          author { login }
+          state
+        }
+      }
+      latestReviews(first: 30) {
+        nodes {
+          author { login }
+          state
         }
       }
       closingIssuesReferences(first: 10) {
@@ -1791,6 +1850,18 @@ query($ids: [ID!]!) {
           state
           submittedAt
           createdAt
+        }
+      }
+      latestOpinionatedReviews(first: 30) {
+        nodes {
+          author { login }
+          state
+        }
+      }
+      latestReviews(first: 30) {
+        nodes {
+          author { login }
+          state
         }
       }
       closingIssuesReferences(first: 10) {
@@ -2188,7 +2259,10 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
                 GqlRequestedReviewer::Other(_) => None,
             })
             .collect(),
-        reviews: submitted_reviewers(&pr.reviews.nodes),
+        reviews: submitted_reviewers(
+            &pr.latest_opinionated_reviews.nodes,
+            &pr.latest_reviews.nodes,
+        ),
         assignees: pr.assignees.nodes.iter().map(|a| a.login.clone()).collect(),
         author: pr
             .author
@@ -2823,65 +2897,59 @@ fn derive_role_inner(
     TaskRole::Mentioned
 }
 
-/// The submitted reviews collapsed to one entry per reviewer, latest
-/// state wins — GitHub's Reviewers section. A decisive review
-/// (`APPROVED` / `CHANGES_REQUESTED`) outranks a later `COMMENTED` from
-/// the same person, matching how GitHub keeps showing the approval when
-/// a reviewer follows up with a plain comment. `PENDING` (an unsubmitted
-/// draft) and `DISMISSED` reviews contribute nothing. Reviewers keep the
-/// order in which they first submitted. Empty on the inbox-scan path
-/// (the reviews connection is lazy-only) — back-filled on workspace open.
-fn submitted_reviewers(reviews: &[GqlReview]) -> Vec<Reviewer> {
-    use std::collections::HashMap;
-    struct Agg {
-        decisive: Option<(Option<DateTime<Utc>>, ReviewState)>,
-        commented: bool,
-    }
-    let mut order: Vec<String> = Vec::new();
-    let mut by: HashMap<String, Agg> = HashMap::new();
-    for r in reviews {
-        let Some(author) = r.author.as_ref() else {
+/// The Reviewers section as GitHub renders it: one entry per reviewer
+/// with their current state. Derived from GitHub's own per-author
+/// collapses rather than a slice of the raw `reviews` history, so it
+/// cannot miss a reviewer whose latest verdict sits beyond a
+/// `reviews(first: N)` cap:
+///
+/// - `opinionated` (`latestOpinionatedReviews`) is each reviewer's
+///   latest APPROVED / CHANGES_REQUESTED — the decisive ✓/✗ state. A
+///   later plain `COMMENTED` never appears here, so an approve-then-
+///   comment reviewer correctly stays "approved", matching GitHub.
+/// - `latest` (`latestReviews`) is each reviewer's latest review of any
+///   kind; it only contributes `COMMENTED` for reviewers who have *no*
+///   decisive verdict, surfacing comment-only reviewers.
+///
+/// `PENDING` (an unsubmitted draft) and `DISMISSED` reviews contribute
+/// nothing. Decisive reviewers come first, then comment-only ones. Empty
+/// on the inbox-scan path (both connections are lazy-only) — back-filled
+/// on workspace open.
+fn submitted_reviewers(
+    opinionated: &[GqlReviewerVerdict],
+    latest: &[GqlReviewerVerdict],
+) -> Vec<Reviewer> {
+    use std::collections::HashSet;
+    let mut out: Vec<Reviewer> = Vec::new();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for v in opinionated {
+        let Some(author) = v.author.as_ref() else {
             continue;
         };
-        let when = r.submitted_at.or(r.created_at);
-        let agg = by.entry(author.login.clone()).or_insert_with(|| {
-            order.push(author.login.clone());
-            Agg {
-                decisive: None,
-                commented: false,
-            }
-        });
-        match r.state.as_str() {
-            "APPROVED" | "CHANGES_REQUESTED" => {
-                let state = if r.state == "APPROVED" {
-                    ReviewState::Approved
-                } else {
-                    ReviewState::ChangesRequested
-                };
-                let supersedes = match &agg.decisive {
-                    Some((prev_when, _)) => when >= *prev_when,
-                    None => true,
-                };
-                if supersedes {
-                    agg.decisive = Some((when, state));
-                }
-            }
-            "COMMENTED" => agg.commented = true,
-            _ => {} // PENDING, DISMISSED — no contribution
+        let state = match v.state.as_str() {
+            "APPROVED" => ReviewState::Approved,
+            "CHANGES_REQUESTED" => ReviewState::ChangesRequested,
+            _ => continue, // `latestOpinionatedReviews` only carries these
+        };
+        if seen.insert(author.login.as_str()) {
+            out.push(Reviewer {
+                login: author.login.clone(),
+                state,
+            });
         }
     }
-    order
-        .into_iter()
-        .filter_map(|login| {
-            let agg = by.get(&login)?;
-            let state = match agg.decisive {
-                Some((_, s)) => s,
-                None if agg.commented => ReviewState::Commented,
-                None => return None,
-            };
-            Some(Reviewer { login, state })
-        })
-        .collect()
+    for v in latest {
+        let Some(author) = v.author.as_ref() else {
+            continue;
+        };
+        if v.state == "COMMENTED" && seen.insert(author.login.as_str()) {
+            out.push(Reviewer {
+                login: author.login.clone(),
+                state: ReviewState::Commented,
+            });
+        }
+    }
+    out
 }
 
 /// Review-status derivation. `reviewDecision` covers the common case
@@ -3753,6 +3821,8 @@ mod tests {
                 total_count: None,
             },
             reviews: GqlReviews { nodes: vec![] },
+            latest_opinionated_reviews: GqlLatestReviews { nodes: vec![] },
+            latest_reviews: GqlLatestReviews { nodes: vec![] },
             review_threads: GqlReviewThreads { nodes: vec![] },
             commits: GqlCommits { nodes: vec![] },
             closing_issues_references: None,
@@ -3761,6 +3831,15 @@ mod tests {
 
     fn ts(secs_offset: i64) -> DateTime<Utc> {
         chrono::Utc::now() + chrono::Duration::seconds(secs_offset)
+    }
+
+    fn verdict(login: &str, state: &str) -> GqlReviewerVerdict {
+        GqlReviewerVerdict {
+            author: Some(GqlAuthor {
+                login: login.into(),
+            }),
+            state: state.into(),
+        }
     }
 
     /// Regression: a user who reviewed-but-didn't-comment was falsely
@@ -4212,7 +4291,13 @@ mod tests {
         // is deliberately NOT in this list — it's a shallow,
         // authoritative field kept eager so issue→PR transfer fires
         // on the poll path (#559); see `search_query_fetches_closing_issue_refs`.
-        for field in ["reviewThreads", "reviews(", "contexts("] {
+        for field in [
+            "reviewThreads",
+            "reviews(",
+            "contexts(",
+            "latestOpinionatedReviews",
+            "latestReviews",
+        ] {
             assert!(
                 !SEARCH_QUERY.contains(field),
                 "`{field}` must not appear in the inbox-scan query — see PR_DETAILS_QUERY",
@@ -4223,6 +4308,8 @@ mod tests {
             "reviewThreads(first: 50)",
             "closingIssuesReferences",
             "reviews(first: 10)",
+            "latestOpinionatedReviews(first: 30)",
+            "latestReviews(first: 30)",
             "contexts(first: 20)",
         ] {
             assert!(
@@ -4949,26 +5036,16 @@ mod tests {
 
     /// #960: on a PR where every requested reviewer has already reviewed,
     /// GitHub empties `reviewRequests` — the reviewers must still surface
-    /// from the reviews list with their state, not read "none".
+    /// from the reviews data with their state, not read "none".
     #[test]
     fn pr_to_task_reviews_populate_reviewers_when_requests_are_empty() {
-        let review = |login: &str, state: &str| GqlReview {
-            author: Some(GqlAuthor {
-                login: login.into(),
-            }),
-            body: None,
-            state: state.into(),
-            submitted_at: Some(chrono::Utc::now()),
-            id: None,
-            created_at: None,
-        };
         let mut pr = make_pr(20, "bob");
         pr.review_decision = Some("APPROVED".into());
         pr.review_requests = GqlReviewRequests { nodes: vec![] };
-        pr.reviews = GqlReviews {
+        pr.latest_opinionated_reviews = GqlLatestReviews {
             nodes: vec![
-                review("claude", "APPROVED"),
-                review("lukazhupa", "APPROVED"),
+                verdict("claude", "APPROVED"),
+                verdict("lukazhupa", "APPROVED"),
             ],
         };
 
@@ -4993,26 +5070,56 @@ mod tests {
         );
     }
 
-    /// A later `COMMENTED` review must not downgrade an earlier decisive
-    /// state — GitHub keeps showing the approval when a reviewer follows
-    /// up with a plain comment. A comment-only reviewer shows `Commented`.
+    /// #960 follow-up: reviewers are sourced from GitHub's per-author
+    /// `latestOpinionatedReviews`, NOT a `reviews(first: N)` slice — so a
+    /// reviewer's latest verdict is rendered even when it lies beyond the
+    /// raw-review cap. Here the raw `reviews` slice carries only unrelated
+    /// noise; dave's approval exists solely in the collapsed connection.
     #[test]
-    fn submitted_reviewers_decisive_state_outranks_later_comment() {
-        let review = |login: &str, state: &str, at: DateTime<Utc>| GqlReview {
+    fn pr_to_task_reviewers_come_from_collapsed_connection_not_truncated_slice() {
+        let noise = |login: &str| GqlReview {
             author: Some(GqlAuthor {
                 login: login.into(),
             }),
             body: None,
-            state: state.into(),
-            submitted_at: Some(at),
+            state: "COMMENTED".into(),
+            submitted_at: Some(chrono::Utc::now()),
             id: None,
             created_at: None,
         };
-        let out = submitted_reviewers(&[
-            review("alice", "APPROVED", ts(0)),
-            review("alice", "COMMENTED", ts(10)),
-            review("bob", "COMMENTED", ts(5)),
-        ]);
+        let mut pr = make_pr(21, "bob");
+        // Stand in for a PR whose first-N reviews are all older comments
+        // from other people; dave's later approval fell outside the slice.
+        pr.reviews = GqlReviews {
+            nodes: (0..10).map(|i| noise(&format!("noise{i}"))).collect(),
+        };
+        pr.latest_opinionated_reviews = GqlLatestReviews {
+            nodes: vec![verdict("dave", "APPROVED")],
+        };
+
+        assert_eq!(
+            pr_to_task(&pr, "bob").reviewer_summary(),
+            vec![Reviewer {
+                login: "dave".into(),
+                state: ReviewState::Approved,
+            }],
+            "dave's approval must render even though it's outside the raw reviews slice",
+        );
+    }
+
+    /// A later `COMMENTED` review must not downgrade an earlier decisive
+    /// state: GitHub's `latestOpinionatedReviews` still carries the
+    /// approval, and a reviewer's `latestReviews` `COMMENTED` entry is
+    /// ignored when they already have a verdict. A reviewer whose only
+    /// review is a comment shows `Commented`.
+    #[test]
+    fn submitted_reviewers_decisive_state_outranks_later_comment() {
+        // alice: approved, then left a plain comment (still in her
+        // `latestReviews`). bob: comment-only.
+        let out = submitted_reviewers(
+            &[verdict("alice", "APPROVED")],
+            &[verdict("alice", "COMMENTED"), verdict("bob", "COMMENTED")],
+        );
         assert_eq!(
             out,
             vec![
@@ -5028,21 +5135,14 @@ mod tests {
         );
     }
 
-    /// A reviewer whose only review is `PENDING` (an unsubmitted draft)
+    /// A reviewer whose latest review is `PENDING` (an unsubmitted draft)
     /// or `DISMISSED` contributes nothing to the reviewers list.
     #[test]
     fn submitted_reviewers_skips_pending_and_dismissed() {
-        let review = |login: &str, state: &str| GqlReview {
-            author: Some(GqlAuthor {
-                login: login.into(),
-            }),
-            body: None,
-            state: state.into(),
-            submitted_at: Some(chrono::Utc::now()),
-            id: None,
-            created_at: None,
-        };
-        let out = submitted_reviewers(&[review("alice", "PENDING"), review("bob", "DISMISSED")]);
+        let out = submitted_reviewers(
+            &[],
+            &[verdict("alice", "PENDING"), verdict("bob", "DISMISSED")],
+        );
         assert!(out.is_empty());
     }
 
@@ -5187,6 +5287,10 @@ mod tests {
                     created_at: None,
                 }],
             },
+            latest_opinionated_reviews: GqlLatestReviews {
+                nodes: vec![verdict("alice", "APPROVED")],
+            },
+            latest_reviews: GqlLatestReviews::default(),
             closing_issues_references: Some(GqlClosingIssues {
                 nodes: vec![GqlClosingIssue {
                     number: 42,

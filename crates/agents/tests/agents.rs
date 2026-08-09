@@ -126,6 +126,16 @@ fn auth_failure_detection_accepts_provider_errors_and_rejects_chat_prose() {
             .detect_auth_failure(include_bytes!("fixtures/codex_auth_chat_negative.bin"))
             .is_none()
     );
+    // Prose that names the revoked-refresh-token wording but lacks the
+    // "access token could not be refreshed" anchor must NOT trip detection —
+    // pins the invariant that the loosened "sign in again" / "refresh token
+    // was revoked" clauses only fire behind the distinctive anchor, so a
+    // future "simplification" that drops the anchor is caught here.
+    assert!(
+        codex
+            .detect_auth_failure(include_bytes!("fixtures/codex_revoked_chat_negative.bin"))
+            .is_none()
+    );
 }
 
 #[test]

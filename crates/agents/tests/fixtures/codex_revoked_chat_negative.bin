@@ -1,0 +1,1 @@
+I broadened the Codex refresh-token detector: the "refresh token was revoked. Please log out and sign in again." wording now triggers in-place re-auth instead of a restart.

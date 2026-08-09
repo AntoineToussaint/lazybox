@@ -300,6 +300,164 @@ mod behavior {
     }
 
     #[test]
+    fn a_working_agent_blocked_on_a_child_is_not_reaped() {
+        // The core #978 fix: `pgrep -f claude` matches the agent, not the
+        // `cargo build` child it spawned and is blocking on. The agent itself
+        // burns almost no CPU across a tick, so summing only the agent pid
+        // would read as idle and reap the box mid-build. The script must sum
+        // the CPU delta over the agent's whole descendant tree.
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("busy_agent_child");
+        let marker = dir.join("idle-since");
+        let stopped = dir.join("STOPPED");
+        let stop_cmd = format!("touch {}", stopped.display());
+        let token = "lazybox-test-blocked-agent";
+        let env = [
+            ("LAZYBOX_IDLE_AGENT_PROCS", token),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
+        ];
+
+        // Agent (argv carries the watched token) sleeps while a *child* spins
+        // the CPU — the agent accrues no CPU of its own.
+        let mut agent = Command::new(&bash)
+            .args(["-c", "( while :; do :; done ) & sleep 30", token])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn blocked agent");
+
+        // Tick 1: newly-seen tree → active, clears the stale marker.
+        fs::write(&marker, "1").expect("stale marker");
+        run_idle(&bash, &marker, &env, None);
+        let stopped_1 = stopped.exists();
+        let cleared_1 = !marker.exists();
+
+        // Tick 2: the agent is idle but its child has burned CPU. The tree
+        // delta must keep the box alive across a second consecutive tick.
+        sleep(Duration::from_secs(3));
+        fs::write(&marker, "1").expect("stale marker");
+        run_idle(&bash, &marker, &env, None);
+        let stopped_2 = stopped.exists();
+        let cleared_2 = !marker.exists();
+
+        let _ = agent.kill();
+        let _ = agent.wait();
+
+        assert!(!stopped_1, "a live agent tree must not be stopped");
+        assert!(cleared_1, "a newly-seen agent tree clears the idle marker");
+        assert!(
+            !stopped_2,
+            "an agent blocked on a CPU-burning child stays active"
+        );
+        assert!(
+            cleared_2,
+            "the child's CPU delta since the last tick must clear the marker"
+        );
+    }
+
+    #[test]
+    fn an_idle_agent_tree_still_stops_after_the_window() {
+        // The dual of the fix: an agent whose whole tree is genuinely idle
+        // (agent + an idle child) must still be reaped once the window passes,
+        // so the descendant walk doesn't wedge the box permanently awake.
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("idle_agent_tree");
+        let marker = dir.join("idle-since");
+        let stopped = dir.join("STOPPED");
+        let stop_cmd = format!("touch {}", stopped.display());
+        let token = "lazybox-test-idle-tree-agent";
+        let env = [
+            ("LAZYBOX_IDLE_AGENT_PROCS", token),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
+        ];
+
+        // Agent and child both sleep — no CPU accrues anywhere in the tree.
+        let mut agent = Command::new(&bash)
+            .args(["-c", "( sleep 30 ) & sleep 30", token])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn idle agent");
+
+        // Tick 1: newly-seen → active, snapshots the tree's CPU.
+        fs::remove_file(&marker).ok();
+        run_idle(&bash, &marker, &env, None);
+        let stopped_1 = stopped.exists();
+
+        // Tick 2: no CPU delta, no new pids → idle → stamps a fresh marker.
+        run_idle(&bash, &marker, &env, None);
+        let stopped_2 = stopped.exists();
+        let stamped = marker.exists();
+
+        // Tick 3: backdate the marker past the window → the idle tree stops.
+        fs::write(&marker, "1").expect("backdate marker");
+        run_idle(&bash, &marker, &env, None);
+        let stopped_3 = stopped.exists();
+
+        let _ = agent.kill();
+        let _ = agent.wait();
+
+        assert!(!stopped_1, "tick 1 (newly-seen) must not stop");
+        assert!(!stopped_2, "tick 2 (fresh marker) must not stop");
+        assert!(stamped, "an idle tree must stamp the idle marker");
+        assert!(
+            stopped_3,
+            "a genuinely idle agent tree must still stop past the window"
+        );
+    }
+
+    #[test]
+    fn a_fresh_daemon_liveness_file_keeps_the_box_alive() {
+        // The daemon touches ~/.lazybox/run/active while it holds a live PTY,
+        // so a client attached over a relay (not inbound sshd) still counts as
+        // busy. A fresh mtime must refuse to stop even past the idle window; a
+        // stale one must proceed.
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("daemon_liveness");
+        let marker = dir.join("idle-since");
+        let stopped = dir.join("STOPPED");
+        let active = dir.join("active");
+        let stop_cmd = format!("touch {}", stopped.display());
+
+        // Fresh liveness file + a backdated marker: must NOT stop.
+        fs::write(&active, "1").expect("write active file");
+        fs::write(&marker, "1").expect("stale marker");
+        let env = [
+            ("LAZYBOX_IDLE_AGENT_PROCS", "lazybox-absent-agent"),
+            ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
+            ("LAZYBOX_IDLE_ACTIVE_FILE", active.to_str().unwrap()),
+            ("LAZYBOX_IDLE_ACTIVE_MAX_AGE", "600"),
+        ];
+        run_idle(&bash, &marker, &env, None);
+        assert!(
+            !stopped.exists(),
+            "a fresh daemon liveness file must keep the box alive"
+        );
+        assert!(
+            !marker.exists(),
+            "an active daemon must clear the idle marker"
+        );
+
+        // Same file, now treated as stale (max-age 1s, aged 2s): must stop.
+        fs::write(&active, "1").expect("rewrite active file");
+        sleep(Duration::from_secs(2));
+        fs::write(&marker, "1").expect("stale marker");
+        let env_stale = [
+            ("LAZYBOX_IDLE_AGENT_PROCS", "lazybox-absent-agent"),
+            ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
+            ("LAZYBOX_IDLE_ACTIVE_FILE", active.to_str().unwrap()),
+            ("LAZYBOX_IDLE_ACTIVE_MAX_AGE", "1"),
+        ];
+        run_idle(&bash, &marker, &env_stale, None);
+        assert!(
+            stopped.exists(),
+            "a stale daemon liveness file must not keep the box alive"
+        );
+    }
+
+    #[test]
     fn a_rejected_gcloud_stop_falls_back_to_shutdown() {
         let Ok(bash) = which_bash() else { return };
         let dir = scratch("stop_fallback");

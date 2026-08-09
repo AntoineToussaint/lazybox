@@ -4,10 +4,15 @@
 #
 # "Idle" means no one is connected and no agent is working:
 #   - no established inbound SSH connection (the IAP/`ssh -L` tunnel a client
-#     holds open shows up as an ESTABLISHED socket on the SSH port), and
-#   - no watched agent CLI (claude/codex/…) that has consumed CPU since the
-#     previous tick — so a detached agent still mid-task, even one mostly
-#     blocked on I/O between short bursts, keeps the box alive until it settles.
+#     holds open shows up as an ESTABLISHED socket on the SSH port),
+#   - no fresh daemon liveness file — the `lazybox server` touches
+#     `~/.lazybox/run/active` while it holds live PTYs, so a client attached
+#     over a relay (which does not present as inbound sshd) still counts, and
+#   - no watched agent CLI (claude/codex/…) whose process *tree* has consumed
+#     CPU since the previous tick — the delta is summed over each agent's whole
+#     descendant tree, so an agent blocked on a long `cargo build` / `pytest`
+#     child (the agent itself near-idle) keeps the box alive until the work
+#     settles, not just an agent burning CPU directly.
 #
 # Meant to run on a short timer (see lazybox-idle-stop.timer). Idle is measured
 # across ticks via a marker file rather than within one tick: the first idle
@@ -24,6 +29,13 @@ AGENT_CPU_SECS="${LAZYBOX_IDLE_AGENT_CPU_SECS:-2}"
 AGENT_PROCS="${LAZYBOX_IDLE_AGENT_PROCS:-claude codex cursor-agent aider}"
 MARKER="${LAZYBOX_IDLE_MARKER:-/run/lazybox/idle-since}"
 SNAP="${MARKER}.agent-cpu"
+# The `lazybox server` keeps this file's mtime fresh while it holds a live PTY.
+# On a root-run timer point it at the box user's home (the daemon writes under
+# *its* $HOME) via /etc/lazybox/idle-stop.env.
+ACTIVE_FILE="${LAZYBOX_IDLE_ACTIVE_FILE:-$HOME/.lazybox/run/active}"
+# Treat the daemon as active while the file is younger than this. Default is two
+# timer ticks (2 × 5min) so a single missed touch never reaps a live daemon.
+ACTIVE_MAX_AGE="${LAZYBOX_IDLE_ACTIVE_MAX_AGE:-600}"
 
 log() { echo "lazybox-idle-stop: $*" >&2; }
 
@@ -44,6 +56,37 @@ ssh_connections() {
   fi
 }
 
+# File mtime as a Unix timestamp. GNU coreutils (`stat -c`) first, BSD/macOS
+# (`stat -f`) second, so the behavioral tests can exercise this on a dev host.
+# Empty if the file is gone or neither form works.
+file_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
+
+# True while the lazybox daemon reports itself active: a liveness file it keeps
+# fresh (mtime younger than ACTIVE_MAX_AGE) while it holds a live PTY or an
+# attached client. A missing file means no daemon is installed — not busy. An
+# existing-but-unreadable mtime resolves to busy (fail-safe: never reap on doubt).
+daemon_active() {
+  [ -e "$ACTIVE_FILE" ] || return 1
+  local mtime now
+  mtime="$(file_mtime "$ACTIVE_FILE")"
+  [ -n "$mtime" ] || return 0
+  now="$(date +%s)"
+  [ "$(( now - mtime ))" -lt "$ACTIVE_MAX_AGE" ]
+}
+
+# Every pid in the process tree rooted at $1 (the pid itself first, then its
+# descendants depth-first). `pgrep -P` lists direct children; both it and the
+# `ps --ppid` alternative ship in procps on the box's Ubuntu.
+proc_tree() {
+  printf '%s\n' "$1"
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null || true); do
+    proc_tree "$child"
+  done
+}
+
 # CPU-seconds a pid has used over its lifetime, from the portable, *cumulative*
 # `ps -o time=` (unlike `%cpu`, which is a lifetime average). Handles the
 # `[D-]HH:MM:SS` / `MM:SS` shapes ps emits. Empty if the pid is gone.
@@ -59,29 +102,45 @@ cputime_secs() {
   }'
 }
 
-# True while any watched agent has consumed CPU since the previous tick. We
-# diff each process's cumulative CPU time against a snapshot from the last tick
-# rather than reading an instantaneous or lifetime-average %CPU: a light-but-
-# active agent (orchestrating `gh`, waiting on an API between short bursts)
-# reliably accrues CPU across a 5-minute window, so it is not mistaken for idle
-# and reaped mid-task — only a process that does no work for the whole window
-# stops counting. A newly-seen process counts as active for its first tick.
+# True while any watched agent's process *tree* has consumed CPU since the
+# previous tick. We diff each pid's cumulative CPU time against a snapshot from
+# the last tick rather than reading an instantaneous or lifetime-average %CPU: a
+# light-but-active agent (orchestrating `gh`, waiting on an API between short
+# bursts) reliably accrues CPU across a 5-minute window, so it is not mistaken
+# for idle and reaped mid-task.
+#
+# Crucially the delta is summed over each agent's *whole descendant tree*, not
+# the agent pid alone: `pgrep -f claude` matches the agent, but the `cargo
+# build` / `pytest` child it spawned and is blocking on is where the CPU goes.
+# Summing the tree keeps a box alive through a 40-minute build the agent kicked
+# off before its laptop closed. A newly-seen pid in a watched tree counts as
+# active for that tick (a just-spawned build is work, not idle).
 agent_busy() {
-  local name pid cur prev tmp active=1
+  local name pid tpid cur prev tmp active=1 sum=0 delta
   tmp="${SNAP}.tmp"
   : >"$tmp"
   for name in $AGENT_PROCS; do
     for pid in $(pgrep -f "$name" 2>/dev/null || true); do
-      cur="$(cputime_secs "$pid")"
-      [ -n "$cur" ] || continue
-      printf '%s %s\n' "$pid" "$cur" >>"$tmp"
-      prev="$(awk -v p="$pid" '$1 == p { print $2; exit }' "$SNAP" 2>/dev/null || true)"
-      if [ -z "$prev" ] || [ "$(( cur - prev ))" -ge "$AGENT_CPU_SECS" ]; then
-        active=0
-      fi
+      for tpid in $(proc_tree "$pid"); do
+        cur="$(cputime_secs "$tpid")"
+        [ -n "$cur" ] || continue
+        printf '%s %s\n' "$tpid" "$cur" >>"$tmp"
+        prev="$(awk -v p="$tpid" '$1 == p { print $2; exit }' "$SNAP" 2>/dev/null || true)"
+        if [ -z "$prev" ]; then
+          active=0
+        else
+          delta=$(( cur - prev ))
+          if [ "$delta" -gt 0 ]; then
+            sum=$(( sum + delta ))
+          fi
+        fi
+      done
     done
   done
   mv -f "$tmp" "$SNAP"
+  if [ "$sum" -ge "$AGENT_CPU_SECS" ]; then
+    active=0
+  fi
   return "$active"
 }
 
@@ -119,6 +178,10 @@ stop_box() {
 }
 
 if [ "$(ssh_connections)" -gt 0 ]; then
+  rm -f "$MARKER"
+  exit 0
+fi
+if daemon_active; then
   rm -f "$MARKER"
   exit 0
 fi

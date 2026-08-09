@@ -499,6 +499,15 @@ pub(crate) enum ActionConfirmTarget {
 #[derive(Debug, Clone)]
 pub(crate) enum BulkAgentStep {
     Spawn(lazybox_ipc::Command),
+    /// An `r`-spawn fan-out target: the spawn goes to the named remote
+    /// box's client (never the local `cmds` flush) and the workspace gets
+    /// the latched `⇅` tag — the bulk mirror of the single-target
+    /// `Action::SpawnAgentRemote` arm.
+    SpawnRemote {
+        remote: String,
+        key: lazybox_core::SessionKey,
+        cmd: lazybox_ipc::Command,
+    },
     Inject {
         terminal_id: lazybox_ipc::TerminalId,
         body: String,
@@ -1180,6 +1189,21 @@ pub struct Model<T: TerminalAdapter> {
     /// The remote an unqualified `r`-spawn targets — today the single
     /// `sandbox:` box. `None` when no box is configured.
     default_remote: Option<String>,
+    /// The r-spawn worker's notice stream (bring-up progress, dropped
+    /// commands), drained once per run-loop iteration into footer
+    /// flashes. `None` when no box is configured. Deliberately not the
+    /// remote client's *event* channel — a second daemon's events would
+    /// clobber the local inbox (see `remote_box`'s module doc).
+    remote_notice_rx:
+        Option<tokio::sync::mpsc::Receiver<lazybox_tui_core::remote::RemoteBoxNotice>>,
+    /// Workspaces optimistically tagged as running on a remote box
+    /// (`r`-spawn), by session key → box display name. The local daemon
+    /// knows nothing about the box, so its `Snapshot`/`WorkspaceUpserted`
+    /// payloads arrive with `remote: None` — this latch re-applies the tag
+    /// at ingest (the `merge_confirmed` pattern) so the `⇅` glyph survives
+    /// the next poll instead of flickering off within seconds. Rolled back
+    /// when the worker reports the spawn dropped.
+    remote_marks: std::collections::HashMap<lazybox_core::SessionKey, String>,
     /// True when this client is attached to a standalone daemon over a
     /// socket (`--connect`) rather than the in-process embedded daemon.
     /// The `Client` transport is deliberately opaque, so the entrypoint
@@ -1906,6 +1930,8 @@ impl<T: TerminalAdapter> Model<T> {
             client,
             remote_clients: std::collections::BTreeMap::new(),
             default_remote: None,
+            remote_notice_rx: None,
+            remote_marks: std::collections::HashMap::new(),
             event_backlog: helpers::BacklogMonitor::default(),
             remote: false,
             redraw: true,
@@ -2141,10 +2167,60 @@ impl<T: TerminalAdapter> Model<T> {
         self
     }
 
+    /// Attach the r-spawn worker's notice stream (see `remote_notice_rx`).
+    pub fn with_remote_notices(
+        mut self,
+        rx: tokio::sync::mpsc::Receiver<lazybox_tui_core::remote::RemoteBoxNotice>,
+    ) -> Self {
+        self.remote_notice_rx = Some(rx);
+        self
+    }
+
     /// The remote name an `r`-spawn targets when the chord doesn't name
     /// one — the configured default, else the first connected remote.
     pub(crate) fn default_remote(&self) -> Option<&str> {
         self.default_remote.as_deref()
+    }
+
+    /// Tag a workspace as running on a remote box: paint the sidebar row
+    /// now AND latch the tag so the next local-daemon snapshot (which
+    /// knows nothing about the box) can't wipe the `⇅` glyph — the
+    /// `merge_confirmed` pattern applied to `Workspace.remote`.
+    pub(crate) fn mark_remote_latched(&mut self, sk: lazybox_core::SessionKey, remote: String) {
+        self.sidebar.mark_remote(sk.clone(), remote.clone());
+        self.remote_marks.insert(sk, remote);
+    }
+
+    /// Roll a workspace's remote tag back — the worker reported the spawn
+    /// it advertised was dropped, so the glyph would lie.
+    pub(crate) fn unmark_remote(&mut self, sk: &lazybox_core::SessionKey) {
+        self.remote_marks.remove(sk);
+        self.sidebar.unmark_remote(sk);
+    }
+
+    /// Drain the r-spawn worker's notices into footer flashes — bring-up
+    /// progress as info, dropped commands as errors (rolling back the
+    /// affected row's optimistic `⇅` tag). Called once per run-loop
+    /// iteration; `try_recv` so it never blocks the UI thread.
+    pub fn tick_remote_notices(&mut self) {
+        let Some(rx) = self.remote_notice_rx.as_mut() else {
+            return;
+        };
+        let mut drained = Vec::new();
+        while let Ok(notice) = rx.try_recv() {
+            drained.push(notice);
+        }
+        for notice in drained {
+            match notice {
+                lazybox_tui_core::remote::RemoteBoxNotice::Info(msg) => self.flash_info(msg),
+                lazybox_tui_core::remote::RemoteBoxNotice::Dropped { session_key, error } => {
+                    if let Some(sk) = session_key {
+                        self.unmark_remote(&sk);
+                    }
+                    self.flash_error(error);
+                }
+            }
+        }
     }
 
     /// Forward a command to a named remote daemon's client. Mirrors

@@ -139,6 +139,11 @@ impl Sidebar {
         self.inner.mark_remote(sk, remote);
     }
 
+    /// Roll back [`Self::mark_remote`] when the advertised spawn dropped.
+    pub fn unmark_remote(&mut self, sk: &lazybox_core::SessionKey) {
+        self.inner.unmark_remote(sk);
+    }
+
     /// Forward `find_agent_terminal` — first running agent terminal
     /// for `(workspace_key, agent_id)` if any. The `w` flow uses
     /// this to decide between InjectPrompt (existing) and Spawn (new).

@@ -3,8 +3,11 @@
 //!
 //! `ensure`/`destroy` drive the Terraform module; `wake`/`sleep`/`status`/
 //! `connect` use the native `gcloud`/IAP path. A [`BoxHandle`] is persisted
-//! per worktree in the store, so `wake`/`sleep`/`connect` address the box
-//! `ensure` stamped without re-running Terraform. Configuration comes from
+//! in the store under the **shared box key** — one `sandbox:` block, one
+//! box, the same identity the TUI's `r`-spawn targets (`remote_box`) — so
+//! `wake`/`sleep`/`connect` address the box `ensure` stamped without
+//! re-running Terraform. `--worktree <key>` opts a command into a separate
+//! per-key box (the pre-#965 per-worktree model). Configuration comes from
 //! the `sandbox:` block (see [`SandboxConfig`]); every field is overridable
 //! per-command by a flag.
 
@@ -13,7 +16,9 @@ use std::process::Stdio;
 
 use lazybox_config::{Config, SandboxConfig};
 use lazybox_sandbox::gcp::GcpProvider;
-use lazybox_sandbox::{BoxHandle, Deployment, PowerState, SandboxProvider, SandboxSpec, persist};
+use lazybox_sandbox::{
+    BoxHandle, Deployment, PowerState, SandboxProvider, SandboxSpec, connect_box, persist,
+};
 use lazybox_store::Store;
 use tokio::process::Command;
 
@@ -22,6 +27,20 @@ use crate::take_value;
 /// Local socket the connect forward binds when nothing else is configured
 /// — the same default `contrib/box-lifecycle/connect.sh` uses.
 const DEFAULT_LOCAL_SOCKET: &str = "/tmp/lazybox.sock";
+
+/// The single shared box's stable identity — the store/tfstate key both
+/// this CLI **and** the TUI's `r`-spawn worker (`remote_box`) resolve by
+/// default, so the two can never silently provision two different boxes
+/// off one `sandbox:` block (#965).
+pub(crate) const SHARED_BOX_KEY: &str = "sandbox";
+
+/// The box's daemon socket, **relative** to the SSH login home: `ssh -L`
+/// resolves a relative remote socket against the box user's `$HOME`, so
+/// lazybox forwards to it without knowing that path. Matches
+/// `contrib/box-lifecycle/connect.sh` (`LAZYBOX_BOX_SOCK` default). The
+/// convention applies whenever `sandbox.remote_socket` is unset — the
+/// product path sets nothing.
+pub(crate) const BOX_DAEMON_SOCKET: &str = ".lazybox/run/daemon.sock";
 
 pub async fn sandbox_subcommand(args: &[String]) -> anyhow::Result<()> {
     // `init_tracing` redirects process stderr into the log file before any
@@ -55,37 +74,15 @@ async fn dispatch(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
-/// The per-worktree key a handle is stored under: `--worktree`, else the
-/// **git worktree root** (a box is stamped per worktree, #931). Resolving
-/// to the worktree root — not the raw cwd — means `ensure` from the repo
-/// root and `wake` from a subdirectory address the same box instead of two
-/// unrelated keys.
-async fn worktree_key(args: &mut Vec<String>) -> anyhow::Result<String> {
-    if let Some(k) = take_value(args, "--worktree") {
-        return Ok(k);
-    }
-    let cwd =
-        std::env::current_dir().map_err(|e| anyhow::anyhow!("resolve current directory: {e}"))?;
-    // Fall back to the cwd itself when not inside a git checkout.
-    let root = git_worktree_root(&cwd).await.unwrap_or(cwd);
-    Ok(root.display().to_string())
-}
-
-/// The `git rev-parse --show-toplevel` for `cwd`, or `None` when `cwd` is
-/// not inside a git worktree.
-async fn git_worktree_root(cwd: &std::path::Path) -> Option<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!root.is_empty()).then(|| PathBuf::from(root))
+/// The key a handle is stored under: `--worktree <key>` for an explicit
+/// per-key box, else the [`SHARED_BOX_KEY`]. Pre-#965 this defaulted to
+/// the git worktree root — a per-worktree box the TUI's `r`-spawn could
+/// never find (it has no worktree). One `sandbox:` block now means one
+/// box, addressed identically from the CLI and the TUI; a stale
+/// worktree-keyed handle is reachable by passing that path via
+/// `--worktree`.
+fn box_key(args: &mut Vec<String>) -> String {
+    take_value(args, "--worktree").unwrap_or_else(|| SHARED_BOX_KEY.to_string())
 }
 
 /// A stable 8-hex-digit digest of `s`, used to disambiguate box identities
@@ -127,6 +124,25 @@ fn instance_name(explicit: Option<String>, worktree: &str) -> String {
     // (hash) must fit, so bound the slug to 36.
     let slug: String = slug.chars().take(36).collect();
     format!("lazybox-sbx-{slug}-{}", short_hash(worktree))
+}
+
+/// What the derived instance name identifies. A per-`--worktree` box uses
+/// the worktree key itself; the shared box salts in the local username so
+/// two people pointing the same `sandbox.project` at the same deployment
+/// don't collide on one GCE instance name. Local state (store handle,
+/// tfstate) still keys off the plain [`SHARED_BOX_KEY`] — the salt only
+/// disambiguates the cloud-side name.
+fn name_salt(key: &str) -> String {
+    if key != SHARED_BOX_KEY {
+        return key.to_string();
+    }
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let user = lazybox_core::slug::slugify(&user);
+    if user.is_empty() {
+        SHARED_BOX_KEY.to_string()
+    } else {
+        format!("{SHARED_BOX_KEY}-{user}")
+    }
 }
 
 /// This box's isolated Terraform state file, under
@@ -182,8 +198,10 @@ pub(crate) fn resolve_provider(
         terraform_dir,
         state_file: state_file_for(worktree),
         user,
-        // Absent until connect needs it; connect validates it is set.
-        remote_socket: remote_socket.unwrap_or_default(),
+        // Unset → the conventional home-relative box daemon socket, the
+        // same one the box's systemd/tmux daemon binds — so `connect`
+        // works with zero socket config, exactly like the `r`-spawn.
+        remote_socket: remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
         local_socket,
     })
 }
@@ -203,7 +221,7 @@ pub(crate) fn resolve_spec(
     let zone = take_value(args, "--zone")
         .or_else(|| sc.zone.clone())
         .unwrap_or_else(|| "us-central1-a".to_string());
-    let name = instance_name(take_value(args, "--name"), worktree);
+    let name = instance_name(take_value(args, "--name"), &name_salt(worktree));
 
     let overlay_path = take_value(args, "--deployment")
         .map(PathBuf::from)
@@ -241,7 +259,7 @@ fn load_handle_or_bail(store: &dyn Store, worktree: &str) -> anyhow::Result<BoxH
 
 async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args).await?;
+    let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let spec = resolve_spec(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
@@ -263,7 +281,7 @@ async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args).await?;
+    let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
@@ -278,7 +296,7 @@ async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args).await?;
+    let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
@@ -293,7 +311,7 @@ async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args).await?;
+    let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
@@ -316,7 +334,7 @@ async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args).await?;
+    let worktree = box_key(args);
     let print_only = crate::take_flag(args, "--print");
     let ports = resolve_ports(take_value(args, "--ports"), &config.sandbox.ports)?;
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
@@ -326,11 +344,24 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
              (the absolute daemon-socket path on the box)"
         );
     }
+    let spec = resolve_spec(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
 
-    // connect() wakes a stopped box, so record it as running.
-    let tunnel = provider.connect(&handle, &ports).await?;
+    // The same ensure-if-missing → connect (wakes a stopped box) sequence
+    // the TUI's `r`-spawn runs — one engine, two callers (#965).
+    let existing = persist::load_handle(store.as_ref(), &worktree)?;
+    if existing.is_none() {
+        if let Some(parent) = provider.state_file.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!("create sandbox state dir {}: {e}", parent.display())
+            })?;
+        }
+        println!(
+            "No box stamped yet — provisioning {} (terraform apply)…",
+            spec.name
+        );
+    }
+    let (mut handle, tunnel) = connect_box(&provider, &spec, existing, &ports).await?;
     handle.observe(PowerState::Running, chrono::Utc::now());
     persist::save_handle(store.as_ref(), &worktree, &handle)?;
 
@@ -364,7 +395,7 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
 
 async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
-    let worktree = worktree_key(args).await?;
+    let worktree = box_key(args);
     // Destroying a box is irreversible, so it is gated behind an explicit
     // opt-in rather than run on a bare `destroy`.
     if !crate::take_flag(args, "--yes") {
@@ -386,6 +417,33 @@ async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn box_key_defaults_to_the_shared_key_and_honors_worktree() {
+        // One `sandbox:` block = one box: the CLI and the TUI r-spawn
+        // must resolve the same identity (#965); `--worktree` opts into
+        // a separate per-key box.
+        let mut args = vec![];
+        assert_eq!(box_key(&mut args), SHARED_BOX_KEY);
+        let mut args = vec!["--worktree".to_string(), "/repos/foo/wt".to_string()];
+        assert_eq!(box_key(&mut args), "/repos/foo/wt");
+    }
+
+    #[test]
+    fn name_salt_disambiguates_only_the_shared_key() {
+        // Per-worktree identities pass through untouched; the shared key
+        // picks up a per-user suffix so two people sharing one GCP
+        // project don't collide on a single instance name.
+        assert_eq!(name_salt("/repos/foo/wt"), "/repos/foo/wt");
+        let salted = name_salt(SHARED_BOX_KEY);
+        assert!(salted.starts_with(SHARED_BOX_KEY), "{salted}");
+        if std::env::var("USER").is_ok_and(|u| !lazybox_core::slug::slugify(&u).is_empty()) {
+            assert_ne!(
+                salted, SHARED_BOX_KEY,
+                "a resolvable user must salt the name"
+            );
+        }
+    }
 
     #[test]
     fn instance_name_prefers_explicit_then_slugs_the_worktree_basename() {

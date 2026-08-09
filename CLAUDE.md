@@ -269,7 +269,14 @@ into PR, `x z` long snooze, `x x` archive, `x c` close issue
 (as not-planned, upstream; issue workspaces only, confirmed first) —
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).
 `r` reply (works from the sidebar as well as the activity pane —
-it's a Workspace-section action). `v` multi-selects the cursor
+it's a Workspace-section action). With a `sandbox:` box configured
+(#965), `r` instead arms the **remote-spawn** leader — `r c` / `r x` /
+`r u` spawn that agent on the box (the worker ensures/wakes/connects it
+lazily; the row gets a latched `⇅ <box>` glyph, rolled back with an
+error notice if the spawn drops), a multi-select fans the spawn out
+behind the usual "start N agents?" confirm, and reply becomes the
+same-key double-tap `r r` (the leader stashes the shadowed direct
+action). `v` multi-selects the cursor
 workspace; `Shift-↑`/`Shift-↓` extend the selection from the cursor
 (spreadsheet-style contiguous sweep, #932) and `Shift-click` extends
 it to the clicked row (marks survive j/k; `Esc` clears). A live

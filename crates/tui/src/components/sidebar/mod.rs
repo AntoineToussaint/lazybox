@@ -587,6 +587,15 @@ impl Sidebar {
         }
     }
 
+    /// Roll back [`Self::mark_remote`] — the spawn the tag advertised was
+    /// dropped, so the `⇅` glyph would name a session that never existed.
+    pub fn unmark_remote(&mut self, sk: &SessionKey) {
+        if let Some(workspace) = self.workspaces.get_mut(sk) {
+            workspace.remote = None;
+            self.recompute_visible();
+        }
+    }
+
     /// Toggle whether merged + closed PRs surface in the Inbox view.
     /// Wired from `DisplayConfig::show_inactive_in_inbox`; idempotent
     /// — calling with the current value is a no-op so a YAML hot-

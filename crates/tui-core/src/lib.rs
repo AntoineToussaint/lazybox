@@ -32,6 +32,7 @@ pub mod notify;
 pub mod platform;
 pub mod pr_chat;
 pub mod prompts;
+pub mod remote;
 pub mod snippets;
 pub mod theme;
 pub mod tips;

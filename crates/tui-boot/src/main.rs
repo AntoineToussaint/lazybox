@@ -1239,7 +1239,10 @@ async fn run_embedded_realm(
     // when no `sandbox:` box is configured — the `r` chords stay hidden.
     // Must run here, in the async context: `setup` spawns a tokio task.
     let remote_box = remote_box::setup(
-        &lazybox_config::Config::load().unwrap_or_default().sandbox,
+        &lazybox_config::Config::load()
+            .map_err(|e| tracing::warn!("config load for the r-spawn box failed: {e:#}"))
+            .unwrap_or_default()
+            .sandbox,
         config.store.clone(),
     );
     let store_for_save = config.store.clone();
@@ -1255,7 +1258,9 @@ async fn run_embedded_realm(
         if let Some(rb) = remote_box {
             let mut clients = std::collections::BTreeMap::new();
             clients.insert(rb.name.clone(), rb.client);
-            model = model.with_remote_clients(clients, Some(rb.name));
+            model = model
+                .with_remote_clients(clients, Some(rb.name))
+                .with_remote_notices(rb.notices);
         }
         // Returning user with persisted setup → mount the polling
         // modal up front so the first poll cycle has UI feedback.

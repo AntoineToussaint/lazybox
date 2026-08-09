@@ -28,13 +28,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lazybox_config::SandboxConfig;
+use lazybox_core::SessionKey;
 use lazybox_ipc::{Client, Command, socket};
 use lazybox_sandbox::gcp::GcpProvider;
 use lazybox_sandbox::{SandboxSpec, connect_box, persist};
 use lazybox_store::Store;
+use lazybox_tui_core::remote::RemoteBoxNotice;
 use tokio::sync::mpsc;
 
-use crate::sandbox::{resolve_provider, resolve_spec};
+use crate::sandbox::{SHARED_BOX_KEY, resolve_provider, resolve_spec};
 
 /// Bound on the in-process command channel bridging the `Model` to this
 /// worker — the same order as the IPC transport's own channels.
@@ -49,29 +51,24 @@ const MAX_BRINGUP_ATTEMPTS: usize = 3;
 /// is inside `bring_up`; this only spaces out a flaky connect/handshake.
 const BRINGUP_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
-/// The single shared `r`-spawn box's stable identity — a fixed key, not a
-/// worktree, so the instance name and persisted handle are the same across
-/// every launch and every workspace that spawns onto it.
-const SHARED_BOX_KEY: &str = "sandbox";
-
-/// The box's daemon socket, **relative** to the SSH login home: `ssh -L`
-/// resolves a relative remote socket against the box user's `$HOME`, so
-/// lazybox forwards to it without knowing that path. Matches
-/// `contrib/box-lifecycle/connect.sh` (`LAZYBOX_BOX_SOCK` default). Used
-/// only when `sandbox.remote_socket` is unset — the product path sets
-/// nothing.
-const BOX_DAEMON_SOCKET: &str = ".lazybox/run/daemon.sock";
-
 /// How long to wait for the forward to bind its local socket before giving
 /// up on this bring-up. Covers SSH auth + IAP handshake.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Bound on the worker→UI notice channel. Notices are rare (bring-up
+/// progress, dropped commands); overflow drops the notice, never blocks
+/// the worker.
+const NOTICE_CAPACITY: usize = 32;
+
 /// A brought-up remote box the realm `Model` can address: the display name
-/// (the deployment name → the sidebar's `⇅ <name>` glyph) and the client
-/// end of the pair to the worker.
+/// (the deployment name → the sidebar's `⇅ <name>` glyph), the client end
+/// of the pair to the worker, and the worker's notice stream (bring-up
+/// progress + dropped-command rollbacks) the run loop drains into footer
+/// flashes.
 pub struct RemoteBox {
     pub name: String,
     pub client: Client,
+    pub notices: mpsc::Receiver<RemoteBoxNotice>,
 }
 
 /// The per-box local Unix socket the forward binds — the endpoint the
@@ -88,11 +85,11 @@ fn local_socket() -> PathBuf {
 /// socket when `sandbox.remote_socket` is unset (the product path leaves it
 /// unset).
 fn build_provider(sandbox: &SandboxConfig) -> anyhow::Result<GcpProvider> {
+    // `resolve_provider` already defaults `remote_socket` to the
+    // conventional home-relative box daemon socket; only the local socket
+    // is overridden to the dedicated per-box path.
     let mut provider = resolve_provider(sandbox, &mut Vec::new(), SHARED_BOX_KEY)?;
     provider.local_socket = local_socket();
-    if provider.remote_socket.is_empty() {
-        provider.remote_socket = BOX_DAEMON_SOCKET.to_string();
-    }
     Ok(provider)
 }
 
@@ -121,11 +118,32 @@ pub fn setup(sandbox: &SandboxConfig, store: Arc<dyn Store>) -> Option<RemoteBox
     // doc), so the box→`Model` render is a follow-up. `evt_rx` exists
     // only because the `Client` constructor needs one; dropping the
     // sender leaves it permanently empty, which is exactly right.
+    let ports = forward_ports(sandbox, &spec);
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
     let (_box_events_tx, evt_rx) = mpsc::channel(CHANNEL_CAPACITY);
+    let (notice_tx, notices) = mpsc::channel(NOTICE_CAPACITY);
     let client = Client::from_bounded_channels(cmd_tx, evt_rx);
-    tokio::spawn(run(provider, spec, store, cmd_rx));
-    Some(RemoteBox { name, client })
+    tokio::spawn(run(provider, spec, store, ports, cmd_rx, notice_tx));
+    Some(RemoteBox {
+        name,
+        client,
+        notices,
+    })
+}
+
+/// The workspace a dropped command was going to spawn into, when it was a
+/// spawn — the UI rolls that row's optimistic `⇅` tag back.
+fn spawn_session_key(cmd: &Command) -> Option<SessionKey> {
+    match cmd {
+        Command::Spawn { session_key, .. } => Some(session_key.clone()),
+        _ => None,
+    }
+}
+
+/// Fire-and-forget a worker→UI notice. A full or closed channel drops the
+/// notice — the UI being gone (or flooded) must never wedge the worker.
+fn notify(tx: &mpsc::Sender<RemoteBoxNotice>, notice: RemoteBoxNotice) {
+    let _ = tx.try_send(notice);
 }
 
 /// Bring the box up on demand: reuse a stamped handle (skip the Terraform
@@ -136,6 +154,7 @@ async fn bring_up(
     provider: &GcpProvider,
     spec: &SandboxSpec,
     store: &dyn Store,
+    ports: &[u16],
 ) -> anyhow::Result<(Client, tokio::task::JoinHandle<()>)> {
     if let Some(parent) = provider.state_file.parent() {
         std::fs::create_dir_all(parent)?;
@@ -147,7 +166,7 @@ async fn bring_up(
     if existing.is_none() {
         tracing::info!("provisioning r-spawn box (terraform apply)…");
     }
-    let (mut handle, tunnel) = connect_box(provider, spec, existing, &spec_ports(spec)).await?;
+    let (mut handle, tunnel) = connect_box(provider, spec, existing, ports).await?;
     handle.observe(lazybox_sandbox::PowerState::Running, chrono::Utc::now());
     persist::save_handle(store, SHARED_BOX_KEY, &handle)?;
 
@@ -201,10 +220,18 @@ where
     Err(last_err.expect("attempts >= 1 always records an error on the failure path"))
 }
 
-/// Workload ports the box forwards alongside the daemon socket — the
-/// deployment's declared ports (a dev server the user may want to reach).
-fn spec_ports(spec: &SandboxSpec) -> Vec<u16> {
-    spec.deployment.config.workload_ports.clone()
+/// Workload ports the box forwards alongside the daemon socket: the union
+/// of `sandbox.ports` (what the CLI's `connect` forwards) and the
+/// deployment's declared `workload_ports` — so the `r`-spawn path never
+/// silently ignores a configured port the CLI would honor.
+fn forward_ports(sandbox: &SandboxConfig, spec: &SandboxSpec) -> Vec<u16> {
+    let mut ports = sandbox.ports.clone();
+    for p in &spec.deployment.config.workload_ports {
+        if !ports.contains(p) {
+            ports.push(*p);
+        }
+    }
+    ports
 }
 
 /// Abort a forward supervisor. Dropping the `JoinHandle` only **detaches**
@@ -237,8 +264,11 @@ async fn run(
     provider: GcpProvider,
     spec: SandboxSpec,
     store: Arc<dyn Store>,
+    ports: Vec<u16>,
     mut cmd_rx: mpsc::Receiver<Command>,
+    notice_tx: mpsc::Sender<RemoteBoxNotice>,
 ) {
+    let name = spec.deployment.config.name.clone();
     let mut connected: Option<(Client, tokio::task::JoinHandle<()>)> = None;
     loop {
         if let Some((mut box_client, supervisor)) = connected.take() {
@@ -256,6 +286,20 @@ async fn run(
                 Step::Forward(cmd) => {
                     if let Err(e) = box_client.send(cmd) {
                         tracing::warn!("r-spawn: send to box failed: {e}");
+                        // `TrySendError` hands the command back — name the
+                        // workspace whose spawn just died so the UI can
+                        // roll its `⇅` tag back.
+                        let (mpsc::error::TrySendError::Full(cmd)
+                        | mpsc::error::TrySendError::Closed(cmd)) = e;
+                        notify(
+                            &notice_tx,
+                            RemoteBoxNotice::Dropped {
+                                session_key: spawn_session_key(&cmd),
+                                error: format!(
+                                    "⇅ {name}: command to box dropped (link busy/closed)"
+                                ),
+                            },
+                        );
                     }
                     connected = Some((box_client, supervisor));
                 }
@@ -272,18 +316,58 @@ async fn run(
             let Some(cmd) = cmd_rx.recv().await else {
                 break;
             };
+            let stamped = persist::load_handle(store.as_ref(), SHARED_BOX_KEY)
+                .ok()
+                .flatten()
+                .is_some();
+            notify(
+                &notice_tx,
+                RemoteBoxNotice::Info(if stamped {
+                    format!("⇅ {name}: waking box…")
+                } else {
+                    format!(
+                        "⇅ {name}: provisioning box (terraform apply — first use can take minutes)…"
+                    )
+                }),
+            );
             match with_retries(MAX_BRINGUP_ATTEMPTS, BRINGUP_RETRY_BACKOFF, || {
-                bring_up(&provider, &spec, store.as_ref())
+                bring_up(&provider, &spec, store.as_ref(), &ports)
             })
             .await
             {
                 Ok((client, supervisor)) => {
+                    notify(
+                        &notice_tx,
+                        RemoteBoxNotice::Info(format!("⇅ {name}: box connected")),
+                    );
                     if let Err(e) = client.send(cmd) {
                         tracing::warn!("r-spawn: send to box failed: {e}");
+                        let (mpsc::error::TrySendError::Full(cmd)
+                        | mpsc::error::TrySendError::Closed(cmd)) = e;
+                        notify(
+                            &notice_tx,
+                            RemoteBoxNotice::Dropped {
+                                session_key: spawn_session_key(&cmd),
+                                error: format!(
+                                    "⇅ {name}: command to box dropped (link busy/closed)"
+                                ),
+                            },
+                        );
                     }
                     connected = Some((client, supervisor));
                 }
-                Err(e) => tracing::warn!("r-spawn box bring-up failed after retries: {e:#}"),
+                Err(e) => {
+                    tracing::warn!("r-spawn box bring-up failed after retries: {e:#}");
+                    notify(
+                        &notice_tx,
+                        RemoteBoxNotice::Dropped {
+                            session_key: spawn_session_key(&cmd),
+                            error: format!(
+                                "⇅ {name}: box bring-up failed after {MAX_BRINGUP_ATTEMPTS} attempts — spawn dropped ({e:#})"
+                            ),
+                        },
+                    );
+                }
             }
         }
     }
@@ -308,7 +392,7 @@ mod tests {
             p.local_socket
                 .starts_with(lazybox_core::paths::state_root())
         );
-        assert_eq!(p.remote_socket, BOX_DAEMON_SOCKET);
+        assert_eq!(p.remote_socket, crate::sandbox::BOX_DAEMON_SOCKET);
         // Isolated state, keyed by the shared-box key, under the state root.
         assert!(p.state_file.starts_with(lazybox_core::paths::state_root()));
         assert!(p.state_file.ends_with("terraform.tfstate"));
@@ -324,6 +408,27 @@ mod tests {
             build_provider(&sc).unwrap().remote_socket,
             "/custom/daemon.sock"
         );
+    }
+
+    #[test]
+    fn forward_ports_unions_config_ports_with_the_deployment() {
+        // The CLI's `connect` honors `sandbox.ports`; the r-spawn path
+        // must not silently ignore them (audit) — it forwards the union,
+        // deduplicated.
+        let sc = SandboxConfig {
+            project: Some("p".into()),
+            ports: vec![8082, 3000],
+            ..SandboxConfig::default()
+        };
+        let spec = build_spec(&sc).unwrap();
+        let ports = forward_ports(&sc, &spec);
+        assert!(ports.contains(&8082), "config-only port kept: {ports:?}");
+        for p in &spec.deployment.config.workload_ports {
+            assert!(ports.contains(p), "deployment port {p} kept: {ports:?}");
+        }
+        let mut deduped = ports.clone();
+        deduped.dedup();
+        assert_eq!(ports, deduped, "no duplicate forwards");
     }
 
     #[tokio::test]

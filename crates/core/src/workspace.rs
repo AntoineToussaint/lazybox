@@ -319,6 +319,14 @@ pub struct Workspace {
     /// Serde-defaulted so pre-#499 records read back as `Unresolved`.
     #[serde(default)]
     pub cleanup_prompt: CleanupPrompt,
+    /// Name of the remote box this workspace's sessions were spawned on
+    /// via an `r`-prefixed chord, or `None` for a local workspace. Purely
+    /// a lazybox concept — lazybox owns the box lifecycle from the
+    /// `sandbox:` config (ensure/wake/connect on `r`-spawn). Drives the
+    /// sidebar's remote indicator. Serde-defaulted so pre-existing records
+    /// read back as local.
+    #[serde(default)]
+    pub remote: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -352,6 +360,7 @@ impl Workspace {
             notes: String::new(),
             sent_snippets: Vec::new(),
             cleanup_prompt: CleanupPrompt::default(),
+            remote: None,
             created_at: now,
             last_viewed_at: None,
         }
@@ -781,6 +790,9 @@ impl Workspace {
             // the source must not silently suppress the destination's own
             // merged/closed cleanup prompt. The destination keeps its own.
             cleanup_prompt: _,
+            // Remote placement belongs to the destination row's own
+            // identity — a transfer never inherits the source's box.
+            remote: _,
             // ── user-owned state: one explicit merge rule each ──
             snoozed_until,
             auto_merge_on_green,

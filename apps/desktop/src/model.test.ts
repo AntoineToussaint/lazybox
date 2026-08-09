@@ -75,6 +75,7 @@ function workspace(key: string, pr: Task | null): Workspace {
     project_key: null,
     local: false,
     linked_checkout: null,
+    remote: null,
     name: key,
     branch: "main",
     sessions: [],

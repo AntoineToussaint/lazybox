@@ -365,6 +365,7 @@
     "fix-ci"
   ],
   "cleanup_prompt": "declined",
+  "remote": "obin",
   "created_at": "2026-03-14T08:15:00Z",
   "last_viewed_at": "2026-03-14T13:00:00Z"
 }

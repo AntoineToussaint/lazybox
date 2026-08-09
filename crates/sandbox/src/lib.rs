@@ -23,6 +23,7 @@
 //! (`start`/`stop`/`status`/`connect`) use the native SDK/CLI — never
 //! Terraform — so waking a box is a `gcloud instances start`, not a plan.
 
+mod connect;
 mod deployment;
 mod handle;
 mod provider;
@@ -33,6 +34,7 @@ pub mod persist;
 #[cfg(feature = "gcp")]
 pub mod gcp;
 
+pub use connect::connect_box;
 pub use deployment::{Deployment, DeploymentConfig, merge_yaml};
 pub use handle::{BoxHandle, BoxStatus, PowerState};
 pub use provider::{SandboxError, SandboxProvider, Tunnel};

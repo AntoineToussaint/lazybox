@@ -1,7 +1,7 @@
 //! Lazy `r`-spawn box lifecycle — lazybox owns the box end to end.
 //!
 //! The realm `Model` addresses a remote box through an ordinary in-process
-//! [`Client`] (from [`channel::pair`]) whose far end is **this worker**,
+//! [`Client`] (from [`lazybox_ipc::channel::pair`]) whose far end is **this worker**,
 //! not a live daemon. So a `sandbox:` box being configured is enough to
 //! light up the `r <agent>` chords (the pair exists), while a normal launch
 //! never touches GCP: the box stays asleep until the first `r`-spawn.

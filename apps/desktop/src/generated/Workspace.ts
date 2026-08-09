@@ -146,4 +146,13 @@ sent_snippets: Array<string>,
  * Durable answer to the merged/closed cleanup prompt (issue #499).
  * Serde-defaulted so pre-#499 records read back as `Unresolved`.
  */
-cleanup_prompt: CleanupPrompt, created_at: string, last_viewed_at: string | null, };
+cleanup_prompt: CleanupPrompt,
+/**
+ * Name of the remote box this workspace's sessions were spawned on
+ * via an `r`-prefixed chord, or `None` for a local workspace. Purely
+ * a lazybox concept — lazybox owns the box lifecycle from the
+ * `sandbox:` config (ensure/wake/connect on `r`-spawn). Drives the
+ * sidebar's remote indicator. Serde-defaulted so pre-existing records
+ * read back as local.
+ */
+remote: string | null, created_at: string, last_viewed_at: string | null, };

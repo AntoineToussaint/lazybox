@@ -318,12 +318,12 @@ pub struct Workspace {
     /// Serde-defaulted so pre-#499 records read back as `Unresolved`.
     #[serde(default)]
     pub cleanup_prompt: CleanupPrompt,
-    /// Name of the remote daemon ("box") this workspace's sessions were
-    /// spawned on via an `r`-prefixed chord, or `None` for a local
-    /// workspace. Purely a lazybox concept — a box is just a named remote
-    /// daemon endpoint (see `config.remotes`). Drives the sidebar's
-    /// remote indicator. Serde-defaulted so pre-existing records read
-    /// back as local.
+    /// Name of the remote box this workspace's sessions were spawned on
+    /// via an `r`-prefixed chord, or `None` for a local workspace. Purely
+    /// a lazybox concept — lazybox owns the box lifecycle from the
+    /// `sandbox:` config (ensure/wake/connect on `r`-spawn). Drives the
+    /// sidebar's remote indicator. Serde-defaulted so pre-existing records
+    /// read back as local.
     #[serde(default)]
     pub remote: Option<String>,
     pub created_at: DateTime<Utc>,

@@ -132,8 +132,8 @@ impl Sidebar {
         self.inner.mark_workspace_merged(key);
     }
 
-    /// Optimistic local update: tag a workspace's row as running on a remote
-    /// daemon (`config.remotes.<name>`) so the sidebar's `⇅` indicator shows
+    /// Optimistic local update: tag a workspace's row as running on the
+    /// remote box (the `sandbox:` box) so the sidebar's `⇅` indicator shows
     /// immediately after an `r`-prefix spawn, before the local snapshot syncs.
     pub fn mark_remote(&mut self, sk: lazybox_core::SessionKey, remote: String) {
         self.inner.mark_remote(sk, remote);

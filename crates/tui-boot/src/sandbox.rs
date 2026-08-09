@@ -133,7 +133,7 @@ fn instance_name(explicit: Option<String>, worktree: &str) -> String {
 /// `~/.lazybox/v2/sandbox/<hash>/terraform.tfstate` — one per worktree key,
 /// out of the shared module source tree, so two worktrees never share
 /// state.
-fn state_file_for(worktree: &str) -> PathBuf {
+pub(crate) fn state_file_for(worktree: &str) -> PathBuf {
     lazybox_core::paths::state_root()
         .join("sandbox")
         .join(short_hash(worktree))
@@ -157,7 +157,7 @@ fn resolve_ports(raw: Option<String>, cfg: &[u16]) -> anyhow::Result<Vec<u16>> {
 
 /// Build the provider from config + flags, with this worktree's isolated
 /// Terraform state. Only `gcp` is implemented.
-fn resolve_provider(
+pub(crate) fn resolve_provider(
     sc: &SandboxConfig,
     args: &mut Vec<String>,
     worktree: &str,
@@ -189,7 +189,7 @@ fn resolve_provider(
 }
 
 /// Build the full spec for `ensure` from config + flags.
-fn resolve_spec(
+pub(crate) fn resolve_spec(
     sc: &SandboxConfig,
     args: &mut Vec<String>,
     worktree: &str,

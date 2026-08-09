@@ -899,17 +899,17 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             // Remote-spawn variant (`r c` / `r x` / `r u`): the same
-            // agent spawn as `a c`, but routed to a configured remote
-            // daemon's client (Design A) instead of `self.client`, and
-            // the workspace gets a sidebar remote indicator. The chord
-            // doesn't name a remote, so we target the resolved default
-            // (config-flagged, else first connected). The command is sent
-            // directly to the remote client here rather than returned in
-            // `cmds` — those flush to the LOCAL daemon.
+            // agent spawn as `a c`, but routed to the remote box's client
+            // (Design A) instead of `self.client`, and the workspace gets
+            // a sidebar remote indicator. The box's client is an in-process
+            // pipe to a worker that ensures/wakes/connects the box on this
+            // first command. The command is sent directly to the remote
+            // client here rather than returned in `cmds` — those flush to
+            // the LOCAL daemon.
             Action::SpawnAgentRemote(agent_id) => {
                 let Some(remote) = self.default_remote().map(str::to_string) else {
                     self.flash_error(
-                        "no remote daemon configured — add a `remotes:` entry to spawn on a box",
+                        "no remote box configured — add a `sandbox:` block to spawn on a box",
                     );
                     return cmds;
                 };

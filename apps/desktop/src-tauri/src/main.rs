@@ -2624,6 +2624,7 @@ mod tests {
             closed_at: None,
             labels: vec![],
             reviewers: vec![],
+            reviews: vec![],
             assignees: vec![],
             author: String::new(),
             auto_merge_enabled: false,

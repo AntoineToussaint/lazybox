@@ -41,6 +41,24 @@ pub fn delete_handle(store: &dyn Store, worktree: &str) -> Result<(), SandboxErr
     Ok(())
 }
 
+/// Every key a box handle is stamped under (the `<worktree>` part of
+/// `box:<worktree>`). Used to surface **legacy** handles when the
+/// shared-key lookup misses: pre-#965 builds keyed boxes per git
+/// worktree, and those instances keep existing (and billing) even though
+/// the new default key can't see them. A backend without prefix listing
+/// yields an empty list — the caller degrades to no hint, never an error.
+pub fn list_handle_keys(store: &dyn Store) -> Result<Vec<String>, SandboxError> {
+    const PREFIX: &str = "box:";
+    match store.list_kv_prefix(PREFIX) {
+        Ok(pairs) => Ok(pairs
+            .into_iter()
+            .filter_map(|(k, _)| k.strip_prefix(PREFIX).map(str::to_string))
+            .collect()),
+        Err(lazybox_store::StoreError::Unsupported(_)) => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +93,20 @@ mod tests {
         assert_eq!(load_handle(&store, "wt-1").unwrap(), None);
         // Idempotent delete.
         delete_handle(&store, "wt-1").unwrap();
+    }
+
+    #[test]
+    fn list_handle_keys_names_every_stamped_key() {
+        let store = MemoryStore::new();
+        assert!(list_handle_keys(&store).unwrap().is_empty());
+
+        save_handle(&store, "/repos/foo/wt", &handle()).unwrap();
+        save_handle(&store, "sandbox", &handle()).unwrap();
+        let mut keys = list_handle_keys(&store).unwrap();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["/repos/foo/wt".to_string(), "sandbox".to_string()]
+        );
     }
 }

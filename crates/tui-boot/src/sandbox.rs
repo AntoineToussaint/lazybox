@@ -149,7 +149,7 @@ fn name_salt(key: &str) -> String {
 /// `~/.lazybox/v2/sandbox/<hash>/terraform.tfstate` — one per worktree key,
 /// out of the shared module source tree, so two worktrees never share
 /// state.
-pub(crate) fn state_file_for(worktree: &str) -> PathBuf {
+fn state_file_for(worktree: &str) -> PathBuf {
     lazybox_core::paths::state_root()
         .join("sandbox")
         .join(short_hash(worktree))
@@ -249,12 +249,42 @@ fn open_store() -> anyhow::Result<std::sync::Arc<dyn Store>> {
 }
 
 fn load_handle_or_bail(store: &dyn Store, worktree: &str) -> anyhow::Result<BoxHandle> {
-    persist::load_handle(store, worktree)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no box for worktree {worktree:?}; run `lazybox sandbox ensure` first \
+    match persist::load_handle(store, worktree)? {
+        Some(handle) => Ok(handle),
+        None => anyhow::bail!(missing_handle_message(store, worktree)),
+    }
+}
+
+/// The "no box stamped" error, naming any handle stamped under a
+/// *different* key. Pre-#965 builds keyed boxes per git worktree; after
+/// the shared-key unification those instances still exist (and bill)
+/// but the default lookup can't see them — silence here is how a user
+/// ends up paying for an orphaned box, so every miss lists what IS
+/// stamped and how to address it.
+fn missing_handle_message(store: &dyn Store, worktree: &str) -> String {
+    let others: Vec<String> = persist::list_handle_keys(store)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|k| k != worktree)
+        .collect();
+    if others.is_empty() {
+        format!(
+            "no box stamped for {worktree:?}; run `lazybox sandbox ensure` first \
              (or pass --worktree)"
         )
-    })
+    } else {
+        format!(
+            "no box stamped for {worktree:?}, but existing box handle(s) found under: \
+             {} — address one with `--worktree <key>` (earlier builds keyed boxes per \
+             git worktree; those instances keep running and billing until slept or \
+             destroyed)",
+            others
+                .iter()
+                .map(|k| format!("{k:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 }
 
 async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
@@ -336,6 +366,13 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
     let worktree = box_key(args);
     let print_only = crate::take_flag(args, "--print");
+    // Provisioning is opt-in for `connect`: creating cloud infrastructure
+    // costs real money, and a missing handle is at least as likely to mean
+    // "wrong key" (e.g. a legacy per-worktree box) as "no box yet". The
+    // TUI's `r`-spawn keeps its automatic ensure — that's the deliberate
+    // invisible-lifecycle product path (#965); a CLI verb named `connect`
+    // is not where a terraform apply should be a surprise.
+    let provision = crate::take_flag(args, "--provision");
     let ports = resolve_ports(take_value(args, "--ports"), &config.sandbox.ports)?;
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     if provider.remote_socket.is_empty() {
@@ -344,24 +381,33 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
              (the absolute daemon-socket path on the box)"
         );
     }
-    let spec = resolve_spec(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
 
-    // The same ensure-if-missing → connect (wakes a stopped box) sequence
-    // the TUI's `r`-spawn runs — one engine, two callers (#965).
     let existing = persist::load_handle(store.as_ref(), &worktree)?;
-    if existing.is_none() {
-        if let Some(parent) = provider.state_file.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                anyhow::anyhow!("create sandbox state dir {}: {e}", parent.display())
-            })?;
+    let (mut handle, tunnel) = match existing {
+        // Stamped box: wake-if-stopped + tunnel. No spec needed, so a
+        // config that dropped `project` after `ensure` still connects.
+        Some(handle) => {
+            let tunnel = provider.connect(&handle, &ports).await?;
+            (handle, tunnel)
         }
-        println!(
-            "No box stamped yet — provisioning {} (terraform apply)…",
-            spec.name
-        );
-    }
-    let (mut handle, tunnel) = connect_box(&provider, &spec, existing, &ports).await?;
+        None if provision => {
+            // The same ensure → connect sequence the TUI's `r`-spawn
+            // runs — one engine, two callers (#965).
+            let spec = resolve_spec(&config.sandbox, args, &worktree)?;
+            if let Some(parent) = provider.state_file.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    anyhow::anyhow!("create sandbox state dir {}: {e}", parent.display())
+                })?;
+            }
+            println!("Provisioning {} (terraform apply)…", spec.name);
+            connect_box(&provider, &spec, None, &ports).await?
+        }
+        None => anyhow::bail!(
+            "{} — or rerun with --provision to create it now",
+            missing_handle_message(store.as_ref(), &worktree)
+        ),
+    };
     handle.observe(PowerState::Running, chrono::Utc::now());
     persist::save_handle(store.as_ref(), &worktree, &handle)?;
 
@@ -417,6 +463,31 @@ async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_handle_message_names_legacy_handles() {
+        // A pre-#965 build stamped the box under a git-worktree path; the
+        // shared-key miss must surface it (that instance keeps billing)
+        // instead of steering straight to a duplicate `ensure`.
+        let store = lazybox_store::MemoryStore::new();
+        let plain = missing_handle_message(&store, SHARED_BOX_KEY);
+        assert!(plain.contains("ensure"), "{plain}");
+        assert!(!plain.contains("existing box handle"), "{plain}");
+
+        let legacy = lazybox_sandbox::BoxHandle {
+            provider: "gcp".into(),
+            id: "lazybox-sbx-old".into(),
+            region: "us-central1".into(),
+            zone: "us-central1-a".into(),
+            project: "proj".into(),
+            power_state: lazybox_sandbox::PowerState::Running,
+            last_active: None,
+        };
+        persist::save_handle(&store, "/repos/foo/wt", &legacy).unwrap();
+        let hinted = missing_handle_message(&store, SHARED_BOX_KEY);
+        assert!(hinted.contains("/repos/foo/wt"), "{hinted}");
+        assert!(hinted.contains("--worktree"), "{hinted}");
+    }
 
     #[test]
     fn box_key_defaults_to_the_shared_key_and_honors_worktree() {

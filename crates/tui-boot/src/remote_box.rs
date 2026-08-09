@@ -320,6 +320,27 @@ async fn run(
                 .ok()
                 .flatten()
                 .is_some();
+            if !stamped {
+                // About to provision. If a pre-#965 build stamped a box
+                // under a per-worktree key, that instance still exists
+                // (and bills) — say so instead of silently paying for two.
+                let legacy: Vec<String> = persist::list_handle_keys(store.as_ref())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|k| k != SHARED_BOX_KEY)
+                    .collect();
+                if !legacy.is_empty() {
+                    notify(
+                        &notice_tx,
+                        RemoteBoxNotice::Info(format!(
+                            "⇅ {name}: found older box handle(s) under {} — provisioning a \
+                             new shared box; manage the old one with `lazybox sandbox \
+                             --worktree <key>`",
+                            legacy.join(", ")
+                        )),
+                    );
+                }
+            }
             notify(
                 &notice_tx,
                 RemoteBoxNotice::Info(if stamped {

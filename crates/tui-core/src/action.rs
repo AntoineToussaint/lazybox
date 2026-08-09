@@ -1006,10 +1006,13 @@ impl ActionDef {
             },
             ActionKind::SpawnAgentRemote => &Self {
                 kind: ActionKind::SpawnAgentRemote,
-                // Per-agent binding generated in `catalog()` (`r c` /
-                // `r x` / `r u`), only when a remote is configured; this
-                // placeholder gives the help panel a row with the literal
-                // multi-agent form.
+                // Never emitted as a row itself — `catalog_full` drops
+                // this placeholder and generates one row per enabled
+                // agent (`r c` / `r x` / `r u`), only when a remote is
+                // configured. Its `section`/`describe` seed those rows;
+                // `default_keys` is display-only (deliberately not a
+                // parseable chord — the generated rows carry the real
+                // bindings, and the leader key falls back to `r`).
                 default_keys: "r c / r x / r u",
                 label: "spawn agent on remote",
                 describe: "Open a new agent terminal on a remote box instead of the local daemon — the `r`-prefixed chords. lazybox ensures/wakes/connects the box automatically; the session runs on it and the sidebar row shows a remote indicator. Requires a `sandbox:` block in the config.",

@@ -103,6 +103,7 @@ fn maximal_pr_task() -> Task {
         is_in_merge_queue: true,
         mergeable: Mergeable::Conflicting,
         is_behind_base: true,
+        merge_blocked: false,
         node_id: Some("PR_kwDOtest001".into()),
         needs_reply: true,
         last_commenter: Some("carol".into()),

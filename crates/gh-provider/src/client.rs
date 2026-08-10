@@ -803,6 +803,49 @@ fn mutation_provider_error(err: GhError) -> lazybox_core::ProviderError {
     }
 }
 
+/// Map a GitHub branch-rule `type` (repository rulesets + classic
+/// protection, as reported by `GET /repos/{o}/{r}/rules/branches/{b}`)
+/// to a short human name for the merge-blocked notice (issue #998).
+///
+/// `None` for rule types that constrain how refs are created / named /
+/// deleted rather than whether a PR can merge — naming those in a
+/// "can't merge" notice would be noise. Unknown types fall through to a
+/// prettified form of the raw type so a new merge-relevant rule still
+/// gets surfaced rather than silently dropped.
+fn humanize_rule(kind: &str, params: Option<&serde_json::Value>) -> Option<String> {
+    match kind {
+        "creation"
+        | "deletion"
+        | "update"
+        | "non_fast_forward"
+        | "branch_name_pattern"
+        | "tag_name_pattern"
+        | "commit_message_pattern"
+        | "commit_author_email_pattern"
+        | "committer_email_pattern" => None,
+        "pull_request" => {
+            let approvals = params
+                .and_then(|p| p.get("required_approving_review_count"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            Some(if approvals > 0 {
+                format!(
+                    "{approvals} approving review{}",
+                    if approvals == 1 { "" } else { "s" }
+                )
+            } else {
+                "pull request review".to_string()
+            })
+        }
+        "required_status_checks" => Some("required status checks".to_string()),
+        "required_signatures" => Some("signed commits".to_string()),
+        "required_linear_history" => Some("linear history".to_string()),
+        "required_deployments" => Some("required deployments".to_string()),
+        "merge_queue" => Some("merge queue".to_string()),
+        other => Some(other.replace('_', " ")),
+    }
+}
+
 /// Search query for one watched repo's open-PR fan-out.
 ///
 /// The `-involves:USER` exclusion is the fix for issue #15. A watched
@@ -4096,6 +4139,68 @@ impl GhClient {
         Ok(())
     }
 
+    /// When a merge failed with GitHub's generic "Repository rule
+    /// violations found" (issue #998), best-effort append the base
+    /// branch's active rule names so the server's humanizer can name
+    /// *which* rule blocked the merge. Any lookup failure leaves the
+    /// error untouched — naming the rule is a nicety, never a new
+    /// failure mode, and non-rule-violation errors pass straight through.
+    async fn name_rule_violation(&self, err: GhError, pr: &lazybox_core::Task) -> GhError {
+        let GhError::Graphql(msg) = &err else {
+            return err;
+        };
+        if !msg
+            .to_ascii_lowercase()
+            .contains("repository rule violation")
+        {
+            return err;
+        }
+        let (Some(repo), Some(branch)) = (pr.repo.as_deref(), pr.base_branch.as_deref()) else {
+            return err;
+        };
+        let Some((owner, name)) = repo.split_once('/') else {
+            return err;
+        };
+        let rules = self.branch_rule_names(owner, name, branch).await;
+        if rules.is_empty() {
+            return err;
+        }
+        GhError::Graphql(format!("{msg} — active rules: {}", rules.join(", ")))
+    }
+
+    /// List the active branch rules (repository rulesets + classic
+    /// protection) that apply to `branch` for the current viewer, as
+    /// short human names. Reads GitHub's REST rules API
+    /// (`GET /repos/{owner}/{repo}/rules/branches/{branch}`), which
+    /// reports the rules the token can see. Best-effort: any error
+    /// yields an empty list (the caller then keeps the generic notice).
+    async fn branch_rule_names(&self, owner: &str, repo: &str, branch: &str) -> Vec<String> {
+        #[derive(serde::Deserialize)]
+        struct BranchRule {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            parameters: Option<serde_json::Value>,
+        }
+        let route = format!("/repos/{owner}/{repo}/rules/branches/{branch}");
+        let rules: Vec<BranchRule> = match self.inner.get(&route, None::<&()>).await {
+            Ok(rules) => rules,
+            Err(e) => {
+                tracing::debug!("branch-rules lookup for {owner}/{repo}@{branch} failed: {e}");
+                return Vec::new();
+            }
+        };
+        let mut names = Vec::new();
+        for rule in &rules {
+            if let Some(name) = humanize_rule(&rule.kind, rule.parameters.as_ref())
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+        names
+    }
+
     pub async fn close_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("closeIssue mutation")?;
         let body = graphql::close_issue_body(issue_node_id);
@@ -4176,9 +4281,12 @@ impl lazybox_core::TaskProvider for GhClient {
                 "PR has no node_id (poll first)",
             ));
         };
-        self.merge_pr(node_id, expected_head_oid)
-            .await
-            .map_err(mutation_provider_error)
+        match self.merge_pr(node_id, expected_head_oid).await {
+            Ok(()) => Ok(()),
+            Err(err) => Err(mutation_provider_error(
+                self.name_rule_violation(err, pr).await,
+            )),
+        }
     }
 
     /// Update the workspace's PR branch against its base — the "Update
@@ -5834,6 +5942,7 @@ mod tests {
             is_in_merge_queue: false,
             mergeable: Mergeable::Unknown,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -6513,6 +6622,40 @@ mod tests {
             .merge_pr("PR_kwDO", None)
             .await
             .expect("merging a squash-only repo must succeed");
+    }
+
+    /// Issue #998: branch-rule types map to short human names for the
+    /// merge-blocked notice. Merge-relevant rules get a friendly name
+    /// (the `pull_request` rule folds in the required approval count);
+    /// ref-shape rules that never block a merge are dropped; an unknown
+    /// type falls through prettified rather than vanishing.
+    #[test]
+    fn humanize_rule_maps_merge_relevant_types() {
+        let approvals = serde_json::json!({ "required_approving_review_count": 2 });
+        assert_eq!(
+            humanize_rule("pull_request", Some(&approvals)),
+            Some("2 approving reviews".to_string())
+        );
+        assert_eq!(
+            humanize_rule("pull_request", None),
+            Some("pull request review".to_string())
+        );
+        assert_eq!(
+            humanize_rule("required_signatures", None),
+            Some("signed commits".to_string())
+        );
+        assert_eq!(
+            humanize_rule("required_linear_history", None),
+            Some("linear history".to_string())
+        );
+        // Ref-shape rules don't gate a merge — omit them.
+        assert_eq!(humanize_rule("non_fast_forward", None), None);
+        assert_eq!(humanize_rule("deletion", None), None);
+        // Unknown-but-possibly-relevant rule: surface it prettified.
+        assert_eq!(
+            humanize_rule("code_scanning", None),
+            Some("code scanning".to_string())
+        );
     }
 
     /// `updatePullRequestBranch` success reply is mutation-shaped (no

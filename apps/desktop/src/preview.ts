@@ -59,6 +59,7 @@ export function loadPreview(): PreviewState {
       is_in_merge_queue: false,
       mergeable: "Mergeable",
       is_behind_base: false,
+      merge_blocked: false,
       node_id: null,
       needs_reply: true,
       last_commenter: "mira",

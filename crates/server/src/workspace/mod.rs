@@ -1527,6 +1527,7 @@ mod set_auto_merge_on_green_tests {
             is_in_merge_queue: false,
             mergeable: Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,

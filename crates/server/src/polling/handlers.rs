@@ -436,6 +436,33 @@ pub(super) fn humanize_mutation_failure(op: &str, err: &lazybox_core::ProviderEr
 fn humanize_branch_protection(msg: &str) -> Option<String> {
     let lower = msg.to_ascii_lowercase();
 
+    // GitHub's repository rulesets (issue #998) reject with a generic
+    // "Repository rule violations found" that names no rule. The provider
+    // enriches the message with the base branch's active rules (fetched
+    // from the REST rules API) as an "active rules: …" tail when it can;
+    // surface those names when present, else point at the usual suspects.
+    // Checked first: an enriched name list can itself contain phrases the
+    // branches below match on ("required status checks"), which would
+    // otherwise mistranslate a ruleset block as a plain CI wait.
+    if lower.contains("repository rule violation") {
+        let rules = msg
+            .split_once("active rules:")
+            .map(|(_, tail)| tail.trim().trim_end_matches('.').trim())
+            .filter(|t| !t.is_empty());
+        return Some(match rules {
+            Some(names) => format!(
+                "Can't merge — a repository ruleset blocks this merge ({names}). \
+                 Satisfy those requirements on GitHub (approvals, signed commits, \
+                 an up-to-date branch), then merge — `g s` re-syncs this PR."
+            ),
+            None => "Can't merge — a repository ruleset blocks this merge. \
+                 Check the PR's merge box on GitHub for the unmet requirement \
+                 (required reviews, signed commits, linear history, or an \
+                 up-to-date branch), satisfy it, then merge — `g s` re-syncs this PR."
+                .to_string(),
+        });
+    }
+
     if lower.contains("required status check") {
         let required = required_check_count(&lower);
         if lower.contains("expected") {
@@ -1547,6 +1574,7 @@ mod merge_pr_details_tests {
             is_in_merge_queue: false,
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -2752,6 +2780,7 @@ mod github_target_tests {
             is_in_merge_queue: false,
             mergeable: Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -2826,6 +2855,7 @@ mod prefetch_score_tests {
             is_in_merge_queue: false,
             mergeable: Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: Some("PR_node".into()),
             needs_reply: false,
             last_commenter: None,
@@ -3095,6 +3125,7 @@ mod inspect_tests {
             is_in_merge_queue: false,
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -3541,6 +3572,7 @@ mod inspect_tests {
             is_in_merge_queue: false,
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -3604,6 +3636,7 @@ mod inspect_tests {
             is_in_merge_queue: false,
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -3662,6 +3695,7 @@ mod inspect_tests {
             is_in_merge_queue: false,
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -4545,6 +4579,7 @@ mod inspect_tests {
             is_in_merge_queue: false,
             mergeable: lazybox_core::Mergeable::Unknown,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -5140,6 +5175,57 @@ mod mutation_retry_tests {
         );
         let reason = humanize_mutation_failure("merge", &err);
         assert!(reason.contains("merge conflicts"), "got {reason}");
+        assert!(!reason.contains("GraphQL"), "raw string leaked: {reason}");
+    }
+
+    /// Issue #998: GitHub's repository-ruleset rejection ("Repository rule
+    /// violations found") must not leak raw — it humanizes to a plain,
+    /// actionable notice. When the provider couldn't name the rule, the
+    /// notice still points at where to look and the next step.
+    #[test]
+    fn ruleset_violation_without_names_is_humanized() {
+        let err = lazybox_core::ProviderError::permanent(
+            "github",
+            "GraphQL error: Repository rule violations found",
+        );
+        let reason = humanize_mutation_failure("merge", &err);
+        assert!(
+            !reason.contains("Repository rule violations found"),
+            "raw GraphQL string leaked: {reason}"
+        );
+        assert!(reason.contains("Can't merge"), "got {reason}");
+        assert!(reason.contains("ruleset"), "names the cause: {reason}");
+        assert!(!reason.contains("GraphQL"), "raw string leaked: {reason}");
+        assert!(!reason.contains('{'), "JSON-free: {reason}");
+    }
+
+    /// When the provider enriched the error with the base branch's active
+    /// rules (the REST rules-API lookup), the notice names them — so the
+    /// user sees *which* rule blocked the merge, not a generic wall.
+    #[test]
+    fn ruleset_violation_names_the_rules_when_present() {
+        let err = lazybox_core::ProviderError::permanent(
+            "github",
+            "GraphQL error: Repository rule violations found — active rules: \
+             2 approving reviews, signed commits, required status checks",
+        );
+        let reason = humanize_mutation_failure("merge", &err);
+        assert!(reason.contains("Can't merge"), "got {reason}");
+        assert!(
+            reason.contains("2 approving reviews"),
+            "names the review rule: {reason}"
+        );
+        assert!(
+            reason.contains("signed commits"),
+            "names the signature rule: {reason}"
+        );
+        // The enriched tail contains "required status checks" — the notice
+        // must render it as a named ruleset cause, NOT be hijacked by the
+        // CI-wait branch into "Wait for CI to run".
+        assert!(
+            !reason.contains("Wait for CI"),
+            "must not be mistranslated as a plain CI wait: {reason}"
+        );
         assert!(!reason.contains("GraphQL"), "raw string leaked: {reason}");
     }
 

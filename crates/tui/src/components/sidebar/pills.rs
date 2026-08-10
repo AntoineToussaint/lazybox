@@ -220,8 +220,12 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     // Approved + CI green = READY (one pill, end-state for "this PR
     // is good to go"). Approved-without-green-CI shows up as a
     // separate APPROVED pill in the review slot via `status_pills`.
+    // A ruleset/branch-protection block (`merge_blocked`) withholds
+    // READY even when approved + green — GitHub would bounce the merge,
+    // so it isn't "good to go" (issue #998).
     if task.review == ReviewStatus::Approved
         && matches!(task.ci, CiStatus::Success | CiStatus::None)
+        && !task.merge_blocked
     {
         return Some(StatusPill {
             label: " READY ",

@@ -156,11 +156,17 @@ pub fn author_gate_blocks(pr: &Task, policy: &MergeOnGreenPolicy) -> bool {
 /// without required reviews — a personal repo, your own PR — let you
 /// merge with no approval, so demanding one here produced false
 /// "not merge-ready" blocks. We only veto on `ChangesRequested`, which
-/// is an unambiguous "not yet" regardless of branch protection. For
-/// anything subtler (a required review that isn't satisfied, a
-/// required-but-unfinished check) we let the merge dispatch and surface
-/// GitHub's real rejection rather than guessing at protection rules we
-/// don't fetch.
+/// is an unambiguous "not yet" regardless of branch protection.
+///
+/// We DO veto when GitHub itself reports the merge blocked by a
+/// branch-protection rule or repository ruleset ([`Task::merge_blocked`],
+/// from `mergeStateStatus == BLOCKED`): a required review, check,
+/// signature, or linear-history rule is unsatisfied, so the merge would
+/// bounce with "Repository rule violations found" (issue #998). This is
+/// GitHub's own computed verdict — not a guess at rules we don't fetch —
+/// so gating on it keeps lazybox from offering (or tagging READY) a merge
+/// it can't land. A racing/stale `BLOCKED` that slips through still hits
+/// GitHub's rejection, which the server humanizes.
 pub fn merge_block_reason(pr: &Task) -> Option<&'static str> {
     if !matches!(
         pr.state,
@@ -176,6 +182,11 @@ pub fn merge_block_reason(pr: &Task) -> Option<&'static str> {
     }
     if pr.mergeable.is_conflicting() {
         return Some("the branch has merge conflicts");
+    }
+    if pr.merge_blocked {
+        return Some(
+            "a repository rule blocks the merge — required reviews, checks, or signatures aren't satisfied",
+        );
     }
     None
 }
@@ -507,6 +518,7 @@ mod merge_gate_tests {
             is_in_merge_queue: false,
             mergeable: crate::Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -708,6 +720,34 @@ mod merge_gate_tests {
         assert_eq!(
             auto_merge_block_reason(&ws, &MergeOnGreenPolicy::allow_all()),
             Some("CI isn't green")
+        );
+    }
+
+    /// Issue #998: a PR GitHub reports as ruleset-blocked
+    /// (`merge_blocked`, from `mergeStateStatus == BLOCKED`) is not
+    /// merge-ready even when approved + green, so `g m` / READY stand
+    /// down instead of offering a merge that bounces. Auto-merge inherits
+    /// the same veto (it delegates to `merge_block_reason`).
+    #[test]
+    fn ruleset_block_is_not_merge_ready() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        assert_eq!(
+            merge_block_reason(ws.pr.as_ref().unwrap()),
+            None,
+            "approved + green merges when no rule blocks it"
+        );
+
+        ws.pr.as_mut().unwrap().merge_blocked = true;
+        assert!(
+            merge_block_reason(ws.pr.as_ref().unwrap()).is_some(),
+            "a ruleset-blocked PR is not merge-ready"
+        );
+
+        // And auto-merge stands down on it too.
+        ws.auto_merge_on_green = true;
+        assert!(
+            !should_auto_merge(&ws, &own()),
+            "auto-merge never fires on a ruleset-blocked PR"
         );
     }
 

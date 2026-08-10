@@ -194,6 +194,7 @@
               "labels": [],
               "last_commenter": null,
               "linked_tasks": [],
+              "merge_blocked": false,
               "mergeable": "Mergeable",
               "needs_reply": false,
               "node_id": null,
@@ -269,6 +270,7 @@
           "labels": [],
           "last_commenter": null,
           "linked_tasks": [],
+          "merge_blocked": false,
           "mergeable": "Mergeable",
           "needs_reply": false,
           "node_id": null,
@@ -445,6 +447,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 3234193029,
+  "protocol_fingerprint": 1366899356,
   "protocol_version": 3
 }

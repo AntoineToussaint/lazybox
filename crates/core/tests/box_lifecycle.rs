@@ -95,9 +95,9 @@ fn service_runs_the_installed_script() {
 
 #[test]
 fn scripts_are_hardened_and_parse() {
-    // Both helpers must use strict mode; a partial run of a box-stop or a
-    // tunnel script on an unset variable is worse than a clean abort.
-    for name in ["lazybox-idle-stop.sh", "connect.sh"] {
+    // Every helper must use strict mode; a partial run of a box-stop, a
+    // tunnel, or a daemon build on an unset variable is worse than a clean abort.
+    for name in ["lazybox-idle-stop.sh", "connect.sh", "lazybox-build.sh"] {
         let body = read(name);
         assert!(
             body.starts_with("#!/usr/bin/env bash"),
@@ -128,9 +128,35 @@ fn scripts_are_hardened_and_parse() {
         "connect.sh should start the instance and open an IAP tunnel"
     );
 
+    // The build/rebuild helper (#977) is the on-box half of build-parity:
+    // it must (re)build at a pinned commit, install the daemon unit, record
+    // the SHA somewhere greppable, and restart the daemon — the four steps
+    // the acceptance criteria hinge on.
+    let build = read("lazybox-build.sh");
+    assert!(
+        build.contains("make setup") && build.contains("make release"),
+        "build helper must build the daemon with the pinned toolchain"
+    );
+    assert!(
+        build.contains("lazybox-daemon@") && build.contains("systemctl"),
+        "build helper must install + drive the daemon systemd unit"
+    );
+    assert!(
+        build.contains("restart"),
+        "build helper must restart the daemon so a rebuild takes effect"
+    );
+    assert!(
+        build.contains("build-sha"),
+        "build helper must record the installed commit somewhere greppable"
+    );
+    assert!(
+        build.contains("lazybox-idle-stop.timer"),
+        "build helper must arm the idle-stop timer so an ensured box still sleeps"
+    );
+
     // Catch shell syntax errors where bash is available (any dev/CI host).
     if let Ok(bash) = which_bash() {
-        for name in ["lazybox-idle-stop.sh", "connect.sh"] {
+        for name in ["lazybox-idle-stop.sh", "connect.sh", "lazybox-build.sh"] {
             let path = lifecycle_dir().join(name);
             let out = Command::new(&bash)
                 .arg("-n")

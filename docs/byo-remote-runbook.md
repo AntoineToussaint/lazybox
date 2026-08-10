@@ -185,6 +185,20 @@ Daemon and client must be built from the same commit — the wire handshake
 rejects a fingerprint mismatch. If `--connect` reports a mismatch, rebuild the
 daemon on the box (or the client) so both sides match, then reconnect.
 
+For a **sandbox** box (`lazybox sandbox …`, #977) this is handled for you:
+`ensure` provisions a box that builds its daemon from the client's own commit,
+so the first `connect` matches by construction. When you later rebuild the
+client at a new commit that changes the wire format, re-sync the box with:
+
+```sh
+lazybox sandbox rebuild        # rebuild the box daemon at the client's commit
+lazybox sandbox rebuild --sha <commit>   # or pin a specific commit
+```
+
+The TUI's `r`-spawn surfaces the same mismatch as an actionable notice
+("box daemon is built from a different commit — run `lazybox sandbox rebuild`")
+rather than a silent drop.
+
 [scoping]: remote-daemon-scoping.md
 [systemd]: ../contrib/systemd/README.md
 [lifecycle]: ../contrib/box-lifecycle/README.md

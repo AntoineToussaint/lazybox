@@ -231,6 +231,37 @@ impl GcpProvider {
         )
     }
 
+    /// The IAP SSH that rebuilds the box's daemon at `sha` and restarts it
+    /// — the recovery path for a wire-fingerprint mismatch (#977) that needs
+    /// no reboot (changing GCE metadata does not re-run the startup script
+    /// on a live box). Runs the on-box `lazybox-build.sh` under `sudo`; an
+    /// empty `sha` tells the helper to track the default branch tip. Foreground
+    /// (not `-N`): the caller inherits stdio so the 10-minute build streams.
+    pub fn rebuild_command(&self, handle: &BoxHandle, sha: &str) -> (String, Vec<String>) {
+        let dest = match &self.user {
+            Some(u) => format!("{u}@{}", handle.id),
+            None => handle.id.clone(),
+        };
+        (
+            "gcloud".to_string(),
+            vec![
+                "compute".to_string(),
+                "ssh".to_string(),
+                dest,
+                "--quiet".to_string(),
+                format!("--zone={}", handle.zone),
+                format!("--project={}", handle.project),
+                "--tunnel-through-iap".to_string(),
+                format!("--command=sudo /usr/local/bin/lazybox-build.sh {sha}"),
+                "--".to_string(),
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
+            ],
+        )
+    }
+
     /// Build the IAP-tunnelled SSH forward carrying the daemon socket plus
     /// each workload port bound to `localhost` on the client. Mirrors
     /// `contrib/box-lifecycle/connect.sh` and `tui-boot`'s IAP tunnel.
@@ -506,6 +537,8 @@ mod tests {
             region: "us-central1".into(),
             zone: "us-central1-a".into(),
             deployment: Deployment::default_recipe().expect("default recipe"),
+            install_lazybox: true,
+            lazybox_git_sha: String::new(),
         }
     }
 
@@ -617,6 +650,37 @@ mod tests {
         // Workload ports bind localhost on both ends.
         assert!(ssh.contains(&"localhost:3000:localhost:3000".to_string()));
         assert!(ssh.contains(&"localhost:8082:localhost:8082".to_string()));
+    }
+
+    #[test]
+    fn rebuild_runs_the_on_box_helper_at_the_pinned_sha_over_iap() {
+        let (prog, args) = provider().rebuild_command(&handle(), "deadbeef1234");
+        assert_eq!(prog, "gcloud");
+        assert_eq!(args[..3], ["compute", "ssh", "me@lazybox-sbx-abc"]);
+        assert!(args.contains(&"--tunnel-through-iap".to_string()));
+        assert!(args.contains(&"--zone=us-central1-a".to_string()));
+        // The remote command runs the installed helper as root with the SHA.
+        assert!(
+            args.contains(
+                &"--command=sudo /usr/local/bin/lazybox-build.sh deadbeef1234".to_string()
+            ),
+            "{args:?}"
+        );
+        // Unattended: never block on a passphrase or host-key prompt.
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+        // Foreground (streams the build) — no `-N` no-command forward flag.
+        assert!(!args.contains(&"-N".to_string()), "{args:?}");
+    }
+
+    #[test]
+    fn rebuild_with_an_empty_sha_tracks_the_default_branch() {
+        // A client with no baked SHA passes empty; the helper then tracks the
+        // default branch tip rather than `git checkout`-ing a bogus commit.
+        let (_, args) = provider().rebuild_command(&handle(), "");
+        assert!(
+            args.contains(&"--command=sudo /usr/local/bin/lazybox-build.sh ".to_string()),
+            "{args:?}"
+        );
     }
 
     #[test]

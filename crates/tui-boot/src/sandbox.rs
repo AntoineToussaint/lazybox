@@ -1,8 +1,12 @@
-//! `lazybox sandbox <ensure|wake|sleep|status|connect|destroy>` — the
-//! client surface for the remote dev-box lifecycle (#931).
+//! `lazybox sandbox <ensure|wake|sleep|status|connect|rebuild|destroy>` —
+//! the client surface for the remote dev-box lifecycle (#931).
 //!
 //! `ensure`/`destroy` drive the Terraform module; `wake`/`sleep`/`status`/
-//! `connect` use the native `gcloud`/IAP path. A [`BoxHandle`] is persisted
+//! `connect`/`rebuild` use the native `gcloud`/IAP path. `ensure` provisions
+//! a box that builds + runs a wire-compatible lazybox daemon on boot (#977),
+//! and `rebuild` re-syncs that daemon to the client's commit without a reboot.
+//!
+//! A [`BoxHandle`] is persisted
 //! in the store under the **shared box key** — one `sandbox:` block, one
 //! box, the same identity the TUI's `r`-spawn targets (`remote_box`) — so
 //! `wake`/`sleep`/`connect` address the box `ensure` stamped without
@@ -43,6 +47,43 @@ pub(crate) const SHARED_BOX_KEY: &str = "sandbox";
 /// product path sets nothing.
 pub(crate) const BOX_DAEMON_SOCKET: &str = ".lazybox/run/daemon.sock";
 
+/// The dedicated login/daemon user provisioning creates when it installs
+/// lazybox (#977). The daemon runs as this account, so its socket lands at
+/// `~lazybox/.lazybox/run/daemon.sock` — the client forwards the relative
+/// [`BOX_DAEMON_SOCKET`] against this user's home, so `connect`/`r`-spawn
+/// hit it with zero socket config as long as they SSH in as this user.
+pub(crate) const BOX_LAZYBOX_USER: &str = "lazybox";
+
+/// Whether `ensure` provisions a box that builds + runs the lazybox daemon
+/// (#977). Config-only (not a flag) so both [`resolve_provider`] and
+/// [`resolve_spec`] can read it off one `sandbox:` block without racing to
+/// consume the same arg. Unset defaults to `true` — the product path wants
+/// a wire-compatible daemon by construction.
+pub(crate) fn install_lazybox_enabled(sc: &SandboxConfig) -> bool {
+    sc.install_lazybox.unwrap_or(true)
+}
+
+/// The client's own build commit — the value baked into this binary and
+/// printed by `lazybox --version`. The box's daemon is built from it so the
+/// wire fingerprint matches by construction. A build outside a git checkout
+/// bakes `"unknown"`; map that to empty so the box tracks the default branch
+/// tip rather than trying to `git checkout unknown`.
+pub(crate) fn client_build_sha() -> String {
+    normalize_build_sha(lazybox_ipc::BUILD_GIT_SHA)
+}
+
+/// Map a baked build SHA to the value passed to Terraform: a real commit
+/// passes through; the `"unknown"` sentinel a non-git build bakes (and an
+/// empty string) become empty, so the box tracks the default branch tip
+/// instead of trying to `git checkout unknown`.
+fn normalize_build_sha(sha: &str) -> String {
+    if sha.is_empty() || sha == "unknown" {
+        String::new()
+    } else {
+        sha.to_string()
+    }
+}
+
 pub async fn sandbox_subcommand(args: &[String]) -> anyhow::Result<()> {
     // `init_tracing` redirects process stderr into the log file before any
     // subcommand runs, so a returned error (terraform/gcloud failures land
@@ -67,10 +108,11 @@ async fn dispatch(args: &[String]) -> anyhow::Result<()> {
         "sleep" | "stop" => sleep(&mut rest).await,
         "status" => status(&mut rest).await,
         "connect" => connect(&mut rest).await,
+        "rebuild" => rebuild(&mut rest).await,
         "destroy" => destroy(&mut rest).await,
         other => anyhow::bail!(
             "unknown `lazybox sandbox` verb {other:?}; usage: lazybox sandbox \
-             <ensure|wake|sleep|status|connect|destroy> [--worktree <key>] [flags]"
+             <ensure|wake|sleep|status|connect|rebuild|destroy> [--worktree <key>] [flags]"
         ),
     }
 }
@@ -217,7 +259,15 @@ pub(crate) fn resolve_provider(
         .map(PathBuf::from)
         .or_else(|| sc.terraform_dir.clone())
         .unwrap_or_else(|| PathBuf::from("terraform/sandbox/gcp"));
-    let user = take_value(args, "--user").or_else(|| sc.user.clone());
+    // Default the SSH login to the dedicated `lazybox` user provisioning
+    // creates when it installs the daemon (#977): its socket lives under
+    // that user's home, so `connect`/`r`-spawn must SSH in as it to reach
+    // the conventional daemon socket. An explicit `--user`/`sandbox.user`
+    // wins; a bring-your-own-stack box (install_lazybox=false) keeps
+    // gcloud's default user.
+    let user = take_value(args, "--user")
+        .or_else(|| sc.user.clone())
+        .or_else(|| install_lazybox_enabled(sc).then(|| BOX_LAZYBOX_USER.to_string()));
     let remote_socket = take_value(args, "--remote-socket").or_else(|| sc.remote_socket.clone());
     let local_socket = take_value(args, "--local-socket")
         .map(PathBuf::from)
@@ -291,6 +341,10 @@ fn resolve_spec_with_deployment(
         region,
         zone,
         deployment,
+        // Build parity by construction (#977): install a daemon (unless the
+        // deployment opts out) built from this client's own commit.
+        install_lazybox: install_lazybox_enabled(sc),
+        lazybox_git_sha: client_build_sha(),
     })
 }
 
@@ -525,6 +579,53 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `lazybox sandbox rebuild [--sha <commit>]` — rebuild the box's daemon at
+/// this client's commit and restart it, without a reboot. The recovery path
+/// for a wire-fingerprint mismatch (#977): changing GCE metadata does not
+/// re-run the startup script on a live box, so the parity fix runs the on-box
+/// `lazybox-build.sh` over IAP SSH. Defaults to the client's own baked SHA
+/// (so the daemon matches this binary); `--sha` targets a specific commit.
+async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
+    let config = Config::load().unwrap_or_default();
+    let worktree = box_key(args);
+    let sha = take_value(args, "--sha").unwrap_or_else(client_build_sha);
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
+    let store = open_store()?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+
+    // The rebuild runs over SSH, so the box must be awake first.
+    if !provider.status(&handle).await?.power.is_running() {
+        println!("Waking {} before rebuild…", handle.id);
+        provider.start(&handle).await?;
+        handle.observe(PowerState::Running, chrono::Utc::now());
+        persist::save_handle(store.as_ref(), &worktree, &handle)?;
+    }
+
+    let target = if sha.is_empty() {
+        "the default branch tip".to_string()
+    } else {
+        sha.clone()
+    };
+    println!(
+        "Rebuilding lazybox on {} at {target} (this can take 10+ minutes)…",
+        handle.id
+    );
+    let (program, cmd_args) = provider.rebuild_command(&handle, &sha);
+    // Foreground with inherited stdout/stderr so the build streams; only
+    // stdin is closed (the box build is non-interactive).
+    let status = Command::new(&program)
+        .args(&cmd_args)
+        .stdin(Stdio::null())
+        .status()
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn `{program}`: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("rebuild `{program}` exited with {status}");
+    }
+    println!("{} rebuilt and daemon restarted.", handle.id);
+    Ok(())
+}
+
 async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
     let worktree = box_key(args);
@@ -738,6 +839,80 @@ mod tests {
             vec![22, 3000, 8082]
         );
         assert_eq!(union_ports(vec![], &[3000]), vec![3000]);
+    }
+
+    #[test]
+    fn install_lazybox_defaults_on_and_honors_an_explicit_opt_out() {
+        assert!(
+            install_lazybox_enabled(&SandboxConfig::default()),
+            "the product path installs a daemon by default"
+        );
+        let opt_out = SandboxConfig {
+            install_lazybox: Some(false),
+            ..SandboxConfig::default()
+        };
+        assert!(!install_lazybox_enabled(&opt_out));
+    }
+
+    #[test]
+    fn normalize_build_sha_blanks_the_non_git_sentinel() {
+        assert_eq!(normalize_build_sha("abc123"), "abc123");
+        // A non-git build (release tarball) or an empty value must NOT pin a
+        // bogus commit — the box falls back to the default branch.
+        assert_eq!(normalize_build_sha("unknown"), "");
+        assert_eq!(normalize_build_sha(""), "");
+    }
+
+    #[test]
+    fn resolve_provider_defaults_the_user_to_lazybox_when_installing() {
+        // Installing the daemon → SSH in as the dedicated `lazybox` user so
+        // the home-relative daemon socket resolves.
+        let sc = SandboxConfig::default();
+        let p = resolve_provider(&sc, &mut vec![], "/wt").unwrap();
+        assert_eq!(p.user.as_deref(), Some(BOX_LAZYBOX_USER));
+
+        // A bring-your-own-stack box keeps gcloud's default user…
+        let opt_out = SandboxConfig {
+            install_lazybox: Some(false),
+            ..SandboxConfig::default()
+        };
+        assert_eq!(
+            resolve_provider(&opt_out, &mut vec![], "/wt").unwrap().user,
+            None
+        );
+
+        // …and an explicit user always wins.
+        let explicit = SandboxConfig {
+            user: Some("alice".into()),
+            ..SandboxConfig::default()
+        };
+        assert_eq!(
+            resolve_provider(&explicit, &mut vec![], "/wt")
+                .unwrap()
+                .user
+                .as_deref(),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn resolve_spec_carries_the_install_flag_and_client_sha() {
+        let sc = SandboxConfig {
+            project: Some("proj".into()),
+            ..SandboxConfig::default()
+        };
+        let spec = resolve_spec(&sc, &mut vec![], "/home/me/wt").unwrap();
+        assert!(spec.install_lazybox, "default installs the daemon");
+        // The spec's SHA is exactly the normalized client build SHA.
+        assert_eq!(spec.lazybox_git_sha, client_build_sha());
+
+        let opt_out = SandboxConfig {
+            project: Some("proj".into()),
+            install_lazybox: Some(false),
+            ..SandboxConfig::default()
+        };
+        let spec = resolve_spec(&opt_out, &mut vec![], "/home/me/wt").unwrap();
+        assert!(!spec.install_lazybox);
     }
 
     #[test]

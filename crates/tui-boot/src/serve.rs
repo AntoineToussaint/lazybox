@@ -3,39 +3,45 @@
 //!
 //! The box holds a control connection to a codefly-hosted relay
 //! ([`lazybox_relay`]); for each client the relay brokers, we dial a
-//! fresh data connection and bridge it to the local daemon's Unix
-//! socket. The relay forwards ciphertext only and executes nothing.
+//! fresh data connection, terminate the end-to-end Noise channel on it,
+//! and bridge the *decrypted* stream to the local daemon's Unix socket.
+//! The relay forwards ciphertext only and executes nothing.
 //!
-//! ## Seams for the rest of the epic
-//!
-//! - **Box identity (#892).** The box-id is a persistent per-box id
-//!   generated on first `serve` and stored under the profile root. When
-//!   per-device identity lands it becomes the box's public-key
-//!   fingerprint (which also pins the box against a malicious relay).
-//! - **E2E channel (#891).** The stream bridged to the daemon carries
-//!   the daemon's own framed protocol today. Once the Noise channel
-//!   exists, wrap the relay stream in the responder side here so the
-//!   daemon only ever sees decrypted frames and the relay only ever
-//!   sees ciphertext.
+//! The channel is **secure by default**: each brokered stream is wrapped
+//! in the E2E responder ([`lazybox_e2e_channel`]) before the daemon sees
+//! a byte, pinned to the box's persistent X25519 channel key
+//! (`crate::relay_e2e`). `--insecure-no-auth` drops the encryption for
+//! loopback testing only.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use lazybox_e2e_channel::{Identity, responder_handshake};
 use tokio::io::copy_bidirectional;
 use tokio::net::{TcpStream, UnixStream};
 
+use crate::relay_e2e;
 use crate::{lifecycle, take_flag, take_value};
 
 /// Backoff between control-connection reconnect attempts.
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
+/// Ceiling on the E2E handshake with a brokered client. A conforming
+/// client completes it in one round trip; the bound stops a client that
+/// finishes the relay splice but then stalls the Noise handshake from
+/// pinning a task (and a daemon connection) forever — the same discipline
+/// the relay's own `handshake_timeout` enforces on its protocol frame.
+const E2E_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// `lazybox serve --relay <host:port> [--account <id>] [--box-id <id>]
-/// [--socket <path>]`.
+/// [--socket <path>] [--insecure-no-auth]`.
 ///
 /// `--relay` (or `LAZYBOX_RELAY`) is required; `--account` (or
-/// `LAZYBOX_ACCOUNT`) defaults to `self-hosted` — the relay records it
-/// for the future entitlement gate but brokers unconditionally today.
+/// `LAZYBOX_ACCOUNT`) defaults to `self-hosted` — the relay checks it
+/// against the entitlement gate before brokering. The channel is
+/// encrypted by default; `--insecure-no-auth` is a loopback-testing
+/// escape hatch that forwards plaintext.
 pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
     let insecure_no_auth = take_flag(&mut args, "--insecure-no-auth");
@@ -59,21 +65,17 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
         None => load_or_create_box_id(&box_id_file())?,
     };
 
-    // The E2E channel (#891) and per-device identity (#892) are not in this
-    // build, so the relay path is plaintext and the daemon socket's only
-    // auth — a same-uid peer check — is satisfied by `serve` on behalf of
-    // every brokered client. Until those land, exposing the daemon is an
-    // explicit, acknowledged choice. `println` (not the anyhow error, which
-    // `init_tracing` redirects into the log) so the refusal is visible.
-    if let Err(refusal) = require_insecure_ack(insecure_no_auth) {
-        println!("refusing to serve: {refusal}");
-        return Err(refusal);
-    }
-    println!(
-        "WARNING: the relay path is unencrypted and unauthenticated \
-         (--insecure-no-auth); anyone who reaches the relay with box-id \
-         {box_id} can drive your daemon"
-    );
+    // Secure by default: load (or generate on first run) the box's
+    // persistent X25519 channel identity and terminate the Noise channel
+    // on every brokered stream. `--insecure-no-auth` forwards plaintext —
+    // a loopback-testing escape hatch only.
+    let channel_identity = if insecure_no_auth {
+        None
+    } else {
+        Some(Arc::new(relay_e2e::load_or_generate_channel_identity(
+            &relay_e2e::channel_identity_dir(),
+        )?))
+    };
 
     if !socket_path.exists() {
         tracing::warn!(
@@ -83,13 +85,26 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
     }
 
     println!("lazybox serve: box-id {box_id}");
+    match &channel_identity {
+        Some(identity) => {
+            println!(
+                "box channel key {} (clients pin this with --box-key)",
+                hex::encode(identity.public_key().as_bytes())
+            );
+        }
+        None => println!(
+            "WARNING: --insecure-no-auth: the relay path is unencrypted; anyone who reaches \
+             the relay with box-id {box_id} can drive your daemon (loopback testing only)"
+        ),
+    }
     println!("dialing relay {relay_addr} (account {account})");
 
     let bridge_socket = socket_path.clone();
     let on_client: lazybox_relay::OnClient = Arc::new(move |relay_stream| {
         let daemon_socket = bridge_socket.clone();
+        let channel_identity = channel_identity.clone();
         Box::pin(async move {
-            bridge_to_daemon(relay_stream, &daemon_socket).await;
+            bridge_to_daemon(relay_stream, &daemon_socket, channel_identity.as_deref()).await;
         })
     });
 
@@ -109,41 +124,69 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
-/// Splice a brokered relay stream to the local daemon socket. Bytes flow
-/// verbatim in both directions — this is where the E2E responder (#891)
-/// will terminate encryption before the daemon sees plaintext.
-async fn bridge_to_daemon(mut relay_stream: TcpStream, daemon_socket: &Path) {
-    match UnixStream::connect(daemon_socket).await {
-        Ok(mut daemon) => {
-            let _ = copy_bidirectional(&mut relay_stream, &mut daemon).await;
+/// Bridge a brokered relay stream to the local daemon socket. With a
+/// channel identity, terminate the E2E responder first so the daemon only
+/// ever sees decrypted frames and the relay only ever sees ciphertext;
+/// without one (`--insecure-no-auth`) forward the bytes verbatim.
+async fn bridge_to_daemon(
+    mut relay_stream: TcpStream,
+    daemon_socket: &Path,
+    channel_identity: Option<&Identity>,
+) {
+    match channel_identity {
+        Some(identity) => {
+            // Terminate the E2E channel *before* touching the daemon: a
+            // client that completes the relay splice but stalls the Noise
+            // handshake must neither hang this task nor pin an open daemon
+            // connection. Bound the handshake, and only dial the daemon
+            // once it succeeds.
+            let handshake = tokio::time::timeout(
+                E2E_HANDSHAKE_TIMEOUT,
+                responder_handshake(relay_stream, identity),
+            )
+            .await;
+            // The device's public key is learned here; binding it to a
+            // per-device credential is the pairing work (#980 step 2).
+            let mut encrypted = match handshake {
+                Ok(Ok((encrypted, _device_key))) => encrypted,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "E2E handshake with brokered client failed");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("E2E handshake with brokered client timed out");
+                    return;
+                }
+            };
+            if let Some(mut daemon) = connect_daemon(daemon_socket).await {
+                let _ = copy_bidirectional(&mut encrypted, &mut daemon).await;
+            }
         }
+        None => {
+            if let Some(mut daemon) = connect_daemon(daemon_socket).await {
+                let _ = copy_bidirectional(&mut relay_stream, &mut daemon).await;
+            }
+        }
+    }
+}
+
+/// Dial the local daemon socket, logging (and yielding `None`) if it is
+/// unreachable — e.g. no `lazybox server start` yet.
+async fn connect_daemon(daemon_socket: &Path) -> Option<UnixStream> {
+    match UnixStream::connect(daemon_socket).await {
+        Ok(daemon) => Some(daemon),
         Err(error) => {
             tracing::warn!(
                 %error,
                 socket = %daemon_socket.display(),
                 "brokered client could not reach the local daemon",
             );
+            None
         }
     }
 }
 
-/// Gate on the caller acknowledging that the relay path is not yet secured.
-/// Without #891/#892 the channel is plaintext and the daemon is reachable by
-/// any brokered client, so `serve` only proceeds when the risk is opted into.
-fn require_insecure_ack(insecure_no_auth: bool) -> anyhow::Result<()> {
-    if insecure_no_auth {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "the relay path is currently unencrypted and unauthenticated — the E2E \
-         channel (#891) and per-device identity (#892) are not in this build, so \
-         anyone who reaches the relay with this box-id gains full control of your \
-         daemon. Re-run with --insecure-no-auth to proceed anyway."
-    )
-}
-
-/// `<profile>/v2/box-id` — the persistent box identity (superseded by the
-/// device-identity keypair in #892).
+/// `<profile>/v2/box-id` — the persistent relay routing id.
 fn box_id_file() -> PathBuf {
     lazybox_core::paths::state_root().join("box-id")
 }
@@ -189,12 +232,44 @@ mod tests {
         assert!(!id.is_empty());
     }
 
-    #[test]
-    fn refuses_to_serve_until_insecurity_is_acknowledged() {
+    /// A brokered client whose E2E handshake fails must never cause the box
+    /// to dial its daemon — the handshake terminates first. Guards the
+    /// reorder that stops a probing / half-open client from pinning a
+    /// daemon connection (and a task) before it has authenticated the box.
+    #[tokio::test]
+    async fn failed_handshake_never_dials_the_daemon() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::net::{TcpListener, TcpStream, UnixListener};
+
+        let dir = tempfile::tempdir().unwrap();
+        let daemon_path = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&daemon_path).unwrap();
+        let dialed = Arc::new(AtomicBool::new(false));
+        let dialed_in_task = Arc::clone(&dialed);
+        let accept = tokio::spawn(async move {
+            if listener.accept().await.is_ok() {
+                dialed_in_task.store(true, Ordering::SeqCst);
+            }
+        });
+
+        // A brokered "client" that hangs up immediately, so the responder
+        // handshake fails fast (EOF) rather than waiting out the timeout.
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _peer) = tcp.accept().await.unwrap();
+        drop(client);
+
+        let identity = Identity::generate().unwrap();
+        bridge_to_daemon(server, &daemon_path, Some(&identity)).await;
+
+        // Give a (buggy) daemon-first dial a chance to land before asserting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
-            require_insecure_ack(false).is_err(),
-            "serve must not expose the daemon without an explicit acknowledgement",
+            !dialed.load(Ordering::SeqCst),
+            "a failed E2E handshake must not reach the daemon socket",
         );
-        assert!(require_insecure_ack(true).is_ok());
+        accept.abort();
     }
 }

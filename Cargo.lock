@@ -1933,6 +1933,8 @@ name = "lazybox-relay"
 version = "0.1.9"
 dependencies = [
  "bincode",
+ "lazybox-e2e-channel",
+ "lazybox-entitlement",
  "serde",
  "tokio",
  "tracing",
@@ -2052,9 +2054,11 @@ version = "0.1.9"
 dependencies = [
  "anyhow",
  "chrono",
+ "hex",
  "lazybox-agents",
  "lazybox-config",
  "lazybox-core",
+ "lazybox-e2e-channel",
  "lazybox-gh",
  "lazybox-git-ops",
  "lazybox-identity",

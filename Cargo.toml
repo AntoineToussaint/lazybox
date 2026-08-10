@@ -100,6 +100,7 @@ publish = false
 # ── Shared library crates ──────────────────────────────────────────────
 lazybox-core        = { path = "crates/core" }
 lazybox-auth        = { path = "crates/auth" }
+lazybox-e2e-channel = { path = "crates/e2e-channel" }
 lazybox-entitlement = { path = "crates/entitlement" }
 lazybox-identity    = { path = "crates/identity" }
 lazybox-store       = { path = "crates/store" }

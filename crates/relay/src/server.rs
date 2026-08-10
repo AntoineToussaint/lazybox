@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lazybox_entitlement::{AccountId, AllowAll, EntitlementGate};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
@@ -43,6 +44,10 @@ pub struct Relay {
     /// Clients parked awaiting their box's data connection, keyed by the
     /// relay-assigned session id.
     pending: Mutex<HashMap<Uuid, oneshot::Sender<TcpStream>>>,
+    /// The subscription check run before a box is allowed to register —
+    /// the relay's payment-enforcement point. [`AllowAll`] by default so
+    /// behaviour is unchanged until real licensing backs it.
+    gate: Box<dyn EntitlementGate>,
     broker_timeout: Duration,
     handshake_timeout: Duration,
 }
@@ -58,9 +63,17 @@ impl Default for Relay {
 
 impl Relay {
     pub fn new() -> Self {
+        Self::with_gate(Box::new(AllowAll))
+    }
+
+    /// A relay whose brokering is gated by `gate`. `new()` wires
+    /// [`AllowAll`]; a deployment swaps in the real subscription check
+    /// here without touching the broker.
+    pub fn with_gate(gate: Box<dyn EntitlementGate>) -> Self {
         Self {
             boxes: Mutex::default(),
             pending: Mutex::default(),
+            gate,
             broker_timeout: DEFAULT_BROKER_TIMEOUT,
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
         }
@@ -111,6 +124,23 @@ impl Relay {
         box_id: String,
         account: String,
     ) -> std::io::Result<()> {
+        // The entitlement gate is the relay's payment-enforcement point:
+        // refuse to register (and therefore to broker for) an account
+        // without an active subscription. Fail closed — a lookup error is
+        // treated as "not entitled", never as an open door.
+        let entitled = match self.gate.check(&AccountId::new(account.clone())).await {
+            Ok(decision) => decision.is_active(),
+            Err(error) => {
+                tracing::warn!(%box_id, %account, %error, "entitlement lookup failed; refusing");
+                false
+            }
+        };
+        if !entitled {
+            tracing::info!(%box_id, %account, "box registration refused: not entitled");
+            write_msg(&mut stream, &Ack::Unavailable).await?;
+            return Ok(());
+        }
+
         write_msg(&mut stream, &Ack::Ok).await?;
 
         let (to_box, mut announcements) = mpsc::channel::<ToBox>(16);
@@ -125,8 +155,6 @@ impl Relay {
                 },
             );
         }
-        // `account` is recorded for the future entitlement gate (#749
-        // milestone 3); today the relay brokers unconditionally.
         tracing::info!(%box_id, %account, "box registered");
 
         let (mut rd, mut wr) = stream.into_split();

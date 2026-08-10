@@ -35,6 +35,7 @@
 // the Slack CLI flows, and the test harness.
 mod build_guard;
 mod device_cli;
+mod relay_e2e;
 mod remote_box;
 mod sandbox;
 mod serve;
@@ -299,9 +300,13 @@ Remote & services:
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox serve --relay <a>   dial out to a rendezvous relay so clients can
                               reach this box's daemon (behind NAT, no ports;
-                              --account <id>, LAZYBOX_RELAY env). Needs
-                              --insecure-no-auth: the channel is not yet
-                              encrypted or authenticated
+                              --account <id>, LAZYBOX_RELAY env). End-to-end
+                              encrypted by default; it prints the box channel
+                              key clients pin (--insecure-no-auth forwards
+                              plaintext, for loopback testing only)
+  lazybox --connect-relay <box-id> --relay <a> --box-key <hex>
+                              attach a TUI to a box through the relay, over an
+                              end-to-end encrypted tunnel (LAZYBOX_RELAY env)
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
   lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots;
@@ -397,6 +402,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(lifecycle::socket_path);
             run_remote(&socket_path, preselect).await
         }
+        Some("--connect-relay") => run_connect_relay(&args[1..], preselect).await,
         _ => run_embedded_realm(preselect).await,
     }
 }
@@ -1067,23 +1073,47 @@ async fn run_remote(
 
     // No drain handle: the standalone daemon outlives this client and
     // runs its own disconnect-time mutation drain.
+    let available_update = update_check.await.unwrap_or_else(|error| {
+        tracing::debug!("startup update check task failed: {error}");
+        None
+    });
+    run_realm_client(
+        client,
+        daemon,
+        config,
+        Some(socket_path.to_path_buf()),
+        available_update,
+        preselect,
+    )
+    .await
+}
+
+/// Run the realm UI over an already-connected daemon `client`. Shared by
+/// the Unix-socket (`--connect`) and relay (`--connect-relay`) remote
+/// paths: both hand off a live `Client`; only how they reached the daemon
+/// differs. `notify_socket` is the path a notification click re-launches
+/// against — `None` for the relay path, which has no local socket.
+async fn run_realm_client(
+    client: lazybox_ipc::Client,
+    daemon: lazybox_ipc::socket::PeerInfo,
+    config: Option<lazybox_config::Config>,
+    notify_socket: Option<PathBuf>,
+    available_update: Option<lazybox_tui::build_guard::AvailableUpdate>,
+    preselect: Option<lazybox_tui::realm::model::Preselect>,
+) -> anyhow::Result<()> {
     spawn_terminal_restore_on_signal(None);
     // The remote path skips the full config application (the daemon
     // owns most of it), but notifications fire client-side — arm them
-    // here too or `--connect` sessions would stay silent.
+    // here too or remote sessions would stay silent.
     let attention = config
         .as_ref()
         .map(|c| c.attention.clone())
         .unwrap_or_default();
     lazybox_tui::platform::set_notification_click_context(
-        Some(socket_path.to_path_buf()),
+        notify_socket,
         attention.terminal_bundle_id,
     );
     lazybox_tui::platform::set_notifier_backend(map_notifier_backend(attention.notifier));
-    let available_update = update_check.await.unwrap_or_else(|error| {
-        tracing::debug!("startup update check task failed: {error}");
-        None
-    });
     tokio::task::spawn_blocking(move || {
         let snippets =
             lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
@@ -1099,6 +1129,78 @@ async fn run_remote(
     })
     .await
     .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
+}
+
+/// `lazybox --connect-relay <box-id> --relay <addr> --box-key <hex>` —
+/// attach a TUI to a box reached through a rendezvous relay. Connects
+/// through the relay, runs the E2E handshake pinned to the box's channel
+/// key, and drives the daemon over the encrypted, ciphertext-only tunnel.
+async fn run_connect_relay(
+    args: &[String],
+    preselect: Option<lazybox_tui::realm::model::Preselect>,
+) -> anyhow::Result<()> {
+    let mut rest = args.to_vec();
+    let relay_addr = take_value(&mut rest, "--relay")
+        .or_else(|| std::env::var("LAZYBOX_RELAY").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--connect-relay needs a relay: pass --relay <host:port> or set LAZYBOX_RELAY"
+            )
+        })?;
+    let box_key = take_value(&mut rest, "--box-key")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("--connect-relay needs the box's channel key: pass --box-key <hex>")
+        })?;
+    let box_id = rest
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+        .ok_or_else(|| {
+            anyhow::anyhow!("--connect-relay needs a box-id: lazybox --connect-relay <box-id>")
+        })?;
+    run_remote_relay(relay_addr, box_id, box_key, preselect).await
+}
+
+async fn run_remote_relay(
+    relay_addr: String,
+    box_id: String,
+    box_key_hex: String,
+    preselect: Option<lazybox_tui::realm::model::Preselect>,
+) -> anyhow::Result<()> {
+    let box_key = relay_e2e::parse_box_key(&box_key_hex)?;
+    let config = lazybox_config::Config::load().ok();
+    // The store here only backs the build guard's release-check cache — a
+    // bounded, throwaway optimization; a failed open just skips it.
+    let update_check = tokio::spawn(async {
+        let open_store = tokio::task::spawn_blocking(lazybox_server::open_store);
+        let store = match tokio::time::timeout(Duration::from_millis(500), open_store).await {
+            Ok(Ok(Ok(store))) => Some(store),
+            _ => None,
+        };
+        build_guard::available_update(store).await
+    });
+
+    let redial = relay_e2e::relay_redial(relay_addr.clone(), box_id.clone(), box_key);
+    let (client, daemon) = match socket::connect_reconnecting_with(redial).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            // println, not just the bail: stderr already points at the log
+            // file, and a wire mismatch / unreachable box needs to reach
+            // the user's terminal to be actionable.
+            println!("connect relay {relay_addr} (box {box_id}): {e}");
+            anyhow::bail!("connect relay {relay_addr} (box {box_id}): {e}");
+        }
+    };
+
+    let available_update = update_check.await.unwrap_or_else(|error| {
+        tracing::debug!("startup update check task failed: {error}");
+        None
+    });
+    run_realm_client(client, daemon, config, None, available_update, preselect).await
 }
 
 /// Realm-based default boot path. Spawns the daemon, runs detection

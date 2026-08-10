@@ -1,0 +1,27 @@
+# Merge strategies to stop lock / append-only files from hand-conflicting
+# on every branch when many agents fan out from a fast-moving main (#1004).
+#
+# `union` is git's BUILT-IN low-level merge driver: on a conflicting hunk
+# it keeps both sides' lines instead of raising a conflict. Being built in,
+# it needs no per-clone `git config` and takes effect for every worktree
+# the moment this file is committed.
+#
+# Only files where a line-wise union is *safe* live here. Generated
+# artifacts compiled from Rust source (apps/desktop/src/generated/*, the
+# keymap-docs reference, protocol fingerprint) are deliberately NOT listed:
+# a merge driver runs mid-merge, before the merged source reaches the
+# working tree, so it would regenerate from the un-merged side — see
+# scripts/rebase-onto-main.sh, which regenerates them *after* the merge
+# stops instead. `.snap` snapshots are excluded too: a union of two
+# regenerated snapshots is malformed, and a visible conflict is the safer
+# signal to re-accept.
+
+# Any branch touching a dependency re-resolves Cargo.lock, so two branches
+# adding crates collide constantly. Union keeps both sides' lines; the next
+# `cargo build`/`cargo update` normalises the merged lockfile.
+Cargo.lock merge=union
+
+# The shared snippet catalog is append-only — each snippet is a distinct
+# entry under `snippets:`. Union keeps every branch's additions rather than
+# conflicting on adjacent inserts.
+.lazybox/snippets.yaml merge=union

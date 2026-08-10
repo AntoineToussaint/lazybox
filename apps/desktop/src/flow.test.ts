@@ -213,8 +213,8 @@ describe("credential-free desktop workflow", () => {
         SpawnAgent: {
           session_key: "github-o-r-42",
           agent: "codex",
-          model_alias: null,
           initial_prompt: null,
+          model_alias: null,
           on_main: false,
         },
       });

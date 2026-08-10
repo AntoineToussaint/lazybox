@@ -342,6 +342,7 @@ struct DesktopState {
     /// pulls a recomputed view per keystroke via `snippet_view`.
     snippets: Arc<Mutex<SnippetModel>>,
     event_handoff: Arc<Mutex<EventHandoff>>,
+    conventions: lazybox_core::Conventions,
 }
 
 #[derive(Clone, Copy)]
@@ -944,6 +945,30 @@ fn correlation_echo_ok(returned: Option<&str>, expected: &str) -> bool {
     returned.is_none_or(|returned| returned == expected)
 }
 
+#[tauri::command]
+async fn resolve_work_prompt(
+    state: State<'_, DesktopState>,
+    session_key: lazybox_core::SessionKey,
+    selected_activity: Vec<usize>,
+    agent: String,
+) -> Result<Option<String>, String> {
+    let inbox = state.inbox.lock().await;
+    let workspace = inbox
+        .workspaces
+        .get(&session_key)
+        .ok_or_else(|| format!("workspace {session_key} is no longer available"))?;
+    match lazybox_tui_core::intent::resolve_work(
+        Some(workspace),
+        &selected_activity,
+        &agent,
+        &state.conventions,
+    ) {
+        lazybox_tui_core::intent::Intent::SpawnAgent { prompt, .. } => Ok(prompt),
+        lazybox_tui_core::intent::Intent::Notice(message) => Err(message),
+        _ => Err("nothing to work on here".to_string()),
+    }
+}
+
 async fn send_gateway_command(
     gateway: &GatewayClient,
     command: DesktopCommand,
@@ -991,6 +1016,51 @@ async fn send_gateway_command(
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
     lazybox_tui_core::editors::open_url(&url, None).map_err(|error| format!("open {url}: {error}"))
+}
+
+#[tauri::command]
+async fn open_workspace_editor(
+    state: State<'_, DesktopState>,
+    session_key: lazybox_core::SessionKey,
+) -> Result<String, String> {
+    let worktree = {
+        let inbox = state.inbox.lock().await;
+        let workspace = inbox
+            .workspaces
+            .get(&session_key)
+            .ok_or_else(|| format!("workspace {session_key} is no longer available"))?;
+        workspace
+            .sessions
+            .iter()
+            .max_by_key(|session| session.created_at)
+            .map(|session| session.worktree_path.clone())
+            .or_else(|| workspace.linked_checkout.clone())
+            .ok_or_else(|| "start an agent or shell to create this workspace first".to_string())?
+    };
+    tokio::task::spawn_blocking(move || {
+        let config = lazybox_config::Config::load()
+            .map_err(|error| format!("load editor configuration: {error}"))?;
+        let user = config
+            .editors
+            .into_iter()
+            .map(|entry| lazybox_tui_core::editors::UserEditorEntry {
+                id: entry.id,
+                display: entry.display,
+                command: entry.command,
+                args: entry.args,
+            })
+            .collect();
+        let editor = lazybox_tui_core::editors::discover_at_startup(user)
+            .into_iter()
+            .next()
+            .ok_or_else(|| "no supported desktop editor is installed".to_string())?;
+        lazybox_tui_core::editors::launch(&editor, Path::new(&worktree)).map_err(|error| {
+            format!("open {} in {}: {error}", worktree.display(), editor.display)
+        })?;
+        Ok(editor.display)
+    })
+    .await
+    .map_err(|error| format!("editor task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -1960,6 +2030,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         event_channel: Arc::new(RwLock::new(None)),
         snippets: Arc::new(Mutex::new(snippets)),
         event_handoff: Arc::new(Mutex::new(EventHandoff::default())),
+        conventions: user_config.conventions.clone(),
     })
 }
 
@@ -2367,6 +2438,8 @@ fn main() {
             set_search,
             snippet_view,
             open_url,
+            open_workspace_editor,
+            resolve_work_prompt,
             send_command,
             send_terminal_frame,
             read_terminal_data,
@@ -2737,8 +2810,8 @@ mod tests {
         let command = Command::from(DesktopCommand::SpawnAgent {
             session_key: session_key.clone(),
             agent: "codex".to_string(),
+            initial_prompt: Some("Fix the failing checks.".to_string()),
             model_alias: Some("L".to_string()),
-            initial_prompt: None,
             on_main: true,
         });
 
@@ -2747,13 +2820,13 @@ mod tests {
             Command::Spawn {
                 kind: lazybox_ipc::TerminalKind::Agent(agent),
                 cwd: None,
-                initial_prompt: None,
+                initial_prompt: Some(prompt),
                 on_main: true,
                 model_alias: Some(alias),
                 access: lazybox_ipc::AgentRunAccess::Default,
                 client_request_id: None,
                 ..
-            } if agent == "codex" && alias == "L"
+            } if agent == "codex" && alias == "L" && prompt == "Fix the failing checks."
         ));
         assert!(matches!(
             Command::from(DesktopCommand::SpawnShell {

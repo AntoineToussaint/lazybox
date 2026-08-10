@@ -5,4 +5,4 @@ import type { TerminalId } from "./TerminalId";
 import type { TerminalKind } from "./TerminalKind";
 import type { UserPrompt } from "./UserPrompt";
 
-export type DesktopTerminalSnapshot = { terminal_id: TerminalId, session_key: SessionKey, kind: TerminalKind, last_seq: number, agent_state: AgentState | null, prompt_history: Array<UserPrompt>, };
+export type DesktopTerminalSnapshot = { terminal_id: TerminalId, session_key: SessionKey, kind: TerminalKind, last_seq: number, agent_state: AgentState | null, model_label: string | null, prompt_history: Array<UserPrompt>, };

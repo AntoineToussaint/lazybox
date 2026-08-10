@@ -9,10 +9,10 @@ pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 mod api_gateway;
 
 use api_gateway::{
-    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCommand, DesktopEvent,
-    DesktopEventFrame, DesktopInfo, DesktopTerminalSnapshot, GatewayOptions, HealthResponse,
-    JsonClientFrame, JsonServerFrame, ProtocolResponse, UnsupportedProtocolResponse,
-    WorkspacesResponse,
+    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCleanupReason, DesktopCommand,
+    DesktopEvent, DesktopEventFrame, DesktopInfo, DesktopTerminalSnapshot, GatewayOptions,
+    HealthResponse, JsonClientFrame, JsonServerFrame, ProtocolResponse,
+    UnsupportedProtocolResponse, WorkspacesResponse,
 };
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
@@ -189,6 +189,15 @@ fn desktop_command_tag(command: &DesktopCommand) -> &'static str {
         DesktopCommand::CloseIssue { .. } => "CloseIssue",
         DesktopCommand::DeleteOrClose { .. } => "DeleteOrClose",
         DesktopCommand::DeliverSnippet { .. } => "DeliverSnippet",
+        DesktopCommand::InjectPrompt { .. } => "InjectPrompt",
+        DesktopCommand::WriteShell { .. } => "WriteShell",
+        DesktopCommand::MarkActivityRead { .. } => "MarkActivityRead",
+        DesktopCommand::KeepWorkspace { .. } => "KeepWorkspace",
+        DesktopCommand::RemoveMergedWorkspace { .. } => "RemoveMergedWorkspace",
+        DesktopCommand::AdoptSessions { .. } => "AdoptSessions",
+        DesktopCommand::RequestReviewers { .. } => "RequestReviewers",
+        DesktopCommand::SetAssignees { .. } => "SetAssignees",
+        DesktopCommand::SetLabels { .. } => "SetLabels",
         DesktopCommand::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
         DesktopCommand::SetTrackMain { .. } => "SetTrackMain",
         DesktopCommand::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
@@ -222,6 +231,8 @@ fn desktop_event_tag(event: &DesktopEvent) -> &'static str {
         DesktopEvent::WorktreeProgress { .. } => "WorktreeProgress",
         DesktopEvent::WorkspaceActionOutcome { .. } => "WorkspaceActionOutcome",
         DesktopEvent::WorkspaceDiffInspected { .. } => "WorkspaceDiffInspected",
+        DesktopEvent::WorkspaceCleanupRequested { .. } => "WorkspaceCleanupRequested",
+        DesktopEvent::WorkspaceCleanupCancelled { .. } => "WorkspaceCleanupCancelled",
     }
 }
 
@@ -276,8 +287,8 @@ fn desktop_compatibility_fixture_is_current() {
         DesktopCommand::SpawnAgent {
             session_key: session_key.clone(),
             agent: "codex".into(),
+            initial_prompt: Some("Fix the failing checks.".into()),
             model_alias: Some("L".into()),
-            initial_prompt: Some("Review the current changes.".into()),
             on_main: true,
         },
         DesktopCommand::SpawnShell {
@@ -324,6 +335,41 @@ fn desktop_compatibility_fixture_is_current() {
             category: "Review".into(),
             body: "Review the current diff.".into(),
         },
+        DesktopCommand::InjectPrompt {
+            terminal_id: TerminalId(7),
+            body: "Take another pass at the failing test.".into(),
+        },
+        DesktopCommand::WriteShell {
+            terminal_id: TerminalId(7),
+            body: "cargo test --workspace".into(),
+        },
+        DesktopCommand::MarkActivityRead {
+            session_key: session_key.clone(),
+            index: 2,
+            fingerprint: lazybox_core::ActivityFingerprint::NodeId("IC_1".into()),
+        },
+        DesktopCommand::KeepWorkspace {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::RemoveMergedWorkspace {
+            session_key: session_key.clone(),
+        },
+        DesktopCommand::AdoptSessions {
+            source_workspace_key: lazybox_core::WorkspaceKey("github:o/r#41".into()),
+            target_workspace_key: lazybox_core::WorkspaceKey("github:o/r#42".into()),
+        },
+        DesktopCommand::RequestReviewers {
+            workspace_key: lazybox_core::WorkspaceKey("github:o/r#42".into()),
+            logins: vec!["octocat".into()],
+        },
+        DesktopCommand::SetAssignees {
+            workspace_key: lazybox_core::WorkspaceKey("github:o/r#42".into()),
+            logins: vec!["octocat".into()],
+        },
+        DesktopCommand::SetLabels {
+            workspace_key: lazybox_core::WorkspaceKey("github:o/r#42".into()),
+            names: vec!["bug".into()],
+        },
         DesktopCommand::SetAutoMergeOnGreen {
             session_key: session_key.clone(),
             enabled: true,
@@ -366,6 +412,7 @@ fn desktop_compatibility_fixture_is_current() {
                 kind: TerminalKind::Agent("codex".into()),
                 last_seq: 42,
                 agent_state: Some(AgentState::Working),
+                model_label: Some("Large".into()),
                 prompt_history: vec![lazybox_ipc::UserPrompt {
                     text: "Review the current changes.".into(),
                     timestamp_ms: 1_700_000_000_000,
@@ -380,6 +427,7 @@ fn desktop_compatibility_fixture_is_current() {
             terminal_id: TerminalId(7),
             session_key: session_key.clone(),
             kind: TerminalKind::Shell,
+            model_label: None,
         },
         DesktopEvent::TerminalExited {
             terminal_id: TerminalId(7),
@@ -471,6 +519,16 @@ fn desktop_compatibility_fixture_is_current() {
             }),
             error: None,
         },
+        DesktopEvent::WorkspaceCleanupRequested {
+            workspace_key: lazybox_core::WorkspaceKey("github:o/r#42".into()),
+            label: "o/r#42".into(),
+            reason: DesktopCleanupReason::Merged,
+            active_terminal_count: 1,
+            has_local_work: true,
+        },
+        DesktopEvent::WorkspaceCleanupCancelled {
+            workspace_key: lazybox_core::WorkspaceKey("github:o/r#42".into()),
+        },
     ];
     let command_tags = commands
         .iter()
@@ -480,8 +538,8 @@ fn desktop_compatibility_fixture_is_current() {
         .iter()
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(command_tags.len(), 22);
-    assert_eq!(event_tags.len(), 19);
+    assert_eq!(command_tags.len(), 31);
+    assert_eq!(event_tags.len(), 21);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,
         "protocol_fingerprint": api_gateway::DESKTOP_PROTOCOL_FINGERPRINT,

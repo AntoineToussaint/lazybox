@@ -1,5 +1,7 @@
 import type {
   ComputeOutcome,
+  Activity,
+  ActivityFingerprint,
   FilterAxis,
   FilterMenuItem,
   LazyboxEvent,
@@ -393,6 +395,95 @@ interface WorkspaceTerminal {
   state: string;
 }
 
+export type BroadcastDisposition =
+  | { type: "agent"; terminalId: number }
+  | { type: "shell"; terminalId: number }
+  | { type: "spawn" }
+  | { type: "skip"; reason: string };
+
+export function broadcastDisposition(
+  workspace: Workspace,
+  terminals: Iterable<WorkspaceTerminal>,
+): BroadcastDisposition {
+  const live = [...terminals]
+    .filter(
+      (terminal) =>
+        terminal.sessionKey === workspace.key &&
+        !terminal.state.startsWith("exited"),
+    )
+    .sort((left, right) => right.id - left.id);
+  const agent = live.find(
+    (terminal) =>
+      typeof terminal.kind === "object" && "Agent" in terminal.kind,
+  );
+  if (agent !== undefined) {
+    return { type: "agent", terminalId: agent.id };
+  }
+  const shell = live.find((terminal) => terminal.kind === "Shell");
+  if (shell !== undefined) {
+    return { type: "shell", terminalId: shell.id };
+  }
+  if (workspace.sessions.length === 0) {
+    return { type: "spawn" };
+  }
+  return { type: "skip", reason: "no running agent or shell" };
+}
+
+export function activityFingerprint(activity: Activity): ActivityFingerprint {
+  if (typeof activity.node_id === "string" && activity.node_id.length > 0) {
+    return { NodeId: activity.node_id };
+  }
+  return {
+    Content: {
+      author: activity.author,
+      created_at: activity.created_at,
+      body_prefix: [...(activity.body ?? "")].slice(0, 64).join(""),
+    },
+  };
+}
+
+export function activityFingerprintKey(activity: Activity): string {
+  return JSON.stringify(activityFingerprint(activity));
+}
+
+export function isActivityUnread(workspace: Workspace, index: number): boolean {
+  const unseen = Math.max(0, workspace.activity.length - workspace.seen_count);
+  return index < unseen && !workspace.read_indices.includes(index);
+}
+
+export function cycleMatchingKey(
+  orderedKeys: string[],
+  current: string | null,
+  matches: (key: string) => boolean,
+): string | null {
+  const candidates = orderedKeys.filter(matches);
+  if (candidates.length === 0) {
+    return null;
+  }
+  const currentIndex = candidates.indexOf(current ?? "");
+  return candidates[(currentIndex + 1) % candidates.length] ?? null;
+}
+
+export function workspaceRuntimeSignals(
+  terminals: Iterable<WorkspaceTerminal>,
+  sessionKey: string,
+): TaskSignal[] {
+  const live = [...terminals].filter(
+    (terminal) =>
+      terminal.sessionKey === sessionKey && !terminal.state.startsWith("exited"),
+  );
+  if (live.some((terminal) => terminal.state === "inputneeded")) {
+    return [{ label: "asking", tone: "attention" }];
+  }
+  if (live.some((terminal) => terminal.state === "working")) {
+    return [{ label: "running", tone: "success" }];
+  }
+  if (live.length > 0) {
+    return [{ label: "agent ready" }];
+  }
+  return [];
+}
+
 export function preferredTerminal<T extends WorkspaceTerminal>(
   terminals: Iterable<T>,
   sessionKey: string,
@@ -448,7 +539,7 @@ export function workspaceDiffTarget(
 }
 
 export function canReplyToTask(task: Task | null): boolean {
-  return task?.id.source === "github";
+  return task?.id.source === "github" || task?.id.source === "linear";
 }
 
 export function shouldHandleWorkspaceEnter(

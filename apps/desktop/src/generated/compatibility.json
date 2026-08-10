@@ -3,7 +3,7 @@
     {
       "SpawnAgent": {
         "agent": "codex",
-        "initial_prompt": "Review the current changes.",
+        "initial_prompt": "Fix the failing checks.",
         "model_alias": "L",
         "on_main": true,
         "session_key": "github:o/r#42"
@@ -78,6 +78,67 @@
       }
     },
     {
+      "InjectPrompt": {
+        "body": "Take another pass at the failing test.",
+        "terminal_id": 7
+      }
+    },
+    {
+      "WriteShell": {
+        "body": "cargo test --workspace",
+        "terminal_id": 7
+      }
+    },
+    {
+      "MarkActivityRead": {
+        "fingerprint": {
+          "NodeId": "IC_1"
+        },
+        "index": 2,
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "KeepWorkspace": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "RemoveMergedWorkspace": {
+        "session_key": "github:o/r#42"
+      }
+    },
+    {
+      "AdoptSessions": {
+        "source_workspace_key": "github:o/r#41",
+        "target_workspace_key": "github:o/r#42"
+      }
+    },
+    {
+      "RequestReviewers": {
+        "logins": [
+          "octocat"
+        ],
+        "workspace_key": "github:o/r#42"
+      }
+    },
+    {
+      "SetAssignees": {
+        "logins": [
+          "octocat"
+        ],
+        "workspace_key": "github:o/r#42"
+      }
+    },
+    {
+      "SetLabels": {
+        "names": [
+          "bug"
+        ],
+        "workspace_key": "github:o/r#42"
+      }
+    },
+    {
       "SetAutoMergeOnGreen": {
         "enabled": true,
         "session_key": "github:o/r#42"
@@ -139,6 +200,7 @@
               "Agent": "codex"
             },
             "last_seq": 42,
+            "model_label": "Large",
             "prompt_history": [
               {
                 "source": "Typed",
@@ -308,6 +370,7 @@
     {
       "TerminalSpawned": {
         "kind": "Shell",
+        "model_label": null,
         "session_key": "github:o/r#42",
         "terminal_id": 7
       }
@@ -447,8 +510,22 @@
         "error": null,
         "workspace_key": "github:o/r#42"
       }
+    },
+    {
+      "WorkspaceCleanupRequested": {
+        "active_terminal_count": 1,
+        "has_local_work": true,
+        "label": "o/r#42",
+        "reason": "Merged",
+        "workspace_key": "github:o/r#42"
+      }
+    },
+    {
+      "WorkspaceCleanupCancelled": {
+        "workspace_key": "github:o/r#42"
+      }
     }
   ],
-  "protocol_fingerprint": 2240621185,
+  "protocol_fingerprint": 2440182692,
   "protocol_version": 3
 }

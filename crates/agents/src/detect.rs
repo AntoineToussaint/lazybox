@@ -151,9 +151,7 @@ pub fn codex_auth_failure(recent_output: &[u8]) -> Option<AuthFailure> {
     // (covers both "please …" and "log out and …") plus the revoked marker so
     // a wording tweak upstream can't silently defeat the in-place re-auth.
     let refresh_rejected = tail.contains("access token could not be refreshed")
-        && (tail.contains("sign in again")
-            || tail.contains("logged out or signed in to another account")
-            || tail.contains("refresh token was revoked"));
+        && (tail.contains("sign in again") || tail.contains("refresh token was revoked"));
     let login_required = tail.contains("not logged in. run `codex login`")
         || tail.contains("not logged in. run codex login")
         || tail.contains("not authenticated. run `codex login`")

@@ -106,6 +106,17 @@ fn auth_failure_detection_accepts_provider_errors_and_rejects_chat_prose() {
             .detect_auth_failure(include_bytes!("fixtures/codex_refresh_revoked.bin"))
             .is_some()
     );
+    // The anchor + "refresh token was revoked" with NO "sign in again"
+    // directive — proves the "refresh token was revoked" marker carries its
+    // own weight, so it can't be pruned as redundant if Codex ever drops the
+    // "sign in again" directive from this line.
+    assert!(
+        codex
+            .detect_auth_failure(include_bytes!(
+                "fixtures/codex_refresh_revoked_no_directive.bin"
+            ))
+            .is_some()
+    );
     assert!(
         codex
             .detect_auth_failure(include_bytes!("fixtures/codex_login_required.bin"))

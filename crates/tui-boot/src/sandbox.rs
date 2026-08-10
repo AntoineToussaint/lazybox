@@ -127,9 +127,13 @@ fn instance_name(explicit: Option<String>, worktree: &str) -> String {
 }
 
 /// What the derived instance name identifies. A per-`--worktree` box uses
-/// the worktree key itself; the shared box salts in the local username so
-/// two people pointing the same `sandbox.project` at the same deployment
-/// don't collide on one GCE instance name. Local state (store handle,
+/// the worktree key itself; the shared box salts in the local username
+/// **and machine name** so neither two people sharing a GCP project nor
+/// one person on two machines collide on one GCE instance name. The
+/// machine component matters because tfstate is machine-local: the same
+/// user's second laptop can never *adopt* the first's box, so without it
+/// `ensure` there would try to create a second instance under the same
+/// name and terraform would error out. Local state (store handle,
 /// tfstate) still keys off the plain [`SHARED_BOX_KEY`] — the salt only
 /// disambiguates the cloud-side name.
 fn name_salt(key: &str) -> String {
@@ -137,12 +141,36 @@ fn name_salt(key: &str) -> String {
         return key.to_string();
     }
     let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-    let user = lazybox_core::slug::slugify(&user);
-    if user.is_empty() {
-        SHARED_BOX_KEY.to_string()
-    } else {
-        format!("{SHARED_BOX_KEY}-{user}")
+    let mut salt = SHARED_BOX_KEY.to_string();
+    for part in [
+        lazybox_core::slug::slugify(&user),
+        lazybox_core::slug::slugify(&machine_name()),
+    ] {
+        if !part.is_empty() {
+            salt.push('-');
+            salt.push_str(&part);
+        }
     }
+    salt
+}
+
+/// Best-effort machine name for the shared box's cloud-side identity:
+/// `$HOSTNAME` when exported, else `uname -n`, else empty (the salt
+/// degrades to user-only). Never an error — a machine we can't name
+/// still gets a working, merely less-unique, instance name.
+fn machine_name() -> String {
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.trim().is_empty()
+    {
+        return h.trim().to_string();
+    }
+    std::process::Command::new("uname")
+        .arg("-n")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// This box's isolated Terraform state file, under
@@ -212,6 +240,38 @@ pub(crate) fn resolve_spec(
     args: &mut Vec<String>,
     worktree: &str,
 ) -> anyhow::Result<SandboxSpec> {
+    let deployment = resolve_deployment(sc, args)?;
+    resolve_spec_with_deployment(sc, args, worktree, deployment)
+}
+
+/// Resolve the deployment recipe (`--deployment` flag → config overlay →
+/// embedded default) on its own, so a caller that only needs the
+/// deployment's declared `workload_ports` (e.g. `connect` to an
+/// already-stamped box) doesn't have to satisfy the full spec's
+/// `project` requirement.
+pub(crate) fn resolve_deployment(
+    sc: &SandboxConfig,
+    args: &mut Vec<String>,
+) -> anyhow::Result<Deployment> {
+    let overlay_path = take_value(args, "--deployment")
+        .map(PathBuf::from)
+        .or_else(|| sc.deployment.clone());
+    match overlay_path {
+        Some(path) => {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("read deployment overlay {}: {e}", path.display()))?;
+            Ok(Deployment::with_overlay(&text)?)
+        }
+        None => Ok(Deployment::default_recipe()?),
+    }
+}
+
+fn resolve_spec_with_deployment(
+    sc: &SandboxConfig,
+    args: &mut Vec<String>,
+    worktree: &str,
+    deployment: Deployment,
+) -> anyhow::Result<SandboxSpec> {
     let project = take_value(args, "--project")
         .or_else(|| sc.project.clone())
         .ok_or_else(|| anyhow::anyhow!("no project: set sandbox.project or pass --project"))?;
@@ -222,18 +282,6 @@ pub(crate) fn resolve_spec(
         .or_else(|| sc.zone.clone())
         .unwrap_or_else(|| "us-central1-a".to_string());
     let name = instance_name(take_value(args, "--name"), &name_salt(worktree));
-
-    let overlay_path = take_value(args, "--deployment")
-        .map(PathBuf::from)
-        .or_else(|| sc.deployment.clone());
-    let deployment = match overlay_path {
-        Some(path) => {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("read deployment overlay {}: {e}", path.display()))?;
-            Deployment::with_overlay(&text)?
-        }
-        None => Deployment::default_recipe()?,
-    };
     Ok(SandboxSpec {
         provider: "gcp".to_string(),
         name,
@@ -242,6 +290,19 @@ pub(crate) fn resolve_spec(
         zone,
         deployment,
     })
+}
+
+/// `base` plus every port in `extra` not already present — the forward
+/// set both `connect` and the r-spawn derive from `sandbox.ports` and
+/// the deployment's `workload_ports`, so neither path silently ignores
+/// a port the other honors.
+pub(crate) fn union_ports(mut base: Vec<u16>, extra: &[u16]) -> Vec<u16> {
+    for p in extra {
+        if !base.contains(p) {
+            base.push(*p);
+        }
+    }
+    base
 }
 
 fn open_store() -> anyhow::Result<std::sync::Arc<dyn Store>> {
@@ -373,7 +434,30 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     // invisible-lifecycle product path (#965); a CLI verb named `connect`
     // is not where a terraform apply should be a surprise.
     let provision = crate::take_flag(args, "--provision");
-    let ports = resolve_ports(take_value(args, "--ports"), &config.sandbox.ports)?;
+    // Forward ports: an explicit `--ports` is honored verbatim (the user
+    // asked for exactly that set); otherwise `sandbox.ports` is unioned
+    // with the deployment's declared `workload_ports` — the same set the
+    // r-spawn forwards, so the two paths can't silently diverge. An
+    // unreadable deployment recipe only degrades the port set on the
+    // stamped-box path (warned); provisioning still hard-fails on it.
+    let explicit_ports = take_value(args, "--ports");
+    let deployment = resolve_deployment(&config.sandbox, args);
+    let ports = match explicit_ports {
+        Some(raw) => resolve_ports(Some(raw), &[])?,
+        None => {
+            let extra = match &deployment {
+                Ok(d) => d.config.workload_ports.clone(),
+                Err(e) => {
+                    println!(
+                        "warning: deployment recipe unreadable ({e:#}); forwarding \
+                         configured ports only"
+                    );
+                    Vec::new()
+                }
+            };
+            union_ports(config.sandbox.ports.clone(), &extra)
+        }
+    };
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     if provider.remote_socket.is_empty() {
         anyhow::bail!(
@@ -394,7 +478,7 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
         None if provision => {
             // The same ensure → connect sequence the TUI's `r`-spawn
             // runs — one engine, two callers (#965).
-            let spec = resolve_spec(&config.sandbox, args, &worktree)?;
+            let spec = resolve_spec_with_deployment(&config.sandbox, args, &worktree, deployment?)?;
             if let Some(parent) = provider.state_file.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     anyhow::anyhow!("create sandbox state dir {}: {e}", parent.display())
@@ -503,8 +587,10 @@ mod tests {
     #[test]
     fn name_salt_disambiguates_only_the_shared_key() {
         // Per-worktree identities pass through untouched; the shared key
-        // picks up a per-user suffix so two people sharing one GCP
-        // project don't collide on a single instance name.
+        // picks up per-user AND per-machine suffixes: two people sharing
+        // one GCP project must not collide on a single instance name, and
+        // one person's second machine (whose local tfstate can't adopt
+        // the first box) must not collide with their first.
         assert_eq!(name_salt("/repos/foo/wt"), "/repos/foo/wt");
         let salted = name_salt(SHARED_BOX_KEY);
         assert!(salted.starts_with(SHARED_BOX_KEY), "{salted}");
@@ -512,6 +598,13 @@ mod tests {
             assert_ne!(
                 salted, SHARED_BOX_KEY,
                 "a resolvable user must salt the name"
+            );
+        }
+        let machine = lazybox_core::slug::slugify(&machine_name());
+        if !machine.is_empty() {
+            assert!(
+                salted.contains(&machine),
+                "a resolvable machine name must salt the name: {salted}"
             );
         }
     }
@@ -604,6 +697,45 @@ mod tests {
             state_file_for("/repos/bar/wt")
         );
         assert!(state_file_for("/wt").ends_with("terraform.tfstate"));
+    }
+
+    #[test]
+    fn an_explicit_empty_remote_socket_reaches_the_connect_guard() {
+        // `remote_socket: ""` in YAML is the one input that must NOT be
+        // silently replaced by the convention default — connect's
+        // empty-socket bail exists exactly for it.
+        let sc = SandboxConfig {
+            remote_socket: Some(String::new()),
+            ..SandboxConfig::default()
+        };
+        let p = resolve_provider(&sc, &mut vec![], "/wt").unwrap();
+        assert!(p.remote_socket.is_empty());
+    }
+
+    #[test]
+    fn resolve_deployment_defaults_and_surfaces_a_bad_overlay() {
+        // No overlay → the embedded default recipe (what `connect` reads
+        // workload ports from without needing a project).
+        let sc = SandboxConfig::default();
+        let d = resolve_deployment(&sc, &mut vec![]).unwrap();
+        assert_eq!(d.config.name, "default");
+
+        // A configured-but-missing overlay is an error, not a silent
+        // fallback to the default recipe.
+        let sc = SandboxConfig {
+            deployment: Some(PathBuf::from("/definitely/not/here.yaml")),
+            ..SandboxConfig::default()
+        };
+        assert!(resolve_deployment(&sc, &mut vec![]).is_err());
+    }
+
+    #[test]
+    fn union_ports_appends_only_missing() {
+        assert_eq!(
+            union_ports(vec![22, 3000], &[3000, 8082]),
+            vec![22, 3000, 8082]
+        );
+        assert_eq!(union_ports(vec![], &[3000]), vec![3000]);
     }
 
     #[test]

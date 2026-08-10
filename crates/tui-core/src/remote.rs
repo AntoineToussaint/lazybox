@@ -16,12 +16,14 @@ use lazybox_core::SessionKey;
 pub enum RemoteBoxNotice {
     /// Bring-up progress ("provisioning…", "connected") — an info flash.
     Info(String),
-    /// A command to the box was dropped (bring-up exhausted its retries,
-    /// or the live link refused the send). When the command was a spawn,
-    /// `session_key` names the workspace whose optimistic `⇅` tag must be
-    /// rolled back — the session it advertised will never exist.
+    /// One or more commands to the box were dropped (a bring-up exhausted
+    /// its retries — taking every command queued behind it — or the live
+    /// link refused a send). `session_keys` names every workspace whose
+    /// optimistic `⇅` tag must be rolled back: the sessions those spawns
+    /// advertised will never exist. Aggregated so a bulk fan-out that dies
+    /// with the box produces one notice, not one per queued spawn.
     Dropped {
-        session_key: Option<SessionKey>,
+        session_keys: Vec<SessionKey>,
         error: String,
     },
 }

@@ -1456,6 +1456,10 @@ impl<T: TerminalAdapter> Model<T> {
             // workspace doesn't inherit a stale restore target.
             let session_key: lazybox_core::SessionKey = key.into();
             self.workspace_focus.remove(&session_key);
+            // Drop the remote-box latch — same leak/mis-patch argument as
+            // `merge_confirmed` above: a re-added key must not inherit a
+            // stale `⇅` tag.
+            self.remote_marks.remove(&session_key);
             // Drop the autonomous-spawn notice marker so a re-added
             // workspace's next auto-spawn announces again, and a spawn
             // that never reached a live terminal can't leak the entry

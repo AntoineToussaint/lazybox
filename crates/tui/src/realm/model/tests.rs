@@ -19903,34 +19903,88 @@ mod remote_spawn_tests {
         assert_eq!(m.remote_marks.len(), 2);
     }
 
-    /// A worker `Dropped` notice rolls the optimistic tag back — the `⇅`
-    /// glyph must not advertise a session whose spawn never happened.
+    /// `WorkspaceRemoved` releases the remote latch, exactly like
+    /// `merge_confirmed` — a re-added key must not inherit a stale `⇅`.
     #[test]
-    fn dropped_notice_rolls_back_the_tag() {
+    fn workspace_removed_releases_the_remote_latch() {
+        let (mut m, _conn, _box_rx) = build_model_with_box();
+        let ws = workspace("owner/repo#1", Duration::hours(1));
+        let wkey = ws.key.clone();
+        let sk: SessionKey = (&wkey).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        m.mark_remote_latched(sk.clone(), "box".to_string());
+        assert!(m.remote_marks.contains_key(&sk));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(wkey));
+        assert!(
+            m.remote_marks.is_empty(),
+            "a removed workspace must not leave a latch entry behind"
+        );
+    }
+
+    /// The notice channel closing means the worker died without a chance
+    /// to report anything in flight: surface it once, stop polling — and
+    /// do NOT clear existing tags (sessions already spawned keep running
+    /// on the box; only the link died).
+    #[test]
+    fn worker_death_is_surfaced_once_and_polling_stops() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (notice_tx, notice_rx) = tokio::sync::mpsc::channel::<RemoteBoxNotice>(8);
+        let mut m = m.with_remote_notices(notice_rx);
+        let sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+        m.mark_remote_latched(sk.clone(), "box".to_string());
+
+        drop(notice_tx);
+        m.tick_remote_notices();
+
+        assert!(
+            m.remote_notice_rx.is_none(),
+            "a dead worker's channel must not be polled forever"
+        );
+        assert_eq!(
+            m.sidebar.workspace_by_key(&sk).unwrap().remote.as_deref(),
+            Some("box"),
+            "tags for possibly-live remote sessions must survive the link dying"
+        );
+        // A second tick after the receiver was dropped is a no-op, not a
+        // second flash or a panic.
+        m.tick_remote_notices();
+    }
+
+    /// A worker `Dropped` notice rolls the optimistic tags back — the `⇅`
+    /// glyph must not advertise sessions whose spawns never happened. One
+    /// aggregate notice covers a whole failed bulk fan-out.
+    #[test]
+    fn dropped_notice_rolls_back_every_named_tag() {
         let (m, _conn, _box_rx) = build_model_with_box();
         let (notice_tx, notice_rx) = tokio::sync::mpsc::channel(8);
         let mut m = m.with_remote_notices(notice_rx);
-        let sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+        let sk1 = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+        let sk2 = seed_focused(&mut m, "owner/repo#2", Duration::hours(2));
 
-        m.mark_remote_latched(sk.clone(), "box".to_string());
+        m.mark_remote_latched(sk1.clone(), "box".to_string());
+        m.mark_remote_latched(sk2.clone(), "box".to_string());
         assert_eq!(
-            m.sidebar.workspace_by_key(&sk).unwrap().remote.as_deref(),
+            m.sidebar.workspace_by_key(&sk1).unwrap().remote.as_deref(),
             Some("box")
         );
 
         notice_tx
             .try_send(RemoteBoxNotice::Dropped {
-                session_key: Some(sk.clone()),
-                error: "⇅ box: bring-up failed — spawn dropped".to_string(),
+                session_keys: vec![sk1.clone(), sk2.clone()],
+                error: "⇅ box: bring-up failed — 2 command(s) dropped".to_string(),
             })
             .expect("test channel");
         m.tick_remote_notices();
 
-        assert_eq!(
-            m.sidebar.workspace_by_key(&sk).unwrap().remote,
-            None,
-            "a dropped spawn must clear the glyph"
-        );
+        for sk in [&sk1, &sk2] {
+            assert_eq!(
+                m.sidebar.workspace_by_key(sk).unwrap().remote,
+                None,
+                "every dropped spawn must clear its glyph"
+            );
+        }
         assert!(m.remote_marks.is_empty(), "the latch is released too");
     }
 }

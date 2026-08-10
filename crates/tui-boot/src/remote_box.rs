@@ -73,11 +73,17 @@ pub struct RemoteBox {
 
 /// The per-box local Unix socket the forward binds — the endpoint the
 /// worker's box client dials. Dedicated (never the `--connect` socket) so
-/// the two never collide.
+/// the two never collide, and **per-process** (pid-suffixed): two
+/// concurrent lazybox instances would otherwise fight over one path —
+/// the second forward can't bind, and the first instance quitting
+/// unlinks the socket out from under the second's live connection. Each
+/// worker unlinks its own socket on exit; a crashed run's leftover file
+/// is inert (nothing dials it) and reclaimed on pid reuse by the
+/// supervisor's stale-socket clearing.
 fn local_socket() -> PathBuf {
     lazybox_core::paths::state_root()
         .join("remotes")
-        .join("sandbox.sock")
+        .join(format!("sandbox-{}.sock", std::process::id()))
 }
 
 /// Build the GCP provider for the shared box, deriving the transport
@@ -225,13 +231,10 @@ where
 /// deployment's declared `workload_ports` — so the `r`-spawn path never
 /// silently ignores a configured port the CLI would honor.
 fn forward_ports(sandbox: &SandboxConfig, spec: &SandboxSpec) -> Vec<u16> {
-    let mut ports = sandbox.ports.clone();
-    for p in &spec.deployment.config.workload_ports {
-        if !ports.contains(p) {
-            ports.push(*p);
-        }
-    }
-    ports
+    crate::sandbox::union_ports(
+        sandbox.ports.clone(),
+        &spec.deployment.config.workload_ports,
+    )
 }
 
 /// Abort a forward supervisor. Dropping the `JoinHandle` only **detaches**
@@ -294,7 +297,7 @@ async fn run(
                         notify(
                             &notice_tx,
                             RemoteBoxNotice::Dropped {
-                                session_key: spawn_session_key(&cmd),
+                                session_keys: spawn_session_key(&cmd).into_iter().collect(),
                                 error: format!(
                                     "⇅ {name}: command to box dropped (link busy/closed)"
                                 ),
@@ -368,7 +371,7 @@ async fn run(
                         notify(
                             &notice_tx,
                             RemoteBoxNotice::Dropped {
-                                session_key: spawn_session_key(&cmd),
+                                session_keys: spawn_session_key(&cmd).into_iter().collect(),
                                 error: format!(
                                     "⇅ {name}: command to box dropped (link busy/closed)"
                                 ),
@@ -378,13 +381,31 @@ async fn run(
                     connected = Some((client, supervisor));
                 }
                 Err(e) => {
-                    tracing::warn!("r-spawn box bring-up failed after retries: {e:#}");
+                    // The box just proved unreachable after a full retry
+                    // cycle. Everything queued behind the triggering
+                    // command was riding this same bring-up — running
+                    // another multi-attempt cycle per queued command would
+                    // burn minutes against a dead box (a 5-row bulk
+                    // fan-out ≈ 5 × ~66s of churn). Drain and drop the
+                    // whole queue now, with ONE aggregate notice that
+                    // rolls back every affected `⇅` tag. A command that
+                    // arrives after this drain is a fresh user action and
+                    // earns a fresh bring-up attempt.
+                    let mut dropped = vec![cmd];
+                    while let Ok(queued) = cmd_rx.try_recv() {
+                        dropped.push(queued);
+                    }
+                    tracing::warn!(
+                        "r-spawn box bring-up failed after retries; dropping {} queued command(s): {e:#}",
+                        dropped.len()
+                    );
                     notify(
                         &notice_tx,
                         RemoteBoxNotice::Dropped {
-                            session_key: spawn_session_key(&cmd),
+                            session_keys: dropped.iter().filter_map(spawn_session_key).collect(),
                             error: format!(
-                                "⇅ {name}: box bring-up failed after {MAX_BRINGUP_ATTEMPTS} attempts — spawn dropped ({e:#})"
+                                "⇅ {name}: box bring-up failed after {MAX_BRINGUP_ATTEMPTS} attempts — {} command(s) dropped ({e:#})",
+                                dropped.len()
                             ),
                         },
                     );
@@ -392,6 +413,11 @@ async fn run(
             }
         }
     }
+    // Worker exit (the Model dropped its client): remove this process's
+    // socket file so the per-pid directory doesn't accumulate one dead
+    // path per run. Best-effort — a crashed run skips this and leaves an
+    // inert file.
+    let _ = std::fs::remove_file(&provider.local_socket);
 }
 
 #[cfg(test)]
@@ -412,6 +438,18 @@ mod tests {
         assert!(
             p.local_socket
                 .starts_with(lazybox_core::paths::state_root())
+        );
+        // Per-process: two concurrent lazybox instances must not fight
+        // over one socket path (the second can't bind; the first's exit
+        // unlinks it under the second).
+        assert!(
+            p.local_socket
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&std::process::id().to_string()),
+            "{:?} must be pid-scoped",
+            p.local_socket
         );
         assert_eq!(p.remote_socket, crate::sandbox::BOX_DAEMON_SOCKET);
         // Isolated state, keyed by the shared-box key, under the state root.

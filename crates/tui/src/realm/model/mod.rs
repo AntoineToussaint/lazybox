@@ -2207,15 +2207,38 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         let mut drained = Vec::new();
-        while let Ok(notice) = rx.try_recv() {
-            drained.push(notice);
+        let mut worker_dead = false;
+        loop {
+            match rx.try_recv() {
+                Ok(notice) => drained.push(notice),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                // The sender lives in the r-spawn worker task; a closed
+                // channel means the worker died (panic / runtime teardown)
+                // — without an explicit `Dropped` for anything in flight.
+                // Say so once and stop polling; existing `⇅` tags are NOT
+                // cleared, because sessions that already spawned keep
+                // running on the box — only the *link* is gone.
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    worker_dead = true;
+                    break;
+                }
+            }
+        }
+        if worker_dead {
+            self.remote_notice_rx = None;
+            self.flash_error(
+                "⇅ remote-box worker terminated — r-spawns are unavailable until restart",
+            );
         }
         for notice in drained {
             match notice {
                 lazybox_tui_core::remote::RemoteBoxNotice::Info(msg) => self.flash_info(msg),
-                lazybox_tui_core::remote::RemoteBoxNotice::Dropped { session_key, error } => {
-                    if let Some(sk) = session_key {
-                        self.unmark_remote(&sk);
+                lazybox_tui_core::remote::RemoteBoxNotice::Dropped {
+                    session_keys,
+                    error,
+                } => {
+                    for sk in &session_keys {
+                        self.unmark_remote(sk);
                     }
                     self.flash_error(error);
                 }

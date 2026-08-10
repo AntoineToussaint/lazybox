@@ -3,8 +3,9 @@ compile_error!("run with --features desktop-contract");
 
 use lazybox_server::api_gateway::{
     DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION, DESKTOP_TERMINAL_STREAM_ITEM_DATA,
-    DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand, DesktopEvent, DesktopInboxView,
-    DesktopInfo, DesktopRepository, DesktopStreamMessage, DesktopTerminalSnapshot, HealthResponse,
+    DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopAgentInfo, DesktopAttentionSettings, DesktopCommand,
+    DesktopDaemonSettings, DesktopEvent, DesktopInboxView, DesktopInfo, DesktopModelTier,
+    DesktopRepository, DesktopStreamMessage, DesktopTerminalSnapshot, HealthResponse,
     ProtocolResponse, TERMINAL_CLIENT_COMMAND_CLOSE, TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK,
     TERMINAL_CLIENT_COMMAND_RESIZE, TERMINAL_CLIENT_COMMAND_RESYNC, TERMINAL_CLIENT_COMMAND_WRITE,
     TERMINAL_CLIENT_FRAME_HEADER_BYTES, TERMINAL_CLIENT_FRAME_KIND_OFFSET,
@@ -47,6 +48,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     DesktopEvent::export_all(&config)?;
     DesktopTerminalSnapshot::export_all(&config)?;
     DesktopInfo::export_all(&config)?;
+    DesktopAgentInfo::export_all(&config)?;
+    DesktopModelTier::export_all(&config)?;
+    DesktopDaemonSettings::export_all(&config)?;
+    DesktopAttentionSettings::export_all(&config)?;
     DesktopRepository::export_all(&config)?;
     DesktopStreamMessage::export_all(&config)?;
     // The grouped inbox view-model (#732). `export_all` pulls in the

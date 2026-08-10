@@ -225,9 +225,9 @@ fn desktop_info_projects_the_daemons_own_agents_and_repositories() {
     // `claude` as the default.
     let mut config = lazybox_config::Config::default();
     let info: DesktopInfo = api_gateway::build_desktop_info(&config);
-    assert!(info.agents.contains(&"claude".to_string()));
-    assert!(info.agents.contains(&"codex".to_string()));
-    assert!(info.agents.contains(&"cursor-agent".to_string()));
+    assert!(info.agents.iter().any(|agent| agent.id == "claude"));
+    assert!(info.agents.iter().any(|agent| agent.id == "codex"));
+    assert!(info.agents.iter().any(|agent| agent.id == "cursor-agent"));
     assert_eq!(info.default_agent, "claude");
     assert!(info.repositories.is_empty());
 
@@ -235,6 +235,7 @@ fn desktop_info_projects_the_daemons_own_agents_and_repositories() {
     // concrete `owner/repo` scopes — a whole-org scope is not a spawn
     // target and is excluded.
     config.setup.agents = ["codex".to_string()].into_iter().collect();
+    config.setup.providers.insert("github".to_string());
     config.setup.default_agent = Some("codex".to_string());
     config.setup.scopes.insert(
         "github".into(),
@@ -244,7 +245,14 @@ fn desktop_info_projects_the_daemons_own_agents_and_repositories() {
     );
     let info = api_gateway::build_desktop_info(&config);
     assert_eq!(info.default_agent, "codex");
-    assert!(info.agents.contains(&"codex".to_string()));
+    let codex = info
+        .agents
+        .iter()
+        .find(|agent| agent.id == "codex")
+        .expect("configured agent projected");
+    assert_eq!(codex.label, "Codex");
+    assert_eq!(info.providers, vec!["github"]);
+    assert_eq!(info.settings.github_scopes.len(), 2);
     assert_eq!(info.repositories.len(), 1);
     assert_eq!(info.repositories[0].label, "acme/widget");
     assert_eq!(

@@ -378,7 +378,9 @@
           </button>
         </div>
 
-        <section class="setup-section" aria-labelledby="github-setup-title">
+        <p id="settings-authority" class="privacy-note"></p>
+
+        <section id="github-settings-section" class="setup-section" aria-labelledby="github-setup-title">
           <div class="setup-section-heading">
             <div>
               <h3 id="github-setup-title">1. GitHub access</h3>
@@ -400,7 +402,7 @@
           </p>
         </section>
 
-        <section class="setup-section" aria-labelledby="repo-setup-title">
+        <section id="repository-settings-section" class="setup-section" aria-labelledby="repo-setup-title">
           <div class="setup-section-heading">
             <div>
               <h3 id="repo-setup-title">2. Repositories</h3>
@@ -431,7 +433,7 @@
           <p id="repository-selection-count" class="selection-count">0 selected</p>
         </section>
 
-        <section class="setup-section setup-grid" aria-labelledby="agent-setup-title">
+        <section id="agent-settings-section" class="setup-section setup-grid" aria-labelledby="agent-setup-title">
           <label>
             <span id="agent-setup-title">3. Default agent</span>
             <select id="default-agent-select"></select>
@@ -446,8 +448,8 @@
           <div class="setup-section-heading">
             <div>
               <h3 id="appearance-title">Appearance</h3>
-              <p>Pick a theme. The change applies immediately and persists to
-                the shared <code>ui.theme</code>.</p>
+              <p>Pick a desktop theme. The change applies immediately and affects
+                only this client.</p>
             </div>
             <span id="keymap-preset-label" class="setup-badge">Keymap: default</span>
           </div>
@@ -457,25 +459,6 @@
             role="radiogroup"
             aria-label="Color theme"
           ></div>
-        </section>
-
-        <section class="setup-section setup-grid" aria-labelledby="workspace-title">
-          <h3 id="workspace-title" class="setup-grid-title">Workspace</h3>
-          <label>
-            <span>New terminal opens as</span>
-            <select id="terminal-layout-select">
-              <option value="split">Split tile</option>
-              <option value="tabs">Tab</option>
-            </select>
-          </label>
-          <label>
-            <span>Activity pane default</span>
-            <select id="activity-pane-select">
-              <option value="full">Full feed</option>
-              <option value="summary">Summary line</option>
-              <option value="hidden">Hidden</option>
-            </select>
-          </label>
         </section>
 
         <section class="setup-section" aria-labelledby="privacy-title">

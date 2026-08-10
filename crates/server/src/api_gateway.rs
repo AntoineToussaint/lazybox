@@ -37,7 +37,7 @@ pub type Body = UnsyncBoxBody<Bytes, Infallible>;
 /// layout, so a real wire change can't ride an unchanged version across a
 /// remote hop. Non-wire churn (a `Cargo.lock` bump, a comment) must not
 /// bump it; that is exactly the skew the advisory fingerprint tolerates.
-pub const DESKTOP_PROTOCOL_VERSION: u32 = 2;
+pub const DESKTOP_PROTOCOL_VERSION: u32 = 3;
 pub const PROTOCOL_VERSION_HEADER: &str = "x-lazybox-protocol-version";
 pub const TERMINAL_BINARY_CONTENT_TYPE: &str = "application/vnd.lazybox.terminal.v1";
 pub const TERMINAL_FRAME_LENGTH_OFFSET: usize = 0;
@@ -380,14 +380,50 @@ pub struct DesktopInfo {
     pub protocol_version: u32,
     pub max_terminal_frame_bytes: usize,
     pub max_terminal_write_bytes: usize,
-    pub agents: Vec<String>,
+    pub providers: Vec<String>,
+    pub agents: Vec<DesktopAgentInfo>,
     pub default_agent: String,
     pub repositories: Vec<DesktopRepository>,
+    pub settings: DesktopDaemonSettings,
     /// A tolerated protocol-skew advisory: set when the daemon and this
     /// client share a compatible protocol version but differ in build
     /// fingerprint (#815). The link works; the UI shows it so the user can
     /// update one side if something misbehaves.
     pub protocol_notice: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopAgentInfo {
+    pub id: String,
+    pub label: String,
+    pub models: Vec<DesktopModelTier>,
+    pub default_tier: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopModelTier {
+    pub alias: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopDaemonSettings {
+    pub github_scopes: Vec<String>,
+    pub keymap_preset: Option<String>,
+    pub attention: DesktopAttentionSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct DesktopAttentionSettings {
+    pub unread: bool,
+    pub ci_failing: bool,
+    pub review_pending: bool,
+    pub agent_asking: bool,
+    pub mentioned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1138,9 +1174,28 @@ pub fn build_desktop_info(config: &lazybox_config::Config) -> DesktopInfo {
         protocol_version: DESKTOP_PROTOCOL_VERSION,
         max_terminal_frame_bytes: MAX_TERMINAL_BINARY_FRAME_BYTES,
         max_terminal_write_bytes: lazybox_ipc::MAX_WRITE_CHUNK_BYTES,
+        providers: config.setup.providers.iter().cloned().collect(),
         agents: desktop_spawnable_agents(config),
         default_agent: desktop_default_agent(config),
         repositories: desktop_repositories(config),
+        settings: DesktopDaemonSettings {
+            github_scopes: config
+                .setup
+                .scopes
+                .get("github")
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect(),
+            keymap_preset: config.ui.keymap_preset.clone(),
+            attention: DesktopAttentionSettings {
+                unread: config.attention.unread,
+                ci_failing: config.attention.ci_failing,
+                review_pending: config.attention.review_pending,
+                agent_asking: config.attention.agent_asking,
+                mentioned: config.attention.mentioned,
+            },
+        },
         // The client fills this from its own build comparison after
         // reading the protocol; the daemon has no view of client skew.
         protocol_notice: None,
@@ -1161,7 +1216,7 @@ fn desktop_default_agent(config: &lazybox_config::Config) -> String {
 /// `setup.agents` plus its default, or the built-in trio when the daemon
 /// is unconfigured so a zero-config box still spawns. `cursor-agent` is
 /// the real registry id ([`lazybox_agents::agent::builtins::Cursor`]).
-fn desktop_spawnable_agents(config: &lazybox_config::Config) -> Vec<String> {
+fn desktop_spawnable_agents(config: &lazybox_config::Config) -> Vec<DesktopAgentInfo> {
     let mut agents = config
         .setup
         .agents
@@ -1172,7 +1227,33 @@ fn desktop_spawnable_agents(config: &lazybox_config::Config) -> Vec<String> {
         agents.extend(["claude", "codex", "cursor-agent"].map(str::to_string));
     }
     agents.insert(desktop_default_agent(config));
-    agents.into_iter().collect()
+    agents
+        .into_iter()
+        .map(|id| {
+            let configured = config.agents.get(&id);
+            let models = config.agent_models(&id);
+            DesktopAgentInfo {
+                label: configured
+                    .and_then(|entry| entry.name.clone())
+                    .unwrap_or_else(|| match id.as_str() {
+                        "claude" => "Claude Code".to_string(),
+                        "codex" => "Codex".to_string(),
+                        "cursor-agent" => "Cursor Agent".to_string(),
+                        _ => id.clone(),
+                    }),
+                models: models
+                    .tiers
+                    .iter()
+                    .map(|tier| DesktopModelTier {
+                        alias: tier.alias.clone(),
+                        label: tier.label.clone(),
+                    })
+                    .collect(),
+                default_tier: models.default,
+                id,
+            }
+        })
+        .collect()
 }
 
 /// The daemon's configured GitHub repositories, projected to the

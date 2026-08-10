@@ -217,6 +217,8 @@ async function boot(workspaces: Array<Record<string, unknown>>): Promise<void> {
   harness.invoke.mockImplementation((command: string) => {
     if (command === "desktop_setup_state") {
       return Promise.resolve({
+        authority: "embedded",
+        providers: ["github"],
         first_run: false,
         selected_scopes: ["github:o/r"],
         agents: [{ id: "codex", label: "Codex", available: true }],
@@ -226,8 +228,7 @@ async function boot(workspaces: Array<Record<string, unknown>>): Promise<void> {
         theme: null,
         themes: [],
         keymap_preset: null,
-        terminal_new_layout: "split",
-        activity_pane_default: "full",
+        collapsed_repos: [],
       });
     }
     if (command === "desktop_info") {

@@ -8,8 +8,9 @@ use lazybox_ipc::{AgentState, TerminalId};
 use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
     CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
-    DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopCommand,
-    DesktopEvent, DesktopInboxView, DesktopInfo, DesktopRepository, DesktopStreamMessage,
+    DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopAgentInfo,
+    DesktopAttentionSettings, DesktopCommand, DesktopDaemonSettings, DesktopEvent,
+    DesktopInboxView, DesktopInfo, DesktopModelTier, DesktopRepository, DesktopStreamMessage,
     GatewayOptions, JsonClientFrame, JsonServerFrame, PROTOCOL_VERSION_HEADER, ProtocolResponse,
     TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
 };
@@ -60,7 +61,6 @@ struct InboxModel {
     /// Active mailbox (Inbox / Inactive / Snoozed), cycled by the
     /// frontend's mailbox control (#816).
     mailbox: Mailbox,
-    collapsed_repos: BTreeSet<String>,
     attention: lazybox_config::AttentionConfig,
     /// Active filter set from the multi-select filter menu (#733).
     filters: FilterSet,
@@ -71,14 +71,13 @@ struct InboxModel {
 }
 
 impl InboxModel {
-    fn new(collapsed_repos: BTreeSet<String>, attention: lazybox_config::AttentionConfig) -> Self {
+    fn new(attention: lazybox_config::AttentionConfig) -> Self {
         Self {
             workspaces: HashMap::new(),
             agent_terminal_states: HashMap::new(),
             agents: HashMap::new(),
             sort_mode: SortMode::default(),
             mailbox: Mailbox::default(),
-            collapsed_repos,
             attention,
             filters: FilterSet::new(),
             search: String::new(),
@@ -252,7 +251,7 @@ impl InboxModel {
             sort_mode: self.sort_mode,
             show_inactive_in_inbox: false,
             projects: &projects,
-            collapsed_repos: &self.collapsed_repos,
+            collapsed_repos: &BTreeSet::new(),
             // The desktop client has no pin-to-top UI yet; the shared
             // builder honors pins when a caller supplies them (#760).
             pinned_repos: &[],
@@ -304,9 +303,12 @@ struct GatewayClient {
 
 struct DesktopState {
     gateway: GatewayClient,
-    agents: Vec<String>,
+    authority: DesktopAuthority,
+    providers: Vec<String>,
+    agents: Vec<DesktopAgentInfo>,
     default_agent: String,
     repositories: Vec<DesktopRepository>,
+    daemon_settings: DesktopDaemonSettings,
     terminal_commands: mpsc::Sender<Bytes>,
     terminal_command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_rx: Mutex<mpsc::Receiver<TerminalStreamItem>>,
@@ -332,12 +334,6 @@ struct DesktopState {
 }
 
 #[derive(Clone, Debug, Serialize)]
-struct DesktopModelTier {
-    alias: String,
-    label: String,
-}
-
-#[derive(Clone, Debug, Serialize)]
 struct DesktopAgentOption {
     id: String,
     label: String,
@@ -348,6 +344,13 @@ struct DesktopAgentOption {
     models: Vec<DesktopModelTier>,
     /// Alias of the tier a bare spawn currently defaults to, if any.
     default_tier: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DesktopAuthority {
+    Embedded,
+    Remote,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -372,13 +375,15 @@ struct DesktopThemeOption {
 
 #[derive(Serialize)]
 struct DesktopSetupState {
+    authority: DesktopAuthority,
+    providers: Vec<String>,
     first_run: bool,
     selected_scopes: Vec<String>,
     agents: Vec<DesktopAgentOption>,
     default_agent: String,
     analytics_enabled: bool,
     diagnostics_path: String,
-    /// Active `ui.theme` name, or `None` for the default theme.
+    /// Active desktop theme name, or `None` for the default theme.
     theme: Option<String>,
     /// The built-in theme catalog (name + palette) the client renders
     /// swatches from — sourced from `lazybox_tui_core::theme`, never
@@ -387,10 +392,7 @@ struct DesktopSetupState {
     /// Active `ui.keymap_preset`, surfaced read-only (a full remap UI is
     /// out of scope).
     keymap_preset: Option<String>,
-    /// `ui.terminal_new_layout` as `"split"` / `"tabs"`.
-    terminal_new_layout: String,
-    /// `ui.activity_pane_default` as `"full"` / `"summary"` / `"hidden"`.
-    activity_pane_default: String,
+    collapsed_repos: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -414,20 +416,8 @@ struct SaveDesktopSettings {
     analytics_enabled: bool,
     #[serde(default)]
     theme: Option<String>,
-    #[serde(default = "default_terminal_layout")]
-    terminal_new_layout: String,
-    #[serde(default = "default_activity_pane")]
-    activity_pane_default: String,
     #[serde(default)]
     default_model_tier: Option<String>,
-}
-
-fn default_terminal_layout() -> String {
-    "split".to_string()
-}
-
-fn default_activity_pane() -> String {
-    "full".to_string()
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -447,18 +437,29 @@ fn desktop_info(state: State<'_, DesktopState>) -> DesktopInfo {
         protocol_version: DESKTOP_PROTOCOL_VERSION,
         max_terminal_frame_bytes: lazybox_server::api_gateway::MAX_TERMINAL_BINARY_FRAME_BYTES,
         max_terminal_write_bytes: lazybox_ipc::MAX_WRITE_CHUNK_BYTES,
+        providers: state.providers.clone(),
         agents: state.agents.clone(),
         default_agent: state.default_agent.clone(),
         repositories: state.repositories.clone(),
+        settings: state.daemon_settings.clone(),
         protocol_notice: state.protocol_notice.clone(),
     }
 }
 
 #[tauri::command]
-fn desktop_setup_state() -> Result<DesktopSetupState, String> {
+fn desktop_setup_state(state: State<'_, DesktopState>) -> Result<DesktopSetupState, String> {
     let config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
-    Ok(desktop_setup_state_from_config(&config))
+    Ok(match state.authority {
+        DesktopAuthority::Embedded => desktop_setup_state_from_config(&config),
+        DesktopAuthority::Remote => desktop_setup_state_for_remote(
+            &config,
+            &state.providers,
+            &state.agents,
+            &state.default_agent,
+            &state.daemon_settings,
+        ),
+    })
 }
 
 fn desktop_setup_state_from_config(config: &lazybox_config::Config) -> DesktopSetupState {
@@ -473,17 +474,51 @@ fn desktop_setup_state_from_config(config: &lazybox_config::Config) -> DesktopSe
     selected_scopes.sort();
     let first_run = !config.setup.wizard_completed || !config.setup.providers.contains("github");
     DesktopSetupState {
+        authority: DesktopAuthority::Embedded,
+        providers: config.setup.providers.iter().cloned().collect(),
         first_run,
         selected_scopes,
         agents: detect_agent_options(config),
         default_agent: effective_default_agent(config),
         analytics_enabled: config.desktop.analytics_enabled,
         diagnostics_path: diagnostics_dir().display().to_string(),
-        theme: config.ui.theme.clone(),
+        theme: config.desktop.theme.clone(),
         themes: theme_options(),
         keymap_preset: config.ui.keymap_preset.clone(),
-        terminal_new_layout: terminal_layout_key(config.ui.terminal_new_layout).to_string(),
-        activity_pane_default: activity_pane_key(config.ui.activity_pane_default).to_string(),
+        collapsed_repos: config.ui.collapsed_repos.iter().cloned().collect(),
+    }
+}
+
+fn desktop_setup_state_for_remote(
+    config: &lazybox_config::Config,
+    providers: &[String],
+    agents: &[DesktopAgentInfo],
+    default_agent: &str,
+    settings: &DesktopDaemonSettings,
+) -> DesktopSetupState {
+    DesktopSetupState {
+        authority: DesktopAuthority::Remote,
+        providers: providers.to_vec(),
+        first_run: false,
+        selected_scopes: settings.github_scopes.clone(),
+        agents: agents
+            .iter()
+            .map(|agent| DesktopAgentOption {
+                id: agent.id.clone(),
+                label: agent.label.clone(),
+                available: true,
+                models: agent.models.clone(),
+                default_tier: agent.default_tier.clone(),
+            })
+            .collect(),
+        default_agent: default_agent.to_string(),
+        analytics_enabled: config.desktop.analytics_enabled,
+        diagnostics_path: diagnostics_dir().display().to_string(),
+        theme: config.desktop.theme.clone(),
+        themes: theme_options(),
+        keymap_preset: settings.keymap_preset.clone(),
+        // Remote collapse is client-owned (see `set_repo_collapsed`).
+        collapsed_repos: config.desktop.collapsed_repos.iter().cloned().collect(),
     }
 }
 
@@ -510,38 +545,6 @@ fn theme_options() -> Vec<DesktopThemeOption> {
             },
         })
         .collect()
-}
-
-fn terminal_layout_key(layout: lazybox_config::NewTerminalLayout) -> &'static str {
-    match layout {
-        lazybox_config::NewTerminalLayout::Split => "split",
-        lazybox_config::NewTerminalLayout::Tabs => "tabs",
-    }
-}
-
-fn activity_pane_key(mode: lazybox_config::ActivityPaneMode) -> &'static str {
-    match mode {
-        lazybox_config::ActivityPaneMode::Full => "full",
-        lazybox_config::ActivityPaneMode::Summary => "summary",
-        lazybox_config::ActivityPaneMode::Hidden => "hidden",
-    }
-}
-
-fn parse_terminal_layout(raw: &str) -> Result<lazybox_config::NewTerminalLayout, String> {
-    match raw {
-        "split" => Ok(lazybox_config::NewTerminalLayout::Split),
-        "tabs" => Ok(lazybox_config::NewTerminalLayout::Tabs),
-        other => Err(format!("unknown terminal layout {other:?}")),
-    }
-}
-
-fn parse_activity_pane(raw: &str) -> Result<lazybox_config::ActivityPaneMode, String> {
-    match raw {
-        "full" => Ok(lazybox_config::ActivityPaneMode::Full),
-        "summary" => Ok(lazybox_config::ActivityPaneMode::Summary),
-        "hidden" => Ok(lazybox_config::ActivityPaneMode::Hidden),
-        other => Err(format!("unknown activity-pane mode {other:?}")),
-    }
 }
 
 fn theme_exists(name: &str) -> bool {
@@ -631,9 +634,23 @@ async fn list_github_repositories() -> Result<Vec<GithubRepositoryOption>, Strin
 }
 
 #[tauri::command]
-fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Result<bool, String> {
+fn save_desktop_settings(
+    state: State<'_, DesktopState>,
+    app: AppHandle,
+    settings: SaveDesktopSettings,
+) -> Result<bool, String> {
     let config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
+    validate_theme_change(settings.theme.as_deref(), config.desktop.theme.as_deref())?;
+    if state.authority == DesktopAuthority::Remote {
+        let analytics_enabled = settings.analytics_enabled;
+        lazybox_config::Config::save_with(move |config| {
+            config.desktop.analytics_enabled = analytics_enabled;
+            config.desktop.theme = settings.theme;
+        })
+        .map_err(|error| format!("save desktop preferences: {error}"))?;
+        return Ok(false);
+    }
     let first_run = !config.setup.wizard_completed || !config.setup.providers.contains("github");
     let scopes = validate_github_scopes(settings.github_scopes, first_run)?;
     if !detect_agent_options(&config)
@@ -642,9 +659,6 @@ fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Resul
     {
         return Err("select an installed agent".to_string());
     }
-    validate_theme_change(settings.theme.as_deref(), config.ui.theme.as_deref())?;
-    let terminal_new_layout = parse_terminal_layout(&settings.terminal_new_layout)?;
-    let activity_pane_default = parse_activity_pane(&settings.activity_pane_default)?;
     if let Some(alias) = settings.default_model_tier.as_deref()
         && config
             .agent_models(&settings.default_agent)
@@ -656,11 +670,6 @@ fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Resul
             settings.default_agent
         ));
     }
-    // Only settings the daemon consumed at startup — the watched scopes
-    // and the default agent baked into `DesktopState` — need a restart to
-    // take effect. Theme / layout / activity-pane / model-tier changes are
-    // read live (the client re-themes in place; the daemon re-reads the
-    // model menu on the next spawn), so they apply without one.
     let previous_scopes = config
         .setup
         .scopes
@@ -676,8 +685,6 @@ fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Resul
         default_agent: settings.default_agent,
         analytics_enabled,
         theme: settings.theme,
-        terminal_new_layout,
-        activity_pane_default,
         default_model_tier: settings.default_model_tier,
     };
     lazybox_config::Config::save_with(move |config| {
@@ -697,6 +704,47 @@ fn save_desktop_settings(app: AppHandle, settings: SaveDesktopSettings) -> Resul
         });
     }
     Ok(restart_required)
+}
+
+#[tauri::command]
+fn set_repo_collapsed(
+    state: State<'_, DesktopState>,
+    repo: String,
+    collapsed: bool,
+) -> Result<(), String> {
+    let repo = repo.trim().to_string();
+    if repo.is_empty() {
+        return Err("repository label cannot be empty".to_string());
+    }
+    let remote = state.authority == DesktopAuthority::Remote;
+    lazybox_config::Config::save_with(move |config| {
+        apply_repo_collapse(config, remote, repo, collapsed);
+    })
+    .map_err(|error| format!("save collapsed repository state: {error}"))
+}
+
+/// Persist one repo's collapse state into the set that owns it. Collapse
+/// follows the same authority split as the rest of settings: embedded
+/// shares the local TUI's `ui.collapsed_repos` (same machine, so the two
+/// clients interoperate — the #971 acceptance criterion), while remote
+/// writes the client-owned `desktop.collapsed_repos` so a remote repo's
+/// collapse never contaminates a same-named repo in the laptop's TUI set.
+fn apply_repo_collapse(
+    config: &mut lazybox_config::Config,
+    remote: bool,
+    repo: String,
+    collapsed: bool,
+) {
+    let set = if remote {
+        &mut config.desktop.collapsed_repos
+    } else {
+        &mut config.ui.collapsed_repos
+    };
+    if collapsed {
+        set.insert(repo);
+    } else {
+        set.remove(&repo);
+    }
 }
 
 #[tauri::command]
@@ -1230,8 +1278,6 @@ struct DesktopSettings {
     default_agent: String,
     analytics_enabled: bool,
     theme: Option<String>,
-    terminal_new_layout: lazybox_config::NewTerminalLayout,
-    activity_pane_default: lazybox_config::ActivityPaneMode,
     default_model_tier: Option<String>,
 }
 
@@ -1249,9 +1295,7 @@ fn apply_desktop_settings(config: &mut lazybox_config::Config, settings: Desktop
         .insert("github".to_string(), settings.scopes);
     config.setup.wizard_completed = true;
     config.desktop.analytics_enabled = settings.analytics_enabled;
-    config.ui.theme = settings.theme;
-    config.ui.terminal_new_layout = settings.terminal_new_layout;
-    config.ui.activity_pane_default = settings.activity_pane_default;
+    config.desktop.theme = settings.theme;
     // Persist the picked default tier against the chosen agent's `models`
     // block — the same "default-model pick" overlay `Config::agent_models`
     // reads. Only touch the agents map when there's a tier to store or the
@@ -1470,11 +1514,17 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     let user_config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
 
-    let (gateway, client_runtime, gateway_task) = match resolve_remote_gateway(
+    let remote = resolve_remote_gateway(
         user_config.desktop.remote.as_ref(),
         std::env::var(DESKTOP_GATEWAY_URL_ENV).ok(),
         std::env::var(DESKTOP_GATEWAY_TOKEN_ENV).ok(),
-    ) {
+    );
+    let authority = if remote.is_some() {
+        DesktopAuthority::Remote
+    } else {
+        DesktopAuthority::Embedded
+    };
+    let (gateway, client_runtime, gateway_task) = match remote {
         Some(remote) => {
             eprintln!(
                 "lazybox desktop attaching to existing gateway at {}",
@@ -1496,9 +1546,11 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     // which, over a remote link, describes the laptop, not the box.
     let info = establish_gateway_session(&gateway).await?;
     let DesktopInfo {
+        providers,
         agents,
         default_agent,
         repositories,
+        settings,
         protocol_notice,
         ..
     } = info;
@@ -1507,17 +1559,17 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     }
     let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
-    let inbox = InboxModel::new(
-        user_config.ui.collapsed_repos.clone(),
-        user_config.attention.clone(),
-    );
+    let inbox = InboxModel::new(attention_config(&settings.attention));
     let snippets = SnippetModel::new(load_snippet_catalog());
 
     Ok(DesktopState {
         gateway,
+        authority,
+        providers,
         agents,
         default_agent,
         repositories,
+        daemon_settings: settings,
         terminal_commands,
         terminal_command_rx: Arc::new(Mutex::new(terminal_command_rx)),
         terminal_rx: Mutex::new(terminal_rx),
@@ -1530,6 +1582,30 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         event_channel: Arc::new(Mutex::new(None)),
         snippets: Arc::new(Mutex::new(snippets)),
     })
+}
+
+fn attention_config(settings: &DesktopAttentionSettings) -> lazybox_config::AttentionConfig {
+    // The daemon projects only the five attention *axes* — the signals
+    // that feed the grouped-inbox badge, the sole `AttentionConfig` input
+    // `InboxModel::to_view` reads. The notification-*delivery* fields below
+    // (`desktop_notify` / `notifier` / `terminal_bundle_id`) drive OS
+    // banners, a daemon/TUI concern the desktop shell never consumes, so
+    // they take their config defaults here. Enumerate every field on
+    // purpose (no `..Default::default()`): if `AttentionConfig` grows a
+    // field, this stops compiling and forces a deliberate decision about
+    // whether the desktop needs it projected — the silent-default path is
+    // exactly how a future view-affecting field would be dropped unnoticed.
+    let defaults = lazybox_config::AttentionConfig::default();
+    lazybox_config::AttentionConfig {
+        unread: settings.unread,
+        ci_failing: settings.ci_failing,
+        review_pending: settings.review_pending,
+        agent_asking: settings.agent_asking,
+        mentioned: settings.mentioned,
+        desktop_notify: defaults.desktop_notify,
+        notifier: defaults.notifier,
+        terminal_bundle_id: defaults.terminal_bundle_id,
+    }
 }
 
 /// Spawn the in-process daemon and its loopback API gateway, returning a
@@ -1749,6 +1825,7 @@ fn main() {
             begin_github_login,
             list_github_repositories,
             save_desktop_settings,
+            set_repo_collapsed,
             record_analytics,
             list_workspaces,
             set_sort_mode,
@@ -1881,15 +1958,7 @@ mod tests {
     }
 
     fn sample_desktop_info() -> DesktopInfo {
-        DesktopInfo {
-            protocol_version: DESKTOP_PROTOCOL_VERSION,
-            max_terminal_frame_bytes: 0,
-            max_terminal_write_bytes: 0,
-            agents: vec!["claude".to_string()],
-            default_agent: "claude".to_string(),
-            repositories: Vec::new(),
-            protocol_notice: None,
-        }
+        lazybox_server::api_gateway::build_desktop_info(&lazybox_config::Config::default())
     }
 
     #[tokio::test]
@@ -2121,8 +2190,6 @@ mod tests {
                 default_agent: "codex".to_string(),
                 analytics_enabled: true,
                 theme: Some("Tokyo Night".to_string()),
-                terminal_new_layout: lazybox_config::NewTerminalLayout::Tabs,
-                activity_pane_default: lazybox_config::ActivityPaneMode::Summary,
                 default_model_tier: Some("M".to_string()),
             },
         );
@@ -2135,15 +2202,7 @@ mod tests {
         assert!(saved.setup.agents.contains("codex"));
         assert!(saved.setup.wizard_completed);
         assert!(saved.desktop.analytics_enabled);
-        assert_eq!(saved.ui.theme.as_deref(), Some("Tokyo Night"));
-        assert_eq!(
-            saved.ui.terminal_new_layout,
-            lazybox_config::NewTerminalLayout::Tabs
-        );
-        assert_eq!(
-            saved.ui.activity_pane_default,
-            lazybox_config::ActivityPaneMode::Summary
-        );
+        assert_eq!(saved.desktop.theme.as_deref(), Some("Tokyo Night"));
         assert_eq!(
             saved
                 .agents
@@ -2192,12 +2251,9 @@ mod tests {
 
         let initial = desktop_setup_state_from_config(&config);
         assert_eq!(initial.default_agent, "claude");
-        // Appearance / workspace defaults surface for the settings UI, and
-        // the theme catalog comes from the shared palette (not hardcoded TS).
+        // The theme catalog comes from the shared palette (not hardcoded TS).
         assert!(initial.theme.is_none());
         assert!(!initial.themes.is_empty());
-        assert_eq!(initial.terminal_new_layout, "split");
-        assert_eq!(initial.activity_pane_default, "full");
         // Claude's built-in tier menu rides on its agent option so the UI
         // can offer a default-model pick.
         let claude = initial
@@ -2234,6 +2290,101 @@ mod tests {
     }
 
     #[test]
+    fn remote_setup_uses_daemon_capabilities_and_skips_local_first_run() {
+        let local = lazybox_config::Config::default();
+        let mut daemon = lazybox_config::Config::default();
+        daemon.setup.providers.insert("github".to_string());
+        daemon.setup.agents.insert("remote-bot".to_string());
+        daemon.setup.default_agent = Some("remote-bot".to_string());
+        daemon.setup.scopes.insert(
+            "github".to_string(),
+            BTreeSet::from(["github:remote/widget".to_string()]),
+        );
+        daemon.agents.insert(
+            "remote-bot".to_string(),
+            lazybox_config::AgentEntry {
+                name: Some("Remote Bot".to_string()),
+                models: lazybox_core::AgentModels {
+                    default: Some("R".to_string()),
+                    tiers: vec![lazybox_core::ModelTier {
+                        alias: "R".to_string(),
+                        label: "Remote Large".to_string(),
+                        args: vec!["--remote-large".to_string()],
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let info = lazybox_server::api_gateway::build_desktop_info(&daemon);
+
+        let state = desktop_setup_state_for_remote(
+            &local,
+            &info.providers,
+            &info.agents,
+            &info.default_agent,
+            &info.settings,
+        );
+
+        assert_eq!(state.authority, DesktopAuthority::Remote);
+        assert!(!state.first_run);
+        assert_eq!(state.providers, vec!["github"]);
+        assert_eq!(state.selected_scopes, vec!["github:remote/widget"]);
+        assert_eq!(state.default_agent, "remote-bot");
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents[0].label, "Remote Bot");
+        assert_eq!(state.agents[0].models[0].label, "Remote Large");
+    }
+
+    #[test]
+    fn attention_config_carries_every_daemon_axis_and_not_just_the_defaults() {
+        // Regression for the silent `..Default::default()` widening: a
+        // daemon that disables an axis must not resurface as `true` on the
+        // client. Every axis flows through, and the delivery fields the
+        // desktop shell never reads take their config defaults.
+        let settings = DesktopAttentionSettings {
+            unread: false,
+            ci_failing: true,
+            review_pending: false,
+            agent_asking: true,
+            mentioned: false,
+        };
+        let config = attention_config(&settings);
+        assert!(!config.unread);
+        assert!(config.ci_failing);
+        assert!(!config.review_pending);
+        assert!(config.agent_asking);
+        assert!(!config.mentioned);
+        let defaults = lazybox_config::AttentionConfig::default();
+        assert_eq!(config.desktop_notify, defaults.desktop_notify);
+        assert_eq!(config.notifier, defaults.notifier);
+        assert_eq!(config.terminal_bundle_id, defaults.terminal_bundle_id);
+    }
+
+    #[test]
+    fn repo_collapse_persists_to_the_authority_owning_the_rows() {
+        // Embedded shares the local TUI's `ui.collapsed_repos` so the two
+        // clients interoperate on one machine; remote writes the
+        // client-owned `desktop.collapsed_repos` so a remote repo's
+        // collapse never contaminates a same-named repo in the laptop TUI.
+        let mut config = lazybox_config::Config::default();
+
+        apply_repo_collapse(&mut config, false, "acme/widget".to_string(), true);
+        assert!(config.ui.collapsed_repos.contains("acme/widget"));
+        assert!(config.desktop.collapsed_repos.is_empty());
+
+        apply_repo_collapse(&mut config, true, "acme/widget".to_string(), true);
+        assert!(config.desktop.collapsed_repos.contains("acme/widget"));
+        // The embedded set is untouched by a remote write — no crossover.
+        assert!(config.ui.collapsed_repos.contains("acme/widget"));
+
+        apply_repo_collapse(&mut config, true, "acme/widget".to_string(), false);
+        assert!(config.desktop.collapsed_repos.is_empty());
+        // Expanding remotely leaves the shared TUI set alone.
+        assert!(config.ui.collapsed_repos.contains("acme/widget"));
+    }
+
+    #[test]
     fn theme_catalog_mirrors_the_shared_palette_and_renders_hex() {
         let options = theme_options();
         assert_eq!(
@@ -2260,20 +2411,6 @@ mod tests {
         // TUI) must not block a save that leaves it unchanged.
         assert!(validate_theme_change(Some("Custom Plugin"), Some("Custom Plugin")).is_ok());
         assert!(validate_theme_change(None, Some("Custom Plugin")).is_ok());
-    }
-
-    #[test]
-    fn boundary_parsers_accept_known_values_and_reject_the_rest() {
-        assert_eq!(
-            parse_terminal_layout("tabs").unwrap(),
-            lazybox_config::NewTerminalLayout::Tabs
-        );
-        assert!(parse_terminal_layout("floating").is_err());
-        assert_eq!(
-            parse_activity_pane("hidden").unwrap(),
-            lazybox_config::ActivityPaneMode::Hidden
-        );
-        assert!(parse_activity_pane("collapsed").is_err());
     }
 
     #[test]
@@ -2454,8 +2591,6 @@ mod tests {
                 default_agent: "claude".to_string(),
                 analytics_enabled: false,
                 theme: None,
-                terminal_new_layout: lazybox_config::NewTerminalLayout::Split,
-                activity_pane_default: lazybox_config::ActivityPaneMode::Full,
                 default_model_tier: None,
             },
         );
@@ -2654,7 +2789,7 @@ mod tests {
     }
 
     fn empty_model() -> InboxModel {
-        InboxModel::new(BTreeSet::new(), lazybox_config::AttentionConfig::default())
+        InboxModel::new(lazybox_config::AttentionConfig::default())
     }
 
     #[test]

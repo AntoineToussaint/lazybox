@@ -1307,8 +1307,7 @@ describe("credential-free desktop workflow", () => {
     button("settings-button").click();
     await vi.waitFor(() => expect(dialog("setup-dialog").open).toBe(true));
 
-    // Theme catalog renders swatches; the model menu and workspace
-    // enums seed from config.
+    // Theme catalog and model menu seed from config.
     expect(document.querySelectorAll(".theme-swatch")).toHaveLength(2);
     expect(element("keymap-preset-label").textContent).toBe("Keymap: vim");
     expect([...select("default-model-select").options].map((o) => o.value)).toEqual([
@@ -1317,13 +1316,9 @@ describe("credential-free desktop workflow", () => {
       "L",
     ]);
     expect(select("default-model-select").value).toBe("L");
-    expect(select("terminal-layout-select").value).toBe("split");
-    expect(select("activity-pane-select").value).toBe("full");
 
     themeSwatch("Lazybox Light").click();
     setSelect("default-model-select", "M");
-    setSelect("terminal-layout-select", "tabs");
-    setSelect("activity-pane-select", "hidden");
 
     form("setup-form").dispatchEvent(submitEvent());
     await vi.waitFor(() => expect(dialog("confirm-dialog").open).toBe(true));
@@ -1335,8 +1330,6 @@ describe("credential-free desktop workflow", () => {
           github_scopes: ["github:acme/widget"],
           default_agent: "claude",
           theme: "Lazybox Light",
-          terminal_new_layout: "tabs",
-          activity_pane_default: "hidden",
           default_model_tier: "M",
         }),
       ),
@@ -1422,6 +1415,91 @@ describe("credential-free desktop workflow", () => {
           github_scopes: ["github:acme/widget"],
           default_agent: "custombot",
           default_model_tier: null,
+        }),
+      ),
+    );
+  });
+
+  it("boots an empty client from remote daemon authority without local onboarding", async () => {
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 3,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          providers: ["github", "linear"],
+          agents: [],
+          default_agent: "remote-bot",
+          repositories: [],
+          settings: {},
+          protocol_notice: null,
+        });
+      }
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({
+            authority: "remote",
+            providers: ["github", "linear"],
+            selected_scopes: ["github:remote/widget"],
+            default_agent: "remote-bot",
+            agents: [
+              {
+                id: "remote-bot",
+                label: "Remote Bot",
+                available: true,
+                models: [{ alias: "R", label: "Remote Large" }],
+                default_tier: "R",
+              },
+            ],
+          }),
+        );
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      if (command === "save_desktop_settings") {
+        return Promise.resolve(false);
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(button("settings-button").disabled).toBe(false),
+    );
+
+    expect(dialog("setup-dialog").open).toBe(false);
+    expect(harness.invoke).not.toHaveBeenCalledWith("github_auth_status");
+    button("settings-button").click();
+    await vi.waitFor(() => expect(dialog("setup-dialog").open).toBe(true));
+
+    expect(element("settings-authority").textContent).toContain(
+      "github, linear",
+    );
+    expect(select("default-agent-select").disabled).toBe(true);
+    expect([...select("default-agent-select").options].map((option) => option.value)).toEqual([
+      "remote-bot",
+    ]);
+    expect([...select("default-model-select").options].map((option) => option.value)).toEqual([
+      "R",
+    ]);
+    expect(harness.invoke).not.toHaveBeenCalledWith("github_auth_status");
+    expect(harness.invoke).not.toHaveBeenCalledWith("list_github_repositories");
+
+    input("#analytics-enabled").click();
+    form("setup-form").dispatchEvent(submitEvent());
+    await vi.waitFor(() => expect(dialog("confirm-dialog").open).toBe(true));
+    button("confirm-accept").click();
+    await vi.waitFor(() =>
+      expect(settingsCalls().at(-1)).toEqual(
+        savePayload({
+          github_scopes: ["github:remote/widget"],
+          default_agent: "remote-bot",
+          analytics_enabled: true,
         }),
       ),
     );
@@ -2319,6 +2397,8 @@ function settingsStateFixture(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
+    authority: "embedded",
+    providers: ["github"],
     first_run: false,
     selected_scopes: [],
     agents: [agentOption("codex", "Codex")],
@@ -2328,14 +2408,12 @@ function settingsStateFixture(
     theme: null,
     themes: [],
     keymap_preset: null,
-    terminal_new_layout: "split",
-    activity_pane_default: "full",
+    collapsed_repos: [],
     ...overrides,
   };
 }
 
-// The full save payload the frontend now emits; the extra appearance /
-// workspace fields default to their unset values in these flows.
+// The full save payload the frontend emits.
 function savePayload(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
@@ -2344,8 +2422,6 @@ function savePayload(
     default_agent: "codex",
     analytics_enabled: false,
     theme: null,
-    terminal_new_layout: "split",
-    activity_pane_default: "full",
     default_model_tier: null,
     ...overrides,
   };

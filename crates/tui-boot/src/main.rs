@@ -36,6 +36,7 @@
 mod build_guard;
 mod device_cli;
 mod relay_e2e;
+mod remote_box;
 mod sandbox;
 mod serve;
 mod setup_detect;
@@ -1334,11 +1335,35 @@ async fn run_embedded_realm(
         trigger: graceful_stop_tx.clone(),
         done: serve_done_rx.clone(),
     }));
+    // Wire the lazy `r`-spawn box from the `sandbox:` config. This only
+    // spawns a worker + returns a `Model`-facing client; the box itself
+    // stays asleep (no GCP, no Terraform) until the first `r`-spawn. `None`
+    // when no `sandbox:` box is configured — the `r` chords stay hidden.
+    // Must run here, in the async context: `setup` spawns a tokio task.
+    let remote_box = remote_box::setup(
+        &lazybox_config::Config::load()
+            .map_err(|e| tracing::warn!("config load for the r-spawn box failed: {e:#}"))
+            .unwrap_or_default()
+            .sandbox,
+        config.store.clone(),
+    );
     let store_for_save = config.store.clone();
     let realm_result = tokio::task::spawn_blocking(move || {
         let snippets =
             lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
         let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
+        // Attach the lazy `r`-spawn box (Design A: the client holds a
+        // connection per remote daemon; here one whose far end is the
+        // box worker). Its presence is what makes the `r <agent>` chords
+        // appear and routes them to the box; absent, the local-only path
+        // is unchanged.
+        if let Some(rb) = remote_box {
+            let mut clients = std::collections::BTreeMap::new();
+            clients.insert(rb.name.clone(), rb.client);
+            model = model
+                .with_remote_clients(clients, Some(rb.name))
+                .with_remote_notices(rb.notices);
+        }
         // Returning user with persisted setup → mount the polling
         // modal up front so the first poll cycle has UI feedback.
         if !returning_sources.is_empty() {

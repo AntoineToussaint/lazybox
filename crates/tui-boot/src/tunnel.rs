@@ -278,6 +278,27 @@ pub async fn supervise(tunnel: Tunnel) {
     supervise_with(|| tunnel.spawn()).await
 }
 
+/// Supervise a pre-built forward given as `program` + `args` — the shape
+/// [`lazybox_sandbox::Tunnel`] hands back — reusing the same
+/// capped-backoff keepalive as [`supervise`]. `socket` is the local Unix
+/// socket the forward binds; a stale copy left by an earlier process is
+/// cleared before each (re)spawn so `ssh -L` doesn't refuse to bind it.
+/// The `r`-spawn box lifecycle (`remote_box`) drives this: `connect_box`
+/// builds the argv, this keeps it up for the session.
+pub async fn supervise_argv(program: String, args: Vec<String>, socket: PathBuf) {
+    supervise_with(move || {
+        let _ = std::fs::remove_file(&socket);
+        Command::new(&program)
+            .args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+    })
+    .await
+}
+
 /// The supervision loop over an injectable spawner, so the backoff /
 /// re-spawn machine is testable without shelling out to `ssh`/`gcloud`.
 async fn supervise_with<F>(mut spawn: F)

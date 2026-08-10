@@ -29,6 +29,10 @@ enum BulkAgentOp {
     WorkWith(String),
     /// `a c` / `a x` / `a u` / `a S`: always spawn a fresh agent.
     SpawnAgent(String),
+    /// `r c` / `r x` / `r u`: spawn a fresh agent on the named remote box
+    /// (#965) — same fan-out and heavy-spawn confirm as [`Self::SpawnAgent`],
+    /// but each spawn routes to the box's client and tags its row `⇅`.
+    SpawnAgentRemote(String, String),
     /// `s`: always spawn a shell.
     SpawnShell,
 }
@@ -99,9 +103,12 @@ fn bulk_agent_summary(plan: &BulkAgentPlan) -> String {
 /// The "start N agents?" confirm copy shown before a bulk fan-out spins
 /// up new sessions (#836): names the spawn count plus any live-agent
 /// continues and skips, so it isn't a blind "Y".
-fn bulk_agent_confirm_prompt(plan: &BulkAgentPlan) -> String {
+fn bulk_agent_confirm_prompt(plan: &BulkAgentPlan, remote: Option<&str>) -> String {
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     let mut prompt = format!("Start {} new agent{}", plan.spawned, plural(plan.spawned));
+    if let Some(remote) = remote {
+        prompt.push_str(&format!(" on box ⇅ {remote}"));
+    }
     if plan.injected > 0 {
         prompt.push_str(&format!(" (and continue {} live)", plan.injected));
     }
@@ -883,6 +890,51 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         on_main: false,
                     });
+                }
+            }
+            // Remote-spawn variant (`r c` / `r x` / `r u`): the same
+            // agent spawn as `a c`, but routed to the remote box's client
+            // (Design A) instead of `self.client`, and the workspace gets
+            // a sidebar remote indicator. The box's client is an in-process
+            // pipe to a worker that ensures/wakes/connects the box on this
+            // first command. The command is sent directly to the remote
+            // client here rather than returned in `cmds` — those flush to
+            // the LOCAL daemon.
+            Action::SpawnAgentRemote(agent_id) => {
+                let Some(remote) = self.default_remote().map(str::to_string) else {
+                    self.flash_error(
+                        "no remote box configured — add a `sandbox:` block to spawn on a box",
+                    );
+                    return cmds;
+                };
+                // Under a live multi-select the r-spawn fans out like every
+                // other bulk-appropriate spawn (#932) — same plan, same
+                // heavy-spawn confirm, each target routed to the box.
+                if self.bulk_active() {
+                    return self.dispatch_bulk_agent(
+                        BulkAgentOp::SpawnAgentRemote(agent_id.clone(), remote),
+                        None,
+                    );
+                }
+                if let Some(sk) = session_key {
+                    let spawn = IpcCommand::Spawn {
+                        model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
+                        session_key: sk.clone(),
+                        session_id,
+                        client_request_id: None,
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+                        cwd: None,
+                        initial_prompt: None,
+                        on_main: false,
+                    };
+                    self.send_to_remote(&remote, spawn);
+                    // Optimistic client-side tag so the sidebar row shows
+                    // the remote indicator immediately — and latched
+                    // (`remote_marks`) so the next local-daemon snapshot,
+                    // which knows nothing about the box, can't wipe it.
+                    self.mark_remote_latched(sk, remote);
+                    self.redraw = true;
                 }
             }
             // Main-checkout variants (`b c` / `b s`, confirm-guarded):
@@ -1796,7 +1848,11 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return self.run_bulk_agent_steps(plan.steps);
         }
-        let prompt = bulk_agent_confirm_prompt(&plan);
+        let remote = match &op {
+            BulkAgentOp::SpawnAgentRemote(_, remote) => Some(remote.as_str()),
+            _ => None,
+        };
+        let prompt = bulk_agent_confirm_prompt(&plan, remote);
         self.set_modal_flow(super::ModalFlow::BulkSpawnConfirm {
             steps: plan.steps,
             summary,
@@ -1820,6 +1876,13 @@ impl<T: TerminalAdapter> Model<T> {
         for step in steps {
             match step {
                 super::BulkAgentStep::Spawn(cmd) => cmds.push(cmd),
+                // Remote spawns never ride the local `cmds` flush — they go
+                // straight to the box's client, and the row's `⇅` tag is
+                // latched so the next local snapshot can't wipe it.
+                super::BulkAgentStep::SpawnRemote { remote, key, cmd } => {
+                    self.send_to_remote(&remote, cmd);
+                    self.mark_remote_latched(key, remote);
+                }
                 super::BulkAgentStep::Inject { terminal_id, body } => {
                     self.deliver_prompt(
                         terminal_id,
@@ -1865,25 +1928,33 @@ impl<T: TerminalAdapter> Model<T> {
                 // Plain spawns always start a fresh session — a repo-less,
                 // project-less row (a Slack DM, scratch) has nothing to
                 // spawn into (#836), so it's skipped and named.
-                BulkAgentOp::SpawnShell | BulkAgentOp::SpawnAgent(_) => {
+                BulkAgentOp::SpawnShell
+                | BulkAgentOp::SpawnAgent(_)
+                | BulkAgentOp::SpawnAgentRemote(..) => {
                     if !spawnable {
                         plan.skipped.push(name);
                         continue;
                     }
                     let kind = match op {
                         BulkAgentOp::SpawnShell => lazybox_ipc::TerminalKind::Shell,
-                        BulkAgentOp::SpawnAgent(agent) => {
+                        BulkAgentOp::SpawnAgent(agent)
+                        | BulkAgentOp::SpawnAgentRemote(agent, _) => {
                             lazybox_ipc::TerminalKind::Agent(agent.clone())
                         }
                         _ => unreachable!(),
                     };
-                    plan.steps
-                        .push(super::BulkAgentStep::Spawn(bulk_spawn_command(
-                            key.clone(),
-                            kind,
-                            None,
-                            model_alias.clone(),
-                        )));
+                    let cmd = bulk_spawn_command(key.clone(), kind, None, model_alias.clone());
+                    let step = match op {
+                        BulkAgentOp::SpawnAgentRemote(_, remote) => {
+                            super::BulkAgentStep::SpawnRemote {
+                                remote: remote.clone(),
+                                key: key.clone(),
+                                cmd,
+                            }
+                        }
+                        _ => super::BulkAgentStep::Spawn(cmd),
+                    };
+                    plan.steps.push(step);
                     plan.spawned += 1;
                     plan.follow.get_or_insert_with(|| key.clone());
                 }

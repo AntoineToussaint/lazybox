@@ -132,6 +132,18 @@ impl Sidebar {
         self.inner.mark_workspace_merged(key);
     }
 
+    /// Optimistic local update: tag a workspace's row as running on the
+    /// remote box (the `sandbox:` box) so the sidebar's `⇅` indicator shows
+    /// immediately after an `r`-prefix spawn, before the local snapshot syncs.
+    pub fn mark_remote(&mut self, sk: lazybox_core::SessionKey, remote: String) {
+        self.inner.mark_remote(sk, remote);
+    }
+
+    /// Roll back [`Self::mark_remote`] when the advertised spawn dropped.
+    pub fn unmark_remote(&mut self, sk: &lazybox_core::SessionKey) {
+        self.inner.unmark_remote(sk);
+    }
+
     /// Forward `find_agent_terminal` — first running agent terminal
     /// for `(workspace_key, agent_id)` if any. The `w` flow uses
     /// this to decide between InjectPrompt (existing) and Spawn (new).

@@ -8,11 +8,16 @@ import {
   ReplyDrafts,
   activeFilters,
   applyWorkspaceEvent,
+  activityFingerprint,
+  activityFingerprintKey,
+  broadcastDisposition,
   canReplyToTask,
   detailSignals,
+  cycleMatchingKey,
   filterMenuGroups,
   hasRepoScope,
   isTerminalTaskState,
+  isActivityUnread,
   kindHeaderLabel,
   mailboxLabel,
   nextMailbox,
@@ -30,6 +35,7 @@ import {
   unreadCount,
   visibleUnreadCount,
   workspaceDiffTarget,
+  workspaceRuntimeSignals,
 } from "./model";
 import {
   type Activity,
@@ -52,18 +58,28 @@ import {
   type Workspace,
   type WorkspacesResponse,
   type WorkspaceDiffDto,
+  type UserPrompt,
+  type DesktopCleanupReason as CleanupReason,
   archiveCommand,
+  adoptSessionsCommand,
   closeIssueCommand,
   commandsForWorkspaceIntent,
   createWorkspaceCommand,
   deleteOrCloseCommand,
   deliverSnippetCommand,
+  injectPromptCommand,
+  keepWorkspaceCommand,
+  removeMergedWorkspaceCommand,
+  markActivityReadCommand,
   inspectWorkspaceDiffCommand,
   mergePrCommand,
   renameWorkspaceCommand,
+  requestReviewersCommand,
+  setAssigneesCommand,
   setAutoFixPoliciesCommand,
   setAutoMergeOnGreenCommand,
   setNotesCommand,
+  setLabelsCommand,
   setTrackMainCommand,
   snoozeCommand,
   spawnAgentCommand,
@@ -71,6 +87,7 @@ import {
   terminalKindLabel,
   unsnoozeCommand,
   updateBranchCommand,
+  writeShellCommand,
 } from "./protocol";
 import {
   autoSubmitRow,
@@ -101,6 +118,8 @@ export interface TerminalRecord extends TerminalReplayState {
   sessionKey: string;
   kind: TerminalKind;
   state: string;
+  modelLabel: string | null;
+  promptHistory: UserPrompt[];
 }
 
 interface ActiveTerminal {
@@ -232,6 +251,13 @@ const filterMenu = element<HTMLDivElement>("filter-menu");
 const filterMenuBody = element<HTMLDivElement>("filter-menu-body");
 const filterClear = element<HTMLButtonElement>("filter-clear");
 const filterChips = element<HTMLDivElement>("filter-chips");
+const workspaceSelectionCount = element<HTMLSpanElement>(
+  "workspace-selection-count",
+);
+const broadcastButton = element<HTMLButtonElement>("broadcast-button");
+const jumpAskingButton = element<HTMLButtonElement>("jump-asking-button");
+const jumpFailingButton = element<HTMLButtonElement>("jump-failing-button");
+const jumpWorkspaceButton = element<HTMLButtonElement>("jump-workspace-button");
 const newWorkspaceButton =
   element<HTMLButtonElement>("new-workspace-button");
 const workspaceEmpty = element<HTMLDivElement>("workspace-empty");
@@ -243,6 +269,7 @@ const taskDescription = element<HTMLDivElement>("task-description");
 const taskSignals = element<HTMLDivElement>("task-signals");
 const activityCount = element<HTMLSpanElement>("activity-count");
 const activityList = element<HTMLDivElement>("activity-list");
+const workActivityButton = element<HTMLButtonElement>("work-activity-button");
 const agentLabel = element<HTMLElement>("agent-label");
 const spawnButton = element<HTMLButtonElement>("spawn-button");
 const shellButton = element<HTMLButtonElement>("shell-button");
@@ -349,10 +376,41 @@ const diffDialog = element<HTMLDialogElement>("diff-dialog");
 const diffBody = element<HTMLDivElement>("diff-body");
 const diffTitle = element<HTMLHeadingElement>("diff-title");
 const diffClose = element<HTMLButtonElement>("diff-close");
+const broadcastDialog = element<HTMLDialogElement>("broadcast-dialog");
+const broadcastForm = element<HTMLFormElement>("broadcast-form");
+const broadcastTargets = element<HTMLParagraphElement>("broadcast-targets");
+const broadcastBody = element<HTMLTextAreaElement>("broadcast-body");
+const broadcastSnippet = element<HTMLButtonElement>("broadcast-snippet");
+const broadcastSubmit = element<HTMLButtonElement>("broadcast-submit");
+const jumpDialog = element<HTMLDialogElement>("jump-dialog");
+const jumpFilter = element<HTMLInputElement>("jump-filter");
+const jumpList = element<HTMLDivElement>("jump-list");
+const cleanupDialog = element<HTMLDialogElement>("cleanup-dialog");
+const cleanupMessage = element<HTMLParagraphElement>("cleanup-message");
+const inputDialog = element<HTMLDialogElement>("input-dialog");
+const inputForm = element<HTMLFormElement>("input-form");
+const inputEyebrow = element<HTMLParagraphElement>("input-eyebrow");
+const inputTitle = element<HTMLHeadingElement>("input-title");
+const inputMessage = element<HTMLParagraphElement>("input-message");
+const inputLabel = element<HTMLSpanElement>("input-label");
+const inputField = element<HTMLInputElement>("input-field");
+const inputCancel = element<HTMLButtonElement>("input-cancel");
 
 let workspaces = new Map<string, Workspace>();
 let terminals = new Map<number, TerminalRecord>();
 let selectedKey: string | null = null;
+const markedWorkspaces = new Set<string>();
+const markedActivity = new Map<string, Set<string>>();
+const expandedActivity = new Set<string>();
+// How many activity rows are currently rendered per workspace. The feed
+// is no longer silently capped at 30, but it is paginated explicitly: we
+// render a bounded page and a "Show more" control reveals the rest, so a
+// workspace with hundreds of rows doesn't rebuild hundreds of DOM nodes
+// (each with listeners) on every re-render.
+const ACTIVITY_PAGE_SIZE = 50;
+const activityShown = new Map<string, number>();
+let snippetBroadcastMode = false;
+let cleanupWorkspaceKey: string | null = null;
 // The grouped inbox view-model computed by the shared `tui-core` logic
 // in `src-tauri` and pushed over the event channel (#732). The frontend
 // never computes grouping or sort — it only renders this structure.
@@ -484,6 +542,21 @@ shellButton.addEventListener("click", () => {
 markReadButton.addEventListener("click", () => {
   void markSelectedRead();
 });
+workActivityButton.addEventListener("click", () => void workOnActivitySelection());
+broadcastButton.addEventListener("click", openBroadcastDialog);
+jumpAskingButton.addEventListener("click", () => jumpToAttention("asking"));
+jumpFailingButton.addEventListener("click", () => jumpToAttention("failing"));
+jumpWorkspaceButton.addEventListener("click", openJumpDialog);
+broadcastForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void broadcastMarked();
+});
+broadcastSnippet.addEventListener("click", () => {
+  snippetBroadcastMode = true;
+  broadcastDialog.close();
+  void openSnippetPicker();
+});
+jumpFilter.addEventListener("input", renderJumpList);
 
 actionsButton.addEventListener("click", () => {
   // No stopPropagation: the document click handler still runs and closes
@@ -495,6 +568,16 @@ renameCancel.addEventListener("click", () => renameDialog.close());
 renameForm.addEventListener("submit", (event) => {
   event.preventDefault();
   void submitRename();
+});
+
+inputCancel.addEventListener("click", () => {
+  inputDialog.returnValue = "";
+  inputDialog.close();
+});
+inputForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  inputDialog.returnValue = "submit";
+  inputDialog.close();
 });
 
 replyForm.addEventListener("submit", (event) => {
@@ -745,6 +828,12 @@ function handleEvent(event: LazyboxEvent): void {
     "AgentState" in event;
   if (workspaceChanged) {
     workspaces = applyWorkspaceEvent(workspaces, event);
+    for (const key of [...markedWorkspaces]) {
+      if (!workspaces.has(key)) {
+        markedWorkspaces.delete(key);
+        markedActivity.delete(key);
+      }
+    }
     if (selectedKey !== null && !workspaces.has(selectedKey)) {
       changeSelectedWorkspace(null);
       // Drop the removed workspace's tiles now; the following Inbox push
@@ -778,6 +867,8 @@ function handleEvent(event: LazyboxEvent): void {
       replayAvailable: true,
       dirty: false,
       state: "running",
+      modelLabel: payload.model_label ?? null,
+      promptHistory: [],
     });
     if (payload.session_key === selectedKey) {
       const focusNew = focusRequestedSession === payload.session_key;
@@ -815,6 +906,8 @@ function handleEvent(event: LazyboxEvent): void {
       replayAvailable: false,
       dirty: false,
       state: payload.authenticating ? "authenticating" : "running",
+      modelLabel: payload.model_label ?? null,
+      promptHistory: [],
     });
     if (payload.session_key === selectedKey) {
       syncWorkspaceTerminals();
@@ -871,6 +964,24 @@ function handleEvent(event: LazyboxEvent): void {
         showWorkspaceDiff(payload.workspace_key, payload.diff);
       } else {
         setStatus(`Couldn't read diff: ${payload.error ?? "unknown error"}`);
+      }
+    }
+  } else if ("WorkspaceCleanupRequested" in event) {
+    const payload = event.WorkspaceCleanupRequested;
+    void offerWorkspaceCleanup(
+      payload.workspace_key,
+      payload.reason,
+      payload.active_terminal_count,
+      payload.has_local_work,
+    );
+  } else if ("WorkspaceCleanupCancelled" in event) {
+    const key = event.WorkspaceCleanupCancelled.workspace_key;
+    if (cleanupWorkspaceKey === key) {
+      // Drop the pending answer before closing so the awaiting
+      // `offerWorkspaceCleanup` sees the key cleared and sends nothing.
+      cleanupWorkspaceKey = null;
+      if (cleanupDialog.open) {
+        cleanupDialog.close();
       }
     }
   }
@@ -1149,8 +1260,17 @@ function workspaceRowSig(workspace: Workspace): string {
   const task = primaryTask(workspace);
   const count = unreadCount(workspace);
   const updated = task === null ? null : task.updated_at;
+  const agentJump = liveAgentWorkspaceKeys().indexOf(workspace.key);
   return JSON.stringify({
     selected: workspace.key === selectedKey,
+    // Broadcast mark, live agent badges (asking/running/ready), and the
+    // ⌥N jump index are all drawn by `renderWorkspaceRow` and closed over
+    // by its handlers, so they must ride the signature — otherwise the
+    // reconciler reuses a stale node and, e.g., an agent entering
+    // "asking" never lights up the row (#877 reuse-correctness contract).
+    marked: markedWorkspaces.has(workspace.key),
+    runtime: workspaceRuntimeSignals(terminals.values(), workspace.key),
+    jump: agentJump >= 0 && agentJump < 9 ? agentJump : -1,
     reference: taskReference(task),
     role: task?.role ?? null,
     updated,
@@ -1179,6 +1299,8 @@ function renderInbox(): void {
     inboxView === null ? 0 : visibleUnreadCount(inboxView, workspaces);
   unreadTotal.textContent = `${unread} unread`;
   renderFilterControls();
+  workspaceSelectionCount.textContent = `${markedWorkspaces.size} selected`;
+  broadcastButton.disabled = markedWorkspaces.size === 0;
 
   if (inboxLoading) {
     workspaceCount.textContent = "Loading…";
@@ -1353,6 +1475,7 @@ function renderWorkspaceRow(workspace: Workspace): HTMLButtonElement {
   button.className = "workspace-row";
   button.dataset.key = workspace.key;
   button.classList.toggle("selected", workspace.key === selectedKey);
+  button.classList.toggle("marked", markedWorkspaces.has(workspace.key));
   button.type = "button";
   button.role = "option";
   button.ariaSelected = String(workspace.key === selectedKey);
@@ -1364,14 +1487,33 @@ function renderWorkspaceRow(workspace: Workspace): HTMLButtonElement {
       count === 0 ? "read" : `${count} unread`
     }`,
   );
-  button.addEventListener("click", () => selectWorkspace(workspace.key));
+  button.addEventListener("click", (event) => {
+    if (
+      event.shiftKey ||
+      event.metaKey ||
+      event.ctrlKey ||
+      (event.target instanceof Element &&
+        event.target.classList.contains("workspace-mark-toggle"))
+    ) {
+      toggleWorkspaceMark(workspace.key);
+    } else {
+      selectWorkspace(workspace.key);
+    }
+  });
 
   const top = document.createElement("span");
   top.className = "workspace-row-top";
   const reference = document.createElement("span");
   reference.className = "workspace-reference";
   reference.textContent = taskReference(task);
-  top.append(reference);
+  const mark = document.createElement("span");
+  mark.className = "workspace-mark-toggle";
+  mark.setAttribute("aria-hidden", "true");
+  mark.title = markedWorkspaces.has(workspace.key)
+    ? "Remove from broadcast selection"
+    : "Add to broadcast selection";
+  mark.textContent = markedWorkspaces.has(workspace.key) ? "●" : "○";
+  top.append(mark, reference);
   if (task?.role !== undefined) {
     const role = document.createElement("span");
     role.className = "workspace-role";
@@ -1394,6 +1536,14 @@ function renderWorkspaceRow(workspace: Workspace): HTMLButtonElement {
   const bottom = document.createElement("span");
   bottom.className = "workspace-row-bottom";
   renderTaskBadges(bottom, rowSignals(task, count));
+  renderTaskBadges(
+    bottom,
+    workspaceRuntimeSignals(terminals.values(), workspace.key),
+  );
+  const agentJump = liveAgentWorkspaceKeys().indexOf(workspace.key);
+  if (agentJump >= 0 && agentJump < 9) {
+    renderTaskBadges(bottom, [{ label: `⌥${agentJump + 1}` }]);
+  }
   if (bottom.childElementCount === 0) {
     const state = document.createElement("span");
     state.className = `task-state task-state-${(task?.state ?? "local").toLowerCase()}`;
@@ -1464,6 +1614,7 @@ function renderWorkspace(): void {
   shellButton.disabled = pendingLaunches.has(launchKey(workspace.key, "shell"));
 
   activityCount.textContent = String(workspace.activity.length);
+  workActivityButton.disabled = selectedActivityIndices(workspace).length === 0;
   if (workspace.activity.length === 0) {
     const empty = document.createElement("p");
     empty.className = "activity-empty";
@@ -1472,32 +1623,99 @@ function renderWorkspace(): void {
     return;
   }
 
-  const entries = workspace.activity.slice(0, 30).map(
-    (activity): RowEntry => ({
-      // Key on the GitHub node id when present; otherwise on content, so
-      // a prepended activity doesn't shift index-based keys and remount
-      // every card below it. The `id:` / `c:` prefixes keep a node id
-      // that happens to be numeric from colliding with a content key.
-      key:
-        activity.node_id !== null
-          ? `act:id:${activity.node_id}`
-          : `act:c:${activity.created_at} ${activity.author} ${activity.kind} ${activity.body}`,
-      sig: JSON.stringify({
-        author: activity.author,
-        body: activity.body,
-        created_at: activity.created_at,
-        kind: activity.kind,
-        age: relativeTime(activity.created_at),
-      }),
-      build: () => renderActivityCard(activity),
-    }),
+  const shown = Math.min(
+    activityShown.get(workspace.key) ?? ACTIVITY_PAGE_SIZE,
+    workspace.activity.length,
   );
+  const selection = markedActivity.get(workspace.key);
+  // slice(0, shown) preserves original indices, so the positional
+  // read/unread bookkeeping stays correct.
+  const entries: RowEntry[] = workspace.activity
+    .slice(0, shown)
+    .map((activity, index): RowEntry => {
+      const fingerprintKey = activityFingerprintKey(activity);
+      const expandedKey = `${workspace.key}\0${fingerprintKey}`;
+      const expanded = expandedActivity.has(expandedKey);
+      const selected = selection?.has(fingerprintKey) ?? false;
+      const unread = isActivityUnread(workspace, index);
+      return {
+        // Stable identity: node id when present, else content — so a
+        // prepended activity doesn't shift index-based keys and remount
+        // every card below it (#877).
+        key:
+          activity.node_id !== null
+            ? `act:id:${activity.node_id}`
+            : `act:c:${fingerprintKey}`,
+        // Everything the card *draws* or its handlers meaningfully close
+        // over, so a poll that changes none of it reuses the node
+        // (focus/selection survive) while toggling select/expand/read
+        // rebuilds it. `index` is deliberately absent: it isn't rendered,
+        // and MarkActivityRead resolves by fingerprint (the index is only
+        // a hint), so a content-stable row that merely shifts position
+        // must stay reused — the position-independence contract from #877.
+        // The index-dependent visual state that *is* drawn (`unread`) is
+        // captured explicitly, so a real read/unread change still rebuilds.
+        sig: JSON.stringify({
+          author: activity.author,
+          body: activity.body,
+          created_at: activity.created_at,
+          kind: activity.kind,
+          age: relativeTime(activity.created_at),
+          selected,
+          expanded,
+          unread,
+        }),
+        build: () =>
+          renderActivityCard(workspace, activity, index, {
+            fingerprintKey,
+            expandedKey,
+            expanded,
+            selected,
+            unread,
+          }),
+      };
+    });
+  const remaining = workspace.activity.length - shown;
+  if (remaining > 0) {
+    const count = Math.min(remaining, ACTIVITY_PAGE_SIZE);
+    entries.push({
+      key: "act:more",
+      sig: `more:${shown}:${remaining}`,
+      build: () => {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "quiet-button activity-show-more";
+        more.textContent = `Show ${count} more of ${remaining}`;
+        more.addEventListener("click", () => {
+          activityShown.set(workspace.key, shown + ACTIVITY_PAGE_SIZE);
+          renderWorkspace();
+        });
+        return more;
+      },
+    });
+  }
   reconcileList(activityList, entries);
 }
 
-function renderActivityCard(activity: Activity): HTMLElement {
+function renderActivityCard(
+  workspace: Workspace,
+  activity: Activity,
+  index: number,
+  ctx: {
+    fingerprintKey: string;
+    expandedKey: string;
+    expanded: boolean;
+    selected: boolean;
+    unread: boolean;
+  },
+): HTMLElement {
+  const { fingerprintKey, expandedKey, expanded, selected, unread } = ctx;
   const card = document.createElement("article");
   card.className = "activity-card";
+  card.classList.toggle("selected", selected);
+  card.classList.toggle("unread", unread);
+  card.classList.toggle("collapsed", !expanded);
+  card.tabIndex = 0;
   card.setAttribute(
     "aria-label",
     `${activity.kind} by ${activity.author}, ${relativeTime(activity.created_at)}`,
@@ -1510,9 +1728,157 @@ function renderActivityCard(activity: Activity): HTMLElement {
   time.textContent = relativeTime(activity.created_at);
   heading.append(author, time);
   const body = document.createElement("p");
-  body.textContent = activity.body;
-  card.append(heading, body);
+  body.className = "activity-body";
+  appendLinkedText(body, activity.body);
+  const actions = document.createElement("div");
+  actions.className = "activity-card-actions";
+  const select = document.createElement("button");
+  select.type = "button";
+  select.className = "quiet-button";
+  select.textContent = selected ? "Selected" : "Select";
+  select.setAttribute(
+    "aria-label",
+    `${selected ? "Deselect" : "Select"} activity by ${activity.author}`,
+  );
+  select.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleActivityMark(workspace.key, fingerprintKey);
+  });
+  const expand = document.createElement("button");
+  expand.type = "button";
+  expand.className = "quiet-button";
+  expand.textContent = expanded ? "Collapse" : "Expand";
+  expand.addEventListener("click", (event) => {
+    event.stopPropagation();
+    toggleActivityExpanded(expandedKey);
+  });
+  actions.append(select, expand);
+  if (unread) {
+    const read = document.createElement("button");
+    read.type = "button";
+    read.className = "quiet-button";
+    read.textContent = "Mark read";
+    read.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void markActivityRead(workspace, index);
+    });
+    actions.append(read);
+  }
+  card.addEventListener("click", () => toggleActivityExpanded(expandedKey));
+  card.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      toggleActivityExpanded(expandedKey);
+    } else if (event.key === " ") {
+      event.preventDefault();
+      toggleActivityMark(workspace.key, fingerprintKey);
+    }
+  });
+  card.append(heading, body, actions);
   return card;
+}
+
+function appendLinkedText(container: HTMLElement, text: string): void {
+  const pattern = /https?:\/\/[^\s<>()]+/g;
+  const safe = text ?? "";
+  let offset = 0;
+  for (const match of safe.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    container.append(document.createTextNode(safe.slice(offset, index)));
+    const url = match[0];
+    const link = document.createElement("a");
+    link.href = url;
+    link.textContent = url;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      void openTaskUrl(url);
+    });
+    container.append(link);
+    offset = index + url.length;
+  }
+  container.append(document.createTextNode(safe.slice(offset)));
+}
+
+function toggleWorkspaceMark(key: string): void {
+  if (!markedWorkspaces.delete(key)) {
+    markedWorkspaces.add(key);
+  }
+  renderInbox();
+}
+
+function toggleActivityMark(workspaceKey: string, fingerprint: string): void {
+  const selected = markedActivity.get(workspaceKey) ?? new Set<string>();
+  if (!selected.delete(fingerprint)) {
+    selected.add(fingerprint);
+  }
+  if (selected.size === 0) {
+    markedActivity.delete(workspaceKey);
+  } else {
+    markedActivity.set(workspaceKey, selected);
+  }
+  renderWorkspace();
+}
+
+function selectedActivityIndices(workspace: Workspace): number[] {
+  const selected = markedActivity.get(workspace.key);
+  if (selected === undefined) {
+    return [];
+  }
+  return workspace.activity.flatMap((activity, index) =>
+    selected.has(activityFingerprintKey(activity)) ? [index] : [],
+  );
+}
+
+function toggleActivityExpanded(key: string): void {
+  if (!expandedActivity.delete(key)) {
+    expandedActivity.add(key);
+  }
+  renderWorkspace();
+}
+
+async function markActivityRead(
+  workspace: Workspace,
+  index: number,
+): Promise<void> {
+  const activity = workspace.activity[index];
+  if (activity === undefined) {
+    return;
+  }
+  await runCommands(
+    [markActivityReadCommand(workspace.key, index, activityFingerprint(activity))],
+    "Marking activity read…",
+    "Activity marked read.",
+  );
+}
+
+async function resolveWorkPrompt(
+  workspaceKey: string,
+  selectedActivity: number[],
+  agent: string,
+): Promise<string | null> {
+  if (previewMode) {
+    return `Work on ${workspaceKey}.`;
+  }
+  return invoke<string | null>("resolve_work_prompt", {
+    sessionKey: workspaceKey,
+    selectedActivity,
+    agent,
+  });
+}
+
+async function workOnActivitySelection(): Promise<void> {
+  if (selectedKey === null) {
+    return;
+  }
+  const workspace = workspaces.get(selectedKey);
+  if (workspace === undefined) {
+    return;
+  }
+  await startContextualAgent(
+    workspace.key,
+    selectedActivityIndices(workspace),
+    defaultAgent,
+  );
 }
 
 function policyKey(workspaceKey: string, field: string): string {
@@ -1864,7 +2230,13 @@ function mountTerminal(record: TerminalRecord): void {
 
   const tabLabel = document.createElement("span");
   tabLabel.className = "terminal-tab-label";
-  tabLabel.textContent = terminalKindLabel(record.kind);
+  tabLabel.textContent = [terminalKindLabel(record.kind), record.modelLabel]
+    .filter((value): value is string => value !== null)
+    .join(" · ");
+  const lastPrompt = (record.promptHistory ?? []).at(-1);
+  if (lastPrompt !== undefined) {
+    tabLabel.title = `Last prompt: ${lastPrompt.text}`;
+  }
   const stateEl = document.createElement("span");
   stateEl.className = "terminal-tab-state";
   const close = document.createElement("button");
@@ -2346,11 +2718,11 @@ async function openSnippetPicker(): Promise<void> {
   if (snippetDialog.open) {
     return;
   }
-  if (focusedTerminalId === null) {
+  if (!snippetBroadcastMode && focusedTerminalId === null) {
     setStatus("Open an agent or shell to send a snippet.");
     return;
   }
-  snippetTargetTerminal = focusedTerminalId;
+  snippetTargetTerminal = snippetBroadcastMode ? null : focusedTerminalId;
   snippetQuery = "";
   snippetFilter.value = "";
   const view = await fetchSnippetView("");
@@ -2369,6 +2741,11 @@ async function openSnippetPicker(): Promise<void> {
 function onSnippetDialogClose(): void {
   snippetViewState = null;
   snippetTargetTerminal = null;
+  if (snippetBroadcastMode) {
+    snippetBroadcastMode = false;
+    openBroadcastDialog();
+    return;
+  }
   if (focusedTerminalId !== null) {
     liveTerminals.get(focusedTerminalId)?.terminal.focus();
   }
@@ -2469,6 +2846,14 @@ function moveSnippetCursor(delta: number): void {
 }
 
 async function deliverSnippet(row: PickerRow): Promise<void> {
+  if (snippetBroadcastMode) {
+    snippetBroadcastMode = false;
+    closeSnippetPicker();
+    broadcastBody.value = row.body;
+    openBroadcastDialog();
+    broadcastBody.focus();
+    return;
+  }
   const terminalId = snippetTargetTerminal;
   closeSnippetPicker();
   if (terminalId === null) {
@@ -2503,34 +2888,284 @@ function previewSnippetView(): SnippetPickerView {
   return { filter: "", groups, auto_submit: null, visible_count: 2, total: 2 };
 }
 
+function openBroadcastDialog(): void {
+  if (markedWorkspaces.size === 0) {
+    setStatus("Select at least one workspace to broadcast.");
+    return;
+  }
+  broadcastTargets.textContent = `${markedWorkspaces.size} target${markedWorkspaces.size === 1 ? "" : "s"}: ${[...markedWorkspaces]
+    .map((key) => workspaces.get(key)?.name ?? key)
+    .join(", ")}`;
+  if (!broadcastDialog.open) {
+    broadcastDialog.showModal();
+  }
+  broadcastBody.focus();
+}
+
+async function broadcastMarked(): Promise<void> {
+  const body = broadcastBody.value.trim();
+  if (body.length === 0 || broadcastSubmit.disabled) {
+    return;
+  }
+  broadcastSubmit.disabled = true;
+  // Snapshot the selection before the first await: an inbox poll under
+  // the modal mutates `markedWorkspaces` (handleEvent drops removed
+  // keys), and iterating the live Set would silently skip a target
+  // mid-loop — dropping it from every one of sent/skipped/failed instead
+  // of reporting it. Snapshotting keeps the outcome complete and stable.
+  const targets = [...markedWorkspaces];
+  // Spawning an agent is heavy, so a broadcast that would start agents on
+  // session-less targets gates behind one explicit confirm — matching the
+  // TUI's "start N agents?" prompt — instead of silently launching them.
+  const spawnCount = targets.filter((key) => {
+    const workspace = workspaces.get(key);
+    return (
+      workspace !== undefined &&
+      broadcastDisposition(workspace, terminals.values()).type === "spawn"
+    );
+  }).length;
+  if (spawnCount > 0) {
+    const accepted = await confirmUserAction(
+      `Start ${spawnCount} agent${spawnCount === 1 ? "" : "s"}?`,
+      `${spawnCount} selected workspace${spawnCount === 1 ? " has" : "s have"} no running agent or shell; broadcasting starts the default agent there with the message as its opening prompt.`,
+      "Start",
+    );
+    if (!accepted) {
+      broadcastSubmit.disabled = false;
+      return;
+    }
+  }
+  const sent: string[] = [];
+  const skipped: string[] = [];
+  const failed: string[] = [];
+  try {
+    for (const key of targets) {
+      const workspace = workspaces.get(key);
+      if (workspace === undefined) {
+        skipped.push(`${key} (no longer available)`);
+        continue;
+      }
+      const label = workspace.name;
+      const disposition = broadcastDisposition(workspace, terminals.values());
+      let command: LazyboxCommand | null = null;
+      if (disposition.type === "agent") {
+        command = injectPromptCommand(disposition.terminalId, body);
+      } else if (disposition.type === "shell") {
+        command = writeShellCommand(disposition.terminalId, body);
+      } else if (disposition.type === "spawn") {
+        try {
+          const context = await resolveWorkPrompt(key, [], defaultAgent);
+          const prompt = context === null ? body : `${context}\n\n${body}`;
+          command = spawnAgentCommand(key, defaultAgent, null, false, prompt);
+        } catch (error) {
+          failed.push(`${label} (${String(error)})`);
+          continue;
+        }
+      } else {
+        skipped.push(`${label} (${disposition.reason})`);
+        continue;
+      }
+      if (await sendCommand(command)) {
+        sent.push(label);
+      } else {
+        failed.push(label);
+      }
+    }
+  } finally {
+    broadcastSubmit.disabled = false;
+  }
+  broadcastDialog.close();
+  const parts = [
+    sent.length > 0 ? `sent: ${sent.join(", ")}` : null,
+    skipped.length > 0 ? `skipped: ${skipped.join(", ")}` : null,
+    failed.length > 0 ? `failed: ${failed.join(", ")}` : null,
+  ].filter((part): part is string => part !== null);
+  setStatus(`Broadcast — ${parts.join("; ")}.`);
+}
+
+function jumpToAttention(kind: "asking" | "failing"): void {
+  const keys = navigableWorkspaceKeys();
+  const next = cycleMatchingKey(keys, selectedKey, (key) => {
+    if (kind === "failing") {
+      const ci = workspaces.get(key);
+      const status = ci === undefined ? "None" : primaryTask(ci)?.ci;
+      return status === "Failure" || status === "Mixed";
+    }
+    return [...terminals.values()].some(
+      (terminal) => terminal.sessionKey === key && terminal.state === "inputneeded",
+    );
+  });
+  if (next === null) {
+    setStatus(kind === "asking" ? "No agent is asking." : "No failing CI target.");
+    return;
+  }
+  selectWorkspace(next);
+}
+
+function openJumpDialog(): void {
+  jumpFilter.value = "";
+  renderJumpList();
+  jumpDialog.showModal();
+  jumpFilter.focus();
+}
+
+function renderJumpList(): void {
+  const query = jumpFilter.value.trim().toLowerCase();
+  const rows = [...workspaces.values()]
+    .filter((workspace) => {
+      const task = primaryTask(workspace);
+      return `${workspace.name} ${taskReference(task)} ${task?.repo ?? ""}`
+        .toLowerCase()
+        .includes(query);
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+  jumpList.replaceChildren();
+  for (const workspace of rows) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "actions-menu-item";
+    button.setAttribute("role", "option");
+    button.textContent = `${workspace.name} · ${taskReference(primaryTask(workspace))}`;
+    button.addEventListener("click", () => {
+      jumpDialog.close();
+      selectWorkspace(workspace.key);
+    });
+    jumpList.append(button);
+  }
+}
+
+function liveAgentWorkspaceKeys(): string[] {
+  return navigableWorkspaceKeys().filter((key) =>
+    [...terminals.values()].some(
+      (terminal) =>
+        terminal.sessionKey === key &&
+        typeof terminal.kind === "object" &&
+        "Agent" in terminal.kind &&
+        !terminal.state.startsWith("exited"),
+    ),
+  );
+}
+
+// The cleanup decision is driven by the daemon's level-triggered
+// removal prompt (a PR merged, an issue closed, or a workspace fell out
+// of scope) — never by a bare terminal exit. That keeps the desktop in
+// lockstep with the TUI: "keep"/"remove" only ever answer a prompt the
+// daemon actually raised, so a healthy open PR can't be archived just
+// because its last shell closed, and answering "keep" can't corrupt the
+// daemon's cleanup-prompt state for a workspace that was never a
+// candidate.
+async function offerWorkspaceCleanup(
+  workspaceKey: string,
+  reason: CleanupReason,
+  activeTerminalCount: number,
+  hasLocalWork: boolean,
+): Promise<void> {
+  const workspace = workspaces.get(workspaceKey);
+  if (workspace === undefined || cleanupDialog.open) {
+    return;
+  }
+  cleanupWorkspaceKey = workspaceKey;
+  const cause =
+    reason === "Merged"
+      ? "Its PR merged"
+      : reason === "Closed"
+        ? "Its issue closed"
+        : "It fell out of your current scope";
+  const terminalsNote =
+    activeTerminalCount > 0
+      ? ` Removing closes ${activeTerminalCount} running terminal${activeTerminalCount === 1 ? "" : "s"}.`
+      : "";
+  const localWorkNote = hasLocalWork
+    ? " Its worktree has uncommitted or unpushed work that removal force-deletes."
+    : "";
+  cleanupMessage.textContent = `${cause} for ${workspace.name}. Keep it in your inbox, or remove it.${terminalsNote}${localWorkNote}`;
+  cleanupDialog.returnValue = "";
+  cleanupDialog.showModal();
+  const decision = await new Promise<string>((resolve) => {
+    cleanupDialog.addEventListener("close", () => resolve(cleanupDialog.returnValue), {
+      once: true,
+    });
+  });
+  // A concurrent WorkspaceCleanupCancelled (issue reopened) or a
+  // superseding prompt clears/repoints the key while the modal was open;
+  // don't act on a decision that no longer belongs to this prompt.
+  if (cleanupWorkspaceKey !== workspaceKey) {
+    return;
+  }
+  cleanupWorkspaceKey = null;
+  if (decision === "keep") {
+    // Out-of-scope "keep" is a no-op the daemon dedupes on its own
+    // (`WorkspaceOutOfScope` has no persisted decline); only the
+    // merged/closed prompt needs KeepWorkspace to stop re-asking.
+    if (reason !== "OutOfScope") {
+      await sendCommand(keepWorkspaceCommand(workspaceKey));
+    }
+    setStatus(`Kept ${workspace.name}.`);
+  } else if (decision === "remove") {
+    // Merged/closed removal deletes the worktree too
+    // (RemoveMergedWorkspace); out-of-scope removal only kills the
+    // still-running sessions (Archive → Kill), matching the TUI.
+    await sendCommand(
+      reason === "OutOfScope"
+        ? archiveCommand(workspaceKey)
+        : removeMergedWorkspaceCommand(workspaceKey),
+    );
+    setStatus(`Removed ${workspace.name}.`);
+  }
+}
+
 async function startAgent(): Promise<void> {
   if (selectedKey === null) {
     return;
   }
-  const existing = terminalForWorkspace(selectedKey, "agent", defaultAgent);
-  if (existing !== undefined && !existing.state.startsWith("exited")) {
-    focusTerminal(existing.id);
-    setStatus(`Opened ${defaultAgent}.`);
-    return;
-  }
-  const pendingKey = launchKey(selectedKey, "agent", defaultAgent);
+  const workspace = workspaces.get(selectedKey);
+  await startContextualAgent(
+    selectedKey,
+    workspace === undefined ? [] : selectedActivityIndices(workspace),
+    defaultAgent,
+  );
+}
+
+async function startContextualAgent(
+  workspaceKey: string,
+  selectedActivity: number[],
+  agent: string,
+  modelAlias: string | null = null,
+  onMain = false,
+): Promise<void> {
+  const existing = terminalForWorkspace(workspaceKey, "agent", agent);
+  const pendingKey = launchKey(workspaceKey, "agent", agent);
   if (pendingLaunches.has(pendingKey)) {
     return;
   }
   pendingLaunches.add(pendingKey);
   renderWorkspace();
-  focusRequestedSession = selectedKey;
+  focusRequestedSession = workspaceKey;
   try {
+    const prompt = await resolveWorkPrompt(workspaceKey, selectedActivity, agent);
+    if (existing !== undefined && !existing.state.startsWith("exited")) {
+      if (prompt === null) {
+        focusTerminal(existing.id);
+        setStatus(`Opened ${agent}.`);
+      } else {
+        await runCommands(
+          [injectPromptCommand(existing.id, prompt)],
+          `Sending contextual work to ${agent}…`,
+          `Contextual work sent to ${agent}.`,
+        );
+      }
+      return;
+    }
     const succeeded = await runCommands(
-      [spawnAgentCommand(selectedKey, defaultAgent)],
+      [spawnAgentCommand(workspaceKey, agent, modelAlias, onMain, prompt)],
       `${
         existing === undefined
-          ? workspaces.get(selectedKey)?.sessions.length === 0
+          ? workspaces.get(workspaceKey)?.sessions.length === 0
             ? "Creating workspace and starting"
             : "Starting"
           : "Resuming"
-      } ${defaultAgent}…`,
-      `${defaultAgent} launch requested.`,
+      } ${agent}…`,
+      `${agent} launch requested.`,
     );
     if (succeeded) {
       recordAnalytics("agent_started");
@@ -2672,6 +3307,28 @@ function renderActionsMenu(): void {
     items.push({ label: "Open in browser", run: () => void openTaskUrl(url) });
   }
   if (workspace !== undefined && workspaceDiffTarget(workspace) !== null) {
+    items.push({ label: "Open in editor", run: () => void openWorkspaceEditor(key) });
+  }
+  if (workspace?.pr !== null && workspace?.pr !== undefined) {
+    items.push({
+      label: "Reviewers…",
+      run: () => void editWorkspaceMetadata(key, "reviewers"),
+    });
+  }
+  if (task !== null) {
+    items.push({
+      label: "Assignees…",
+      run: () => void editWorkspaceMetadata(key, "assignees"),
+    });
+    items.push({
+      label: "Labels…",
+      run: () => void editWorkspaceMetadata(key, "labels"),
+    });
+  }
+  if ((workspace?.sessions.length ?? 0) > 0 && workspaces.size > 1) {
+    items.push({ label: "Adopt sessions into…", run: () => void adoptSessions(key) });
+  }
+  if (workspace !== undefined && workspaceDiffTarget(workspace) !== null) {
     items.push({ label: "View diff", run: () => void requestWorkspaceDiff(key) });
   }
   if (canMerge) {
@@ -2783,22 +3440,14 @@ async function spawnFromMenu(
       return;
     }
   }
-  focusRequestedSession = workspaceKey;
-  const succeeded = await runCommands(
-    commandsForWorkspaceIntent(workspaceKey, {
-      type: "spawn-agent",
-      agent,
-      modelAlias,
-      onMain,
-    }),
-    `Starting ${agent}…`,
-    `${agent} launch requested.`,
+  const workspace = workspaces.get(workspaceKey);
+  await startContextualAgent(
+    workspaceKey,
+    workspace === undefined ? [] : selectedActivityIndices(workspace),
+    agent,
+    modelAlias,
+    onMain,
   );
-  if (succeeded) {
-    recordAnalytics("agent_started");
-  } else {
-    focusRequestedSession = null;
-  }
 }
 
 async function spawnShellFromMenu(
@@ -2839,6 +3488,143 @@ async function openTaskUrl(url: string): Promise<void> {
   } catch (error) {
     setStatus(String(error));
   }
+}
+
+async function openWorkspaceEditor(workspaceKey: string): Promise<void> {
+  if (previewMode) {
+    setStatus("Would open the workspace in an editor.");
+    return;
+  }
+  try {
+    const editor = await invoke<string>("open_workspace_editor", {
+      sessionKey: workspaceKey,
+    });
+    setStatus(`Opened in ${editor}.`);
+  } catch (error) {
+    setStatus(String(error));
+  }
+}
+
+function parseCsvList(value: string): string[] {
+  return value
+    .split(",")
+    .map((entry) => entry.trim().replace(/^@/, ""))
+    .filter((entry) => entry.length > 0);
+}
+
+async function editWorkspaceMetadata(
+  workspaceKey: string,
+  kind: "reviewers" | "assignees" | "labels",
+): Promise<void> {
+  const workspace = workspaces.get(workspaceKey);
+  const task = workspace === undefined ? null : primaryTask(workspace);
+  if (workspace === undefined || task === null) {
+    return;
+  }
+  const known = [
+    ...new Set([
+      ...task.reviewers,
+      ...task.assignees,
+      ...workspace.activity.map((activity) => activity.author),
+    ]),
+  ];
+  if (kind === "reviewers") {
+    // GitHub review requests are additive and lazybox exposes no
+    // remove-reviewer path, so this is an explicit "request more"
+    // action — never an editable set. Prefilling the current reviewers
+    // would falsely imply that deleting a name un-requests them; it
+    // doesn't (RequestReviewers is add-only and silently no-ops on an
+    // empty list), so removals would vanish without a trace.
+    const already =
+      task.reviewers.length > 0
+        ? `Already requested: ${task.reviewers.join(", ")}. `
+        : "";
+    const value = await promptText({
+      eyebrow: "Request reviewers",
+      title: "Request reviewers",
+      message: `${already}New reviewers are added to the existing set.${
+        known.length > 0 ? ` Known people: ${known.join(", ")}.` : ""
+      }`,
+      label: "Logins to request (comma-separated)",
+      initial: "",
+    });
+    if (value === null) {
+      return;
+    }
+    const entries = parseCsvList(value);
+    if (entries.length === 0) {
+      setStatus("Enter at least one reviewer to request.");
+      return;
+    }
+    await runCommands(
+      [requestReviewersCommand(workspaceKey, entries)],
+      "Requesting reviewers…",
+      "Reviewers requested.",
+    );
+    return;
+  }
+  // Assignees and labels replace the whole set (SetAssignees / SetLabels),
+  // so the current value is genuinely editable and removals take effect.
+  const current =
+    kind === "assignees"
+      ? task.assignees
+      : task.labels.map((label) => label.name);
+  const value = await promptText({
+    eyebrow: kind === "assignees" ? "Set assignees" : "Set labels",
+    title: kind === "assignees" ? "Set assignees" : "Set labels",
+    message: `The full ${kind} set — names you remove are cleared.${
+      kind === "assignees" && known.length > 0
+        ? ` Known people: ${known.join(", ")}.`
+        : ""
+    }`,
+    label: `${capitalize(kind)} (comma-separated)`,
+    initial: current.join(", "),
+  });
+  if (value === null) {
+    return;
+  }
+  const entries = parseCsvList(value);
+  await runCommands(
+    [
+      kind === "assignees"
+        ? setAssigneesCommand(workspaceKey, entries)
+        : setLabelsCommand(workspaceKey, entries),
+    ],
+    `Updating ${kind}…`,
+    `${capitalize(kind)} updated.`,
+  );
+}
+
+async function adoptSessions(sourceWorkspaceKey: string): Promise<void> {
+  const candidates = [...workspaces.values()].filter(
+    (workspace) => workspace.key !== sourceWorkspaceKey,
+  );
+  if (candidates.length === 0) {
+    setStatus("No other workspace to adopt sessions into.");
+    return;
+  }
+  const value = await promptText({
+    eyebrow: "Adopt sessions",
+    title: "Move sessions into another workspace",
+    message: `Targets: ${candidates
+      .map((workspace) => `${workspace.key} — ${workspace.name}`)
+      .join(", ")}`,
+    label: "Target workspace key",
+    initial: "",
+  });
+  if (value === null) {
+    return;
+  }
+  const target = value.trim();
+  if (!workspaces.has(target)) {
+    setStatus("Choose a workspace key from the list.");
+    return;
+  }
+  await runCommands(
+    [adoptSessionsCommand(sourceWorkspaceKey, target)],
+    "Moving sessions…",
+    `Sessions moved to ${workspaces.get(target)?.name ?? target}.`,
+  );
 }
 
 async function runWorkspaceMutation(
@@ -3100,7 +3886,7 @@ async function reviewReply(): Promise<void> {
   const workspace = workspaces.get(workspaceKey);
   const task = workspace === undefined ? null : primaryTask(workspace);
   if (!canReplyToTask(task)) {
-    setStatus("Replies are available for GitHub tasks only.");
+    setStatus("This task provider does not support replies.");
     return;
   }
   const body = replyBody.value.trim();
@@ -3114,7 +3900,7 @@ async function reviewReply(): Promise<void> {
   try {
     const accepted = await confirmUserAction(
       "Post this reply?",
-      "This comment will be visible to everyone with access to the GitHub task.",
+      `This comment will be visible to everyone with access to the ${task?.id.source ?? "upstream"} task.`,
       "Post reply",
       body,
     );
@@ -3124,7 +3910,7 @@ async function reviewReply(): Promise<void> {
     replyDrafts.save(workspaceKey, body);
     const succeeded = await runCommands(
       commandsForWorkspaceIntent(workspaceKey, { type: "reply", body }),
-      "Posting reply to GitHub…",
+      `Posting reply to ${task?.id.source ?? "provider"}…`,
       "Reply posted. Refreshing activity…",
     );
     if (succeeded) {
@@ -3702,6 +4488,42 @@ function showSetupError(message: string): void {
   setupError.classList.remove("hidden");
 }
 
+function capitalize(value: string): string {
+  return value.length === 0 ? value : `${value[0]?.toUpperCase()}${value.slice(1)}`;
+}
+
+// In-app single-line text prompt, mirroring `confirmUserAction`. The
+// desktop deliberately never calls the native `window.prompt`, whose
+// support is inconsistent across Tauri's platform webviews (WKWebView
+// commonly returns null), which would make the metadata/adopt flows
+// silently un-actionable. Resolves to the entered text on submit, or
+// null on cancel/Escape.
+function promptText(options: {
+  eyebrow: string;
+  title: string;
+  message: string;
+  label: string;
+  initial?: string;
+}): Promise<string | null> {
+  inputEyebrow.textContent = options.eyebrow;
+  inputTitle.textContent = options.title;
+  inputMessage.textContent = options.message;
+  inputMessage.classList.toggle("hidden", options.message.length === 0);
+  inputLabel.textContent = options.label;
+  inputField.value = options.initial ?? "";
+  inputDialog.returnValue = "";
+  inputDialog.showModal();
+  inputField.focus();
+  inputField.select();
+  return new Promise((resolve) => {
+    inputDialog.addEventListener(
+      "close",
+      () => resolve(inputDialog.returnValue === "submit" ? inputField.value : null),
+      { once: true },
+    );
+  });
+}
+
 function confirmUserAction(
   title: string,
   message: string,
@@ -3786,8 +4608,20 @@ function handleKeyboard(event: KeyboardEvent): void {
     confirmDialog.open ||
     newWorkspaceDialog.open ||
     snippetDialog.open ||
-    diffDialog.open
+    diffDialog.open ||
+    broadcastDialog.open ||
+    jumpDialog.open ||
+    cleanupDialog.open ||
+    inputDialog.open
   ) {
+    return;
+  }
+  if (event.altKey && /^[1-9]$/.test(event.key)) {
+    const key = liveAgentWorkspaceKeys()[Number(event.key) - 1];
+    if (key !== undefined) {
+      event.preventDefault();
+      selectWorkspace(key);
+    }
     return;
   }
   if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -3835,6 +4669,21 @@ function handleKeyboard(event: KeyboardEvent): void {
   } else if (event.key === "R") {
     event.preventDefault();
     void refreshInbox(true);
+  } else if (event.key === "v" && selectedKey !== null) {
+    event.preventDefault();
+    toggleWorkspaceMark(selectedKey);
+  } else if (event.key === "B") {
+    event.preventDefault();
+    openBroadcastDialog();
+  } else if (event.key === "!") {
+    event.preventDefault();
+    jumpToAttention("asking");
+  } else if (event.key === "F") {
+    event.preventDefault();
+    jumpToAttention("failing");
+  } else if (event.key === "`") {
+    event.preventDefault();
+    openJumpDialog();
   }
 }
 
@@ -3881,6 +4730,8 @@ function terminalFromSnapshot(snapshot: TerminalSnapshot): TerminalRecord {
       snapshot.agent_state === null
         ? "running"
         : formatAgentState(snapshot.agent_state),
+    modelLabel: snapshot.model_label ?? null,
+    promptHistory: snapshot.prompt_history ?? [],
   };
 }
 

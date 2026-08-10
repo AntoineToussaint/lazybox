@@ -134,6 +134,21 @@
             role="list"
             aria-label="Active filters"
           ></div>
+          <div class="bulk-toolbar" aria-label="Workspace selection and navigation">
+            <span id="workspace-selection-count">0 selected</span>
+            <button id="broadcast-button" class="quiet-button" type="button" disabled>
+              Broadcast…
+            </button>
+            <button id="jump-asking-button" class="quiet-button" type="button">
+              Asking
+            </button>
+            <button id="jump-failing-button" class="quiet-button" type="button">
+              Failing CI
+            </button>
+            <button id="jump-workspace-button" class="quiet-button" type="button">
+              Jump…
+            </button>
+          </div>
           <div class="inbox-summary">
             <span id="workspace-count">Loading…</span>
             <span id="unread-count">0 unread</span>
@@ -283,7 +298,12 @@
             </section>
             <div class="activity-heading">
               <h3>Activity</h3>
-              <span id="activity-count"></span>
+              <div class="activity-heading-actions">
+                <span id="activity-count"></span>
+                <button id="work-activity-button" class="quiet-button" type="button" disabled>
+                  Work on selection
+                </button>
+              </div>
             </div>
             <div id="activity-list" class="activity-list" role="feed"></div>
             <form id="reply-form" class="reply-form">
@@ -599,6 +619,67 @@
       <p class="diff-help">
         <span><kbd>Esc</kbd> close</span>
       </p>
+    </dialog>
+
+    <dialog id="broadcast-dialog" class="setup-dialog" aria-labelledby="broadcast-title">
+      <form id="broadcast-form" method="dialog">
+        <p class="eyebrow">Multi-agent control</p>
+        <h2 id="broadcast-title">Broadcast to selected workspaces</h2>
+        <p id="broadcast-targets"></p>
+        <label>
+          Instruction
+          <textarea id="broadcast-body" rows="8" required></textarea>
+        </label>
+        <div class="dialog-actions split-actions">
+          <button id="broadcast-snippet" class="quiet-button" type="button">Choose snippet…</button>
+          <span class="dialog-spacer"></span>
+          <button class="quiet-button" value="cancel">Cancel</button>
+          <button id="broadcast-submit" class="primary-button" type="submit">Broadcast</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="jump-dialog" class="setup-dialog" aria-labelledby="jump-title">
+      <form method="dialog">
+        <p class="eyebrow">Workspace navigation</p>
+        <h2 id="jump-title">Jump to workspace</h2>
+        <input id="jump-filter" type="search" autocomplete="off" placeholder="Search all workspaces" />
+        <div id="jump-list" class="jump-list" role="listbox" aria-label="Matching workspaces"></div>
+        <div class="dialog-actions">
+          <button class="quiet-button" value="cancel">Cancel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="cleanup-dialog" class="confirm-dialog" aria-labelledby="cleanup-title">
+      <form method="dialog">
+        <p class="eyebrow">Cleanup suggested</p>
+        <h2 id="cleanup-title">What should happen to this workspace?</h2>
+        <p id="cleanup-message"></p>
+        <div class="dialog-actions split-actions">
+          <button id="cleanup-keep" class="quiet-button" value="keep">Keep</button>
+          <span class="dialog-spacer"></span>
+          <button id="cleanup-remove" class="danger-button" value="remove">Remove</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="input-dialog" class="setup-dialog" aria-labelledby="input-title">
+      <form id="input-form" method="dialog">
+        <p class="eyebrow" id="input-eyebrow">Edit</p>
+        <h2 id="input-title">Edit</h2>
+        <p id="input-message"></p>
+        <label>
+          <span id="input-label">Value</span>
+          <input id="input-field" type="text" autocomplete="off" />
+        </label>
+        <div class="dialog-footer">
+          <button id="input-cancel" class="quiet-button" type="button">
+            Cancel
+          </button>
+          <button class="primary-button" type="submit">Save</button>
+        </div>
+      </form>
     </dialog>
 
     <script type="module" src="/src/main.ts"></script>

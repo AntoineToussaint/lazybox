@@ -4,11 +4,15 @@ import {
   InboxConnection,
   ReplyDrafts,
   applyWorkspaceEvent,
+  activityFingerprint,
+  broadcastDisposition,
   canReplyToTask,
   ciSignal,
+  cycleMatchingKey,
   detailSignals,
   hasRepoScope,
   isTerminalTaskState,
+  isActivityUnread,
   kindHeaderLabel,
   orderedWorkspaceKeys,
   preferredTerminal,
@@ -24,6 +28,7 @@ import {
   unreadCount,
   visibleUnreadCount,
   workspaceDiffTarget,
+  workspaceRuntimeSignals,
 } from "./model";
 import type { Session } from "./generated/Session";
 
@@ -415,13 +420,13 @@ describe("workspace model", () => {
     expect(preferredTerminal(records, "one", "shell")?.id).toBe(3);
   });
 
-  it("only enables replies for GitHub tasks", () => {
+  it("enables replies for the provider-backed GitHub and Linear tasks", () => {
     const github = task("GitHub");
     const linear = task("Linear");
     linear.id.source = "linear";
 
     expect(canReplyToTask(github)).toBe(true);
-    expect(canReplyToTask(linear)).toBe(false);
+    expect(canReplyToTask(linear)).toBe(true);
     expect(canReplyToTask(null)).toBe(false);
   });
 
@@ -490,5 +495,80 @@ describe("workspace model", () => {
     const deltaMs = (tomorrow?.getTime() ?? 0) - now.getTime();
     expect(deltaMs).toBeGreaterThan(0);
     expect(deltaMs).toBeLessThanOrEqual(2 * 24 * 3600 * 1000);
+  });
+});
+
+describe("desktop daily-driver state", () => {
+  it("plans the mixed-target broadcast matrix without losing target identity", () => {
+    const runningAgent = workspace("agent", task("agent"));
+    const runningShell = workspace("shell", task("shell"));
+    const sessionless = workspace("new", task("new"));
+    const stopped = workspace("stopped", task("stopped"));
+    stopped.sessions = [session("old", "2026-01-01T00:00:00Z")];
+    const terminals = [
+      {
+        id: 7,
+        sessionKey: "agent",
+        kind: { Agent: "codex" } as const,
+        state: "working",
+      },
+      { id: 8, sessionKey: "shell", kind: "Shell" as const, state: "running" },
+    ];
+
+    expect(broadcastDisposition(runningAgent, terminals)).toEqual({
+      type: "agent",
+      terminalId: 7,
+    });
+    expect(broadcastDisposition(runningShell, terminals)).toEqual({
+      type: "shell",
+      terminalId: 8,
+    });
+    expect(broadcastDisposition(sessionless, terminals)).toEqual({ type: "spawn" });
+    expect(broadcastDisposition(stopped, terminals)).toEqual({
+      type: "skip",
+      reason: "no running agent or shell",
+    });
+  });
+
+  it("cycles attention targets in view order and reflects live agent badges", () => {
+    const keys = ["one", "two", "three"];
+    const asking = new Set(["one", "three"]);
+    expect(cycleMatchingKey(keys, null, (key) => asking.has(key))).toBe("one");
+    expect(cycleMatchingKey(keys, "one", (key) => asking.has(key))).toBe("three");
+    expect(cycleMatchingKey(keys, "three", (key) => asking.has(key))).toBe("one");
+
+    const terminal = {
+      id: 1,
+      sessionKey: "one",
+      kind: { Agent: "codex" } as const,
+      // The runtime `state` is `formatAgentState(AgentState)`, which
+      // lowercases the wire variant — `"InputNeeded"` → `"inputneeded"`,
+      // no space. A literal `"input needed"` here is what previously
+      // masked the badge/jump never firing in production.
+      state: "inputneeded",
+    };
+    expect(workspaceRuntimeSignals([terminal], "one")).toEqual([
+      { label: "asking", tone: "attention" },
+    ]);
+    terminal.state = "working";
+    expect(workspaceRuntimeSignals([terminal], "one")).toEqual([
+      { label: "running", tone: "success" },
+    ]);
+  });
+
+  it("uses stable activity fingerprints while read state remains positional", () => {
+    const item = workspace("activity", task("activity"));
+    item.activity = [activity("octo", "a".repeat(70)), activity("hub", "next")];
+    item.seen_count = 1;
+    item.read_indices = [];
+    expect(activityFingerprint(item.activity[0]!)).toEqual({
+      Content: {
+        author: "octo",
+        created_at: "2026-01-01T00:00:00Z",
+        body_prefix: "a".repeat(64),
+      },
+    });
+    expect(isActivityUnread(item, 0)).toBe(true);
+    expect(isActivityUnread(item, 1)).toBe(false);
   });
 });

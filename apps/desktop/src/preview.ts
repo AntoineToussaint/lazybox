@@ -183,6 +183,8 @@ export function loadPreview(): PreviewState {
           replayAvailable: true,
           dirty: false,
           state: "done",
+          modelLabel: "Large",
+          promptHistory: [],
         },
       ],
     ]),

@@ -1,7 +1,9 @@
 import type { Activity } from "./generated/Activity";
 import type { PolicyArm } from "./generated/PolicyArm";
+import type { DesktopCleanupReason } from "./generated/DesktopCleanupReason";
 import type {
   ComputeOutcome,
+  ActivityFingerprint,
   DesktopInboxView,
   DesktopInfo,
   DesktopRepository,
@@ -30,11 +32,14 @@ import type {
   WorkspaceDiffTarget,
   WorkspaceKind,
   WorkspacesResponse,
+  UserPrompt,
 } from "./generated";
 
 export type {
   Activity,
   ComputeOutcome,
+  ActivityFingerprint,
+  DesktopCleanupReason,
   DesktopInboxView,
   DesktopInfo,
   DesktopRepository,
@@ -64,6 +69,7 @@ export type {
   WorkspaceDiffTarget,
   WorkspaceKind,
   WorkspacesResponse,
+  UserPrompt,
 };
 
 export function spawnAgentCommand(
@@ -77,8 +83,8 @@ export function spawnAgentCommand(
     SpawnAgent: {
       session_key: sessionKey,
       agent,
-      model_alias: modelAlias,
       initial_prompt: initialPrompt,
+      model_alias: modelAlias,
       on_main: onMain,
     },
   };
@@ -143,6 +149,7 @@ export type WorkspaceIntent =
       agent: string;
       modelAlias?: string | null;
       onMain?: boolean;
+      initialPrompt?: string | null;
     }
   | { type: "spawn-shell"; onMain?: boolean }
   | { type: "mark-read" }
@@ -163,6 +170,7 @@ export function commandsForWorkspaceIntent(
           intent.agent,
           intent.modelAlias ?? null,
           intent.onMain ?? false,
+          intent.initialPrompt ?? null,
         ),
       ];
     case "spawn-shell":
@@ -191,6 +199,71 @@ export function deliverSnippetCommand(
       body: row.body,
     },
   };
+}
+
+export function injectPromptCommand(
+  terminalId: number,
+  body: string,
+): LazyboxCommand {
+  return { InjectPrompt: { terminal_id: terminalId, body } };
+}
+
+export function writeShellCommand(
+  terminalId: number,
+  body: string,
+): LazyboxCommand {
+  return { WriteShell: { terminal_id: terminalId, body } };
+}
+
+export function markActivityReadCommand(
+  sessionKey: string,
+  index: number,
+  fingerprint: ActivityFingerprint,
+): LazyboxCommand {
+  return { MarkActivityRead: { session_key: sessionKey, index, fingerprint } };
+}
+
+export function keepWorkspaceCommand(sessionKey: string): LazyboxCommand {
+  return { KeepWorkspace: { session_key: sessionKey } };
+}
+
+export function removeMergedWorkspaceCommand(
+  sessionKey: string,
+): LazyboxCommand {
+  return { RemoveMergedWorkspace: { session_key: sessionKey } };
+}
+
+export function adoptSessionsCommand(
+  sourceWorkspaceKey: string,
+  targetWorkspaceKey: string,
+): LazyboxCommand {
+  return {
+    AdoptSessions: {
+      source_workspace_key: sourceWorkspaceKey,
+      target_workspace_key: targetWorkspaceKey,
+    },
+  };
+}
+
+export function requestReviewersCommand(
+  workspaceKey: string,
+  logins: string[],
+): LazyboxCommand {
+  return { RequestReviewers: { workspace_key: workspaceKey, logins } };
+}
+
+export function setAssigneesCommand(
+  workspaceKey: string,
+  logins: string[],
+): LazyboxCommand {
+  return { SetAssignees: { workspace_key: workspaceKey, logins } };
+}
+
+export function setLabelsCommand(
+  workspaceKey: string,
+  names: string[],
+): LazyboxCommand {
+  return { SetLabels: { workspace_key: workspaceKey, names } };
 }
 
 export function setAutoMergeOnGreenCommand(

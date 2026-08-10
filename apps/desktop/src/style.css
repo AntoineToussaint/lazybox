@@ -607,6 +607,85 @@ h2 {
   cursor: pointer;
 }
 
+.workspace-row.marked {
+  box-shadow: inset 3px 0 var(--theme-accent, #79d1b7);
+}
+
+.workspace-mark {
+  width: 1rem;
+  height: 1rem;
+  margin-right: 0.35rem;
+  accent-color: var(--theme-accent, #79d1b7);
+}
+
+.bulk-toolbar,
+.activity-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.bulk-toolbar {
+  padding: 0.35rem 0.75rem;
+  border-bottom: 1px solid var(--theme-chrome, #273039);
+  color: var(--theme-text-dim, #8c9aa2);
+  font-size: 0.78rem;
+}
+
+.activity-card {
+  cursor: pointer;
+}
+
+.activity-card.selected {
+  outline: 2px solid var(--theme-accent, #79d1b7);
+}
+
+.activity-card.unread::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: var(--theme-accent, #79d1b7);
+  position: absolute;
+  margin-left: -0.85rem;
+  margin-top: 0.45rem;
+}
+
+.activity-card.collapsed .activity-body {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.activity-card-actions {
+  display: flex;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.split-actions {
+  display: flex;
+  align-items: center;
+}
+
+.dialog-spacer {
+  flex: 1;
+}
+
+.jump-list {
+  display: grid;
+  gap: 0.25rem;
+  max-height: min(55vh, 28rem);
+  overflow: auto;
+  margin-top: 0.75rem;
+}
+
+.jump-list button {
+  text-align: left;
+}
+
 .workspace-row[aria-label*="unread"] strong {
   color: #f0f5f6;
 }

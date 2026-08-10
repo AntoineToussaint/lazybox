@@ -6,6 +6,8 @@ import {
   createWorkspaceCommand,
   deleteOrCloseCommand,
   inspectWorkspaceDiffCommand,
+  injectPromptCommand,
+  markActivityReadCommand,
   mergePrCommand,
   renameWorkspaceCommand,
   setAutoFixPoliciesCommand,
@@ -17,6 +19,7 @@ import {
   syncWorkspaceCommand,
   unsnoozeCommand,
   updateBranchCommand,
+  writeShellCommand,
 } from "./protocol";
 
 describe("IPC command JSON", () => {
@@ -25,19 +28,25 @@ describe("IPC command JSON", () => {
       SpawnAgent: {
         session_key: "github:owner/repo#1",
         agent: "codex",
-        model_alias: null,
         initial_prompt: null,
+        model_alias: null,
         on_main: false,
       },
     });
     expect(
-      spawnAgentCommand("github:owner/repo#1", "claude", "L", true),
+      spawnAgentCommand(
+        "github:owner/repo#1",
+        "claude",
+        "L",
+        true,
+        "Fix CI with the repository conventions.",
+      ),
     ).toEqual({
       SpawnAgent: {
         session_key: "github:owner/repo#1",
         agent: "claude",
+        initial_prompt: "Fix CI with the repository conventions.",
         model_alias: "L",
-        initial_prompt: null,
         on_main: true,
       },
     });
@@ -48,6 +57,24 @@ describe("IPC command JSON", () => {
         name: "first workspace",
         project_key: "github-owner-repo",
         agent: "codex",
+      },
+    });
+  });
+
+  it("keeps contextual spawn and live delivery atomic at the desktop wire", () => {
+    expect(injectPromptCommand(7, "Review the selected comments.")).toEqual({
+      InjectPrompt: { terminal_id: 7, body: "Review the selected comments." },
+    });
+    expect(writeShellCommand(8, "cargo test")).toEqual({
+      WriteShell: { terminal_id: 8, body: "cargo test" },
+    });
+    expect(
+      markActivityReadCommand("github:owner/repo#1", 3, { NodeId: "C_1" }),
+    ).toEqual({
+      MarkActivityRead: {
+        session_key: "github:owner/repo#1",
+        index: 3,
+        fingerprint: { NodeId: "C_1" },
       },
     });
   });
@@ -90,8 +117,8 @@ describe("IPC command JSON", () => {
         SpawnAgent: {
           session_key: key,
           agent: "claude",
-          model_alias: "M",
           initial_prompt: null,
+          model_alias: "M",
           on_main: true,
         },
       },

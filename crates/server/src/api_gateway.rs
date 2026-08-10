@@ -447,17 +447,17 @@ pub enum DesktopCommand {
     SpawnAgent {
         session_key: lazybox_core::SessionKey,
         agent: String,
+        /// Contextual work brief resolved through `tui-core::intent` by
+        /// the native desktop layer. It travels on the spawn command so
+        /// the agent can never start before its goal arrives.
+        #[serde(default)]
+        initial_prompt: Option<String>,
         /// Model-tier alias (`"S"`/`"M"`/`"L"`) from the agent's tier
         /// menu, mirroring the TUI's `a S`/`w M` chords. `None` spawns
         /// the agent's default tier. The daemon resolves it per agent and
         /// falls back to the default model when the alias is undefined.
         #[serde(default)]
         model_alias: Option<String>,
-        /// Work submitted atomically with the spawn. The daemon preserves
-        /// the agent's raw/normalized run behavior and records the prompt in
-        /// the same history as an interactive submission.
-        #[serde(default)]
-        initial_prompt: Option<String>,
         /// Spawn on the repo's shared main checkout instead of an isolated
         /// worktree (the TUI's `b`-leader on-main group). The desktop
         /// confirms this before sending, since edits land on main.
@@ -528,6 +528,49 @@ pub enum DesktopCommand {
         snippet_key: String,
         category: String,
         body: String,
+    },
+    /// Deliver free-form work to an existing agent using the daemon's
+    /// settle-gated paste/submit protocol.
+    InjectPrompt {
+        terminal_id: TerminalId,
+        body: String,
+    },
+    /// Deliver free-form work to a plain shell terminal.
+    WriteShell {
+        terminal_id: TerminalId,
+        body: String,
+    },
+    /// Mark one activity row read using its stable identity, not only its
+    /// position in a feed that may shift during a provider refresh.
+    MarkActivityRead {
+        session_key: lazybox_core::SessionKey,
+        index: usize,
+        fingerprint: lazybox_core::ActivityFingerprint,
+    },
+    KeepWorkspace {
+        session_key: lazybox_core::SessionKey,
+    },
+    /// Answer "remove" to a merged/closed cleanup prompt: drop the row
+    /// and delete its backing worktree (the TUI's `RemoveMergedWorkspace`
+    /// on "yes"). Distinct from `Archive`, which only kills sessions.
+    RemoveMergedWorkspace {
+        session_key: lazybox_core::SessionKey,
+    },
+    AdoptSessions {
+        source_workspace_key: lazybox_core::WorkspaceKey,
+        target_workspace_key: lazybox_core::WorkspaceKey,
+    },
+    RequestReviewers {
+        workspace_key: lazybox_core::WorkspaceKey,
+        logins: Vec<String>,
+    },
+    SetAssignees {
+        workspace_key: lazybox_core::WorkspaceKey,
+        logins: Vec<String>,
+    },
+    SetLabels {
+        workspace_key: lazybox_core::WorkspaceKey,
+        names: Vec<String>,
     },
     /// Arm/disarm lazybox's "auto-merge on green" for the workspace
     /// (the `ARM` pill / `g g` chord). Persisted on the `Workspace`;
@@ -603,8 +646,8 @@ impl DesktopCommand {
             DesktopCommand::SpawnAgent {
                 session_key,
                 agent,
-                model_alias,
                 initial_prompt,
+                model_alias,
                 on_main,
             } => Command::Spawn {
                 session_key,
@@ -675,6 +718,60 @@ impl DesktopCommand {
                 body,
                 submit: true,
             },
+            DesktopCommand::InjectPrompt { terminal_id, body } => Command::InjectPrompt {
+                terminal_id,
+                prompt: body,
+                fallback_spawn: None,
+                submit: true,
+            },
+            DesktopCommand::WriteShell { terminal_id, body } => Command::Write {
+                terminal_id,
+                bytes: format!("{body}\n").into_bytes(),
+                intent: lazybox_ipc::TerminalInputIntent::Submit,
+            },
+            DesktopCommand::MarkActivityRead {
+                session_key,
+                index,
+                fingerprint,
+            } => Command::MarkActivityRead {
+                session_key,
+                index,
+                fingerprint: Some(fingerprint),
+            },
+            DesktopCommand::KeepWorkspace { session_key } => {
+                Command::KeepMergedWorkspace { session_key }
+            }
+            DesktopCommand::RemoveMergedWorkspace { session_key } => {
+                Command::RemoveMergedWorkspace { session_key }
+            }
+            DesktopCommand::AdoptSessions {
+                source_workspace_key,
+                target_workspace_key,
+            } => Command::AdoptSessions {
+                source_workspace_key,
+                target_workspace_key,
+            },
+            DesktopCommand::RequestReviewers {
+                workspace_key,
+                logins,
+            } => Command::RequestReviewers {
+                workspace_key,
+                logins,
+            },
+            DesktopCommand::SetAssignees {
+                workspace_key,
+                logins,
+            } => Command::SetAssignees {
+                workspace_key,
+                logins,
+            },
+            DesktopCommand::SetLabels {
+                workspace_key,
+                names,
+            } => Command::SetLabels {
+                workspace_key,
+                names,
+            },
             DesktopCommand::SetAutoMergeOnGreen {
                 session_key,
                 enabled,
@@ -727,6 +824,8 @@ pub struct DesktopTerminalSnapshot {
     pub last_seq: u64,
     pub agent_state: Option<lazybox_ipc::AgentState>,
     #[serde(default)]
+    pub model_label: Option<String>,
+    #[serde(default)]
     pub prompt_history: Vec<lazybox_ipc::UserPrompt>,
 }
 
@@ -747,6 +846,8 @@ pub enum DesktopEvent {
         terminal_id: TerminalId,
         session_key: lazybox_core::SessionKey,
         kind: lazybox_ipc::TerminalKind,
+        #[serde(default)]
+        model_label: Option<String>,
     },
     TerminalExited {
         terminal_id: TerminalId,
@@ -835,6 +936,39 @@ pub enum DesktopEvent {
         diff: Option<lazybox_ipc::WorkspaceDiffDto>,
         error: Option<String>,
     },
+    /// The daemon decided a workspace is a cleanup candidate — its PR
+    /// merged, its issue closed, or it fell out of scope — and wants the
+    /// user to keep or remove it. This is the *same* level-triggered
+    /// prompt the TUI answers (`Event::MergedPrRemovable` /
+    /// `Event::WorkspaceOutOfScope`), never a bare terminal exit: the
+    /// keep/remove decision belongs to the workspace's upstream state,
+    /// not to whether a terminal happens to be running.
+    WorkspaceCleanupRequested {
+        workspace_key: lazybox_core::WorkspaceKey,
+        label: String,
+        reason: DesktopCleanupReason,
+        active_terminal_count: usize,
+        has_local_work: bool,
+    },
+    /// A previously-requested cleanup no longer applies (e.g. a closed
+    /// issue reopened before the user answered). Mirrors
+    /// `Event::RemovalCancelled`; the desktop dismisses any open prompt
+    /// for this workspace.
+    WorkspaceCleanupCancelled {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+}
+
+/// Why the daemon is offering to remove a workspace. Merged/Closed came
+/// from a terminal upstream state (remove also deletes the worktree);
+/// OutOfScope means the task left the configured filter while sessions
+/// still run (remove kills the sessions).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum DesktopCleanupReason {
+    Merged,
+    Closed,
+    OutOfScope,
 }
 
 /// The grouped inbox view-model the desktop renders. Computed by the
@@ -910,6 +1044,7 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
                     kind: terminal.kind,
                     last_seq: terminal.last_seq,
                     agent_state: terminal.agent_state,
+                    model_label: terminal.model_label,
                     prompt_history: terminal.prompt_history,
                 })
                 .collect(),
@@ -921,11 +1056,13 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             terminal_id,
             session_key,
             kind,
+            model_label,
             ..
         } => Some(DesktopEvent::TerminalSpawned {
             terminal_id,
             session_key,
             kind,
+            model_label,
         }),
         Event::TerminalExited {
             terminal_id,
@@ -1108,6 +1245,37 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             diff,
             error,
         }),
+        Event::MergedPrRemovable {
+            workspace_key,
+            label,
+            terminal_state,
+            active_terminal_count,
+            has_local_work,
+        } => Some(DesktopEvent::WorkspaceCleanupRequested {
+            workspace_key,
+            label,
+            reason: match terminal_state {
+                lazybox_ipc::RemovableTerminalState::Merged => DesktopCleanupReason::Merged,
+                lazybox_ipc::RemovableTerminalState::Closed => DesktopCleanupReason::Closed,
+            },
+            active_terminal_count,
+            has_local_work,
+        }),
+        Event::WorkspaceOutOfScope {
+            workspace_key,
+            label,
+            active_terminal_count,
+            ..
+        } => Some(DesktopEvent::WorkspaceCleanupRequested {
+            workspace_key,
+            label,
+            reason: DesktopCleanupReason::OutOfScope,
+            active_terminal_count,
+            has_local_work: false,
+        }),
+        Event::RemovalCancelled { workspace_key } => {
+            Some(DesktopEvent::WorkspaceCleanupCancelled { workspace_key })
+        }
         _ => None,
     }
 }

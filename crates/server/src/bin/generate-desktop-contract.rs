@@ -104,6 +104,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          export type { Mailbox } from \"./Mailbox\";\n\
          export type { RepoSummary } from \"./RepoSummary\";\n\
          export type { TerminalKind } from \"./TerminalKind\";\n\
+         export type { Activity } from \"./Activity\";\n\
+         export type { ActivityFingerprint } from \"./ActivityFingerprint\";\n\
+         export type { UserPrompt } from \"./UserPrompt\";\n\
          export type { DesktopTerminalSnapshot as TerminalSnapshot } from \"./DesktopTerminalSnapshot\";\n\
          export type { Task } from \"./Task\";\n\
          export type { Workspace } from \"./Workspace\";\n\

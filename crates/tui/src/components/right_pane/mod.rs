@@ -1186,6 +1186,7 @@ impl RightPane {
         area: Rect,
         frame: &mut Frame,
         origin: Option<(String, String, String)>,
+        show_diffstat: bool,
     ) {
         self.click_hits.header_title = None;
         self.click_hits.header_issue = None;
@@ -1375,7 +1376,9 @@ impl RightPane {
         // Diffstat — a one-line at-a-glance sense of a PR's size/shape.
         // PRs only; issues have no diff. Additions green, deletions red,
         // file count dim, matching the desktop `detailSignals` summary.
-        if task.is_pr() {
+        // `show_diffstat` is computed once in `render` and threaded in so
+        // the height reservation and this line read the same value.
+        if show_diffstat {
             let files = task.changed_files;
             let files_noun = if files == 1 { "file" } else { "files" };
             lines.push(Line::from(vec![
@@ -2206,12 +2209,12 @@ impl RightPane {
         // threaded into `render_header` so the height reservation and the
         // emitted lines can't disagree.
         let origin = self.originating_issue();
-        let is_pr = self
+        let show_diffstat = self
             .workspace
             .as_ref()
             .and_then(|w| w.primary_task())
             .is_some_and(|t| t.is_pr());
-        let header_height = 4 + u16::from(origin.is_some()) + u16::from(is_pr);
+        let header_height = 4 + u16::from(origin.is_some()) + u16::from(show_diffstat);
         let chunks = Layout::vertical([
             Constraint::Length(header_height), // header (crumbs, pill, branch, [issue])
             Constraint::Length(1),             // separator
@@ -2220,7 +2223,7 @@ impl RightPane {
         ])
         .split(area);
 
-        self.render_header(chunks[0], frame, origin);
+        self.render_header(chunks[0], frame, origin, show_diffstat);
 
         // Thin separator; accent-tinted while this pane has focus so
         // the active pane reads at a glance (#286) — same cue as the

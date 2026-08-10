@@ -150,6 +150,8 @@ interface DesktopThemeOption {
 }
 
 interface DesktopSetupState {
+  authority: "embedded" | "remote";
+  providers: string[];
   first_run: boolean;
   selected_scopes: string[];
   agents: DesktopAgentOption[];
@@ -159,8 +161,7 @@ interface DesktopSetupState {
   theme: string | null;
   themes: DesktopThemeOption[];
   keymap_preset: string | null;
-  terminal_new_layout: string;
-  activity_pane_default: string;
+  collapsed_repos: string[];
 }
 
 interface GithubAuthStatus {
@@ -294,6 +295,10 @@ const setupDialog = element<HTMLDialogElement>("setup-dialog");
 const setupForm = element<HTMLFormElement>("setup-form");
 const setupTitle = element<HTMLHeadingElement>("setup-title");
 const setupClose = element<HTMLButtonElement>("setup-close");
+const settingsAuthority = element<HTMLParagraphElement>("settings-authority");
+const githubSettingsSection = element<HTMLElement>("github-settings-section");
+const repositorySettingsSection = element<HTMLElement>("repository-settings-section");
+const agentSettingsSection = element<HTMLElement>("agent-settings-section");
 const githubAuthMessage = element<HTMLParagraphElement>("github-auth-message");
 const githubAuthBadge = element<HTMLSpanElement>("github-auth-badge");
 const githubLoginButton = element<HTMLButtonElement>("github-login-button");
@@ -311,10 +316,6 @@ const defaultModelSelect =
 const defaultModelField = element<HTMLLabelElement>("default-model-field");
 const themeList = element<HTMLDivElement>("theme-list");
 const keymapPresetLabel = element<HTMLSpanElement>("keymap-preset-label");
-const terminalLayoutSelect =
-  element<HTMLSelectElement>("terminal-layout-select");
-const activityPaneSelect =
-  element<HTMLSelectElement>("activity-pane-select");
 const analyticsEnabled = element<HTMLInputElement>("analytics-enabled");
 const setupError = element<HTMLParagraphElement>("setup-error");
 const diagnosticsPath = element<HTMLSpanElement>("diagnostics-path");
@@ -364,6 +365,12 @@ let inboxFilterMenu: FilterMenuItem[] = [];
 // Repos the user has visually collapsed in this session. Display-only:
 // it hides already-grouped rows, it does not regroup anything.
 const collapsedRepos = new Set<string>();
+// Monotonic per-repo toggle counter, so a failed persist only rolls back
+// when it is still the newest toggle for that repo. A later click owns the
+// truth (and its own persist), and — critically — may set the *same* value
+// this call did, so a value comparison can't tell "still mine" from
+// "superseded by an identical newer click"; only a sequence can.
+const repoCollapseSeq = new Map<string, number>();
 let defaultAgent = "claude";
 let previewMode = false;
 let inboxLoading = true;
@@ -387,6 +394,7 @@ let currentThemeColors: DesktopThemeColors | null = null;
 let selectedScopes = new Set<string>();
 let configuredRepositories: DesktopRepository[] = [];
 let setupRequired = false;
+let authorityMode: "embedded" | "remote" = "embedded";
 const replySubmitting = new Set<string>();
 let creatingWorkspace = false;
 const replyDrafts = new ReplyDrafts();
@@ -621,12 +629,6 @@ async function initializeDesktopMetadata(): Promise<void> {
     return;
   }
   try {
-    setupState = await invoke<DesktopSetupState>("desktop_setup_state");
-    applySetupState(setupState);
-    if (setupState.first_run) {
-      openSetupDialog(true);
-      void refreshGithubAuth();
-    }
     const info = await invoke<DesktopInfo>("desktop_info");
     terminalDecoder = new TerminalFrameDecoder(info.max_terminal_frame_bytes);
     maxTerminalWriteBytes = info.max_terminal_write_bytes;
@@ -634,6 +636,12 @@ async function initializeDesktopMetadata(): Promise<void> {
     configuredRepositories = info.repositories;
     agentLabel.textContent = defaultAgent;
     setProtocolNotice(info.protocol_notice);
+    setupState = await invoke<DesktopSetupState>("desktop_setup_state");
+    applySetupState(setupState);
+    if (setupState.first_run) {
+      openSetupDialog(true);
+      void refreshGithubAuth();
+    }
     desktopMetadataLoaded = true;
   } catch (error) {
     desktopMetadataLoaded = false;
@@ -1250,14 +1258,37 @@ function renderRepoHeader(repo: string): HTMLDivElement {
   meta.textContent = attention > 0 ? `${active} · ${attention} ⚑` : `${active}`;
   header.append(twisty, label, meta);
   header.addEventListener("click", () => {
-    if (collapsedRepos.has(repo)) {
-      collapsedRepos.delete(repo);
-    } else {
-      collapsedRepos.add(repo);
-    }
+    const collapsed = !collapsedRepos.has(repo);
+    if (collapsed) collapsedRepos.add(repo);
+    else collapsedRepos.delete(repo);
     renderInbox();
+    if (!previewMode) {
+      const seq = (repoCollapseSeq.get(repo) ?? 0) + 1;
+      repoCollapseSeq.set(repo, seq);
+      void persistRepoCollapse(repo, collapsed, seq);
+    }
   });
   return header;
+}
+
+async function persistRepoCollapse(
+  repo: string,
+  collapsed: boolean,
+  seq: number,
+): Promise<void> {
+  try {
+    await invoke("set_repo_collapsed", { repo, collapsed });
+  } catch (error) {
+    // Only roll back if this is still the newest toggle for the repo. A
+    // rapid re-click bumps the sequence and fires its own persist that
+    // owns the newer truth; reverting a superseded call would undo that
+    // later click and desync the view from the value being saved.
+    if (repoCollapseSeq.get(repo) !== seq) return;
+    if (collapsed) collapsedRepos.delete(repo);
+    else collapsedRepos.add(repo);
+    renderInbox();
+    setStatus(String(error));
+  }
 }
 
 function renderFocusedHeader(): HTMLDivElement {
@@ -3190,6 +3221,8 @@ async function sendCommand(
 async function openSettings(): Promise<void> {
   if (previewMode) {
     setupState = {
+      authority: "embedded",
+      providers: ["github"],
       first_run: false,
       selected_scopes: ["github:acme/relay"],
       agents: [
@@ -3212,8 +3245,7 @@ async function openSettings(): Promise<void> {
       theme: null,
       themes: PREVIEW_THEMES,
       keymap_preset: null,
-      terminal_new_layout: "split",
-      activity_pane_default: "full",
+      collapsed_repos: [],
     };
   } else {
     try {
@@ -3225,11 +3257,14 @@ async function openSettings(): Promise<void> {
   }
   applySetupState(setupState);
   openSetupDialog(false);
-  void refreshGithubAuth();
+  if (authorityMode === "embedded") void refreshGithubAuth();
 }
 
 function applySetupState(state: DesktopSetupState): void {
+  authorityMode = state.authority;
   selectedScopes = new Set(state.selected_scopes);
+  collapsedRepos.clear();
+  for (const repo of state.collapsed_repos) collapsedRepos.add(repo);
   defaultAgentSelect.replaceChildren();
   for (const agent of state.agents) {
     const option = document.createElement("option");
@@ -3255,12 +3290,23 @@ function applySetupState(state: DesktopSetupState): void {
   applyThemeByName(selectedTheme);
   keymapPresetLabel.textContent = `Keymap: ${state.keymap_preset ?? "default"}`;
 
-  terminalLayoutSelect.value = state.terminal_new_layout;
-  activityPaneSelect.value = state.activity_pane_default;
-
   analyticsEnabled.checked = state.analytics_enabled;
   diagnosticsPath.textContent = `Crash reports: ${state.diagnostics_path}`;
   renderRepositories();
+  const remote = authorityMode === "remote";
+  settingsAuthority.textContent = remote
+    ? `Connected to a remote daemon. ${state.providers.join(", ") || "No providers"}, repositories, agents, and models are read-only here; appearance and privacy belong to this client.`
+    : "Embedded daemon settings and desktop preferences are stored on this machine.";
+  for (const section of [githubSettingsSection, repositorySettingsSection, agentSettingsSection]) {
+    section.classList.toggle("settings-readonly", remote);
+    for (const control of section.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button")) {
+      control.disabled = remote;
+    }
+  }
+  if (remote) {
+    githubAuthBadge.textContent = "Remote";
+    githubAuthMessage.textContent = "GitHub access is managed by the connected daemon.";
+  }
 }
 
 function renderModelOptions(agentId: string): void {
@@ -3370,7 +3416,7 @@ function openSetupDialog(required: boolean): void {
   if (!setupDialog.open) {
     setupDialog.showModal();
   }
-  githubCheckButton.focus();
+  (authorityMode === "remote" ? setupClose : githubCheckButton).focus();
 }
 
 function closeSettings(): void {
@@ -3564,17 +3610,19 @@ function updateRepositorySelectionCount(): void {
 
 async function saveSettings(): Promise<void> {
   setupError.classList.add("hidden");
-  if (setupRequired && selectedScopes.size === 0) {
+  if (authorityMode === "embedded" && setupRequired && selectedScopes.size === 0) {
     showSetupError("Select a GitHub organization or repository.");
     return;
   }
-  if (defaultAgentSelect.value.length === 0) {
+  if (authorityMode === "embedded" && defaultAgentSelect.value.length === 0) {
     showSetupError("Install and select a default agent.");
     return;
   }
   const accepted = await confirmUserAction(
     "Save desktop settings?",
-    "lazybox will update the shared configuration. Provider scope and default-agent changes restart the app; theme and workspace changes apply immediately.",
+    authorityMode === "remote"
+      ? "Only preferences owned by this desktop client will be saved. The connected daemon will not be changed."
+      : "lazybox will update the embedded daemon configuration and this client's preferences. Provider scope and default-agent changes restart the app.",
     "Save settings",
   );
   if (!accepted) {
@@ -3591,10 +3639,8 @@ async function saveSettings(): Promise<void> {
           default_agent: defaultAgentSelect.value,
           analytics_enabled: analyticsEnabled.checked,
           theme: selectedTheme,
-          terminal_new_layout: terminalLayoutSelect.value,
-          activity_pane_default: activityPaneSelect.value,
           default_model_tier:
-            defaultModelField.classList.contains("hidden") ||
+            authorityMode === "remote" || defaultModelField.classList.contains("hidden") ||
             defaultModelSelect.value.length === 0
               ? null
               : defaultModelSelect.value,

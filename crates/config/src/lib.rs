@@ -157,6 +157,19 @@ pub struct DesktopConfig {
     /// Allow the desktop client to record its fixed, content-free usage
     /// events. Disabled unless the user explicitly opts in.
     pub analytics_enabled: bool,
+    /// Desktop-only color theme. TUI appearance remains under `ui.theme`;
+    /// a remote desktop can change this without editing the daemon's config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
+    /// Client-owned repo-collapse set used only in *remote* mode. Collapse
+    /// is a presentation concern of whichever client renders the rows; in
+    /// embedded mode the desktop and the local TUI share one machine and
+    /// interoperate through `ui.collapsed_repos`, but against a remote
+    /// daemon those repos live on another box, so persisting them into the
+    /// laptop's `ui.collapsed_repos` would cross-contaminate a same-named
+    /// repo in the local TUI. Keep the remote client's collapse state here.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub collapsed_repos: std::collections::BTreeSet<String>,
     /// Attach the desktop to an already-running gateway instead of
     /// spawning an in-process daemon. Set this to drive agents on a
     /// remote box reached through an SSH-forwarded loopback port
@@ -2290,6 +2303,8 @@ mod tests {
 
         let configured = DesktopConfig {
             analytics_enabled: false,
+            theme: None,
+            collapsed_repos: std::collections::BTreeSet::new(),
             remote: Some(RemoteGatewayConfig {
                 url: "http://127.0.0.1:8787".to_string(),
                 token: "box-token".to_string(),

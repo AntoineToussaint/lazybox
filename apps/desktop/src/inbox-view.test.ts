@@ -131,12 +131,95 @@ describe("grouped inbox renderer (#732)", () => {
     expect(mainSource).not.toContain("updated_at ??");
     expect(modelSource).not.toContain("unreadCount(right)");
   });
+
+  it("expands a TUI-collapsed repo from complete rows and persists the shared state", async () => {
+    const workspaces = [prWorkspace(), issueWorkspace()];
+    await boot(workspaces, ["o/r"]);
+    channel().onmessage(splitView());
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".repo-header")).toHaveLength(1),
+    );
+    expect(document.querySelectorAll(".workspace-row")).toHaveLength(0);
+
+    element(".repo-header").click();
+    await vi.waitFor(() =>
+      expect(harness.invoke).toHaveBeenCalledWith("set_repo_collapsed", {
+        repo: "o/r",
+        collapsed: false,
+      }),
+    );
+    expect(document.querySelectorAll(".workspace-row")).toHaveLength(2);
+
+    loadDocument();
+    harness.channels.length = 0;
+    await boot(workspaces, []);
+    channel().onmessage(splitView());
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row")).toHaveLength(2),
+    );
+  });
+
+  it("a stale failed collapse persist does not clobber a newer re-collapse", async () => {
+    // #971 review: three quick toggles where the FIRST persist fails late,
+    // and the third re-collapses to the *same* value the first tried. A
+    // value-based rollback guard would see "state still collapsed, must be
+    // mine" and revert, re-expanding against the successful third toggle;
+    // sequence-based supersession must leave the newest toggle intact.
+    const workspaces = [prWorkspace(), issueWorkspace()];
+    await boot(workspaces, []);
+    channel().onmessage(splitView());
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row")).toHaveLength(2),
+    );
+
+    const deferred: Array<{
+      collapsed: boolean;
+      resolve: () => void;
+      reject: (error: unknown) => void;
+    }> = [];
+    harness.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "set_repo_collapsed") {
+        const collapsed = (args as { collapsed: boolean }).collapsed;
+        return new Promise<void>((resolve, reject) => {
+          deferred.push({ collapsed, resolve, reject });
+        });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>(() => {});
+      }
+      return Promise.resolve();
+    });
+
+    element(".repo-header").click(); // 1: collapse (persist will FAIL)
+    element(".repo-header").click(); // 2: expand   (persist will succeed)
+    element(".repo-header").click(); // 3: collapse (persist will succeed)
+    expect(deferred.map((call) => call.collapsed)).toEqual([true, false, true]);
+    expect(document.querySelectorAll(".workspace-row")).toHaveLength(0);
+    const [first, second, third] = deferred;
+    if (!first || !second || !third) throw new Error("expected three persists");
+
+    second.resolve();
+    third.resolve();
+    first.reject(new Error("save failed"));
+
+    // The stale rejection must NOT re-expand the repo the third click
+    // collapsed; rows stay hidden.
+    await Promise.resolve();
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row")).toHaveLength(0),
+    );
+  });
 });
 
-async function boot(workspaces: Array<Record<string, unknown>>): Promise<void> {
+async function boot(
+  workspaces: Array<Record<string, unknown>>,
+  collapsedRepos: string[] = [],
+): Promise<void> {
   harness.invoke.mockImplementation((command: string) => {
     if (command === "desktop_setup_state") {
       return Promise.resolve({
+        authority: "embedded",
+        providers: ["github"],
         first_run: false,
         selected_scopes: ["github:o/r"],
         agents: [{ id: "codex", label: "Codex", available: true }],
@@ -146,8 +229,7 @@ async function boot(workspaces: Array<Record<string, unknown>>): Promise<void> {
         theme: null,
         themes: [],
         keymap_preset: null,
-        terminal_new_layout: "split",
-        activity_pane_default: "full",
+        collapsed_repos: collapsedRepos,
       });
     }
     if (command === "desktop_info") {
@@ -172,6 +254,14 @@ async function boot(workspaces: Array<Record<string, unknown>>): Promise<void> {
   vi.resetModules();
   await import("./main");
   await vi.waitFor(() => expect(channelMaybe()).not.toBeUndefined());
+}
+
+function element(selector: string): HTMLElement {
+  const value = document.querySelector<HTMLElement>(selector);
+  if (value === null) {
+    throw new Error(`missing ${selector}`);
+  }
+  return value;
 }
 
 function prWorkspace(): Record<string, unknown> {

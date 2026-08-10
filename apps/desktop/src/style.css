@@ -1292,6 +1292,10 @@ dialog::backdrop {
   background: #152a23;
 }
 
+.settings-readonly {
+  opacity: 0.72;
+}
+
 .button-row {
   display: flex;
   gap: 7px;

@@ -51,7 +51,6 @@ lazybox-ipc      = { workspace = true }
 lazybox-identity = { workspace = true }
 lazybox-e2e-channel = { workspace = true }
 lazybox-relay    = { workspace = true }
-lazybox-agents   = { workspace = true }
 lazybox-server   = { path = "../server" }
 
 tokio              = { workspace = true }

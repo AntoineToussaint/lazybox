@@ -125,7 +125,6 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         (
             "lazybox-tui-boot",
             set(&[
-                "lazybox-agents",
                 "lazybox-config",
                 "lazybox-core",
                 // The box side of the relay's E2E channel (#980): `serve`

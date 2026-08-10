@@ -316,14 +316,14 @@ fn hook_exe() -> Option<PathBuf> {
     if stable.is_file() {
         return Some(stable);
     }
-    #[cfg(test)]
-    {
-        std::env::current_exe().ok().filter(|p| p.is_file())
-    }
-    #[cfg(not(test))]
-    {
-        None
-    }
+    // Fall back to the running binary when the stable copy isn't in place yet
+    // (integration tests that drive `handle_spawn` directly, or a daemon whose
+    // boot-time `ensure_stable_hook_exe` couldn't write `<home>/bin`). This is
+    // safe against desktop defect #1 — a hook invoking a GUI binary as
+    // `<exe> hook-ingest …` ingests and exits before any window opens, and
+    // `ensure_stable_hook_exe` still refuses to *install* a non-hook-capable
+    // executable as the durable helper.
+    std::env::current_exe().ok().filter(|p| p.is_file())
 }
 
 pub const HOOK_HELPER_PROBE_ARG: &str = "--lazybox-hook-helper-probe";
@@ -357,7 +357,20 @@ fn ensure_stable_hook_exe_from(current: &Path, stable: &Path) -> Option<PathBuf>
         );
         return None;
     }
-    stabilize_exe(current, stable)
+    let stabilized = stabilize_exe(current, stable);
+    if stabilized.is_none() {
+        // A copy/metadata failure (unwritable bin dir, full disk) otherwise
+        // vanishes: `hook_exe` then finds no stable helper and — with the
+        // current-exe fallback gone in release builds — silently disables
+        // lifecycle hooks. Callers that only need best-effort hooks (tui-boot)
+        // ignore the return, so this is the sole place the failure is recorded.
+        tracing::error!(
+            executable = %current.display(),
+            stable = %stable.display(),
+            "failed to install the stable hook helper; lifecycle hooks will be disabled"
+        );
+    }
+    stabilized
 }
 
 fn is_hook_capable_exe(candidate: &Path) -> bool {
@@ -13414,6 +13427,31 @@ mod tests {
             Some(stable.clone())
         );
         assert!(stable.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_hook_exe_reports_a_copy_failure_as_none() {
+        // A hook-capable source but an uninstallable target (its parent is a
+        // regular file, so the bin dir can't be created) must surface as None,
+        // not a stale success — otherwise `hook_exe` finds no helper and hooks
+        // go dark. The accompanying error log is the only failure signal for
+        // callers that ignore the return.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cli = directory.path().join("lazybox");
+        write_fake_exe(
+            &cli,
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = \"{}\" ] && echo {}\n",
+                HOOK_HELPER_PROBE_ARG, HOOK_HELPER_PROBE_RESPONSE
+            ),
+        );
+        // `bin` is a file, so `bin/lazybox`'s parent can never be a directory.
+        let blocker = directory.path().join("bin");
+        std::fs::write(&blocker, "not a directory").expect("write blocker");
+        let stable = blocker.join("lazybox");
+
+        assert_eq!(ensure_stable_hook_exe_from(&cli, &stable), None);
     }
 
     /// The injected hook command pins the *running* binary by absolute

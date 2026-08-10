@@ -2053,7 +2053,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "hex",
- "lazybox-agents",
  "lazybox-config",
  "lazybox-core",
  "lazybox-e2e-channel",

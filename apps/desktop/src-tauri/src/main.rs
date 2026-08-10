@@ -1029,6 +1029,14 @@ async fn subscribe_events(
     let start_streams =
         replace_event_subscription(&state.streams_started, &state.event_channel, on_event);
     if !start_streams {
+        // A resubscribe (webview reload / HMR / renderer recovery) keeps the
+        // already-running stream tasks, but the fresh webview starts with an
+        // empty view-model. The live stream loops only push on the *next*
+        // gateway event, so on a quiet inbox the reloaded webview would render
+        // "No workspaces to show" until an unrelated change happened to arrive.
+        // Re-emit the current grouped view to the new channel so the newest
+        // webview reflects the daemon's state immediately (#972).
+        emit_inbox_view(&state.inbox, &state.event_channel).await;
         return Ok(());
     }
 
@@ -1106,9 +1114,10 @@ impl DesktopState {
                 let _ = task.await;
             }
         }
-        if let Some(runtime) = self.client_runtime.lock().await.take() {
-            runtime.shutdown().await;
-        }
+        // Drain the request-facing services (gateway + socket) to completion
+        // *before* tearing down the runtime they call into. Draining first
+        // lets an in-flight one-shot command (a spawn, a mark-read) finish
+        // against a live runtime/store instead of racing a half-dropped one.
         if let Some(shutdown) = self.socket_shutdown.lock().await.take() {
             shutdown.notify_one();
         }
@@ -1133,6 +1142,11 @@ impl DesktopState {
             tracing::warn!("desktop socket service exceeded shutdown bound; aborting");
             task.abort();
             let _ = task.await;
+        }
+        // Only now that nothing can issue further commands is it safe to stop
+        // the runtime (pollers, PTYs).
+        if let Some(runtime) = self.client_runtime.lock().await.take() {
+            runtime.shutdown().await;
         }
     }
 }
@@ -1216,7 +1230,10 @@ async fn stream_control_events(
                 );
             }
             Err(ControlStreamError::Incompatible(message)) => {
-                send_webview_event(&event_channel, DesktopStreamMessage::Incompatible { message });
+                send_webview_event(
+                    &event_channel,
+                    DesktopStreamMessage::Incompatible { message },
+                );
                 return;
             }
         }
@@ -1993,9 +2010,8 @@ impl LocalServices {
     }
 
     async fn shutdown(mut self) {
-        if let Some(runtime) = self.client_runtime.take() {
-            runtime.shutdown().await;
-        }
+        // Same ordering as `DesktopState::shutdown`: drain the request-facing
+        // services before stopping the runtime they call into.
         if let Some(shutdown) = self.gateway_shutdown.take() {
             let _ = shutdown.send(true);
         }
@@ -2014,6 +2030,9 @@ impl LocalServices {
         {
             task.abort();
             let _ = task.await;
+        }
+        if let Some(runtime) = self.client_runtime.take() {
+            runtime.shutdown().await;
         }
     }
 }
@@ -2439,6 +2458,69 @@ mod tests {
         ));
         assert_eq!(first_hits.load(Ordering::Relaxed), 0);
         assert_eq!(second_hits.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn resubscribe_reemits_the_current_view_to_the_newest_channel() {
+        // A reloaded webview reuses the running streams (streams_started is
+        // already set), so the fix must push the current grouped view to the
+        // new channel — otherwise a quiet inbox renders empty until the next
+        // unrelated event. Mirrors the `!start_streams` path of
+        // `subscribe_events` (which needs a live `State` we can't build here).
+        let streams_started = AtomicBool::new(false);
+        let event_channel = Arc::new(RwLock::new(None));
+        let inbox = Arc::new(Mutex::new(empty_model()));
+        inbox.lock().await.apply_event(&DesktopEvent::Snapshot {
+            workspaces: vec![contract_workspace("octo/widget", 10, true)],
+            terminals: vec![],
+            recent_snippets: vec![],
+        });
+
+        // Initial subscribe starts the streams (its own view emit is exercised
+        // by the live stream loop, not here).
+        let first_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first = {
+            let hits = first_hits.clone();
+            Channel::new(move |_| {
+                hits.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+        };
+        assert!(replace_event_subscription(
+            &streams_started,
+            &event_channel,
+            first
+        ));
+
+        // Resubscribe: a fresh channel replaces the live one, streams do NOT
+        // restart.
+        let second_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second = {
+            let hits = second_hits.clone();
+            Channel::new(move |_| {
+                hits.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+        };
+        assert!(!replace_event_subscription(
+            &streams_started,
+            &event_channel,
+            second
+        ));
+
+        // The re-emit the resubscribe path now performs must reach the newest
+        // channel — and never the replaced one.
+        emit_inbox_view(&inbox, &event_channel).await;
+        assert_eq!(
+            second_hits.load(Ordering::Relaxed),
+            1,
+            "the reloaded webview must receive the current grouped view"
+        );
+        assert_eq!(
+            first_hits.load(Ordering::Relaxed),
+            0,
+            "the replaced channel must receive nothing"
+        );
     }
 
     #[cfg(unix)]

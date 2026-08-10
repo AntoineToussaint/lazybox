@@ -1,0 +1,31 @@
+# Homebrew cask for the lazybox macOS desktop app.
+#
+# Rendered and pushed to the AntoineToussaint/homebrew-lazybox tap by
+# .github/workflows/release-desktop.yml on each release: __VERSION__ and
+# __SHA256__ are substituted; #{version} stays as Ruby interpolation so the
+# download URL and DMG name track the version stanza.
+#
+# Distinct token from the CLI `lazybox` *formula* — install with
+#   brew install --cask lazybox-desktop
+# and update with `brew upgrade --cask lazybox-desktop`.
+cask "lazybox-desktop" do
+  version "__VERSION__"
+  sha256 "__SHA256__"
+
+  url "https://github.com/AntoineToussaint/lazybox/releases/download/v#{version}/lazybox_#{version}_universal.dmg",
+      verified: "github.com/AntoineToussaint/lazybox/"
+  name "lazybox"
+  desc "Reactive PR inbox desktop app for your coding agents"
+  homepage "https://lazybox.ai/"
+
+  # Universal binary (arm64 + x86_64); signed with a Developer ID cert and
+  # notarized, so no minimum beyond what Tauri v2 supports.
+  depends_on macos: ">= :monterey"
+
+  app "lazybox.app"
+
+  zap trash: [
+    "~/.lazybox/v2/desktop-analytics.ndjson",
+    "~/.lazybox/v2/desktop-crashes",
+  ]
+end

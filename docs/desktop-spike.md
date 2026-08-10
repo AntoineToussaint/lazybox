@@ -142,6 +142,46 @@ versioned contract and calls the shared lifecycle; it does not fork daemon boot
 logic or hand-copy IPC shapes. Licensing, billing, updater behavior, and hosted
 multi-tenancy are intentionally outside this repository's boundary.
 
+## Distribution and updates (macOS)
+
+The TUI ships through cargo-dist (`[workspace.metadata.dist]` in the root
+`Cargo.toml`): a shell installer plus a Homebrew *formula* pushed to the
+`AntoineToussaint/homebrew-lazybox` tap. cargo-dist builds one Rust binary; it
+cannot build a Tauri app or emit a Homebrew cask, so the desktop app has its
+own release path that runs off the *same* version tag.
+
+**Decision — the desktop ships as a Homebrew cask.**
+
+- `.github/workflows/release-desktop.yml` triggers on the same `v<x.y.z>` tags
+  as `release.yml`. It builds a **universal** (`aarch64` + `x86_64`) macOS
+  `.app` + `.dmg` from `apps/desktop`, **signs** it with a Developer ID cert
+  and **notarizes + staples** it through Apple (Tauri v2 does both when the
+  `APPLE_*` env is present), attaches the `.dmg` to the GitHub Release that
+  cargo-dist created for that tag, and pushes a rendered
+  `Casks/lazybox-desktop.rb` (template in
+  `apps/desktop/packaging/lazybox-desktop.rb.tmpl`) to the same tap.
+- Install: `brew install --cask lazybox-desktop`. **Update path:**
+  `brew upgrade --cask lazybox-desktop` — the cask *is* the updater, so the
+  desktop needs no in-app Tauri updater for the Homebrew channel (the TUI's
+  build-guard modal remains TUI-only). A direct `.dmg` download from the
+  release is the non-Homebrew fallback.
+- The cask token `lazybox-desktop` is deliberately distinct from the CLI
+  `lazybox` formula; both can be installed side by side.
+- **Version coherence (#815):** the release workflow stamps the tag's version
+  into `tauri.conf.json` and `package.json` before building, so the desktop and
+  TUI release from one version and their `/v1/protocol` fingerprints line up.
+
+**Enabling / required secrets.** The workflow is gated on the
+`DESKTOP_RELEASE_ENABLED` repository variable so tagging never reds the desktop
+build before signing is provisioned. To turn it on, add the Apple Developer
+secrets (`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`; the
+existing `HOMEBREW_TAP_TOKEN` is reused) and set `DESKTOP_RELEASE_ENABLED` to
+`true`. `workflow_dispatch` builds + signs a chosen tag as a dry run without
+attaching to a release or pushing the cask. The CI `desktop` job still builds
+the *unsigned debug* dogfood bundle on every PR touching `apps/desktop`; the
+signed universal bundle is release-only.
+
 ## Verification
 
 ```sh

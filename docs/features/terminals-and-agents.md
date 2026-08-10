@@ -205,8 +205,9 @@ root-cause-over-masking principles).
 When lazybox picks up `@lazybox`-triggered work, it spawns the agent **unattended**.
 Since no human is there to approve tool-use prompts, those sessions launch Claude
 with `--dangerously-skip-permissions` and the tab strip flags them with a
-`⚠ no-perms` badge. Sessions you open yourself keep approval prompts on by
-default.
+compact `⚠` glyph. Sessions you open yourself keep approval prompts on by
+default. Focusing a flagged tab spells the meaning out in a one-shot footer
+hint, so the terse glyph never leaves a user guessing.
 
 ### How to use it
 Mention `@lazybox` in a GitHub issue or PR comment (gated by
@@ -228,13 +229,13 @@ The "Skip permission prompts for your sessions" toggle in Settings flips
 `skip_permissions_for(autonomous, cfg)` (`crates/server/src/spawn_handler.rs`)
 returns `autonomous_skip_permissions` for autonomous spawns, else
 `skip_permissions`. The result rides in `SpawnCtx.skip_permissions`; Claude adds
-`--dangerously-skip-permissions` when set. The `⚠ no-perms` badge renders from
+`--dangerously-skip-permissions` when set. The `⚠` badge renders from
 `TerminalMetadata::skip_permissions` (`crates/tui/.../terminal_stack.rs`). Blast
 radius is bounded to the per-task worktree; the work preamble is the in-prompt
 counterweight to relaxed approvals.
 
 ### Test checklist
-- [ ] An autonomous spawn launches Claude with `--dangerously-skip-permissions` and shows the `⚠ no-perms` badge.
+- [ ] An autonomous spawn launches Claude with `--dangerously-skip-permissions` and shows the `⚠` badge.
 - [ ] A session you open with `c` does *not* skip permissions by default (no badge).
 - [ ] `autonomous_skip_permissions: false` makes autonomous runs prompt (no bypass).
 - [ ] `skip_permissions: true` makes your own sessions bypass (badge appears).

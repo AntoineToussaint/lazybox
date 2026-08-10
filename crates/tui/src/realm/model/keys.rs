@@ -216,6 +216,10 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     self.flush_dispatched_cmds(cmds);
                 }
+                // A `]]`-leader tile/tab switch changes the active
+                // terminal without touching pane focus, so re-explain a
+                // cycled-to bypass tab's compact `⚠` (#989).
+                self.hint_no_permission_focus();
                 return;
             }
             // Direct-key path: which key means which command lives in ONE
@@ -241,6 +245,11 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             self.flush_dispatched_cmds(cmds);
+            // A `]]`-leader tile/tab switch (`]]<arrow>`, `]]x`) changes
+            // the active terminal without touching pane focus or the
+            // selected workspace, so neither focus-hint hook fires —
+            // re-explain a cycled-to bypass tab's compact `⚠` (#989).
+            self.hint_no_permission_focus();
             return;
         }
         // ── Dismiss the current footer notice (#309) ────────────────

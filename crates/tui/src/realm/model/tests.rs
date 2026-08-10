@@ -18268,6 +18268,57 @@ mod keybinding_audit_tests {
         m.dispatch_key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
+    /// Without a `sandbox:` box there are no `r <agent>` rows, so `r` is
+    /// not a leader — it fires Reply directly, exactly as before #965.
+    #[test]
+    fn r_replies_directly_when_no_box_is_configured() {
+        let (mut m, _conn) = build_model();
+        let pr = pr_workspace("owner/repo#1", 0);
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        press(&mut m, Key::Char('r'));
+        assert!(m.leader_pending().is_none(), "no box → `r` is not a leader");
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+    }
+
+    /// With a box configured, the `r <agent>` family shares `r` with
+    /// Reply (same Workspace section): `r` arms the leader and the
+    /// same-key double-tap (`r r`) fires the shadowed Reply — the
+    /// documented `leader_fallback` contract, previously untested.
+    #[test]
+    fn r_arms_the_remote_leader_and_r_r_still_replies() {
+        let (m, _conn) = build_model();
+        let (box_tx, _box_rx) = tokio::sync::mpsc::channel(16);
+        let (_box_evt_tx, box_evt_rx) = tokio::sync::mpsc::channel(16);
+        let mut clients = std::collections::BTreeMap::new();
+        clients.insert(
+            "box".to_string(),
+            lazybox_ipc::Client::from_bounded_channels(box_tx, box_evt_rx),
+        );
+        let mut m = m.with_remote_clients(clients, Some("box".to_string()));
+        let pr = pr_workspace("owner/repo#1", 0);
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        press(&mut m, Key::Char('r'));
+        assert!(
+            m.leader_pending().is_some(),
+            "a configured box makes `r` the remote-spawn leader"
+        );
+        assert!(m.modal_stack.is_empty(), "arming must not mount Reply yet");
+
+        press(&mut m, Key::Char('r'));
+        assert!(m.leader_pending().is_none(), "the double-tap disarms");
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::Reply),
+            "`r r` must fall back to the shadowed Reply"
+        );
+    }
+
     /// A merge-ready PR workspace (CI green, mergeable, own PR) with
     /// `activity_rows` comments — the state where both the activity
     /// cursor keys and the github leader are live.
@@ -19679,5 +19730,261 @@ mod optimistic_mutation_tests {
             "a rejected assignee set must roll back"
         );
         assert!(m.pending_mutations.is_empty());
+    }
+}
+mod remote_spawn_tests {
+    //! #965 r-spawn hardening: spawns route to the box's client (never the
+    //! local flush), the `⇅` tag is latched against local-daemon snapshots,
+    //! a `v` multi-select fans the spawn out with the heavy-spawn confirm
+    //! (#932), and a worker "spawn dropped" notice rolls the tag back.
+    use super::super::*;
+    use chrono::{Duration, Utc};
+    use lazybox_core::{SessionKey, Task, TaskId, Workspace};
+    use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
+    use lazybox_tui_core::action::Action;
+    use lazybox_tui_core::remote::RemoteBoxNotice;
+    use tuirealm::ratatui::layout::Size;
+
+    fn task(key: &str, age: Duration) -> Task {
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        Task {
+            author: String::new(),
+            id: TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now() - age,
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    fn workspace(key: &str, age: Duration) -> Workspace {
+        Workspace::from_task(task(key, age), Utc::now())
+    }
+
+    /// A model wired to one remote box `"box"`. Returns the box-side
+    /// command receiver (the worker's end of the in-process pair) so
+    /// tests assert what actually reached the box, plus the local
+    /// connection to keep the local channel alive.
+    fn build_model_with_box() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+        tokio::sync::mpsc::Receiver<IpcCommand>,
+    ) {
+        let (client, server) = channel::pair();
+        let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let (box_tx, box_rx) = tokio::sync::mpsc::channel(16);
+        let (_box_evt_tx, box_evt_rx) = tokio::sync::mpsc::channel(16);
+        let box_client = lazybox_ipc::Client::from_bounded_channels(box_tx, box_evt_rx);
+        let mut clients = std::collections::BTreeMap::new();
+        clients.insert("box".to_string(), box_client);
+        let m = m.with_remote_clients(clients, Some("box".to_string()));
+        (m, server, box_rx)
+    }
+
+    fn seed_focused(
+        m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        key: &str,
+        age: Duration,
+    ) -> SessionKey {
+        let ws = workspace(key, age);
+        let sk: SessionKey = (&ws.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        sk
+    }
+
+    /// An `r c` spawn goes to the box's client — never the local `cmds`
+    /// flush — and the row's `⇅` tag survives the next local-daemon
+    /// upsert (which knows nothing about the box) via the latch.
+    #[test]
+    fn r_spawn_routes_to_the_box_and_latches_the_glyph() {
+        let (mut m, _conn, mut box_rx) = build_model_with_box();
+        let sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        let cmds = m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            cmds.is_empty(),
+            "a remote spawn never rides the local flush"
+        );
+        match box_rx.try_recv() {
+            Ok(IpcCommand::Spawn { kind, .. }) => {
+                assert!(
+                    matches!(kind, lazybox_ipc::TerminalKind::Agent(ref a) if a == "claude"),
+                    "spawn must carry the claude agent, got {kind:?}"
+                );
+            }
+            other => panic!("the box client must receive the spawn, got {other:?}"),
+        }
+        assert_eq!(
+            m.sidebar.workspace_by_key(&sk).unwrap().remote.as_deref(),
+            Some("box"),
+            "the row is tagged immediately"
+        );
+
+        // The local daemon's next upsert carries `remote: None` — the
+        // pre-latch behavior wiped the glyph here within one poll.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(workspace(
+            "owner/repo#1",
+            Duration::hours(1),
+        ))));
+        assert_eq!(
+            m.sidebar.workspace_by_key(&sk).unwrap().remote.as_deref(),
+            Some("box"),
+            "the latch must re-apply the tag at ingest"
+        );
+    }
+
+    /// Under a `v` multi-select, `r c` fans out like every other
+    /// bulk-appropriate spawn (#932): gated behind the heavy-spawn
+    /// confirm, one spawn per target to the box, every row tagged.
+    #[test]
+    fn bulk_r_spawn_gates_and_fans_out_to_the_box() {
+        let (mut m, _conn, mut box_rx) = build_model_with_box();
+        let sk1 = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+        m.sidebar.toggle_broadcast_select();
+        let sk2 = seed_focused(&mut m, "owner/repo#2", Duration::hours(2));
+        m.sidebar.toggle_broadcast_select();
+
+        let cmds = m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(cmds.is_empty(), "bulk remote spawn gates on confirm");
+        assert_eq!(m.modal_stack.last(), Some(&Id::BulkSpawnConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.is_empty(),
+            "remote spawns bypass the local flush even post-confirm"
+        );
+        let mut spawned = 0;
+        while let Ok(cmd) = box_rx.try_recv() {
+            assert!(matches!(cmd, IpcCommand::Spawn { .. }));
+            spawned += 1;
+        }
+        assert_eq!(spawned, 2, "one spawn per selected workspace");
+        for sk in [&sk1, &sk2] {
+            assert_eq!(
+                m.sidebar.workspace_by_key(sk).unwrap().remote.as_deref(),
+                Some("box"),
+                "every fanned-out row gets the latched tag"
+            );
+        }
+        assert_eq!(m.remote_marks.len(), 2);
+    }
+
+    /// `WorkspaceRemoved` releases the remote latch, exactly like
+    /// `merge_confirmed` — a re-added key must not inherit a stale `⇅`.
+    #[test]
+    fn workspace_removed_releases_the_remote_latch() {
+        let (mut m, _conn, _box_rx) = build_model_with_box();
+        let ws = workspace("owner/repo#1", Duration::hours(1));
+        let wkey = ws.key.clone();
+        let sk: SessionKey = (&wkey).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        m.mark_remote_latched(sk.clone(), "box".to_string());
+        assert!(m.remote_marks.contains_key(&sk));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(wkey));
+        assert!(
+            m.remote_marks.is_empty(),
+            "a removed workspace must not leave a latch entry behind"
+        );
+    }
+
+    /// The notice channel closing means the worker died without a chance
+    /// to report anything in flight: surface it once, stop polling — and
+    /// do NOT clear existing tags (sessions already spawned keep running
+    /// on the box; only the link died).
+    #[test]
+    fn worker_death_is_surfaced_once_and_polling_stops() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (notice_tx, notice_rx) = tokio::sync::mpsc::channel::<RemoteBoxNotice>(8);
+        let mut m = m.with_remote_notices(notice_rx);
+        let sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+        m.mark_remote_latched(sk.clone(), "box".to_string());
+
+        drop(notice_tx);
+        m.tick_remote_notices();
+
+        assert!(
+            m.remote_notice_rx.is_none(),
+            "a dead worker's channel must not be polled forever"
+        );
+        assert_eq!(
+            m.sidebar.workspace_by_key(&sk).unwrap().remote.as_deref(),
+            Some("box"),
+            "tags for possibly-live remote sessions must survive the link dying"
+        );
+        // A second tick after the receiver was dropped is a no-op, not a
+        // second flash or a panic.
+        m.tick_remote_notices();
+    }
+
+    /// A worker `Dropped` notice rolls the optimistic tags back — the `⇅`
+    /// glyph must not advertise sessions whose spawns never happened. One
+    /// aggregate notice covers a whole failed bulk fan-out.
+    #[test]
+    fn dropped_notice_rolls_back_every_named_tag() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (notice_tx, notice_rx) = tokio::sync::mpsc::channel(8);
+        let mut m = m.with_remote_notices(notice_rx);
+        let sk1 = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+        let sk2 = seed_focused(&mut m, "owner/repo#2", Duration::hours(2));
+
+        m.mark_remote_latched(sk1.clone(), "box".to_string());
+        m.mark_remote_latched(sk2.clone(), "box".to_string());
+        assert_eq!(
+            m.sidebar.workspace_by_key(&sk1).unwrap().remote.as_deref(),
+            Some("box")
+        );
+
+        notice_tx
+            .try_send(RemoteBoxNotice::Dropped {
+                session_keys: vec![sk1.clone(), sk2.clone()],
+                error: "⇅ box: bring-up failed — 2 command(s) dropped".to_string(),
+            })
+            .expect("test channel");
+        m.tick_remote_notices();
+
+        for sk in [&sk1, &sk2] {
+            assert_eq!(
+                m.sidebar.workspace_by_key(sk).unwrap().remote,
+                None,
+                "every dropped spawn must clear its glyph"
+            );
+        }
+        assert!(m.remote_marks.is_empty(), "the latch is released too");
     }
 }

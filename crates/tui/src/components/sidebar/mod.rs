@@ -575,6 +575,27 @@ impl Sidebar {
         }
     }
 
+    /// Optimistically tag a workspace's row as running on a remote box
+    /// (client-side UI state) so the sidebar's remote indicator shows
+    /// immediately, before the local daemon's snapshot — which doesn't know
+    /// about the box — catches up. `remote` is the box's display name (the
+    /// `sandbox:` box) this session was spawned on; `None` clears the tag.
+    pub fn mark_remote(&mut self, sk: SessionKey, remote: String) {
+        if let Some(workspace) = self.workspaces.get_mut(&sk) {
+            workspace.remote = Some(remote);
+            self.recompute_visible();
+        }
+    }
+
+    /// Roll back [`Self::mark_remote`] — the spawn the tag advertised was
+    /// dropped, so the `⇅` glyph would name a session that never existed.
+    pub fn unmark_remote(&mut self, sk: &SessionKey) {
+        if let Some(workspace) = self.workspaces.get_mut(sk) {
+            workspace.remote = None;
+            self.recompute_visible();
+        }
+    }
+
     /// Toggle whether merged + closed PRs surface in the Inbox view.
     /// Wired from `DisplayConfig::show_inactive_in_inbox`; idempotent
     /// — calling with the current value is a no-op so a YAML hot-

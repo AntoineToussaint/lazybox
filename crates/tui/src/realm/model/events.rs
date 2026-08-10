@@ -859,12 +859,16 @@ impl<T: TerminalAdapter> Model<T> {
         // poll/snapshot that still reports `Open` is stale — patch the
         // owned event to MERGED here so the sidebar row AND the right-pane
         // header agree. No-op unless a key is latched.
-        if !self.merge_confirmed.is_empty() {
+        if !self.merge_confirmed.is_empty() || !self.remote_marks.is_empty() {
             match &mut event {
-                IpcEvent::WorkspaceUpserted(ws) => self.apply_merge_latch(ws),
+                IpcEvent::WorkspaceUpserted(ws) => {
+                    self.apply_merge_latch(ws);
+                    self.apply_remote_latch(ws);
+                }
                 IpcEvent::Snapshot { workspaces, .. } => {
                     for ws in workspaces.iter_mut() {
                         self.apply_merge_latch(ws);
+                        self.apply_remote_latch(ws);
                     }
                 }
                 // Deliberately ignored: the latch only patches
@@ -1452,6 +1456,10 @@ impl<T: TerminalAdapter> Model<T> {
             // workspace doesn't inherit a stale restore target.
             let session_key: lazybox_core::SessionKey = key.into();
             self.workspace_focus.remove(&session_key);
+            // Drop the remote-box latch — same leak/mis-patch argument as
+            // `merge_confirmed` above: a re-added key must not inherit a
+            // stale `⇅` tag.
+            self.remote_marks.remove(&session_key);
             // Drop the autonomous-spawn notice marker so a re-added
             // workspace's next auto-spawn announces again, and a spawn
             // that never reached a live terminal can't leak the entry
@@ -2422,6 +2430,24 @@ impl<T: TerminalAdapter> Model<T> {
             None => {
                 self.merge_confirmed.remove(&ws.key);
             }
+        }
+    }
+
+    /// Re-apply the optimistic remote-box tag at ingest. The local daemon
+    /// doesn't know about the box, so every `Snapshot`/`WorkspaceUpserted`
+    /// it sends arrives with `remote: None` — without this latch the `⇅`
+    /// glyph an `r`-spawn painted is wiped by the next poll. Mirrors
+    /// [`Self::apply_merge_latch`]; the latch is released only by
+    /// [`Model::unmark_remote`] (worker reported the spawn dropped).
+    pub(super) fn apply_remote_latch(&mut self, ws: &mut lazybox_core::Workspace) {
+        if ws.remote.is_some() {
+            // A payload that already carries a remote tag is authoritative
+            // (a future remote-aware daemon) — don't fight it.
+            return;
+        }
+        let sk: lazybox_core::SessionKey = (&ws.key).into();
+        if let Some(remote) = self.remote_marks.get(&sk) {
+            ws.remote = Some(remote.clone());
         }
     }
 

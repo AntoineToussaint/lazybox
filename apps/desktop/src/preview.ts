@@ -28,6 +28,7 @@ export function loadPreview(): PreviewState {
     project_key: null,
     local: false,
     linked_checkout: null,
+    remote: null,
     name: "Desktop client boundary",
     branch: "issue-646-desktop-boundary",
     sessions: [],

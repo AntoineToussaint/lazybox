@@ -1245,6 +1245,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             model.update(msg);
         }
         model.tick_notice();
+        model.tick_remote_notices();
         model.tick_tips();
         model.tick_right();
         model.tick_working();

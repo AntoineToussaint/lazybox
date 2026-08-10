@@ -95,6 +95,25 @@ impl Identity {
         Ok(Self { keypair })
     }
 
+    /// Reconstruct an identity from its persisted key material — the
+    /// bytes a box writes to disk on first run and reloads thereafter,
+    /// so its pinned public key is stable across restarts.
+    pub fn from_keypair(private: &[u8], public: &[u8]) -> Self {
+        Self {
+            keypair: snow::Keypair {
+                private: private.to_vec(),
+                public: public.to_vec(),
+            },
+        }
+    }
+
+    /// This identity's private key bytes, for persisting it to disk.
+    /// Secret material — store it with the same owner-only care as any
+    /// other on-disk key seed.
+    pub fn private_key(&self) -> &[u8] {
+        &self.keypair.private
+    }
+
     /// This identity's public key — the value a peer pins.
     pub fn public_key(&self) -> PublicKey {
         let mut bytes = [0u8; 32];
@@ -463,6 +482,27 @@ mod tests {
     fn public_key_round_trips_through_bytes() {
         let key = Identity::generate().expect("identity").public_key();
         assert_eq!(PublicKey::from_bytes(*key.as_bytes()), key);
+    }
+
+    /// A box persists its identity and reloads it on restart: the
+    /// reconstructed identity carries the same public key and still
+    /// completes a handshake a client pinned against the original.
+    #[tokio::test]
+    async fn persisted_identity_reloads_and_handshakes() {
+        let original = Identity::generate().expect("identity");
+        let box_pub = original.public_key();
+        let reloaded = Identity::from_keypair(original.private_key(), box_pub.as_bytes());
+        assert_eq!(reloaded.public_key(), box_pub);
+
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let device = Identity::generate().expect("device identity");
+        let server = tokio::spawn(async move { responder_handshake(server_io, &reloaded).await });
+        let client = initiator_handshake(client_io, &device, &box_pub).await;
+        assert!(client.is_ok(), "client pins the reloaded box's public key");
+        assert!(
+            server.await.expect("server task").is_ok(),
+            "the reloaded identity completes the handshake"
+        );
     }
 
     #[tokio::test]

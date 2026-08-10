@@ -62,9 +62,17 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ("lazybox-ipc", set(&["lazybox-core"])),
         ("lazybox-linear", set(&["lazybox-auth", "lazybox-core"])),
         // The rendezvous relay is a standalone, codefly-hosted deployable
-        // and a dumb ciphertext forwarder — it depends on no internal
-        // crate so it can build and deploy on its own.
-        ("lazybox-relay", set(&[])),
+        // and a dumb ciphertext forwarder. Its one production edge is the
+        // entitlement gate (#895): the relay is the payment-enforcement
+        // point, so it holds an `EntitlementGate` and refuses to broker
+        // for an unentitled account. `e2e-channel` is a dev-only edge —
+        // the broker's encrypted-path test wraps the brokered stream the
+        // same way the box/client do. Both `entitlement` and
+        // `e2e-channel` are leaves (deps set(&[])), so neither adds a cycle.
+        (
+            "lazybox-relay",
+            set(&["lazybox-e2e-channel", "lazybox-entitlement"]),
+        ),
         // The remote-box lifecycle crate (#931): it persists a `BoxHandle`
         // through the store's kv table, so it depends on store (store →
         // core only, so no cycle). It is the first crate below the client
@@ -120,6 +128,11 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-agents",
                 "lazybox-config",
                 "lazybox-core",
+                // The box side of the relay's E2E channel (#980): `serve`
+                // terminates the Noise responder on each brokered stream
+                // and `--connect-relay` runs the initiator, so the boot
+                // crate holds the channel identity + handshake directly.
+                "lazybox-e2e-channel",
                 "lazybox-gh",
                 "lazybox-git-ops",
                 "lazybox-identity",

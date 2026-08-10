@@ -15,6 +15,8 @@ use crate::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
@@ -450,9 +452,43 @@ fn next_backoff_after_drop(current: Duration, served: Duration) -> Duration {
 /// so instead of freezing), back to `Connected` with the reconnected
 /// daemon's build on success.
 pub async fn connect_reconnecting(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
-    let (mut rd, mut wr) = transport::connect(path)
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let path = path.to_path_buf();
+    let redial: Redial = Arc::new(move || {
+        let path = path.clone();
+        Box::pin(async move {
+            transport::connect(&path)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        })
+    });
+    connect_reconnecting_with(redial).await
+}
+
+/// A source of fresh transport connections for [`connect_reconnecting_with`].
+///
+/// Each call dials a new connection and returns its raw
+/// (pre-handshake) read/write halves. The supervisor runs the protocol
+/// handshake on top, so a redialer only owns *reaching* the daemon:
+/// a Unix socket, or — for the relay path — a fresh relay dial plus the
+/// E2E handshake, whose ciphertext halves this yields.
+pub type Redial = Arc<
+    dyn Fn() -> Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = std::io::Result<(transport::BoxRead, transport::BoxWrite)>,
+                    > + Send,
+            >,
+        > + Send
+        + Sync,
+>;
+
+/// Like [`connect_reconnecting`], but the caller supplies how to reach
+/// the daemon. The Unix-socket path is `connect_reconnecting`; the relay
+/// path passes a redialer that dials the relay and wraps the brokered
+/// stream in the E2E channel, so a relay flap reconnects transparently
+/// the same way a tunnel reset does.
+pub async fn connect_reconnecting_with(redial: Redial) -> std::io::Result<(Client, PeerInfo)> {
+    let (mut rd, mut wr) = redial().await?;
     let peer = client_handshake_with_timeout(&mut rd, &mut wr, HANDSHAKE_TIMEOUT).await?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
@@ -467,7 +503,7 @@ pub async fn connect_reconnecting(path: &Path) -> std::io::Result<(Client, PeerI
     });
     tokio::spawn(chunk_commands_loop(cmd_rx, wire_tx));
     tokio::spawn(reconnect_supervisor(
-        path.to_path_buf(),
+        redial,
         (rd, wr),
         wire_rx,
         evt_tx,
@@ -506,7 +542,7 @@ enum ReconnectResult {
 /// transient outage, and publishes [`ConnectionState`] transitions so
 /// the UI can surface a reconnecting indicator.
 async fn reconnect_supervisor(
-    path: std::path::PathBuf,
+    redial: Redial,
     initial: (transport::BoxRead, transport::BoxWrite),
     mut wire_rx: mpsc::Receiver<Command>,
     evt_tx: mpsc::Sender<Event>,
@@ -529,7 +565,7 @@ async fn reconnect_supervisor(
                     status: ConnectionStatus::Reconnecting,
                     daemon_build: daemon_build.clone(),
                 });
-                match reconnect_with_backoff(&path, &mut wire_rx, &mut backoff).await {
+                match reconnect_with_backoff(&redial, &mut wire_rx, &mut backoff).await {
                     ReconnectResult::Connected { conn, peer } => {
                         daemon_build = peer.build.clone();
                         status_tx.send_replace(ConnectionState {
@@ -627,7 +663,7 @@ async fn serve_one_connection(
 /// reconnect — but a closed command channel means the caller is gone and
 /// we stop.
 async fn reconnect_with_backoff(
-    path: &Path,
+    redial: &Redial,
     wire_rx: &mut mpsc::Receiver<Command>,
     backoff: &mut Duration,
 ) -> ReconnectResult {
@@ -635,7 +671,7 @@ async fn reconnect_with_backoff(
         if !backoff_wait(wire_rx, *backoff).await {
             return ReconnectResult::CallerGone;
         }
-        match try_reconnect(path).await {
+        match try_reconnect(redial).await {
             Ok((conn, peer)) => return ReconnectResult::Connected { conn, peer },
             Err(ReconnectError::Fatal) => return ReconnectResult::Fatal,
             Err(ReconnectError::Retryable) => {
@@ -673,11 +709,9 @@ enum ReconnectError {
 }
 
 async fn try_reconnect(
-    path: &Path,
+    redial: &Redial,
 ) -> Result<((transport::BoxRead, transport::BoxWrite), PeerInfo), ReconnectError> {
-    let (mut rd, mut wr) = transport::connect(path)
-        .await
-        .map_err(|_| ReconnectError::Retryable)?;
+    let (mut rd, mut wr) = redial().await.map_err(|_| ReconnectError::Retryable)?;
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, client_handshake(&mut rd, &mut wr)).await {
         Ok(Ok(peer)) => Ok(((rd, wr), peer)),
         Ok(Err(HandshakeError::FingerprintMismatch { .. } | HandshakeError::BadMagic(_))) => {

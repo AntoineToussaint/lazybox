@@ -18,6 +18,7 @@ name = "lazybox-relay"
 path = "src/bin/lazybox-relay.rs"
 
 [dependencies]
+lazybox-entitlement = { workspace = true }
 serde              = { workspace = true }
 bincode            = { workspace = true }
 tokio              = { workspace = true }
@@ -26,6 +27,11 @@ tracing-subscriber = { workspace = true }
 uuid               = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+# The broker's encrypted-path test wraps the brokered stream in the E2E
+# channel exactly as the box/client do; the deny-gate test drives the
+# entitlement seam. Both are test-only edges.
+lazybox-e2e-channel = { workspace = true }
+lazybox-entitlement = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 
 [lints]

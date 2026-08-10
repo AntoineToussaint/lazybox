@@ -153,4 +153,19 @@ fn startup_template_installs_the_daemon_only_under_the_flag() {
         !inside.contains("https://x-access-token:"),
         "the clone URL must stay token-free"
     );
+
+    // An unreachable client commit (an unpushed local build) must not abort
+    // the startup script under `set -e` — that would strand the box with no
+    // build unit and no daemon. It falls back to the cloned default branch.
+    assert!(
+        inside.contains("is unreachable"),
+        "the SHA checkout must fall back instead of aborting the startup script"
+    );
+
+    // The box runs its daemon as the client's SSH user, baked as lazybox_user,
+    // so the socket home and the rebuild sudo grant share one identity.
+    assert!(
+        inside.contains("LAZYBOX_USER=${lazybox_user}"),
+        "box.env must carry the daemon user so it matches the client's SSH user"
+    );
 }

@@ -112,6 +112,17 @@ variable "lazybox_repo" {
   description = "Repo the box clones to build the daemon (owner/repo or URL)."
 }
 
+variable "lazybox_user" {
+  type        = string
+  default     = "lazybox"
+  description = <<-EOT
+    Account the box runs the lazybox daemon as. Must equal the SSH user the
+    client connects/rebuilds with (sandbox.user), so the daemon socket
+    (/home/<user>/.lazybox/run/daemon.sock) and the rebuild sudo grant resolve
+    to one identity. The client passes its own resolved user here.
+  EOT
+}
+
 variable "lazybox_repo_token_secret" {
   type        = string
   default     = ""

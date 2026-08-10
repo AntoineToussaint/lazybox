@@ -44,7 +44,13 @@ if [ -n "$TARGET_SHA" ]; then
   # whatever HEAD is rather than aborting.
   git -C "$LAZYBOX_SRC" fetch origin "$TARGET_SHA" 2>/dev/null \
     || git -C "$LAZYBOX_SRC" fetch origin 2>/dev/null || true
-  git -C "$LAZYBOX_SRC" checkout --quiet --detach "$TARGET_SHA"
+  # Fail loudly, not with an opaque git error, when the requested commit is
+  # unreachable — silently building the current checkout instead would make a
+  # rebuild report success while leaving the box on the wrong commit.
+  if ! git -C "$LAZYBOX_SRC" checkout --quiet --detach "$TARGET_SHA"; then
+    log "commit $TARGET_SHA is unreachable (unpushed, or wrong repo) — nothing rebuilt"
+    exit 1
+  fi
 fi
 HEAD_SHA="$(git -C "$LAZYBOX_SRC" rev-parse HEAD)"
 
@@ -73,7 +79,13 @@ else
   log "building lazybox at $HEAD_SHA (this can take 10+ minutes)"
   make -C "$LAZYBOX_SRC" setup
   make -C "$LAZYBOX_SRC" release
-  install -m0755 "$LAZYBOX_SRC/target/release/lazybox" "$BIN_DST"
+  # Swap the binary by rename, never an in-place overwrite: on a rebuild the
+  # old daemon is still executing $BIN_DST, and opening a running executable
+  # with O_TRUNC (what `install`/`cp` do) fails with ETXTBSY. `mv` onto the
+  # same filesystem is an atomic rename, which the running process tolerates
+  # (it keeps the unlinked old inode until it restarts).
+  install -m0755 "$LAZYBOX_SRC/target/release/lazybox" "$BIN_DST.new"
+  mv -f "$BIN_DST.new" "$BIN_DST"
   echo "$HEAD_SHA" >"$BUILD_SHA_FILE"
   log "installed lazybox $HEAD_SHA to $BIN_DST"
 fi

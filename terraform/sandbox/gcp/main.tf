@@ -106,6 +106,7 @@ resource "google_compute_instance" "sandbox" {
     lazybox_git_sha           = var.lazybox_git_sha
     lazybox_repo              = var.lazybox_repo
     lazybox_repo_token_secret = var.lazybox_repo_token_secret
+    lazybox_user              = var.lazybox_user
   })
 
   # A per-worktree box is disposable; let `terraform destroy` (and the idle

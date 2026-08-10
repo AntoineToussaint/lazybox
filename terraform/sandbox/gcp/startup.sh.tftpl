@@ -60,8 +60,14 @@ if [ ! -d "$LAZYBOX_SRC/.git" ]; then
   git clone "$LAZYBOX_URL" "$LAZYBOX_SRC"
 fi
 if [ -n "$LAZYBOX_SHA" ]; then
-  git -C "$LAZYBOX_SRC" fetch origin "$LAZYBOX_SHA" || git -C "$LAZYBOX_SRC" fetch origin
-  git -C "$LAZYBOX_SRC" checkout --quiet --detach "$LAZYBOX_SHA"
+  git -C "$LAZYBOX_SRC" fetch origin "$LAZYBOX_SHA" || git -C "$LAZYBOX_SRC" fetch origin || true
+  # A client commit that was never pushed (a dirty/local build bakes its HEAD
+  # sha regardless) is unreachable here. Do NOT abort — that would strand the
+  # box with no build unit and no daemon; fall back to the cloned default
+  # branch and record the miss so `/etc/lazybox/build-sha` shows the drift.
+  if ! git -C "$LAZYBOX_SRC" checkout --quiet --detach "$LAZYBOX_SHA"; then
+    echo "startup: lazybox_git_sha $LAZYBOX_SHA is unreachable — building the default branch instead; run 'lazybox sandbox rebuild' once the commit is pushed" >&2
+  fi
 fi
 
 # Stable installer path so `lazybox sandbox rebuild` re-runs the same script
@@ -72,6 +78,7 @@ cat > /etc/lazybox/box.env <<ENV
 LAZYBOX_SRC=$LAZYBOX_SRC
 LAZYBOX_REPO=$LAZYBOX_URL
 LAZYBOX_GIT_SHA=$LAZYBOX_SHA
+LAZYBOX_USER=${lazybox_user}
 ENV
 
 # A oneshot unit runs the build detached from the startup script, with a

@@ -107,6 +107,21 @@ impl GcpProvider {
         )
     }
 
+    /// The `-var`s an `apply` carries: the spec's deployment/identity vars
+    /// plus `lazybox_user` — the account the box runs its daemon as. It is
+    /// the same account this provider's `connect`/`rebuild` SSH into (the
+    /// `user` field), so the daemon's socket home and the rebuild sudo grant
+    /// resolve to one identity instead of drifting apart. Unset user → the
+    /// `lazybox` convention the box also defaults to.
+    fn apply_vars(&self, spec: &SandboxSpec) -> Vec<String> {
+        let mut vars = spec.tf_vars();
+        vars.push(format!(
+            "lazybox_user={}",
+            self.user.as_deref().unwrap_or("lazybox")
+        ));
+        vars
+    }
+
     /// The identity `-var`s a `destroy` needs from a handle.
     fn destroy_vars(handle: &BoxHandle) -> Vec<String> {
         vec![
@@ -351,7 +366,7 @@ impl SandboxProvider for GcpProvider {
         let (prog, args) = self.init_command();
         run(&prog, &args).await?;
 
-        let (prog, args) = self.terraform_command("apply", &spec.tf_vars());
+        let (prog, args) = self.terraform_command("apply", &self.apply_vars(spec));
         run(&prog, &args).await?;
 
         let (prog, args) = self.output_command();
@@ -447,6 +462,35 @@ mod tests {
         // Each var is a `-var k=v` pair.
         let i = args.iter().position(|a| a == "-var").expect("a -var flag");
         assert_eq!(args[i + 1], "project=proj");
+    }
+
+    fn spec() -> SandboxSpec {
+        SandboxSpec {
+            provider: "gcp".into(),
+            name: "lazybox-sbx-abc".into(),
+            project: "proj".into(),
+            region: "us-central1".into(),
+            zone: "us-central1-a".into(),
+            deployment: crate::Deployment::default_recipe().unwrap(),
+            lazybox_git_sha: "cafef00d".into(),
+        }
+    }
+
+    #[test]
+    fn apply_vars_carry_the_daemon_user_matching_the_ssh_user() {
+        // The box runs its daemon as the same account connect/rebuild SSH
+        // into, so the socket home and the rebuild sudo grant can't drift.
+        let vars = provider().apply_vars(&spec());
+        assert!(vars.contains(&"lazybox_user=me".to_string()), "{vars:?}");
+
+        // No SSH user configured → the `lazybox` convention the box defaults to.
+        let mut p = provider();
+        p.user = None;
+        let vars = p.apply_vars(&spec());
+        assert!(
+            vars.contains(&"lazybox_user=lazybox".to_string()),
+            "{vars:?}"
+        );
     }
 
     #[test]

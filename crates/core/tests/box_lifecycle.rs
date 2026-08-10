@@ -198,6 +198,25 @@ fn box_installer_builds_and_wires_the_daemon() {
         "install.sh should restart the daemon after a rebuild"
     );
 
+    // The binary must be swapped by rename onto a staged temp file, never an
+    // in-place overwrite: opening the running daemon's own executable with
+    // O_TRUNC (what `install`/`cp` do) fails with ETXTBSY on a rebuild.
+    assert!(
+        body.contains("$BIN_DST.new") && body.contains("mv -f"),
+        "install.sh must stage the binary and rename it into place (ETXTBSY-safe)"
+    );
+    assert!(
+        !body.contains("install -m0755 \"$LAZYBOX_SRC/target/release/lazybox\" \"$BIN_DST\""),
+        "install.sh must not overwrite the running binary in place"
+    );
+
+    // A rebuild to an unreachable commit must fail loudly, not silently build
+    // the current checkout and report success.
+    assert!(
+        body.contains("is unreachable") && body.contains("exit 1"),
+        "install.sh should error out when the requested commit can't be checked out"
+    );
+
     // The units it installs must actually exist in the tree it copies from.
     for unit in [
         "contrib/systemd/lazybox-daemon@.service",

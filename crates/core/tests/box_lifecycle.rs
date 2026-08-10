@@ -190,6 +190,15 @@ mod behavior {
         cmd.arg(lifecycle_dir().join("lazybox-idle-stop.sh"));
         cmd.env("LAZYBOX_IDLE_MARKER", marker);
         cmd.env("LAZYBOX_IDLE_SSH_PORT", "65533");
+        // Pin the daemon-liveness file to a path that never exists, so a real
+        // `~/.lazybox/run/active` on the dev/CI host (a running lazybox with a
+        // terminal open) can't make the script read the box as active and skip
+        // the stop path. Tests that exercise the liveness check override this
+        // via `env`, which is applied afterward and wins.
+        cmd.env(
+            "LAZYBOX_IDLE_ACTIVE_FILE",
+            marker.with_file_name("no-such-active-file"),
+        );
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -454,6 +463,40 @@ mod behavior {
         assert!(
             stopped.exists(),
             "a stale daemon liveness file must not keep the box alive"
+        );
+    }
+
+    #[test]
+    fn script_survives_an_unset_home() {
+        // A systemd oneshot without `User=` can run with $HOME unset. The
+        // liveness-file default expands `$HOME`, and under `set -u` a bare
+        // `$HOME` would abort the whole check every tick — the box would then
+        // never reap. The default must tolerate an unset $HOME (falls back to
+        // root's home) and still run the idle decision to completion.
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("unset_home");
+        let marker = dir.join("idle-since");
+
+        // Build the command by hand: `run_idle` pins LAZYBOX_IDLE_ACTIVE_FILE,
+        // which would bypass the `$HOME` expansion this test must exercise.
+        let mut cmd = Command::new(&bash);
+        cmd.arg(lifecycle_dir().join("lazybox-idle-stop.sh"));
+        cmd.env("LAZYBOX_IDLE_MARKER", &marker);
+        cmd.env("LAZYBOX_IDLE_SSH_PORT", "65533");
+        cmd.env("LAZYBOX_IDLE_AGENT_PROCS", "lazybox-absent-agent");
+        cmd.env_remove("HOME");
+        cmd.env_remove("LAZYBOX_IDLE_ACTIVE_FILE");
+        let out = cmd.output().expect("run lazybox-idle-stop.sh");
+
+        assert!(
+            out.status.success(),
+            "the idle check must not abort when $HOME is unset: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            marker.exists(),
+            "with $HOME unset the first idle tick must still stamp the marker, \
+             proving the check ran to completion rather than aborting on `set -u`"
         );
     }
 

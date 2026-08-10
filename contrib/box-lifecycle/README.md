@@ -20,12 +20,15 @@ The box is idle when **all** of these hold:
 - **no active tunnel** — zero established connections on the SSH port. A client
   holding an `ssh -L` / IAP forward keeps an ESTABLISHED socket open, so a
   connected laptop always reads as active;
-- **no live daemon** — the `lazybox server` refreshes a liveness file
+- **no live daemon session** — the `lazybox server` refreshes a liveness file
   (`~/.lazybox/run/active`, override with `LAZYBOX_IDLE_ACTIVE_FILE`) while it
-  holds a live PTY. A fresh mtime reads as active, so a client attached over a
-  **relay** — which, unlike an IAP tunnel, does not present as inbound sshd —
-  still keeps the box alive. On a bare box (no daemon) the file never appears
-  and nothing changes; and
+  holds at least one live terminal (agent or shell PTY). A fresh mtime reads as
+  active, so a session running behind a **relay** — which, unlike an IAP
+  tunnel, does not present as inbound sshd — keeps the box alive. A client
+  attached with no terminal open has no running session, so it is *not* kept
+  alive on this signal alone (there is no in-flight work to lose); an open
+  relay tunnel would still need to register as a connection to count. On a bare
+  box (no daemon) the file never appears and nothing changes; and
 - **no agent working** — no watched agent CLI (`claude`, `codex`, … — see
   `LAZYBOX_IDLE_AGENT_PROCS`) whose process *tree* has consumed CPU since the
   previous tick. The CPU delta is summed over each agent's whole descendant

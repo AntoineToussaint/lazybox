@@ -31,8 +31,11 @@ MARKER="${LAZYBOX_IDLE_MARKER:-/run/lazybox/idle-since}"
 SNAP="${MARKER}.agent-cpu"
 # The `lazybox server` keeps this file's mtime fresh while it holds a live PTY.
 # On a root-run timer point it at the box user's home (the daemon writes under
-# *its* $HOME) via /etc/lazybox/idle-stop.env.
-ACTIVE_FILE="${LAZYBOX_IDLE_ACTIVE_FILE:-$HOME/.lazybox/run/active}"
+# *its* $HOME) via /etc/lazybox/idle-stop.env. `${HOME:-/root}` guards the
+# default expansion: systemd oneshots without a `User=` may run with $HOME
+# unset, and under `set -u` a bare `$HOME` would abort the whole check every
+# tick — the box would then never reap. root's home is the safe fallback.
+ACTIVE_FILE="${LAZYBOX_IDLE_ACTIVE_FILE:-${HOME:-/root}/.lazybox/run/active}"
 # Treat the daemon as active while the file is younger than this. Default is two
 # timer ticks (2 × 5min) so a single missed touch never reaps a live daemon.
 ACTIVE_MAX_AGE="${LAZYBOX_IDLE_ACTIVE_MAX_AGE:-600}"
@@ -64,8 +67,8 @@ file_mtime() {
 }
 
 # True while the lazybox daemon reports itself active: a liveness file it keeps
-# fresh (mtime younger than ACTIVE_MAX_AGE) while it holds a live PTY or an
-# attached client. A missing file means no daemon is installed — not busy. An
+# fresh (mtime younger than ACTIVE_MAX_AGE) while it holds at least one live
+# terminal (PTY). A missing file means no daemon is installed — not busy. An
 # existing-but-unreadable mtime resolves to busy (fail-safe: never reap on doubt).
 daemon_active() {
   [ -e "$ACTIVE_FILE" ] || return 1

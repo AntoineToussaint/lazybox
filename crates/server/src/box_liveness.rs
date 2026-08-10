@@ -57,7 +57,7 @@ async fn run(terminals: TerminalRegistry, path: PathBuf, tick: Duration) {
 fn touch(path: &Path) {
     use std::io::Write;
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        create_private_dir(parent);
     }
     match std::fs::OpenOptions::new()
         .create(true)
@@ -69,6 +69,28 @@ fn touch(path: &Path) {
             let _ = writeln!(f, "{}", std::process::id());
         }
         Err(e) => tracing::debug!("box-liveness: touch {} failed: {e}", path.display()),
+    }
+}
+
+/// Create `dir` (and parents) private to the owner. The beacon's parent is the
+/// daemon runtime dir, which holds `daemon.sock` and must stay `0700` — a plain
+/// `create_dir_all` under the default umask could leave it world-traversable if
+/// the beacon's first tick wins the race to create it before the socket
+/// service does. A `0700` mode has no group/other bits for the umask to strip,
+/// so the result is exactly `0700`. No-op when the dir already exists (the
+/// common case: the socket service created it first).
+fn create_private_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::create_dir_all(dir);
     }
 }
 
@@ -97,6 +119,34 @@ mod tests {
         touch(&path);
         let second = mtime(&path).expect("still present");
         assert!(second > first, "touch must advance the mtime");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn touch_creates_its_parent_private() {
+        use std::os::unix::fs::PermissionsExt;
+        // The beacon's parent is the daemon runtime dir, which holds
+        // `daemon.sock` and must stay 0700. If the beacon's first tick creates
+        // it under the default umask it could be world-traversable. Touch a
+        // path two levels below a fresh tempdir so `touch` has to create the
+        // parent, then assert it came out 0700.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run_dir = dir.path().join("run");
+        let path = run_dir.join("active");
+        assert!(!run_dir.exists(), "parent starts absent");
+
+        touch(&path);
+
+        let mode = std::fs::metadata(&run_dir)
+            .expect("parent created")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "the beacon must create its parent dir 0700, not world-traversable"
+        );
+        assert!(mtime(&path).is_some(), "the liveness file was written");
     }
 
     #[tokio::test(start_paused = true)]

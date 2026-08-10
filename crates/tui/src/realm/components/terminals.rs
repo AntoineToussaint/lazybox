@@ -114,6 +114,10 @@ impl Terminals {
         self.inner.terminal_is_on_main(id)
     }
 
+    pub(crate) fn terminal_no_permission(&self, id: TerminalId) -> bool {
+        self.inner.terminal_no_permission(id)
+    }
+
     pub(crate) fn prepare_agent_replacement(
         &mut self,
         id: TerminalId,

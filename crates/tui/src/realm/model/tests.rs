@@ -13380,6 +13380,51 @@ mod spawn_spinner_projection_tests {
             "staying on the same flagged terminal must not re-flash the hint"
         );
     }
+
+    /// #989: the `⚠` no-permission tab glyph is compact, so focusing a
+    /// bypass-mode terminal spells out its meaning in the footer — a
+    /// one-shot `Hint`, once per terminal.
+    #[test]
+    fn focusing_no_permission_terminal_hints_in_context() {
+        use crate::realm::components::footer::NoticeSeverity;
+        let mut m = build_model();
+        let ws_key = lazybox_core::WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: true,
+            on_main: false,
+        });
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+        m.status.notice = None;
+        m.set_focus(PaneFocus::Terminals);
+        let notice = m.status.notice.as_ref().expect("focus hint");
+        assert!(notice.message.contains("no-permission mode"));
+        assert_eq!(notice.severity, NoticeSeverity::Hint);
+        // Re-focusing the same terminal must not re-nag.
+        m.status.notice = None;
+        m.set_focus(PaneFocus::Sidebar);
+        m.set_focus(PaneFocus::Terminals);
+        assert!(
+            m.status.notice.is_none(),
+            "staying on the same bypass terminal must not re-flash the hint"
+        );
+    }
 }
 
 #[cfg(test)]

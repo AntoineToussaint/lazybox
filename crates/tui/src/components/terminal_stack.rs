@@ -1548,6 +1548,15 @@ impl TerminalStack {
         self.terminals.get(&id).is_some_and(|slot| slot.on_main)
     }
 
+    /// Whether the tracked terminal runs in no-permission / bypass mode
+    /// (auto-accepts tool-use prompts, unattended). Drives the `⚠` tab
+    /// glyph's on-focus footer hint (#989).
+    pub(crate) fn terminal_no_permission(&self, id: TerminalId) -> bool {
+        self.terminals
+            .get(&id)
+            .is_some_and(|slot| slot.no_permission)
+    }
+
     pub(crate) fn prepare_agent_replacement(
         &mut self,
         id: TerminalId,
@@ -3600,10 +3609,11 @@ impl TerminalStack {
                 cursor = cursor.saturating_add(hint.chars().count() as u16);
             }
             // No-permission / bypass mode: this session auto-accepts
-            // tool-use prompts and runs unattended. Flag it so the user
-            // can tell at a glance which tabs aren't gated by approvals.
+            // tool-use prompts and runs unattended. A compact `⚠` glyph
+            // flags it at a glance without crowding the tab strip; the
+            // full meaning surfaces as a footer hint on focus (#989).
             if no_permission {
-                let noperm_text = " ⚠ no-perms";
+                let noperm_text = " ⚠";
                 title_spans.push(Span::styled(
                     noperm_text,
                     Style::default().fg(theme.warn).add_modifier(Modifier::DIM),

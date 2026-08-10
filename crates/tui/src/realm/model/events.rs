@@ -198,6 +198,8 @@ impl<T: TerminalAdapter> Model<T> {
         // Entering the terminal pane on an outdated old-build terminal
         // explains its broken scrollback in context (#544).
         self.hint_outdated_scroll_focus();
+        // Same for a bypass-mode terminal's compact `⚠` glyph (#989).
+        self.hint_no_permission_focus();
     }
 
     /// Record the recovered old-build terminals the daemon flagged and,
@@ -260,6 +262,30 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_hint(
                 "scrollback unavailable here — reopen this session (older lazybox build) \
                  to enable it",
+            );
+        }
+    }
+
+    /// The `⚠` tab glyph is compact by design (#989), so focusing a
+    /// bypass-mode terminal spells out what it means in the footer —
+    /// once per terminal, so re-syncing or bouncing pane focus on the
+    /// same terminal never re-nags. Resetting the throttle when the
+    /// active terminal changes lets re-entering a bypass terminal
+    /// re-explain.
+    fn hint_no_permission_focus(&mut self) {
+        let active = self.terminals.active_terminal_id();
+        if self.no_permission_hinted != active {
+            self.no_permission_hinted = None;
+        }
+        if self.focus == PaneFocus::Terminals
+            && let Some(id) = active
+            && self.terminals.terminal_no_permission(id)
+            && self.no_permission_hinted != Some(id)
+        {
+            self.no_permission_hinted = Some(id);
+            self.flash_hint(
+                "⚠ no-permission mode — this agent runs unattended, auto-accepting \
+                 tool-use prompts",
             );
         }
     }
@@ -2661,6 +2687,8 @@ impl<T: TerminalAdapter> Model<T> {
         // Navigating onto an outdated old-build terminal explains its
         // broken scrollback in context (#544).
         self.hint_outdated_scroll_focus();
+        // Navigating onto a bypass-mode terminal explains its `⚠` (#989).
+        self.hint_no_permission_focus();
     }
 
     /// Snapshot the pane the user currently rests in for the selected

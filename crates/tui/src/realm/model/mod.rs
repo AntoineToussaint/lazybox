@@ -1524,6 +1524,11 @@ pub struct Model<T: TerminalAdapter> {
     /// re-syncing or bouncing pane focus on the same terminal doesn't
     /// re-flash the hint. Reset when the active terminal changes.
     outdated_scroll_hinted: Option<lazybox_ipc::TerminalId>,
+    /// The active terminal a #989 no-permission focus hint was last
+    /// shown for. The `⚠` tab glyph is compact, so focusing a bypass-mode
+    /// terminal explains it once in the footer; re-entering the same
+    /// terminal re-explains, but bouncing focus on it doesn't re-flash.
+    no_permission_hinted: Option<lazybox_ipc::TerminalId>,
     /// Last `SessionKey` we sent a `Command::FocusWorkspace` for.
     /// Single source of truth for "did the cursor leave the previous
     /// workspace?". `sync_panes` reads it after every key/mouse
@@ -1985,6 +1990,7 @@ impl<T: TerminalAdapter> Model<T> {
             merge_confirmed: std::collections::HashSet::new(),
             outdated_scroll_terminals: std::collections::HashSet::new(),
             outdated_scroll_hinted: None,
+            no_permission_hinted: None,
             last_focused_session_key: None,
             needs_pane_sync: false,
             workspace_focus: std::collections::HashMap::new(),

@@ -705,8 +705,12 @@ fn render_shows_no_perms_badge_for_autonomous_session() {
     t.set_active_session(Some(sk("o/r#1")));
     let out = render_to_string(&mut t, 60, 10, true);
     assert!(
-        out.contains("no-perms"),
-        "autonomous session must show the no-permission badge; got:\n{out}"
+        out.contains('⚠'),
+        "autonomous session must show the compact no-permission glyph; got:\n{out}"
+    );
+    assert!(
+        !out.contains("no-perms"),
+        "the wordy no-perms label must be gone from the tab (#989); got:\n{out}"
     );
 }
 
@@ -717,7 +721,7 @@ fn render_omits_no_perms_badge_for_interactive_session() {
     t.set_active_session(Some(sk("o/r#1")));
     let out = render_to_string(&mut t, 60, 10, true);
     assert!(
-        !out.contains("no-perms"),
+        !out.contains('⚠') && !out.contains("no-perms"),
         "interactive session must not show the no-permission badge; got:\n{out}"
     );
 }

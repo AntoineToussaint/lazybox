@@ -1,6 +1,6 @@
 # lazybox desktop client
 
-The private macOS client covers the focused daily lazybox workflow:
+The macOS client covers the focused daily lazybox workflow:
 
 - first-run GitHub authentication, repository scope, and default-agent setup;
 - inbox search, attention filters, unread state, task metadata, and activity;
@@ -10,6 +10,22 @@ The private macOS client covers the focused daily lazybox workflow:
 - shared YAML settings for provider scope and agent choice;
 - keyboard navigation, accessibility semantics, local crash diagnostics, and
   opt-in content-free analytics.
+
+## Install (macOS)
+
+The desktop app is distributed as a signed + notarized **Homebrew cask**,
+released off the same version tag as the TUI (see
+[`../../docs/desktop-spike.md`](../../docs/desktop-spike.md#distribution-and-updates-macos)):
+
+```sh
+brew tap AntoineToussaint/lazybox
+brew install --cask lazybox-desktop     # updates via `brew upgrade --cask lazybox-desktop`
+```
+
+The universal `.dmg` is also attached to each
+[GitHub Release](https://github.com/AntoineToussaint/lazybox/releases) for a
+direct download. `lazybox-desktop` (the app) and `lazybox` (the CLI formula)
+are independent and can be installed side by side.
 
 The Rust shell starts `lazybox-server` through the shared `ClientRuntime` and
 binds an authenticated gateway to an ephemeral loopback port. The bearer token,

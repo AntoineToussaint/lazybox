@@ -1,0 +1,281 @@
+# Desktop (Tauri) release — the companion to the cargo-dist `release.yml`.
+#
+# cargo-dist builds and publishes the single `lazybox` TUI binary (shell
+# installer + Homebrew *formula*). It cannot build a Tauri app or emit a
+# Homebrew cask, so the desktop app gets its own workflow on the same tags.
+#
+# What it does, per `v<major>.<minor>.<patch>` tag:
+#   1. Builds a *universal* macOS `.app` + `.dmg` from `apps/desktop`.
+#   2. Signs with the Developer ID cert and notarizes + staples via Apple.
+#   3. Uploads the `.dmg` onto the GitHub Release that `release.yml` creates
+#      for the same tag (waiting for it to appear).
+#   4. Renders `Casks/lazybox-desktop.rb` and pushes it to the Homebrew tap.
+#
+# The result: `brew install --cask lazybox-desktop`, updated by
+# `brew upgrade --cask lazybox-desktop` — the desktop's distribution and
+# update channel, coherent with the TUI because both release off the same tag.
+#
+# ── Enabling ──────────────────────────────────────────────────────────────
+# Every job is gated on the `DESKTOP_RELEASE_ENABLED` repository *variable*
+# so tagging a release never reds the desktop workflow before signing is
+# provisioned. To turn desktop releases on:
+#   1. Add these repository *secrets* (Settings → Secrets and variables →
+#      Actions):
+#        APPLE_CERTIFICATE            base64 of the Developer ID Application
+#                                     .p12 (`base64 -i cert.p12 | pbcopy`)
+#        APPLE_CERTIFICATE_PASSWORD   the .p12 export password
+#        APPLE_SIGNING_IDENTITY       e.g. "Developer ID Application: Name (TEAMID)"
+#        APPLE_ID                     Apple account email used for notarization
+#        APPLE_PASSWORD               an app-specific password for that Apple ID
+#        APPLE_TEAM_ID                the 10-char Apple Developer Team ID
+#        HOMEBREW_TAP_TOKEN           already present — reused to push the cask
+#   2. Set the repository variable `DESKTOP_RELEASE_ENABLED` to `true`.
+# Until the variable is `true`, this workflow is a no-op.
+
+name: Release desktop
+
+on:
+  push:
+    tags:
+      - '**[0-9]+.[0-9]+.[0-9]+*'
+  # Manual dry-run: builds + signs + notarizes but skips the release upload
+  # and cask push, so signing can be validated without cutting a tag.
+  workflow_dispatch:
+    inputs:
+      ref_tag:
+        description: "Existing tag to (re)build the desktop artifact for, e.g. v0.1.9"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# Serialize desktop releases: they all push to the one shared tap, so a second
+# tag must queue behind the first rather than race its `git push`. Never cancel
+# an in-flight release mid-notarization.
+concurrency:
+  group: release-desktop
+  cancel-in-progress: false
+
+env:
+  TAP_REPO: AntoineToussaint/homebrew-lazybox
+  DMG_BASENAME: lazybox
+
+jobs:
+  build:
+    name: build · sign · notarize (universal macOS)
+    if: ${{ vars.DESKTOP_RELEASE_ENABLED == 'true' }}
+    runs-on: macos-14
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      dmg_name: ${{ steps.version.outputs.dmg_name }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # A tag push checks out the tag by default; a manual dispatch must be
+          # pointed at the tag it names rather than the default branch.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref_tag || github.ref }}
+
+      - name: Resolve version and tag
+        id: version
+        env:
+          RAW_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.ref_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Accept v0.1.9, releases/v0.1.9, my-app/0.1.9 — pull the SemVer core.
+          version="$(printf '%s' "$RAW_REF" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?' | head -n1)"
+          if [ -z "$version" ]; then
+            echo "::error::Could not parse a SemVer version from ref '$RAW_REF'"
+            exit 1
+          fi
+          dmg_name="${DMG_BASENAME}_${version}_universal.dmg"
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "dmg_name=$dmg_name"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved version=$version tag=v$version dmg=$dmg_name"
+
+      - name: Require Apple signing secrets
+        # The job gates on the DESKTOP_RELEASE_ENABLED *variable*, which says
+        # nothing about whether the signing *secrets* exist. Without this,
+        # enabling the variable with any secret unset lets Tauri build an
+        # unsigned or un-notarized bundle that still exits 0 — and we would
+        # publish a Gatekeeper-blocked app to the tap. Fail fast, before the
+        # long build, naming exactly what is missing.
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD \
+                      APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "::error::DESKTOP_RELEASE_ENABLED is true but required signing secrets are unset: ${missing[*]}"
+            exit 1
+          fi
+          echo "All Apple signing secrets are present."
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - uses: ./.github/actions/rust-build-env
+        with:
+          cache-workspaces: |
+            .
+            apps/desktop/src-tauri
+
+      - name: Add macOS Rust targets (universal)
+        # rust-build-env installs stable + the host target and the pinned
+        # Zig; the universal build needs the second Apple arch too.
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install frontend dependencies
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Import Developer ID signing certificate
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Stamp version from tag into tauri.conf.json
+        # tauri.conf.json's version is what the bundle ships; stamping it keeps
+        # the released version identical to the tag so the desktop↔daemon
+        # protocol fingerprint lines up with the TUI (#815). package.json is a
+        # private, unconsumed manifest — stamping it here would only desync it
+        # from package-lock.json in the build tree, so we leave it alone.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("fs");
+            const p = "apps/desktop/src-tauri/tauri.conf.json";
+            const j = JSON.parse(fs.readFileSync(p, "utf8"));
+            j.version = process.env.VERSION;
+            fs.writeFileSync(p, JSON.stringify(j, null, 2) + "\n");
+            console.log(`stamped ${p} -> ${j.version}`);
+          '
+
+      - name: Build signed + notarized universal bundle
+        working-directory: apps/desktop
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          # Tauri auto-notarizes + staples when APPLE_ID/APPLE_PASSWORD/
+          # APPLE_TEAM_ID are present, and signs with APPLE_SIGNING_IDENTITY.
+          npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
+
+      - name: Assert the bundle is notarized (fatal)
+        # The gate that a build with missing/invalid Apple credentials must not
+        # pass. `stapler validate` fails unless a notarization ticket is
+        # stapled, and `spctl` fails unless Gatekeeper accepts the signature —
+        # both non-optional here, so an unsigned/un-notarized .app stops the
+        # release instead of shipping a Gatekeeper-blocked cask to users.
+        run: |
+          set -euo pipefail
+          app="apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/lazybox.app"
+          test -d "$app" || { echo "::error::built .app not found at $app"; exit 1; }
+          xcrun stapler validate "$app"
+          spctl --assess --type exec -vv "$app"
+
+      - name: Locate and normalize the DMG
+        id: dmg
+        env:
+          DMG_NAME: ${{ steps.version.outputs.dmg_name }}
+        run: |
+          set -euo pipefail
+          bundle_dir="apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle"
+          out="$RUNNER_TEMP/$DMG_NAME"
+          scripts/locate-desktop-dmg.sh "$bundle_dir" "$out" "$RUNNER_TEMP/dmg.sha256"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(cat "$RUNNER_TEMP/dmg.sha256")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lazybox-desktop-dmg
+          path: ${{ steps.dmg.outputs.path }}
+          if-no-files-found: error
+
+      # sha256 written by locate-desktop-dmg.sh above; carried to `publish`.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: lazybox-desktop-dmg-sha256
+          path: ${{ runner.temp }}/dmg.sha256
+          if-no-files-found: error
+
+  publish:
+    name: attach to release · push cask
+    needs: build
+    # workflow_dispatch is a build/sign dry-run only — no publish.
+    if: ${{ vars.DESKTOP_RELEASE_ENABLED == 'true' && github.event_name == 'push' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: lazybox-desktop-dmg
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: lazybox-desktop-dmg-sha256
+          path: sha
+
+      - name: Wait for the GitHub Release, then attach the DMG
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
+          DMG_NAME: ${{ needs.build.outputs.dmg_name }}
+        run: |
+          set -euo pipefail
+          # release.yml (cargo-dist) creates the Release for this tag in
+          # parallel; poll until it exists (up to ~40 min) before uploading.
+          for i in $(seq 1 80); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Release $TAG is present."
+              break
+            fi
+            echo "Waiting for release $TAG to be created ($i/80)…"
+            sleep 30
+          done
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || {
+            echo "::error::Release $TAG never appeared; cannot attach the desktop DMG"
+            exit 1
+          }
+          gh release upload "$TAG" "dist/$DMG_NAME" --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Render + publish the cask to the Homebrew tap
+        # Idempotent first-publish/update/race handling lives in the script so
+        # it can be regression-tested (scripts/publish-desktop-cask_test.sh).
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha="$(cat sha/dmg.sha256)"
+          scripts/publish-desktop-cask.sh \
+            apps/desktop/packaging/lazybox-desktop.rb.tmpl \
+            "$VERSION" "$sha" \
+            "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git"

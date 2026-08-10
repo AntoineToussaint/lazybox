@@ -1,3 +1,4 @@
+import type { Activity } from "./generated/Activity";
 import type { PolicyArm } from "./generated/PolicyArm";
 import type {
   ComputeOutcome,
@@ -32,6 +33,7 @@ import type {
 } from "./generated";
 
 export type {
+  Activity,
   ComputeOutcome,
   DesktopInboxView,
   DesktopInfo,

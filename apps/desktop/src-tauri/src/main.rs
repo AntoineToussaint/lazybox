@@ -7,12 +7,13 @@ use lazybox_core::ProviderConfig;
 use lazybox_ipc::{AgentState, TerminalId};
 use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
-    CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION,
-    DESKTOP_TERMINAL_STREAM_ITEM_DATA, DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopAgentInfo,
-    DesktopAttentionSettings, DesktopCommand, DesktopDaemonSettings, DesktopEvent,
-    DesktopInboxView, DesktopInfo, DesktopModelTier, DesktopRepository, DesktopStreamMessage,
-    GatewayOptions, JsonClientFrame, JsonServerFrame, PROTOCOL_VERSION_HEADER, ProtocolResponse,
-    TERMINAL_BINARY_CONTENT_TYPE, WorkspacesResponse, desktop_event,
+    CLIENT_REQUEST_ID_HEADER, CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT,
+    DESKTOP_PROTOCOL_VERSION, DESKTOP_TERMINAL_STREAM_ITEM_DATA,
+    DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopAgentInfo, DesktopAttentionSettings, DesktopCommand,
+    DesktopDaemonSettings, DesktopEvent, DesktopEventFrame, DesktopInboxView, DesktopInfo,
+    DesktopModelTier, DesktopRepository, DesktopStreamMessage, GatewayOptions, JsonClientFrame,
+    PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER, ProtocolResponse,
+    TERMINAL_BINARY_CONTENT_TYPE, UnsupportedProtocolResponse, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
 use lazybox_tui_core::inbox::{
@@ -22,7 +23,7 @@ use lazybox_tui_core::snippets::{PickerRow, SnippetPickerView};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use snippets::SnippetModel;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -331,6 +332,40 @@ struct DesktopState {
     /// daemon-owned MRU, reduced from the control stream. The frontend
     /// pulls a recomputed view per keystroke via `snippet_view`.
     snippets: Arc<Mutex<SnippetModel>>,
+    event_handoff: Arc<Mutex<EventHandoff>>,
+}
+
+#[derive(Clone, Copy)]
+enum EventSource {
+    Live,
+    Response,
+}
+
+#[derive(Default)]
+struct EventHandoff {
+    live: VecDeque<String>,
+    responses: VecDeque<String>,
+}
+
+impl EventHandoff {
+    fn accept(&mut self, source: EventSource, event: &DesktopEvent) -> bool {
+        let Ok(key) = serde_json::to_string(event) else {
+            return true;
+        };
+        let (own, opposite) = match source {
+            EventSource::Live => (&mut self.live, &mut self.responses),
+            EventSource::Response => (&mut self.responses, &mut self.live),
+        };
+        if let Some(index) = opposite.iter().position(|candidate| candidate == &key) {
+            opposite.remove(index);
+            return false;
+        }
+        own.push_back(key);
+        if own.len() > 256 {
+            own.pop_front();
+        }
+        true
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -862,19 +897,39 @@ async fn send_command(
     state: State<'_, DesktopState>,
     command: DesktopCommand,
 ) -> Result<(), String> {
-    send_gateway_command(&state.gateway, command).await
+    let events = send_gateway_command(&state.gateway, command).await?;
+    let channel = state.event_channel.lock().await.clone();
+    if let Some(channel) = channel.as_ref() {
+        for event in events {
+            if !forward_desktop_event(
+                event,
+                EventSource::Response,
+                channel,
+                &state.inbox,
+                &state.snippets,
+                &state.event_handoff,
+            )
+            .await
+            {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn send_gateway_command(
     gateway: &GatewayClient,
     command: DesktopCommand,
-) -> Result<(), String> {
-    let command = command.into_correlated(Some(uuid::Uuid::new_v4().simple().to_string()));
+) -> Result<Vec<DesktopEvent>, String> {
+    let client_request_id = uuid::Uuid::new_v4().simple().to_string();
+    let command = command.into_correlated(Some(client_request_id.clone()));
     let response = gateway
         .authorized(
             gateway
                 .client
                 .post(gateway.url("/v1/commands"))
+                .header(CLIENT_REQUEST_ID_HEADER, &client_request_id)
                 .json(&JsonClientFrame::Command(command))
                 .timeout(Duration::from_secs(5 * 60 + 5)),
         )
@@ -883,7 +938,14 @@ async fn send_gateway_command(
         .map_err(|error| format!("send command: {error}"))?;
     let response: CommandResponse = decode_response(response).await?;
     if response.ok && response.completed {
-        Ok(())
+        if response.client_request_id.as_deref() != Some(client_request_id.as_str()) {
+            return Err("daemon returned a mismatched command response".to_string());
+        }
+        Ok(response
+            .events
+            .into_iter()
+            .filter_map(desktop_event)
+            .collect())
     } else {
         Err(response
             .error
@@ -941,9 +1003,10 @@ fn subscribe_events(
     let inbox = state.inbox.clone();
     let event_channel = state.event_channel.clone();
     let snippets = state.snippets.clone();
+    let event_handoff = state.event_handoff.clone();
     tauri::async_runtime::spawn(async move {
         *event_channel.lock().await = Some(on_event.clone());
-        stream_control_events(control_gateway, on_event, inbox, snippets).await;
+        stream_control_events(control_gateway, on_event, inbox, snippets, event_handoff).await;
     });
 
     let terminal_gateway = state.gateway.clone();
@@ -976,6 +1039,7 @@ impl GatewayClient {
         request
             .bearer_auth(&self.bearer_token)
             .header(PROTOCOL_VERSION_HEADER, DESKTOP_PROTOCOL_VERSION)
+            .header(PROTOCOL_FINGERPRINT_HEADER, DESKTOP_PROTOCOL_FINGERPRINT)
     }
 }
 
@@ -983,10 +1047,18 @@ async fn decode_response<T: DeserializeOwned>(response: Response) -> Result<T, S
     let status = response.status();
     if !status.is_success() {
         let body = response
-            .text()
+            .bytes()
             .await
-            .unwrap_or_else(|error| format!("response body unavailable: {error}"));
-        return Err(format!("gateway returned {status}: {body}"));
+            .map_err(|error| format!("read gateway error response: {error}"))?;
+        if status == reqwest::StatusCode::UPGRADE_REQUIRED {
+            let unsupported: UnsupportedProtocolResponse = serde_json::from_slice(&body)
+                .map_err(|error| format!("decode protocol incompatibility: {error}"))?;
+            return Err(format_unsupported_protocol(&unsupported));
+        }
+        return Err(format!(
+            "gateway returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        ));
     }
     response
         .json()
@@ -994,25 +1066,51 @@ async fn decode_response<T: DeserializeOwned>(response: Response) -> Result<T, S
         .map_err(|error| format!("decode gateway response: {error}"))
 }
 
+fn format_unsupported_protocol(response: &UnsupportedProtocolResponse) -> String {
+    format!(
+        "Incompatible lazybox protocol: desktop requested version {} (fingerprint {}), daemon supports version {} (fingerprint {}). {}",
+        response.requested,
+        response
+            .requested_fingerprint
+            .as_deref()
+            .unwrap_or("unknown"),
+        response.supported,
+        response.supported_fingerprint,
+        response.remediation
+    )
+}
+
 async fn stream_control_events(
     gateway: GatewayClient,
     on_event: Channel<DesktopStreamMessage>,
     inbox: Arc<Mutex<InboxModel>>,
     snippets: Arc<Mutex<SnippetModel>>,
+    event_handoff: Arc<Mutex<EventHandoff>>,
 ) {
     loop {
-        match stream_control_events_once(&gateway, &on_event, &inbox, &snippets).await {
+        match stream_control_events_once(&gateway, &on_event, &inbox, &snippets, &event_handoff)
+            .await
+        {
             Ok(()) => {
                 let _ = on_event.send(DesktopStreamMessage::Disconnected {
                     message: "gateway control stream ended".to_string(),
                 });
             }
-            Err(error) => {
+            Err(ControlStreamError::Transient(error)) => {
                 let _ = on_event.send(DesktopStreamMessage::Disconnected { message: error });
+            }
+            Err(ControlStreamError::Incompatible(message)) => {
+                let _ = on_event.send(DesktopStreamMessage::Incompatible { message });
+                return;
             }
         }
         tokio::time::sleep(Duration::from_millis(750)).await;
     }
+}
+
+enum ControlStreamError {
+    Transient(String),
+    Incompatible(String),
 }
 
 async fn stream_control_events_once(
@@ -1020,17 +1118,33 @@ async fn stream_control_events_once(
     on_event: &Channel<DesktopStreamMessage>,
     inbox: &Mutex<InboxModel>,
     snippets: &Mutex<SnippetModel>,
-) -> Result<(), String> {
+    event_handoff: &Mutex<EventHandoff>,
+) -> Result<(), ControlStreamError> {
     let mut response = gateway
         .authorized(gateway.client.get(gateway.url("/v1/events")))
         .send()
         .await
-        .map_err(|error| format!("connect control stream: {error}"))?;
+        .map_err(|error| {
+            ControlStreamError::Transient(format!("connect control stream: {error}"))
+        })?;
     if !response.status().is_success() {
-        return Err(format!(
+        if response.status() == reqwest::StatusCode::UPGRADE_REQUIRED {
+            let unsupported = response
+                .json::<UnsupportedProtocolResponse>()
+                .await
+                .map_err(|error| {
+                    ControlStreamError::Transient(format!(
+                        "decode control-stream incompatibility: {error}"
+                    ))
+                })?;
+            return Err(ControlStreamError::Incompatible(
+                format_unsupported_protocol(&unsupported),
+            ));
+        }
+        return Err(ControlStreamError::Transient(format!(
             "control stream returned HTTP {}",
             response.status()
-        ));
+        )));
     }
     let _ = on_event.send(DesktopStreamMessage::Connected);
     // Emit the current grouped view immediately (seeded from
@@ -1041,38 +1155,61 @@ async fn stream_control_events_once(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| format!("read control stream: {error}"))?
+        .map_err(|error| ControlStreamError::Transient(format!("read control stream: {error}")))?
     {
-        for frame in decoder.push(&chunk)? {
-            let JsonServerFrame::Event(event) = frame;
-            if let Some(event) = desktop_event(event) {
-                // Keep the snippet MRU aligned with the daemon: seed from
-                // every snapshot, advance on every delivery (from any
-                // client). The frontend pulls a recomputed view per
-                // keystroke, so there's no channel to push here.
-                match &event {
-                    DesktopEvent::Snapshot {
-                        recent_snippets, ..
-                    } => snippets.lock().await.seed_recent(recent_snippets.clone()),
-                    DesktopEvent::SnippetDelivered { snippet_key, .. } => {
-                        snippets.lock().await.record_recent(snippet_key.clone())
-                    }
-                    _ => {}
-                }
-                let recompute = inbox.lock().await.apply_event(&event);
-                if on_event
-                    .send(DesktopStreamMessage::Frame(Box::new(event)))
-                    .is_err()
-                {
-                    return Ok(());
-                }
-                if recompute {
-                    emit_inbox_view(inbox, on_event).await;
-                }
+        for frame in decoder
+            .push(&chunk)
+            .map_err(ControlStreamError::Transient)?
+        {
+            let DesktopEventFrame::Event(event) = frame;
+            if !forward_desktop_event(
+                event,
+                EventSource::Live,
+                on_event,
+                inbox,
+                snippets,
+                event_handoff,
+            )
+            .await
+            {
+                return Ok(());
             }
         }
     }
-    decoder.finish()
+    decoder.finish().map_err(ControlStreamError::Transient)
+}
+
+async fn forward_desktop_event(
+    event: DesktopEvent,
+    source: EventSource,
+    on_event: &Channel<DesktopStreamMessage>,
+    inbox: &Mutex<InboxModel>,
+    snippets: &Mutex<SnippetModel>,
+    event_handoff: &Mutex<EventHandoff>,
+) -> bool {
+    if !event_handoff.lock().await.accept(source, &event) {
+        return true;
+    }
+    match &event {
+        DesktopEvent::Snapshot {
+            recent_snippets, ..
+        } => snippets.lock().await.seed_recent(recent_snippets.clone()),
+        DesktopEvent::SnippetDelivered { snippet_key, .. } => {
+            snippets.lock().await.record_recent(snippet_key.clone())
+        }
+        _ => {}
+    }
+    let recompute = inbox.lock().await.apply_event(&event);
+    if on_event
+        .send(DesktopStreamMessage::Frame(Box::new(event)))
+        .is_err()
+    {
+        return false;
+    }
+    if recompute {
+        emit_inbox_view(inbox, on_event).await;
+    }
+    true
 }
 
 /// Compute the grouped inbox view from the current model and push it to
@@ -1192,7 +1329,7 @@ struct NdjsonDecoder {
 }
 
 impl NdjsonDecoder {
-    fn push(&mut self, bytes: &[u8]) -> Result<Vec<JsonServerFrame>, String> {
+    fn push(&mut self, bytes: &[u8]) -> Result<Vec<DesktopEventFrame>, String> {
         if self.buffer.len().saturating_add(bytes.len()) > lazybox_ipc::MAX_FRAME_BYTES as usize {
             return Err(format!(
                 "gateway event line exceeds the {}-byte IPC limit",
@@ -1581,6 +1718,7 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         inbox: Arc::new(Mutex::new(inbox)),
         event_channel: Arc::new(Mutex::new(None)),
         snippets: Arc::new(Mutex::new(snippets)),
+        event_handoff: Arc::new(Mutex::new(EventHandoff::default())),
     })
 }
 
@@ -1858,10 +1996,10 @@ mod tests {
 
     #[test]
     fn ndjson_decoder_handles_split_and_batched_frames() {
-        let first = JsonServerFrame::Event(lazybox_ipc::Event::TerminalResyncUnavailable {
+        let first = DesktopEventFrame::Event(DesktopEvent::TerminalFocusRequested {
             terminal_id: TerminalId(7),
         });
-        let second = JsonServerFrame::Event(lazybox_ipc::Event::PollCompleted {
+        let second = DesktopEventFrame::Event(DesktopEvent::PollCompleted {
             source: "github".to_string(),
             count: 2,
         });
@@ -2069,6 +2207,7 @@ mod tests {
             session_key: session_key.clone(),
             agent: "codex".to_string(),
             model_alias: Some("L".to_string()),
+            initial_prompt: None,
             on_main: true,
         });
 

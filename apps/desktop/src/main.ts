@@ -698,6 +698,11 @@ function handleStreamMessage(message: DesktopStreamMessage): void {
     setStatus(message.payload.message);
     return;
   }
+  if (message.type === "Incompatible") {
+    setConnection(false, "Incompatible");
+    setStatus(message.payload.message);
+    return;
+  }
   if (message.type === "Inbox") {
     inboxView = message.payload.outcome;
     sortMode = message.payload.sort_mode;
@@ -735,6 +740,7 @@ function handleEvent(event: LazyboxEvent): void {
     "Snapshot" in event ||
     "TerminalSpawned" in event ||
     "TerminalExited" in event ||
+    "TerminalReplaced" in event ||
     "AgentState" in event;
   if (workspaceChanged) {
     workspaces = applyWorkspaceEvent(workspaces, event);
@@ -793,6 +799,29 @@ function handleEvent(event: LazyboxEvent): void {
         live.terminal.write(`\r\n${event.TerminalExited.last_output}`);
       }
     }
+  } else if ("TerminalReplaced" in event) {
+    const payload = event.TerminalReplaced;
+    const wasFocused = focusedTerminalId === payload.old_terminal_id;
+    unmountTerminal(payload.old_terminal_id);
+    terminals.delete(payload.old_terminal_id);
+    pendingTerminalFrames.delete(payload.old_terminal_id);
+    terminals.set(payload.terminal_id, {
+      id: payload.terminal_id,
+      sessionKey: payload.session_key,
+      kind: payload.kind,
+      replay: new Uint8Array(),
+      lastSeq: 0,
+      replayAvailable: false,
+      dirty: false,
+      state: payload.authenticating ? "authenticating" : "running",
+    });
+    if (payload.session_key === selectedKey) {
+      syncWorkspaceTerminals();
+      if (wasFocused) {
+        focusTerminal(payload.terminal_id);
+      }
+    }
+    applyPendingTerminalFrames(payload.terminal_id);
   } else if ("TerminalFocusRequested" in event) {
     focusTerminalById(event.TerminalFocusRequested.terminal_id);
   } else if ("AgentState" in event) {
@@ -808,6 +837,10 @@ function handleEvent(event: LazyboxEvent): void {
     setStatus(`${event.ProviderError.source}: ${event.ProviderError.message}`);
   } else if ("CommandRejected" in event) {
     setStatus(`${event.CommandRejected.command}: ${event.CommandRejected.message}`);
+  } else if ("TerminalInputRejected" in event) {
+    setStatus(`Terminal input rejected: ${event.TerminalInputRejected.message}`);
+  } else if ("CommandFailed" in event) {
+    setStatus(event.CommandFailed.message);
   } else if ("PollProgress" in event) {
     setStatus(event.PollProgress.message);
   } else if ("PollCompleted" in event) {

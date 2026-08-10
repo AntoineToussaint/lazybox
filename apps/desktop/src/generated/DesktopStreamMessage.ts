@@ -2,4 +2,4 @@
 import type { DesktopEvent } from "./DesktopEvent";
 import type { DesktopInboxView } from "./DesktopInboxView";
 
-export type DesktopStreamMessage = { "type": "Connected" } | { "type": "Disconnected", "payload": { message: string, } } | { "type": "Frame", "payload": DesktopEvent } | { "type": "Inbox", "payload": DesktopInboxView };
+export type DesktopStreamMessage = { "type": "Connected" } | { "type": "Disconnected", "payload": { message: string, } } | { "type": "Incompatible", "payload": { message: string, } } | { "type": "Frame", "payload": DesktopEvent } | { "type": "Inbox", "payload": DesktopInboxView };

@@ -39,6 +39,8 @@ pub type Body = UnsyncBoxBody<Bytes, Infallible>;
 /// bump it; that is exactly the skew the advisory fingerprint tolerates.
 pub const DESKTOP_PROTOCOL_VERSION: u32 = 3;
 pub const PROTOCOL_VERSION_HEADER: &str = "x-lazybox-protocol-version";
+pub const PROTOCOL_FINGERPRINT_HEADER: &str = "x-lazybox-protocol-fingerprint";
+pub const CLIENT_REQUEST_ID_HEADER: &str = "x-lazybox-client-request-id";
 pub const TERMINAL_BINARY_CONTENT_TYPE: &str = "application/vnd.lazybox.terminal.v1";
 pub const TERMINAL_FRAME_LENGTH_OFFSET: usize = 0;
 pub const TERMINAL_FRAME_LENGTH_PREFIX_BYTES: usize = 4;
@@ -185,6 +187,10 @@ pub struct UnsupportedProtocolResponse {
     pub error: String,
     pub requested: String,
     pub supported: u32,
+    #[serde(default)]
+    pub requested_fingerprint: Option<String>,
+    pub supported_fingerprint: u32,
+    pub remediation: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +306,8 @@ pub struct CommandResponse {
     /// Human-readable command failure, present when `ok` is false.
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub client_request_id: Option<String>,
     /// Connection-scoped outcomes emitted directly by the command handler.
     pub events: Vec<Event>,
 }
@@ -445,6 +453,11 @@ pub enum DesktopCommand {
         /// falls back to the default model when the alias is undefined.
         #[serde(default)]
         model_alias: Option<String>,
+        /// Work submitted atomically with the spawn. The daemon preserves
+        /// the agent's raw/normalized run behavior and records the prompt in
+        /// the same history as an interactive submission.
+        #[serde(default)]
+        initial_prompt: Option<String>,
         /// Spawn on the repo's shared main checkout instead of an isolated
         /// worktree (the TUI's `b`-leader on-main group). The desktop
         /// confirms this before sending, since edits land on main.
@@ -591,6 +604,7 @@ impl DesktopCommand {
                 session_key,
                 agent,
                 model_alias,
+                initial_prompt,
                 on_main,
             } => Command::Spawn {
                 session_key,
@@ -598,7 +612,7 @@ impl DesktopCommand {
                 client_request_id,
                 kind: lazybox_ipc::TerminalKind::Agent(agent),
                 cwd: None,
-                initial_prompt: None,
+                initial_prompt,
                 on_main,
                 model_alias,
                 access: lazybox_ipc::AgentRunAccess::Default,
@@ -712,6 +726,8 @@ pub struct DesktopTerminalSnapshot {
     pub kind: lazybox_ipc::TerminalKind,
     pub last_seq: u64,
     pub agent_state: Option<lazybox_ipc::AgentState>,
+    #[serde(default)]
+    pub prompt_history: Vec<lazybox_ipc::UserPrompt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -739,6 +755,27 @@ pub enum DesktopEvent {
     },
     TerminalFocusRequested {
         terminal_id: TerminalId,
+    },
+    TerminalInputRejected {
+        terminal_id: TerminalId,
+        message: String,
+    },
+    TerminalReplaced {
+        old_terminal_id: TerminalId,
+        terminal_id: TerminalId,
+        session_key: lazybox_core::SessionKey,
+        kind: lazybox_ipc::TerminalKind,
+        no_permission: bool,
+        on_main: bool,
+        model_label: Option<String>,
+        authenticating: bool,
+    },
+    CommandCompleted {
+        client_request_id: String,
+    },
+    CommandFailed {
+        client_request_id: String,
+        message: String,
     },
     AgentState {
         session_key: lazybox_core::SessionKey,
@@ -841,10 +878,19 @@ pub enum DesktopStreamMessage {
     Disconnected {
         message: String,
     },
+    Incompatible {
+        message: String,
+    },
     Frame(Box<DesktopEvent>),
     /// The recomputed grouped inbox view. Emitted by `src-tauri`
     /// whenever the workspace/agent state or sort mode changes.
     Inbox(Box<DesktopInboxView>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "payload")]
+pub enum DesktopEventFrame {
+    Event(DesktopEvent),
 }
 
 pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
@@ -864,6 +910,7 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
                     kind: terminal.kind,
                     last_seq: terminal.last_seq,
                     agent_state: terminal.agent_state,
+                    prompt_history: terminal.prompt_history,
                 })
                 .collect(),
             recent_snippets,
@@ -892,6 +939,42 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
         Event::TerminalFocusRequested { terminal_id } => {
             Some(DesktopEvent::TerminalFocusRequested { terminal_id })
         }
+        Event::TerminalInputRejected {
+            terminal_id,
+            message,
+        } => Some(DesktopEvent::TerminalInputRejected {
+            terminal_id,
+            message,
+        }),
+        Event::TerminalReplaced {
+            old_terminal_id,
+            terminal_id,
+            session_key,
+            kind,
+            no_permission,
+            on_main,
+            model_label,
+            authenticating,
+        } => Some(DesktopEvent::TerminalReplaced {
+            old_terminal_id,
+            terminal_id,
+            session_key,
+            kind,
+            no_permission,
+            on_main,
+            model_label,
+            authenticating,
+        }),
+        Event::CommandCompleted { client_request_id } => {
+            Some(DesktopEvent::CommandCompleted { client_request_id })
+        }
+        Event::CommandFailed {
+            client_request_id,
+            message,
+        } => Some(DesktopEvent::CommandFailed {
+            client_request_id,
+            message,
+        }),
         Event::AgentState {
             session_key,
             terminal_id,
@@ -1504,6 +1587,11 @@ where
     if let Some(requested) = request.headers().get(PROTOCOL_VERSION_HEADER)
         && requested.as_bytes() != DESKTOP_PROTOCOL_VERSION.to_string().as_bytes()
     {
+        let requested_fingerprint = request
+            .headers()
+            .get(PROTOCOL_FINGERPRINT_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         return json_response(
             StatusCode::UPGRADE_REQUIRED,
             &UnsupportedProtocolResponse {
@@ -1514,9 +1602,20 @@ where
                 ),
                 requested: requested.to_str().unwrap_or("<non-UTF-8>").to_string(),
                 supported: DESKTOP_PROTOCOL_VERSION,
+                requested_fingerprint,
+                supported_fingerprint: DESKTOP_PROTOCOL_FINGERPRINT,
+                remediation:
+                    "Update the lazybox desktop and daemon to compatible builds, then reconnect."
+                        .to_string(),
             },
         );
     }
+
+    let client_request_id = request
+        .headers()
+        .get(CLIENT_REQUEST_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
 
     match (request.method(), request.uri().path()) {
         (&Method::GET, "/v1/health") => json_response(StatusCode::OK, &health_response()),
@@ -1545,7 +1644,14 @@ where
             agent_output_response(config, &options, request.into_body()).await
         }
         (&Method::POST, "/v1/commands") => {
-            command_response(config, &options, principal, request.into_body()).await
+            command_response(
+                config,
+                &options,
+                principal,
+                client_request_id,
+                request.into_body(),
+            )
+            .await
         }
         (&Method::POST, "/v1/stream") => stream_command_response(config, request.into_body()),
         (&Method::POST, "/v1/terminal") => terminal_stream_response(config, request.into_body()),
@@ -1560,6 +1666,7 @@ async fn command_response<B>(
     config: ServerConfig,
     options: &GatewayOptions,
     principal: PrincipalId,
+    client_request_id: Option<String>,
     body: B,
 ) -> Response<Body>
 where
@@ -1604,12 +1711,16 @@ where
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_tx = lazybox_ipc::EventSender::from_unbounded(event_tx);
     let command = bind_principal(command, principal);
+    let mut broadcast_rx = config.bus.subscribe();
     let mut task =
         tokio::spawn(async move { dispatch_one_shot_command(&config, &event_tx, command).await });
     match tokio::time::timeout(options.command_timeout, &mut task).await {
         Ok(Ok(outcome)) => {
             let mut events = Vec::new();
             while let Ok(event) = event_rx.try_recv() {
+                events.push(event);
+            }
+            while let Ok(event) = broadcast_rx.try_recv() {
                 events.push(event);
             }
             let error = outcome.err();
@@ -1619,6 +1730,7 @@ where
                     ok: error.is_none(),
                     completed: true,
                     error,
+                    client_request_id,
                     events,
                 },
             )
@@ -1895,7 +2007,7 @@ fn stream_events_response(config: ServerConfig) -> Response<Body> {
     let bridge = spawn_local_bridge(config);
     let keepalive_tx = bridge.command_tx.clone();
     let _ = bridge.command_tx.try_send(Command::Subscribe);
-    ndjson_event_response(bridge.event_rx, Some(keepalive_tx))
+    ndjson_desktop_event_response(bridge.event_rx, keepalive_tx)
 }
 
 fn stream_command_response<B>(config: ServerConfig, body: B) -> Response<Body>
@@ -1927,6 +2039,34 @@ fn ndjson_event_response(
                 Ok(bytes) => bytes,
                 Err(error) => {
                     tracing::warn!("api gateway: serialize event frame: {error}");
+                    continue;
+                }
+            };
+            bytes.push(b'\n');
+            if tx.send_data(Bytes::from(bytes)).await.is_err() {
+                break;
+            }
+        }
+    });
+    response_with_body(StatusCode::OK, "application/x-ndjson", body.boxed_unsync())
+}
+
+fn ndjson_desktop_event_response(
+    mut event_rx: mpsc::Receiver<Event>,
+    keepalive_tx: mpsc::Sender<Command>,
+) -> Response<Body> {
+    let (mut tx, body) = Channel::<Bytes, Infallible>::new(32);
+    tokio::spawn(async move {
+        let _keepalive_tx = keepalive_tx;
+        while let Some(event) = event_rx.recv().await {
+            let Some(event) = control_event(event).and_then(desktop_event) else {
+                continue;
+            };
+            let frame = DesktopEventFrame::Event(event);
+            let mut bytes = match serde_json::to_vec(&frame) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!("api gateway: serialize desktop event frame: {error}");
                     continue;
                 }
             };

@@ -3,6 +3,7 @@
     {
       "SpawnAgent": {
         "agent": "codex",
+        "initial_prompt": "Review the current changes.",
         "model_alias": "L",
         "on_main": true,
         "session_key": "github:o/r#42"
@@ -138,6 +139,13 @@
               "Agent": "codex"
             },
             "last_seq": 42,
+            "prompt_history": [
+              {
+                "source": "Typed",
+                "text": "Review the current changes.",
+                "timestamp_ms": 1700000000000
+              }
+            ],
             "session_key": "github:o/r#42",
             "terminal_id": 7
           }
@@ -313,6 +321,37 @@
       }
     },
     {
+      "TerminalInputRejected": {
+        "message": "agent did not settle",
+        "terminal_id": 7
+      }
+    },
+    {
+      "TerminalReplaced": {
+        "authenticating": false,
+        "kind": {
+          "Agent": "codex"
+        },
+        "model_label": "large",
+        "no_permission": false,
+        "old_terminal_id": 7,
+        "on_main": false,
+        "session_key": "github:o/r#42",
+        "terminal_id": 8
+      }
+    },
+    {
+      "CommandCompleted": {
+        "client_request_id": "request-1"
+      }
+    },
+    {
+      "CommandFailed": {
+        "client_request_id": "request-2",
+        "message": "agent unavailable"
+      }
+    },
+    {
       "AgentState": {
         "session_key": "github:o/r#42",
         "state": "InputNeeded",
@@ -406,6 +445,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 4248807249,
+  "protocol_fingerprint": 3428933680,
   "protocol_version": 3
 }

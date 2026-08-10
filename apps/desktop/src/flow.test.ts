@@ -214,6 +214,7 @@ describe("credential-free desktop workflow", () => {
           session_key: "github-o-r-42",
           agent: "codex",
           model_alias: null,
+          initial_prompt: null,
           on_main: false,
         },
       });

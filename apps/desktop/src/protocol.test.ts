@@ -26,6 +26,7 @@ describe("IPC command JSON", () => {
         session_key: "github:owner/repo#1",
         agent: "codex",
         model_alias: null,
+        initial_prompt: null,
         on_main: false,
       },
     });
@@ -36,6 +37,7 @@ describe("IPC command JSON", () => {
         session_key: "github:owner/repo#1",
         agent: "claude",
         model_alias: "L",
+        initial_prompt: null,
         on_main: true,
       },
     });
@@ -89,6 +91,7 @@ describe("IPC command JSON", () => {
           session_key: key,
           agent: "claude",
           model_alias: "M",
+          initial_prompt: null,
           on_main: true,
         },
       },

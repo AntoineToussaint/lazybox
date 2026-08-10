@@ -1372,6 +1372,29 @@ impl RightPane {
             lines.push(Line::from(spans));
         }
 
+        // Diffstat — a one-line at-a-glance sense of a PR's size/shape.
+        // PRs only; issues have no diff. Additions green, deletions red,
+        // file count dim, matching the desktop `detailSignals` summary.
+        if task.is_pr() {
+            let files = task.changed_files;
+            let files_noun = if files == 1 { "file" } else { "files" };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("+{}", task.additions),
+                    Style::default().fg(theme.success),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("−{}", task.deletions),
+                    Style::default().fg(theme.error),
+                ),
+                Span::styled(
+                    format!(" · {files} {files_noun} changed"),
+                    Style::default().fg(theme.text_dim),
+                ),
+            ]));
+        }
+
         // Originating issue — the Issue this PR was created from /
         // closes. An explicit, clickable path to it so the user doesn't
         // have to expand the description and hunt for the reference
@@ -2178,11 +2201,17 @@ impl RightPane {
         // + 2 rows visible, no matter how long the PR description is.
         let body_constraint = self.task_body_constraint();
         // Baseline header is crumbs + pill/title + branch + reviewers;
-        // an originating-issue line (#567) adds one row when present.
-        // Computed once and threaded into `render_header` so the height
-        // reservation and the emitted line can't disagree.
+        // an originating-issue line (#567) adds one row when present, and
+        // a PR's diffstat line (#997) adds one more. Computed once and
+        // threaded into `render_header` so the height reservation and the
+        // emitted lines can't disagree.
         let origin = self.originating_issue();
-        let header_height = if origin.is_some() { 5 } else { 4 };
+        let is_pr = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.primary_task())
+            .is_some_and(|t| t.is_pr());
+        let header_height = 4 + u16::from(origin.is_some()) + u16::from(is_pr);
         let chunks = Layout::vertical([
             Constraint::Length(header_height), // header (crumbs, pill, branch, [issue])
             Constraint::Length(1),             // separator

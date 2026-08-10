@@ -1534,6 +1534,7 @@ mod set_auto_merge_on_green_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             kind: Some(TaskKind::Pr),
             closes_issues: vec![],
             linked_tasks: vec![],

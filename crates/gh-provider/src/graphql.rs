@@ -78,6 +78,7 @@ query($query: String!, $first: Int!, $after: String) {
         merged
         additions
         deletions
+        changedFiles
         headRefName
         baseRefName
         mergeable
@@ -361,6 +362,8 @@ pub struct GqlPr {
     pub additions: u32,
     #[serde(default)]
     pub deletions: u32,
+    #[serde(default, rename = "changedFiles")]
+    pub changed_files: u32,
     #[serde(rename = "headRefName")]
     pub head_ref_name: String,
     /// Head commit OID. Selected only by `SINGLE_PR_QUERY` (the
@@ -1562,6 +1565,7 @@ query($owner: String!, $name: String!, $number: Int!) {
       merged
       additions
       deletions
+      changedFiles
       headRefName
       headRefOid
       baseRefName
@@ -1790,6 +1794,7 @@ query($ids: [ID!]!) {
       merged
       additions
       deletions
+      changedFiles
       headRefName
       headRefOid
       baseRefName
@@ -2300,6 +2305,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         recent_activity: activities,
         additions: pr.additions,
         deletions: pr.deletions,
+        changed_files: pr.changed_files,
         closes_issues: extract_closes_issues(pr, &repo),
         linked_tasks: extract_linear_refs(&pr.head_ref_name, &pr.title),
         kind: Some(lazybox_core::TaskKind::Pr),
@@ -3339,6 +3345,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         recent_activity: comments,
         additions: 0,
         deletions: 0,
+        changed_files: 0,
         closes_issues: vec![],
         linked_tasks: vec![],
         kind: Some(lazybox_core::TaskKind::Issue),
@@ -3804,6 +3811,7 @@ mod tests {
             merged: false,
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             head_ref_name: "feature".into(),
             head_ref_oid: None,
             base_ref_name: "main".into(),
@@ -4596,6 +4604,7 @@ mod tests {
                   "merged": false,
                   "additions": 10,
                   "deletions": 2,
+                  "changedFiles": 4,
                   "headRefName": "feature/foo",
                   "baseRefName": "main",
                   "mergeable": "MERGEABLE",
@@ -4667,6 +4676,11 @@ mod tests {
         assert_eq!(task.title, "Add foo to bar");
         assert_eq!(task.branch.as_deref(), Some("feature/foo"));
         assert_eq!(task.state, TaskState::Open);
+        // Diffstat rides through the poll path so the right-pane header
+        // can show `+A −D · N files changed` without a lazy fetch.
+        assert_eq!(task.additions, 10);
+        assert_eq!(task.deletions, 2);
+        assert_eq!(task.changed_files, 4);
         // `unread_count` rides on the server-side totalCount even
         // though the body (and thus the activity) isn't fetched.
         assert_eq!(task.unread_count, 3);

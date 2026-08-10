@@ -142,6 +142,11 @@ additions: number,
  */
 deletions: number,
 /**
+ * Number of files changed in this PR. `#[serde(default)]` so older
+ * snapshots (and non-PR tasks) deserialize as zero.
+ */
+changed_files: number,
+/**
  * Other tasks this PR closes when merged. Populated from
  * GitHub's `closingIssuesReferences` field. Used by the server
  * to collapse the issue + PR workspaces so the user doesn't

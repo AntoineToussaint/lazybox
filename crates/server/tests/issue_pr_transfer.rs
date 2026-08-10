@@ -164,6 +164,7 @@ fn gh_task(key: &str, is_pr: bool, branch: Option<&str>, closes: Vec<TaskId>) ->
         recent_activity: vec![],
         additions: 0,
         deletions: 0,
+        changed_files: 0,
         kind: None,
         closes_issues: closes,
         linked_tasks: vec![],

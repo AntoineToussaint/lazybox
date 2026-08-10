@@ -110,6 +110,7 @@ fn maximal_pr_task() -> Task {
         recent_activity: vec![],
         additions: 120,
         deletions: 45,
+        changed_files: 7,
         kind: Some(TaskKind::Pr),
         closes_issues: vec![TaskId {
             source: "github".into(),

@@ -474,6 +474,17 @@ pub struct Task {
     /// Derived from GitHub's `mergeStateStatus == BEHIND`.
     #[serde(default)]
     pub is_behind_base: bool,
+    /// GitHub reports the merge is blocked by a branch-protection rule or
+    /// repository ruleset (`mergeStateStatus == BLOCKED`) — an unmet
+    /// requirement like required reviews, required status checks, signed
+    /// commits, or linear history. Distinct from `mergeable` (a content
+    /// conflict): the branch merges cleanly, but a *policy* gate is
+    /// unsatisfied, so a `mergePullRequest` mutation would bounce with
+    /// "Repository rule violations found". The merge-readiness gate reads
+    /// it so lazybox doesn't offer a merge (or show READY) that GitHub
+    /// will reject.
+    #[serde(default)]
+    pub merge_blocked: bool,
     /// GraphQL node ID of the PR — required for mutations like
     /// `updatePullRequestBranch`. Populated by providers that fetch it.
     #[serde(default)]
@@ -918,6 +929,7 @@ mod status_tag_tests {
             is_in_merge_queue: false,
             mergeable: crate::Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,

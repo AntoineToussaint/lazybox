@@ -168,6 +168,7 @@ mod tests {
             is_in_merge_queue: false,
             mergeable: crate::Mergeable::Mergeable,
             is_behind_base: false,
+            merge_blocked: false,
             node_id: None,
             needs_reply: false,
             last_commenter: None,

@@ -3579,6 +3579,7 @@ fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> laz
         is_in_merge_queue: false,
         mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
+        merge_blocked: false,
         node_id: None,
         needs_reply: false,
         last_commenter: None,

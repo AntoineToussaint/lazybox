@@ -54,6 +54,7 @@ function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
     is_in_merge_queue: false,
     mergeable: "Unknown",
     is_behind_base: false,
+    merge_blocked: false,
     node_id: null,
     needs_reply: false,
     last_commenter: null,

@@ -69,6 +69,7 @@ fn synthetic_issue(i: usize) -> Task {
         is_in_merge_queue: false,
         mergeable: lazybox_core::Mergeable::Unknown,
         is_behind_base: false,
+        merge_blocked: false,
         node_id: None,
         needs_reply: false,
         last_commenter: None,

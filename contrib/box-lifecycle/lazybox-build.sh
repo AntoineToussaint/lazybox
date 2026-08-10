@@ -47,11 +47,22 @@ if [ ! -d "$SRC_DIR/.git" ]; then
   as_build "git clone '$REPO_URL' '$SRC_DIR'"
 fi
 as_build "cd '$SRC_DIR' && git fetch --all --tags --prune"
-if [ -n "$TARGET_SHA" ]; then
-  log "checking out $TARGET_SHA"
-  as_build "cd '$SRC_DIR' && git checkout --detach '$TARGET_SHA'"
+# Fall back to the default branch when the pinned commit can't be checked out.
+# `git fetch --all` only retrieves commits reachable from an origin ref, so a
+# client built from an UNPUSHED local commit (the common dogfooding state)
+# passes a SHA the box can't resolve. Aborting here would leave the box with no
+# daemon at all — the exact failure #977 exists to remove — so instead build the
+# default-branch tip: the box still comes up running a daemon, and a leftover
+# wire-fingerprint mismatch surfaces as an actionable "run rebuild once the
+# commit is pushed" notice rather than a silent dead box.
+if [ -n "$TARGET_SHA" ] && as_build "cd '$SRC_DIR' && git checkout --detach '$TARGET_SHA'"; then
+  log "checked out $TARGET_SHA"
 else
-  log "no pinned SHA — tracking the default branch tip"
+  if [ -n "$TARGET_SHA" ]; then
+    log "WARNING: commit $TARGET_SHA is not fetchable (unpushed, or gone from origin) — building the default branch tip so the box still runs a daemon; rerun the rebuild once the commit is pushed"
+  else
+    log "no pinned SHA — tracking the default branch tip"
+  fi
   as_build "cd '$SRC_DIR' && git checkout main && git pull --ff-only"
 fi
 

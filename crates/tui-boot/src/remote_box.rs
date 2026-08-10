@@ -140,7 +140,7 @@ pub fn setup(sandbox: &SandboxConfig, store: Arc<dyn Store>) -> Option<RemoteBox
 /// Whether a bring-up failure's root cause is the wire-fingerprint
 /// handshake rejecting a daemon built from a different commit (#977). The
 /// initial dial (`socket::connect_reconnecting`) surfaces this as an
-/// `io::Error` carrying [`HandshakeError::FingerprintMismatch`]'s message
+/// `io::Error` carrying [`lazybox_ipc::socket::HandshakeError::FingerprintMismatch`]'s message
 /// (string-wrapped, so it can't be downcast) — matched on the stable
 /// "fingerprint mismatch" phrase so the drop becomes an actionable
 /// "run `lazybox sandbox rebuild`" notice instead of a generic failure.

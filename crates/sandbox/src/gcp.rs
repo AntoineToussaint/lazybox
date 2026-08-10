@@ -234,14 +234,29 @@ impl GcpProvider {
     /// The IAP SSH that rebuilds the box's daemon at `sha` and restarts it
     /// — the recovery path for a wire-fingerprint mismatch (#977) that needs
     /// no reboot (changing GCE metadata does not re-run the startup script
-    /// on a live box). Runs the on-box `lazybox-build.sh` under `sudo`; an
-    /// empty `sha` tells the helper to track the default branch tip. Foreground
-    /// (not `-N`): the caller inherits stdio so the 10-minute build streams.
+    /// on a live box). An empty `sha` tells the helper to track the default
+    /// branch tip.
+    ///
+    /// The build itself is a 10+ minute compile, so it must NOT run in the SSH
+    /// session's own process tree: a dropped IAP link or a slept laptop would
+    /// SIGHUP it mid-build (the very #903 hazard the boot path avoids). It is
+    /// instead launched in a **supervised systemd transient unit** that keeps
+    /// running to completion even if this SSH dies. `--wait --pipe` streams the
+    /// build and propagates its exit status while connected; `EnvironmentFile`
+    /// picks up the same `/etc/lazybox/build.env` the boot build reads (the `-`
+    /// prefix makes it optional), so a box provisioned with non-default paths
+    /// rebuilds against its real config rather than the helper's fallbacks.
     pub fn rebuild_command(&self, handle: &BoxHandle, sha: &str) -> (String, Vec<String>) {
         let dest = match &self.user {
             Some(u) => format!("{u}@{}", handle.id),
             None => handle.id.clone(),
         };
+        let remote = format!(
+            "sudo systemd-run --wait --pipe --collect --unit=lazybox-rebuild \
+             --property=TimeoutStartSec=7200 \
+             --property=EnvironmentFile=-/etc/lazybox/build.env \
+             /usr/local/bin/lazybox-build.sh {sha}"
+        );
         (
             "gcloud".to_string(),
             vec![
@@ -252,7 +267,7 @@ impl GcpProvider {
                 format!("--zone={}", handle.zone),
                 format!("--project={}", handle.project),
                 "--tunnel-through-iap".to_string(),
-                format!("--command=sudo /usr/local/bin/lazybox-build.sh {sha}"),
+                format!("--command={remote}"),
                 "--".to_string(),
                 "-o".to_string(),
                 "BatchMode=yes".to_string(),
@@ -652,6 +667,14 @@ mod tests {
         assert!(ssh.contains(&"localhost:8082:localhost:8082".to_string()));
     }
 
+    /// The `--command=…` remote string a rebuild ssh carries.
+    fn rebuild_remote(args: &[String]) -> String {
+        args.iter()
+            .find_map(|a| a.strip_prefix("--command="))
+            .expect("a --command= arg")
+            .to_string()
+    }
+
     #[test]
     fn rebuild_runs_the_on_box_helper_at_the_pinned_sha_over_iap() {
         let (prog, args) = provider().rebuild_command(&handle(), "deadbeef1234");
@@ -659,17 +682,27 @@ mod tests {
         assert_eq!(args[..3], ["compute", "ssh", "me@lazybox-sbx-abc"]);
         assert!(args.contains(&"--tunnel-through-iap".to_string()));
         assert!(args.contains(&"--zone=us-central1-a".to_string()));
-        // The remote command runs the installed helper as root with the SHA.
+        let remote = rebuild_remote(&args);
+        // Runs the installed helper as root with the SHA…
+        assert!(remote.contains("sudo"), "{remote}");
         assert!(
-            args.contains(
-                &"--command=sudo /usr/local/bin/lazybox-build.sh deadbeef1234".to_string()
-            ),
-            "{args:?}"
+            remote.contains("/usr/local/bin/lazybox-build.sh deadbeef1234"),
+            "{remote}"
+        );
+        // …but NOT in the SSH session's process tree: a dropped IAP link would
+        // SIGHUP a 10-minute build (#903). It must run in a supervised systemd
+        // transient unit that survives the disconnect, with `--wait` so the
+        // exit status still propagates while connected.
+        assert!(remote.contains("systemd-run"), "{remote}");
+        assert!(remote.contains("--wait"), "{remote}");
+        // And it must source the same build.env the boot build reads, so a box
+        // provisioned with non-default paths rebuilds against its real config.
+        assert!(
+            remote.contains("EnvironmentFile=-/etc/lazybox/build.env"),
+            "{remote}"
         );
         // Unattended: never block on a passphrase or host-key prompt.
         assert!(args.contains(&"BatchMode=yes".to_string()));
-        // Foreground (streams the build) — no `-N` no-command forward flag.
-        assert!(!args.contains(&"-N".to_string()), "{args:?}");
     }
 
     #[test]
@@ -677,10 +710,8 @@ mod tests {
         // A client with no baked SHA passes empty; the helper then tracks the
         // default branch tip rather than `git checkout`-ing a bogus commit.
         let (_, args) = provider().rebuild_command(&handle(), "");
-        assert!(
-            args.contains(&"--command=sudo /usr/local/bin/lazybox-build.sh ".to_string()),
-            "{args:?}"
-        );
+        let remote = rebuild_remote(&args);
+        assert!(remote.trim_end().ends_with("lazybox-build.sh"), "{remote}");
     }
 
     #[test]

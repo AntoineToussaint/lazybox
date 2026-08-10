@@ -199,6 +199,12 @@ The TUI's `r`-spawn surfaces the same mismatch as an actionable notice
 ("box daemon is built from a different commit — run `lazybox sandbox rebuild`")
 rather than a silent drop.
 
+**Upgrade note (#977):** provisioning now runs the daemon as a dedicated
+`lazybox` user, so `connect`/`r`-spawn default the SSH login to `lazybox`
+whenever `install_lazybox` is on (the default). If you manage a box whose
+daemon runs as a different account, set `sandbox.user` (or `--user`)
+explicitly, or set `install_lazybox: false` to keep gcloud's default user.
+
 [scoping]: remote-daemon-scoping.md
 [systemd]: ../contrib/systemd/README.md
 [lifecycle]: ../contrib/box-lifecycle/README.md

@@ -153,6 +153,25 @@ fn scripts_are_hardened_and_parse() {
         build.contains("lazybox-idle-stop.timer"),
         "build helper must arm the idle-stop timer so an ensured box still sleeps"
     );
+    // A client built from an unpushed commit passes a SHA the box can't fetch;
+    // the checkout must fall back to the default branch so the box still runs a
+    // daemon, not abort with none (the exact failure #977 removes). Assert the
+    // pinned checkout is guarded and the else path builds the default branch.
+    assert!(
+        build.contains("git checkout --detach '$TARGET_SHA'")
+            && build.contains("git checkout main"),
+        "build helper must fall back to the default branch when the pinned SHA is unfetchable"
+    );
+    let checkout = build
+        .find("git checkout --detach")
+        .expect("pinned checkout present");
+    let fallback = build.find("git checkout main").expect("fallback present");
+    assert!(
+        build[..checkout].contains("if ")
+            && checkout < fallback
+            && build[checkout..fallback].contains("else"),
+        "the pinned checkout must be guarded with an else fallback, not run unconditionally"
+    );
 
     // Catch shell syntax errors where bash is available (any dev/CI host).
     if let Ok(bash) = which_bash() {

@@ -1056,8 +1056,10 @@ interface RowEntry {
  * Reconcile `container`'s children against `entries` by key, reusing a
  * node whose stored signature is unchanged instead of rebuilding it.
  * Poll-driven renders then touch only the rows whose data actually
- * changed — the list no longer fully remounts on every event, so scroll
- * position, keyboard focus, and text selection survive an update (#877).
+ * changed — the list no longer fully remounts on every event. Scroll
+ * position always survives (the container itself is never replaced);
+ * keyboard focus and text selection survive on any row left unchanged,
+ * i.e. every row except the one whose data this render rebuilt (#877).
  */
 function reconcileList(container: HTMLElement, entries: RowEntry[]): void {
   const existing = new Map<string, HTMLElement>();
@@ -1096,7 +1098,10 @@ function reconcileList(container: HTMLElement, entries: RowEntry[]): void {
 
 /**
  * Signature of everything `renderWorkspaceRow` draws, so a poll that
- * leaves a row's data untouched reuses the existing node verbatim.
+ * leaves a row's rendered output untouched reuses the existing node
+ * verbatim. This is the reuse-correctness contract: every value the row
+ * renders — and every mutable value its event handlers close over — must
+ * appear here, or a stale node will be served after that value changes.
  */
 function workspaceRowSig(workspace: Workspace): string {
   const task = primaryTask(workspace);
@@ -1107,6 +1112,10 @@ function workspaceRowSig(workspace: Workspace): string {
     reference: taskReference(task),
     role: task?.role ?? null,
     updated,
+    // The rendered relative-time string, not just its raw stamp, so a
+    // render still refreshes "2m ago" → "3m ago" on a row whose data is
+    // otherwise unchanged as wall-clock time advances (#877).
+    age: updated === null ? null : relativeTime(updated),
     title: task?.title ?? workspace.name,
     subtitle: task?.repo ?? workspace.branch,
     signals: rowSignals(task, count),
@@ -1270,6 +1279,9 @@ function renderKindHeader(kind: "Pr" | "Issue" | "Other"): HTMLDivElement {
   return header;
 }
 
+// Any value this row renders, or that its click handler closes over,
+// must be reflected in `workspaceRowSig` — the reconciler reuses an
+// unchanged node by signature and would otherwise serve a stale row.
 function renderWorkspaceRow(workspace: Workspace): HTMLButtonElement {
   const task = primaryTask(workspace);
   const button = document.createElement("button");
@@ -1396,13 +1408,21 @@ function renderWorkspace(): void {
   }
 
   const entries = workspace.activity.slice(0, 30).map(
-    (activity, index): RowEntry => ({
-      key: `act:${activity.node_id ?? index}`,
+    (activity): RowEntry => ({
+      // Key on the GitHub node id when present; otherwise on content, so
+      // a prepended activity doesn't shift index-based keys and remount
+      // every card below it. The `id:` / `c:` prefixes keep a node id
+      // that happens to be numeric from colliding with a content key.
+      key:
+        activity.node_id !== null
+          ? `act:id:${activity.node_id}`
+          : `act:c:${activity.created_at} ${activity.author} ${activity.kind} ${activity.body}`,
       sig: JSON.stringify({
         author: activity.author,
         body: activity.body,
         created_at: activity.created_at,
         kind: activity.kind,
+        age: relativeTime(activity.created_at),
       }),
       build: () => renderActivityCard(activity),
     }),

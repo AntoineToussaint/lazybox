@@ -105,6 +105,76 @@ describe("workspace list render stability (#877)", () => {
     expect(after.get("github-o-r-7")).toBe(before.get("github-o-r-7"));
   });
 
+  it("refreshes a row's relative time as the clock advances", async () => {
+    // A render whose row data is otherwise unchanged must still update
+    // the displayed age — before, the signature keyed on the raw stamp
+    // only, so "30 seconds ago" froze while other rows churned.
+    const stamp = "2026-01-01T00:00:00.000Z";
+    const base = Date.parse(stamp) + 30_000;
+    const clock = vi.spyOn(Date, "now").mockReturnValue(base);
+    try {
+      const pr = prWorkspace();
+      (pr.pr as Record<string, unknown>).updated_at = stamp;
+      await boot([pr, issueWorkspace()]);
+      channel().onmessage(splitView());
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll(".workspace-row").length).toBe(2),
+      );
+
+      const before = rowNodes().get("github-o-r-42");
+      const ageBefore = before?.querySelector("time")?.textContent ?? "";
+      expect(ageBefore).not.toBe("");
+
+      clock.mockReturnValue(base + 5 * 60_000);
+      channel().onmessage(splitView());
+      await vi.waitFor(() =>
+        expect(
+          rowNodes().get("github-o-r-42")?.querySelector("time")?.textContent,
+        ).not.toBe(ageBefore),
+      );
+      // The refresh happens by rebuilding exactly that row.
+      expect(rowNodes().get("github-o-r-42")).not.toBe(before);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("keeps a node-id-less activity card stable across a prepend", async () => {
+    const pr = prWorkspace();
+    pr.activity = [activityEntry("2026-01-01T00:01:00.000Z", "alice", "first")];
+    pr.seen_count = 0;
+    await boot([pr]);
+    channel().onmessage(singleView("github-o-r-42"));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row").length).toBe(1),
+    );
+    rowNodes().get("github-o-r-42")?.click();
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".activity-card").length).toBe(1),
+    );
+    const original = document.querySelector(".activity-card");
+
+    // A newer activity is prepended (newest-first). With an index-based
+    // key the original card below it would remount; a content key keeps
+    // it the same node.
+    const updated = {
+      ...pr,
+      activity: [
+        activityEntry("2026-01-01T00:02:00.000Z", "bob", "second"),
+        ...(pr.activity as Array<Record<string, unknown>>),
+      ],
+    };
+    channel().onmessage({
+      type: "Frame",
+      payload: { WorkspaceUpserted: updated },
+    });
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".activity-card").length).toBe(2),
+    );
+    const cards = [...document.querySelectorAll(".activity-card")];
+    expect(cards[1]).toBe(original);
+  });
+
   it("reuses nodes when only the order changes", async () => {
     await boot([prWorkspace(), issueWorkspace()]);
     channel().onmessage(splitView());
@@ -244,6 +314,39 @@ function splitView(): Record<string, unknown> {
       filter_menu: [],
       filter_chips: [],
     },
+  };
+}
+
+function singleView(key: string): Record<string, unknown> {
+  return {
+    type: "Inbox",
+    payload: {
+      outcome: {
+        visible: [{ RepoHeader: "o/r" }, { Workspace: key }],
+        summaries: { "o/r": { active: 1, attention: 0 } },
+      },
+      sort_mode: "Recent",
+      filter_menu: [],
+      filter_chips: [],
+    },
+  };
+}
+
+function activityEntry(
+  createdAt: string,
+  author: string,
+  body: string,
+): Record<string, unknown> {
+  return {
+    author,
+    body,
+    created_at: createdAt,
+    kind: "Comment",
+    node_id: null,
+    path: null,
+    line: null,
+    diff_hunk: null,
+    thread_id: null,
   };
 }
 

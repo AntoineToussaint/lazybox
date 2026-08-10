@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Startup script for a lazybox GCP sandbox box. Rendered by Terraform
-# (templatefile) with the deployment's packages / repo / bring-up command.
+# (templatefile) with the deployment's packages / repo / bring-up command
+# and the lazybox-daemon install inputs.
 #
 # Idempotent: it may re-run on every boot (GCE re-executes the startup
 # script), so each step guards against a re-run.
@@ -11,6 +12,100 @@ export DEBIAN_FRONTEND=noninteractive
 %{ if length(packages) > 0 ~}
 apt-get update -y
 apt-get install -y ${join(" ", packages)}
+%{ endif ~}
+
+%{ if install_lazybox ~}
+# ── lazybox daemon toolchain (build-parity by construction) ────────────
+# Clone the client's exact commit and build a matching daemon, then hand
+# the heavy work to the repo's box installer under a supervised oneshot
+# unit — the first `cargo build` on a fresh box takes 10+ minutes, and
+# blocking the startup script that long would look like a failed boot.
+LAZYBOX_SRC="/opt/lazybox/src"
+LAZYBOX_SHA="${lazybox_git_sha}"
+LAZYBOX_REPO="${lazybox_repo}"
+
+apt-get update -y
+apt-get install -y git curl ca-certificates xz-utils
+
+%{ if lazybox_repo_token_secret != "" ~}
+# Private repo: pull the clone token from Secret Manager with the box's own
+# service account and hand it to git via GIT_ASKPASS — never in the URL, so
+# it can't leak into process args, the reflog, or the remote config.
+mkdir -p /etc/lazybox
+LAZYBOX_SA_TOKEN="$(curl -sf -H 'Metadata-Flavor: Google' \
+  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+  | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')"
+LAZYBOX_GIT_PASSWORD="$(curl -sf -H "Authorization: Bearer $LAZYBOX_SA_TOKEN" \
+  "https://secretmanager.googleapis.com/v1/projects/-/secrets/${lazybox_repo_token_secret}/versions/latest:access" \
+  | sed -n 's/.*"data":"\([^"]*\)".*/\1/p' | base64 -d)"
+cat > /usr/local/bin/lazybox-git-askpass <<'ASKPASS'
+#!/usr/bin/env bash
+case "$1" in
+  Username*) echo "x-access-token" ;;
+  *)         echo "$LAZYBOX_GIT_PASSWORD" ;;
+esac
+ASKPASS
+chmod 0755 /usr/local/bin/lazybox-git-askpass
+export GIT_ASKPASS=/usr/local/bin/lazybox-git-askpass LAZYBOX_GIT_PASSWORD
+%{ endif ~}
+
+# Normalize owner/repo → an https URL (kept token-free).
+case "$LAZYBOX_REPO" in
+  *://*) LAZYBOX_URL="$LAZYBOX_REPO" ;;
+  *)     LAZYBOX_URL="https://github.com/$LAZYBOX_REPO" ;;
+esac
+
+if [ ! -d "$LAZYBOX_SRC/.git" ]; then
+  mkdir -p "$(dirname "$LAZYBOX_SRC")"
+  git clone "$LAZYBOX_URL" "$LAZYBOX_SRC"
+fi
+if [ -n "$LAZYBOX_SHA" ]; then
+  git -C "$LAZYBOX_SRC" fetch origin "$LAZYBOX_SHA" || git -C "$LAZYBOX_SRC" fetch origin || true
+  # A client commit that was never pushed (a dirty/local build bakes its HEAD
+  # sha regardless) is unreachable here. Do NOT abort — that would strand the
+  # box with no build unit and no daemon; fall back to the cloned default
+  # branch and record the miss so `/etc/lazybox/build-sha` shows the drift.
+  if ! git -C "$LAZYBOX_SRC" checkout --quiet --detach "$LAZYBOX_SHA"; then
+    echo "startup: lazybox_git_sha $LAZYBOX_SHA is unreachable — building the default branch instead; run 'lazybox sandbox rebuild' once the commit is pushed" >&2
+  fi
+fi
+
+# Stable installer path so `lazybox sandbox rebuild` re-runs the same script
+# regardless of the current checkout, and record the build inputs for it.
+install -m0755 "$LAZYBOX_SRC/contrib/box/install.sh" /usr/local/bin/lazybox-box-install.sh
+mkdir -p /etc/lazybox
+cat > /etc/lazybox/box.env <<ENV
+LAZYBOX_SRC=$LAZYBOX_SRC
+LAZYBOX_REPO=$LAZYBOX_URL
+LAZYBOX_GIT_SHA=$LAZYBOX_SHA
+LAZYBOX_USER=${lazybox_user}
+ENV
+
+# A oneshot unit runs the build detached from the startup script, with a
+# generous timeout, then installs + starts the daemon and the idle-stop timer.
+cat > /etc/systemd/system/lazybox-build.service <<'UNIT'
+[Unit]
+Description=Build + install lazybox and bring up its daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/lazybox/box.env
+# The first build on a fresh e2-standard-8 takes 10+ minutes; a generous
+# start timeout keeps systemd from reaping it as a failed boot.
+TimeoutStartSec=3600
+ExecStart=/usr/local/bin/lazybox-box-install.sh
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+# install.sh is a no-op once the recorded SHA matches, so re-running the unit
+# on every boot is cheap after the first build.
+systemctl enable --now lazybox-build.service
 %{ endif ~}
 
 %{ if repo != "" ~}

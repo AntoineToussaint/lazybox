@@ -15,6 +15,13 @@ pub struct SandboxSpec {
     pub region: String,
     pub zone: String,
     pub deployment: Deployment,
+    /// The client's build commit (`lazybox_ipc::BUILD_GIT_SHA`). The box
+    /// clones + builds lazybox at this commit so the daemon's wire
+    /// fingerprint matches this client's — provisioning tracks the caller's
+    /// build instead of leaving parity a manual step. Empty when the client
+    /// was built outside a git checkout (a release tarball); the box then
+    /// builds the repo's default branch.
+    pub lazybox_git_sha: String,
 }
 
 impl SandboxSpec {
@@ -37,6 +44,8 @@ impl SandboxSpec {
             json_var("service_account_roles", &d.service_account_roles),
             json_var("workload_ports", &d.workload_ports),
             json_var("packages", &d.packages),
+            var("install_lazybox", &d.install_lazybox.to_string()),
+            var("lazybox_git_sha", &self.lazybox_git_sha),
         ];
         if let Some(repo) = &d.repo {
             vars.push(var("repo", repo));
@@ -78,6 +87,7 @@ repo: obin-ai/obin-platform
             region: "us-central1".into(),
             zone: "us-central1-a".into(),
             deployment: Deployment::with_overlay(overlay).unwrap(),
+            lazybox_git_sha: "abc123def456".into(),
         }
     }
 
@@ -101,6 +111,32 @@ repo: obin-ai/obin-platform
     }
 
     #[test]
+    fn tf_vars_carry_the_daemon_install_flag_and_client_sha() {
+        // The box builds a daemon at the client's own commit (build parity
+        // by construction) unless the deployment opts out.
+        let vars = spec().tf_vars();
+        assert!(
+            vars.contains(&"install_lazybox=true".to_string()),
+            "{vars:?}"
+        );
+        assert!(
+            vars.contains(&"lazybox_git_sha=abc123def456".to_string()),
+            "{vars:?}"
+        );
+    }
+
+    #[test]
+    fn tf_vars_reflect_an_opt_out_deployment() {
+        let mut spec = spec();
+        spec.deployment = Deployment::with_overlay("name: byo\ninstall_lazybox: false\n").unwrap();
+        let vars = spec.tf_vars();
+        assert!(
+            vars.contains(&"install_lazybox=false".to_string()),
+            "{vars:?}"
+        );
+    }
+
+    #[test]
     fn tf_vars_omit_absent_optional_keys() {
         // The default recipe has no repo/bringup, so no such -var appears
         // (Terraform would reject an unknown/empty value otherwise).
@@ -111,6 +147,7 @@ repo: obin-ai/obin-platform
             region: "r".into(),
             zone: "z".into(),
             deployment: Deployment::default_recipe().unwrap(),
+            lazybox_git_sha: String::new(),
         };
         let vars = spec.tf_vars();
         assert!(!vars.iter().any(|v| v.starts_with("repo=")), "{vars:?}");

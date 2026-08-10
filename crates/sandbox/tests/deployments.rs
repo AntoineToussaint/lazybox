@@ -79,3 +79,93 @@ fn gcp_module_ships_the_files_the_provider_drives() {
     assert!(outputs.contains("output \"instance_name\""));
     assert!(outputs.contains("output \"zone\""));
 }
+
+/// Split the `startup.sh.tftpl` source into (inside-the-install-block,
+/// everything-else). `templatefile` gates the daemon-install block on
+/// `%{ if install_lazybox ~} … %{ endif ~}`, so a render with the flag off
+/// drops exactly that span. We can't render without a terraform binary in
+/// CI, so we assert against the block boundaries directly: the install
+/// markers appear inside the guard and nowhere outside it — proving they
+/// appear/disappear with the flag.
+fn split_install_block(tftpl: &str) -> (String, String) {
+    let start = tftpl
+        .find("%{ if install_lazybox ~}")
+        .expect("startup template guards the install on install_lazybox");
+    // The block nests an `%{ if lazybox_repo_token_secret … }`, so match the
+    // balanced `endif` rather than the first one.
+    let mut depth = 0usize;
+    let mut idx = start;
+    let bytes = tftpl.as_bytes();
+    let end = loop {
+        assert!(idx < tftpl.len(), "install block is never closed");
+        if tftpl[idx..].starts_with("%{ if ") {
+            depth += 1;
+            idx += "%{ if ".len();
+        } else if tftpl[idx..].starts_with("%{ endif ~}") {
+            depth -= 1;
+            if depth == 0 {
+                break idx + "%{ endif ~}".len();
+            }
+            idx += "%{ endif ~}".len();
+        } else {
+            idx += 1;
+            // Stay on a char boundary (the template is ASCII, but be safe).
+            while idx < tftpl.len() && (bytes[idx] & 0xC0) == 0x80 {
+                idx += 1;
+            }
+        }
+    };
+    (
+        tftpl[start..end].to_string(),
+        format!("{}{}", &tftpl[..start], &tftpl[end..]),
+    )
+}
+
+#[test]
+fn startup_template_installs_the_daemon_only_under_the_flag() {
+    let tftpl = std::fs::read_to_string(sandbox_dir().join("gcp/startup.sh.tftpl"))
+        .expect("read startup.sh.tftpl");
+    let (inside, outside) = split_install_block(&tftpl);
+
+    // The whole toolchain-install path lives inside the guarded block, so a
+    // "bring your own stack" box (install_lazybox = false) renders none of it.
+    for marker in [
+        "/opt/lazybox/src",       // the daemon build checkout
+        "${lazybox_git_sha}",     // pinned to the client's commit
+        "lazybox-box-install.sh", // the build+wire installer
+        "lazybox-build.service",  // the detached build unit
+        "systemctl enable --now lazybox-build.service",
+        "TimeoutStartSec=3600", // don't reap the 10-min build
+    ] {
+        assert!(inside.contains(marker), "install block missing {marker:?}");
+        assert!(
+            !outside.contains(marker),
+            "{marker:?} leaks outside the install_lazybox guard — it would run on an opt-out box"
+        );
+    }
+
+    // The private-repo clone must never put the token in the URL.
+    assert!(
+        inside.contains("GIT_ASKPASS"),
+        "private clone should feed the token via GIT_ASKPASS, not the URL"
+    );
+    assert!(
+        !inside.contains("https://x-access-token:"),
+        "the clone URL must stay token-free"
+    );
+
+    // An unreachable client commit (an unpushed local build) must not abort
+    // the startup script under `set -e` — that would strand the box with no
+    // build unit and no daemon. It falls back to the cloned default branch.
+    assert!(
+        inside.contains("is unreachable"),
+        "the SHA checkout must fall back instead of aborting the startup script"
+    );
+
+    // The box runs its daemon as the client's SSH user, baked as lazybox_user,
+    // so the socket home and the rebuild sudo grant share one identity.
+    assert!(
+        inside.contains("LAZYBOX_USER=${lazybox_user}"),
+        "box.env must carry the daemon user so it matches the client's SSH user"
+    );
+}

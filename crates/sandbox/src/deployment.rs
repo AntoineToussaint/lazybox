@@ -45,6 +45,12 @@ pub struct DeploymentConfig {
     /// `tools/local-dev/dev up <profile>`).
     #[serde(default)]
     pub bringup: Option<String>,
+    /// Whether provisioning installs the lazybox toolchain + daemon +
+    /// idle-stop lifecycle on the box. On by default so a plain box is
+    /// reachable by `r`-spawn/`connect` out of the box; a "bring your own
+    /// stack" overlay (obin) sets this `false` to opt out.
+    #[serde(default = "default_true")]
+    pub install_lazybox: bool,
 }
 
 fn default_true() -> bool {
@@ -128,6 +134,19 @@ mod tests {
         assert!(
             d.config.enable_nat,
             "NAT on by default for a no-external-IP box"
+        );
+        assert!(
+            d.config.install_lazybox,
+            "the daemon toolchain installs by default; a BYO overlay opts out"
+        );
+    }
+
+    #[test]
+    fn an_overlay_can_opt_out_of_installing_lazybox() {
+        let d = Deployment::with_overlay("name: byo\ninstall_lazybox: false\n").unwrap();
+        assert!(
+            !d.config.install_lazybox,
+            "a bring-your-own-stack overlay disables the daemon install"
         );
     }
 

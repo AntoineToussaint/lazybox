@@ -1,8 +1,10 @@
-//! `lazybox sandbox <ensure|wake|sleep|status|connect|destroy>` — the
+//! `lazybox sandbox <ensure|wake|sleep|status|connect|rebuild|destroy>` — the
 //! client surface for the remote dev-box lifecycle (#931).
 //!
 //! `ensure`/`destroy` drive the Terraform module; `wake`/`sleep`/`status`/
-//! `connect` use the native `gcloud`/IAP path. A [`BoxHandle`] is persisted
+//! `connect`/`rebuild` use the native `gcloud`/IAP path (`rebuild` re-runs
+//! the box's daemon build at a commit so the wire fingerprint matches this
+//! client — #977). A [`BoxHandle`] is persisted
 //! in the store under the **shared box key** — one `sandbox:` block, one
 //! box, the same identity the TUI's `r`-spawn targets (`remote_box`) — so
 //! `wake`/`sleep`/`connect` address the box `ensure` stamped without
@@ -42,6 +44,12 @@ pub(crate) const SHARED_BOX_KEY: &str = "sandbox";
 /// product path sets nothing.
 pub(crate) const BOX_DAEMON_SOCKET: &str = ".lazybox/run/daemon.sock";
 
+/// The account the provisioned box runs its daemon as, and the default SSH
+/// user the client connects/rebuilds with. `ensure` bakes it as the
+/// `lazybox_user` Terraform var (see `GcpProvider::apply_vars`) so both sides
+/// agree; a non-standard `sandbox.user` overrides it on both ends at once.
+pub(crate) const BOX_DAEMON_USER: &str = "lazybox";
+
 pub async fn sandbox_subcommand(args: &[String]) -> anyhow::Result<()> {
     // `init_tracing` redirects process stderr into the log file before any
     // subcommand runs, so a returned error (terraform/gcloud failures land
@@ -66,10 +74,11 @@ async fn dispatch(args: &[String]) -> anyhow::Result<()> {
         "sleep" | "stop" => sleep(&mut rest).await,
         "status" => status(&mut rest).await,
         "connect" => connect(&mut rest).await,
+        "rebuild" => rebuild(&mut rest).await,
         "destroy" => destroy(&mut rest).await,
         other => anyhow::bail!(
             "unknown `lazybox sandbox` verb {other:?}; usage: lazybox sandbox \
-             <ensure|wake|sleep|status|connect|destroy> [--worktree <key>] [flags]"
+             <ensure|wake|sleep|status|connect|rebuild|destroy> [--worktree <key>] [flags]"
         ),
     }
 }
@@ -216,7 +225,16 @@ pub(crate) fn resolve_provider(
         .map(PathBuf::from)
         .or_else(|| sc.terraform_dir.clone())
         .unwrap_or_else(|| PathBuf::from("terraform/sandbox/gcp"));
-    let user = take_value(args, "--user").or_else(|| sc.user.clone());
+    // Default the SSH user to the box's daemon account. `ensure` bakes this
+    // same value as `lazybox_user`, so the daemon runs as the account we log
+    // in as: the home-relative daemon socket and the `rebuild` sudo grant both
+    // resolve to one identity instead of the gcloud-inferred login user, under
+    // whose home no daemon socket exists.
+    let user = Some(
+        take_value(args, "--user")
+            .or_else(|| sc.user.clone())
+            .unwrap_or_else(|| BOX_DAEMON_USER.to_string()),
+    );
     let remote_socket = take_value(args, "--remote-socket").or_else(|| sc.remote_socket.clone());
     let local_socket = take_value(args, "--local-socket")
         .map(PathBuf::from)
@@ -232,6 +250,34 @@ pub(crate) fn resolve_provider(
         remote_socket: remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
         local_socket,
     })
+}
+
+/// The client's baked build commit — the value the box builds its daemon at
+/// so the two share a wire fingerprint. `LAZYBOX_BUILD_GIT_SHA` is the
+/// unknown-sentinel when the client was built outside a git checkout (a
+/// release tarball); that maps to empty so the box builds the repo's default
+/// branch instead of trying to check out a bogus ref.
+fn client_git_sha() -> String {
+    let sha = lazybox_ipc::BUILD_GIT_SHA;
+    if sha.is_empty() || sha == "unknown" {
+        String::new()
+    } else {
+        sha.to_string()
+    }
+}
+
+/// Resolve the commit the box builds its daemon at: `--lazybox-sha` if given,
+/// else the client's baked commit. The value is later interpolated into a
+/// remote shell command (`gcloud … --command=… <sha>`) and a `git checkout`,
+/// so it is constrained to a git object name (hex) or empty (meaning "the
+/// repo's default branch"); anything else is rejected here with a clear error
+/// rather than reaching the box as an opaque failure or a shell metacharacter.
+fn resolve_lazybox_sha(args: &mut Vec<String>) -> anyhow::Result<String> {
+    let sha = take_value(args, "--lazybox-sha").unwrap_or_else(client_git_sha);
+    if !sha.is_empty() && !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        anyhow::bail!("--lazybox-sha {sha:?} is not a git commit SHA (hex only)");
+    }
+    Ok(sha)
 }
 
 /// Build the full spec for `ensure` from config + flags.
@@ -282,6 +328,7 @@ fn resolve_spec_with_deployment(
         .or_else(|| sc.zone.clone())
         .unwrap_or_else(|| "us-central1-a".to_string());
     let name = instance_name(take_value(args, "--name"), &name_salt(worktree));
+    let lazybox_git_sha = resolve_lazybox_sha(args)?;
     Ok(SandboxSpec {
         provider: "gcp".to_string(),
         name,
@@ -289,6 +336,7 @@ fn resolve_spec_with_deployment(
         region,
         zone,
         deployment,
+        lazybox_git_sha,
     })
 }
 
@@ -523,6 +571,36 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Rebuild the box's daemon at a commit and restart it — the recovery for a
+/// wire-fingerprint mismatch after the client moved to a new commit
+/// (changing a live instance's startup-script metadata does not re-run it,
+/// so parity is restored over SSH). Targets this client's own build commit
+/// by default; `--lazybox-sha <sha>` picks another.
+async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
+    let config = Config::load().unwrap_or_default();
+    let worktree = box_key(args);
+    let sha = resolve_lazybox_sha(args)?;
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
+    let store = open_store()?;
+    let handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+
+    if sha.is_empty() {
+        println!(
+            "Rebuilding {} at its current checkout (this client knows no commit — a release \
+             build)…",
+            handle.id
+        );
+    } else {
+        println!(
+            "Rebuilding {} at {sha} (this can take several minutes)…",
+            handle.id
+        );
+    }
+    provider.rebuild(&handle, &sha).await?;
+    println!("{} rebuilt; daemon restarted.", handle.id);
+    Ok(())
+}
+
 async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
     let worktree = box_key(args);
@@ -691,6 +769,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_provider_defaults_the_ssh_user_to_the_box_daemon_account() {
+        // Unset user must resolve to the daemon account (not the gcloud-
+        // inferred login user, under whose home no daemon socket exists), so
+        // connect/rebuild and the box's `lazybox_user` agree by default.
+        let sc = SandboxConfig::default();
+        let mut args = vec![];
+        let p = resolve_provider(&sc, &mut args, "/wt").unwrap();
+        assert_eq!(p.user.as_deref(), Some(BOX_DAEMON_USER));
+    }
+
+    #[test]
     fn state_file_is_isolated_per_worktree_key() {
         assert_ne!(
             state_file_for("/repos/foo/wt"),
@@ -759,5 +848,27 @@ mod tests {
         assert!(spec.name.starts_with("lazybox-sbx-wt-"), "{}", spec.name);
         // No overlay → the generic default recipe.
         assert_eq!(spec.deployment.config.name, "default");
+    }
+
+    #[test]
+    fn resolve_spec_stamps_the_clients_build_commit_by_default() {
+        // The box builds its daemon at the client's own commit (build parity)
+        // — the spec carries whatever the client baked, overridable for a
+        // rebuild-to-another-commit.
+        let sc = SandboxConfig {
+            project: Some("proj".into()),
+            ..SandboxConfig::default()
+        };
+        let mut args = vec![];
+        let spec = resolve_spec(&sc, &mut args, "/wt").unwrap();
+        assert_eq!(spec.lazybox_git_sha, client_git_sha());
+
+        let mut args = vec!["--lazybox-sha".into(), "feedface99".into()];
+        let spec = resolve_spec(&sc, &mut args, "/wt").unwrap();
+        assert_eq!(spec.lazybox_git_sha, "feedface99");
+
+        // A non-hex sha would reach a remote shell + `git checkout`; reject it.
+        let mut args = vec!["--lazybox-sha".into(), "v1.0; rm -rf /".into()];
+        assert!(resolve_spec(&sc, &mut args, "/wt").is_err());
     }
 }

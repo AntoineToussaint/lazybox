@@ -137,6 +137,19 @@ pub fn setup(sandbox: &SandboxConfig, store: Arc<dyn Store>) -> Option<RemoteBox
     })
 }
 
+/// Whether a bring-up failure's root cause is the wire-fingerprint
+/// handshake rejecting a daemon built from a different commit (#977). The
+/// initial dial (`socket::connect_reconnecting`) surfaces this as an
+/// `io::Error` carrying [`lazybox_ipc::socket::HandshakeError::FingerprintMismatch`]'s message
+/// (string-wrapped, so it can't be downcast) — matched on the stable
+/// "fingerprint mismatch" phrase so the drop becomes an actionable
+/// "run `lazybox sandbox rebuild`" notice instead of a generic failure.
+fn is_fingerprint_mismatch(err: &anyhow::Error) -> bool {
+    format!("{err:#}")
+        .to_ascii_lowercase()
+        .contains("fingerprint mismatch")
+}
+
 /// The workspace a dropped command was going to spawn into, when it was a
 /// spawn — the UI rolls that row's optimistic `⇅` tag back.
 fn spawn_session_key(cmd: &Command) -> Option<SessionKey> {
@@ -395,18 +408,37 @@ async fn run(
                     while let Ok(queued) = cmd_rx.try_recv() {
                         dropped.push(queued);
                     }
-                    tracing::warn!(
-                        "r-spawn box bring-up failed after retries; dropping {} queued command(s): {e:#}",
-                        dropped.len()
-                    );
+                    let session_keys: Vec<SessionKey> =
+                        dropped.iter().filter_map(spawn_session_key).collect();
+                    // A fingerprint mismatch is not a transient failure — the
+                    // box daemon is a different build. Say so and name the fix
+                    // (#977), instead of the generic "bring-up failed" that
+                    // reads as flaky infra and buries the actual remedy.
+                    let error = if is_fingerprint_mismatch(&e) {
+                        tracing::warn!(
+                            "r-spawn box daemon fingerprint mismatch; dropping {} command(s): {e:#}",
+                            dropped.len()
+                        );
+                        format!(
+                            "⇅ {name}: box daemon is built from a different commit — run \
+                             `lazybox sandbox rebuild`, then retry ({} command(s) dropped)",
+                            dropped.len()
+                        )
+                    } else {
+                        tracing::warn!(
+                            "r-spawn box bring-up failed after retries; dropping {} queued command(s): {e:#}",
+                            dropped.len()
+                        );
+                        format!(
+                            "⇅ {name}: box bring-up failed after {MAX_BRINGUP_ATTEMPTS} attempts — {} command(s) dropped ({e:#})",
+                            dropped.len()
+                        )
+                    };
                     notify(
                         &notice_tx,
                         RemoteBoxNotice::Dropped {
-                            session_keys: dropped.iter().filter_map(spawn_session_key).collect(),
-                            error: format!(
-                                "⇅ {name}: box bring-up failed after {MAX_BRINGUP_ATTEMPTS} attempts — {} command(s) dropped ({e:#})",
-                                dropped.len()
-                            ),
+                            session_keys,
+                            error,
                         },
                     );
                 }
@@ -488,6 +520,26 @@ mod tests {
         let mut deduped = ports.clone();
         deduped.dedup();
         assert_eq!(ports, deduped, "no duplicate forwards");
+    }
+
+    #[test]
+    fn is_fingerprint_mismatch_matches_the_real_handshake_error() {
+        // Couple the detector to the ACTUAL ipc error text, wrapped exactly
+        // as the dial surfaces it: the handshake `Display` string wrapped in
+        // an `io::Error`, then in anyhow — so a reworded ipc message breaks
+        // this test rather than silently degrading the notice to a generic
+        // "bring-up failed".
+        let handshake = lazybox_ipc::socket::HandshakeError::FingerprintMismatch {
+            peer: 0x1111_1111,
+            ours: 0x2222_2222,
+        };
+        let io = std::io::Error::other(handshake.to_string());
+        let err = anyhow::Error::new(io).context("forward did not dial the box daemon");
+        assert!(is_fingerprint_mismatch(&err), "{err:#}");
+
+        // A plain transport failure must NOT be classified as a mismatch.
+        let other = anyhow::anyhow!("forward did not bind /tmp/x.sock within 20s");
+        assert!(!is_fingerprint_mismatch(&other));
     }
 
     #[tokio::test]

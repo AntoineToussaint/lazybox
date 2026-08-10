@@ -12,6 +12,12 @@ costs cents a day. Part of epic #885 (see [`docs/byo-remote-runbook.md`][runbook
 - **`connect.sh`** — run *on your laptop*. Starts the box if stopped, waits for
   SSH, then opens the IAP tunnel. The in-lazybox tunnel supervisor that
   replaces this is [#889].
+- **`lazybox-build.sh`** — run *on the box* (as root). Builds the lazybox
+  daemon at a pinned commit, installs the binary + systemd units, records the
+  commit to `/etc/lazybox/build-sha`, and (re)starts the daemon + this idle
+  timer. Provisioning's boot build runs it once (`terraform/sandbox/gcp/`),
+  and `lazybox sandbox rebuild` re-runs it over SSH to re-sync the daemon to
+  the client's commit after a wire-fingerprint mismatch (#977) — no reboot.
 
 ## What counts as idle
 

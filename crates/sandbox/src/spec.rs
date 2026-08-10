@@ -15,6 +15,16 @@ pub struct SandboxSpec {
     pub region: String,
     pub zone: String,
     pub deployment: Deployment,
+    /// Whether provisioning installs the lazybox toolchain + daemon on the
+    /// box (#977) so it runs a wire-compatible daemon on boot. Default
+    /// `true`; a bring-your-own-stack deployment (obin) opts out and
+    /// manages its own daemon.
+    pub install_lazybox: bool,
+    /// The client's own build commit the box's daemon is built from, so
+    /// the wire fingerprint matches by construction. Empty (a release
+    /// tarball with no baked SHA) → the box tracks the default branch tip
+    /// instead of pinning a bogus commit.
+    pub lazybox_git_sha: String,
 }
 
 impl SandboxSpec {
@@ -37,6 +47,11 @@ impl SandboxSpec {
             json_var("service_account_roles", &d.service_account_roles),
             json_var("workload_ports", &d.workload_ports),
             json_var("packages", &d.packages),
+            // Provisioning-time build parity (#977): whether to install the
+            // lazybox daemon, and the exact commit it is built from so the
+            // wire fingerprint matches the client by construction.
+            var("install_lazybox", &self.install_lazybox.to_string()),
+            var("lazybox_git_sha", &self.lazybox_git_sha),
         ];
         if let Some(repo) = &d.repo {
             vars.push(var("repo", repo));
@@ -78,6 +93,8 @@ repo: obin-ai/obin-platform
             region: "us-central1".into(),
             zone: "us-central1-a".into(),
             deployment: Deployment::with_overlay(overlay).unwrap(),
+            install_lazybox: true,
+            lazybox_git_sha: "abc123def456".into(),
         }
     }
 
@@ -111,9 +128,46 @@ repo: obin-ai/obin-platform
             region: "r".into(),
             zone: "z".into(),
             deployment: Deployment::default_recipe().unwrap(),
+            install_lazybox: true,
+            lazybox_git_sha: String::new(),
         };
         let vars = spec.tf_vars();
         assert!(!vars.iter().any(|v| v.starts_with("repo=")), "{vars:?}");
         assert!(!vars.iter().any(|v| v.starts_with("bringup=")), "{vars:?}");
+    }
+
+    #[test]
+    fn tf_vars_carry_the_lazybox_install_flag_and_pinned_sha() {
+        // The provisioning-parity vars (#977): the box needs both the
+        // gate and the exact commit to build a wire-compatible daemon.
+        let vars = spec().tf_vars();
+        assert!(
+            vars.contains(&"install_lazybox=true".to_string()),
+            "{vars:?}"
+        );
+        assert!(
+            vars.contains(&"lazybox_git_sha=abc123def456".to_string()),
+            "{vars:?}"
+        );
+    }
+
+    #[test]
+    fn tf_vars_emit_install_lazybox_false_when_opted_out() {
+        // A bring-your-own-stack deployment turns the daemon install off;
+        // the var must serialize as the literal `false` Terraform parses,
+        // and an empty pinned SHA must still emit (the box falls back to
+        // the default branch) rather than silently dropping the var.
+        let mut spec = spec();
+        spec.install_lazybox = false;
+        spec.lazybox_git_sha = String::new();
+        let vars = spec.tf_vars();
+        assert!(
+            vars.contains(&"install_lazybox=false".to_string()),
+            "{vars:?}"
+        );
+        assert!(
+            vars.contains(&"lazybox_git_sha=".to_string()),
+            "an empty SHA still emits the var: {vars:?}"
+        );
     }
 }

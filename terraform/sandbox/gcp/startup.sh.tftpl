@@ -30,3 +30,63 @@ fi
 cd /opt/lazybox/workload 2>/dev/null || cd /
 ${bringup}
 %{ endif ~}
+
+%{ if install_lazybox ~}
+# ── lazybox daemon: a wire-compatible daemon on boot (#977) ──────────────
+# So an `ensure`d box runs a `lazybox server` reachable at the conventional
+# ~/.lazybox/run/daemon.sock, built from the SAME commit as the client — the
+# wire-fingerprint handshake then passes by construction instead of demanding
+# a manual rebuild. Everything quick (user, apt, a shallow bootstrap clone)
+# runs inline; the heavy build (rustup, pinned zig via `make setup`, a
+# `--release` compile that takes 10+ minutes on first boot) is handed to a
+# SUPERVISED systemd transient unit. That is deliberate: a bare `&` job would
+# be SIGHUP'd (#903), and a 10-minute inline step would make GCE's
+# startup-script runner look wedged. `--no-block` returns at once so boot
+# finishes; the build unit installs the systemd units and enables the daemon
+# + idle-stop timer when it completes.
+LAZYBOX_USER="lazybox"
+LAZYBOX_SRC="/opt/lazybox/src"
+LAZYBOX_REPO_URL="https://github.com/AntoineToussaint/lazybox"
+LAZYBOX_TARGET_SHA="${lazybox_git_sha}"
+
+id -u "$LAZYBOX_USER" >/dev/null 2>&1 \
+  || useradd --create-home --shell /bin/bash "$LAZYBOX_USER"
+
+# Daemon build prerequisites. ghostty's VT links LLVM libc++ (NOT GNU
+# libstdc++), so libc++-dev/libc++abi-dev are required or the link fails
+# with `undefined reference to std::__1::*` (see scripts/bootstrap.sh).
+# apt is a no-op when these are already present, so a reboot re-run is cheap.
+apt-get update -y
+apt-get install -y git curl build-essential pkg-config xz-utils \
+  clang libc++-dev libc++abi-dev ca-certificates
+
+# Bootstrap clone so the build helper exists; the helper itself re-checks
+# out the pinned SHA and rebuilds on every run, so a reboot with a changed
+# metadata SHA self-heals. Owned by the build user — the compile is unprivileged.
+install -d -o "$LAZYBOX_USER" -g "$LAZYBOX_USER" /opt/lazybox
+if [ ! -d "$LAZYBOX_SRC/.git" ]; then
+  sudo -u "$LAZYBOX_USER" git clone "$LAZYBOX_REPO_URL" "$LAZYBOX_SRC"
+fi
+
+install -m0755 "$LAZYBOX_SRC/contrib/box-lifecycle/lazybox-build.sh" \
+  /usr/local/bin/lazybox-build.sh
+install -d -m0755 /etc/lazybox
+# Knobs both the boot build and `lazybox sandbox rebuild` read.
+cat >/etc/lazybox/build.env <<EOF
+LAZYBOX_USER=$LAZYBOX_USER
+LAZYBOX_SRC_DIR=$LAZYBOX_SRC
+LAZYBOX_REPO_URL=$LAZYBOX_REPO_URL
+LAZYBOX_TARGET_SHA=$LAZYBOX_TARGET_SHA
+EOF
+# The idle-stop timer runs as root; point it at the daemon user's liveness
+# file so a client attached over a relay still counts as busy (#913).
+cat >/etc/lazybox/idle-stop.env <<EOF
+LAZYBOX_IDLE_ACTIVE_FILE=/home/$LAZYBOX_USER/.lazybox/run/active
+EOF
+
+systemd-run --unit=lazybox-build --no-block --collect \
+  --property=Type=oneshot \
+  --property=TimeoutStartSec=7200 \
+  --property=EnvironmentFile=/etc/lazybox/build.env \
+  /usr/local/bin/lazybox-build.sh
+%{ endif ~}

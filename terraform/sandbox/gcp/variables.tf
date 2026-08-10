@@ -85,3 +85,25 @@ variable "bringup" {
   default     = ""
   description = "Optional command run after clone to bring the workload up."
 }
+
+variable "install_lazybox" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    Install the lazybox toolchain + daemon on first boot (#977): build the
+    daemon from `lazybox_git_sha`, install the systemd units, and arm the
+    idle-stop timer, so the box runs a wire-compatible daemon unattended.
+    A bring-your-own-stack deployment sets this false to manage its own.
+  EOT
+}
+
+variable "lazybox_git_sha" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Commit the box's lazybox daemon is built from — the client passes its
+    own baked build SHA so the wire fingerprint matches by construction.
+    Empty tracks the default branch tip (a client with no baked SHA, e.g.
+    a release tarball). Only used when install_lazybox is true.
+  EOT
+}

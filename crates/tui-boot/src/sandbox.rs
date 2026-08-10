@@ -1,8 +1,12 @@
-//! `lazybox sandbox <ensure|wake|sleep|status|connect|destroy>` — the
-//! client surface for the remote dev-box lifecycle (#931).
+//! `lazybox sandbox <ensure|wake|sleep|status|connect|rebuild|destroy>` —
+//! the client surface for the remote dev-box lifecycle (#931).
 //!
 //! `ensure`/`destroy` drive the Terraform module; `wake`/`sleep`/`status`/
-//! `connect` use the native `gcloud`/IAP path. A [`BoxHandle`] is persisted
+//! `connect`/`rebuild` use the native `gcloud`/IAP path. `ensure` provisions
+//! a box that builds + runs a wire-compatible lazybox daemon on boot (#977),
+//! and `rebuild` re-syncs that daemon to the client's commit without a reboot.
+//!
+//! A [`BoxHandle`] is persisted
 //! in the store under the **shared box key** — one `sandbox:` block, one
 //! box, the same identity the TUI's `r`-spawn targets (`remote_box`) — so
 //! `wake`/`sleep`/`connect` address the box `ensure` stamped without
@@ -14,6 +18,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use lazybox_config::{Config, SandboxConfig};
 use lazybox_sandbox::gcp::{GcpProvider, SystemRunner};
@@ -43,6 +48,60 @@ pub(crate) const SHARED_BOX_KEY: &str = "sandbox";
 /// product path sets nothing.
 pub(crate) const BOX_DAEMON_SOCKET: &str = ".lazybox/run/daemon.sock";
 
+/// The dedicated login/daemon user provisioning creates when it installs
+/// lazybox (#977). The daemon runs as this account, so its socket lands at
+/// `~lazybox/.lazybox/run/daemon.sock` — the client forwards the relative
+/// [`BOX_DAEMON_SOCKET`] against this user's home, so `connect`/`r`-spawn
+/// hit it with zero socket config as long as they SSH in as this user.
+pub(crate) const BOX_LAZYBOX_USER: &str = "lazybox";
+
+/// Whether `ensure` provisions a box that builds + runs the lazybox daemon
+/// (#977). Config-only (not a flag) so both [`resolve_provider`] and
+/// [`resolve_spec`] can read it off one `sandbox:` block without racing to
+/// consume the same arg. Unset defaults to `true` — the product path wants
+/// a wire-compatible daemon by construction.
+pub(crate) fn install_lazybox_enabled(sc: &SandboxConfig) -> bool {
+    sc.install_lazybox.unwrap_or(true)
+}
+
+/// The client's own build commit — the value baked into this binary and
+/// printed by `lazybox --version`. The box's daemon is built from it so the
+/// wire fingerprint matches by construction. A build outside a git checkout
+/// bakes `"unknown"`; map that to empty so the box tracks the default branch
+/// tip rather than trying to `git checkout unknown`.
+pub(crate) fn client_build_sha() -> String {
+    normalize_build_sha(lazybox_ipc::BUILD_GIT_SHA)
+}
+
+/// Map a baked build SHA to the value passed to Terraform: a real commit
+/// passes through; the `"unknown"` sentinel a non-git build bakes (and an
+/// empty string) become empty, so the box tracks the default branch tip
+/// instead of trying to `git checkout unknown`.
+fn normalize_build_sha(sha: &str) -> String {
+    if sha.is_empty() || sha == "unknown" {
+        String::new()
+    } else {
+        sha.to_string()
+    }
+}
+
+/// A warning when this client is a **dirty** build (uncommitted changes).
+/// [`client_build_sha`] resolves to the clean commit, so the box builds *that*
+/// — meaning uncommitted wire changes (`crates/ipc`/`core`) leave the
+/// fingerprints mismatched right after `ensure`/`rebuild`, and no rebuild can
+/// close the gap (it rebuilds the same clean commit); only committing can.
+/// Stripping `-dirty` silently is how that reads as a baffling "mismatch
+/// immediately after ensure", so say it up front. `None` for a clean build.
+/// Takes the version string so both branches are unit-tested.
+fn dirty_build_warning(build_version: &str) -> Option<String> {
+    build_version.contains("-dirty").then(|| {
+        "warning: this lazybox client is a dirty build (uncommitted changes); the box \
+         builds the clean commit, so any wire changes you haven't committed won't match \
+         — commit them for guaranteed build parity"
+            .to_string()
+    })
+}
+
 pub async fn sandbox_subcommand(args: &[String]) -> anyhow::Result<()> {
     // `init_tracing` redirects process stderr into the log file before any
     // subcommand runs, so a returned error (terraform/gcloud failures land
@@ -67,10 +126,11 @@ async fn dispatch(args: &[String]) -> anyhow::Result<()> {
         "sleep" | "stop" => sleep(&mut rest).await,
         "status" => status(&mut rest).await,
         "connect" => connect(&mut rest).await,
+        "rebuild" => rebuild(&mut rest).await,
         "destroy" => destroy(&mut rest).await,
         other => anyhow::bail!(
             "unknown `lazybox sandbox` verb {other:?}; usage: lazybox sandbox \
-             <ensure|wake|sleep|status|connect|destroy> [--worktree <key>] [flags]"
+             <ensure|wake|sleep|status|connect|rebuild|destroy> [--worktree <key>] [flags]"
         ),
     }
 }
@@ -217,7 +277,15 @@ pub(crate) fn resolve_provider(
         .map(PathBuf::from)
         .or_else(|| sc.terraform_dir.clone())
         .unwrap_or_else(|| PathBuf::from("terraform/sandbox/gcp"));
-    let user = take_value(args, "--user").or_else(|| sc.user.clone());
+    // Default the SSH login to the dedicated `lazybox` user provisioning
+    // creates when it installs the daemon (#977): its socket lives under
+    // that user's home, so `connect`/`r`-spawn must SSH in as it to reach
+    // the conventional daemon socket. An explicit `--user`/`sandbox.user`
+    // wins; a bring-your-own-stack box (install_lazybox=false) keeps
+    // gcloud's default user.
+    let user = take_value(args, "--user")
+        .or_else(|| sc.user.clone())
+        .or_else(|| install_lazybox_enabled(sc).then(|| BOX_LAZYBOX_USER.to_string()));
     let remote_socket = take_value(args, "--remote-socket").or_else(|| sc.remote_socket.clone());
     let local_socket = take_value(args, "--local-socket")
         .map(PathBuf::from)
@@ -291,6 +359,10 @@ fn resolve_spec_with_deployment(
         region,
         zone,
         deployment,
+        // Build parity by construction (#977): install a daemon (unless the
+        // deployment opts out) built from this client's own commit.
+        install_lazybox: install_lazybox_enabled(sc),
+        lazybox_git_sha: client_build_sha(),
     })
 }
 
@@ -361,6 +433,14 @@ async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
     if let Some(parent) = provider.state_file.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("create sandbox state dir {}: {e}", parent.display()))?;
+    }
+    // A dirty client can't get a fingerprint-matching daemon (the box builds
+    // the clean commit); warn before spending minutes on a box that will still
+    // mismatch. Only when we're actually installing the daemon.
+    if spec.install_lazybox
+        && let Some(w) = dirty_build_warning(lazybox_ipc::BUILD_VERSION)
+    {
+        println!("{w}");
     }
     println!("Provisioning box {} (terraform apply)…", spec.name);
     let handle = provider.ensure(&spec).await?;
@@ -522,6 +602,105 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     if !status.success() {
         anyhow::bail!("tunnel `{}` exited with {status}", tunnel.program);
     }
+    Ok(())
+}
+
+/// How long a rebuild waits for a freshly-woken box to accept SSH before
+/// giving up, and how often it re-probes. A `start` acks the GCE API well
+/// before sshd is up, so the rebuild's SSH would fail in that window without
+/// this — the same wake→sshd poll `contrib/box-lifecycle/connect.sh` does.
+const REBUILD_SSH_TIMEOUT: Duration = Duration::from_secs(120);
+const REBUILD_SSH_POLL: Duration = Duration::from_secs(5);
+
+/// Poll `provider.status` until an IAP SSH actually completes (sshd accepting)
+/// or `timeout` elapses. A transient status error (the box still booting)
+/// counts as not-yet-reachable and keeps polling, so only a real timeout
+/// bails. Generic over the provider so the wake→sshd wait is unit-tested
+/// without a live box.
+async fn wait_until_reachable<P: SandboxProvider>(
+    provider: &P,
+    handle: &BoxHandle,
+    timeout: Duration,
+    poll: Duration,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if provider
+            .status(handle)
+            .await
+            .map(|s| s.reachable)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "box {} did not accept SSH within {}s of waking",
+                handle.id,
+                timeout.as_secs()
+            );
+        }
+        tokio::time::sleep(poll).await;
+    }
+}
+
+/// `lazybox sandbox rebuild [--sha <commit>]` — rebuild the box's daemon at
+/// this client's commit and restart it, without a reboot. The recovery path
+/// for a wire-fingerprint mismatch (#977): changing GCE metadata does not
+/// re-run the startup script on a live box, so the parity fix runs the on-box
+/// `lazybox-build.sh` over IAP SSH. Defaults to the client's own baked SHA
+/// (so the daemon matches this binary); `--sha` targets a specific commit.
+async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
+    let config = Config::load().unwrap_or_default();
+    let worktree = box_key(args);
+    // `take_value` consumes the flag, so read it once. No `--sha` means rebuild
+    // to this client's own commit — where a dirty build can't clear a mismatch
+    // caused by uncommitted wire changes (it rebuilds the clean commit), so warn.
+    let explicit_sha = take_value(args, "--sha");
+    if explicit_sha.is_none()
+        && let Some(w) = dirty_build_warning(lazybox_ipc::BUILD_VERSION)
+    {
+        println!("{w}");
+    }
+    let sha = explicit_sha.unwrap_or_else(client_build_sha);
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
+    let store = open_store()?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+
+    // The rebuild runs over SSH, so the box must be awake AND accepting SSH.
+    if !provider.status(&handle).await?.power.is_running() {
+        println!("Waking {} before rebuild…", handle.id);
+        provider.start(&handle).await?;
+        handle.observe(PowerState::Running, chrono::Utc::now());
+        persist::save_handle(store.as_ref(), &worktree, &handle)?;
+        // `start` only acks the GCE API; sshd isn't up yet. Wait for it, or the
+        // rebuild ssh fails in the wake→sshd window.
+        println!("Waiting for {} to accept SSH…", handle.id);
+        wait_until_reachable(&provider, &handle, REBUILD_SSH_TIMEOUT, REBUILD_SSH_POLL).await?;
+    }
+
+    let target = if sha.is_empty() {
+        "the default branch tip".to_string()
+    } else {
+        sha.clone()
+    };
+    println!(
+        "Rebuilding lazybox on {} at {target} (this can take 10+ minutes)…",
+        handle.id
+    );
+    let (program, cmd_args) = provider.rebuild_command(&handle, &sha);
+    // Foreground with inherited stdout/stderr so the build streams; only
+    // stdin is closed (the box build is non-interactive).
+    let status = Command::new(&program)
+        .args(&cmd_args)
+        .stdin(Stdio::null())
+        .status()
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn `{program}`: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("rebuild `{program}` exited with {status}");
+    }
+    println!("{} rebuilt and daemon restarted.", handle.id);
     Ok(())
 }
 
@@ -741,6 +920,80 @@ mod tests {
     }
 
     #[test]
+    fn install_lazybox_defaults_on_and_honors_an_explicit_opt_out() {
+        assert!(
+            install_lazybox_enabled(&SandboxConfig::default()),
+            "the product path installs a daemon by default"
+        );
+        let opt_out = SandboxConfig {
+            install_lazybox: Some(false),
+            ..SandboxConfig::default()
+        };
+        assert!(!install_lazybox_enabled(&opt_out));
+    }
+
+    #[test]
+    fn normalize_build_sha_blanks_the_non_git_sentinel() {
+        assert_eq!(normalize_build_sha("abc123"), "abc123");
+        // A non-git build (release tarball) or an empty value must NOT pin a
+        // bogus commit — the box falls back to the default branch.
+        assert_eq!(normalize_build_sha("unknown"), "");
+        assert_eq!(normalize_build_sha(""), "");
+    }
+
+    #[test]
+    fn resolve_provider_defaults_the_user_to_lazybox_when_installing() {
+        // Installing the daemon → SSH in as the dedicated `lazybox` user so
+        // the home-relative daemon socket resolves.
+        let sc = SandboxConfig::default();
+        let p = resolve_provider(&sc, &mut vec![], "/wt").unwrap();
+        assert_eq!(p.user.as_deref(), Some(BOX_LAZYBOX_USER));
+
+        // A bring-your-own-stack box keeps gcloud's default user…
+        let opt_out = SandboxConfig {
+            install_lazybox: Some(false),
+            ..SandboxConfig::default()
+        };
+        assert_eq!(
+            resolve_provider(&opt_out, &mut vec![], "/wt").unwrap().user,
+            None
+        );
+
+        // …and an explicit user always wins.
+        let explicit = SandboxConfig {
+            user: Some("alice".into()),
+            ..SandboxConfig::default()
+        };
+        assert_eq!(
+            resolve_provider(&explicit, &mut vec![], "/wt")
+                .unwrap()
+                .user
+                .as_deref(),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn resolve_spec_carries_the_install_flag_and_client_sha() {
+        let sc = SandboxConfig {
+            project: Some("proj".into()),
+            ..SandboxConfig::default()
+        };
+        let spec = resolve_spec(&sc, &mut vec![], "/home/me/wt").unwrap();
+        assert!(spec.install_lazybox, "default installs the daemon");
+        // The spec's SHA is exactly the normalized client build SHA.
+        assert_eq!(spec.lazybox_git_sha, client_build_sha());
+
+        let opt_out = SandboxConfig {
+            project: Some("proj".into()),
+            install_lazybox: Some(false),
+            ..SandboxConfig::default()
+        };
+        let spec = resolve_spec(&opt_out, &mut vec![], "/home/me/wt").unwrap();
+        assert!(!spec.install_lazybox);
+    }
+
+    #[test]
     fn resolve_spec_requires_a_project() {
         let sc = SandboxConfig::default();
         let mut args = vec![];
@@ -761,5 +1014,116 @@ mod tests {
         assert!(spec.name.starts_with("lazybox-sbx-wt-"), "{}", spec.name);
         // No overlay → the generic default recipe.
         assert_eq!(spec.deployment.config.name, "default");
+    }
+
+    #[test]
+    fn dirty_build_warning_fires_only_for_a_dirty_client() {
+        // A clean build can build a matching daemon → no warning.
+        assert!(dirty_build_warning("0.1.0+abc123def456").is_none());
+        // A dirty build resolves to the clean commit, so parity can't hold —
+        // the warning must fire and name the remedy.
+        let w = dirty_build_warning("0.1.0+abc123def456-dirty").expect("dirty client warns");
+        assert!(w.contains("parity"), "{w}");
+    }
+
+    /// A scripted [`SandboxProvider`] whose `status` reports the box as
+    /// reachable only from the Nth call onward — so the wake→sshd wait is
+    /// exercised without a live box.
+    struct FakeBox {
+        power: PowerState,
+        reachable_after: usize,
+        calls: std::cell::Cell<usize>,
+    }
+
+    impl SandboxProvider for FakeBox {
+        fn id(&self) -> &str {
+            "fake"
+        }
+        async fn ensure(
+            &self,
+            _s: &SandboxSpec,
+        ) -> Result<BoxHandle, lazybox_sandbox::SandboxError> {
+            unreachable!("wait test never ensures")
+        }
+        async fn start(&self, _h: &BoxHandle) -> Result<(), lazybox_sandbox::SandboxError> {
+            Ok(())
+        }
+        async fn stop(&self, _h: &BoxHandle) -> Result<(), lazybox_sandbox::SandboxError> {
+            Ok(())
+        }
+        async fn status(
+            &self,
+            _h: &BoxHandle,
+        ) -> Result<lazybox_sandbox::BoxStatus, lazybox_sandbox::SandboxError> {
+            let n = self.calls.get() + 1;
+            self.calls.set(n);
+            Ok(lazybox_sandbox::BoxStatus {
+                power: self.power,
+                reachable: n >= self.reachable_after,
+            })
+        }
+        async fn connect(
+            &self,
+            _h: &BoxHandle,
+            _p: &[u16],
+        ) -> Result<lazybox_sandbox::Tunnel, lazybox_sandbox::SandboxError> {
+            unreachable!("wait test never connects")
+        }
+        async fn destroy(&self, _h: &BoxHandle) -> Result<(), lazybox_sandbox::SandboxError> {
+            Ok(())
+        }
+    }
+
+    fn fake_handle() -> BoxHandle {
+        BoxHandle {
+            provider: "fake".into(),
+            id: "lazybox-sbx-test".into(),
+            region: "r".into(),
+            zone: "z".into(),
+            project: "p".into(),
+            power_state: PowerState::Running,
+            last_active: None,
+        }
+    }
+
+    // Tiny real durations (not paused time, which needs tokio's test-util
+    // feature) keep these well under the CI per-test deadline.
+    #[tokio::test]
+    async fn wait_until_reachable_returns_once_sshd_answers() {
+        // Reachable on the 2nd probe: the wait must poll past the first
+        // not-yet-reachable result instead of running the rebuild ssh blind.
+        let fake = FakeBox {
+            power: PowerState::Running,
+            reachable_after: 2,
+            calls: std::cell::Cell::new(0),
+        };
+        wait_until_reachable(
+            &fake,
+            &fake_handle(),
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect("becomes reachable within the window");
+        assert_eq!(fake.calls.get(), 2, "polled until reachable");
+    }
+
+    #[tokio::test]
+    async fn wait_until_reachable_times_out_when_sshd_never_answers() {
+        // A box that never accepts SSH must bail at the deadline, not loop
+        // forever — the caller then reports a clear failure.
+        let fake = FakeBox {
+            power: PowerState::Running,
+            reachable_after: usize::MAX,
+            calls: std::cell::Cell::new(0),
+        };
+        let out = wait_until_reachable(
+            &fake,
+            &fake_handle(),
+            Duration::from_millis(30),
+            Duration::from_millis(2),
+        )
+        .await;
+        assert!(out.is_err(), "an unreachable box must time out");
     }
 }

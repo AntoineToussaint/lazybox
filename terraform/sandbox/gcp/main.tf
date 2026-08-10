@@ -99,9 +99,11 @@ resource "google_compute_instance" "sandbox" {
   }
 
   metadata_startup_script = templatefile("${path.module}/startup.sh.tftpl", {
-    packages = var.packages
-    repo     = var.repo
-    bringup  = var.bringup
+    packages        = var.packages
+    repo            = var.repo
+    bringup         = var.bringup
+    install_lazybox = var.install_lazybox
+    lazybox_git_sha = var.lazybox_git_sha
   })
 
   # A per-worktree box is disposable; let `terraform destroy` (and the idle

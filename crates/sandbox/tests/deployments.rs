@@ -78,4 +78,74 @@ fn gcp_module_ships_the_files_the_provider_drives() {
     let outputs = std::fs::read_to_string(gcp.join("outputs.tf")).expect("read outputs.tf");
     assert!(outputs.contains("output \"instance_name\""));
     assert!(outputs.contains("output \"zone\""));
+
+    // The daemon-install vars (#977) must be declared and threaded into the
+    // startup script, or the client's `-var install_lazybox=…`/`lazybox_git_sha=…`
+    // would be rejected as unknown at apply time.
+    let variables = std::fs::read_to_string(gcp.join("variables.tf")).expect("read variables.tf");
+    assert!(variables.contains("variable \"install_lazybox\""));
+    assert!(variables.contains("variable \"lazybox_git_sha\""));
+    let main = std::fs::read_to_string(gcp.join("main.tf")).expect("read main.tf");
+    assert!(main.contains("install_lazybox = var.install_lazybox"));
+    assert!(main.contains("lazybox_git_sha = var.lazybox_git_sha"));
+}
+
+#[test]
+fn startup_script_installs_the_daemon_behind_the_install_flag() {
+    // The startup template can't be rendered without Terraform (and there's
+    // no live TF in CI), so assert STRUCTURALLY that the whole daemon install
+    // lives inside the `install_lazybox` guard: everything in the guarded
+    // region appears only when the flag is true and vanishes when it's false
+    // — exactly the appear/disappear the acceptance hinges on (#977).
+    let tpl = std::fs::read_to_string(sandbox_dir().join("gcp/startup.sh.tftpl"))
+        .expect("read startup.sh.tftpl");
+
+    let start = tpl
+        .find("%{ if install_lazybox ~}")
+        .expect("startup template must gate the lazybox install on install_lazybox");
+    let after = &tpl[start..];
+    let end = after
+        .find("%{ endif ~}")
+        .expect("the gated block must be closed with endif");
+    let block = &after[..end];
+
+    // The pinned commit + user/build/supervise steps must be INSIDE the guard.
+    assert!(
+        block.contains("${lazybox_git_sha}"),
+        "install must pin the client's commit"
+    );
+    assert!(
+        block.contains("useradd"),
+        "install must provision the dedicated daemon user"
+    );
+    assert!(
+        block.contains("lazybox-build.sh"),
+        "install must run the build helper"
+    );
+    // The heavy build must be handed to a SUPERVISED unit — never a bare `&`
+    // (SIGHUP'd, #903) — with `--no-block` so a 10-minute build doesn't wedge
+    // boot, and a generous timeout so systemd doesn't call it failed.
+    assert!(
+        block.contains("systemd-run"),
+        "build must run under systemd"
+    );
+    assert!(
+        block.contains("--no-block"),
+        "the build must not block boot completion"
+    );
+    assert!(
+        block.contains("TimeoutStartSec"),
+        "the build unit needs a generous timeout for the first ~10min compile"
+    );
+
+    // …and NOT outside the guard, or the opt-out would still install a daemon.
+    let outside = format!("{}{}", &tpl[..start], &after[end..]);
+    assert!(
+        !outside.contains("lazybox-build.sh"),
+        "no unguarded daemon install"
+    );
+    assert!(
+        !outside.contains("${lazybox_git_sha}"),
+        "the pinned SHA is referenced only inside the guard"
+    );
 }

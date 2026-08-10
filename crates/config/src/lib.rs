@@ -268,6 +268,12 @@ pub struct SandboxConfig {
     /// Workload TCP ports the connect forward carries (obin `:3000` …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
+    /// Whether `ensure` provisions a box that builds + runs the lazybox
+    /// daemon on boot (#977). Unset → `true`: the product path wants a
+    /// wire-compatible daemon reachable with no manual build. A
+    /// bring-your-own-stack deployment sets it `false` to manage its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_lazybox: Option<bool>,
 }
 
 impl SandboxConfig {

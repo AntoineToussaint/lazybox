@@ -91,8 +91,9 @@ provider or terminal content. The private build records those events locally
 at `~/.lazybox/v2/desktop-analytics.ndjson`.
 
 Crash diagnostics are always local and contain the build version, platform,
-architecture, and panic location only. The Settings dialog shows their exact
-directory, normally `~/.lazybox/v2/desktop-crashes`.
+architecture, and panic location only. Protected daemon logs use the shared
+`ui.log_path` setting (normally `/tmp/lazybox.log`). The Settings dialog shows
+both exact paths.
 
 See [`../../docs/desktop-spike.md`](../../docs/desktop-spike.md) for the
 lifecycle, protocol, security, and separate-product packaging boundary.

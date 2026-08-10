@@ -1503,15 +1503,52 @@ pub async fn serve_listener(
     options: GatewayOptions,
     listener: TcpListener,
 ) -> Result<(), GatewayError> {
+    serve_listener_inner(config, options, listener, None, Duration::ZERO).await
+}
+
+/// Serve an already-bound gateway until `shutdown` is raised, then allow
+/// active one-shot requests and streams to finish within `drain_timeout`.
+/// Connections still open at the deadline are cancelled and joined.
+pub async fn serve_listener_until(
+    config: ServerConfig,
+    options: GatewayOptions,
+    listener: TcpListener,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+    drain_timeout: Duration,
+) -> Result<(), GatewayError> {
+    serve_listener_inner(config, options, listener, Some(shutdown), drain_timeout).await
+}
+
+async fn serve_listener_inner(
+    config: ServerConfig,
+    options: GatewayOptions,
+    listener: TcpListener,
+    mut shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    drain_timeout: Duration,
+) -> Result<(), GatewayError> {
     ensure_loopback(listener.local_addr()?)?;
     let connection_limit = Arc::new(Semaphore::new(options.max_connections.max(1)));
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let permit = connection_limit
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("API connection semaphore is never closed");
-        let stream = match listener.accept().await {
+        while let Some(result) = connections.try_join_next() {
+            if let Err(error) = result {
+                tracing::warn!("api gateway connection task failed: {error}");
+            }
+        }
+        let permit = tokio::select! {
+            _ = gateway_shutdown_requested(&mut shutdown) => break,
+            permit = connection_limit.clone().acquire_owned() => {
+                permit.expect("API connection semaphore is never closed")
+            }
+        };
+        let accepted = tokio::select! {
+            _ = gateway_shutdown_requested(&mut shutdown) => {
+                drop(permit);
+                break;
+            }
+            accepted = listener.accept() => accepted,
+        };
+        let stream = match accepted {
             Ok((stream, _)) => stream,
             // A transient accept error (e.g. EMFILE under fd pressure)
             // must not tear down the whole listener — log and keep
@@ -1524,12 +1561,37 @@ pub async fn serve_listener(
         };
         let config = config.clone();
         let options = options.clone();
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let _permit = permit;
             if let Err(error) = serve_connection(config, options, stream).await {
                 tracing::warn!("api gateway connection failed: {error}");
             }
         });
+    }
+
+    let drain = async {
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                tracing::warn!("api gateway connection task failed: {error}");
+            }
+        }
+    };
+    if tokio::time::timeout(drain_timeout, drain).await.is_err() {
+        tracing::warn!(
+            ?drain_timeout,
+            "api gateway connections exceeded graceful shutdown bound"
+        );
+    }
+    connections.shutdown().await;
+    Ok(())
+}
+
+async fn gateway_shutdown_requested(shutdown: &mut Option<tokio::sync::watch::Receiver<bool>>) {
+    match shutdown {
+        Some(receiver) => {
+            let _ = receiver.wait_for(|requested| *requested).await;
+        }
+        None => std::future::pending().await,
     }
 }
 

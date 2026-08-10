@@ -344,6 +344,14 @@ fn wants_version(args: &[String]) -> bool {
 async fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
+    if lazybox_server::spawn_handler::hook_helper_probe_requested(&args) {
+        println!(
+            "{}",
+            lazybox_server::spawn_handler::HOOK_HELPER_PROBE_RESPONSE
+        );
+        return Ok(());
+    }
+
     // Resolve --help / --version before init_tracing (which redirects stderr
     // into the log file and opens the daemon path). These short-circuit to
     // clean stdout and exit 0, so they work in a pipe and don't touch state.
@@ -363,7 +371,8 @@ async fn main() -> anyhow::Result<()> {
     // perms) can't abort the hook — tracing is best-effort here.
     if matches!(args.first().map(String::as_str), Some("hook-ingest")) {
         let _ = init_tracing();
-        return hook_ingest_subcommand(&args[1..]).await;
+        lazybox_server::lifecycle::ingest_hook_from_stdio(&args[1..]).await;
+        return Ok(());
     }
 
     init_tracing()?;
@@ -529,40 +538,6 @@ fn terminal_selection_script(bundle_id: &str, terminal_tty: &str) -> Option<Stri
 /// Designed to never disrupt Claude: a missing daemon, a bad payload, or
 /// no correlation flag all resolve to a silent no-op (exit 0). A hook
 /// command that errored or hung would stall Claude's turn.
-async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
-    let mut args = args.to_vec();
-    let (backend_key, terminal_id) = parse_hook_correlation(&mut args);
-    if backend_key.is_none() && terminal_id.is_none() {
-        // Nothing to correlate by. Drain stdin so Claude's write
-        // doesn't block on a full pipe, then exit cleanly.
-        let _ = read_stdin_to_string();
-        return Ok(());
-    }
-
-    let payload = read_stdin_to_string();
-    let Some(hook) = lazybox_agents::hook::parse_claude_hook(&payload) else {
-        return Ok(());
-    };
-
-    let command = lazybox_ipc::Command::IngestHook {
-        terminal_id: lazybox_ipc::TerminalId(terminal_id.unwrap_or_default()),
-        hook,
-        backend_key,
-    };
-
-    // Best-effort forward. Connect, handshake, write one framed
-    // command, done — no reply expected. A connect/write error means no
-    // daemon is listening (e.g. hooks fired against a session whose
-    // daemon already exited); that's a no-op, not a failure. A
-    // handshake error means a version-skewed daemon — logged (never
-    // surfaced to Claude, whose turn would stall on a non-zero exit)
-    // so the operator can see why agent state stopped updating.
-    if let Err(error) = socket::send_command(&lifecycle::socket_path(), &command).await {
-        tracing::warn!("hook-ingest IPC send failed: {error}");
-    }
-    Ok(())
-}
-
 /// Pull `hook-ingest`'s correlation flags out of `args`, ignoring every
 /// option it doesn't recognize.
 ///
@@ -580,18 +555,6 @@ async fn hook_ingest_subcommand(args: &[String]) -> anyhow::Result<()> {
 /// settings carry, ingest must degrade to "state signal missed", not fail.
 /// So it keeps what it knows and walks past the rest. Do not tighten this
 /// into a strict parser.
-fn parse_hook_correlation(args: &mut Vec<String>) -> (Option<String>, Option<u64>) {
-    let backend_key = take_value(args, "--backend-key")
-        .or_else(|| {
-            take_value(args, "--backend-key-file")
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|s| s.trim().to_string())
-        })
-        .filter(|k| !k.is_empty());
-    let terminal_id = take_value(args, "--terminal").and_then(|s| s.parse::<u64>().ok());
-    (backend_key, terminal_id)
-}
-
 /// `lazybox workspace <verb>` — the agent-facing surface over the running
 /// daemon. Lets a spawned agent (or a script) drive lazybox itself, not just
 /// the repo. Today the only verb is `create`.
@@ -803,15 +766,6 @@ async fn resolve_project_key(
             lazybox_core::ProjectKey::local(&lazybox_core::slug::slugify(&dir))
         });
     Some(key)
-}
-
-/// Read all of stdin into a string (best-effort; an IO error yields what
-/// was read so far, or an empty string).
-fn read_stdin_to_string() -> String {
-    use std::io::Read;
-    let mut buf = String::new();
-    let _ = std::io::stdin().read_to_string(&mut buf);
-    buf
 }
 
 /// `--key value` and `--key=value` parser. Removes both the flag and
@@ -2164,22 +2118,22 @@ mod argv_tests {
         // hook must keep parsing what it knows and drop the rest — a strict
         // parser that rejected the unknown flag would exit non-zero and
         // surface a red "Stop hook error" in the agent (#848).
-        let mut a = args(&[
+        let a = args(&[
             "--backend-key",
             "lzb-sess-7",
             "--some-future-flag",
             "whatever",
             "--another-unknown",
         ]);
-        let (key, terminal) = parse_hook_correlation(&mut a);
+        let (key, terminal) = lazybox_server::lifecycle::parse_hook_correlation(&a);
         assert_eq!(key.as_deref(), Some("lzb-sess-7"));
         assert_eq!(terminal, None);
     }
 
     #[test]
     fn hook_correlation_ignores_empty_backend_key() {
-        let mut a = args(&["--backend-key", ""]);
-        let (key, terminal) = parse_hook_correlation(&mut a);
+        let a = args(&["--backend-key", ""]);
+        let (key, terminal) = lazybox_server::lifecycle::parse_hook_correlation(&a);
         assert_eq!(key, None);
         assert_eq!(terminal, None);
     }

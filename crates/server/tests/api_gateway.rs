@@ -2571,3 +2571,52 @@ async fn inject_route_times_out_when_the_terminal_lock_is_held() {
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     writer.abort();
 }
+
+#[tokio::test]
+async fn gateway_shutdown_is_bounded_by_the_connection_drain_timeout() {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind gateway");
+    let address = listener.local_addr().expect("gateway address");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(api_gateway::serve_listener_until(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        listener,
+        shutdown_rx,
+        std::time::Duration::from_millis(30),
+    ));
+    let _held_connection = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect without sending a request");
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+    shutdown_tx.send(true).expect("signal shutdown");
+    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("gateway shutdown must stay bounded")
+        .expect("gateway task")
+        .expect("gateway result");
+}
+
+#[tokio::test]
+async fn idle_gateway_shutdown_finishes_without_waiting_for_the_bound() {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind gateway");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(api_gateway::serve_listener_until(
+        ServerConfig::in_memory(),
+        GatewayOptions::default(),
+        listener,
+        shutdown_rx,
+        std::time::Duration::from_secs(30),
+    ));
+
+    shutdown_tx.send(true).expect("signal shutdown");
+    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("idle gateway stops immediately")
+        .expect("gateway task")
+        .expect("gateway result");
+}

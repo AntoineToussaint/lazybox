@@ -226,6 +226,7 @@ async function boot(
         default_agent: "codex",
         analytics_enabled: false,
         diagnostics_path: "/tmp/lazybox-crashes",
+        log_path: "/tmp/lazybox.log",
         theme: null,
         themes: [],
         keymap_preset: null,

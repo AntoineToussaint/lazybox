@@ -32,6 +32,7 @@ import {
   workspaceDiffTarget,
 } from "./model";
 import {
+  type Activity,
   type ComputeOutcome,
   type DesktopInfo,
   type DesktopRepository,
@@ -1045,8 +1046,75 @@ function renderFilterMenuBody(): void {
   }
 }
 
+interface RowEntry {
+  key: string;
+  sig: string;
+  build: () => HTMLElement;
+}
+
+/**
+ * Reconcile `container`'s children against `entries` by key, reusing a
+ * node whose stored signature is unchanged instead of rebuilding it.
+ * Poll-driven renders then touch only the rows whose data actually
+ * changed — the list no longer fully remounts on every event, so scroll
+ * position, keyboard focus, and text selection survive an update (#877).
+ */
+function reconcileList(container: HTMLElement, entries: RowEntry[]): void {
+  const existing = new Map<string, HTMLElement>();
+  for (const child of Array.from(container.children)) {
+    const key = (child as HTMLElement).dataset.rowKey;
+    if (key !== undefined) {
+      existing.set(key, child as HTMLElement);
+    }
+  }
+  const desired: HTMLElement[] = [];
+  const keep = new Set<HTMLElement>();
+  for (const entry of entries) {
+    const prev = existing.get(entry.key);
+    let node: HTMLElement;
+    if (prev !== undefined && prev.dataset.rowSig === entry.sig) {
+      node = prev;
+    } else {
+      node = entry.build();
+      node.dataset.rowKey = entry.key;
+      node.dataset.rowSig = entry.sig;
+    }
+    keep.add(node);
+    desired.push(node);
+  }
+  for (const child of Array.from(container.children)) {
+    if (!keep.has(child as HTMLElement)) {
+      child.remove();
+    }
+  }
+  desired.forEach((node, index) => {
+    if (container.children[index] !== node) {
+      container.insertBefore(node, container.children[index] ?? null);
+    }
+  });
+}
+
+/**
+ * Signature of everything `renderWorkspaceRow` draws, so a poll that
+ * leaves a row's data untouched reuses the existing node verbatim.
+ */
+function workspaceRowSig(workspace: Workspace): string {
+  const task = primaryTask(workspace);
+  const count = unreadCount(workspace);
+  const updated = task === null ? null : task.updated_at;
+  return JSON.stringify({
+    selected: workspace.key === selectedKey,
+    reference: taskReference(task),
+    role: task?.role ?? null,
+    updated,
+    title: task?.title ?? workspace.name,
+    subtitle: task?.repo ?? workspace.branch,
+    signals: rowSignals(task, count),
+    state: task?.state ?? null,
+  });
+}
+
 function renderInbox(): void {
-  workspaceList.replaceChildren();
   workspaceList.setAttribute("aria-busy", String(inboxLoading));
   sortLabel.textContent = sortModeLabel(sortMode);
   mailboxLabelElement.textContent = mailboxLabel(mailbox);
@@ -1093,20 +1161,43 @@ function renderInbox(): void {
   // walk it top-to-bottom, drawing repo headers, PR/Issue/Other section
   // headers, and workspace rows. Collapse only hides already-grouped
   // rows; it never reorders.
+  const entries: RowEntry[] = [];
   let collapsed = false;
+  let group = "";
   for (const row of rows) {
     if (row === "FocusedHeader") {
       // The synthetic `★ Focused` section leads the list, above every
       // repo group, and never collapses (it holds starred workspaces
       // lifted out of their repos).
       collapsed = false;
-      workspaceList.append(renderFocusedHeader());
+      group = "focused";
+      entries.push({
+        key: "focused-header",
+        sig: "focused",
+        build: renderFocusedHeader,
+      });
     } else if ("RepoHeader" in row) {
-      collapsed = collapsedRepos.has(row.RepoHeader);
-      workspaceList.append(renderRepoHeader(row.RepoHeader));
+      const repo = row.RepoHeader;
+      collapsed = collapsedRepos.has(repo);
+      group = `repo:${repo}`;
+      const summary = inboxView?.summaries[repo];
+      entries.push({
+        key: group,
+        sig: JSON.stringify({
+          collapsed,
+          active: summary?.active ?? 0,
+          attention: summary?.attention ?? 0,
+        }),
+        build: () => renderRepoHeader(repo),
+      });
     } else if ("KindHeader" in row) {
       if (!collapsed) {
-        workspaceList.append(renderKindHeader(row.KindHeader));
+        const kind = row.KindHeader;
+        entries.push({
+          key: `kind:${group}:${kind}`,
+          sig: kind,
+          build: () => renderKindHeader(kind),
+        });
       }
     } else if ("Workspace" in row) {
       if (collapsed) {
@@ -1117,11 +1208,16 @@ function renderInbox(): void {
       // recomputed a frame ahead of the WorkspaceUpserted echo). Skip
       // it; the next view refresh fills it in.
       if (workspace !== undefined) {
-        workspaceList.append(renderWorkspaceRow(workspace));
+        entries.push({
+          key: `ws:${workspace.key}`,
+          sig: workspaceRowSig(workspace),
+          build: () => renderWorkspaceRow(workspace),
+        });
       }
     }
     // `Session` sub-rows are represented by their workspace row for now.
   }
+  reconcileList(workspaceList, entries);
 }
 
 function renderRepoHeader(repo: string): HTMLDivElement {
@@ -1290,35 +1386,48 @@ function renderWorkspace(): void {
       : "Open shell";
   shellButton.disabled = pendingLaunches.has(launchKey(workspace.key, "shell"));
 
-  activityList.replaceChildren();
   activityCount.textContent = String(workspace.activity.length);
   if (workspace.activity.length === 0) {
     const empty = document.createElement("p");
     empty.className = "activity-empty";
     empty.textContent = "No activity yet.";
-    activityList.append(empty);
+    activityList.replaceChildren(empty);
     return;
   }
 
-  for (const activity of workspace.activity.slice(0, 30)) {
-    const card = document.createElement("article");
-    card.className = "activity-card";
-    card.setAttribute(
-      "aria-label",
-      `${activity.kind} by ${activity.author}, ${relativeTime(activity.created_at)}`,
-    );
-    const heading = document.createElement("div");
-    const author = document.createElement("strong");
-    author.textContent = activity.author;
-    const time = document.createElement("time");
-    time.dateTime = activity.created_at;
-    time.textContent = relativeTime(activity.created_at);
-    heading.append(author, time);
-    const body = document.createElement("p");
-    body.textContent = activity.body;
-    card.append(heading, body);
-    activityList.append(card);
-  }
+  const entries = workspace.activity.slice(0, 30).map(
+    (activity, index): RowEntry => ({
+      key: `act:${activity.node_id ?? index}`,
+      sig: JSON.stringify({
+        author: activity.author,
+        body: activity.body,
+        created_at: activity.created_at,
+        kind: activity.kind,
+      }),
+      build: () => renderActivityCard(activity),
+    }),
+  );
+  reconcileList(activityList, entries);
+}
+
+function renderActivityCard(activity: Activity): HTMLElement {
+  const card = document.createElement("article");
+  card.className = "activity-card";
+  card.setAttribute(
+    "aria-label",
+    `${activity.kind} by ${activity.author}, ${relativeTime(activity.created_at)}`,
+  );
+  const heading = document.createElement("div");
+  const author = document.createElement("strong");
+  author.textContent = activity.author;
+  const time = document.createElement("time");
+  time.dateTime = activity.created_at;
+  time.textContent = relativeTime(activity.created_at);
+  heading.append(author, time);
+  const body = document.createElement("p");
+  body.textContent = activity.body;
+  card.append(heading, body);
+  return card;
 }
 
 function policyKey(workspaceKey: string, field: string): string {
@@ -1430,7 +1539,7 @@ function renderInboxMessage(message: string, error = false): void {
   if (error) {
     empty.role = "alert";
   }
-  workspaceList.append(empty);
+  workspaceList.replaceChildren(empty);
 }
 
 /**

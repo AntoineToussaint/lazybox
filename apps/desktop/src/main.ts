@@ -158,6 +158,7 @@ interface DesktopSetupState {
   default_agent: string;
   analytics_enabled: boolean;
   diagnostics_path: string;
+  log_path: string;
   theme: string | null;
   themes: DesktopThemeOption[];
   keymap_preset: string | null;
@@ -3275,6 +3276,7 @@ async function openSettings(): Promise<void> {
       default_agent: defaultAgent,
       analytics_enabled: false,
       diagnostics_path: "~/.lazybox/v2/desktop-crashes",
+      log_path: "/tmp/lazybox.log",
       theme: null,
       themes: PREVIEW_THEMES,
       keymap_preset: null,
@@ -3324,7 +3326,7 @@ function applySetupState(state: DesktopSetupState): void {
   keymapPresetLabel.textContent = `Keymap: ${state.keymap_preset ?? "default"}`;
 
   analyticsEnabled.checked = state.analytics_enabled;
-  diagnosticsPath.textContent = `Crash reports: ${state.diagnostics_path}`;
+  diagnosticsPath.textContent = `Logs: ${state.log_path} · Crash reports: ${state.diagnostics_path}`;
   renderRepositories();
   const remote = authorityMode === "remote";
   settingsAuthority.textContent = remote

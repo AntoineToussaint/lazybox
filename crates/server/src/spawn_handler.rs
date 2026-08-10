@@ -316,7 +316,21 @@ fn hook_exe() -> Option<PathBuf> {
     if stable.is_file() {
         return Some(stable);
     }
-    std::env::current_exe().ok().filter(|p| p.is_file())
+    #[cfg(test)]
+    {
+        std::env::current_exe().ok().filter(|p| p.is_file())
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
+pub const HOOK_HELPER_PROBE_ARG: &str = "--lazybox-hook-helper-probe";
+pub const HOOK_HELPER_PROBE_RESPONSE: &str = "lazybox-hook-helper-v1";
+
+pub fn hook_helper_probe_requested(args: &[String]) -> bool {
+    args.len() == 1 && args[0] == HOOK_HELPER_PROBE_ARG
 }
 
 /// Copy the running binary to the stable `<home>/bin/lazybox` so agent
@@ -330,9 +344,52 @@ fn hook_exe() -> Option<PathBuf> {
 /// `LAZYBOX_HOME` — a per-spawn copy there raced dozens of test processes on
 /// one `~/.lazybox/bin/lazybox`. Doing it at boot keeps the hot path a pure
 /// `hook_exe` read and leaves tests (which never boot a daemon) untouched.
-pub fn ensure_stable_hook_exe() {
-    if let Ok(current) = std::env::current_exe() {
-        let _ = stabilize_exe(&current, &lazybox_core::paths::stable_exe_path());
+pub fn ensure_stable_hook_exe() -> Option<PathBuf> {
+    let current = std::env::current_exe().ok()?;
+    ensure_stable_hook_exe_from(&current, &lazybox_core::paths::stable_exe_path())
+}
+
+fn ensure_stable_hook_exe_from(current: &Path, stable: &Path) -> Option<PathBuf> {
+    if !is_hook_capable_exe(current) {
+        tracing::error!(
+            executable = %current.display(),
+            "refusing to install a hook helper that cannot ingest lifecycle hooks"
+        );
+        return None;
+    }
+    stabilize_exe(current, stable)
+}
+
+fn is_hook_capable_exe(candidate: &Path) -> bool {
+    let Ok(mut child) = std::process::Command::new(candidate)
+        .arg(HOOK_HELPER_PROBE_ARG)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let Ok(output) = child.wait_with_output() else {
+                    return false;
+                };
+                return status.success()
+                    && String::from_utf8_lossy(&output.stdout).trim()
+                        == HOOK_HELPER_PROBE_RESPONSE;
+            }
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
 }
 
@@ -13324,6 +13381,39 @@ mod tests {
         let got = stabilize_exe(&stable, &stable).expect("no-op returns the path");
         assert_eq!(got, stable);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_hook_exe_rejects_a_gui_only_executable() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let gui = directory.path().join("lazybox-desktop");
+        let stable = directory.path().join("bin/lazybox");
+        write_fake_exe(&gui, "#!/bin/sh\nexit 0\n");
+
+        assert_eq!(ensure_stable_hook_exe_from(&gui, &stable), None);
+        assert!(!stable.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_hook_exe_accepts_a_probed_cli_helper() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let cli = directory.path().join("lazybox");
+        let stable = directory.path().join("bin/lazybox");
+        write_fake_exe(
+            &cli,
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = \"{}\" ] && echo {}\n",
+                HOOK_HELPER_PROBE_ARG, HOOK_HELPER_PROBE_RESPONSE
+            ),
+        );
+
+        assert_eq!(
+            ensure_stable_hook_exe_from(&cli, &stable),
+            Some(stable.clone())
+        );
+        assert!(stable.is_file());
     }
 
     /// The injected hook command pins the *running* binary by absolute

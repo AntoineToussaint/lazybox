@@ -16,6 +16,8 @@ use lazybox_server::api_gateway::{
     TERMINAL_BINARY_CONTENT_TYPE, UnsupportedProtocolResponse, WorkspacesResponse, desktop_event,
 };
 use lazybox_server::client_runtime::{ClientRuntime, ClientRuntimeOptions};
+use lazybox_server::lifecycle::{self, ServerStatus};
+use lazybox_server::socket_service::SocketService;
 use lazybox_tui_core::inbox::{
     self, ComputeInputs, Filter, FilterSet, Mailbox, SearchState, SortMode, mailbox_membership,
 };
@@ -29,13 +31,14 @@ use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::ipc::{Channel, InvokeBody, Request};
 use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 
 enum TerminalStreamItem {
     Reset,
@@ -300,6 +303,7 @@ struct GatewayClient {
     base_url: String,
     bearer_token: String,
     client: Client,
+    stream_client: Client,
 }
 
 struct DesktopState {
@@ -315,8 +319,13 @@ struct DesktopState {
     terminal_rx: Mutex<mpsc::Receiver<TerminalStreamItem>>,
     terminal_tx: mpsc::Sender<TerminalStreamItem>,
     streams_started: AtomicBool,
+    stream_shutdown: watch::Sender<bool>,
+    stream_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     client_runtime: Mutex<Option<ClientRuntime>>,
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    gateway_shutdown: Mutex<Option<watch::Sender<bool>>>,
+    socket_task: Mutex<Option<tokio::task::JoinHandle<Result<(), String>>>>,
+    socket_shutdown: Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// A tolerated protocol-skew advisory captured at startup (#815): set
     /// when the daemon speaks a compatible protocol version but a different
     /// build fingerprint. Surfaced to the UI through `desktop_info`.
@@ -327,7 +336,7 @@ struct DesktopState {
     inbox: Arc<Mutex<InboxModel>>,
     /// The live webview channel, stored so `set_sort_mode` can push a
     /// recomputed inbox view on the same channel the event stream uses.
-    event_channel: Arc<Mutex<Option<Channel<DesktopStreamMessage>>>>,
+    event_channel: Arc<RwLock<Option<Channel<DesktopStreamMessage>>>>,
     /// State-of-record for the snippet picker (#734): the catalog plus the
     /// daemon-owned MRU, reduced from the control stream. The frontend
     /// pulls a recomputed view per keystroke via `snippet_view`.
@@ -418,6 +427,7 @@ struct DesktopSetupState {
     default_agent: String,
     analytics_enabled: bool,
     diagnostics_path: String,
+    log_path: String,
     /// Active desktop theme name, or `None` for the default theme.
     theme: Option<String>,
     /// The built-in theme catalog (name + palette) the client renders
@@ -517,6 +527,7 @@ fn desktop_setup_state_from_config(config: &lazybox_config::Config) -> DesktopSe
         default_agent: effective_default_agent(config),
         analytics_enabled: config.desktop.analytics_enabled,
         diagnostics_path: diagnostics_dir().display().to_string(),
+        log_path: desktop_log_path().display().to_string(),
         theme: config.desktop.theme.clone(),
         themes: theme_options(),
         keymap_preset: config.ui.keymap_preset.clone(),
@@ -549,6 +560,7 @@ fn desktop_setup_state_for_remote(
         default_agent: default_agent.to_string(),
         analytics_enabled: config.desktop.analytics_enabled,
         diagnostics_path: diagnostics_dir().display().to_string(),
+        log_path: desktop_log_path().display().to_string(),
         theme: config.desktop.theme.clone(),
         themes: theme_options(),
         keymap_preset: settings.keymap_preset.clone(),
@@ -819,9 +831,10 @@ async fn set_sort_mode(state: State<'_, DesktopState>) -> Result<(), String> {
         inbox.cycle_sort_mode();
         inbox.compute()
     };
-    if let Some(channel) = state.event_channel.lock().await.as_ref() {
-        let _ = channel.send(DesktopStreamMessage::Inbox(Box::new(view)));
-    }
+    send_webview_event(
+        &state.event_channel,
+        DesktopStreamMessage::Inbox(Box::new(view)),
+    );
     Ok(())
 }
 
@@ -835,9 +848,10 @@ async fn set_mailbox(state: State<'_, DesktopState>) -> Result<(), String> {
         inbox.cycle_mailbox();
         inbox.compute()
     };
-    if let Some(channel) = state.event_channel.lock().await.as_ref() {
-        let _ = channel.send(DesktopStreamMessage::Inbox(Box::new(view)));
-    }
+    send_webview_event(
+        &state.event_channel,
+        DesktopStreamMessage::Inbox(Box::new(view)),
+    );
     Ok(())
 }
 
@@ -862,9 +876,10 @@ async fn set_filters(state: State<'_, DesktopState>, filters: Vec<Filter>) -> Re
         inbox.set_filters(filters);
         inbox.compute()
     };
-    if let Some(channel) = state.event_channel.lock().await.as_ref() {
-        let _ = channel.send(DesktopStreamMessage::Inbox(Box::new(view)));
-    }
+    send_webview_event(
+        &state.event_channel,
+        DesktopStreamMessage::Inbox(Box::new(view)),
+    );
     Ok(())
 }
 
@@ -877,15 +892,21 @@ async fn set_search(state: State<'_, DesktopState>, query: String) -> Result<(),
         inbox.set_search(query);
         inbox.compute()
     };
-    if let Some(channel) = state.event_channel.lock().await.as_ref() {
-        let _ = channel.send(DesktopStreamMessage::Inbox(Box::new(view)));
-    }
+    send_webview_event(
+        &state.event_channel,
+        DesktopStreamMessage::Inbox(Box::new(view)),
+    );
     Ok(())
 }
 
 async fn list_gateway_workspaces(gateway: &GatewayClient) -> Result<WorkspacesResponse, String> {
     let response = gateway
-        .authorized(gateway.client.get(gateway.url("/v1/workspaces")))
+        .authorized(
+            gateway
+                .client
+                .get(gateway.url("/v1/workspaces"))
+                .timeout(Duration::from_secs(30)),
+        )
         .send()
         .await
         .map_err(|error| format!("list workspaces: {error}"))?;
@@ -898,21 +919,18 @@ async fn send_command(
     command: DesktopCommand,
 ) -> Result<(), String> {
     let events = send_gateway_command(&state.gateway, command).await?;
-    let channel = state.event_channel.lock().await.clone();
-    if let Some(channel) = channel.as_ref() {
-        for event in events {
-            if !forward_desktop_event(
-                event,
-                EventSource::Response,
-                channel,
-                &state.inbox,
-                &state.snippets,
-                &state.event_handoff,
-            )
-            .await
-            {
-                break;
-            }
+    for event in events {
+        if !forward_desktop_event(
+            event,
+            EventSource::Response,
+            &state.event_channel,
+            &state.inbox,
+            &state.snippets,
+            &state.event_handoff,
+        )
+        .await
+        {
+            break;
         }
     }
     Ok(())
@@ -1004,12 +1022,14 @@ async fn read_terminal_data(
 }
 
 #[tauri::command]
-fn subscribe_events(
+async fn subscribe_events(
     state: State<'_, DesktopState>,
     on_event: Channel<DesktopStreamMessage>,
 ) -> Result<(), String> {
-    if state.streams_started.swap(true, Ordering::AcqRel) {
-        return Err("desktop streams are already subscribed".to_string());
+    let start_streams =
+        replace_event_subscription(&state.streams_started, &state.event_channel, on_event);
+    if !start_streams {
+        return Ok(());
     }
 
     let control_gateway = state.gateway.clone();
@@ -1017,28 +1037,102 @@ fn subscribe_events(
     let event_channel = state.event_channel.clone();
     let snippets = state.snippets.clone();
     let event_handoff = state.event_handoff.clone();
-    tauri::async_runtime::spawn(async move {
-        *event_channel.lock().await = Some(on_event.clone());
-        stream_control_events(control_gateway, on_event, inbox, snippets, event_handoff).await;
+    let control_shutdown = state.stream_shutdown.subscribe();
+    let control_task = tokio::spawn(async move {
+        stream_control_events(
+            control_gateway,
+            event_channel,
+            inbox,
+            snippets,
+            event_handoff,
+            control_shutdown,
+        )
+        .await;
     });
 
     let terminal_gateway = state.gateway.clone();
     let terminal_command_rx = state.terminal_command_rx.clone();
     let terminal_tx = state.terminal_tx.clone();
-    tauri::async_runtime::spawn(async move {
-        stream_terminal_events(terminal_gateway, terminal_command_rx, terminal_tx).await;
+    let terminal_shutdown = state.stream_shutdown.subscribe();
+    let terminal_task = tokio::spawn(async move {
+        stream_terminal_events(
+            terminal_gateway,
+            terminal_command_rx,
+            terminal_tx,
+            terminal_shutdown,
+        )
+        .await;
     });
+    state
+        .stream_tasks
+        .lock()
+        .await
+        .extend([control_task, terminal_task]);
     Ok(())
+}
+
+fn replace_event_subscription(
+    streams_started: &AtomicBool,
+    event_channel: &RwLock<Option<Channel<DesktopStreamMessage>>>,
+    on_event: Channel<DesktopStreamMessage>,
+) -> bool {
+    *event_channel
+        .write()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(on_event);
+    !streams_started.swap(true, Ordering::AcqRel)
+}
+
+fn send_webview_event(
+    event_channel: &RwLock<Option<Channel<DesktopStreamMessage>>>,
+    message: DesktopStreamMessage,
+) -> bool {
+    event_channel
+        .read()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .as_ref()
+        .is_some_and(|channel| channel.send(message).is_ok())
 }
 
 impl DesktopState {
     async fn shutdown(&self) {
-        if let Some(task) = self.gateway_task.lock().await.take() {
-            task.abort();
-            let _ = task.await;
+        let _ = self.stream_shutdown.send(true);
+        let stream_tasks = std::mem::take(&mut *self.stream_tasks.lock().await);
+        for mut task in stream_tasks {
+            if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+                let _ = task.await;
+            }
         }
         if let Some(runtime) = self.client_runtime.lock().await.take() {
             runtime.shutdown().await;
+        }
+        if let Some(shutdown) = self.socket_shutdown.lock().await.take() {
+            shutdown.notify_one();
+        }
+        if let Some(shutdown) = self.gateway_shutdown.lock().await.take() {
+            let _ = shutdown.send(true);
+        }
+        let service_bound = lazybox_server::MUTATION_DRAIN_TIMEOUT + Duration::from_secs(2);
+        if let Some(mut task) = self.gateway_task.lock().await.take()
+            && tokio::time::timeout(service_bound, &mut task)
+                .await
+                .is_err()
+        {
+            tracing::warn!("desktop gateway exceeded shutdown bound; aborting");
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(mut task) = self.socket_task.lock().await.take()
+            && tokio::time::timeout(service_bound, &mut task)
+                .await
+                .is_err()
+        {
+            tracing::warn!("desktop socket service exceeded shutdown bound; aborting");
+            task.abort();
+            let _ = task.await;
         }
     }
 }
@@ -1095,29 +1189,41 @@ fn format_unsupported_protocol(response: &UnsupportedProtocolResponse) -> String
 
 async fn stream_control_events(
     gateway: GatewayClient,
-    on_event: Channel<DesktopStreamMessage>,
+    event_channel: Arc<RwLock<Option<Channel<DesktopStreamMessage>>>>,
     inbox: Arc<Mutex<InboxModel>>,
     snippets: Arc<Mutex<SnippetModel>>,
     event_handoff: Arc<Mutex<EventHandoff>>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
-        match stream_control_events_once(&gateway, &on_event, &inbox, &snippets, &event_handoff)
-            .await
-        {
+        let result = tokio::select! {
+            _ = shutdown.wait_for(|requested| *requested) => return,
+            result = stream_control_events_once(&gateway, &event_channel, &inbox, &snippets, &event_handoff) => result,
+        };
+        match result {
             Ok(()) => {
-                let _ = on_event.send(DesktopStreamMessage::Disconnected {
-                    message: "gateway control stream ended".to_string(),
-                });
+                send_webview_event(
+                    &event_channel,
+                    DesktopStreamMessage::Disconnected {
+                        message: "gateway control stream ended".to_string(),
+                    },
+                );
             }
             Err(ControlStreamError::Transient(error)) => {
-                let _ = on_event.send(DesktopStreamMessage::Disconnected { message: error });
+                send_webview_event(
+                    &event_channel,
+                    DesktopStreamMessage::Disconnected { message: error },
+                );
             }
             Err(ControlStreamError::Incompatible(message)) => {
-                let _ = on_event.send(DesktopStreamMessage::Incompatible { message });
+                send_webview_event(&event_channel, DesktopStreamMessage::Incompatible { message });
                 return;
             }
         }
-        tokio::time::sleep(Duration::from_millis(750)).await;
+        tokio::select! {
+            _ = shutdown.wait_for(|requested| *requested) => return,
+            _ = tokio::time::sleep(Duration::from_millis(750)) => {}
+        }
     }
 }
 
@@ -1128,13 +1234,13 @@ enum ControlStreamError {
 
 async fn stream_control_events_once(
     gateway: &GatewayClient,
-    on_event: &Channel<DesktopStreamMessage>,
+    event_channel: &RwLock<Option<Channel<DesktopStreamMessage>>>,
     inbox: &Mutex<InboxModel>,
     snippets: &Mutex<SnippetModel>,
     event_handoff: &Mutex<EventHandoff>,
 ) -> Result<(), ControlStreamError> {
     let mut response = gateway
-        .authorized(gateway.client.get(gateway.url("/v1/events")))
+        .authorized(gateway.stream_client.get(gateway.url("/v1/events")))
         .send()
         .await
         .map_err(|error| {
@@ -1159,10 +1265,10 @@ async fn stream_control_events_once(
             response.status()
         )));
     }
-    let _ = on_event.send(DesktopStreamMessage::Connected);
+    send_webview_event(event_channel, DesktopStreamMessage::Connected);
     // Emit the current grouped view immediately (seeded from
     // `list_workspaces`), before the daemon's own `Snapshot` arrives.
-    emit_inbox_view(inbox, on_event).await;
+    emit_inbox_view(inbox, event_channel).await;
 
     let mut decoder = NdjsonDecoder::default();
     while let Some(chunk) = response
@@ -1175,18 +1281,20 @@ async fn stream_control_events_once(
             .map_err(ControlStreamError::Transient)?
         {
             let DesktopEventFrame::Event(event) = frame;
-            if !forward_desktop_event(
+            // Best-effort delivery: a failed send means the webview is between
+            // subscriptions (reload/HMR), not that the daemon stream is done —
+            // keep folding events into the model so the next resubscribe sees
+            // current state. `forward_desktop_event` routes through the shared
+            // `event_channel`, so a swapped-in channel receives live events.
+            let _ = forward_desktop_event(
                 event,
                 EventSource::Live,
-                on_event,
+                event_channel,
                 inbox,
                 snippets,
                 event_handoff,
             )
-            .await
-            {
-                return Ok(());
-            }
+            .await;
         }
     }
     decoder.finish().map_err(ControlStreamError::Transient)
@@ -1195,7 +1303,7 @@ async fn stream_control_events_once(
 async fn forward_desktop_event(
     event: DesktopEvent,
     source: EventSource,
-    on_event: &Channel<DesktopStreamMessage>,
+    event_channel: &RwLock<Option<Channel<DesktopStreamMessage>>>,
     inbox: &Mutex<InboxModel>,
     snippets: &Mutex<SnippetModel>,
     event_handoff: &Mutex<EventHandoff>,
@@ -1213,40 +1321,53 @@ async fn forward_desktop_event(
         _ => {}
     }
     let recompute = inbox.lock().await.apply_event(&event);
-    if on_event
-        .send(DesktopStreamMessage::Frame(Box::new(event)))
-        .is_err()
-    {
-        return false;
-    }
+    // Route through the shared `event_channel` (not a captured `Channel`) so a
+    // resubscribe's swapped-in channel receives live events. A failed send
+    // means no live webview; the model still updated, so report it without
+    // treating it as fatal.
+    let delivered = send_webview_event(event_channel, DesktopStreamMessage::Frame(Box::new(event)));
     if recompute {
-        emit_inbox_view(inbox, on_event).await;
+        emit_inbox_view(inbox, event_channel).await;
     }
-    true
+    delivered
 }
 
 /// Compute the grouped inbox view from the current model and push it to
 /// the webview. A failed send means the webview reader is gone; callers
 /// treat that as a benign disconnect.
-async fn emit_inbox_view(inbox: &Mutex<InboxModel>, on_event: &Channel<DesktopStreamMessage>) {
+async fn emit_inbox_view(
+    inbox: &Mutex<InboxModel>,
+    event_channel: &RwLock<Option<Channel<DesktopStreamMessage>>>,
+) {
     let view = inbox.lock().await.compute();
-    let _ = on_event.send(DesktopStreamMessage::Inbox(Box::new(view)));
+    send_webview_event(event_channel, DesktopStreamMessage::Inbox(Box::new(view)));
 }
 
 async fn stream_terminal_events(
     gateway: GatewayClient,
     command_rx: Arc<Mutex<mpsc::Receiver<Bytes>>>,
     terminal_tx: mpsc::Sender<TerminalStreamItem>,
+    mut shutdown: watch::Receiver<bool>,
 ) {
     let mut reconnect = false;
     loop {
-        if let Err(error) =
-            stream_terminal_events_once(&gateway, command_rx.clone(), &terminal_tx, reconnect).await
-        {
-            eprintln!("desktop terminal stream disconnected: {error}");
+        let result = tokio::select! {
+            _ = shutdown.wait_for(|requested| *requested) => return,
+            result = stream_terminal_events_once(
+                &gateway,
+                command_rx.clone(),
+                &terminal_tx,
+                reconnect,
+            ) => result,
+        };
+        if let Err(error) = result {
+            tracing::warn!("desktop terminal stream disconnected: {error}");
         }
         reconnect = true;
-        tokio::time::sleep(Duration::from_millis(750)).await;
+        tokio::select! {
+            _ = shutdown.wait_for(|requested| *requested) => return,
+            _ = tokio::time::sleep(Duration::from_millis(750)) => {}
+        }
     }
 }
 
@@ -1282,7 +1403,7 @@ async fn stream_terminal_events_once(
     let mut response = gateway
         .authorized(
             gateway
-                .client
+                .stream_client
                 .post(gateway.url("/v1/terminal"))
                 .header(reqwest::header::CONTENT_TYPE, TERMINAL_BINARY_CONTENT_TYPE)
                 .body(body),
@@ -1517,6 +1638,54 @@ fn diagnostics_dir() -> std::path::PathBuf {
     lazybox_core::paths::state_root().join("desktop-crashes")
 }
 
+fn desktop_log_path() -> std::path::PathBuf {
+    lazybox_config::Config::load()
+        .map(|config| config.ui.resolved().log_path)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp/lazybox.log"))
+}
+
+fn open_private_log(path: &Path) -> io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(file)
+}
+
+fn init_desktop_tracing() -> Result<std::path::PathBuf, String> {
+    use tracing_subscriber::prelude::*;
+
+    let path = desktop_log_path();
+    let file = open_private_log(&path)
+        .map_err(|error| format!("open protected desktop log {}: {error}", path.display()))?;
+    lazybox_tui_core::platform::redirect_stderr_to_file(&file);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "lazybox=info,lazybox_gh=info,lazybox_server=info".into());
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .with_filter(filter),
+        )
+        .try_init()
+        .map_err(|error| format!("initialize desktop tracing: {error}"))?;
+    tracing::info!(log_path = %path.display(), "desktop tracing initialized");
+    Ok(path)
+}
+
 fn analytics_path() -> std::path::PathBuf {
     lazybox_core::paths::state_root().join("desktop-analytics.ndjson")
 }
@@ -1621,6 +1790,33 @@ const DESKTOP_GATEWAY_URL_ENV: &str = "LAZYBOX_DESKTOP_GATEWAY_URL";
 /// Env var carrying that gateway's bearer token; wins over
 /// `desktop.remote.token`.
 const DESKTOP_GATEWAY_TOKEN_ENV: &str = "LAZYBOX_DESKTOP_GATEWAY_TOKEN";
+const GATEWAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const GATEWAY_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const GATEWAY_TCP_KEEPALIVE: Duration = Duration::from_secs(30);
+const GATEWAY_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn gateway_client(base_url: String, bearer_token: String) -> Result<GatewayClient, String> {
+    let base = Client::builder()
+        .connect_timeout(GATEWAY_CONNECT_TIMEOUT)
+        .pool_idle_timeout(GATEWAY_POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(GATEWAY_TCP_KEEPALIVE);
+    let client = base
+        .build()
+        .map_err(|error| format!("build gateway HTTP client: {error}"))?;
+    let stream_client = Client::builder()
+        .connect_timeout(GATEWAY_CONNECT_TIMEOUT)
+        .read_timeout(GATEWAY_STREAM_IDLE_TIMEOUT)
+        .pool_idle_timeout(GATEWAY_POOL_IDLE_TIMEOUT)
+        .tcp_keepalive(GATEWAY_TCP_KEEPALIVE)
+        .build()
+        .map_err(|error| format!("build gateway stream client: {error}"))?;
+    Ok(GatewayClient {
+        base_url,
+        bearer_token,
+        client,
+        stream_client,
+    })
+}
 
 /// The effective gateway the desktop should attach to, resolved from env
 /// vars layered over `desktop.remote:` config. `None` means the default
@@ -1664,37 +1860,45 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
     let user_config = lazybox_config::Config::load()
         .map_err(|error| format!("load lazybox configuration: {error}"))?;
 
-    let remote = resolve_remote_gateway(
+    let (gateway, authority, mut local) = match resolve_remote_gateway(
         user_config.desktop.remote.as_ref(),
         std::env::var(DESKTOP_GATEWAY_URL_ENV).ok(),
         std::env::var(DESKTOP_GATEWAY_TOKEN_ENV).ok(),
-    );
-    let authority = if remote.is_some() {
-        DesktopAuthority::Remote
-    } else {
-        DesktopAuthority::Embedded
-    };
-    let (gateway, client_runtime, gateway_task) = match remote {
+    ) {
         Some(remote) => {
-            eprintln!(
+            tracing::info!(
                 "lazybox desktop attaching to existing gateway at {}",
                 remote.base_url
             );
-            let gateway = GatewayClient {
-                base_url: remote.base_url,
-                bearer_token: remote.bearer_token,
-                client: Client::new(),
-            };
-            (gateway, None, None)
+            (
+                gateway_client(remote.base_url, remote.bearer_token)?,
+                DesktopAuthority::Remote,
+                None,
+            )
         }
-        None => start_local_gateway(&user_config).await?,
+        None => {
+            let services = start_local_gateway(&user_config).await?;
+            (
+                services.gateway.clone(),
+                DesktopAuthority::Embedded,
+                Some(services),
+            )
+        }
     };
 
     // Validate the protocol and read the daemon's spawn menu (agents,
     // default, repositories) from the gateway itself, so an attached
     // desktop offers what the *daemon* runs rather than the local config —
     // which, over a remote link, describes the laptop, not the box.
-    let info = establish_gateway_session(&gateway).await?;
+    let info = match establish_gateway_session(&gateway).await {
+        Ok(info) => info,
+        Err(error) => {
+            if let Some(services) = local.take() {
+                services.shutdown().await;
+            }
+            return Err(error);
+        }
+    };
     let DesktopInfo {
         providers,
         agents,
@@ -1705,13 +1909,15 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         ..
     } = info;
     if let Some(notice) = &protocol_notice {
-        eprintln!("lazybox desktop: {notice}");
+        tracing::warn!("lazybox desktop: {notice}");
     }
     let (terminal_commands, terminal_command_rx) = mpsc::channel(256);
     let (terminal_tx, terminal_rx) = mpsc::channel(32);
     let inbox = InboxModel::new(attention_config(&settings.attention));
     let snippets = SnippetModel::new(load_snippet_catalog());
 
+    let (stream_shutdown, _) = watch::channel(false);
+    let local = local.unwrap_or_else(LocalServices::remote);
     Ok(DesktopState {
         gateway,
         authority,
@@ -1725,11 +1931,16 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         terminal_rx: Mutex::new(terminal_rx),
         terminal_tx,
         streams_started: AtomicBool::new(false),
+        stream_shutdown,
+        stream_tasks: Mutex::new(Vec::new()),
         protocol_notice,
-        client_runtime: Mutex::new(client_runtime),
-        gateway_task: Mutex::new(gateway_task),
+        client_runtime: Mutex::new(local.client_runtime),
+        gateway_task: Mutex::new(local.gateway_task),
+        gateway_shutdown: Mutex::new(local.gateway_shutdown),
+        socket_task: Mutex::new(local.socket_task),
+        socket_shutdown: Mutex::new(local.socket_shutdown),
         inbox: Arc::new(Mutex::new(inbox)),
-        event_channel: Arc::new(Mutex::new(None)),
+        event_channel: Arc::new(RwLock::new(None)),
         snippets: Arc::new(Mutex::new(snippets)),
         event_handoff: Arc::new(Mutex::new(EventHandoff::default())),
     })
@@ -1759,22 +1970,103 @@ fn attention_config(settings: &DesktopAttentionSettings) -> lazybox_config::Atte
     }
 }
 
+struct LocalServices {
+    gateway: GatewayClient,
+    client_runtime: Option<ClientRuntime>,
+    gateway_task: Option<tokio::task::JoinHandle<()>>,
+    gateway_shutdown: Option<watch::Sender<bool>>,
+    socket_task: Option<tokio::task::JoinHandle<Result<(), String>>>,
+    socket_shutdown: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl LocalServices {
+    fn remote() -> Self {
+        Self {
+            gateway: gateway_client(String::new(), String::new())
+                .expect("static HTTP client configuration is valid"),
+            client_runtime: None,
+            gateway_task: None,
+            gateway_shutdown: None,
+            socket_task: None,
+            socket_shutdown: None,
+        }
+    }
+
+    async fn shutdown(mut self) {
+        if let Some(runtime) = self.client_runtime.take() {
+            runtime.shutdown().await;
+        }
+        if let Some(shutdown) = self.gateway_shutdown.take() {
+            let _ = shutdown.send(true);
+        }
+        if let Some(shutdown) = self.socket_shutdown.take() {
+            shutdown.notify_one();
+        }
+        let bound = lazybox_server::MUTATION_DRAIN_TIMEOUT + Duration::from_secs(2);
+        if let Some(mut task) = self.gateway_task.take()
+            && tokio::time::timeout(bound, &mut task).await.is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Some(mut task) = self.socket_task.take()
+            && tokio::time::timeout(bound, &mut task).await.is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
 /// Spawn the in-process daemon and its loopback API gateway, returning a
 /// client pointed at the ephemeral address plus the handles the caller
 /// must own for shutdown. Used unless the desktop is configured to attach
 /// to an existing gateway.
 async fn start_local_gateway(
     user_config: &lazybox_config::Config,
-) -> Result<
-    (
-        GatewayClient,
-        Option<ClientRuntime>,
-        Option<tokio::task::JoinHandle<()>>,
-    ),
-    String,
-> {
+) -> Result<LocalServices, String> {
+    lazybox_server::spawn_handler::ensure_stable_hook_exe().ok_or_else(|| {
+        "desktop executable cannot provide the lifecycle hook helper; see the desktop log"
+            .to_string()
+    })?;
+    if let ServerStatus::Running { pid } = lifecycle::status() {
+        return Err(format!(
+            "lazybox daemon is already owned by process {pid}; stop it before starting the embedded desktop daemon"
+        ));
+    }
     let config = ServerConfig::from_user_config()
         .map_err(|error| format!("start lazybox daemon: {error}"))?;
+    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+        .await
+        .map_err(|error| format!("bind embedded API gateway: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("read embedded API address: {error}"))?;
+    let bearer_token = uuid::Uuid::new_v4().simple().to_string();
+    let socket_service = SocketService::new(lifecycle::socket_path(), lifecycle::pid_path(), {
+        let config = config.clone();
+        move || config.clone()
+    });
+    let socket_shutdown = socket_service.shutdown_handle();
+    let socket_task = tokio::spawn(async move {
+        socket_service
+            .run()
+            .await
+            .map_err(|error| error.to_string())
+    });
+    if let Err(error) = wait_for_socket_owner(&socket_task).await {
+        socket_shutdown.notify_one();
+        if !socket_task.is_finished() {
+            socket_task.abort();
+        }
+        let detail = socket_task
+            .await
+            .ok()
+            .and_then(Result::err)
+            .unwrap_or(error);
+        return Err(format!("bind embedded daemon socket: {detail}"));
+    }
+
     let client_runtime = ClientRuntime::start(
         config.clone(),
         ClientRuntimeOptions {
@@ -1784,33 +2076,54 @@ async fn start_local_gateway(
         },
     )
     .await;
-
-    let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-        .await
-        .map_err(|error| format!("bind embedded API gateway: {error}"))?;
-    let address = listener
-        .local_addr()
-        .map_err(|error| format!("read embedded API address: {error}"))?;
-    let bearer_token = uuid::Uuid::new_v4().simple().to_string();
     let options = GatewayOptions {
         bind_addr: address,
         bearer_token: Some(bearer_token.clone()),
         ..GatewayOptions::default()
     };
+    let (gateway_shutdown, gateway_shutdown_rx) = watch::channel(false);
     let gateway_task = tokio::spawn(async move {
-        if let Err(error) =
-            lazybox_server::api_gateway::serve_listener(config, options, listener).await
+        if let Err(error) = lazybox_server::api_gateway::serve_listener_until(
+            config,
+            options,
+            listener,
+            gateway_shutdown_rx,
+            lazybox_server::MUTATION_DRAIN_TIMEOUT + Duration::from_secs(1),
+        )
+        .await
         {
-            eprintln!("lazybox desktop embedded API gateway stopped: {error}");
+            tracing::error!("lazybox desktop embedded API gateway stopped: {error}");
         }
     });
 
-    let gateway = GatewayClient {
-        base_url: format!("http://{address}"),
-        bearer_token,
-        client: Client::new(),
-    };
-    Ok((gateway, Some(client_runtime), Some(gateway_task)))
+    Ok(LocalServices {
+        gateway: gateway_client(format!("http://{address}"), bearer_token)?,
+        client_runtime: Some(client_runtime),
+        gateway_task: Some(gateway_task),
+        gateway_shutdown: Some(gateway_shutdown),
+        socket_task: Some(socket_task),
+        socket_shutdown: Some(socket_shutdown),
+    })
+}
+
+async fn wait_for_socket_owner(
+    task: &tokio::task::JoinHandle<Result<(), String>>,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if lifecycle::read_pid(&lifecycle::pid_path()).ok().flatten() == Some(std::process::id())
+            && lifecycle::socket_path().exists()
+        {
+            return Ok(());
+        }
+        if task.is_finished() {
+            return Err("socket service exited before becoming ready".to_string());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("socket service did not become ready within 2 seconds".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// How many times the startup handshake retries a gateway that isn't
@@ -1879,7 +2192,12 @@ where
 
 async fn gateway_session_once(gateway: &GatewayClient) -> Result<DesktopInfo, GatewaySessionError> {
     let protocol_response = gateway
-        .authorized(gateway.client.get(gateway.url("/v1/protocol")))
+        .authorized(
+            gateway
+                .client
+                .get(gateway.url("/v1/protocol"))
+                .timeout(GATEWAY_CONNECT_TIMEOUT),
+        )
         .send()
         .await
         .map_err(|error| {
@@ -1895,7 +2213,12 @@ async fn gateway_session_once(gateway: &GatewayClient) -> Result<DesktopInfo, Ga
     let protocol_notice = validate_protocol(&protocol).map_err(GatewaySessionError::Fatal)?;
 
     let info_response = gateway
-        .authorized(gateway.client.get(gateway.url("/v1/info")))
+        .authorized(
+            gateway
+                .client
+                .get(gateway.url("/v1/info"))
+                .timeout(GATEWAY_CONNECT_TIMEOUT),
+        )
         .send()
         .await
         .map_err(|error| GatewaySessionError::Transient(format!("read daemon info: {error}")))?;
@@ -1952,23 +2275,63 @@ fn validate_protocol(protocol: &ProtocolResponse) -> Result<Option<String>, Stri
 }
 
 fn main() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if lazybox_server::spawn_handler::hook_helper_probe_requested(&args) {
+        println!(
+            "{}",
+            lazybox_server::spawn_handler::HOOK_HELPER_PROBE_RESPONSE
+        );
+        return;
+    }
     install_crash_diagnostics();
+    let tracing_error = init_desktop_tracing().err();
+    if matches!(args.first().map(String::as_str), Some("hook-ingest")) {
+        tauri::async_runtime::block_on(lifecycle::ingest_hook_from_stdio(&args[1..]));
+        return;
+    }
     import_login_shell_path();
-    let state = match tauri::async_runtime::block_on(start_desktop_state()) {
-        Ok(state) => state,
-        Err(error) => {
-            eprintln!("lazybox desktop failed to start: {error}");
-            std::process::exit(1);
-        }
-    };
     let app = tauri::Builder::default()
-        .setup(|app| {
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_dialog::init())
+        .setup(move |app| {
+            if let Some(error) = &tracing_error {
+                app.dialog()
+                    .message(format!(
+                        "Lazybox could not initialize its protected log at {}.\n\n{error}",
+                        desktop_log_path().display()
+                    ))
+                    .title("Lazybox failed to start")
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+                return Err(std::io::Error::other(error.clone()).into());
+            }
+            let state = match tauri::async_runtime::block_on(start_desktop_state()) {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::error!("lazybox desktop failed to start: {error}");
+                    app.dialog()
+                        .message(format!(
+                            "{error}\n\nDetails were written to {}.",
+                            desktop_log_path().display()
+                        ))
+                        .title("Lazybox failed to start")
+                        .kind(MessageDialogKind::Error)
+                        .blocking_show();
+                    return Err(std::io::Error::other(error).into());
+                }
+            };
+            app.manage(state);
             if let Some(window) = app.get_webview_window("main") {
                 window.set_focus()?;
             }
             Ok(())
         })
-        .manage(state)
         .invoke_handler(tauri::generate_handler![
             desktop_info,
             desktop_setup_state,
@@ -1984,16 +2347,20 @@ fn main() {
             set_filters,
             set_search,
             snippet_view,
-            set_filters,
-            set_search,
             open_url,
             send_command,
             send_terminal_frame,
             read_terminal_data,
             subscribe_events
         ])
-        .build(tauri::generate_context!())
-        .expect("build lazybox desktop");
+        .build(tauri::generate_context!());
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            tracing::error!("build lazybox desktop: {error}");
+            return;
+        }
+    };
     app.run(|handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
             tauri::async_runtime::block_on(handle.state::<DesktopState>().shutdown());
@@ -2036,11 +2403,70 @@ mod tests {
     }
 
     #[test]
+    fn resubscribe_replaces_the_channel_without_starting_duplicate_streams() {
+        let streams_started = AtomicBool::new(false);
+        let event_channel = RwLock::new(None);
+        let first_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first = {
+            let hits = first_hits.clone();
+            Channel::new(move |_| {
+                hits.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+        };
+        let second = {
+            let hits = second_hits.clone();
+            Channel::new(move |_| {
+                hits.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            })
+        };
+
+        assert!(replace_event_subscription(
+            &streams_started,
+            &event_channel,
+            first
+        ));
+        assert!(!replace_event_subscription(
+            &streams_started,
+            &event_channel,
+            second
+        ));
+        assert!(send_webview_event(
+            &event_channel,
+            DesktopStreamMessage::Connected
+        ));
+        assert_eq!(first_hits.load(Ordering::Relaxed), 0);
+        assert_eq!(second_hits.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_log_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("desktop.log");
+        let _file = open_private_log(&path).expect("open log");
+
+        assert_eq!(
+            std::fs::metadata(path)
+                .expect("log metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn gateway_client_keeps_the_token_out_of_its_url() {
         let gateway = GatewayClient {
             base_url: "http://127.0.0.1:1234".to_string(),
             bearer_token: "secret".to_string(),
             client: Client::new(),
+            stream_client: Client::new(),
         };
         assert_eq!(
             gateway.url("/v1/terminal"),
@@ -2703,6 +3129,7 @@ mod tests {
             base_url: format!("http://{address}"),
             bearer_token: String::new(),
             client: Client::new(),
+            stream_client: Client::new(),
         };
         let (tx, rx) = mpsc::channel::<Bytes>(8);
         let command_rx = Arc::new(Mutex::new(rx));
@@ -2811,6 +3238,7 @@ mod tests {
             base_url: format!("http://{address}"),
             bearer_token: "dogfood-token".to_string(),
             client: Client::new(),
+            stream_client: Client::new(),
         };
 
         let listed = list_gateway_workspaces(&gateway)

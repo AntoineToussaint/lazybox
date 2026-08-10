@@ -1662,6 +1662,31 @@ where
     }
 }
 
+/// The client-supplied correlation id a one-shot command carries, if any.
+/// Only `Spawn` is correlated: the daemon stamps this id into the terminal
+/// launch outcome it emits on the bus, which is how the one-shot reply
+/// re-associates that outcome with this request.
+fn command_request_id(command: &Command) -> Option<String> {
+    match command {
+        Command::Spawn {
+            client_request_id, ..
+        } => client_request_id.clone(),
+        _ => None,
+    }
+}
+
+/// The correlation id carried by a bus event, if it is one of the
+/// request-correlated terminal-launch outcomes.
+fn event_request_id(event: &Event) -> Option<&str> {
+    match event {
+        Event::CommandCompleted { client_request_id }
+        | Event::CommandFailed {
+            client_request_id, ..
+        } => Some(client_request_id),
+        _ => None,
+    }
+}
+
 async fn command_response<B>(
     config: ServerConfig,
     options: &GatewayOptions,
@@ -1711,7 +1736,16 @@ where
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let event_tx = lazybox_ipc::EventSender::from_unbounded(event_tx);
     let command = bind_principal(command, principal);
-    let mut broadcast_rx = config.bus.subscribe();
+    // Correlate the one-shot reply to *this* command's bus-emitted outcome
+    // instead of draining the whole broadcast bus: a blanket drain scoops up
+    // every unrelated event a concurrent poller or another client puts on the
+    // bus during the handler window, which then rides back on this response
+    // and races the live stream. Only the terminal-launch outcome
+    // (`CommandCompleted` / `CommandFailed`) is bus-emitted for a one-shot
+    // command, and it carries the request id, so subscribe only when this
+    // command is correlated and keep only the matching frames.
+    let correlated_request = command_request_id(&command);
+    let mut broadcast_rx = correlated_request.as_ref().map(|_| config.bus.subscribe());
     let mut task =
         tokio::spawn(async move { dispatch_one_shot_command(&config, &event_tx, command).await });
     match tokio::time::timeout(options.command_timeout, &mut task).await {
@@ -1720,8 +1754,14 @@ where
             while let Ok(event) = event_rx.try_recv() {
                 events.push(event);
             }
-            while let Ok(event) = broadcast_rx.try_recv() {
-                events.push(event);
+            if let (Some(request_id), Some(rx)) =
+                (correlated_request.as_deref(), broadcast_rx.as_mut())
+            {
+                while let Ok(event) = rx.try_recv() {
+                    if event_request_id(&event) == Some(request_id) {
+                        events.push(event);
+                    }
+                }
             }
             let error = outcome.err();
             json_response(
@@ -2023,18 +2063,28 @@ where
     ndjson_event_response(bridge.event_rx, Some(bridge.command_tx))
 }
 
-fn ndjson_event_response(
+/// Stream events as newline-delimited JSON frames. `project` maps each raw
+/// internal event to the wire frame this endpoint exposes (returning `None`
+/// to drop it); `keepalive` is held for the stream's lifetime so its bridge
+/// stays alive. Shared so the internal (`/v1/stream`) and desktop
+/// (`/v1/events`) framings can't drift — e.g. a keepalive or backpressure fix
+/// lands in exactly one place.
+fn ndjson_frame_response<Frame, Keepalive>(
     mut event_rx: mpsc::Receiver<Event>,
-    keepalive_tx: Option<mpsc::Sender<Command>>,
-) -> Response<Body> {
+    keepalive: Keepalive,
+    project: impl Fn(Event) -> Option<Frame> + Send + 'static,
+) -> Response<Body>
+where
+    Frame: Serialize + Send + 'static,
+    Keepalive: Send + 'static,
+{
     let (mut tx, body) = Channel::<Bytes, Infallible>::new(32);
     tokio::spawn(async move {
-        let _keepalive_tx = keepalive_tx;
+        let _keepalive = keepalive;
         while let Some(event) = event_rx.recv().await {
-            let Some(event) = control_event(event) else {
+            let Some(frame) = project(event) else {
                 continue;
             };
-            let frame = JsonServerFrame::Event(event);
             let mut bytes = match serde_json::to_vec(&frame) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -2051,32 +2101,24 @@ fn ndjson_event_response(
     response_with_body(StatusCode::OK, "application/x-ndjson", body.boxed_unsync())
 }
 
+fn ndjson_event_response(
+    event_rx: mpsc::Receiver<Event>,
+    keepalive_tx: Option<mpsc::Sender<Command>>,
+) -> Response<Body> {
+    ndjson_frame_response(event_rx, keepalive_tx, |event| {
+        control_event(event).map(JsonServerFrame::Event)
+    })
+}
+
 fn ndjson_desktop_event_response(
-    mut event_rx: mpsc::Receiver<Event>,
+    event_rx: mpsc::Receiver<Event>,
     keepalive_tx: mpsc::Sender<Command>,
 ) -> Response<Body> {
-    let (mut tx, body) = Channel::<Bytes, Infallible>::new(32);
-    tokio::spawn(async move {
-        let _keepalive_tx = keepalive_tx;
-        while let Some(event) = event_rx.recv().await {
-            let Some(event) = control_event(event).and_then(desktop_event) else {
-                continue;
-            };
-            let frame = DesktopEventFrame::Event(event);
-            let mut bytes = match serde_json::to_vec(&frame) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    tracing::warn!("api gateway: serialize desktop event frame: {error}");
-                    continue;
-                }
-            };
-            bytes.push(b'\n');
-            if tx.send_data(Bytes::from(bytes)).await.is_err() {
-                break;
-            }
-        }
-    });
-    response_with_body(StatusCode::OK, "application/x-ndjson", body.boxed_unsync())
+    ndjson_frame_response(event_rx, keepalive_tx, |event| {
+        control_event(event)
+            .and_then(desktop_event)
+            .map(DesktopEventFrame::Event)
+    })
 }
 
 pub(crate) fn control_event(mut event: Event) -> Option<Event> {

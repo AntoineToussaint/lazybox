@@ -918,6 +918,14 @@ async fn send_command(
     Ok(())
 }
 
+/// Whether a command response's echoed correlation id is acceptable. A
+/// missing echo (a proxy stripped the header) is fine — HTTP already pairs
+/// the reply with the request; only a present, different id signals a
+/// genuinely crossed reply.
+fn correlation_echo_ok(returned: Option<&str>, expected: &str) -> bool {
+    returned.is_none_or(|returned| returned == expected)
+}
+
 async fn send_gateway_command(
     gateway: &GatewayClient,
     command: DesktopCommand,
@@ -938,7 +946,12 @@ async fn send_gateway_command(
         .map_err(|error| format!("send command: {error}"))?;
     let response: CommandResponse = decode_response(response).await?;
     if response.ok && response.completed {
-        if response.client_request_id.as_deref() != Some(client_request_id.as_str()) {
+        // The correlation id is advisory: HTTP already pairs this response
+        // with this request on the connection. Fail only on a *present and
+        // different* id (a genuinely crossed reply); a missing echo — e.g. a
+        // proxy that stripped the `x-lazybox-client-request-id` header — must
+        // not turn a successful command into a spurious error.
+        if !correlation_echo_ok(response.client_request_id.as_deref(), &client_request_id) {
             return Err("daemon returned a mismatched command response".to_string());
         }
         Ok(response
@@ -2034,6 +2047,16 @@ mod tests {
             "http://127.0.0.1:1234/v1/terminal"
         );
         assert!(!gateway.url("/v1/terminal").contains("secret"));
+    }
+
+    #[test]
+    fn a_missing_correlation_echo_is_accepted_but_a_crossed_one_is_rejected() {
+        // A stripped `x-lazybox-client-request-id` header (None echo) must
+        // not fail an otherwise-successful command; only a present, different
+        // id is a genuine mismatch.
+        assert!(correlation_echo_ok(None, "req-1"));
+        assert!(correlation_echo_ok(Some("req-1"), "req-1"));
+        assert!(!correlation_echo_ok(Some("req-2"), "req-1"));
     }
 
     #[test]

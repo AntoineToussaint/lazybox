@@ -197,8 +197,12 @@ and remediation text and must stop reconnecting until one side is updated.
 surface for an authenticated bearer. Possession of that bearer is therefore
 equivalent to daemon-control access; callers that only need desktop workflows
 should send the generated `DesktopCommand` subset. The one-shot response echoes
-the client request id and carries events emitted before the handler returns;
-clients consume those events and deduplicate their later live-stream copies.
+the client request id and carries the command's own handler-emitted events plus
+the bus outcome correlated to that request id (a terminal-launch
+`CommandCompleted`/`CommandFailed`) — never unrelated bus traffic from other
+clients or pollers. Clients consume those events and deduplicate their later
+live-stream copies. The echoed id is advisory: HTTP already pairs the reply to
+the request, so a stripped correlation header is not treated as a failure.
 
 Provider credentials mutated through the experimental API remain in memory for
 the daemon process lifetime. Restarting the daemon discards them; persistent

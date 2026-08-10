@@ -1616,6 +1616,52 @@ async fn command_route_returns_connection_scoped_handler_events() {
 }
 
 #[tokio::test]
+async fn command_route_does_not_leak_unrelated_bus_events_into_the_response() {
+    // A one-shot command's reply must carry only *its own* outcome, not
+    // whatever a concurrent poller or another client happens to broadcast
+    // while the handler runs. Regression for the blanket bus drain that
+    // scooped up every bus frame and raced it against the live stream.
+    let config = ServerConfig::in_memory();
+
+    // Flood the bus with unrelated traffic for the whole handler window so a
+    // blanket drain would be overwhelmingly likely to capture at least one.
+    let noise_bus = config.bus.clone();
+    let noise = tokio::spawn(async move {
+        for _ in 0..500 {
+            let _ = noise_bus.send(Event::PollCompleted {
+                source: "noise".into(),
+                count: 999,
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    });
+
+    let frame = JsonClientFrame::Command(Command::ListProviderCredentials {
+        principal_id: lazybox_ipc::PrincipalId::local(),
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: CommandResponse = read_json(response).await;
+    noise.abort();
+    assert!(
+        !payload.events.iter().any(|event| matches!(
+            event,
+            Event::PollCompleted { source, .. } if source == "noise"
+        )),
+        "unrelated bus events leaked into the command response: {:?}",
+        payload.events
+    );
+}
+
+#[tokio::test]
 async fn device_bearer_scopes_credentials_to_its_own_principal() {
     // A minted device credential authenticates as `device:<id>`; the
     // gateway must ignore the client-supplied `principal_id` and scope

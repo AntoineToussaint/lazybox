@@ -34,6 +34,7 @@ pub mod api_gateway;
 pub mod auth;
 pub mod auto_wait;
 pub mod backend;
+pub mod box_liveness;
 pub mod chat;
 pub mod client_kv;
 pub mod client_runtime;

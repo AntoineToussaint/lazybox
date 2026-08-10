@@ -15,17 +15,41 @@ costs cents a day. Part of epic #885 (see [`docs/byo-remote-runbook.md`][runbook
 
 ## What counts as idle
 
-The box is idle when **both** hold:
+The box is idle when **all** of these hold:
 
 - **no active tunnel** — zero established connections on the SSH port. A client
   holding an `ssh -L` / IAP forward keeps an ESTABLISHED socket open, so a
-  connected laptop always reads as active; and
+  connected laptop always reads as active;
+- **no live daemon session** — the `lazybox server` refreshes a liveness file
+  (`~/.lazybox/run/active`, override with `LAZYBOX_IDLE_ACTIVE_FILE`) while it
+  holds at least one live terminal (agent or shell PTY). A fresh mtime reads as
+  active, so a session running behind a **relay** — which, unlike an IAP
+  tunnel, does not present as inbound sshd — keeps the box alive. A client
+  attached with no terminal open has no running session, so it is *not* kept
+  alive on this signal alone (there is no in-flight work to lose); an open
+  relay tunnel would still need to register as a connection to count. On a bare
+  box (no daemon) the file never appears and nothing changes; and
 - **no agent working** — no watched agent CLI (`claude`, `codex`, … — see
-  `LAZYBOX_IDLE_AGENT_PROCS`) that has consumed CPU since the previous tick.
-  Measuring CPU *used between ticks* — not an instantaneous or lifetime-average
-  reading — keeps a light-but-active agent (orchestrating `gh`, waiting on an
-  API between short bursts) from being mistaken for idle, so disconnecting
-  mid-run never kills the work.
+  `LAZYBOX_IDLE_AGENT_PROCS`) whose process *tree* has consumed CPU since the
+  previous tick. The CPU delta is summed over each agent's whole descendant
+  tree, so an agent blocked on a long `cargo build` / `pytest` child (the agent
+  itself near-idle) keeps the box alive until the work settles — not just an
+  agent burning CPU directly. Measuring CPU *used between ticks* — not an
+  instantaneous or lifetime-average reading — also keeps a light-but-active
+  agent (orchestrating `gh`, waiting on an API between short bursts) from being
+  mistaken for idle, so disconnecting mid-run never kills the work.
+
+> **New built-in agents:** `crates/agents/tests/idle_stop_roster.rs` fails the
+> build if `LAZYBOX_IDLE_AGENT_PROCS`'s default drops behind the agent
+> registry, so a new built-in can't be silently un-watched. Operator-added
+> `GenericCli` agents aren't in the registry — extend `LAZYBOX_IDLE_AGENT_PROCS`
+> in `/etc/lazybox/idle-stop.env` to keep their sessions alive.
+
+> **Root-run timer:** the systemd timer runs as root, so the script's default
+> `~/.lazybox/run/active` resolves under `/root`, while the daemon writes under
+> the box user's home. On such a box, set `LAZYBOX_IDLE_ACTIVE_FILE` in
+> `/etc/lazybox/idle-stop.env` to the box user's path
+> (e.g. `/home/alice/.lazybox/run/active`).
 
 Idle is measured **across timer ticks**, not within one: the first idle tick
 stamps a marker, a busy tick clears it, and once the marker is older than

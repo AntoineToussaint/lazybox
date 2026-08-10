@@ -776,6 +776,7 @@ mod has_visible_content_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
@@ -874,6 +875,7 @@ mod summary_render_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
@@ -999,6 +1001,7 @@ mod mark_workspace_merged_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
@@ -1095,6 +1098,7 @@ mod description_expand_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
@@ -1407,6 +1411,60 @@ mod description_expand_tests {
     }
 
     #[test]
+    fn pr_header_shows_diffstat_summary() {
+        // The right-pane PR header carries a one-line diffstat so the
+        // size/shape of a PR reads at a glance (#997).
+        let mut task = task_with_body("body");
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task.url = "https://github.com/o/r/pull/1".into();
+        task.additions = 128;
+        task.deletions = 47;
+        task.changed_files = 6;
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            text.contains("+128") && text.contains("−47") && text.contains("6 files changed"),
+            "PR header must show the diffstat summary: {text}",
+        );
+    }
+
+    #[test]
+    fn pr_header_diffstat_singular_file() {
+        let mut task = task_with_body("body");
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task.url = "https://github.com/o/r/pull/1".into();
+        task.additions = 3;
+        task.deletions = 0;
+        task.changed_files = 1;
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            text.contains("1 file changed") && !text.contains("1 files changed"),
+            "a single-file PR must read '1 file changed': {text}",
+        );
+    }
+
+    #[test]
+    fn issue_header_omits_diffstat() {
+        // Issues have no diff, so no diffstat line (#997).
+        let mut task = task_with_body("body");
+        task.kind = Some(lazybox_core::TaskKind::Issue);
+        task.url = "https://github.com/o/r/issues/1".into();
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            !text.contains("files changed") && !text.contains("file changed"),
+            "an issue must not show a diffstat line: {text}",
+        );
+    }
+
+    #[test]
     fn preview_header_hint_matches_what_d_does() {
         // Plain short body: `d` collapses, so the hint must say collapse.
         let mut plain = pane_showing("just one short line");
@@ -1541,6 +1599,7 @@ mod linked_issue_modal_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
@@ -1664,6 +1723,7 @@ mod originating_issue_header_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             kind: None,
             closes_issues: closes,
             linked_tasks: vec![],

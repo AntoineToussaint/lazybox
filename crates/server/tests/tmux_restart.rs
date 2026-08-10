@@ -143,6 +143,7 @@ fn github_task(
         recent_activity: Vec::new(),
         additions: 0,
         deletions: 0,
+        changed_files: 0,
         kind: None,
         closes_issues,
         linked_tasks: vec![],

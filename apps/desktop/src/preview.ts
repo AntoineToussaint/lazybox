@@ -66,6 +66,7 @@ export function loadPreview(): PreviewState {
       recent_activity: [],
       additions: 0,
       deletions: 0,
+      changed_files: 0,
       closes_issues: [],
       linked_tasks: [],
       kind: "Pr",

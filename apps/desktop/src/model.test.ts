@@ -61,6 +61,7 @@ function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
     recent_activity: [],
     additions: 0,
     deletions: 0,
+    changed_files: 0,
     closes_issues: [],
     linked_tasks: [],
     kind: "Pr",

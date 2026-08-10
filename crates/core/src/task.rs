@@ -504,6 +504,10 @@ pub struct Task {
     /// Number of lines deleted in this PR.
     #[serde(default)]
     pub deletions: u32,
+    /// Number of files changed in this PR. `#[serde(default)]` so older
+    /// snapshots (and non-PR tasks) deserialize as zero.
+    #[serde(default)]
+    pub changed_files: u32,
     /// Other tasks this PR closes when merged. Populated from
     /// GitHub's `closingIssuesReferences` field. Used by the server
     /// to collapse the issue + PR workspaces so the user doesn't
@@ -936,6 +940,7 @@ mod status_tag_tests {
             recent_activity: vec![],
             additions: 0,
             deletions: 0,
+            changed_files: 0,
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],

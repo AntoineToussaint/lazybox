@@ -120,6 +120,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::sent_snippets` — issue #463), bounded by
     /// `SENT_SNIPPETS_MAX`. Renders a dim ` ]N ` pill; `0` renders nothing.
     pub sent_snippet_count: usize,
+    /// This workspace's PR is part of a detected stack (issue #969) — its
+    /// [`StackPosition`](lazybox_core::StackPosition). Renders a ` ⇗k/N `
+    /// badge so a chain of stacked PRs reads as an ordered stack at a
+    /// glance rather than unrelated rows. `None` for standalone PRs.
+    pub stack: Option<&'a lazybox_core::StackPosition>,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -862,6 +867,7 @@ fn pack_badges(cells: impl IntoIterator<Item = Cell>) -> Cell {
 fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     pack_badges([
         cell_remote(ctx),
+        cell_stack(ctx),
         cell_linked(ctx),
         cell_notes(ctx),
         cell_snippet(ctx),
@@ -887,6 +893,29 @@ fn cell_remote(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .add_modifier(Modifier::BOLD)
     };
     Cell::from_span(Span::styled(format!(" ⇅ {name} "), style))
+}
+
+/// The ` ⇗k/N ` stacked-PR badge (issue #969): this workspace's PR sits
+/// at position `k` of a stack `N` deep. A fg-only accent glyph — passive
+/// structural info, so it reads like the other decorations rather than an
+/// urgent arm. The parent PR number is spelled out in the right pane;
+/// here the position alone signals "part of a chain." Packs into the
+/// shared badge cluster (#813).
+fn cell_stack(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    let Some(stack) = ctx.stack else {
+        return Cell::empty();
+    };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(
+        format!(" ⇗{}/{} ", stack.position, stack.depth),
+        style,
+    ))
 }
 
 /// The merge-arm badge cluster (#813): ` ARM ` (lazybox client-side
@@ -1205,6 +1234,7 @@ mod tests {
             track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
+            stack: None,
         }
     }
 
@@ -1560,6 +1590,7 @@ mod tests {
             track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
+            stack: None,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1951,6 +1982,7 @@ mod tests {
             track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
+            stack: None,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -2153,6 +2185,29 @@ mod tests {
         ctx.has_notes = true;
         let cell = cell_notes(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " ✎ ");
+    }
+
+    /// A PR that's part of a stack surfaces a ` ⇗k/N ` badge (issue
+    /// #969); a standalone PR (no `stack`) shows nothing.
+    #[test]
+    fn cell_stack_shows_position_badge() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_stack(&ctx).width(), 0, "no stack, no badge");
+        let stack = lazybox_core::StackPosition {
+            parent: Some(lazybox_core::TaskId {
+                source: "github".into(),
+                key: "owner/repo#1".into(),
+            }),
+            children: vec![],
+            position: 2,
+            depth: 3,
+        };
+        ctx.stack = Some(&stack);
+        let cell = cell_stack(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), " ⇗2/3 ");
     }
 
     /// A workspace that's been sent snippets surfaces a ` ]N ` badge
@@ -3009,6 +3064,7 @@ mod tests {
             track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
+            stack: None,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

@@ -19,6 +19,7 @@ pub mod provider;
 pub mod scope;
 mod session_key;
 pub mod slug;
+pub mod stack;
 mod task;
 pub mod time;
 mod workspace;
@@ -48,6 +49,7 @@ pub use provider::{
 };
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;
+pub use stack::{StackPosition, detect_stacks};
 pub use task::*;
 pub use workspace::{
     CleanupPrompt, MAX_ACTIVITY_ITEMS, SENT_SNIPPETS_MAX, Session as WorkspaceSession, SessionId,

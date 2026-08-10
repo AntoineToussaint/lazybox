@@ -120,6 +120,13 @@ pub struct Sidebar {
     /// Per-repo counters computed during `recompute_visible`. Keys
     /// are the same display strings used by `VisibleRow::RepoHeader`.
     repo_summaries: BTreeMap<String, RepoSummary>,
+    /// Stacked-PR relationships, recomputed during `recompute_visible`
+    /// over the full workspace set (issue #969). Keyed by the workspace's
+    /// session key; present only for workspaces whose PR participates in a
+    /// stack (has a parent PR or children stacked on it). Read by the row
+    /// builder for the `⇗` indicator and by the merge dispatch to warn
+    /// before merging a child ahead of its still-open parent.
+    stacks: HashMap<SessionKey, lazybox_core::StackPosition>,
     /// Index into `visible`. Always points at a `Workspace` variant
     /// when there is at least one — `recompute_visible` and the
     /// j/k handlers maintain that invariant.
@@ -320,6 +327,7 @@ impl Sidebar {
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
             repo_summaries: BTreeMap::new(),
+            stacks: HashMap::new(),
             cursor: 0,
             scroll: 0,
             scroll_detached: false,
@@ -2258,6 +2266,34 @@ impl Sidebar {
         self.recompute_visible_inner(true);
     }
 
+    /// Rebuild the stacked-PR index (#969) over the full workspace set.
+    /// A workspace lands in the index only when its PR is part of a stack
+    /// — `detect_stacks` already drops standalone PRs based on the repo
+    /// default branch.
+    fn recompute_stacks(&mut self) {
+        let prs: Vec<&lazybox_core::Task> = self
+            .workspaces
+            .values()
+            .filter_map(|w| w.pr.as_ref())
+            .collect();
+        let by_task = lazybox_core::detect_stacks(prs);
+        self.stacks = self
+            .workspaces
+            .iter()
+            .filter_map(|(key, w)| {
+                let pos = by_task.get(&w.pr.as_ref()?.id)?;
+                Some((key.clone(), pos.clone()))
+            })
+            .collect();
+    }
+
+    /// Stack position of a workspace's PR, if it participates in a stack.
+    /// Read by the merge dispatch (warn before merging a child ahead of
+    /// its still-open parent) and by the right pane's header.
+    pub fn stack_info(&self, key: &SessionKey) -> Option<&lazybox_core::StackPosition> {
+        self.stacks.get(key)
+    }
+
     /// Variant for callers that have just *reset* `self.cursor` (e.g.
     /// mailbox cycle, fresh snapshot). The reset clobbered whatever
     /// row the user was on, so the regular "park me back on the same
@@ -2362,6 +2398,7 @@ impl Sidebar {
         );
         self.visible = outcome.visible;
         self.repo_summaries = outcome.summaries;
+        self.recompute_stacks();
 
         // Preserve cursor on a repo header across reorderings — j/k
         // can land on headers (collapse target), and snapshots

@@ -42,6 +42,11 @@ use ratatui::widgets::*;
 pub struct RightPane {
     id: PaneId,
     workspace: Option<Workspace>,
+    /// Stacked-PR position of the focused workspace's PR (issue #969),
+    /// set alongside [`RightPane::set_workspace`] from the sidebar's
+    /// cross-workspace index. Drives the `Stacked on #A · k/N` header
+    /// line. `None` when the focused PR is standalone.
+    stack: Option<lazybox_core::StackPosition>,
     /// Scroll offset into the comment list (top-of-viewport index).
     comment_scroll: usize,
     /// Headless navigation state for the activity feed: cursor +
@@ -355,6 +360,7 @@ impl RightPane {
         Self {
             id,
             workspace: None,
+            stack: None,
             comment_scroll: 0,
             feed: crate::components::activity_feed::ActivityFeed::new(),
             viewer_logins: std::collections::HashMap::new(),
@@ -783,6 +789,13 @@ impl RightPane {
     /// AppRoot calls this whenever the Sidebar's selection changes.
     /// Resets the comment cursor because what was "row 3" on the
     /// previous workspace is meaningless on the new one.
+    /// Set the focused PR's stacked-PR position (issue #969). Fed from
+    /// the sidebar's index by the model whenever the selection changes,
+    /// paired with [`RightPane::set_workspace`].
+    pub fn set_stack(&mut self, stack: Option<lazybox_core::StackPosition>) {
+        self.stack = stack;
+    }
+
     pub fn set_workspace(&mut self, workspace: Option<Workspace>) {
         let same = match (&self.workspace, &workspace) {
             (Some(a), Some(b)) => a.key == b.key,
@@ -1330,6 +1343,26 @@ impl RightPane {
             Span::styled("Branch: ", Style::default().fg(theme.text_dim)),
             Span::styled(branch, Style::default().fg(theme.accent)),
         ]));
+
+        // Stacked-PR relationship (issue #969). A PR whose base is
+        // another open PR's head sits mid-stack; spell out the parent it
+        // rides on and its `k/N` position so the chain reads as a stack,
+        // not unrelated rows. The bottom PR (nothing beneath it) shows
+        // only its position — there's no parent to name.
+        if let Some(stack) = &self.stack {
+            let mut spans = vec![Span::styled("Stack: ", Style::default().fg(theme.text_dim))];
+            if let Some(parent) = stack.parent.as_ref().and_then(|p| p.number()) {
+                spans.push(Span::styled(
+                    format!("stacked on #{parent} "),
+                    Style::default().fg(theme.accent),
+                ));
+            }
+            spans.push(Span::styled(
+                format!("· {}/{}", stack.position, stack.depth),
+                Style::default().fg(theme.text_dim),
+            ));
+            lines.push(Line::from(spans));
+        }
 
         // Originating issue — the Issue this PR was created from /
         // closes. An explicit, clickable path to it so the user doesn't

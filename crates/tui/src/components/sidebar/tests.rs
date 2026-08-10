@@ -3790,3 +3790,55 @@ mod keep_awake_badge_tests {
         assert!(!header_row(&mut sb).contains("awake"));
     }
 }
+
+#[cfg(test)]
+mod stack_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::{TaskKind, Workspace};
+
+    fn pr_ws(num: u64, head: &str, base: &str) -> Workspace {
+        let mut t = base_task();
+        t.id.key = format!("o/r#{num}");
+        t.url = format!("https://github.com/o/r/pull/{num}");
+        t.kind = Some(TaskKind::Pr);
+        t.branch = Some(head.into());
+        t.base_branch = Some(base.into());
+        Workspace::from_task(t, chrono::Utc::now())
+    }
+
+    /// A recompute over a base==head chain links the child to its parent
+    /// and reports each PR's `k/N` position (issue #969).
+    #[test]
+    fn recompute_stacks_links_child_to_parent() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let parent = pr_ws(1, "feat-a", "main");
+        let child = pr_ws(2, "feat-b", "feat-a");
+        let parent_key = SessionKey::from(&parent.key);
+        let child_key = SessionKey::from(&child.key);
+        sb.workspaces.insert(parent_key.clone(), parent);
+        sb.workspaces.insert(child_key.clone(), child);
+        sb.recompute_visible();
+
+        let cs = sb.stack_info(&child_key).expect("child is stacked");
+        assert_eq!((cs.position, cs.depth), (2, 2));
+        assert_eq!(cs.parent.as_ref().and_then(|p| p.number()), Some(1));
+
+        let ps = sb.stack_info(&parent_key).expect("parent has a child");
+        assert_eq!((ps.position, ps.depth), (1, 2));
+        assert_eq!(ps.children.len(), 1);
+        assert!(ps.parent.is_none());
+    }
+
+    /// A PR based directly on the default branch with nothing stacked on
+    /// it is not part of any stack, so `stack_info` returns `None`.
+    #[test]
+    fn standalone_pr_has_no_stack_info() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let ws = pr_ws(1, "feat-a", "main");
+        let key = SessionKey::from(&ws.key);
+        sb.workspaces.insert(key.clone(), ws);
+        sb.recompute_visible();
+        assert!(sb.stack_info(&key).is_none());
+    }
+}

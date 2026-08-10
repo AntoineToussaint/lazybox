@@ -1116,6 +1116,7 @@ impl Sidebar {
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.len()),
+                stack: self.stacks.get(key),
             };
             row_indices.push(i);
             rows.push(build_workspace_row(&ctx));

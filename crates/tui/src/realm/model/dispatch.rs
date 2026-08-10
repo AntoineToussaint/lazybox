@@ -786,8 +786,37 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspaces under it." Adding more overrides here is the right
     /// growth path — keeps catalog defaults declarative and the
     /// context-sensitive copy out of the dispatch.
-    fn action_confirm_override(&self, action: &lazybox_tui_core::action::Action) -> Option<String> {
+    pub(super) fn action_confirm_override(
+        &self,
+        action: &lazybox_tui_core::action::Action,
+    ) -> Option<String> {
         use lazybox_tui_core::action::Action;
+        // Stack-aware merge (issue #969): merging a PR that is stacked on
+        // a still-open parent lands it out of order — GitHub then
+        // retargets the parent's other children onto the grandparent/main,
+        // so the rest of the stack must be restacked. Warn before the
+        // merge instead of letting the user discover it after. The bottom
+        // of a stack (no open parent) merges with the default prompt.
+        if matches!(action, Action::MergePr) {
+            let sk = self.sidebar.selected_workspace_key()?;
+            if let Some(stack) = self.sidebar.stack_info(sk)
+                && let Some(parent) = stack.parent.as_ref().and_then(|p| p.number())
+            {
+                let this = self
+                    .sidebar
+                    .workspace_by_key(sk)
+                    .and_then(|w| w.pr.as_ref())
+                    .and_then(|pr| pr.id.number());
+                let this = this.map_or_else(|| "this PR".to_string(), |n| format!("#{n}"));
+                return Some(format!(
+                    "{this} is stacked on #{parent}, which is still open. Merging it \
+                     first lands the stack out of order — GitHub will retarget the rest \
+                     onto its base, so you'll need to restack (update branch) the \
+                     children. Merge {this} anyway?"
+                ));
+            }
+            return None;
+        }
         // Delete/close names its exact target — the number + title of
         // the issue/PR the confirmed keypress destroys — so the modal
         // never asks about an ambiguous "this".

@@ -2677,6 +2677,11 @@ impl<T: TerminalAdapter> Model<T> {
             .and_then(|w| w.default_session())
             .map(|s| s.layout.clone())
             .unwrap_or_default();
+        let stack = session_key
+            .as_ref()
+            .and_then(|k| self.sidebar.stack_info(k))
+            .cloned();
+        self.right.set_stack(stack);
         self.right.set_workspace(workspace);
         self.terminals.set_active_session(session_key);
         self.terminals.set_layout(layout);

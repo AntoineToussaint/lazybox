@@ -8605,6 +8605,47 @@ mod merge_focus_follow_tests {
         ws
     }
 
+    fn stacked_pr(key: &str, head: &str, base: &str) -> Workspace {
+        let mut ws = workspace(key, true, Duration::hours(1));
+        let pr = ws.pr.as_mut().unwrap();
+        pr.branch = Some(head.into());
+        pr.base_branch = Some(base.into());
+        ws
+    }
+
+    /// Issue #969: `g m` on a PR stacked on a still-open parent warns
+    /// that merging lands the stack out of order, naming the parent — so
+    /// the user restacks the children instead of discovering the retarget
+    /// after the fact. The bottom of the stack keeps the default prompt.
+    #[test]
+    fn g_m_on_a_stacked_child_warns_before_merging_out_of_order() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let parent = stacked_pr("owner/repo#1", "feat-a", "main");
+        let child = stacked_pr("owner/repo#2", "feat-b", "feat-a");
+        let parent_key = SessionKey::from(&parent.key);
+        let child_key = SessionKey::from(&child.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(parent)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(child)));
+
+        assert!(m.sidebar.focus_workspace_key(&child_key));
+        let prompt = m
+            .action_confirm_override(&Action::MergePr)
+            .expect("a stacked child gets a stack-aware confirm prompt");
+        assert!(
+            prompt.contains("stacked on #1") && prompt.contains("out of order"),
+            "unexpected stacked-merge prompt: {prompt}",
+        );
+
+        // The bottom PR (based on main) merges with the default prompt.
+        assert!(m.sidebar.focus_workspace_key(&parent_key));
+        assert!(
+            m.action_confirm_override(&Action::MergePr).is_none(),
+            "the bottom of the stack keeps the default merge confirm",
+        );
+    }
+
     /// Issue #947: `g m` on a PR lazybox already knows is conflicting is
     /// a doomed dispatch. Instead of a merge confirm that can only fail,
     /// route straight to the one-key resolve prompt — no `MergePr`

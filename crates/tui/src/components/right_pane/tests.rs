@@ -1314,6 +1314,62 @@ mod description_expand_tests {
     }
 
     #[test]
+    fn header_shows_stacked_on_line_when_stacked() {
+        // Issue #969: a mid-stack PR spells out the parent it rides on and
+        // its k/N position in the header; a standalone PR shows nothing.
+        let mut task = task_with_body("body");
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task.url = "https://github.com/o/r/pull/2".into();
+        task.branch = Some("feat-b".into());
+        task.base_branch = Some("feat-a".into());
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+
+        // Without stack info, no stack line.
+        assert!(
+            !full_buffer_text(&mut pane, 80, 24).contains("Stack:"),
+            "a PR with no stack info shows no stack line",
+        );
+
+        pane.set_stack(Some(lazybox_core::StackPosition {
+            parent: Some(lazybox_core::TaskId {
+                source: "github".into(),
+                key: "o/r#1".into(),
+            }),
+            children: vec![],
+            position: 2,
+            depth: 3,
+        }));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        assert!(
+            text.contains("stacked on #1") && text.contains("2/3"),
+            "the header must name the parent + position: {text}",
+        );
+
+        // Bottom of the stack (no parent): position only, no dangling
+        // separator before it.
+        pane.set_stack(Some(lazybox_core::StackPosition {
+            parent: None,
+            children: vec![lazybox_core::TaskId {
+                source: "github".into(),
+                key: "o/r#2".into(),
+            }],
+            position: 1,
+            depth: 3,
+        }));
+        let root = full_buffer_text(&mut pane, 80, 24);
+        let stack_row = root
+            .lines()
+            .find(|r| r.contains("Stack:"))
+            .expect("root of a stack still shows the Stack line");
+        assert!(
+            stack_row.contains("1/3") && !stack_row.contains('·'),
+            "the stack root shows position alone, no dangling separator: {stack_row:?}",
+        );
+    }
+
+    #[test]
     fn approved_pr_renders_reviewers_not_none() {
         // #960: a PR whose requested reviewers all reviewed carries an
         // empty `reviewers` (GitHub dropped them) but a populated

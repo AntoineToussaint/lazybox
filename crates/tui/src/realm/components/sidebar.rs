@@ -331,6 +331,15 @@ impl Sidebar {
         self.inner.workspace_by_key(key)
     }
 
+    /// See `Sidebar::stack_info` — the workspace's stacked-PR position
+    /// (issue #969), read by the merge dispatch and the right pane.
+    pub fn stack_info(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> Option<&lazybox_core::StackPosition> {
+        self.inner.stack_info(key)
+    }
+
     /// See `Sidebar::take_workspace` — optimistic archive/delete (#476).
     pub fn take_workspace(
         &mut self,

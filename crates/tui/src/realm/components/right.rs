@@ -42,6 +42,12 @@ impl Right {
         self.inner.set_workspace(workspace);
     }
 
+    /// Forward the focused PR's stacked-PR position (issue #969) to the
+    /// inner pane so the header can render the `stacked on #A · k/N` line.
+    pub fn set_stack(&mut self, stack: Option<lazybox_core::StackPosition>) {
+        self.inner.set_stack(stack);
+    }
+
     /// Forward the YAML-configured `setup.default_agent` to the inner
     /// pane so `f`-on-selection spawns the user's preferred agent.
     pub fn set_default_agent(&mut self, agent: impl Into<String>) {

@@ -18,6 +18,14 @@ impl std::fmt::Display for TaskId {
     }
 }
 
+impl TaskId {
+    /// The trailing `#N` of a GitHub-style key (`owner/repo#123` → `123`).
+    /// `None` for keys without a numeric suffix (Linear identifiers, …).
+    pub fn number(&self) -> Option<u64> {
+        self.key.rsplit_once('#').and_then(|(_, n)| n.parse().ok())
+    }
+}
+
 /// Why this task is on your radar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]

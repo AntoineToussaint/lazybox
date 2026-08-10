@@ -13,9 +13,10 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use lazybox_config::{Config, SandboxConfig};
-use lazybox_sandbox::gcp::GcpProvider;
+use lazybox_sandbox::gcp::{GcpProvider, SystemRunner};
 use lazybox_sandbox::{
     BoxHandle, Deployment, PowerState, SandboxProvider, SandboxSpec, connect_box, persist,
 };
@@ -231,6 +232,7 @@ pub(crate) fn resolve_provider(
         // works with zero socket config, exactly like the `r`-spawn.
         remote_socket: remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
         local_socket,
+        runner: Arc::new(SystemRunner),
     })
 }
 

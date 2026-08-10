@@ -13,14 +13,59 @@
 //! unit-tested without a real GCP project (the same stance `tui-boot`'s
 //! tunnel supervisor takes).
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use chrono::Utc;
 use tokio::process::Command;
 
 use crate::provider::{SandboxError, SandboxProvider, Tunnel};
 use crate::{BoxHandle, BoxStatus, PowerState, SandboxSpec};
+
+/// Boxed async result returned by [`CommandRunner`].
+pub type CommandFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SandboxError>> + Send + 'a>>;
+
+/// Runs one external command (`terraform`/`gcloud`) to completion.
+/// Injectable so `GcpProvider`'s lifecycle sequencing — ensure's
+/// init→apply→output, connect's wake-then-forward — is unit-tested against
+/// scripted output without a real GCP project (see this module's tests).
+pub trait CommandRunner: Send + Sync + std::fmt::Debug {
+    /// Run `program` with `args`, resolving to captured stdout on a zero
+    /// exit or a [`SandboxError`] carrying the program name and stderr
+    /// otherwise. Spawn failures surface as [`SandboxError::Spawn`].
+    fn run<'a>(&'a self, program: &'a str, args: &'a [String]) -> CommandFuture<'a, String>;
+}
+
+/// The production runner: shells out with stdin closed and captures output.
+#[derive(Debug, Clone)]
+pub struct SystemRunner;
+
+impl CommandRunner for SystemRunner {
+    fn run<'a>(&'a self, program: &'a str, args: &'a [String]) -> CommandFuture<'a, String> {
+        Box::pin(async move {
+            let output = Command::new(program)
+                .args(args)
+                .stdin(Stdio::null())
+                .output()
+                .await
+                .map_err(|source| SandboxError::Spawn {
+                    program: program.to_string(),
+                    source,
+                })?;
+            if !output.status.success() {
+                return Err(SandboxError::Command {
+                    program: program.to_string(),
+                    status: output.status.to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                });
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        })
+    }
+}
 
 /// Keepalive cadence for the IAP forward — matches `connect.sh` and the
 /// in-process supervisor so all three damp on the same schedule.
@@ -52,6 +97,11 @@ pub struct GcpProvider {
     pub remote_socket: String,
     /// Local socket the forward binds — the path `--connect` dials.
     pub local_socket: PathBuf,
+    /// Runs `terraform`/`gcloud`; `Arc::new(SystemRunner)` in production, a
+    /// scripted fake under test. Named like every other field so the struct
+    /// literal stays the construction path — no positional constructor to
+    /// transpose the two `PathBuf`s through.
+    pub runner: Arc<dyn CommandRunner>,
 }
 
 impl GcpProvider {
@@ -268,35 +318,18 @@ fn parse_tf_outputs(json: &str) -> Result<(String, String), SandboxError> {
     Ok((get("instance_name")?, get("zone")?))
 }
 
-/// Run a command to completion, returning stdout on success or a
-/// [`SandboxError`] carrying the captured stderr on failure.
-async fn run(program: &str, args: &[String]) -> Result<String, SandboxError> {
-    let output = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .map_err(|source| SandboxError::Spawn {
-            program: program.to_string(),
-            source,
-        })?;
-    if !output.status.success() {
-        return Err(SandboxError::Command {
-            program: program.to_string(),
-            status: output.status.to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
 impl GcpProvider {
+    /// Run a command through the injected runner.
+    async fn run(&self, program: &str, args: &[String]) -> Result<String, SandboxError> {
+        self.runner.run(program, args).await
+    }
+
     /// Read the box's power state (describe only — no reachability probe),
     /// shared by `status` and the `connect` wake decision so the latter
     /// doesn't pay for a reachability round-trip it doesn't need.
     async fn power(&self, handle: &BoxHandle) -> Result<PowerState, SandboxError> {
         let (prog, args) = Self::describe_command(handle);
-        Ok(parse_power_state(&run(&prog, &args).await?))
+        Ok(parse_power_state(&self.run(&prog, &args).await?))
     }
 }
 
@@ -309,13 +342,13 @@ impl SandboxProvider for GcpProvider {
         // Init first: a fresh module dir has no providers, so a bare
         // `apply` would fail before touching any infrastructure.
         let (prog, args) = self.init_command();
-        run(&prog, &args).await?;
+        self.run(&prog, &args).await?;
 
         let (prog, args) = self.terraform_command("apply", &spec.tf_vars());
-        run(&prog, &args).await?;
+        self.run(&prog, &args).await?;
 
         let (prog, args) = self.output_command();
-        let outputs = run(&prog, &args).await?;
+        let outputs = self.run(&prog, &args).await?;
         let (id, zone) = parse_tf_outputs(&outputs)?;
 
         Ok(BoxHandle {
@@ -332,12 +365,12 @@ impl SandboxProvider for GcpProvider {
 
     async fn start(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
         let (prog, args) = Self::instance_command(handle, "start");
-        run(&prog, &args).await.map(|_| ())
+        self.run(&prog, &args).await.map(|_| ())
     }
 
     async fn stop(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
         let (prog, args) = Self::instance_command(handle, "stop");
-        run(&prog, &args).await.map(|_| ())
+        self.run(&prog, &args).await.map(|_| ())
     }
 
     async fn status(&self, handle: &BoxHandle) -> Result<BoxStatus, SandboxError> {
@@ -346,7 +379,7 @@ impl SandboxProvider for GcpProvider {
         // block on a doomed SSH; only probe when it claims to be running.
         let reachable = if power.is_running() {
             let (prog, args) = self.reachable_probe_command(handle);
-            run(&prog, &args).await.is_ok()
+            self.run(&prog, &args).await.is_ok()
         } else {
             false
         };
@@ -366,13 +399,16 @@ impl SandboxProvider for GcpProvider {
 
     async fn destroy(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
         let (prog, args) = self.terraform_command("destroy", &Self::destroy_vars(handle));
-        run(&prog, &args).await.map(|_| ())
+        self.run(&prog, &args).await.map(|_| ())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Deployment;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
 
     fn provider() -> GcpProvider {
         GcpProvider {
@@ -381,6 +417,95 @@ mod tests {
             user: Some("me".into()),
             remote_socket: "/home/me/.lazybox/run/daemon.sock".into(),
             local_socket: PathBuf::from("/tmp/lazybox.sock"),
+            runner: Arc::new(SystemRunner),
+        }
+    }
+
+    /// One scripted step: the stdout/err a queued invocation returns.
+    enum Step {
+        Out(String),
+        Fail,
+    }
+
+    /// Returns queued outputs in order and records every `(program, args)`
+    /// so a sequencing test can assert both the commands run and their order.
+    #[derive(Debug)]
+    struct ScriptedRunner {
+        queue: Mutex<VecDeque<Result<String, ()>>>,
+        calls: Mutex<Vec<(String, Vec<String>)>>,
+    }
+
+    impl ScriptedRunner {
+        fn new(steps: Vec<Step>) -> Arc<Self> {
+            let queue = steps
+                .into_iter()
+                .map(|s| match s {
+                    Step::Out(s) => Ok(s),
+                    Step::Fail => Err(()),
+                })
+                .collect();
+            Arc::new(Self {
+                queue: Mutex::new(queue),
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> Vec<(String, Vec<String>)> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+    }
+
+    impl CommandRunner for ScriptedRunner {
+        fn run<'a>(&'a self, program: &'a str, args: &'a [String]) -> CommandFuture<'a, String> {
+            self.calls
+                .lock()
+                .expect("calls lock")
+                .push((program.to_string(), args.to_vec()));
+            let step = self
+                .queue
+                .lock()
+                .expect("queue lock")
+                .pop_front()
+                .expect("unexpected extra command");
+            Box::pin(async move {
+                step.map_err(|()| SandboxError::Command {
+                    program: program.to_string(),
+                    status: "exit status: 1".to_string(),
+                    stderr: "scripted failure".to_string(),
+                })
+            })
+        }
+    }
+
+    fn with_runner(runner: Arc<dyn CommandRunner>) -> GcpProvider {
+        let mut p = provider();
+        p.runner = runner;
+        p
+    }
+
+    /// The action of a `gcloud compute …` call — `instances <verb>` yields
+    /// the verb (`describe`/`start`/…), `ssh` yields `"ssh"`. Used to assert
+    /// lifecycle sequencing across calls.
+    fn gcloud_action(call: &(String, Vec<String>)) -> Option<&str> {
+        let (prog, args) = call;
+        if prog != "gcloud" || args.first().map(String::as_str) != Some("compute") {
+            return None;
+        }
+        match args.get(1).map(String::as_str) {
+            Some("instances") => args.get(2).map(String::as_str),
+            Some("ssh") => Some("ssh"),
+            other => other,
+        }
+    }
+
+    fn spec() -> SandboxSpec {
+        SandboxSpec {
+            provider: "gcp".into(),
+            name: "lazybox-sbx-abc".into(),
+            project: "proj".into(),
+            region: "us-central1".into(),
+            zone: "us-central1-a".into(),
+            deployment: Deployment::default_recipe().expect("default recipe"),
         }
     }
 
@@ -532,5 +657,113 @@ mod tests {
         let json = r#"{"zone": {"value": "z"}}"#;
         let err = parse_tf_outputs(json).unwrap_err();
         assert!(matches!(err, SandboxError::Parse { .. }));
+    }
+
+    #[tokio::test]
+    async fn ensure_runs_init_then_apply_then_output() {
+        let outputs = r#"{
+            "instance_name": {"value": "lazybox-sbx-abc"},
+            "zone": {"value": "us-central1-b"}
+        }"#;
+        let runner = ScriptedRunner::new(vec![
+            Step::Out(String::new()),       // init
+            Step::Out(String::new()),       // apply
+            Step::Out(outputs.to_string()), // output -json
+        ]);
+        let provider = with_runner(runner.clone());
+
+        let handle = provider.ensure(&spec()).await.unwrap();
+
+        assert_eq!(handle.id, "lazybox-sbx-abc");
+        assert_eq!(handle.zone, "us-central1-b");
+        assert_eq!(handle.power_state, PowerState::Running);
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 3, "ensure runs init→apply→output");
+        assert!(calls.iter().all(|(prog, _)| prog == "terraform"));
+        assert!(calls[0].1.contains(&"init".to_string()));
+        assert!(calls[1].1.contains(&"apply".to_string()));
+        assert!(calls[2].1.contains(&"output".to_string()));
+    }
+
+    #[tokio::test]
+    async fn connect_starts_a_stopped_box_before_forwarding() {
+        // describe → STOPPED, so connect must start the box, then hand back
+        // the forward without a second describe.
+        let runner = ScriptedRunner::new(vec![
+            Step::Out("TERMINATED".to_string()), // power probe
+            Step::Out(String::new()),            // instances start
+        ]);
+        let provider = with_runner(runner.clone());
+
+        let tunnel = provider.connect(&handle(), &[3000]).await.unwrap();
+
+        assert_eq!(tunnel.program, "gcloud");
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2, "power probe, then start");
+        assert_eq!(gcloud_action(&calls[0]), Some("describe"));
+        assert_eq!(gcloud_action(&calls[1]), Some("start"));
+    }
+
+    #[tokio::test]
+    async fn connect_skips_start_when_the_box_is_running() {
+        let runner = ScriptedRunner::new(vec![Step::Out("RUNNING".to_string())]);
+        let provider = with_runner(runner.clone());
+
+        provider.connect(&handle(), &[]).await.unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1, "a running box needs only the power probe");
+        assert_eq!(gcloud_action(&calls[0]), Some("describe"));
+    }
+
+    #[tokio::test]
+    async fn status_probes_reachability_only_when_running() {
+        // Running box: describe says RUNNING, then the reachability SSH is
+        // attempted — here it succeeds, so `reachable` is true.
+        let runner = ScriptedRunner::new(vec![
+            Step::Out("RUNNING".to_string()), // power probe
+            Step::Out(String::new()),         // reachability ssh
+        ]);
+        let provider = with_runner(runner.clone());
+
+        let status = provider.status(&handle()).await.unwrap();
+        assert_eq!(status.power, PowerState::Running);
+        assert!(status.reachable);
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(gcloud_action(&calls[0]), Some("describe"));
+        assert_eq!(gcloud_action(&calls[1]), Some("ssh"));
+    }
+
+    #[tokio::test]
+    async fn status_of_a_stopped_box_never_probes() {
+        // A stopped box is never reachable; probing would block on a doomed
+        // SSH, so `status` must not attempt it.
+        let runner = ScriptedRunner::new(vec![Step::Out("TERMINATED".to_string())]);
+        let provider = with_runner(runner.clone());
+
+        let status = provider.status(&handle()).await.unwrap();
+        assert_eq!(status.power, PowerState::Stopped);
+        assert!(!status.reachable);
+        assert_eq!(
+            runner.calls().len(),
+            1,
+            "no reachability probe when stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_running_but_unreachable_when_the_probe_fails() {
+        let runner = ScriptedRunner::new(vec![
+            Step::Out("RUNNING".to_string()), // power probe
+            Step::Fail,                       // reachability ssh fails
+        ]);
+        let provider = with_runner(runner);
+
+        let status = provider.status(&handle()).await.unwrap();
+        assert_eq!(status.power, PowerState::Running);
+        assert!(!status.reachable, "a failed probe reads as unreachable");
     }
 }

@@ -78,6 +78,8 @@ jobs:
               - "crates/gh-provider/**"
               - "crates/ipc/**"
               - "crates/server/**"
+              - "crates/store/**"
+              - "crates/tui-core/**"
               - "docs/desktop-spike.md"
             contracts:
               - ".github/ISSUE_TEMPLATE/**"

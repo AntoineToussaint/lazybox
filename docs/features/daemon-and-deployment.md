@@ -173,9 +173,10 @@ workspace deltas a client subscribes to after the initial read.
 `server_api` (`crates/tui-boot/src/main.rs`) parses the addr (arg → `LAZYBOX_API_ADDR`
 → default) and `LAZYBOX_API_TOKEN`, refusing to start without a token unless
 `--insecure-no-auth` is passed. The gateway (`api_gateway.rs`)
-serves the endpoints; streaming uses NDJSON frames (`JsonClientFrame::Command`
- / `JsonServerFrame::Event`) except terminal bytes, which use the versioned
-binary terminal stream. When a token is set, requests need
+serves the endpoints; `/v1/stream` uses NDJSON `JsonClientFrame::Command` /
+`JsonServerFrame::Event` frames, while `/v1/events` uses projected
+`DesktopEventFrame` values. Terminal bytes use the versioned binary stream.
+When a token is set, requests need
 `Authorization: Bearer <token>`. One-shot commands execute their handler to
 completion before HTTP 200 and return connection-scoped handler outcomes in
 the response's `events` array; control commands that require a stream are
@@ -183,6 +184,25 @@ rejected. Terminal commands are accepted only by the ordered binary endpoint.
 Connections, request bodies, command lines, and commands per stream all have
 hard bounds. `GET /v1/workspaces` includes a `warnings` array for persisted
 rows that were preserved but could not be decoded.
+
+`GET /v1/events` is the versioned desktop surface: it emits only the closed,
+generated `DesktopEvent` projection, never the daemon's internal `Event` enum.
+New optional fields may be added without changing the protocol version;
+removing or changing a field, adding a required field, or adding a required
+event variant requires a version bump. A client outside the daemon's supported
+version range receives HTTP 426 with both versions, both build fingerprints,
+and remediation text and must stop reconnecting until one side is updated.
+
+`POST /v1/commands` intentionally accepts the full internal `Command` JSON
+surface for an authenticated bearer. Possession of that bearer is therefore
+equivalent to daemon-control access; callers that only need desktop workflows
+should send the generated `DesktopCommand` subset. The one-shot response echoes
+the client request id and carries the command's own handler-emitted events plus
+the bus outcome correlated to that request id (a terminal-launch
+`CommandCompleted`/`CommandFailed`) — never unrelated bus traffic from other
+clients or pollers. Clients consume those events and deduplicate their later
+live-stream copies. The echoed id is advisory: HTTP already pairs the reply to
+the request, so a stripped correlation header is not treated as a failure.
 
 Provider credentials mutated through the experimental API remain in memory for
 the daemon process lifetime. Restarting the daemon discards them; persistent

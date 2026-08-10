@@ -14,6 +14,12 @@ export type DesktopCommand = { "SpawnAgent": { session_key: SessionKey, agent: s
  */
 model_alias: string | null,
 /**
+ * Work submitted atomically with the spawn. The daemon preserves
+ * the agent's raw/normalized run behavior and records the prompt in
+ * the same history as an interactive submission.
+ */
+initial_prompt: string | null,
+/**
  * Spawn on the repo's shared main checkout instead of an isolated
  * worktree (the TUI's `b`-leader on-main group). The desktop
  * confirms this before sending, since edits land on main.

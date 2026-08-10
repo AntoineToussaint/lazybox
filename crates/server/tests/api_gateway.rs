@@ -9,9 +9,10 @@ pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 mod api_gateway;
 
 use api_gateway::{
-    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCommand, DesktopEvent, DesktopInfo,
-    DesktopTerminalSnapshot, GatewayOptions, HealthResponse, JsonClientFrame, JsonServerFrame,
-    ProtocolResponse, UnsupportedProtocolResponse, WorkspacesResponse,
+    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCommand, DesktopEvent,
+    DesktopEventFrame, DesktopInfo, DesktopTerminalSnapshot, GatewayOptions, HealthResponse,
+    JsonClientFrame, JsonServerFrame, ProtocolResponse, UnsupportedProtocolResponse,
+    WorkspacesResponse,
 };
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
@@ -206,6 +207,10 @@ fn desktop_event_tag(event: &DesktopEvent) -> &'static str {
         DesktopEvent::TerminalSpawned { .. } => "TerminalSpawned",
         DesktopEvent::TerminalExited { .. } => "TerminalExited",
         DesktopEvent::TerminalFocusRequested { .. } => "TerminalFocusRequested",
+        DesktopEvent::TerminalInputRejected { .. } => "TerminalInputRejected",
+        DesktopEvent::TerminalReplaced { .. } => "TerminalReplaced",
+        DesktopEvent::CommandCompleted { .. } => "CommandCompleted",
+        DesktopEvent::CommandFailed { .. } => "CommandFailed",
         DesktopEvent::AgentState { .. } => "AgentState",
         DesktopEvent::SnippetDelivered { .. } => "SnippetDelivered",
         DesktopEvent::ProviderError { .. } => "ProviderError",
@@ -270,6 +275,7 @@ fn desktop_compatibility_fixture_is_current() {
             session_key: session_key.clone(),
             agent: "codex".into(),
             model_alias: Some("L".into()),
+            initial_prompt: Some("Review the current changes.".into()),
             on_main: true,
         },
         DesktopCommand::SpawnShell {
@@ -358,6 +364,11 @@ fn desktop_compatibility_fixture_is_current() {
                 kind: TerminalKind::Agent("codex".into()),
                 last_seq: 42,
                 agent_state: Some(AgentState::Working),
+                prompt_history: vec![lazybox_ipc::UserPrompt {
+                    text: "Review the current changes.".into(),
+                    timestamp_ms: 1_700_000_000_000,
+                    source: lazybox_ipc::PromptSource::Typed,
+                }],
             }],
             recent_snippets: vec!["rev".into()],
         },
@@ -375,6 +386,27 @@ fn desktop_compatibility_fixture_is_current() {
         },
         DesktopEvent::TerminalFocusRequested {
             terminal_id: TerminalId(7),
+        },
+        DesktopEvent::TerminalInputRejected {
+            terminal_id: TerminalId(7),
+            message: "agent did not settle".into(),
+        },
+        DesktopEvent::TerminalReplaced {
+            old_terminal_id: TerminalId(7),
+            terminal_id: TerminalId(8),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: Some("large".into()),
+            authenticating: false,
+        },
+        DesktopEvent::CommandCompleted {
+            client_request_id: "request-1".into(),
+        },
+        DesktopEvent::CommandFailed {
+            client_request_id: "request-2".into(),
+            message: "agent unavailable".into(),
         },
         DesktopEvent::AgentState {
             session_key: session_key.clone(),
@@ -447,7 +479,7 @@ fn desktop_compatibility_fixture_is_current() {
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(command_tags.len(), 22);
-    assert_eq!(event_tags.len(), 15);
+    assert_eq!(event_tags.len(), 19);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,
         "protocol_fingerprint": api_gateway::DESKTOP_PROTOCOL_FINGERPRINT,
@@ -1584,6 +1616,52 @@ async fn command_route_returns_connection_scoped_handler_events() {
 }
 
 #[tokio::test]
+async fn command_route_does_not_leak_unrelated_bus_events_into_the_response() {
+    // A one-shot command's reply must carry only *its own* outcome, not
+    // whatever a concurrent poller or another client happens to broadcast
+    // while the handler runs. Regression for the blanket bus drain that
+    // scooped up every bus frame and raced it against the live stream.
+    let config = ServerConfig::in_memory();
+
+    // Flood the bus with unrelated traffic for the whole handler window so a
+    // blanket drain would be overwhelmingly likely to capture at least one.
+    let noise_bus = config.bus.clone();
+    let noise = tokio::spawn(async move {
+        for _ in 0..500 {
+            let _ = noise_bus.send(Event::PollCompleted {
+                source: "noise".into(),
+                count: 999,
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    });
+
+    let frame = JsonClientFrame::Command(Command::ListProviderCredentials {
+        principal_id: lazybox_ipc::PrincipalId::local(),
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .body(Full::new(Bytes::from(serde_json::to_vec(&frame).unwrap())))
+        .unwrap();
+
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload: CommandResponse = read_json(response).await;
+    noise.abort();
+    assert!(
+        !payload.events.iter().any(|event| matches!(
+            event,
+            Event::PollCompleted { source, .. } if source == "noise"
+        )),
+        "unrelated bus events leaked into the command response: {:?}",
+        payload.events
+    );
+}
+
+#[tokio::test]
 async fn device_bearer_scopes_credentials_to_its_own_principal() {
     // A minted device credential authenticates as `device:<id>`; the
     // gateway must ignore the client-supplied `principal_id` and scope
@@ -1913,9 +1991,9 @@ async fn events_route_streams_initial_snapshot_as_ndjson() {
         .expect("body frame")
         .expect("frame ok");
     let data = frame.into_data().expect("data frame");
-    let server_frame: JsonServerFrame = serde_json::from_slice(data.trim_ascii()).unwrap();
+    let server_frame: DesktopEventFrame = serde_json::from_slice(data.trim_ascii()).unwrap();
     match server_frame {
-        JsonServerFrame::Event(Event::Snapshot {
+        DesktopEventFrame::Event(DesktopEvent::Snapshot {
             workspaces,
             terminals,
             ..
@@ -1924,6 +2002,94 @@ async fn events_route_streams_initial_snapshot_as_ndjson() {
             assert!(terminals.is_empty());
         }
         other => panic!("expected Snapshot frame, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn events_route_skips_unprojected_internal_events_without_breaking_the_stream() {
+    let config = ServerConfig::in_memory();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/v1/events")
+        .body(Full::new(Bytes::new()))
+        .unwrap();
+    let response =
+        api_gateway::handle_request(config.clone(), GatewayOptions::default(), request).await;
+    let mut body = response.into_body();
+    let _snapshot = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+        .await
+        .expect("initial snapshot")
+        .expect("snapshot frame")
+        .expect("snapshot body");
+
+    let _ = config.bus.send(Event::TerminalResyncUnavailable {
+        terminal_id: TerminalId(7),
+    });
+    let _ = config.bus.send(Event::PollCompleted {
+        source: "github".into(),
+        count: 1,
+    });
+
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(2), body.frame())
+        .await
+        .expect("projected event follows ignored internal event")
+        .expect("event frame")
+        .expect("event body");
+    let data = frame.into_data().expect("data frame");
+    let frame: DesktopEventFrame = serde_json::from_slice(data.trim_ascii()).unwrap();
+    assert!(matches!(
+        frame,
+        DesktopEventFrame::Event(DesktopEvent::PollCompleted { count: 1, .. })
+    ));
+}
+
+#[test]
+fn desktop_projection_maps_terminal_repair_events() {
+    assert!(matches!(
+        api_gateway::desktop_event(Event::TerminalInputRejected {
+            terminal_id: TerminalId(4),
+            message: "not delivered".into(),
+        }),
+        Some(DesktopEvent::TerminalInputRejected {
+            terminal_id: TerminalId(4),
+            ..
+        })
+    ));
+    assert!(matches!(
+        api_gateway::desktop_event(Event::TerminalReplaced {
+            old_terminal_id: TerminalId(4),
+            terminal_id: TerminalId(5),
+            session_key: "github:o/r#42".into(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: true,
+            on_main: false,
+            model_label: Some("large".into()),
+            authenticating: false,
+        }),
+        Some(DesktopEvent::TerminalReplaced {
+            old_terminal_id: TerminalId(4),
+            terminal_id: TerminalId(5),
+            no_permission: true,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn desktop_ci_watches_every_generated_contract_input() {
+    let workflow = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml"),
+    )
+    .expect("read CI workflow");
+    for path in [
+        "apps/desktop/**",
+        "crates/core/**",
+        "crates/ipc/**",
+        "crates/server/**",
+        "crates/store/**",
+        "crates/tui-core/**",
+    ] {
+        assert!(workflow.contains(path), "desktop CI must watch {path}");
     }
 }
 

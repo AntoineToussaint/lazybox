@@ -266,13 +266,21 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// The `⚠` tab glyph is compact by design (#989), so focusing a
+    /// The `⚠` tab glyph is compact by design (#989), so landing on a
     /// bypass-mode terminal spells out what it means in the footer —
     /// once per terminal, so re-syncing or bouncing pane focus on the
     /// same terminal never re-nags. Resetting the throttle when the
     /// active terminal changes lets re-entering a bypass terminal
-    /// re-explain.
-    fn hint_no_permission_focus(&mut self) {
+    /// re-explain. Called from every path that can change which terminal
+    /// is active: pane-focus changes, workspace selection, and the
+    /// `]]`-leader tab/tile switches that never touch pane focus.
+    ///
+    /// Yields to the #544 outdated-scroll hint: a terminal that is both
+    /// recovered-old-build and bypass shows the functional
+    /// scrollback-limited warning rather than this informational one, so
+    /// the two focus hints (run back-to-back in `set_focus_attr`) can't
+    /// clobber each other.
+    pub(super) fn hint_no_permission_focus(&mut self) {
         let active = self.terminals.active_terminal_id();
         if self.no_permission_hinted != active {
             self.no_permission_hinted = None;
@@ -280,6 +288,7 @@ impl<T: TerminalAdapter> Model<T> {
         if self.focus == PaneFocus::Terminals
             && let Some(id) = active
             && self.terminals.terminal_no_permission(id)
+            && !self.outdated_scroll_terminals.contains(&id)
             && self.no_permission_hinted != Some(id)
         {
             self.no_permission_hinted = Some(id);

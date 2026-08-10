@@ -13425,6 +13425,105 @@ mod spawn_spinner_projection_tests {
             "staying on the same bypass terminal must not re-flash the hint"
         );
     }
+
+    /// #989: a `]]`-leader tab switch changes the active terminal without
+    /// touching pane focus or the selected workspace, so the hint must
+    /// re-fire from the leader-dispatch path — otherwise cycling onto a
+    /// bypass tab leaves its compact `⚠` unexplained.
+    #[test]
+    fn leader_tab_cycle_to_bypass_terminal_hints() {
+        use lazybox_core::SessionLayout;
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+        let mut m = build_model();
+        let sk = SessionKey::new("github:o/r#1");
+        // Two agent tabs in one session: interactive (tab 0), bypass (tab 1).
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(2),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: true,
+            on_main: false,
+        });
+        m.terminals.set_active_session(Some(sk));
+        m.terminals.set_layout(SessionLayout::Tabs { active: 0 });
+        m.terminals.set_active_tab(0);
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
+        m.status.notice = None;
+
+        // `]]→` cycles to the bypass tab. This routes through the terminal
+        // leader, which returns before `sync_panes`/`set_focus` — the paths
+        // the other two hint hooks live on.
+        m.terminal_leader_armed = true;
+        m.dispatch_key(RealmKey::new(Key::Right, RealmMods::NONE));
+        assert_eq!(
+            m.terminals.active_terminal_id(),
+            Some(TerminalId(2)),
+            "the leader arrow must cycle to the bypass tab"
+        );
+        let notice = m.status.notice.as_ref().expect("cycle hint");
+        assert!(
+            notice.message.contains("no-permission mode"),
+            "cycling onto a bypass tab must explain its ⚠; got: {}",
+            notice.message
+        );
+    }
+
+    /// #989: a terminal that is both a recovered old-build tab (#544) and a
+    /// bypass spawn must show the functional scrollback warning, not the
+    /// informational bypass hint — the two focus hints run back-to-back and
+    /// must not clobber each other.
+    #[test]
+    fn outdated_scroll_hint_takes_precedence_over_no_permission() {
+        let mut m = build_model();
+        let ws_key = lazybox_core::WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: true,
+            on_main: false,
+        });
+        m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
+            terminal_ids: vec![TerminalId(1)],
+        });
+        m.status.notice = None;
+        m.set_focus(PaneFocus::Terminals);
+        let notice = m.status.notice.as_ref().expect("focus hint");
+        assert!(
+            notice.message.contains("scrollback unavailable"),
+            "the functional scrollback warning must win over the bypass hint; got: {}",
+            notice.message
+        );
+        assert!(
+            !notice.message.contains("no-permission mode"),
+            "the bypass hint must not clobber the scrollback warning"
+        );
+    }
 }
 
 #[cfg(test)]

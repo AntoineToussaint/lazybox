@@ -178,6 +178,7 @@
               "base_branch": null,
               "body": null,
               "branch": null,
+              "changed_files": 0,
               "checks": [],
               "ci": "Success",
               "closed_at": null,
@@ -254,6 +255,7 @@
           "base_branch": null,
           "body": null,
           "branch": null,
+          "changed_files": 0,
           "checks": [],
           "ci": "Success",
           "closed_at": null,
@@ -447,6 +449,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 1366899356,
+  "protocol_fingerprint": 161578429,
   "protocol_version": 3
 }

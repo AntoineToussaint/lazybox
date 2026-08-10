@@ -1346,6 +1346,27 @@ mod description_expand_tests {
             text.contains("stacked on #1") && text.contains("2/3"),
             "the header must name the parent + position: {text}",
         );
+
+        // Bottom of the stack (no parent): position only, no dangling
+        // separator before it.
+        pane.set_stack(Some(lazybox_core::StackPosition {
+            parent: None,
+            children: vec![lazybox_core::TaskId {
+                source: "github".into(),
+                key: "o/r#2".into(),
+            }],
+            position: 1,
+            depth: 3,
+        }));
+        let root = full_buffer_text(&mut pane, 80, 24);
+        let stack_row = root
+            .lines()
+            .find(|r| r.contains("Stack:"))
+            .expect("root of a stack still shows the Stack line");
+        assert!(
+            stack_row.contains("1/3") && !stack_row.contains('·'),
+            "the stack root shows position alone, no dangling separator: {stack_row:?}",
+        );
     }
 
     #[test]

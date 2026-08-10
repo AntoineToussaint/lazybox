@@ -37,9 +37,10 @@ pub struct StackPosition {
     /// 1-based position measured from the bottom of the chain — the
     /// bottom-most PR is `1`, the one stacked on it is `2`, and so on.
     pub position: usize,
-    /// Length of the longest root-to-leaf chain passing through this PR.
-    /// For a linear stack this is the stack size, so `(position, depth)`
-    /// renders as `2/3`.
+    /// Height of the whole stack this PR belongs to — the longest
+    /// root-to-leaf chain in its tree. This is a per-stack constant, so
+    /// two PRs branching off the same parent report the same `N` in
+    /// `k/N` rather than each measuring only the chain through itself.
     pub depth: usize,
 }
 
@@ -135,16 +136,24 @@ fn position_from_bottom(id: &TaskId, parent: &HashMap<&TaskId, &TaskId>) -> usiz
     pos
 }
 
-/// Length of the longest root-to-leaf chain through `id`: hops up to the
-/// root plus the tallest subtree below. Cycle-safe.
-fn chain_depth(
-    id: &TaskId,
-    parent: &HashMap<&TaskId, &TaskId>,
-    children: &HashMap<&TaskId, Vec<&TaskId>>,
+/// Height of the whole tree `id` belongs to: walk to the root, then
+/// measure its tallest root-to-leaf chain. Constant for every node in a
+/// tree, so siblings share the same `N` in `k/N`. Cycle-safe.
+fn chain_depth<'a>(
+    id: &'a TaskId,
+    parent: &HashMap<&'a TaskId, &'a TaskId>,
+    children: &HashMap<&'a TaskId, Vec<&'a TaskId>>,
 ) -> usize {
-    position_from_bottom(id, parent)
-        + subtree_height(id, children, &mut std::collections::HashSet::new())
-        - 1
+    let mut seen = std::collections::HashSet::new();
+    let mut root = id;
+    seen.insert(root);
+    while let Some(&p) = parent.get(root) {
+        if !seen.insert(p) {
+            break;
+        }
+        root = p;
+    }
+    subtree_height(root, children, &mut std::collections::HashSet::new())
 }
 
 /// Number of PRs in the tallest descendant chain including `id` itself
@@ -286,8 +295,10 @@ mod tests {
     }
 
     #[test]
-    fn branching_stack_reports_longest_chain_as_depth() {
-        // A ← B, A ← C, C ← D. Longest chain A-C-D has depth 3.
+    fn branching_stack_reports_tree_height_as_depth() {
+        // A ← B, A ← C, C ← D. The tree height is 3 (chain A-C-D), and
+        // `depth` is that height for EVERY node — so siblings B and C
+        // both read `2/3`, not `2/2` vs `2/3`.
         let a = pr("o/r", 1, "feat-a", "main");
         let b = pr("o/r", 2, "feat-b", "feat-a");
         let c = pr("o/r", 3, "feat-c", "feat-a");
@@ -298,8 +309,11 @@ mod tests {
         assert_eq!(sa.children, vec![id("o/r", 2), id("o/r", 3)]);
         assert_eq!((sa.position, sa.depth), (1, 3));
 
+        // Siblings off the same parent share N (the tree height).
         let sb = &stacks[&id("o/r", 2)];
-        assert_eq!((sb.position, sb.depth), (2, 2));
+        assert_eq!((sb.position, sb.depth), (2, 3));
+        let sc = &stacks[&id("o/r", 3)];
+        assert_eq!((sc.position, sc.depth), (2, 3));
 
         let sd = &stacks[&id("o/r", 4)];
         assert_eq!((sd.position, sd.depth), (3, 3));

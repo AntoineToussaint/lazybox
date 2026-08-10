@@ -328,6 +328,39 @@ async fn run_real_attempt_with_resolver<F, Fut>(
     }
 }
 
+/// Whether `child` is stacked on a still-open parent PR (issue #969) —
+/// its base branch is another open PR's head among the workspaces lazybox
+/// tracks. `child` carries the attempt's *fresh* state (so a parent-merge
+/// that already retargeted its base is honored); the candidate parents
+/// come from the local snapshot. Reuses [`lazybox_core::detect_stacks`]
+/// so the daemon's "is this a stacked child" verdict matches the UI's.
+async fn stacked_on_open_parent(config: &ServerConfig, child: &Task) -> bool {
+    if child.repo.is_none() || child.base_branch.is_none() {
+        return false;
+    }
+    let store = config.store.clone();
+    let others = tokio::task::spawn_blocking(move || {
+        store
+            .list_workspaces()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| r.workspace_json)
+            .filter_map(|j| serde_json::from_str::<Workspace>(&j).ok())
+            .filter_map(|w| w.pr)
+            .collect::<Vec<Task>>()
+    })
+    .await
+    .unwrap_or_default();
+
+    // Swap the child's stored (possibly stale) row for its fresh state.
+    let mut prs: Vec<&Task> = others.iter().filter(|t| t.id != child.id).collect();
+    prs.push(child);
+    lazybox_core::detect_stacks(prs)
+        .get(&child.id)
+        .and_then(|pos| pos.parent.as_ref())
+        .is_some()
+}
+
 /// One auto-merge attempt: fresh fetch → re-verify → guarded merge.
 ///
 /// Every exit path settles the `InFlight` latch, so a settled attempt
@@ -417,6 +450,27 @@ pub async fn run_attempt<B: MergeBackend>(
         let _ = config.bus.send(Event::provider_error_retryable(
             "auto-merge",
             format!("auto-merge stood down on {pr_label}: {reason}"),
+        ));
+        settle(Some(Latch::Blocked(head)));
+        commit_fresh_task(config, key, fresh).await;
+        return;
+    }
+
+    // Stack order (issue #969): never auto-merge a PR that is stacked on a
+    // still-open parent. Merging it out of order lands the stack wrong —
+    // GitHub retargets the parent's other children onto the base and the
+    // user must restack. The manual `g m` path warns the human first; this
+    // path has no human, so it must refuse outright. Hold (Block) rather
+    // than release: when the parent lands, its merge retargets this child
+    // (a `changed` commit), which re-probes and — now the bottom of the
+    // stack — auto-merges then. A parent our snapshot still shows open but
+    // that just merged only delays this by one poll; it never merges out of
+    // order.
+    if stacked_on_open_parent(config, &fresh).await {
+        tracing::info!(workspace = %key, "auto-merge: stacked on an open parent — standing down");
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "auto-merge",
+            format!("auto-merge held on {pr_label}: stacked on a still-open parent PR"),
         ));
         settle(Some(Latch::Blocked(head)));
         commit_fresh_task(config, key, fresh).await;
@@ -771,6 +825,85 @@ mod tests {
         );
         let evt = rx.try_recv().expect("PrMerged must be broadcast");
         assert!(matches!(evt, Event::PrMerged { .. }), "got {evt:?}");
+    }
+
+    /// Issue #969: an armed, green PR that is stacked on a still-open
+    /// parent must NOT auto-merge — merging it out of order would force a
+    /// restack of the children. It stands down (Blocked) with a reason,
+    /// mirroring the `g m` warning the human would have seen.
+    #[tokio::test(flavor = "current_thread")]
+    async fn attempt_holds_a_stacked_child_with_an_open_parent() {
+        // Parent PR (open) on `main`; its head is `feat-parent`.
+        let mut parent = green_task("o/r#1");
+        parent.branch = Some("feat-parent".into());
+        let parent_ws = Workspace::from_task(parent, Utc::now());
+
+        // Child PR (armed, green) stacked on the parent's head.
+        let mut child = green_task("o/r#2");
+        child.branch = Some("feat-child".into());
+        child.base_branch = Some("feat-parent".into());
+        let mut child_ws = Workspace::from_task(child.clone(), Utc::now());
+        child_ws.auto_merge_on_green = true;
+
+        let store = Arc::new(MemoryStore::new());
+        seed(&store, &parent_ws);
+        seed(&store, &child_ws);
+        let config = ServerConfig::with_store(store);
+        let mut rx = config.bus.subscribe();
+
+        let mut fresh = green_task("o/r#2");
+        fresh.branch = Some("feat-child".into());
+        fresh.base_branch = Some("feat-parent".into());
+        let backend = FakeBackend::merging(fresh, "abc123");
+
+        run_attempt(&config, ticket(&child_ws, None), &own_policy(), &backend).await;
+
+        assert!(
+            backend.merges.lock().is_empty(),
+            "a stacked child must not merge ahead of its open parent",
+        );
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&child_ws.key),
+            Some(&Latch::Blocked(Some("abc123".into()))),
+            "held (Blocked) so it re-probes once the parent lands",
+        );
+        let evt = rx.try_recv().expect("a stand-down notice is broadcast");
+        match evt {
+            Event::ProviderError { message, .. } => {
+                assert!(
+                    message.contains("stacked"),
+                    "reason names the cause: {message}"
+                )
+            }
+            other => panic!("expected a stand-down notice, got {other:?}"),
+        }
+    }
+
+    /// The bottom of a stack (base is `main`, no open parent) still
+    /// auto-merges normally — the guard only holds non-bottom PRs.
+    #[tokio::test(flavor = "current_thread")]
+    async fn attempt_merges_the_bottom_of_a_stack() {
+        // A child stacked on THIS pr sits above it, but this PR's own base
+        // is `main`, so it is the mergeable bottom.
+        let mut child = green_task("o/r#2");
+        child.branch = Some("feat-child".into());
+        child.base_branch = Some("feature".into()); // feature == this PR's head
+        let child_ws = Workspace::from_task(child, Utc::now());
+
+        let bottom_ws = armed_ws("o/r#1"); // head "feature", base "main"
+        let store = Arc::new(MemoryStore::new());
+        seed(&store, &bottom_ws);
+        seed(&store, &child_ws);
+        let config = ServerConfig::with_store(store);
+
+        let backend = FakeBackend::merging(green_task("o/r#1"), "abc123");
+        run_attempt(&config, ticket(&bottom_ws, None), &own_policy(), &backend).await;
+
+        assert_eq!(
+            backend.merges.lock().as_slice(),
+            &[Some("abc123".to_string())],
+            "the bottom of the stack merges normally",
+        );
     }
 
     /// Build an armed workspace whose PR is authored by someone else

@@ -1350,17 +1350,25 @@ impl RightPane {
         // not unrelated rows. The bottom PR (nothing beneath it) shows
         // only its position — there's no parent to name.
         if let Some(stack) = &self.stack {
+            let position = format!("{}/{}", stack.position, stack.depth);
             let mut spans = vec![Span::styled("Stack: ", Style::default().fg(theme.text_dim))];
-            if let Some(parent) = stack.parent.as_ref().and_then(|p| p.number()) {
-                spans.push(Span::styled(
-                    format!("stacked on #{parent} "),
-                    Style::default().fg(theme.accent),
-                ));
+            match stack.parent.as_ref().and_then(|p| p.number()) {
+                // Mid-stack: name the parent, then the position after a
+                // separator.
+                Some(parent) => {
+                    spans.push(Span::styled(
+                        format!("stacked on #{parent} "),
+                        Style::default().fg(theme.accent),
+                    ));
+                    spans.push(Span::styled(
+                        format!("· {position}"),
+                        Style::default().fg(theme.text_dim),
+                    ));
+                }
+                // Bottom of the stack: no parent to name, so show the
+                // position alone — no dangling separator.
+                None => spans.push(Span::styled(position, Style::default().fg(theme.text_dim))),
             }
-            spans.push(Span::styled(
-                format!("· {}/{}", stack.position, stack.depth),
-                Style::default().fg(theme.text_dim),
-            ));
             lines.push(Line::from(spans));
         }
 

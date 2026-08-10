@@ -96,6 +96,7 @@ mod tests {
             region: "r".into(),
             zone: "z".into(),
             deployment: Deployment::default_recipe().unwrap(),
+            lazybox_git_sha: String::new(),
         }
     }
 

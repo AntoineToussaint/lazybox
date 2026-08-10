@@ -85,3 +85,40 @@ variable "bringup" {
   default     = ""
   description = "Optional command run after clone to bring the workload up."
 }
+
+variable "install_lazybox" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    Install the lazybox toolchain + daemon + idle-stop lifecycle on the box
+    at first boot. On by default so the box is reachable by `r`-spawn/`connect`
+    out of the box; a "bring your own stack" deployment sets this false.
+  EOT
+}
+
+variable "lazybox_git_sha" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Commit the box clones + builds lazybox at, so the box daemon's wire
+    fingerprint matches the client that provisioned it. Empty → the repo's
+    default branch (a client built outside a git checkout knows no commit).
+  EOT
+}
+
+variable "lazybox_repo" {
+  type        = string
+  default     = "https://github.com/AntoineToussaint/lazybox"
+  description = "Repo the box clones to build the daemon (owner/repo or URL)."
+}
+
+variable "lazybox_repo_token_secret" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Optional Secret Manager secret name holding a token to clone a PRIVATE
+    lazybox_repo. Fetched on the box via the instance service account and fed
+    to git through GIT_ASKPASS — never placed in the clone URL. Empty for the
+    public repo.
+  EOT
+}

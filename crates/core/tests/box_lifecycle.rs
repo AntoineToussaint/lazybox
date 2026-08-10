@@ -146,6 +146,85 @@ fn scripts_are_hardened_and_parse() {
     }
 }
 
+/// The box installer (`contrib/box/install.sh`, #977) is what a freshly
+/// provisioned box runs to get a daemon whose wire fingerprint matches the
+/// client — build at the pinned commit, install the binary, then copy +
+/// enable the daemon and idle-stop units. It runs unattended under a systemd
+/// oneshot far from anyone watching, so this keeps it honest: strict mode, a
+/// real build+install path, the SHA record `lazybox sandbox rebuild` reads,
+/// and the systemd wiring that makes the daemon come up on boot.
+#[test]
+fn box_installer_builds_and_wires_the_daemon() {
+    let path = workspace_root().join("contrib/box/install.sh");
+    let body = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+
+    assert!(
+        body.starts_with("#!/usr/bin/env bash"),
+        "install.sh: missing bash shebang"
+    );
+    assert!(
+        body.contains("set -euo pipefail"),
+        "install.sh: missing `set -euo pipefail`"
+    );
+
+    // Builds at the checkout and installs the binary where the units expect it.
+    assert!(
+        body.contains("make -C \"$LAZYBOX_SRC\" release"),
+        "install.sh should build the release binary"
+    );
+    assert!(
+        body.contains("/usr/local/bin/lazybox"),
+        "install.sh should install the binary to /usr/local/bin/lazybox"
+    );
+    // Records the built commit so rebuild can skip a no-op and the box is greppable.
+    assert!(
+        body.contains("/etc/lazybox/build-sha"),
+        "install.sh must record the installed SHA"
+    );
+
+    // Copies + enables the daemon on boot and the idle-stop timer — the two
+    // units the issue's acceptance turns on.
+    assert!(
+        body.contains("lazybox-daemon@") && body.contains("systemctl enable --now"),
+        "install.sh should enable the daemon unit on boot"
+    );
+    assert!(
+        body.contains("lazybox-idle-stop.timer"),
+        "install.sh should arm the idle-stop timer so an untouched box stops itself"
+    );
+    // A rebuild swaps the binary under a running daemon, so it must restart.
+    assert!(
+        body.contains("systemctl restart"),
+        "install.sh should restart the daemon after a rebuild"
+    );
+
+    // The units it installs must actually exist in the tree it copies from.
+    for unit in [
+        "contrib/systemd/lazybox-daemon@.service",
+        "contrib/box-lifecycle/lazybox-idle-stop.service",
+        "contrib/box-lifecycle/lazybox-idle-stop.timer",
+        "contrib/box-lifecycle/lazybox-idle-stop.sh",
+    ] {
+        assert!(
+            workspace_root().join(unit).exists(),
+            "install.sh copies {unit}, which is missing"
+        );
+    }
+
+    if let Ok(bash) = which_bash() {
+        let out = Command::new(&bash)
+            .arg("-n")
+            .arg(&path)
+            .output()
+            .unwrap_or_else(|e| panic!("run bash -n {}: {e}", path.display()));
+        assert!(
+            out.status.success(),
+            "bash -n install.sh failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 fn which_bash() -> Result<PathBuf, ()> {
     for dir in ["/bin", "/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"] {
         let p = Path::new(dir).join("bash");

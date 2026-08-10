@@ -60,6 +60,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// the worker.
 const NOTICE_CAPACITY: usize = 32;
 
+/// A substring of [`lazybox_ipc::socket::HandshakeError::FingerprintMismatch`]'s
+/// message. The box daemon rejects a client compiled from a different commit,
+/// and the error reaches this worker flattened into a string (through
+/// `connect_reconnecting`'s `io::Error`), so a mismatch is classified by this
+/// stable marker. A regression test pins it against the real error's Display.
+const FINGERPRINT_MISMATCH_MARKER: &str = "wire fingerprint mismatch";
+
+/// Whether a bring-up failure's root cause is a wire-fingerprint mismatch —
+/// the box daemon was built from a different commit than this client. Unlike
+/// a flaky connect, retrying can't fix it; the box must be rebuilt.
+fn is_fingerprint_mismatch(err: &anyhow::Error) -> bool {
+    format!("{err:#}").contains(FINGERPRINT_MISMATCH_MARKER)
+}
+
 /// A brought-up remote box the realm `Model` can address: the display name
 /// (the deployment name → the sidebar's `⇅ <name>` glyph), the client end
 /// of the pair to the worker, and the worker's notice stream (bring-up
@@ -204,8 +218,15 @@ async fn bring_up(
 /// Retry `op` up to `attempts` times, spacing failures by `backoff`.
 /// Returns the first success or the last error. Used to keep a transient
 /// bring-up failure (flaky connect/handshake) from silently dropping the
-/// `r`-spawn that triggered it.
-async fn with_retries<T, F, Fut>(attempts: usize, backoff: Duration, mut op: F) -> anyhow::Result<T>
+/// `r`-spawn that triggered it. An error `fatal` classifies as unrecoverable
+/// (a fingerprint mismatch — retrying re-runs Terraform/wake for nothing)
+/// short-circuits immediately.
+async fn with_retries<T, F, Fut>(
+    attempts: usize,
+    backoff: Duration,
+    fatal: impl Fn(&anyhow::Error) -> bool,
+    mut op: F,
+) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
@@ -214,6 +235,10 @@ where
     for attempt in 1..=attempts {
         match op().await {
             Ok(value) => return Ok(value),
+            Err(e) if fatal(&e) => {
+                tracing::warn!("r-spawn box bring-up failed unrecoverably: {e:#}");
+                return Err(e);
+            }
             Err(e) => {
                 tracing::warn!("r-spawn box bring-up attempt {attempt}/{attempts} failed: {e:#}");
                 last_err = Some(e);
@@ -354,9 +379,12 @@ async fn run(
                     )
                 }),
             );
-            match with_retries(MAX_BRINGUP_ATTEMPTS, BRINGUP_RETRY_BACKOFF, || {
-                bring_up(&provider, &spec, store.as_ref(), &ports)
-            })
+            match with_retries(
+                MAX_BRINGUP_ATTEMPTS,
+                BRINGUP_RETRY_BACKOFF,
+                is_fingerprint_mismatch,
+                || bring_up(&provider, &spec, store.as_ref(), &ports),
+            )
             .await
             {
                 Ok((client, supervisor)) => {
@@ -399,14 +427,26 @@ async fn run(
                         "r-spawn box bring-up failed after retries; dropping {} queued command(s): {e:#}",
                         dropped.len()
                     );
+                    // A fingerprint mismatch is actionable, not a transient
+                    // drop: the box daemon is a different commit, so name the
+                    // one-command fix instead of a generic failure.
+                    let error = if is_fingerprint_mismatch(&e) {
+                        format!(
+                            "⇅ {name}: box daemon built from a different commit — run \
+                             `lazybox sandbox rebuild`, then retry the {} dropped command(s)",
+                            dropped.len()
+                        )
+                    } else {
+                        format!(
+                            "⇅ {name}: box bring-up failed after {MAX_BRINGUP_ATTEMPTS} attempts — {} command(s) dropped ({e:#})",
+                            dropped.len()
+                        )
+                    };
                     notify(
                         &notice_tx,
                         RemoteBoxNotice::Dropped {
                             session_keys: dropped.iter().filter_map(spawn_session_key).collect(),
-                            error: format!(
-                                "⇅ {name}: box bring-up failed after {MAX_BRINGUP_ATTEMPTS} attempts — {} command(s) dropped ({e:#})",
-                                dropped.len()
-                            ),
+                            error,
                         },
                     );
                 }
@@ -543,7 +583,7 @@ mod tests {
         // triggering command — with_retries keeps trying to the cap.
         use std::cell::Cell;
         let calls = Cell::new(0usize);
-        let out = with_retries(3, Duration::ZERO, || {
+        let out = with_retries(3, Duration::ZERO, is_fingerprint_mismatch, || {
             calls.set(calls.get() + 1);
             let n = calls.get();
             async move {
@@ -564,15 +604,45 @@ mod tests {
     async fn with_retries_gives_up_at_the_attempt_cap() {
         use std::cell::Cell;
         let calls = Cell::new(0usize);
-        let result: anyhow::Result<()> = with_retries(3, Duration::ZERO, || {
-            calls.set(calls.get() + 1);
-            async { anyhow::bail!("always fails") }
-        })
-        .await;
+        let result: anyhow::Result<()> =
+            with_retries(3, Duration::ZERO, is_fingerprint_mismatch, || {
+                calls.set(calls.get() + 1);
+                async { anyhow::bail!("always fails") }
+            })
+            .await;
         assert!(
             result.is_err(),
             "a permanent failure surfaces the last error"
         );
         assert_eq!(calls.get(), 3, "bounded — stops at the cap, not forever");
+    }
+
+    #[tokio::test]
+    async fn with_retries_short_circuits_a_fatal_error() {
+        // A fingerprint mismatch can't be fixed by retrying (it would re-run
+        // Terraform/wake for nothing), so it must stop on the first attempt.
+        use std::cell::Cell;
+        let calls = Cell::new(0usize);
+        let result: anyhow::Result<()> =
+            with_retries(3, Duration::ZERO, is_fingerprint_mismatch, || {
+                calls.set(calls.get() + 1);
+                async { anyhow::bail!("wire fingerprint mismatch: peer 0x1, ours 0x2") }
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1, "a fatal error stops after one attempt");
+    }
+
+    #[test]
+    fn fingerprint_mismatch_is_classified_from_the_real_handshake_error() {
+        // The classifier keys off a substring of the ipc handshake error's
+        // Display; pin it to the real type so a message change breaks here
+        // rather than silently disabling the actionable notice.
+        let err: anyhow::Error =
+            lazybox_ipc::socket::HandshakeError::FingerprintMismatch { peer: 1, ours: 2 }.into();
+        assert!(is_fingerprint_mismatch(&err), "{err:#}");
+        assert!(!is_fingerprint_mismatch(&anyhow::anyhow!(
+            "forward did not bind /tmp/x within 20s"
+        )));
     }
 }

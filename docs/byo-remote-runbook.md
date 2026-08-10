@@ -182,8 +182,28 @@ box still fails at spawn, same as it would locally.)
 ## Build parity
 
 Daemon and client must be built from the same commit — the wire handshake
-rejects a fingerprint mismatch. If `--connect` reports a mismatch, rebuild the
-daemon on the box (or the client) so both sides match, then reconnect.
+rejects a fingerprint mismatch.
+
+A box provisioned by `lazybox sandbox ensure` (#977) handles this by
+construction: the client passes its own build commit (`lazybox --version`) as
+a Terraform var, and the box clones + builds lazybox at that commit before
+starting the daemon, so a fresh box's daemon already matches the client that
+stamped it — no manual daemon build.
+
+After you rebuild the **client** at a new commit (e.g. one touching
+`crates/ipc`), the box daemon is now behind. Move it forward with:
+
+```sh
+lazybox sandbox rebuild        # builds the box daemon at this client's commit
+```
+
+Changing a live instance's startup-script metadata does **not** re-run it, so
+`rebuild` restores parity over SSH (fetch → checkout → `cargo build` → restart
+the daemon). From the TUI's `r`-spawn path a mismatch surfaces as a footer
+notice naming this exact command instead of a silent drop.
+
+For a hand-built BYO box (no `sandbox ensure`), rebuild the daemon on the box
+(or the client) so both sides match, then reconnect.
 
 [scoping]: remote-daemon-scoping.md
 [systemd]: ../contrib/systemd/README.md

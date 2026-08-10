@@ -181,6 +181,46 @@ impl GcpProvider {
         )
     }
 
+    /// A one-shot IAP SSH that re-runs the box installer at `sha` — the
+    /// `lazybox sandbox rebuild` path. Changing a live instance's
+    /// startup-script metadata does NOT re-run it, so moving the box to a
+    /// new commit is an over-SSH rebuild (fetch, checkout, `cargo build`,
+    /// restart the daemon) done by the installer the startup script left at
+    /// a stable path. No forward: the command runs to completion on the box
+    /// (the build takes minutes), and its output streams back.
+    fn rebuild_command(&self, handle: &BoxHandle, sha: &str) -> (String, Vec<String>) {
+        let dest = match &self.user {
+            Some(u) => format!("{u}@{}", handle.id),
+            None => handle.id.clone(),
+        };
+        (
+            "gcloud".to_string(),
+            vec![
+                "compute".to_string(),
+                "ssh".to_string(),
+                dest,
+                "--quiet".to_string(),
+                format!("--zone={}", handle.zone),
+                format!("--project={}", handle.project),
+                "--tunnel-through-iap".to_string(),
+                format!("--command=sudo /usr/local/bin/lazybox-box-install.sh {sha}"),
+                "--".to_string(),
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                "-o".to_string(),
+                "StrictHostKeyChecking=accept-new".to_string(),
+            ],
+        )
+    }
+
+    /// Rebuild the box's daemon at `sha` (or the current checkout when
+    /// empty) and restart it, over IAP SSH. Blocks until the remote build
+    /// finishes.
+    pub async fn rebuild(&self, handle: &BoxHandle, sha: &str) -> Result<(), SandboxError> {
+        let (prog, args) = self.rebuild_command(handle, sha);
+        run(&prog, &args).await.map(|_| ())
+    }
+
     /// Build the IAP-tunnelled SSH forward carrying the daemon socket plus
     /// each workload port bound to `localhost` on the client. Mirrors
     /// `contrib/box-lifecycle/connect.sh` and `tui-boot`'s IAP tunnel.
@@ -445,6 +485,25 @@ mod tests {
         // Runs a trivial command and caps the wait so `status` stays snappy.
         assert!(args.contains(&"--command=true".to_string()));
         assert!(args.contains(&format!("ConnectTimeout={PROBE_CONNECT_TIMEOUT}")));
+        assert!(args.contains(&"BatchMode=yes".to_string()));
+    }
+
+    #[test]
+    fn rebuild_reruns_the_box_installer_at_the_sha_over_iap() {
+        let (prog, args) = provider().rebuild_command(&handle(), "deadbeef1234");
+        assert_eq!(prog, "gcloud");
+        assert_eq!(args[..3], ["compute", "ssh", "me@lazybox-sbx-abc"]);
+        assert!(args.contains(&"--tunnel-through-iap".to_string()));
+        assert!(args.contains(&"--zone=us-central1-a".to_string()));
+        assert!(args.contains(&"--project=proj".to_string()));
+        // The remote command runs the stable installer at the requested sha.
+        assert!(
+            args.contains(
+                &"--command=sudo /usr/local/bin/lazybox-box-install.sh deadbeef1234".to_string()
+            ),
+            "{args:?}"
+        );
+        // Unattended auth — never blocks on a passphrase/host-key prompt.
         assert!(args.contains(&"BatchMode=yes".to_string()));
     }
 

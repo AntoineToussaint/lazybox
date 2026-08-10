@@ -1,8 +1,10 @@
-//! `lazybox sandbox <ensure|wake|sleep|status|connect|destroy>` — the
+//! `lazybox sandbox <ensure|wake|sleep|status|connect|rebuild|destroy>` — the
 //! client surface for the remote dev-box lifecycle (#931).
 //!
 //! `ensure`/`destroy` drive the Terraform module; `wake`/`sleep`/`status`/
-//! `connect` use the native `gcloud`/IAP path. A [`BoxHandle`] is persisted
+//! `connect`/`rebuild` use the native `gcloud`/IAP path (`rebuild` re-runs
+//! the box's daemon build at a commit so the wire fingerprint matches this
+//! client — #977). A [`BoxHandle`] is persisted
 //! in the store under the **shared box key** — one `sandbox:` block, one
 //! box, the same identity the TUI's `r`-spawn targets (`remote_box`) — so
 //! `wake`/`sleep`/`connect` address the box `ensure` stamped without
@@ -66,10 +68,11 @@ async fn dispatch(args: &[String]) -> anyhow::Result<()> {
         "sleep" | "stop" => sleep(&mut rest).await,
         "status" => status(&mut rest).await,
         "connect" => connect(&mut rest).await,
+        "rebuild" => rebuild(&mut rest).await,
         "destroy" => destroy(&mut rest).await,
         other => anyhow::bail!(
             "unknown `lazybox sandbox` verb {other:?}; usage: lazybox sandbox \
-             <ensure|wake|sleep|status|connect|destroy> [--worktree <key>] [flags]"
+             <ensure|wake|sleep|status|connect|rebuild|destroy> [--worktree <key>] [flags]"
         ),
     }
 }
@@ -234,6 +237,20 @@ pub(crate) fn resolve_provider(
     })
 }
 
+/// The client's baked build commit — the value the box builds its daemon at
+/// so the two share a wire fingerprint. `LAZYBOX_BUILD_GIT_SHA` is the
+/// unknown-sentinel when the client was built outside a git checkout (a
+/// release tarball); that maps to empty so the box builds the repo's default
+/// branch instead of trying to check out a bogus ref.
+fn client_git_sha() -> String {
+    let sha = lazybox_ipc::BUILD_GIT_SHA;
+    if sha.is_empty() || sha == "unknown" {
+        String::new()
+    } else {
+        sha.to_string()
+    }
+}
+
 /// Build the full spec for `ensure` from config + flags.
 pub(crate) fn resolve_spec(
     sc: &SandboxConfig,
@@ -282,6 +299,7 @@ fn resolve_spec_with_deployment(
         .or_else(|| sc.zone.clone())
         .unwrap_or_else(|| "us-central1-a".to_string());
     let name = instance_name(take_value(args, "--name"), &name_salt(worktree));
+    let lazybox_git_sha = take_value(args, "--lazybox-sha").unwrap_or_else(client_git_sha);
     Ok(SandboxSpec {
         provider: "gcp".to_string(),
         name,
@@ -289,6 +307,7 @@ fn resolve_spec_with_deployment(
         region,
         zone,
         deployment,
+        lazybox_git_sha,
     })
 }
 
@@ -520,6 +539,36 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     if !status.success() {
         anyhow::bail!("tunnel `{}` exited with {status}", tunnel.program);
     }
+    Ok(())
+}
+
+/// Rebuild the box's daemon at a commit and restart it — the recovery for a
+/// wire-fingerprint mismatch after the client moved to a new commit
+/// (changing a live instance's startup-script metadata does not re-run it,
+/// so parity is restored over SSH). Targets this client's own build commit
+/// by default; `--lazybox-sha <sha>` picks another.
+async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
+    let config = Config::load().unwrap_or_default();
+    let worktree = box_key(args);
+    let sha = take_value(args, "--lazybox-sha").unwrap_or_else(client_git_sha);
+    let provider = resolve_provider(&config.sandbox, args, &worktree)?;
+    let store = open_store()?;
+    let handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+
+    if sha.is_empty() {
+        println!(
+            "Rebuilding {} at its current checkout (this client knows no commit — a release \
+             build)…",
+            handle.id
+        );
+    } else {
+        println!(
+            "Rebuilding {} at {sha} (this can take several minutes)…",
+            handle.id
+        );
+    }
+    provider.rebuild(&handle, &sha).await?;
+    println!("{} rebuilt; daemon restarted.", handle.id);
     Ok(())
 }
 
@@ -759,5 +808,23 @@ mod tests {
         assert!(spec.name.starts_with("lazybox-sbx-wt-"), "{}", spec.name);
         // No overlay → the generic default recipe.
         assert_eq!(spec.deployment.config.name, "default");
+    }
+
+    #[test]
+    fn resolve_spec_stamps_the_clients_build_commit_by_default() {
+        // The box builds its daemon at the client's own commit (build parity)
+        // — the spec carries whatever the client baked, overridable for a
+        // rebuild-to-another-commit.
+        let sc = SandboxConfig {
+            project: Some("proj".into()),
+            ..SandboxConfig::default()
+        };
+        let mut args = vec![];
+        let spec = resolve_spec(&sc, &mut args, "/wt").unwrap();
+        assert_eq!(spec.lazybox_git_sha, client_git_sha());
+
+        let mut args = vec!["--lazybox-sha".into(), "feedface99".into()];
+        let spec = resolve_spec(&sc, &mut args, "/wt").unwrap();
+        assert_eq!(spec.lazybox_git_sha, "feedface99");
     }
 }

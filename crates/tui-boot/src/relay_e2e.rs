@@ -15,6 +15,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use lazybox_e2e_channel::{ChannelError, Identity, PublicKey, initiator_handshake};
 use lazybox_ipc::socket::Redial;
@@ -24,8 +25,19 @@ use lazybox_ipc::transport::{BoxRead, BoxWrite};
 /// identity (private + public, hex).
 const CHANNEL_KEY_FILE: &str = "box_channel_key";
 
+/// Per-(process, call) disambiguator for the channel-key temp file, so
+/// racing threads within one process don't collide on the same temp path.
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Ceiling on reaching the box through the relay and completing the E2E
+/// handshake. Bounds the dial so a box that registered but whose daemon
+/// (or Noise responder) stalls surfaces as a retryable error instead of
+/// hanging the launch / wedging the reconnect supervisor — matching the
+/// bounded handshake every other connect path in the tree uses.
+const RELAY_DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Load the box's channel identity from `dir`, generating and persisting
-/// a fresh one on first run. The private key is written mode `0600`,
+/// a fresh one on first run. The private key is written mode `0600` and
 /// published atomically so racing first-runs converge on one key (the
 /// same discipline `BoxIdentity` uses for its seed).
 pub fn load_or_generate_channel_identity(dir: &Path) -> anyhow::Result<Identity> {
@@ -43,7 +55,23 @@ pub fn load_or_generate_channel_identity(dir: &Path) -> anyhow::Result<Identity>
         hex::encode(identity.public_key().as_bytes())
     );
 
-    match write_new_owner_only(&path, contents.as_bytes()) {
+    // Publish atomically: write the full contents to a private temp file,
+    // then hard-link it into place. `link` fails `AlreadyExists` when a
+    // racing first-run already created the key, so a loser adopts a
+    // *complete* file rather than reading the empty window a bare
+    // `create_new` exposes between file creation and the content write.
+    // The temp name is unique per (process, call) so racing threads don't
+    // collide on it.
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = dir.join(format!(
+        ".{CHANNEL_KEY_FILE}.{}.{seq}.tmp",
+        std::process::id()
+    ));
+    write_new_owner_only(&tmp_path, contents.as_bytes())
+        .map_err(|e| anyhow::anyhow!("write {}: {e}", tmp_path.display()))?;
+    let link_result = std::fs::hard_link(&tmp_path, &path);
+    let _ = std::fs::remove_file(&tmp_path);
+    match link_result {
         Ok(()) => Ok(identity),
         // A concurrent first-run already published a complete key — adopt
         // it rather than clobber, so both processes pin the same box.
@@ -51,7 +79,7 @@ pub fn load_or_generate_channel_identity(dir: &Path) -> anyhow::Result<Identity>
             .ok_or_else(|| {
                 anyhow::anyhow!("channel key at {} vanished after write", path.display())
             }),
-        Err(e) => Err(anyhow::anyhow!("write {}: {e}", path.display())),
+        Err(e) => Err(anyhow::anyhow!("link {}: {e}", path.display())),
     }
 }
 
@@ -75,16 +103,26 @@ pub fn relay_redial(relay_addr: String, box_id: String, box_key: PublicKey) -> R
         let relay_addr = relay_addr.clone();
         let box_id = box_id.clone();
         Box::pin(async move {
-            let tcp = lazybox_relay::connect_through_relay(&relay_addr, &box_id).await?;
-            // A device identity the box learns during the handshake. Step 1
-            // does not yet bind it to a per-device credential (that is the
-            // pairing work), so a fresh ephemeral key per dial is correct.
-            let device = Identity::generate().map_err(channel_io)?;
-            let encrypted = initiator_handshake(tcp, &device, &box_key)
-                .await
-                .map_err(channel_io)?;
-            let (rd, wr) = tokio::io::split(encrypted);
-            Ok((Box::new(rd) as BoxRead, Box::new(wr) as BoxWrite))
+            let dial = async {
+                let tcp = lazybox_relay::connect_through_relay(&relay_addr, &box_id).await?;
+                // A device identity the box learns during the handshake.
+                // Step 1 does not yet bind it to a per-device credential
+                // (that is the pairing work), so a fresh ephemeral key per
+                // dial is correct.
+                let device = Identity::generate().map_err(channel_io)?;
+                let encrypted = initiator_handshake(tcp, &device, &box_key)
+                    .await
+                    .map_err(channel_io)?;
+                let (rd, wr) = tokio::io::split(encrypted);
+                Ok((Box::new(rd) as BoxRead, Box::new(wr) as BoxWrite))
+            };
+            match tokio::time::timeout(RELAY_DIAL_TIMEOUT, dial).await {
+                Ok(result) => result,
+                Err(_) => Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "relay dial + E2E handshake timed out",
+                )),
+            }
         })
     })
 }
@@ -113,12 +151,23 @@ fn decode_key(line: Option<&str>, path: &Path, which: &str) -> anyhow::Result<Ve
             path.display()
         )
     })?;
-    hex::decode(line.trim()).map_err(|_| {
+    let bytes = hex::decode(line.trim()).map_err(|_| {
         anyhow::anyhow!(
             "channel key at {} has a malformed {which} key",
             path.display()
         )
-    })
+    })?;
+    // X25519 keys are 32 bytes. Reject a truncated/corrupt file here with a
+    // clear error rather than letting it surface as a cryptic Noise failure
+    // at connect time.
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "channel key at {} has a {which} key of {} bytes, expected 32",
+            path.display(),
+            bytes.len()
+        );
+    }
+    Ok(bytes)
 }
 
 /// Create `path` exclusively (`O_EXCL`, mode `0600`) and write `bytes`:
@@ -156,6 +205,48 @@ mod tests {
             pubkey,
             "the channel key must persist across calls"
         );
+    }
+
+    #[test]
+    fn concurrent_first_run_converges_on_one_channel_key() {
+        // Many threads hitting a fresh box at once must all end up with the
+        // same persisted key; the temp-file + hard-link publish is what
+        // guarantees it. A bare create_new + write would let a loser read
+        // the empty window and fail, or diverge.
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(dir.path().to_path_buf());
+        let keys: Vec<[u8; 32]> = (0..8)
+            .map(|_| {
+                let path = Arc::clone(&path);
+                std::thread::spawn(move || {
+                    *load_or_generate_channel_identity(&path)
+                        .unwrap()
+                        .public_key()
+                        .as_bytes()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert!(
+            keys.iter().all(|k| *k == keys[0]),
+            "racing first-runs must adopt one channel key",
+        );
+    }
+
+    #[test]
+    fn malformed_channel_key_is_rejected_on_load() {
+        // A truncated / corrupt key file must fail at load with a clear
+        // error, not silently produce an Identity that blows up at
+        // handshake time.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(CHANNEL_KEY_FILE),
+            "deadbeef\ndeadbeef\n", // 4 bytes each, not 32
+        )
+        .unwrap();
+        assert!(load_or_generate_channel_identity(dir.path()).is_err());
     }
 
     #[cfg(unix)]

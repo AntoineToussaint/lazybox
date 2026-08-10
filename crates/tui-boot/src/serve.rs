@@ -27,6 +27,13 @@ use crate::{lifecycle, take_flag, take_value};
 /// Backoff between control-connection reconnect attempts.
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 
+/// Ceiling on the E2E handshake with a brokered client. A conforming
+/// client completes it in one round trip; the bound stops a client that
+/// finishes the relay splice but then stalls the Noise handshake from
+/// pinning a task (and a daemon connection) forever — the same discipline
+/// the relay's own `handshake_timeout` enforces on its protocol frame.
+const E2E_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// `lazybox serve --relay <host:port> [--account <id>] [--box-id <id>]
 /// [--socket <path>] [--insecure-no-auth]`.
 ///
@@ -126,30 +133,55 @@ async fn bridge_to_daemon(
     daemon_socket: &Path,
     channel_identity: Option<&Identity>,
 ) {
-    let mut daemon = match UnixStream::connect(daemon_socket).await {
-        Ok(daemon) => daemon,
+    match channel_identity {
+        Some(identity) => {
+            // Terminate the E2E channel *before* touching the daemon: a
+            // client that completes the relay splice but stalls the Noise
+            // handshake must neither hang this task nor pin an open daemon
+            // connection. Bound the handshake, and only dial the daemon
+            // once it succeeds.
+            let handshake = tokio::time::timeout(
+                E2E_HANDSHAKE_TIMEOUT,
+                responder_handshake(relay_stream, identity),
+            )
+            .await;
+            // The device's public key is learned here; binding it to a
+            // per-device credential is the pairing work (#980 step 2).
+            let mut encrypted = match handshake {
+                Ok(Ok((encrypted, _device_key))) => encrypted,
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "E2E handshake with brokered client failed");
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!("E2E handshake with brokered client timed out");
+                    return;
+                }
+            };
+            if let Some(mut daemon) = connect_daemon(daemon_socket).await {
+                let _ = copy_bidirectional(&mut encrypted, &mut daemon).await;
+            }
+        }
+        None => {
+            if let Some(mut daemon) = connect_daemon(daemon_socket).await {
+                let _ = copy_bidirectional(&mut relay_stream, &mut daemon).await;
+            }
+        }
+    }
+}
+
+/// Dial the local daemon socket, logging (and yielding `None`) if it is
+/// unreachable — e.g. no `lazybox server start` yet.
+async fn connect_daemon(daemon_socket: &Path) -> Option<UnixStream> {
+    match UnixStream::connect(daemon_socket).await {
+        Ok(daemon) => Some(daemon),
         Err(error) => {
             tracing::warn!(
                 %error,
                 socket = %daemon_socket.display(),
                 "brokered client could not reach the local daemon",
             );
-            return;
-        }
-    };
-    match channel_identity {
-        Some(identity) => match responder_handshake(relay_stream, identity).await {
-            // The device's public key is learned here; binding it to a
-            // per-device credential is the pairing work (#980 step 2).
-            Ok((mut encrypted, _device_key)) => {
-                let _ = copy_bidirectional(&mut encrypted, &mut daemon).await;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "E2E handshake with brokered client failed");
-            }
-        },
-        None => {
-            let _ = copy_bidirectional(&mut relay_stream, &mut daemon).await;
+            None
         }
     }
 }
@@ -198,5 +230,46 @@ mod tests {
         std::fs::write(&path, "   \n").unwrap();
         let id = load_or_create_box_id(&path).unwrap();
         assert!(!id.is_empty());
+    }
+
+    /// A brokered client whose E2E handshake fails must never cause the box
+    /// to dial its daemon — the handshake terminates first. Guards the
+    /// reorder that stops a probing / half-open client from pinning a
+    /// daemon connection (and a task) before it has authenticated the box.
+    #[tokio::test]
+    async fn failed_handshake_never_dials_the_daemon() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::net::{TcpListener, TcpStream, UnixListener};
+
+        let dir = tempfile::tempdir().unwrap();
+        let daemon_path = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&daemon_path).unwrap();
+        let dialed = Arc::new(AtomicBool::new(false));
+        let dialed_in_task = Arc::clone(&dialed);
+        let accept = tokio::spawn(async move {
+            if listener.accept().await.is_ok() {
+                dialed_in_task.store(true, Ordering::SeqCst);
+            }
+        });
+
+        // A brokered "client" that hangs up immediately, so the responder
+        // handshake fails fast (EOF) rather than waiting out the timeout.
+        let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _peer) = tcp.accept().await.unwrap();
+        drop(client);
+
+        let identity = Identity::generate().unwrap();
+        bridge_to_daemon(server, &daemon_path, Some(&identity)).await;
+
+        // Give a (buggy) daemon-first dial a chance to land before asserting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !dialed.load(Ordering::SeqCst),
+            "a failed E2E handshake must not reach the daemon socket",
+        );
+        accept.abort();
     }
 }

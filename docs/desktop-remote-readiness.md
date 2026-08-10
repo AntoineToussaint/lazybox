@@ -11,7 +11,13 @@ that this assessment kicks off lives in [desktop-dogfood-log.md][dogfood-log]
 long-running agents) and use the **desktop app** as the local UI over that link —
 so we largely stop using the TUI. Is that wired end to end today?
 
-**Go / no-go: NO-GO today**, on two independent axes:
+> **Historical assessment.** This document records the repository state when
+> #806 was audited. Its NO-GO verdict and blocker list below are preserved as
+> decision history, not as a statement about the current desktop. The live
+> status and remaining fallback ledger are maintained in
+> [`desktop-dogfood-log.md`][dogfood-log].
+
+**Go / no-go at the time of the audit: NO-GO**, on two independent axes:
 
 1. **Remote transport.** The desktop cannot connect to a daemon it did not start.
    It always spawns an in-process daemon and binds a loopback gateway; there is no
@@ -171,7 +177,7 @@ updater are explicitly out of scope for now (`docs/desktop-spike.md:99-102, 120-
 
 ---
 
-## Ranked dogfood blockers
+## Historical ranked dogfood blockers
 
 The "I hit this and went back to the TUI" list, most-blocking first:
 
@@ -188,10 +194,10 @@ The "I hit this and went back to the TUI" list, most-blocking first:
 6. **Reconnect robustness** over the remote link (resync parity with the socket
    path). Folded into **[#814][issue-814]**.
 
-## Verdict
+## Historical verdict
 
-**No-go** on dogfooding the desktop as the primary UI against a remote daemon
-today, and **no-go** even as a primary *local* UI until the Tier-A parity gaps
+**No-go at the time of this assessment** on dogfooding the desktop as the primary UI against a remote daemon,
+and **no-go** even as a primary *local* UI until the Tier-A parity gaps
 close. The architecture is sound and the terminal is genuinely the upgrade #806
 wants — the work is (1) a remote-connect mode + reconnect, (2) closing the
 act-on-work parity gap, and (3) a version-skew story. When #814 + #816 land, the

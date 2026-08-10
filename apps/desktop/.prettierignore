@@ -1,0 +1,7 @@
+dist
+node_modules
+src/generated
+src-tauri/target
+test-results
+e2e/*-snapshots
+package-lock.json

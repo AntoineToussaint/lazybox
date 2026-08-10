@@ -290,7 +290,10 @@ describe("workspace model", () => {
     const failing = task("Broken release");
     failing.ci = "Failure";
     failing.review = "ChangesRequested";
-    expect(ciSignal(failing)).toEqual({ label: "CI failure", tone: "attention" });
+    expect(ciSignal(failing)).toEqual({
+      label: "CI failure",
+      tone: "attention",
+    });
     expect(reviewSignal(failing)).toEqual({
       label: "Review changes requested",
       tone: "attention",
@@ -372,9 +375,7 @@ describe("workspace model", () => {
     // `FocusedHeader` is not a repo header — the primitive doesn't crash
     // the `in` narrowing and carries no label.
     expect(repoHeaderLabel("FocusedHeader")).toBeNull();
-    expect(repoHeaderLabel({ RepoHeader: "octo/widget" })).toBe(
-      "octo/widget",
-    );
+    expect(repoHeaderLabel({ RepoHeader: "octo/widget" })).toBe("octo/widget");
   });
 
   it("replaces the baseline and then applies live upserts and removals", () => {
@@ -477,15 +478,11 @@ describe("workspace model", () => {
       SNOOZE_PRESETS.map((preset) => [preset.label, preset.until(now)]),
     );
 
-    expect(byLabel.get("1 hour")).toEqual(
-      new Date("2026-08-04T13:00:00.000Z"),
-    );
+    expect(byLabel.get("1 hour")).toEqual(new Date("2026-08-04T13:00:00.000Z"));
     expect(byLabel.get("4 hours")).toEqual(
       new Date("2026-08-04T16:00:00.000Z"),
     );
-    expect(byLabel.get("1 week")).toEqual(
-      new Date("2026-08-11T12:00:00.000Z"),
-    );
+    expect(byLabel.get("1 week")).toEqual(new Date("2026-08-11T12:00:00.000Z"));
     // "Tomorrow 9am" is anchored to the viewer's local wall clock; assert
     // it lands at 09:00 local and is within the next two days regardless
     // of the test's timezone.
@@ -523,7 +520,9 @@ describe("desktop daily-driver state", () => {
       type: "shell",
       terminalId: 8,
     });
-    expect(broadcastDisposition(sessionless, terminals)).toEqual({ type: "spawn" });
+    expect(broadcastDisposition(sessionless, terminals)).toEqual({
+      type: "spawn",
+    });
     expect(broadcastDisposition(stopped, terminals)).toEqual({
       type: "skip",
       reason: "no running agent or shell",
@@ -534,8 +533,12 @@ describe("desktop daily-driver state", () => {
     const keys = ["one", "two", "three"];
     const asking = new Set(["one", "three"]);
     expect(cycleMatchingKey(keys, null, (key) => asking.has(key))).toBe("one");
-    expect(cycleMatchingKey(keys, "one", (key) => asking.has(key))).toBe("three");
-    expect(cycleMatchingKey(keys, "three", (key) => asking.has(key))).toBe("one");
+    expect(cycleMatchingKey(keys, "one", (key) => asking.has(key))).toBe(
+      "three",
+    );
+    expect(cycleMatchingKey(keys, "three", (key) => asking.has(key))).toBe(
+      "one",
+    );
 
     const terminal = {
       id: 1,

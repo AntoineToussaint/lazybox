@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "lazybox",
-  "version": "0.1.9",
   "identifier": "ai.lazybox.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -18,6 +17,7 @@
         "height": 900,
         "minWidth": 960,
         "minHeight": 640,
+        "visible": false,
         "resizable": true,
         "fullscreen": false
       }

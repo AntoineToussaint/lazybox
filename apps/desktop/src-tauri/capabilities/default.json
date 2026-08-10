@@ -3,5 +3,14 @@
   "identifier": "default",
   "description": "Permissions for the lazybox desktop window",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-is-focused",
+    "core:window:allow-set-badge-count",
+    "core:window:allow-set-focus",
+    "core:window:allow-show",
+    "core:window:allow-unminimize",
+    "notification:default",
+    "window-state:default"
+  ]
 }

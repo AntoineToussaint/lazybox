@@ -70,7 +70,8 @@ export function buildDiffView(diff: WorkspaceDiffDto): HTMLElement {
   } else if (diff.truncated) {
     const truncated = document.createElement("p");
     truncated.className = "diff-truncated";
-    truncated.textContent = "Diff truncated — open the worktree to see the rest.";
+    truncated.textContent =
+      "Diff truncated — open the worktree to see the rest.";
     root.append(truncated);
   }
 
@@ -88,7 +89,10 @@ function totalDiffLines(diff: WorkspaceDiffDto): number {
   return total;
 }
 
-function fileSection(file: DiffFileDto, budget: { remaining: number }): HTMLElement {
+function fileSection(
+  file: DiffFileDto,
+  budget: { remaining: number },
+): HTMLElement {
   const section = document.createElement("section");
   section.className = "diff-file";
 
@@ -106,7 +110,10 @@ function fileSection(file: DiffFileDto, budget: { remaining: number }): HTMLElem
   return section;
 }
 
-function hunkBlock(hunk: DiffHunkDto, budget: { remaining: number }): HTMLElement {
+function hunkBlock(
+  hunk: DiffHunkDto,
+  budget: { remaining: number },
+): HTMLElement {
   const block = document.createElement("div");
   block.className = "diff-hunk";
 

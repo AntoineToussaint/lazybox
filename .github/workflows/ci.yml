@@ -247,8 +247,15 @@ jobs:
         working-directory: apps/desktop
         run: |
           npm audit --audit-level=moderate
+          npm run check
           npm test
           npm run build
+      - name: Install browser for desktop e2e
+        working-directory: apps/desktop
+        run: npx playwright install chromium
+      - name: Browser accessibility and integration e2e
+        working-directory: apps/desktop
+        run: npm run e2e
       - name: Lint and test desktop shell
         run: |
           cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check
@@ -261,6 +268,8 @@ jobs:
         working-directory: apps/desktop/src-tauri
         run: |
           test -x target/debug/bundle/macos/lazybox.app/Contents/MacOS/lazybox-desktop
+          target/debug/bundle/macos/lazybox.app/Contents/MacOS/lazybox-desktop --version \
+            | grep -E '^lazybox-desktop [0-9]+\.[0-9]+\.[0-9]+\+[0-9a-f]{12}$'
           tar -czf target/debug/bundle/macos/lazybox-macos-dogfood.tar.gz \
             -C target/debug/bundle/macos lazybox.app
           mkdir target/debug/bundle/macos/archive-check

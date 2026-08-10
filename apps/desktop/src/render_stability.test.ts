@@ -93,9 +93,8 @@ describe("workspace list render stability (#877)", () => {
     });
     await vi.waitFor(() =>
       expect(
-        rowNodes()
-          .get("github-o-r-42")
-          ?.querySelector(".workspace-row-title")?.textContent,
+        rowNodes().get("github-o-r-42")?.querySelector(".workspace-row-title")
+          ?.textContent,
       ).toBe("PR o/r#42 (updated)"),
     );
 

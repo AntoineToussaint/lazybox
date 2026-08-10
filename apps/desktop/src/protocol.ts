@@ -288,10 +288,7 @@ export function setAutoFixPoliciesCommand(
   return { SetAutoFixPolicies: { session_key: sessionKey, ci, conflict } };
 }
 
-export function snoozeCommand(
-  sessionKey: string,
-  until: Date,
-): LazyboxCommand {
+export function snoozeCommand(sessionKey: string, until: Date): LazyboxCommand {
   return { Snooze: { session_key: sessionKey, until: until.toISOString() } };
 }
 

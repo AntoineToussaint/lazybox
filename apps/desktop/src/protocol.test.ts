@@ -152,9 +152,7 @@ describe("IPC command JSON", () => {
     expect(setAutoFixPoliciesCommand(key, "Arm", "Disarm")).toEqual({
       SetAutoFixPolicies: { session_key: key, ci: "Arm", conflict: "Disarm" },
     });
-    expect(
-      snoozeCommand(key, new Date("2026-08-05T09:00:00.000Z")),
-    ).toEqual({
+    expect(snoozeCommand(key, new Date("2026-08-05T09:00:00.000Z"))).toEqual({
       Snooze: { session_key: key, until: "2026-08-05T09:00:00.000Z" },
     });
     expect(unsnoozeCommand(key)).toEqual({ Unsnooze: { session_key: key } });

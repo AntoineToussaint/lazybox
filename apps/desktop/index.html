@@ -92,16 +92,12 @@
                 aria-label="Filter workspaces"
               >
                 <p class="filter-menu-hint">
-                  Same section matches any (OR); across sections all must
-                  match (AND).
+                  Same section matches any (OR); across sections all must match
+                  (AND).
                 </p>
                 <div id="filter-menu-body" class="filter-menu-body"></div>
                 <div class="filter-menu-footer">
-                  <button
-                    id="filter-clear"
-                    class="quiet-button"
-                    type="button"
-                  >
+                  <button id="filter-clear" class="quiet-button" type="button">
                     Clear filters
                   </button>
                 </div>
@@ -134,9 +130,17 @@
             role="list"
             aria-label="Active filters"
           ></div>
-          <div class="bulk-toolbar" aria-label="Workspace selection and navigation">
+          <div
+            class="bulk-toolbar"
+            aria-label="Workspace selection and navigation"
+          >
             <span id="workspace-selection-count">0 selected</span>
-            <button id="broadcast-button" class="quiet-button" type="button" disabled>
+            <button
+              id="broadcast-button"
+              class="quiet-button"
+              type="button"
+              disabled
+            >
               Broadcast…
             </button>
             <button id="jump-asking-button" class="quiet-button" type="button">
@@ -145,7 +149,11 @@
             <button id="jump-failing-button" class="quiet-button" type="button">
               Failing CI
             </button>
-            <button id="jump-workspace-button" class="quiet-button" type="button">
+            <button
+              id="jump-workspace-button"
+              class="quiet-button"
+              type="button"
+            >
               Jump…
             </button>
           </div>
@@ -156,7 +164,7 @@
           <div
             id="workspace-list"
             class="workspace-list"
-            role="listbox"
+            role="region"
             aria-label="Workspaces"
             aria-busy="true"
           ></div>
@@ -168,161 +176,192 @@
           role="separator"
           aria-orientation="vertical"
           aria-label="Resize inbox"
+          aria-valuemin="240"
+          tabindex="0"
         ></div>
 
         <div class="right-pane">
           <section class="activity-panel" aria-label="Task activity">
-          <div id="workspace-empty" class="empty-state">
-            <span class="empty-glyph" aria-hidden="true">↳</span>
-            <h2>Choose a workspace</h2>
-            <p>Open a task to inspect activity, reply, and start work.</p>
-          </div>
-          <div id="workspace-detail" class="workspace-detail hidden">
-            <div class="detail-heading">
-              <div>
-                <p id="task-kicker" class="eyebrow"></p>
-                <h2 id="task-title"></h2>
-                <p id="task-meta" class="task-meta"></p>
-              </div>
-              <div class="workspace-actions">
-                <button id="mark-read-button" class="quiet-button" type="button">
-                  Mark read
-                </button>
-                <button id="shell-button" class="quiet-button" type="button">
-                  Shell
-                </button>
-                <div class="actions-wrap">
+            <div id="workspace-empty" class="empty-state">
+              <span class="empty-glyph" aria-hidden="true">↳</span>
+              <h2>Choose a workspace</h2>
+              <p>Open a task to inspect activity, reply, and start work.</p>
+            </div>
+            <div id="workspace-detail" class="workspace-detail hidden">
+              <div class="detail-heading">
+                <div>
+                  <p id="task-kicker" class="eyebrow"></p>
+                  <h2 id="task-title"></h2>
+                  <p id="task-meta" class="task-meta"></p>
+                </div>
+                <div class="workspace-actions">
                   <button
-                    id="actions-button"
+                    id="mark-read-button"
                     class="quiet-button"
                     type="button"
-                    aria-haspopup="true"
-                    aria-expanded="false"
-                    aria-label="Workspace actions"
-                    title="Workspace actions"
                   >
-                    Actions ▾
+                    Mark read
                   </button>
-                  <div
-                    id="actions-menu"
-                    class="actions-menu hidden"
-                    role="menu"
-                    aria-label="Workspace actions"
-                  ></div>
-                </div>
-                <button id="spawn-button" class="primary-button" type="button">
-                  <span>Start</span>
-                  <strong id="agent-label">agent</strong>
-                </button>
-              </div>
-            </div>
-            <div id="task-signals" class="task-signals" aria-label="Task metadata"></div>
-            <div id="task-description" class="task-description"></div>
-            <section
-              id="automation-panel"
-              class="automation-panel"
-              aria-label="Automation and workspace management"
-            >
-              <div class="activity-heading">
-                <h3>Automation</h3>
-                <button
-                  id="sync-button"
-                  class="quiet-button"
-                  type="button"
-                  title="Re-poll just this workspace"
-                >
-                  Sync
-                </button>
-              </div>
-              <div class="automation-policies">
-                <label class="policy-toggle">
-                  <input id="auto-merge-toggle" type="checkbox" />
-                  <span>Auto-merge on green</span>
-                </label>
-                <label class="policy-toggle">
-                  <input id="track-main-toggle" type="checkbox" />
-                  <span>Track main</span>
-                </label>
-                <label class="policy-select">
-                  <span>Auto-fix CI</span>
-                  <select id="auto-fix-ci-select">
-                    <option value="Default">Follow config</option>
-                    <option value="Arm">Armed</option>
-                    <option value="Disarm">Disarmed</option>
-                  </select>
-                </label>
-                <label class="policy-select">
-                  <span>Auto-fix conflicts</span>
-                  <select id="auto-fix-conflict-select">
-                    <option value="Default">Follow config</option>
-                    <option value="Arm">Armed</option>
-                    <option value="Disarm">Disarmed</option>
-                  </select>
-                </label>
-              </div>
-              <div class="automation-snooze">
-                <span id="snooze-status" class="automation-status"></span>
-                <div class="automation-snooze-controls">
-                  <select id="snooze-select" aria-label="Snooze duration"></select>
-                  <button id="snooze-button" class="quiet-button" type="button">
-                    Snooze
+                  <button id="shell-button" class="quiet-button" type="button">
+                    Shell
                   </button>
+                  <div class="actions-wrap">
+                    <button
+                      id="actions-button"
+                      class="quiet-button"
+                      type="button"
+                      aria-haspopup="true"
+                      aria-expanded="false"
+                      aria-controls="actions-menu"
+                      aria-label="Workspace actions"
+                      title="Workspace actions"
+                    >
+                      Actions ▾
+                    </button>
+                    <div
+                      id="actions-menu"
+                      class="actions-menu hidden"
+                      role="menu"
+                      aria-label="Workspace actions"
+                    ></div>
+                  </div>
                   <button
-                    id="unsnooze-button"
-                    class="quiet-button hidden"
+                    id="spawn-button"
+                    class="primary-button"
                     type="button"
                   >
-                    Unsnooze
+                    <span>Start</span>
+                    <strong id="agent-label">agent</strong>
                   </button>
                 </div>
               </div>
-              <form id="notes-form" class="reply-form automation-notes">
-                <label for="notes-body">Notes</label>
+              <div
+                id="task-signals"
+                class="task-signals"
+                aria-label="Task metadata"
+              ></div>
+              <div id="task-description" class="task-description"></div>
+              <section
+                id="automation-panel"
+                class="automation-panel"
+                aria-label="Automation and workspace management"
+              >
+                <div class="activity-heading">
+                  <h3>Automation</h3>
+                  <button
+                    id="sync-button"
+                    class="quiet-button"
+                    type="button"
+                    title="Re-poll just this workspace"
+                  >
+                    Sync
+                  </button>
+                </div>
+                <div class="automation-policies">
+                  <label class="policy-toggle">
+                    <input id="auto-merge-toggle" type="checkbox" />
+                    <span>Auto-merge on green</span>
+                  </label>
+                  <label class="policy-toggle">
+                    <input id="track-main-toggle" type="checkbox" />
+                    <span>Track main</span>
+                  </label>
+                  <label class="policy-select">
+                    <span>Auto-fix CI</span>
+                    <select id="auto-fix-ci-select">
+                      <option value="Default">Follow config</option>
+                      <option value="Arm">Armed</option>
+                      <option value="Disarm">Disarmed</option>
+                    </select>
+                  </label>
+                  <label class="policy-select">
+                    <span>Auto-fix conflicts</span>
+                    <select id="auto-fix-conflict-select">
+                      <option value="Default">Follow config</option>
+                      <option value="Arm">Armed</option>
+                      <option value="Disarm">Disarmed</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="automation-snooze">
+                  <span id="snooze-status" class="automation-status"></span>
+                  <div class="automation-snooze-controls">
+                    <select
+                      id="snooze-select"
+                      aria-label="Snooze duration"
+                    ></select>
+                    <button
+                      id="snooze-button"
+                      class="quiet-button"
+                      type="button"
+                    >
+                      Snooze
+                    </button>
+                    <button
+                      id="unsnooze-button"
+                      class="quiet-button hidden"
+                      type="button"
+                    >
+                      Unsnooze
+                    </button>
+                  </div>
+                </div>
+                <form id="notes-form" class="reply-form automation-notes">
+                  <label for="notes-body">Notes</label>
+                  <textarea
+                    id="notes-body"
+                    rows="2"
+                    maxlength="10000"
+                    placeholder="Local scratchpad — never synced to GitHub…"
+                  ></textarea>
+                  <div>
+                    <span>Local · never synced</span>
+                    <button
+                      id="notes-save-button"
+                      class="primary-button"
+                      type="submit"
+                    >
+                      Save notes
+                    </button>
+                  </div>
+                </form>
+              </section>
+              <div class="activity-heading">
+                <h3>Activity</h3>
+                <div class="activity-heading-actions">
+                  <span id="activity-count"></span>
+                  <button
+                    id="work-activity-button"
+                    class="quiet-button"
+                    type="button"
+                    disabled
+                  >
+                    Work on selection
+                  </button>
+                </div>
+              </div>
+              <div id="activity-list" class="activity-list" role="feed"></div>
+              <form id="reply-form" class="reply-form">
+                <label for="reply-body">Reply on GitHub</label>
                 <textarea
-                  id="notes-body"
-                  rows="2"
+                  id="reply-body"
+                  rows="3"
                   maxlength="10000"
-                  placeholder="Local scratchpad — never synced to GitHub…"
+                  placeholder="Write a reply…"
                 ></textarea>
                 <div>
-                  <span>Local · never synced</span>
+                  <span>⌘↵ to review</span>
                   <button
-                    id="notes-save-button"
+                    id="reply-button"
                     class="primary-button"
                     type="submit"
                   >
-                    Save notes
+                    Review reply
                   </button>
                 </div>
               </form>
-            </section>
-            <div class="activity-heading">
-              <h3>Activity</h3>
-              <div class="activity-heading-actions">
-                <span id="activity-count"></span>
-                <button id="work-activity-button" class="quiet-button" type="button" disabled>
-                  Work on selection
-                </button>
-              </div>
             </div>
-            <div id="activity-list" class="activity-list" role="feed"></div>
-            <form id="reply-form" class="reply-form">
-              <label for="reply-body">Reply on GitHub</label>
-              <textarea
-                id="reply-body"
-                rows="3"
-                maxlength="10000"
-                placeholder="Write a reply…"
-              ></textarea>
-              <div>
-                <span>⌘↵ to review</span>
-                <button id="reply-button" class="primary-button" type="submit">
-                  Review reply
-                </button>
-              </div>
-            </form>
-          </div>
-        </section>
+          </section>
 
           <div
             id="right-pane-splitter"
@@ -330,44 +369,48 @@
             role="separator"
             aria-orientation="horizontal"
             aria-label="Resize activity and terminal"
+            aria-valuemin="120"
+            tabindex="0"
           ></div>
 
           <section class="terminal-panel" aria-label="Live terminal">
-          <div class="terminal-heading">
-            <div>
-              <p class="eyebrow">Live daemon PTY</p>
-              <h2 id="terminal-title">No terminal attached</h2>
+            <div class="terminal-heading">
+              <div>
+                <p class="eyebrow">Live daemon PTY</p>
+                <h2 id="terminal-title">No terminal attached</h2>
+              </div>
+              <div class="terminal-heading-actions">
+                <button
+                  id="snippet-button"
+                  class="ghost-button"
+                  type="button"
+                  title="Send a snippet to this terminal (⌘/Ctrl-J)"
+                  disabled
+                >
+                  Snippets
+                </button>
+                <span id="terminal-state" class="terminal-state" role="status"
+                  >idle</span
+                >
+              </div>
             </div>
-            <div class="terminal-heading-actions">
-              <button
-                id="snippet-button"
-                class="ghost-button"
-                type="button"
-                title="Send a snippet to this terminal (⌘/Ctrl-J)"
-                disabled
-              >
-                Snippets
-              </button>
-              <span id="terminal-state" class="terminal-state" role="status">idle</span>
+            <div id="terminal-shell" class="terminal-shell">
+              <div id="terminal-empty" class="terminal-empty">
+                <span aria-hidden="true">›_</span>
+                <p>Start the configured agent or a shell in this workspace.</p>
+              </div>
+              <div
+                id="terminal-tabs"
+                class="terminal-tabs hidden"
+                role="tablist"
+                aria-label="Workspace terminals"
+              ></div>
+              <div
+                id="terminal"
+                class="terminal-tiles hidden"
+                aria-label="Interactive workspace terminals"
+              ></div>
             </div>
-          </div>
-          <div id="terminal-shell" class="terminal-shell">
-            <div id="terminal-empty" class="terminal-empty">
-              <span aria-hidden="true">›_</span>
-              <p>Start the configured agent or a shell in this workspace.</p>
-            </div>
-            <div
-              id="terminal-tabs"
-              class="terminal-tabs hidden"
-              role="tablist"
-              aria-label="Workspace terminals"
-            ></div>
-            <div
-              id="terminal"
-              class="terminal-tiles hidden"
-              aria-label="Interactive workspace terminals"
-            ></div>
-          </div>
           </section>
         </div>
       </main>
@@ -376,12 +419,31 @@
         <span id="status-message" role="status" aria-live="polite">
           Loading persisted workspaces…
         </span>
-        <span id="protocol-notice" class="protocol-notice" role="status" aria-live="polite" hidden></span>
-        <span>↑↓ navigate · ↵ open · o sort · r reply · a agent · s shell · . focus · ⌘/Ctrl-J snippets</span>
+        <span
+          id="protocol-notice"
+          class="protocol-notice"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></span>
+        <span
+          ><span id="build-label"></span> · ↑↓ navigate · ↵ open · o sort · r
+          reply · a agent · s shell · . focus · ⌘/Ctrl-J snippets</span
+        >
       </footer>
+      <aside id="update-notice" class="update-notice hidden" aria-live="polite">
+        <span id="update-message"></span>
+        <button id="update-dismiss" class="quiet-button" type="button">
+          Dismiss
+        </button>
+      </aside>
     </div>
 
-    <dialog id="setup-dialog" class="setup-dialog" aria-labelledby="setup-title">
+    <dialog
+      id="setup-dialog"
+      class="setup-dialog"
+      aria-labelledby="setup-title"
+    >
       <form id="setup-form">
         <div class="dialog-heading">
           <div>
@@ -400,11 +462,17 @@
 
         <p id="settings-authority" class="privacy-note"></p>
 
-        <section id="github-settings-section" class="setup-section" aria-labelledby="github-setup-title">
+        <section
+          id="github-settings-section"
+          class="setup-section"
+          aria-labelledby="github-setup-title"
+        >
           <div class="setup-section-heading">
             <div>
               <h3 id="github-setup-title">1. GitHub access</h3>
-              <p id="github-auth-message">Checking the existing credential chain…</p>
+              <p id="github-auth-message">
+                Checking the existing credential chain…
+              </p>
             </div>
             <span id="github-auth-badge" class="setup-badge">Checking</span>
           </div>
@@ -422,7 +490,11 @@
           </p>
         </section>
 
-        <section id="repository-settings-section" class="setup-section" aria-labelledby="repo-setup-title">
+        <section
+          id="repository-settings-section"
+          class="setup-section"
+          aria-labelledby="repo-setup-title"
+        >
           <div class="setup-section-heading">
             <div>
               <h3 id="repo-setup-title">2. Repositories</h3>
@@ -431,7 +503,11 @@
                 In Settings, no selection means all accessible repositories.
               </p>
             </div>
-            <button id="discover-repos-button" class="quiet-button" type="button">
+            <button
+              id="discover-repos-button"
+              class="quiet-button"
+              type="button"
+            >
               Discover
             </button>
           </div>
@@ -450,10 +526,16 @@
           >
             <p>Verify GitHub access, then discover repositories.</p>
           </div>
-          <p id="repository-selection-count" class="selection-count">0 selected</p>
+          <p id="repository-selection-count" class="selection-count">
+            0 selected
+          </p>
         </section>
 
-        <section id="agent-settings-section" class="setup-section setup-grid" aria-labelledby="agent-setup-title">
+        <section
+          id="agent-settings-section"
+          class="setup-section setup-grid"
+          aria-labelledby="agent-setup-title"
+        >
           <label>
             <span id="agent-setup-title">3. Default agent</span>
             <select id="default-agent-select"></select>
@@ -468,10 +550,14 @@
           <div class="setup-section-heading">
             <div>
               <h3 id="appearance-title">Appearance</h3>
-              <p>Pick a desktop theme. The change applies immediately and affects
-                only this client.</p>
+              <p>
+                Pick a desktop theme. The change applies immediately and affects
+                only this client.
+              </p>
             </div>
-            <span id="keymap-preset-label" class="setup-badge">Keymap: default</span>
+            <span id="keymap-preset-label" class="setup-badge"
+              >Keymap: default</span
+            >
           </div>
           <div
             id="theme-list"
@@ -483,6 +569,37 @@
 
         <section class="setup-section" aria-labelledby="privacy-title">
           <h3 id="privacy-title">Privacy</h3>
+          <label class="analytics-choice">
+            <input id="notifications-enabled" type="checkbox" checked />
+            <span>
+              Notify when a workspace needs attention
+              <small
+                >Native alerts are quiet while this window is focused.</small
+              >
+            </span>
+          </label>
+          <label class="analytics-choice">
+            <input id="notification-previews" type="checkbox" />
+            <span>
+              Show workspace names in notifications
+              <small
+                >Off by default so task content never appears on the lock
+                screen.</small
+              >
+            </span>
+          </label>
+          <div class="notification-permission-row">
+            <span id="notification-permission"
+              >Notification permission: not requested</span
+            >
+            <button
+              id="notification-permission-button"
+              class="quiet-button"
+              type="button"
+            >
+              Enable notifications
+            </button>
+          </div>
           <label class="analytics-choice">
             <input id="analytics-enabled" type="checkbox" />
             <span>
@@ -497,8 +614,16 @@
 
         <p id="setup-error" class="dialog-error hidden" role="alert"></p>
         <div class="dialog-footer">
-          <span id="diagnostics-path"></span>
-          <button id="save-settings-button" class="primary-button" type="submit">
+          <span
+            ><span id="about-version"></span><br /><span
+              id="diagnostics-path"
+            ></span
+          ></span>
+          <button
+            id="save-settings-button"
+            class="primary-button"
+            type="submit"
+          >
             Save settings
           </button>
         </div>
@@ -526,7 +651,11 @@
           <input id="new-workspace-agent" type="checkbox" checked />
           <span>Start the configured agent</span>
         </label>
-        <p id="new-workspace-error" class="dialog-error hidden" role="alert"></p>
+        <p
+          id="new-workspace-error"
+          class="dialog-error hidden"
+          role="alert"
+        ></p>
         <div class="dialog-footer">
           <button id="new-workspace-cancel" class="quiet-button" type="button">
             Cancel
@@ -536,7 +665,11 @@
       </form>
     </dialog>
 
-    <dialog id="rename-dialog" class="setup-dialog" aria-labelledby="rename-title">
+    <dialog
+      id="rename-dialog"
+      class="setup-dialog"
+      aria-labelledby="rename-title"
+    >
       <form id="rename-form" method="dialog">
         <p class="eyebrow">Rename workspace</p>
         <h2 id="rename-title">Rename workspace</h2>
@@ -554,14 +687,20 @@
       </form>
     </dialog>
 
-    <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+    <dialog
+      id="confirm-dialog"
+      class="confirm-dialog"
+      aria-labelledby="confirm-title"
+    >
       <form method="dialog">
         <p class="eyebrow">Confirm action</p>
         <h2 id="confirm-title">Continue?</h2>
         <p id="confirm-message"></p>
         <pre id="confirm-preview" class="confirm-preview hidden"></pre>
         <div class="dialog-footer">
-          <button id="confirm-cancel" class="quiet-button" value="cancel">Cancel</button>
+          <button id="confirm-cancel" class="quiet-button" value="cancel">
+            Cancel
+          </button>
           <button id="confirm-accept" class="primary-button" value="confirm">
             Confirm
           </button>
@@ -569,7 +708,11 @@
       </form>
     </dialog>
 
-    <dialog id="snippet-dialog" class="snippet-dialog" aria-labelledby="snippet-title">
+    <dialog
+      id="snippet-dialog"
+      class="snippet-dialog"
+      aria-labelledby="snippet-title"
+    >
       <div class="snippet-heading">
         <h2 id="snippet-title" class="sr-only">Send a snippet</h2>
         <div class="snippet-filter-row">
@@ -621,7 +764,11 @@
       </p>
     </dialog>
 
-    <dialog id="broadcast-dialog" class="setup-dialog" aria-labelledby="broadcast-title">
+    <dialog
+      id="broadcast-dialog"
+      class="setup-dialog"
+      aria-labelledby="broadcast-title"
+    >
       <form id="broadcast-form" method="dialog">
         <p class="eyebrow">Multi-agent control</p>
         <h2 id="broadcast-title">Broadcast to selected workspaces</h2>
@@ -631,10 +778,14 @@
           <textarea id="broadcast-body" rows="8" required></textarea>
         </label>
         <div class="dialog-actions split-actions">
-          <button id="broadcast-snippet" class="quiet-button" type="button">Choose snippet…</button>
+          <button id="broadcast-snippet" class="quiet-button" type="button">
+            Choose snippet…
+          </button>
           <span class="dialog-spacer"></span>
           <button class="quiet-button" value="cancel">Cancel</button>
-          <button id="broadcast-submit" class="primary-button" type="submit">Broadcast</button>
+          <button id="broadcast-submit" class="primary-button" type="submit">
+            Broadcast
+          </button>
         </div>
       </form>
     </dialog>
@@ -643,28 +794,50 @@
       <form method="dialog">
         <p class="eyebrow">Workspace navigation</p>
         <h2 id="jump-title">Jump to workspace</h2>
-        <input id="jump-filter" type="search" autocomplete="off" placeholder="Search all workspaces" />
-        <div id="jump-list" class="jump-list" role="listbox" aria-label="Matching workspaces"></div>
+        <input
+          id="jump-filter"
+          type="search"
+          autocomplete="off"
+          placeholder="Search all workspaces"
+        />
+        <div
+          id="jump-list"
+          class="jump-list"
+          role="listbox"
+          aria-label="Matching workspaces"
+        ></div>
         <div class="dialog-actions">
           <button class="quiet-button" value="cancel">Cancel</button>
         </div>
       </form>
     </dialog>
 
-    <dialog id="cleanup-dialog" class="confirm-dialog" aria-labelledby="cleanup-title">
+    <dialog
+      id="cleanup-dialog"
+      class="confirm-dialog"
+      aria-labelledby="cleanup-title"
+    >
       <form method="dialog">
         <p class="eyebrow">Cleanup suggested</p>
         <h2 id="cleanup-title">What should happen to this workspace?</h2>
         <p id="cleanup-message"></p>
         <div class="dialog-actions split-actions">
-          <button id="cleanup-keep" class="quiet-button" value="keep">Keep</button>
+          <button id="cleanup-keep" class="quiet-button" value="keep">
+            Keep
+          </button>
           <span class="dialog-spacer"></span>
-          <button id="cleanup-remove" class="danger-button" value="remove">Remove</button>
+          <button id="cleanup-remove" class="danger-button" value="remove">
+            Remove
+          </button>
         </div>
       </form>
     </dialog>
 
-    <dialog id="input-dialog" class="setup-dialog" aria-labelledby="input-title">
+    <dialog
+      id="input-dialog"
+      class="setup-dialog"
+      aria-labelledby="input-title"
+    >
       <form id="input-form" method="dialog">
         <p class="eyebrow" id="input-eyebrow">Edit</p>
         <h2 id="input-title">Edit</h2>

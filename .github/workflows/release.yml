@@ -225,6 +225,37 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
+  desktop-release-check:
+    needs: plan
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: ./.github/actions/rust-build-env
+        with:
+          cache-workspaces: |
+            .
+            apps/desktop/src-tauri
+      - working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run check
+          npm test
+          npm run build
+          npx playwright install chromium
+          npm run e2e
+          npm run tauri build -- --bundles app
+      - name: Exercise packaged desktop identity
+        run: |
+          apps/desktop/src-tauri/target/release/bundle/macos/lazybox.app/Contents/MacOS/lazybox-desktop --version \
+            | grep -E '^lazybox-desktop [0-9]+\.[0-9]+\.[0-9]+\+[0-9a-f]{12}$'
+
   custom-smoke-release-artifacts:
     needs:
       - plan
@@ -240,8 +271,9 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - custom-smoke-release-artifacts
+      - desktop-release-check
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-smoke-release-artifacts.result == 'skipped' || needs.custom-smoke-release-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.desktop-release-check.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-smoke-release-artifacts.result == 'skipped' || needs.custom-smoke-release-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

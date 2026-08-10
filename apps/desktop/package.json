@@ -12,6 +12,7 @@
     "format:check": "prettier --check .",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:browser": "playwright test",
     "tauri": "tauri"
   },
   "dependencies": {

@@ -19,6 +19,7 @@ import {
   primaryTask,
   projectKeyLabel,
   repoHeaderLabel,
+  resolveDesktopShortcut,
   reviewSignal,
   rowSignals,
   SNOOZE_PRESETS,
@@ -435,6 +436,52 @@ describe("workspace model", () => {
     expect(shouldHandleWorkspaceEnter(true, false, false)).toBe(true);
     expect(shouldHandleWorkspaceEnter(true, false, true)).toBe(false);
     expect(shouldHandleWorkspaceEnter(true, true, false)).toBe(false);
+  });
+
+  it("requires the exact modifier set for desktop shortcuts", () => {
+    const key = (overrides: Partial<KeyboardEvent>) => ({
+      key: "a",
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+      ...overrides,
+    });
+
+    expect(resolveDesktopShortcut(key({}), false)).toBe("start-agent");
+    expect(resolveDesktopShortcut(key({ metaKey: true }), false)).toBeNull();
+    expect(resolveDesktopShortcut(key({ ctrlKey: true }), false)).toBeNull();
+    expect(resolveDesktopShortcut(key({ altKey: true }), false)).toBeNull();
+    expect(resolveDesktopShortcut(key({ shiftKey: true }), false)).toBeNull();
+    expect(
+      resolveDesktopShortcut(key({ key: "j", metaKey: true }), false),
+    ).toBe("snippets");
+    expect(
+      resolveDesktopShortcut(key({ key: "j", ctrlKey: true }), false),
+    ).toBe("snippets");
+    expect(
+      resolveDesktopShortcut(
+        key({ key: "j", metaKey: true, ctrlKey: true }),
+        false,
+      ),
+    ).toBeNull();
+    expect(
+      resolveDesktopShortcut(key({ key: "R", shiftKey: true }), false),
+    ).toBe("refresh");
+  });
+
+  it("gives modal and editor keyboard ownership precedence", () => {
+    const agentKey = {
+      key: "a",
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+    };
+    const settingsKey = { ...agentKey, key: ",", metaKey: true };
+
+    expect(resolveDesktopShortcut(agentKey, true)).toBeNull();
+    expect(resolveDesktopShortcut(settingsKey, true)).toBeNull();
   });
 
   it("derives a human label from a project key instead of the raw key", () => {

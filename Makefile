@@ -136,6 +136,7 @@ desktop-build: desktop-deps ## Build the debug macOS bundle → apps/desktop/src
 
 desktop-test: desktop-deps ## Headless desktop checks, as CI gates them (frontend tests + build + Rust shell tests).
 	@cd $(DESKTOP_DIR) && npm test
+	@cd $(DESKTOP_DIR) && npx playwright install chromium && npm run e2e
 	@cd $(DESKTOP_DIR) && npm run build
 	@PATH="$(PINNED_PATH)" cargo test --manifest-path $(DESKTOP_MANIFEST) --locked
 

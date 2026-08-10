@@ -9,9 +9,10 @@ use lazybox_server::ServerConfig;
 use lazybox_server::api_gateway::{
     CLIENT_REQUEST_ID_HEADER, CommandResponse, DESKTOP_PROTOCOL_FINGERPRINT,
     DESKTOP_PROTOCOL_VERSION, DESKTOP_TERMINAL_STREAM_ITEM_DATA,
-    DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopAgentInfo, DesktopAttentionSettings, DesktopCommand,
-    DesktopDaemonSettings, DesktopEvent, DesktopEventFrame, DesktopInboxView, DesktopInfo,
-    DesktopModelTier, DesktopRepository, DesktopStreamMessage, GatewayOptions, JsonClientFrame,
+    DESKTOP_TERMINAL_STREAM_ITEM_DISCONNECTED, DESKTOP_TERMINAL_STREAM_ITEM_RESET,
+    DesktopAgentInfo, DesktopAttentionSettings, DesktopCommand, DesktopDaemonSettings,
+    DesktopEvent, DesktopEventFrame, DesktopInboxView, DesktopInfo, DesktopModelTier,
+    DesktopRepository, DesktopStreamMessage, GatewayOptions, JsonClientFrame,
     PROTOCOL_FINGERPRINT_HEADER, PROTOCOL_VERSION_HEADER, ProtocolResponse,
     TERMINAL_BINARY_CONTENT_TYPE, UnsupportedProtocolResponse, WorkspacesResponse, desktop_event,
 };
@@ -43,6 +44,7 @@ use tokio::sync::{Mutex, mpsc, watch};
 enum TerminalStreamItem {
     Reset,
     Data(Bytes),
+    Disconnected(String),
 }
 
 /// Desktop-side state-of-record for the grouped inbox (#732). The
@@ -1449,6 +1451,13 @@ async fn stream_terminal_events(
         };
         if let Err(error) = result {
             tracing::warn!("desktop terminal stream disconnected: {error}");
+            if terminal_tx
+                .send(TerminalStreamItem::Disconnected(error))
+                .await
+                .is_err()
+            {
+                return;
+            }
         }
         reconnect = true;
         tokio::select! {
@@ -1539,6 +1548,12 @@ fn encode_terminal_stream_item(item: TerminalStreamItem) -> Vec<u8> {
             let mut encoded = Vec::with_capacity(1 + bytes.len());
             encoded.push(DESKTOP_TERMINAL_STREAM_ITEM_DATA);
             encoded.extend_from_slice(&bytes);
+            encoded
+        }
+        TerminalStreamItem::Disconnected(message) => {
+            let mut encoded = Vec::with_capacity(1 + message.len());
+            encoded.push(DESKTOP_TERMINAL_STREAM_ITEM_DISCONNECTED);
+            encoded.extend_from_slice(message.as_bytes());
             encoded
         }
     }
@@ -3596,6 +3611,16 @@ mod tests {
                 0, 27, 255
             ]))),
             vec![DESKTOP_TERMINAL_STREAM_ITEM_DATA, 0, 27, 255]
+        );
+        assert_eq!(
+            encode_terminal_stream_item(TerminalStreamItem::Disconnected(
+                "connection lost".to_string()
+            )),
+            [
+                vec![DESKTOP_TERMINAL_STREAM_ITEM_DISCONNECTED],
+                b"connection lost".to_vec()
+            ]
+            .concat()
         );
     }
 

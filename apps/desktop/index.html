@@ -389,10 +389,27 @@
                 >
                   Snippets
                 </button>
+                <button
+                  id="terminal-stream-health"
+                  class="terminal-stream-health"
+                  type="button"
+                  aria-expanded="false"
+                >
+                  terminal connecting
+                </button>
                 <span id="terminal-state" class="terminal-state" role="status"
                   >idle</span
                 >
               </div>
+            </div>
+            <div
+              id="terminal-stream-notice"
+              class="terminal-stream-notice"
+              role="status"
+              hidden
+            >
+              <span id="terminal-stream-message"></span>
+              <button id="terminal-stream-dismiss" type="button">Dismiss</button>
             </div>
             <div id="terminal-shell" class="terminal-shell">
               <div id="terminal-empty" class="terminal-empty">

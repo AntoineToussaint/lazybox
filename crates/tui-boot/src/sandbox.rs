@@ -13,9 +13,10 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use lazybox_config::{Config, SandboxConfig};
-use lazybox_sandbox::gcp::GcpProvider;
+use lazybox_sandbox::gcp::{GcpProvider, SystemRunner};
 use lazybox_sandbox::{
     BoxHandle, Deployment, PowerState, SandboxProvider, SandboxSpec, connect_box, persist,
 };
@@ -222,16 +223,17 @@ pub(crate) fn resolve_provider(
         .map(PathBuf::from)
         .or_else(|| sc.local_socket.clone())
         .unwrap_or_else(|| PathBuf::from(DEFAULT_LOCAL_SOCKET));
-    Ok(GcpProvider::new(
+    Ok(GcpProvider {
         terraform_dir,
-        state_file_for(worktree),
+        state_file: state_file_for(worktree),
         user,
         // Unset → the conventional home-relative box daemon socket, the
         // same one the box's systemd/tmux daemon binds — so `connect`
         // works with zero socket config, exactly like the `r`-spawn.
-        remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
+        remote_socket: remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
         local_socket,
-    ))
+        runner: Arc::new(SystemRunner),
+    })
 }
 
 /// Build the full spec for `ensure` from config + flags.

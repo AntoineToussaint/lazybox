@@ -125,58 +125,6 @@ pub struct Config {
     pub conventions: lazybox_core::Conventions,
 }
 
-/// A `remote.host:` block — target a provisioned remote box per worktree
-/// instead of running the worktree on the daemon host. Off by default;
-/// when enabled, lazybox stamps a box from the golden image for a remote
-/// worktree, reuses it across sessions, and tears it down on cleanup.
-///
-/// ```yaml
-/// remote:
-///   host:
-///     enabled: true
-///     project: internal-robin-dev
-///     zone: us-central1-a
-///     machine_type: e2-standard-8
-///     source_image: projects/internal-robin-dev/global/machineImages/lazybox-golden
-///     instance_prefix: lazybox
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default)]
-pub struct RemoteHostConfig {
-    /// Master switch. While off, every worktree runs on the daemon host
-    /// as before and no box is ever provisioned.
-    pub enabled: bool,
-    /// GCP project the box lives in.
-    pub project: String,
-    /// GCE zone the box is created in (e.g. `us-central1-a`).
-    pub zone: String,
-    /// Machine type for a freshly stamped box.
-    pub machine_type: String,
-    /// A `--source-machine-image` to stamp from. Ignored when
-    /// `instance_template` is set.
-    pub source_image: Option<String>,
-    /// A `--source-instance-template` to stamp from. Wins over
-    /// `source_image` when both are present.
-    pub instance_template: Option<String>,
-    /// Prefix for the per-worktree instance name; the worktree's stable
-    /// identifier is appended and sanitized to GCE's naming rules.
-    pub instance_prefix: String,
-}
-
-impl Default for RemoteHostConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            project: String::new(),
-            zone: String::new(),
-            machine_type: "e2-standard-8".to_string(),
-            source_image: None,
-            instance_template: None,
-            instance_prefix: "lazybox".to_string(),
-        }
-    }
-}
-
 /// `setup:` block — wizard-driven user config. Mirrors
 /// `lazybox_core::PersistedSetup` shape but in YAML form.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -247,18 +195,13 @@ pub struct RemoteConfig {
     /// replacing the operator-run `autossh` of the BYO-remote runbook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel: Option<TunnelConfig>,
-    /// Remote-host targeting: stamp/reuse a provisioned box per worktree
-    /// instead of running the worktree on the daemon host. See
-    /// [`RemoteHostConfig`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<RemoteHostConfig>,
 }
 
 impl RemoteConfig {
     /// True when nothing is configured — lets the whole block round-trip
     /// out of a written config rather than serializing as `remote: {}`.
     pub fn is_empty(&self) -> bool {
-        self.tunnel.is_none() && self.host.is_none()
+        self.tunnel.is_none()
     }
 }
 

@@ -845,20 +845,36 @@ fn tombstone_legacy_remote_host(config: &ServerConfig, workspace: &Workspace) {
     let Ok(Some(record)) = config.store.get_kv(&kv_key) else {
         return;
     };
-    let instance = serde_json::from_str::<serde_json::Value>(&record)
-        .ok()
-        .and_then(|v| {
-            v.get("instance")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "<unknown>".to_string());
     tracing::warn!(
         workspace = workspace.key.as_str(),
-        instance = %instance,
+        host = %describe_legacy_remote_host(&record),
         "clearing legacy remote-host record on delete; verify no GCE instance is left running",
     );
     let _ = config.store.delete_kv(&kv_key);
+}
+
+/// The GCE coordinates a legacy `remote-host` record names, formatted so the
+/// delete log is actionable: reclaiming the box by hand is `gcloud compute
+/// instances delete <instance> --zone <zone> --project <project>`, so all
+/// three must be in the log, not just the instance name. Any field the
+/// record lacks (or an unparseable record) reads as `<unknown>` rather than
+/// dropping the warning entirely.
+fn describe_legacy_remote_host(record: &str) -> String {
+    let value =
+        serde_json::from_str::<serde_json::Value>(record).unwrap_or(serde_json::Value::Null);
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unknown>")
+            .to_string()
+    };
+    format!(
+        "project={} zone={} instance={}",
+        field("project"),
+        field("zone"),
+        field("instance"),
+    )
 }
 
 #[cfg(test)]
@@ -903,6 +919,33 @@ mod tombstone_tests {
                 .get_kv(&format!("remote-host:{}", key.as_str()))
                 .expect("read kv"),
             None
+        );
+    }
+
+    #[test]
+    fn descriptor_names_project_zone_and_instance_for_reclamation() {
+        // All three are needed to run `gcloud instances delete`; logging the
+        // instance name alone leaves the operator unable to locate the box.
+        let desc = describe_legacy_remote_host(
+            r#"{"project":"internal-robin-dev","zone":"us-central1-a","instance":"lazybox-old-box","id":"42"}"#,
+        );
+        assert_eq!(
+            desc,
+            "project=internal-robin-dev zone=us-central1-a instance=lazybox-old-box"
+        );
+    }
+
+    #[test]
+    fn descriptor_degrades_to_unknown_fields_not_a_dropped_log() {
+        // A malformed or partial record must still yield a warning-worthy
+        // string rather than silently vanishing.
+        assert_eq!(
+            describe_legacy_remote_host("not json"),
+            "project=<unknown> zone=<unknown> instance=<unknown>"
+        );
+        assert_eq!(
+            describe_legacy_remote_host(r#"{"instance":"only-name"}"#),
+            "project=<unknown> zone=<unknown> instance=only-name"
         );
     }
 }

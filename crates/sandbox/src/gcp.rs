@@ -97,9 +97,11 @@ pub struct GcpProvider {
     pub remote_socket: String,
     /// Local socket the forward binds — the path `--connect` dials.
     pub local_socket: PathBuf,
-    /// Runs `terraform`/`gcloud`; the real process in production, a scripted
-    /// fake under test. Defaults to [`SystemRunner`] via [`GcpProvider::new`].
-    runner: Arc<dyn CommandRunner>,
+    /// Runs `terraform`/`gcloud`; `Arc::new(SystemRunner)` in production, a
+    /// scripted fake under test. Named like every other field so the struct
+    /// literal stays the construction path — no positional constructor to
+    /// transpose the two `PathBuf`s through.
+    pub runner: Arc<dyn CommandRunner>,
 }
 
 impl GcpProvider {
@@ -317,24 +319,6 @@ fn parse_tf_outputs(json: &str) -> Result<(String, String), SandboxError> {
 }
 
 impl GcpProvider {
-    /// Build a provider driven by the real process runner.
-    pub fn new(
-        terraform_dir: PathBuf,
-        state_file: PathBuf,
-        user: Option<String>,
-        remote_socket: String,
-        local_socket: PathBuf,
-    ) -> Self {
-        Self {
-            terraform_dir,
-            state_file,
-            user,
-            remote_socket,
-            local_socket,
-            runner: Arc::new(SystemRunner),
-        }
-    }
-
     /// Run a command through the injected runner.
     async fn run(&self, program: &str, args: &[String]) -> Result<String, SandboxError> {
         self.runner.run(program, args).await
@@ -427,13 +411,14 @@ mod tests {
     use std::sync::Mutex;
 
     fn provider() -> GcpProvider {
-        GcpProvider::new(
-            PathBuf::from("/repo/terraform/sandbox/gcp"),
-            PathBuf::from("/state/lazybox-sbx-abc/terraform.tfstate"),
-            Some("me".into()),
-            "/home/me/.lazybox/run/daemon.sock".into(),
-            PathBuf::from("/tmp/lazybox.sock"),
-        )
+        GcpProvider {
+            terraform_dir: PathBuf::from("/repo/terraform/sandbox/gcp"),
+            state_file: PathBuf::from("/state/lazybox-sbx-abc/terraform.tfstate"),
+            user: Some("me".into()),
+            remote_socket: "/home/me/.lazybox/run/daemon.sock".into(),
+            local_socket: PathBuf::from("/tmp/lazybox.sock"),
+            runner: Arc::new(SystemRunner),
+        }
     }
 
     /// One scripted step: the stdout/err a queued invocation returns.

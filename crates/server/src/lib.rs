@@ -46,7 +46,6 @@ pub mod metrics;
 pub mod polling;
 pub mod pty;
 pub mod registries;
-pub mod remote;
 mod resource_limits;
 pub mod slack;
 pub mod socket_service;

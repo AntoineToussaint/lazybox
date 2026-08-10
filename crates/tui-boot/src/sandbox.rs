@@ -222,16 +222,16 @@ pub(crate) fn resolve_provider(
         .map(PathBuf::from)
         .or_else(|| sc.local_socket.clone())
         .unwrap_or_else(|| PathBuf::from(DEFAULT_LOCAL_SOCKET));
-    Ok(GcpProvider {
+    Ok(GcpProvider::new(
         terraform_dir,
-        state_file: state_file_for(worktree),
+        state_file_for(worktree),
         user,
         // Unset → the conventional home-relative box daemon socket, the
         // same one the box's systemd/tmux daemon binds — so `connect`
         // works with zero socket config, exactly like the `r`-spawn.
-        remote_socket: remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
+        remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
         local_socket,
-    })
+    ))
 }
 
 /// Build the full spec for `ensure` from config + flags.

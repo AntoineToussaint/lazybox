@@ -1864,8 +1864,6 @@ version = "0.1.9"
 dependencies = [
  "lazybox-core",
  "libc",
- "serde",
- "serde_json",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

@@ -829,23 +829,82 @@ async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspac
         reclaimed.bytes += size;
     }
 
-    // Tear down any remote box stamped for this worktree (#888).
-    // Best-effort and a no-op unless `remote.host.enabled` — the local
-    // path provisions nothing, so `from_config` returns `None` and this
-    // is free. The persisted handle is keyed by the workspace key, so a
-    // teardown after a daemon restart still finds the box — and the
-    // provision-on-open path (deferred) must key `ensure` by this same
-    // workspace key or the handle recorded there won't match here.
-    let user_config = lazybox_config::Config::load().unwrap_or_default();
-    if let Some(host_cfg) = user_config.remote.host.as_ref()
-        && let Some(remote) =
-            crate::remote::RemoteHostManager::from_config(host_cfg, config.store.clone())
-        && let Err(error) = remote.teardown(workspace.key.as_str()).await
-    {
-        tracing::warn!(%error, workspace = workspace.key.as_str(), "remote box teardown failed");
-    }
+    tombstone_legacy_remote_host(config, workspace);
 
     reclaimed
+}
+
+/// Clear a legacy `remote-host:<workspace-key>` record left by the retired
+/// #888 provision-on-open path. Nothing can stamp such a box anymore, but a
+/// record written when that path was reachable can still point at a live GCE
+/// instance — so drop the pointer and log the instance name for the operator
+/// to reclaim by hand, rather than silently leaving both the record and a
+/// possibly-running box behind.
+fn tombstone_legacy_remote_host(config: &ServerConfig, workspace: &Workspace) {
+    let kv_key = format!("remote-host:{}", workspace.key.as_str());
+    let Ok(Some(record)) = config.store.get_kv(&kv_key) else {
+        return;
+    };
+    let instance = serde_json::from_str::<serde_json::Value>(&record)
+        .ok()
+        .and_then(|v| {
+            v.get("instance")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string());
+    tracing::warn!(
+        workspace = workspace.key.as_str(),
+        instance = %instance,
+        "clearing legacy remote-host record on delete; verify no GCE instance is left running",
+    );
+    let _ = config.store.delete_kv(&kv_key);
+}
+
+#[cfg(test)]
+mod tombstone_tests {
+    use super::*;
+
+    fn workspace(key: &WorkspaceKey) -> Workspace {
+        Workspace::empty(key.clone(), "scratch", Utc::now())
+    }
+
+    #[test]
+    fn clears_a_legacy_remote_host_record_and_leaves_none_behind() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("local:scratch#1");
+        let kv_key = format!("remote-host:{}", key.as_str());
+        config
+            .store
+            .set_kv(
+                &kv_key,
+                r#"{"project":"p","zone":"z","instance":"lazybox-old-box","id":"42"}"#,
+            )
+            .expect("seed legacy record");
+
+        tombstone_legacy_remote_host(&config, &workspace(&key));
+
+        assert_eq!(
+            config.store.get_kv(&kv_key).expect("read kv"),
+            None,
+            "the legacy remote-host record must be cleared on delete"
+        );
+    }
+
+    #[test]
+    fn is_a_no_op_without_a_legacy_record() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("local:scratch#2");
+        // No record seeded — must not panic or write anything.
+        tombstone_legacy_remote_host(&config, &workspace(&key));
+        assert_eq!(
+            config
+                .store
+                .get_kv(&format!("remote-host:{}", key.as_str()))
+                .expect("read kv"),
+            None
+        );
+    }
 }
 
 /// Delete a workspace, returning the worktree space reclaimed on success

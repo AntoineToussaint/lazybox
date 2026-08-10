@@ -188,7 +188,9 @@ describe("binary terminal protocol", () => {
 
     appendTerminalInput(pending, bytes, "compose", 64 * 1024);
 
-    expect(pending.every((input) => input.bytes.length <= 64 * 1024)).toBe(true);
+    expect(pending.every((input) => input.bytes.length <= 64 * 1024)).toBe(
+      true,
+    );
     expect(pending.reduce((sum, input) => sum + input.bytes.length, 0)).toBe(
       300_002,
     );

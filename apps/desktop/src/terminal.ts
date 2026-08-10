@@ -90,6 +90,11 @@ export class TerminalFrameDecoder {
         bodyLength < TERMINAL_SERVER_FRAME_HEADER_BYTES ||
         bodyLength > this.maxFrameBytes
       ) {
+        // Reset clears the whole buffer, including any valid frames already
+        // parsed from this chunk into `frames` above and then discarded by
+        // the throw. That drop is transient, not lost: the caller's
+        // malformed-data handler requests a full resync, which re-delivers
+        // them from an attainable baseline.
         this.reset();
         throw new Error(`invalid terminal frame length ${bodyLength}`);
       }

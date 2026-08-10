@@ -98,6 +98,14 @@ fn auth_failure_detection_accepts_provider_errors_and_rejects_chat_prose() {
             .detect_auth_failure(include_bytes!("fixtures/codex_refresh_rejected.bin"))
             .is_some()
     );
+    // Verbatim wording from issue #982 — "refresh token was revoked. Please
+    // log out and sign in again." A one-string gap in the detector defeated
+    // the context-preserving in-place re-auth for this common variant.
+    assert!(
+        codex
+            .detect_auth_failure(include_bytes!("fixtures/codex_refresh_revoked.bin"))
+            .is_some()
+    );
     assert!(
         codex
             .detect_auth_failure(include_bytes!("fixtures/codex_login_required.bin"))
@@ -116,6 +124,16 @@ fn auth_failure_detection_accepts_provider_errors_and_rejects_chat_prose() {
     assert!(
         codex
             .detect_auth_failure(include_bytes!("fixtures/codex_auth_chat_negative.bin"))
+            .is_none()
+    );
+    // Prose that names the auth-error wording but lacks the "access token
+    // could not be refreshed" anchor must NOT trip detection — pins the
+    // invariant that the loosened "sign in again" clause only fires behind
+    // the distinctive anchor, so a future "simplification" that drops the
+    // anchor is caught here.
+    assert!(
+        codex
+            .detect_auth_failure(include_bytes!("fixtures/codex_revoked_chat_negative.bin"))
             .is_none()
     );
 }

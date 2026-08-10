@@ -144,9 +144,13 @@ pub fn contains_paired(text: &str, choices: &[&str], questions: &[&str]) -> bool
 pub fn codex_auth_failure(recent_output: &[u8]) -> Option<AuthFailure> {
     let text = strip_ansi_lossy(recent_output).to_ascii_lowercase();
     let tail = recent_tail(&text, 8 * 1024);
-    let refresh_rejected = tail.contains("access token could not be refreshed")
-        && (tail.contains("please sign in again")
-            || tail.contains("logged out or signed in to another account"));
+    // "access token could not be refreshed" is distinctive enough that the
+    // exact re-auth directive can vary — Codex prints "please sign in again"
+    // and "please log out and sign in again". Anchor on the loose "sign in
+    // again" (covers both) so a directive-wording tweak upstream can't
+    // silently defeat the in-place re-auth.
+    let refresh_rejected =
+        tail.contains("access token could not be refreshed") && tail.contains("sign in again");
     let login_required = tail.contains("not logged in. run `codex login`")
         || tail.contains("not logged in. run codex login")
         || tail.contains("not authenticated. run `codex login`")

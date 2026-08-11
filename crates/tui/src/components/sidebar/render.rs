@@ -845,27 +845,34 @@ impl Sidebar {
             let bar = Rect::new(area.x + l_pad, area.y + area.height - 1, inner_width, 1);
             self.search_bar_rect = Some(bar);
             let global = s.scope.is_none();
-            let (prefix, edit_key) = if global { ("⌕ ", "#") } else { ("/", "/") };
+            let prefix = if global { "⌕ " } else { "/ " };
             let mut spans = vec![
                 Span::styled(prefix, Style::default().fg(theme.accent)),
                 Span::styled(s.query.clone(), Style::default().fg(theme.text_strong)),
             ];
             if s.editing {
                 spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
-                spans.push(Span::styled(
-                    if global {
-                        "  all repos · esc clear".to_string()
-                    } else {
-                        "  esc clear".to_string()
-                    },
-                    Style::default().fg(theme.text_dim),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    format!("  {edit_key} edit · esc clear"),
-                    Style::default().fg(theme.text_dim),
-                ));
             }
+            // Trailing guidance for a scoped `/` search. The actionable
+            // cues lead so they survive a narrow-pane clip: the `#`
+            // pointer to the wider reach, then `esc clear`, with the
+            // project NAME last — it's the most expendable (the repo
+            // header already shows it, and `/` is inherently on the
+            // focused project). When the scope matches nothing the `#`
+            // pointer is the whole point, so the empty hint drops the
+            // (clip-prone) scope name entirely and reads as "look wider"
+            // rather than "broken" (#1033). `esc clear` holds in every
+            // state — Esc clears both an editing and a committed search.
+            let empty_scoped = !s.query.is_empty()
+                && s.scope.as_deref().is_some_and(|scope| {
+                    self.repo_summaries.get(scope).map_or(0, |sm| sm.active) == 0
+                });
+            let hint = match (&s.scope, empty_scoped) {
+                (Some(_), true) => "  no matches · # all repos · esc clear".to_string(),
+                (Some(scope), false) => format!("  # all repos · esc clear · {scope}"),
+                (None, _) => "  all repos · esc clear".to_string(),
+            };
+            spans.push(Span::styled(hint, Style::default().fg(theme.text_dim)));
             frame.render_widget(Paragraph::new(Line::from(spans)), bar);
         }
     }

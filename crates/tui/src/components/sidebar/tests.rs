@@ -1863,6 +1863,111 @@ mod search_tests {
         );
     }
 
+    /// Read the bottom `/` search bar row as a string at a given pane
+    /// width (height fixed at 12 so the bar always draws).
+    fn search_bar_row_at(sb: &mut Sidebar, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(width, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let bar = sb.search_bar_rect.expect("search bar rect recorded");
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, bar.y)].symbol())
+            .collect()
+    }
+
+    fn search_bar_row(sb: &mut Sidebar) -> String {
+        search_bar_row_at(sb, 60)
+    }
+
+    /// A scoped `/` search names the project it's pinned to and points
+    /// at `#` for the wider reach, so its scope is never invisible
+    /// (#1033).
+    #[test]
+    fn scoped_search_bar_names_its_project_and_points_to_global() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "al");
+        let bar = search_bar_row(&mut sb);
+        assert!(bar.contains("o/r"), "scope named: {bar:?}");
+        assert!(bar.contains('#'), "points to global search: {bar:?}");
+    }
+
+    /// A scoped `/` search that matches nothing surfaces the `#`
+    /// escape hatch instead of reading as broken (#1033).
+    #[test]
+    fn scoped_search_empty_result_suggests_global() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "zzzqqq");
+        let bar = search_bar_row(&mut sb);
+        assert!(bar.contains("no matches"), "{bar:?}");
+        assert!(bar.contains("# all repos"), "suggests widening: {bar:?}");
+    }
+
+    /// The `#` pointer is the actionable cue, so it leads the hint and
+    /// survives a narrow pane while the (expendable) scope name is the
+    /// first thing to clip — the failure the header search box already
+    /// guards against, now guarded for the bottom bar too (#1033).
+    #[test]
+    fn scoped_search_hint_keeps_the_global_pointer_when_the_scope_name_clips() {
+        let repo = "averylongowner/averylongreponame";
+        let w = issue_ws_in_repo(repo, "1", "Alpha");
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+        sb.open_search();
+        type_query(&mut sb, "al");
+        let bar = search_bar_row_at(&mut sb, 34);
+        assert!(
+            bar.contains("# all repos"),
+            "actionable pointer survives the clip: {bar:?}"
+        );
+        assert!(
+            !bar.contains(repo),
+            "the expendable scope name clips first: {bar:?}"
+        );
+    }
+
+    /// A committed (non-editing) search still advertises `esc clear`,
+    /// because Esc now clears it — the hint no longer lies (#1033).
+    #[test]
+    fn committed_scoped_search_hint_promises_esc_clear() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "al");
+        sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!sb.search_editing(), "Enter commits the search");
+        let bar = search_bar_row(&mut sb);
+        assert!(
+            bar.contains("esc clear"),
+            "esc-clear cue is honest now: {bar:?}"
+        );
+    }
+
+    /// A bare Esc clears a committed search filter (the pane-handler
+    /// path, distinct from the editing-time Esc). Without it a committed
+    /// search trapped the user in a narrowed tree (#1033).
+    #[test]
+    fn esc_clears_a_committed_search_via_the_pane_handler() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        sb.open_search();
+        type_query(&mut sb, "search");
+        sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!sb.search_editing(), "Enter commits");
+        assert_eq!(sb.workspace_count(), 1, "filter still applied");
+
+        let mut cmds = Vec::new();
+        let outcome = sb.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut cmds);
+        assert!(matches!(outcome, PaneOutcome::Consumed), "Esc is consumed");
+        assert!(sb.search().is_none(), "committed search cleared");
+        assert_eq!(sb.workspace_count(), 2, "full tree restored");
+    }
+
     /// While a global query is applied the header box shows the query
     /// rather than the `[find]` placeholder.
     #[test]

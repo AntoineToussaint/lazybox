@@ -853,23 +853,29 @@ impl Sidebar {
             if s.editing {
                 spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
             }
-            // Trailing scope label + guidance. A scoped `/` search names
-            // the project it's pinned to and always points at `#` for
-            // the wider reach; when it matches nothing that pointer
-            // becomes the whole hint, so an empty result reads as "look
-            // wider" rather than "broken" (#1033).
+            // Trailing guidance for a scoped `/` search. The actionable
+            // cues lead so they survive a narrow-pane clip: the `#`
+            // pointer to the wider reach, then the exit affordance, with
+            // the project NAME last — it's the most expendable (the repo
+            // header already shows it, and `/` is inherently on the
+            // focused project). When the scope matches nothing the `#`
+            // pointer is the whole point, so the empty hint drops the
+            // (clip-prone) scope name entirely and reads as "look wider"
+            // rather than "broken" (#1033). `esc clear` appears only
+            // while editing, where Esc actually clears — a committed
+            // (non-editing) search is cleared by re-editing first, so
+            // promising `esc clear` there would be a lie.
             let empty_scoped = !s.query.is_empty()
                 && s.scope.as_deref().is_some_and(|scope| {
                     self.repo_summaries.get(scope).map_or(0, |sm| sm.active) == 0
                 });
-            let hint = match (&s.scope, s.editing) {
-                (Some(scope), _) if empty_scoped => {
-                    format!("  no matches in {scope} · # search all repos")
-                }
-                (None, true) => "  all repos · esc clear".to_string(),
-                (None, false) => "  # edit · esc clear".to_string(),
-                (Some(scope), true) => format!("  {scope} · # all repos · esc clear"),
-                (Some(scope), false) => format!("  {scope} · / edit · # all repos"),
+            let hint = match (&s.scope, empty_scoped, s.editing) {
+                (Some(_), true, true) => "  no matches · # all repos · esc clear".to_string(),
+                (Some(_), true, false) => "  no matches · # all repos".to_string(),
+                (Some(scope), false, true) => format!("  # all repos · esc clear · {scope}"),
+                (Some(scope), false, false) => format!("  # all repos · / edit · {scope}"),
+                (None, _, true) => "  all repos · esc clear".to_string(),
+                (None, _, false) => "  all repos · # edit".to_string(),
             };
             spans.push(Span::styled(hint, Style::default().fg(theme.text_dim)));
             frame.render_widget(Paragraph::new(Line::from(spans)), bar);

@@ -1863,11 +1863,12 @@ mod search_tests {
         );
     }
 
-    /// Read the bottom `/` search bar row as a string.
-    fn search_bar_row(sb: &mut Sidebar) -> String {
+    /// Read the bottom `/` search bar row as a string at a given pane
+    /// width (height fixed at 12 so the bar always draws).
+    fn search_bar_row_at(sb: &mut Sidebar, width: u16) -> String {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let backend = TestBackend::new(60, 12);
+        let backend = TestBackend::new(width, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| sb.render(frame.area(), frame, true))
@@ -1877,6 +1878,10 @@ mod search_tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, bar.y)].symbol())
             .collect()
+    }
+
+    fn search_bar_row(sb: &mut Sidebar) -> String {
+        search_bar_row_at(sb, 60)
     }
 
     /// A scoped `/` search names the project it's pinned to and points
@@ -1900,11 +1905,50 @@ mod search_tests {
         sb.open_search();
         type_query(&mut sb, "zzzqqq");
         let bar = search_bar_row(&mut sb);
-        assert!(bar.contains("no matches in o/r"), "{bar:?}");
+        assert!(bar.contains("no matches"), "{bar:?}");
+        assert!(bar.contains("# all repos"), "suggests widening: {bar:?}");
+    }
+
+    /// The `#` pointer is the actionable cue, so it leads the hint and
+    /// survives a narrow pane while the (expendable) scope name is the
+    /// first thing to clip — the failure the header search box already
+    /// guards against, now guarded for the bottom bar too (#1033).
+    #[test]
+    fn scoped_search_hint_keeps_the_global_pointer_when_the_scope_name_clips() {
+        let repo = "averylongowner/averylongreponame";
+        let w = issue_ws_in_repo(repo, "1", "Alpha");
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+        sb.open_search();
+        type_query(&mut sb, "al");
+        let bar = search_bar_row_at(&mut sb, 34);
         assert!(
-            bar.contains("search all repos"),
-            "suggests widening: {bar:?}"
+            bar.contains("# all repos"),
+            "actionable pointer survives the clip: {bar:?}"
         );
+        assert!(
+            !bar.contains(repo),
+            "the expendable scope name clips first: {bar:?}"
+        );
+    }
+
+    /// `esc clear` is only promised while editing, where Esc actually
+    /// clears; a committed (non-editing) search is cleared by
+    /// re-editing, so the applied hint must not lie about it (#1033).
+    #[test]
+    fn applied_scoped_search_hint_does_not_promise_esc_clear() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "al");
+        sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!sb.search_editing(), "Enter commits the search");
+        let bar = search_bar_row(&mut sb);
+        assert!(
+            !bar.contains("esc clear"),
+            "no false esc-clear cue: {bar:?}"
+        );
+        assert!(bar.contains("/ edit"), "re-edit is the real cue: {bar:?}");
     }
 
     /// While a global query is applied the header box shows the query

@@ -1312,6 +1312,61 @@ mod description_expand_tests {
     }
 
     #[test]
+    fn reader_title_names_the_ticket_when_the_pr_has_no_body() {
+        // #1037: the reader's content is entirely the linked ticket, so
+        // its header must name the ticket — not the empty-bodied PR that
+        // merely roots the workspace.
+        let mut ws = Workspace::from_task(pr_with_body(""), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let title = pane.task_body_title().expect("title present");
+        assert!(
+            title.contains("ENG-1"),
+            "the sole linked ticket titles the reader; got: {title}"
+        );
+        assert!(
+            !title.contains("o/r#7"),
+            "the empty-bodied PR must not title the reader; got: {title}"
+        );
+    }
+
+    #[test]
+    fn reader_title_stays_the_pr_when_it_has_its_own_body() {
+        let mut ws = Workspace::from_task(pr_with_body("PR description"), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let title = pane.task_body_title().expect("title present");
+        assert!(
+            title.contains("o/r#7"),
+            "a PR with its own body still heads the composite reader; got: {title}"
+        );
+    }
+
+    #[test]
+    fn reader_title_stays_the_pr_with_multiple_linked_issues() {
+        // More than one folded-in issue makes the reader a genuine
+        // composite the PR heads — keep the PR title so no single section
+        // masquerades as the whole.
+        let mut ws = Workspace::from_task(pr_with_body(""), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        let mut gh = task_with_body("Second brief");
+        gh.id.key = "o/r#42".into();
+        gh.url = "https://github.com/o/r/issues/42".into();
+        ws.attach_task(gh);
+        assert_eq!(ws.gh_issues.len(), 1);
+        assert_eq!(ws.linear_issues.len(), 1);
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let title = pane.task_body_title().expect("title present");
+        assert!(
+            title.contains("o/r#7"),
+            "a multi-issue composite stays PR-titled; got: {title}"
+        );
+    }
+
+    #[test]
     fn table_shaped_line_in_indented_code_is_not_treated_as_a_table() {
         // A `| --- |`-shaped line indented into a code block (4 spaces)
         // is literal text the teaser handles fine — it must NOT trip the

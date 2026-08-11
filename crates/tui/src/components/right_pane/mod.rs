@@ -2661,10 +2661,23 @@ impl RightPane {
 
     /// A concise title for the reader modal: the task key (e.g.
     /// `owner/repo#123`) plus its title when they differ.
+    ///
+    /// Normally the primary task. But when a PR contributes no body of
+    /// its own and folds in exactly one issue / ticket, the reader's
+    /// content *is* that issue's description (#1037) — so the header
+    /// names it, not the empty-bodied PR that merely roots the
+    /// workspace. A PR with its own body, or more than one linked issue,
+    /// keeps the PR title: the reader is then a genuine composite the PR
+    /// heads.
     pub fn task_body_title(&self) -> Option<String> {
-        let task = self.workspace.as_ref()?.primary_task()?;
-        let key = task.id.key.as_str();
-        let title = task.title.trim();
+        let ws = self.workspace.as_ref()?;
+        let linked = self.linked_issue_tasks();
+        let subject = match (self.primary_body_str(), linked.as_slice()) {
+            (None, [only]) => *only,
+            _ => ws.primary_task()?,
+        };
+        let key = subject.id.key.as_str();
+        let title = subject.title.trim();
         if title.is_empty() || title == key {
             Some(key.to_string())
         } else {

@@ -538,6 +538,13 @@ struct TerminalHit {
     terminal_id: TerminalId,
     tile: Rect,
     body: Rect,
+    /// The exact cell-grid rect the renderer drew for this terminal —
+    /// the body with the recap rows and the scrollbar gutter already
+    /// removed. Recorded so every screen↔grid coordinate mapping reads
+    /// back the geometry the frame actually used instead of recomputing
+    /// the recap/chrome inset and drifting by a row when they disagree
+    /// (#1021).
+    grid: Rect,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1904,14 +1911,39 @@ impl TerminalStack {
         }
     }
 
-    /// Screen-absolute grid bounds of the focused terminal's cell grid
-    /// within pane `rect`: `(inner_x, inner_y, last_col, last_row)` in
-    /// crossterm screen coordinates, undoing the left border, the 3-row
-    /// top chrome (tab strip + divider + blank), and any recap rows the
-    /// renderer inset. `None` when nothing is focused or the pane is too
-    /// small to hold a single grid cell. Mirrors the mapping in
-    /// [`Self::screen_to_cell`] / [`Self::target_at`].
+    /// The exact cell-grid rect the renderer drew for the focused
+    /// terminal this frame — chrome, recap rows, and the scrollbar gutter
+    /// already removed (recorded in [`Self::render_one_terminal`]). This
+    /// is the single source of truth every screen↔grid mapping reads, so
+    /// none of them recompute the recap/chrome inset and drift by a row
+    /// against what was actually painted — including split tiles, whose
+    /// grid does not begin at the pane's top (#1021). `None` when the
+    /// focused terminal was not part of the last render.
+    fn focused_grid_rect(&self) -> Option<Rect> {
+        let id = self.focused_terminal_id()?;
+        self.tile_hits
+            .iter()
+            .find(|hit| hit.terminal_id == id)
+            .map(|hit| hit.grid)
+    }
+
+    /// Screen-absolute grid bounds of the focused terminal's cell grid:
+    /// `(inner_x, inner_y, last_col, last_row)` in crossterm screen
+    /// coordinates. Read straight from the rect the renderer drew
+    /// ([`Self::focused_grid_rect`]) so the mapping can never diverge from
+    /// the frame the user clicked on. Falls back to deriving the inset
+    /// from the pane `rect` only before the first render (nothing on
+    /// screen to click yet). `None` when nothing is focused or the grid
+    /// holds no cell.
     fn grid_bounds(&self, rect: tuirealm::ratatui::layout::Rect) -> Option<(u16, u16, u16, u16)> {
+        if let Some(grid) = self.focused_grid_rect() {
+            if grid.width == 0 || grid.height == 0 {
+                return None;
+            }
+            let last_col = grid.x + grid.width - 1;
+            let last_row = grid.y + grid.height - 1;
+            return Some((grid.x, grid.y, last_col, last_row));
+        }
         let id = self.focused_terminal_id()?;
         let slot = self.terminals.get(&id)?;
         let inner_x = rect.x.saturating_add(1);
@@ -2291,44 +2323,27 @@ impl TerminalStack {
     }
 
     /// Translate a screen `(col, row)` into 0-based grid-cell
-    /// coordinates inside the focused terminal's body, undoing the same
-    /// inset the renderer applies: the left border (`+1` col), the
-    /// three rows of top chrome (tab strip + divider + blank), and any
-    /// recap rows. This is the coordinate space `encode_mouse_for_focused`
-    /// expects. Returns `None` when the point falls in the border / tab
-    /// strip / recap (left of or above the grid) so callers forwarding a
-    /// click to a mouse-tracking inner program never feed it a
-    /// cell the renderer never drew there. Mirrors `target_at` /
-    /// `grid_bounds`, the other paths that undo this offset — the
-    /// forward path used the raw pane origin and so landed every event
-    /// 1 column right and 3+ rows high.
+    /// coordinates inside the focused terminal's grid, using the exact
+    /// grid rect the renderer drew ([`Self::grid_bounds`]) — the left
+    /// border, the top chrome (tab strip + divider + blank), any recap
+    /// rows, and the scrollbar gutter already removed. This is the
+    /// coordinate space `encode_mouse_for_focused` expects. Returns
+    /// `None` when the point falls outside that grid (border / tab strip
+    /// / recap / gutter) so callers forwarding a click to a
+    /// mouse-tracking inner program never feed it a cell the renderer
+    /// never drew there.
     pub fn screen_to_cell(
         &self,
         rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
     ) -> Option<(u32, u32)> {
-        let id = self.focused_terminal_id()?;
-        let slot = self.terminals.get(&id)?;
-        let inner_x = rect.x.saturating_add(1);
-        // Use the SAME body height the renderer feeds `recap_rows` — the
-        // pane minus 3 top-chrome rows AND the 1 held-back bottom margin
-        // (`render()` insets to `area.height - 4` before calling
-        // `render_one_terminal`). Using `- 3` here diverged from the
-        // renderer at exactly height 6, where `recap_rows` flips.
-        let body_height = rect.height.saturating_sub(4);
-        let recap = Self::recap_rows(slot, body_height);
-        let inner_y = rect.y.saturating_add(3).saturating_add(recap);
-        // Reject points OUTSIDE the inner body — the left/right border
-        // columns and the bottom row are never grid cells, so a click
-        // there must not be forwarded to the inner program as a bogus
-        // near-edge cell. (Lower bounds guard the border/chrome above and
-        // left; these guard the border below and right.)
-        if col < inner_x
-            || row < inner_y
-            || col >= rect.x.saturating_add(rect.width).saturating_sub(1)
-            || row >= rect.y.saturating_add(rect.height).saturating_sub(1)
-        {
+        let (inner_x, inner_y, last_col, last_row) = self.grid_bounds(rect)?;
+        // Reject points OUTSIDE the grid — the border columns, the top
+        // chrome / recap rows, the bottom margin, and the scrollbar gutter
+        // are never grid cells, so a click there must not be forwarded to
+        // the inner program as a bogus near-edge cell.
+        if col < inner_x || row < inner_y || col > last_col || row > last_row {
             return None;
         }
         Some(((col - inner_x) as u32, (row - inner_y) as u32))
@@ -4258,6 +4273,7 @@ impl TerminalStack {
                 terminal_id: id,
                 tile,
                 body: rect,
+                grid,
             });
             slot.vt.ensure_size(grid.width, grid.height);
             // Only now drain whatever arrived while this slot was hidden.
@@ -5846,6 +5862,93 @@ mod selection_offset_tests {
         // "line2" — the row two below the highlight.
         let text = copy_between(&mut stack, Rect::new(0, 0, 80, 30), (1, 5), (10, 5));
         assert_eq!(text, "line0");
+    }
+
+    /// Every on-screen grid row — top and bottom boundary included —
+    /// copies the exact line the renderer painted there, with recap rows
+    /// present AND after scrolling into scrollback. Guards the #1021
+    /// off-by-one: the selection row mapping reads the exact grid the
+    /// frame drew, so it can't drift from `bar.offset` / recap / chrome.
+    #[test]
+    fn selection_row_matches_rendered_grid_with_recap_and_scroll() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 80;
+        const H: u16 = 12;
+        let area = Rect::new(0, 0, W, H);
+
+        // Agent + remembered message → 2 recap rows carved off the top.
+        let mut stack = stack_with(
+            TerminalKind::Agent("claude".into()),
+            Some("do the thing"),
+            &[],
+        );
+        // Enough distinctly-numbered lines to overflow the grid, leaving
+        // scrollback to scroll into.
+        let mut payload = String::new();
+        for i in 0..40 {
+            payload.push_str(&format!("row{i:02}\r\n"));
+        }
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .vt
+            .feed(payload.as_bytes());
+
+        // Render to a real backend, then assert each on-screen grid row
+        // copies exactly the text drawn there.
+        fn assert_rows_match(stack: &mut TerminalStack, area: Rect) {
+            let backend = TestBackend::new(area.width, area.height);
+            let mut term = Terminal::new(backend).unwrap();
+            term.draw(|f| stack.render(area, f, true)).unwrap();
+            let buf = term.backend().buffer().clone();
+
+            let (inner_x, inner_y, last_col, last_row) =
+                stack.grid_bounds(area).expect("focused grid");
+            // The top grid row must map to the viewport-top content row —
+            // the crisp no-off-by-one check.
+            let bar = stack.terminals[&TerminalId(1)]
+                .vt
+                .terminal
+                .scrollbar()
+                .unwrap();
+            assert_eq!(
+                stack.selection_point(area, inner_x, inner_y),
+                Some((0, bar.offset as u32)),
+                "grid-top screen row must map to the viewport-top content row",
+            );
+            for screen_row in inner_y..=last_row {
+                let onscreen: String = (inner_x..=last_col)
+                    .map(|x| buf[(x, screen_row)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string();
+                if onscreen.is_empty() {
+                    continue;
+                }
+                let text = copy_between(stack, area, (inner_x, screen_row), (last_col, screen_row));
+                assert_eq!(text, onscreen, "click at screen row {screen_row}");
+            }
+        }
+
+        // At the live bottom.
+        assert_rows_match(&mut stack, area);
+
+        // …and scrolled up into scrollback (non-zero `bar.offset`).
+        assert!(
+            matches!(stack.scroll_active(-3), ScrollOutcome::Moved { .. }),
+            "scroll must move",
+        );
+        let offset = stack.terminals[&TerminalId(1)]
+            .vt
+            .terminal
+            .scrollbar()
+            .unwrap()
+            .offset;
+        assert!(offset > 0, "must be scrolled into scrollback");
+        assert_rows_match(&mut stack, area);
     }
 
     #[test]

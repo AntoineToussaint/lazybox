@@ -670,8 +670,10 @@ impl Snippets {
                      and record the current branch, staged and uncommitted changes, and how \
                      to verify the work (the build, test, and lint commands). Be specific and \
                      actionable, not a vague recap: this document is the only thing the next \
-                     session will have. Write it to `HANDOFF.md` at the repo root; if you \
-                     can't write files, print the whole thing clearly instead.",
+                     session will have. Write it to `HANDOFF.md` at the repo root, but don't \
+                     clobber an existing one — append a timestamped section if it's already \
+                     there — and leave it untracked rather than committing it; if you can't \
+                     write files, print the whole thing clearly instead.",
                 ),
             ),
             // ── GitHub ──────────────────────────────────────────────
@@ -1735,6 +1737,10 @@ snippets:
         assert!(s.provider.is_none(), "handoff is generic, not scoped");
         assert!(s.body.contains("HANDOFF.md"));
         assert!(s.body.contains("next concrete steps"));
+        // Guards against silently clobbering an existing doc or leaking
+        // it into a commit (review finding on #1013).
+        assert!(s.body.contains("clobber"));
+        assert!(s.body.contains("untracked"));
     }
 
     #[test]

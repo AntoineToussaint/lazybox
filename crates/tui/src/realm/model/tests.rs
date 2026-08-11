@@ -5273,6 +5273,43 @@ mod input_starvation_tests {
         );
     }
 
+    /// A `WorkspaceFocusRequested` that lands in the SAME drain batch as
+    /// the upsert of its target must still focus that row. The upsert's
+    /// visible-list rebuild is coalesced (deferred to the batch flush), so
+    /// the focus request's by-key scan has to self-heal that pending
+    /// rebuild — otherwise it reads a stale list without the row, the jump
+    /// silently fails, and the cursor is left elsewhere (#1030).
+    #[test]
+    fn focus_request_lands_on_a_row_upserted_in_the_same_batch() {
+        use chrono::Utc;
+        use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+        let key = WorkspaceKey::new("github:o/r#7");
+        let sk: SessionKey = (&key).into();
+
+        evt_tx
+            .try_send(Event::WorkspaceUpserted(Box::new(Workspace::empty(
+                key,
+                "main",
+                Utc::now(),
+            ))))
+            .expect("room for the upsert");
+        evt_tx
+            .try_send(Event::WorkspaceFocusRequested {
+                session_key: sk.clone(),
+            })
+            .expect("room for the focus request");
+
+        drain_daemon_events(&mut m, None);
+
+        assert_eq!(
+            m.sidebar.selected_workspace_key(),
+            Some(&sk),
+            "focus must land on a row upserted earlier in the same drain batch"
+        );
+    }
+
     /// A daemon event the idle wait woke on (`Wake::Daemon`) is handed
     /// to the next drain as `carried` — it must be processed even when
     /// the channel itself is empty, and it counts toward the batch.

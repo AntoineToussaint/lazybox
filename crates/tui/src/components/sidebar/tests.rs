@@ -2092,6 +2092,32 @@ mod search_tests {
         sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(sb.search().is_none());
     }
+
+    /// While a recompute batch is open, an upsert defers the visible-list
+    /// rebuild — but a by-key scan (`focus_workspace_key`, and its sibling
+    /// `focus_project_header`) must self-heal that pending rebuild so it
+    /// finds the row instead of missing it against a stale list (#1030).
+    /// Without the self-heal, a `WorkspaceFocusRequested` / `ProjectUpserted`
+    /// / merge-follow that lands in the same drain batch as the upsert
+    /// silently fails to move the cursor.
+    #[test]
+    fn focus_workspace_key_flushes_a_pending_batched_recompute() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.begin_recompute_batch();
+        let workspace = issue_ws("991", "Batched upsert");
+        let key = SessionKey::from(&workspace.key);
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        // The batch deferred the rebuild, so the list is still empty here…
+        assert!(
+            sb.visible_rows().is_empty(),
+            "an open batch must defer the visible-list rebuild"
+        );
+        // …but the by-key scan self-heals it and lands on the row.
+        assert!(
+            sb.focus_workspace_key(&key),
+            "focus must find a row upserted while a batch is open"
+        );
+    }
 }
 
 #[cfg(test)]

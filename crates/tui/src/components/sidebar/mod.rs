@@ -1087,6 +1087,7 @@ impl Sidebar {
     /// Move the cursor onto the workspace row matching `key`. Returns
     /// true on a hit. Used by `--workspace` preselect on startup.
     pub fn focus_workspace_key(&mut self, key: &SessionKey) -> bool {
+        self.ensure_visible_fresh();
         for (i, row) in self.visible.iter().enumerate() {
             if let VisibleRow::Workspace(k) = row
                 && k == key
@@ -1157,6 +1158,7 @@ impl Sidebar {
     /// (header rows are skipped by `move_cursor_by`), which made the
     /// new-project flow feel broken.
     pub fn focus_project_header(&mut self, key: &lazybox_core::ProjectKey) -> bool {
+        self.ensure_visible_fresh();
         let label = match self.projects.get(key) {
             Some(p) => crate::components::visible_rows::project_label(p, &self.workspaces),
             None => return false,
@@ -2308,6 +2310,16 @@ impl Sidebar {
     /// deferred event asked for it.
     pub fn flush_recompute(&mut self) {
         self.defer_recompute = false;
+        self.ensure_visible_fresh();
+    }
+
+    /// Flush a batched recompute deferred by `begin_recompute_batch`
+    /// before a by-key scan of `self.visible`, so a lookup never misses a
+    /// row an upsert added — or re-sorted — earlier in the same drain
+    /// batch (#1030). A `WorkspaceFocusRequested` / `ProjectUpserted` /
+    /// merge-follow can land mid-batch, right after a deferred upsert, and
+    /// must see the fresh list. No-op when nothing is pending.
+    fn ensure_visible_fresh(&mut self) {
         if self.recompute_pending {
             self.recompute_visible_inner(true);
         }

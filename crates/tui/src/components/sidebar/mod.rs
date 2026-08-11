@@ -2021,7 +2021,8 @@ impl Sidebar {
     }
 
     /// True when the cursor's repo group is currently collapsed. `None`
-    /// when the cursor isn't in a group at all.
+    /// when the cursor isn't in a group at all. Drives the header-row
+    /// footer's collapse-vs-expand verb (#338).
     pub fn cursor_repo_collapsed(&self) -> Option<bool> {
         self.cursor_repo()
             .map(|repo| self.collapsed_repos.contains(&repo))
@@ -2121,13 +2122,6 @@ impl Sidebar {
             tracing::warn!("save spaces failed: {e}");
         }
         self.space_of_source(source)
-    }
-
-    /// True when the cursor's repo group is currently pinned. `None`
-    /// when the cursor isn't in a group at all.
-    pub fn cursor_repo_pinned(&self) -> Option<bool> {
-        self.cursor_repo()
-            .map(|repo| self.pinned_repos.contains(&repo))
     }
 
     /// Pin / unpin the repo group at or above the cursor to the top of
@@ -2558,14 +2552,21 @@ impl Sidebar {
             actions.push(Action::ToggleFocusWorkspace);
         }
         // Repo-group collapse/expand (`Space`) and pin (`p`) are
-        // deliberately kept OUT of the footer (#1026): they're
-        // always-available whenever the cursor sits in any group (i.e.
-        // almost always), obvious, and trivially mouse-discoverable
-        // (click the ▾/▸ header triangle) — a permanent footer cell for
-        // them just crowds out the state-driven hints that actually
-        // matter on THIS row. They stay in `?` help (catalog-driven) and
-        // the which-key popup, and dispatch unchanged.
+        // dropped from the footer on WORKSPACE rows (#1026): there
+        // they're obvious, always-available, and mouse-discoverable
+        // (click the ▾/▸ header triangle), so a permanent cell just
+        // crowds out the state-driven hints (merge/work/mark-read/…)
+        // that matter on the selected row. They stay in `?` help
+        // (catalog-driven) and dispatch unchanged.
         //
+        // Collapse is restored on a repo/space HEADER row, where no
+        // workspace is selected so nothing state-driven competes and
+        // folding the group you're sitting on IS the likely next action
+        // — the "show only when nothing better competes" case. Pin stays
+        // dropped even here: it's the secondary action on a header.
+        if workspace.is_none() && self.cursor_repo().is_some() {
+            actions.push(Action::ToggleRepoGroup);
+        }
         // Focus mode (`.`) surfaces only when the selected workspace
         // has a coding agent to maximize — otherwise the key is a
         // no-op, so advertising it would be noise. The `]]<digit>`
@@ -2627,6 +2628,16 @@ impl Sidebar {
                         // A single-key remap of an agent row keeps its
                         // own name — there's no group cell to defer to.
                         Action::SpawnAgent(_) => entry.label.clone(),
+                        // On a header row the verb tracks the group's
+                        // state so the footer never says "collapse" over
+                        // an already-collapsed group (#338).
+                        Action::ToggleRepoGroup => std::borrow::Cow::Borrowed(
+                            if self.cursor_repo_collapsed() == Some(true) {
+                                "expand group"
+                            } else {
+                                "collapse group"
+                            },
+                        ),
                         // The verb tracks the cursor workspace's star
                         // state so the footer never says "focus" over an
                         // already-starred row.

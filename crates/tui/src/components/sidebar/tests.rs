@@ -2935,39 +2935,83 @@ mod done_alert_tests {
         (sb, key)
     }
 
-    /// Repo-group collapse surfaces in the footer wherever the cursor
-    /// resolves to a group, and its verb tracks the group's state:
-    /// `collapse group` while expanded, `expand group` once folded —
-    /// never a "collapse" hint over an already-collapsed group (#338).
+    /// The always-on obvious actions — repo-group collapse (`Space`) and
+    /// pin (`p`) — are kept OUT of the footer so they can't crowd out the
+    /// state-driven hints that matter on this row (#1026). They stay
+    /// mouse-discoverable (the header ▾/▸ triangle) and in `?` help; the
+    /// state-contextual `Work` action leads instead.
     #[test]
-    fn repo_group_collapse_footer_verb_tracks_state() {
+    fn obvious_group_actions_absent_from_footer() {
         let catalog =
             lazybox_tui_core::action::ActionDef::catalog(&[], &std::collections::BTreeMap::new());
         let (mut sb, key) = sidebar_with_one_workspace();
         assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
-        // The cursor sits inside a repo group.
+        // The cursor sits inside a repo group — the OLD footer appended
+        // collapse-group + pin here unconditionally.
         assert!(
             sb.cursor_repo().is_some(),
             "workspace row resolves to a group"
         );
 
-        let expanded = sb.contextual_bindings(&catalog, false);
+        let binds = sb.contextual_bindings(&catalog, false);
         assert!(
-            expanded
+            !binds
                 .iter()
-                .any(|b| b.keys == "Space" && b.label == "collapse group"),
-            "expanded group → `Space collapse group`: {expanded:?}",
+                .any(|b| b.label == "collapse group" || b.label == "expand group"),
+            "collapse-group must not occupy a footer slot: {binds:?}",
+        );
+        assert!(
+            !binds
+                .iter()
+                .any(|b| b.label == "pin group" || b.label == "unpin group"),
+            "pin-group must not occupy a footer slot: {binds:?}",
+        );
+        // The state-contextual Work action still leads the bar (its
+        // verb tracks the row's classification — never a group/pin hint).
+        let work_label = lazybox_tui_core::action::contextual_label(
+            &lazybox_tui_core::action::Action::Work,
+            sb.selected_workspace(),
+        );
+        assert_eq!(
+            binds.first().map(|b| b.label.as_ref()),
+            Some(work_label),
+            "footer leads with the state-driven Work hint: {binds:?}",
         );
 
-        // Fold it — the verb flips to expand.
+        // Folding the group doesn't reintroduce a hint either.
         sb.toggle_repo_at_cursor();
         assert_eq!(sb.cursor_repo_collapsed(), Some(true), "group is collapsed");
         let collapsed = sb.contextual_bindings(&catalog, false);
         assert!(
-            collapsed
+            !collapsed
                 .iter()
-                .any(|b| b.keys == "Space" && b.label == "expand group"),
-            "collapsed group → `Space expand group`: {collapsed:?}",
+                .any(|b| b.label == "collapse group" || b.label == "expand group"),
+            "collapsed group still has no footer hint: {collapsed:?}",
+        );
+    }
+
+    /// A live multi-select leads the footer with the broadcast action —
+    /// the one selection-only action with no single-row equivalent —
+    /// ahead of the per-row state hints, and never surfaces the obvious
+    /// group/pin cells (#1026, #932).
+    #[test]
+    fn multi_select_footer_leads_with_broadcast() {
+        let catalog =
+            lazybox_tui_core::action::ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let (mut sb, key) = sidebar_with_one_workspace();
+        assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
+        sb.toggle_broadcast_select();
+        assert!(sb.is_broadcast_selected(&key), "row is selected");
+
+        let binds = sb.contextual_bindings(&catalog, false);
+        assert_eq!(
+            binds.first().map(|b| b.label.as_ref()),
+            Some("broadcast"),
+            "multi-select footer leads with broadcast: {binds:?}",
+        );
+        assert!(
+            !binds.iter().any(|b| b.label.contains("group")),
+            "no obvious group/pin cells under selection: {binds:?}",
         );
     }
 

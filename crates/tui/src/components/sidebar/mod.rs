@@ -2021,8 +2021,7 @@ impl Sidebar {
     }
 
     /// True when the cursor's repo group is currently collapsed. `None`
-    /// when the cursor isn't in a group at all. Drives the footer's
-    /// collapse-vs-expand verb (#338).
+    /// when the cursor isn't in a group at all.
     pub fn cursor_repo_collapsed(&self) -> Option<bool> {
         self.cursor_repo()
             .map(|repo| self.collapsed_repos.contains(&repo))
@@ -2125,8 +2124,7 @@ impl Sidebar {
     }
 
     /// True when the cursor's repo group is currently pinned. `None`
-    /// when the cursor isn't in a group at all. Drives the footer's
-    /// pin-vs-unpin verb (#760).
+    /// when the cursor isn't in a group at all.
     pub fn cursor_repo_pinned(&self) -> Option<bool> {
         self.cursor_repo()
             .map(|repo| self.pinned_repos.contains(&repo))
@@ -2559,15 +2557,15 @@ impl Sidebar {
             actions.push(Action::Archive);
             actions.push(Action::ToggleFocusWorkspace);
         }
-        // Repo-group collapse/expand (`Space`) — the "group the
-        // sessions" shortcut users couldn't find (#338). Surfaces
-        // wherever the key would actually fold something: anywhere the
-        // cursor resolves to a repo group (header, workspace, session,
-        // or kind sub-row) — the same predicate the key dispatches on.
-        if self.cursor_repo().is_some() {
-            actions.push(Action::ToggleRepoGroup);
-            actions.push(Action::ToggleRepoPin);
-        }
+        // Repo-group collapse/expand (`Space`) and pin (`p`) are
+        // deliberately kept OUT of the footer (#1026): they're
+        // always-available whenever the cursor sits in any group (i.e.
+        // almost always), obvious, and trivially mouse-discoverable
+        // (click the ▾/▸ header triangle) — a permanent footer cell for
+        // them just crowds out the state-driven hints that actually
+        // matter on THIS row. They stay in `?` help (catalog-driven) and
+        // the which-key popup, and dispatch unchanged.
+        //
         // Focus mode (`.`) surfaces only when the selected workspace
         // has a coding agent to maximize — otherwise the key is a
         // no-op, so advertising it would be noise. The `]]<digit>`
@@ -2629,26 +2627,6 @@ impl Sidebar {
                         // A single-key remap of an agent row keeps its
                         // own name — there's no group cell to defer to.
                         Action::SpawnAgent(_) => entry.label.clone(),
-                        // The verb tracks the cursor's group state so the
-                        // footer never says "collapse" over an already-
-                        // collapsed group (#338).
-                        Action::ToggleRepoGroup => std::borrow::Cow::Borrowed(
-                            if self.cursor_repo_collapsed() == Some(true) {
-                                "expand group"
-                            } else {
-                                "collapse group"
-                            },
-                        ),
-                        // The verb tracks the cursor's pin state so the
-                        // footer never says "pin" over an already-pinned
-                        // group.
-                        Action::ToggleRepoPin => {
-                            std::borrow::Cow::Borrowed(if self.cursor_repo_pinned() == Some(true) {
-                                "unpin group"
-                            } else {
-                                "pin group"
-                            })
-                        }
                         // The verb tracks the cursor workspace's star
                         // state so the footer never says "focus" over an
                         // already-starred row.

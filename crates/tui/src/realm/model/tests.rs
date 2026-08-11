@@ -8579,6 +8579,40 @@ mod merge_focus_follow_tests {
         )));
     }
 
+    /// #928 acceptance #3: the model-tier chords (`w S/M/L`) fan out over
+    /// a multi-select the same way bare `w w` does, threading the picked
+    /// tier alias into every spawned agent.
+    #[test]
+    fn bulk_work_tier_fans_out_with_alias() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+
+        assert!(m.dispatch_action(&Action::WorkTier("M".into())).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::BulkSpawnConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 2, "one spawn per selected workspace");
+        assert!(
+            cmds.iter().all(|c| matches!(
+                c,
+                IpcCommand::Spawn {
+                    kind: lazybox_ipc::TerminalKind::Agent(_),
+                    model_alias: Some(alias),
+                    ..
+                } if alias == "M"
+            )),
+            "every fanned-out spawn carries the picked tier: {cmds:?}",
+        );
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
     /// #899 regression: an inherently single-target destructive action
     /// (`x c` close-issue) must stay focused-only even under a `v`
     /// selection — before the fix it swept the whole set behind the

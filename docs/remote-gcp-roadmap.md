@@ -3,7 +3,9 @@
 _Written for [#1014][issue-1014], picked up after the remote/desktop/sandbox
 merge backlog cleared (#976/#975/#972/#977 and the sandbox+relay tracks landed
 on main). This is the re-scope the placeholder issue asked for: a clear-headed
-review of the remote-work-on-GCP path and a prioritized plan for what's next._
+review of the remote-work-on-GCP path and a prioritized plan for what's next.
+Issue states below reflect the repo as of 2026-08; treat them as a snapshot,
+not a live tracker._
 
 _Reads on top of the sibling scoping notes — [`remote-daemon-scoping.md`][remote]
 (#728), [`byo-remote-runbook.md`][runbook] (#742), [`obin-remote-dev-scoping.md`][obin]
@@ -29,8 +31,10 @@ all four layers the scoping docs laid out:
   r-spawn wired to it (#965), and provisioning that installs a **build-matched**
   daemon so the #815 skew case can't arise for boxes we stamp (#977).
 - **Desktop parity** — Tier A/B/C act-on-work + automation + terminals
-  (#816/#817/#818), then the daily-driver hardening pass (#972/#975/#976). The
-  desktop is now a credible primary **local** UI.
+  (#816/#817/#818), the deferred slice (#843), then the daily-driver hardening
+  pass (#972/#975/#976). Parity is essentially closed; stability polish
+  (#970/#974, both open) and an empirical sign-off ([`desktop-dogfood-log.md`][dogfood]
+  leaves its verdict unsigned) are what remain before it's the primary **local** UI.
 
 What is **not** yet closed is the last mile of each layer: the obin-box demo
 itself (#886), an **empirical** remote-box dogfood (nobody has lived on a GCP

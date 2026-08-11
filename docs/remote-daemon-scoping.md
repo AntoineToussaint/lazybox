@@ -142,9 +142,13 @@ gated behind those same security gates.
    make the product cheap; safe multi-tenant cloud agent execution is the cost,
    and it waits for demonstrated paid demand from Lane 1.
 
+For where this sizing landed and the prioritized next steps after the remote
+merge backlog cleared, see [`remote-gcp-roadmap.md`][roadmap] (#1014).
+
 [issue-728]: https://github.com/AntoineToussaint/lazybox/issues/728
 [issue-672]: https://github.com/AntoineToussaint/lazybox/issues/672
 [monetization]: monetization-strategy.md
 [desktop]: desktop-spike.md
 [deployment]: features/daemon-and-deployment.md
 [systemd]: ../contrib/systemd/README.md
+[roadmap]: remote-gcp-roadmap.md

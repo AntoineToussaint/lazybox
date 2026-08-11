@@ -86,7 +86,8 @@ diff inspection; and the live theme picker.
 _Filled in once the phases close._ The bar is two-staged, mirroring the
 readiness assessment: **(1)** desktop credible as the primary *local* UI (Phase
 2 gaps closed), then **(2)** credible as the primary *remote-box* UI (Phase 3
-holds up over a real link).
+holds up over a real link). Phase 3 is prioritized as P0 in the post-merge
+remote plan — [`remote-gcp-roadmap.md`][roadmap] (#1014).
 
 [issue-837]: https://github.com/AntoineToussaint/lazybox/issues/837
 [issue-814]: https://github.com/AntoineToussaint/lazybox/issues/814
@@ -97,3 +98,4 @@ holds up over a real link).
 [issue-843]: https://github.com/AntoineToussaint/lazybox/issues/843
 [readiness]: desktop-remote-readiness.md
 [runbook]: byo-remote-runbook.md
+[roadmap]: remote-gcp-roadmap.md

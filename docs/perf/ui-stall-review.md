@@ -59,9 +59,10 @@ Render-phase stalls, split into real CPU cost vs. clock artifacts:
   just the most *frequent* cause, it is by far the largest *time sink*.
 - **Suspend/blocked-write artifacts (`render_ms` ≥ 5 s), n = 104, totalling
   ~2,060 s.** These are not CPU: e.g. one `iteration_ms=195727` (195 s) line
-  has `suppressed=2` — if the thread had really spun for 195 s it would have
-  suppressed thousands of frames, not two. They cluster tightly in wall-clock
-  (18 of the >30 s stalls fall in a single 14:0x–14:4x window), the signature
+  has `suppressed=2` — a single 195 s blocking call (or a suspend) produces one
+  over-budget observation, not the thousands a genuine CPU spin would suppress.
+  They cluster tightly in wall-clock (10 of the 18 stalls >30 s fall in one
+  ~40-minute 14:0x–14:4x window), the signature
   of laptop **suspend/resume** spanning the monotonic clock, or a **blocked
   stdout write** to a stalled terminal/SSH pipe inside `terminal.draw`. They
   are excluded from the render-cost analysis but are a real *reporting*
@@ -259,7 +260,10 @@ structure makes it unbounded.
 - **Consequence:** a poll that changes N workspaces arrives as **N separate**
   `WorkspaceUpserted` events, handled individually → **O(N · (W log W + P))**
   in one drain, all past the D-0 budget. This is the primary drain overrun and
-  ties directly to #1030 (sync bursts).
+  is very likely the **mechanism behind #1030** (the sync-burst freeze) — the
+  drain-phase counterpart to the render dominance. **Coordinate with the
+  in-flight #1030 fix so this isn't addressed twice**; if #1030 lands the
+  coalescing, D-1 collapses to a verification item here.
 - **Fix:** coalesce a poll's `WorkspaceUpserted` batch into the map first, then
   `recompute_visible` **once** per drain (like `flush_pane_sync` already does
   for projection).
@@ -275,9 +279,11 @@ structure makes it unbounded.
   rebuilds the projects map and calls `apply_projects` → `recompute_visible`
   **again** (`mod.rs:664`). A single Snapshot can trigger the full rebuild
   **twice**.
-- **Fix:** dedupe the double recompute; make `rebuild_agent_aggregates` a
-  single pass; skip the projects recompute when the map is unchanged.
-- **Tag:** drain. **Priority: medium.**
+- **Fix:** dedupe the double recompute (the projects path is *already* guarded
+  by `if projects != self.projects`, `mod.rs:663`, so the second recompute only
+  fires on a genuine projects change — the remaining win is folding it with the
+  Snapshot handler's recompute); make `rebuild_agent_aggregates` a single pass.
+- **Tag:** drain. **Priority: low** (the guard already caps the common case).
 
 ### D-3. `flush_pane_sync` unconditional large-struct clones
 
@@ -382,7 +388,7 @@ during a flood" report while VT stays on-thread.
 | R-3a | Sidebar per-row badge scan O(rows×terminals) | render | **high** | Precompute `SessionKey → badges` map once/frame |
 | R-5 | Terminal full-viewport grid walk, ~5 FFI/cell, no content-changed gate | render | **high** | Short-circuit unchanged VT snapshot; batch per-cell FFI |
 | 6 | Input starvation during heavy phases | other | **high** | Service pending input mid-drain/mid-render-batch |
-| D-2 | `Snapshot` rebuilds everything twice + O(T²) aggregate | drain | medium | Dedupe double recompute; single-pass aggregate |
+| D-2 | `Snapshot` rebuilds everything twice + O(T²) aggregate (projects path already guarded) | drain | low | Dedupe residual recompute; single-pass aggregate |
 | R-2 | `body_wants_rich_modal` full-body scan/frame | render | medium | Fold into R-1 memo |
 | R-3b/c | Sidebar attention counters + per-row rebuild | render | medium | Single-pass counters; cache per-row `Line`s |
 | D-3 | `flush_pane_sync` clones on unchanged selection | drain | low | Short-circuit when selection key unchanged |

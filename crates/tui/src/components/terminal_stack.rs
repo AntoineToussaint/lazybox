@@ -545,6 +545,13 @@ struct TerminalHit {
     /// the recap/chrome inset and drifting by a row when they disagree
     /// (#1021).
     grid: Rect,
+    /// The viewport scroll offset (`Scrollbar::offset`) of the frame this
+    /// hit was recorded for — the screen row of the top visible grid row.
+    /// The selection mapping composes a click against THIS offset, not the
+    /// live VT offset, so output that advanced the viewport between the
+    /// painted frame and the click can't shift the selection by the scroll
+    /// delta (#1021). `None` when the scrollbar couldn't be read at render.
+    offset: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1875,15 +1882,14 @@ impl TerminalStack {
             .iter()
             .find(|hit| Self::rect_contains(hit.tile, col, row))
             .copied()?;
-        let cell = self
-            .terminals
-            .get(&hit.terminal_id)
-            .and_then(|slot| Self::cell_in_body(slot, hit.body, col, row));
-        let target = if cell.is_some() {
-            self.target_in_body(hit.terminal_id, hit.body, col, row)
-        } else {
-            None
-        };
+        // Map through the grid the renderer actually drew for this tile,
+        // NOT a recap recomputed from the now-live slot state — a prompt
+        // submitted between the painted frame and the click would otherwise
+        // shift the recap and resolve the wrong row (#1021).
+        let cell = Self::cell_in_grid(hit.grid, col, row);
+        let target = cell.and_then(|(cell_col, cell_row)| {
+            self.target_in_body(hit.terminal_id, cell_col, cell_row)
+        });
         Some(RenderedClickTarget {
             terminal_id: hit.terminal_id,
             tile: hit.tile,
@@ -1911,32 +1917,56 @@ impl TerminalStack {
         }
     }
 
-    /// The exact cell-grid rect the renderer drew for the focused
-    /// terminal this frame — chrome, recap rows, and the scrollbar gutter
-    /// already removed (recorded in [`Self::render_one_terminal`]). This
-    /// is the single source of truth every screen↔grid mapping reads, so
-    /// none of them recompute the recap/chrome inset and drift by a row
-    /// against what was actually painted — including split tiles, whose
-    /// grid does not begin at the pane's top (#1021). `None` when the
-    /// focused terminal was not part of the last render.
-    fn focused_grid_rect(&self) -> Option<Rect> {
+    /// The render-time hit the focused terminal recorded this frame —
+    /// its exact grid rect (chrome, recap rows, and scrollbar gutter
+    /// already removed) and the viewport offset it was painted at
+    /// (recorded in [`Self::render_one_terminal`]). This is the single
+    /// source of truth every screen↔grid mapping reads, so none of them
+    /// recompute the recap/chrome inset or re-read a live scroll offset
+    /// and drift against what was actually painted — including split
+    /// tiles, whose grid does not begin at the pane's top (#1021). `None`
+    /// when the focused terminal was not part of the last render.
+    fn focused_hit(&self) -> Option<TerminalHit> {
         let id = self.focused_terminal_id()?;
         self.tile_hits
             .iter()
             .find(|hit| hit.terminal_id == id)
-            .map(|hit| hit.grid)
+            .copied()
+    }
+
+    /// The viewport offset to compose a focused-terminal selection
+    /// against: the offset of the frame the user clicked on (recorded in
+    /// [`Self::focused_hit`]), falling back to the live VT offset only
+    /// before the first render, when there is no painted frame yet. `None`
+    /// when the scrollbar is unavailable — the caller then declines the
+    /// mapping rather than guessing.
+    fn focused_frame_offset(&self) -> Option<u64> {
+        match self.focused_hit() {
+            Some(hit) => hit.offset,
+            None => {
+                let id = self.focused_terminal_id()?;
+                self.terminals
+                    .get(&id)?
+                    .vt
+                    .terminal
+                    .scrollbar()
+                    .ok()
+                    .map(|b| b.offset)
+            }
+        }
     }
 
     /// Screen-absolute grid bounds of the focused terminal's cell grid:
     /// `(inner_x, inner_y, last_col, last_row)` in crossterm screen
     /// coordinates. Read straight from the rect the renderer drew
-    /// ([`Self::focused_grid_rect`]) so the mapping can never diverge from
-    /// the frame the user clicked on. Falls back to deriving the inset
-    /// from the pane `rect` only before the first render (nothing on
-    /// screen to click yet). `None` when nothing is focused or the grid
-    /// holds no cell.
+    /// ([`Self::focused_hit`]) so the mapping can never diverge from the
+    /// frame the user clicked on. `rect` is consulted ONLY on the
+    /// pre-first-render fallback path (no painted frame to read yet); once
+    /// anything has rendered it is ignored in favour of the recorded grid.
+    /// `None` when nothing is focused or the grid holds no cell.
     fn grid_bounds(&self, rect: tuirealm::ratatui::layout::Rect) -> Option<(u16, u16, u16, u16)> {
-        if let Some(grid) = self.focused_grid_rect() {
+        if let Some(hit) = self.focused_hit() {
+            let grid = hit.grid;
             if grid.width == 0 || grid.height == 0 {
                 return None;
             }
@@ -1982,15 +2012,16 @@ impl TerminalStack {
         row: u16,
     ) -> Option<(u16, u32)> {
         let (inner_x, inner_y, last_col, last_row) = self.grid_bounds(rect)?;
-        let id = self.focused_terminal_id()?;
-        let slot = self.terminals.get(&id)?;
-        let bar = slot.vt.terminal.scrollbar().ok()?;
+        // The offset of the frame the user clicked on — NOT a live re-read,
+        // which output arriving between that frame and the click may have
+        // advanced (#1021).
+        let offset = self.focused_frame_offset()?;
         let vx = col.clamp(inner_x, last_col) - inner_x;
         let vy = u64::from(row.clamp(inner_y, last_row) - inner_y);
         // `offset` is the viewport top's row in the total scrollable area,
         // i.e. the screen row of viewport row 0. Adding the in-viewport
         // offset yields the content's absolute screen row.
-        Some((vx, (bar.offset + vy) as u32))
+        Some((vx, (offset + vy) as u32))
     }
 
     /// Extract the plain text of the selection spanning two
@@ -2064,10 +2095,9 @@ impl TerminalStack {
         b: (u16, u32),
     ) -> Option<((u16, u16), (u16, u16))> {
         let (inner_x, inner_y, _last_col, _last_row) = self.grid_bounds(rect)?;
-        let id = self.focused_terminal_id()?;
-        let slot = self.terminals.get(&id)?;
-        let bar = slot.vt.terminal.scrollbar().ok()?;
-        let offset = bar.offset as i64;
+        // Project against the same recorded frame offset the anchor was
+        // captured with, so highlight and extraction agree (#1021).
+        let offset = self.focused_frame_offset()? as i64;
         let max_x = i64::from(rect.x.saturating_add(rect.width.saturating_sub(1)));
         let max_y = i64::from(rect.y.saturating_add(rect.height.saturating_sub(1)));
         let project = |p: (u16, u32)| -> (u16, u16) {
@@ -2178,18 +2208,20 @@ impl TerminalStack {
             width: rect.width.saturating_sub(2),
             height: rect.height.saturating_sub(4),
         };
-        self.target_in_body(id, body, col, row)
+        let (cell_col, cell_row) = {
+            let slot = self.terminals.get(&id)?;
+            Self::cell_in_body(slot, body, col, row)?
+        };
+        self.target_in_body(id, cell_col, cell_row)
     }
 
     fn target_in_body(
         &mut self,
         id: TerminalId,
-        body: Rect,
-        col: u16,
-        row: u16,
+        cell_col: u32,
+        cell_row: u32,
     ) -> Option<ClickTarget> {
         let slot = self.terminals.get_mut(&id)?;
-        let (cell_col, cell_row) = Self::cell_in_body(slot, body, col, row)?;
         let cell_col = cell_col as u16;
         let target_row = cell_row as usize;
         let hyperlink = hyperlink_uri_at(&slot.vt.terminal, cell_col, cell_row as u16);
@@ -2253,6 +2285,23 @@ impl TerminalStack {
             return None;
         }
         Some(((col - body.x) as u32, (row - grid_y) as u32))
+    }
+
+    /// Map a screen `(col, row)` to 0-based grid-cell coordinates within a
+    /// recorded grid rect — the exact area the renderer drew, with recap
+    /// rows and the scrollbar gutter already carved off. Unlike
+    /// [`Self::cell_in_body`] this recomputes nothing from live slot state,
+    /// so it can't drift when the recap changes between the painted frame
+    /// and the click (#1021). `None` when the point is outside the grid.
+    fn cell_in_grid(grid: Rect, col: u16, row: u16) -> Option<(u32, u32)> {
+        if col < grid.x
+            || col >= grid.x.saturating_add(grid.width)
+            || row < grid.y
+            || row >= grid.y.saturating_add(grid.height)
+        {
+            return None;
+        }
+        Some(((col - grid.x) as u32, (row - grid.y) as u32))
     }
 
     /// Every `http(s)://…` URL visible in the focused terminal's grid,
@@ -4274,6 +4323,7 @@ impl TerminalStack {
                 tile,
                 body: rect,
                 grid,
+                offset: None,
             });
             slot.vt.ensure_size(grid.width, grid.height);
             // Only now drain whatever arrived while this slot was hidden.
@@ -4285,6 +4335,14 @@ impl TerminalStack {
             // different grid than a live one fed the same bytes. See
             // `fresh_and_reattach_reach_identical_scroll_state`.
             slot.flush_pending();
+            // Record the viewport offset of the frame we're painting AFTER
+            // the flush — the widget below renders from this same post-flush
+            // state, so this is the offset the selection mapping must reuse
+            // (see `TerminalHit::offset`).
+            let frame_offset = slot.vt.terminal.scrollbar().ok().map(|b| b.offset);
+            if let Some(hit) = self.tile_hits.last_mut() {
+                hit.offset = frame_offset;
+            }
             // Backend PTY also needs to know the new size — otherwise
             // the shell process keeps writing at its spawn dimensions
             // and the bottom rows go blank as soon as the user scrolls
@@ -5949,6 +6007,236 @@ mod selection_offset_tests {
             .offset;
         assert!(offset > 0, "must be scrolled into scrollback");
         assert_rows_match(&mut stack, area);
+    }
+
+    /// A click composes its content row against the offset of the frame the
+    /// user SAW, not a live re-read. If output advances the viewport after
+    /// that frame is painted but before the click is handled (no re-render
+    /// between), the mapping must still use the painted frame's offset —
+    /// else the selection jumps by the scroll delta (#1021).
+    #[test]
+    fn selection_uses_rendered_frame_offset_not_a_live_reread() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 80;
+        const H: u16 = 12;
+        let area = Rect::new(0, 0, W, H);
+
+        let mut stack = stack_with(TerminalKind::Shell, None, &[]);
+        let mut payload = String::new();
+        for i in 0..40 {
+            payload.push_str(&format!("row{i:02}\r\n"));
+        }
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .vt
+            .feed(payload.as_bytes());
+
+        // Paint a frame — records this frame's viewport offset.
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+
+        let (inner_x, inner_y, _, _) = stack.grid_bounds(area).expect("grid");
+        let rendered = stack
+            .selection_point(area, inner_x, inner_y)
+            .expect("grid-top maps");
+
+        // More output arrives and advances the viewport — but WITHOUT another
+        // render, so the frame still on screen shows the old top row.
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .vt
+            .feed(b"more0\r\nmore1\r\nmore2\r\n");
+        let live = stack.terminals[&TerminalId(1)]
+            .vt
+            .terminal
+            .scrollbar()
+            .unwrap()
+            .offset;
+        assert!(
+            live as u32 > rendered.1,
+            "precondition: the live viewport advanced past the painted frame",
+        );
+
+        // The click at the same on-screen cell must still map to the painted
+        // frame's content row, not the advanced live offset.
+        assert_eq!(
+            stack.selection_point(area, inner_x, inner_y),
+            Some(rendered),
+            "selection must reuse the painted frame's offset, not a live re-read",
+        );
+    }
+
+    /// A right-click resolves its target through the grid the renderer
+    /// drew, not a recap recomputed from live state. A prompt submitted
+    /// between the painted frame and the click changes the agent's recap;
+    /// the click must still land on the row it was painted at (#1021).
+    #[test]
+    fn rendered_target_uses_recorded_grid_across_a_recap_change() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 80;
+        const H: u16 = 20;
+        let area = Rect::new(0, 0, W, H);
+
+        // Agent with NO remembered message → recap 0 at render time.
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
+        let mut payload = String::new();
+        for i in 0..8 {
+            payload.push_str(&format!("plain{i}\r\n"));
+        }
+        payload.push_str("see https://example.com/target here\r\n");
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .vt
+            .feed(payload.as_bytes());
+
+        // Paint, then locate the URL's screen cell from the buffer.
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let (url_col, url_row) = (0..H)
+            .find_map(|y| {
+                let line: String = (0..W).map(|x| buf[(x, y)].symbol()).collect();
+                line.find("https").map(|c| (c as u16, y))
+            })
+            .expect("url is on screen");
+
+        let want = Some(ClickTarget::Url("https://example.com/target".into()));
+        assert_eq!(
+            stack
+                .rendered_target_at(url_col, url_row)
+                .and_then(|t| t.target),
+            want,
+            "baseline: the click resolves the URL",
+        );
+
+        // A prompt is now remembered — the LIVE recap would become 2 rows —
+        // but no frame has been repainted since.
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .push_prompt(lazybox_ipc::UserPrompt {
+                text: "hi".into(),
+                timestamp_ms: 0,
+                source: lazybox_ipc::PromptSource::Typed,
+            });
+
+        // The same on-screen cell must still resolve the URL: the mapping
+        // reads the recorded grid (recap 0 when painted), not the now-changed
+        // live recap that would shift the row by 2.
+        assert_eq!(
+            stack
+                .rendered_target_at(url_col, url_row)
+                .and_then(|t| t.target),
+            want,
+            "recap drift between frame and click must not move the target row",
+        );
+    }
+
+    /// Selection in a split's BOTTOM tile maps against that tile's grid —
+    /// not the pane top. The bottom tile's grid begins well below the top
+    /// chrome, so the old pane-rect recompute grabbed rows from the wrong
+    /// tile entirely (#1021).
+    #[test]
+    fn selection_in_bottom_split_tile_maps_to_that_tile() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 80;
+        const H: u16 = 24;
+        let area = Rect::new(0, 0, W, H);
+
+        let sk = SessionKey::new("split");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let feed_tagged = |sk: &SessionKey, tag: &str| {
+            let mut slot = TerminalStack::make_slot(
+                sk.clone(),
+                TerminalKind::Shell,
+                0,
+                false,
+                false,
+                None,
+                Vec::new(),
+                String::new(),
+            );
+            let mut payload = String::new();
+            for i in 0..30 {
+                payload.push_str(&format!("{tag}{i:02}\r\n"));
+            }
+            slot.vt.feed(payload.as_bytes());
+            slot
+        };
+        stack
+            .terminals
+            .insert(TerminalId(1), feed_tagged(&sk, "TOP"));
+        stack
+            .terminals
+            .insert(TerminalId(2), feed_tagged(&sk, "BOT"));
+        stack.set_active_session(Some(sk));
+        // Stacked split, focus on the BOTTOM leaf. `focused` is a
+        // child-index path: index 1 = the second (bottom) child.
+        stack.layout = lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::VSplit {
+                top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                bottom: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![1],
+        };
+        assert_eq!(
+            stack.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "precondition: the bottom tile is focused",
+        );
+
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer().clone();
+
+        let (inner_x, inner_y, last_col, last_row) = stack.grid_bounds(area).expect("focused grid");
+        // The recorded grid is the bottom tile's — its top sits far below the
+        // pane's own top chrome (which would put a naive mapping at row 3).
+        assert!(
+            inner_y > area.y + 4,
+            "bottom tile grid must start below the pane top chrome, got {inner_y}",
+        );
+
+        // Every visible row of the focused (bottom) tile copies exactly what
+        // the renderer painted there — and it is BOT content, not TOP.
+        for screen_row in inner_y..=last_row {
+            let onscreen: String = (inner_x..=last_col)
+                .map(|x| buf[(x, screen_row)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string();
+            if onscreen.is_empty() {
+                continue;
+            }
+            assert!(
+                onscreen.starts_with("BOT"),
+                "focused tile must show bottom content, got {onscreen:?}",
+            );
+            let text = copy_between(
+                &mut stack,
+                area,
+                (inner_x, screen_row),
+                (last_col, screen_row),
+            );
+            assert_eq!(
+                text, onscreen,
+                "click at screen row {screen_row} in bottom tile"
+            );
+        }
     }
 
     #[test]

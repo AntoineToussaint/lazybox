@@ -1033,6 +1033,12 @@ pub struct TickState {
     /// a truncated allowlist), and reset when the GitHub client is
     /// rebuilt so a token rotation to another account refetches.
     pub(crate) implicit_gh_scopes: Option<Vec<String>>,
+    /// Linear's own poll cadence, decoupled from the shared tick loop.
+    /// Persists the next-due clock + idle streak across ticks so
+    /// `sources_for_with_engagement` only builds a `LinearSource` when the
+    /// Linear cadence is actually due — Linear tickets change far less
+    /// often than GitHub CI/PR state (#1032).
+    pub(crate) linear_schedule: sources::LinearSchedule,
 }
 
 impl TickState {
@@ -2238,8 +2244,13 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
             // at error level + the loop continues with a normal
             // interval — degraded behaviour is far better than
             // silent death.
+            // An explicit refresh/subscribe (`warm_requested`) forces the
+            // Linear sweep past its own cadence gate; the periodic warm
+            // cadence does not — that would defeat Linear's idle back-off.
             let summary = match std::panic::AssertUnwindSafe(run_one_tick_with_notifications(
-                &config, poll_warm,
+                &config,
+                poll_warm,
+                warm_requested,
             ))
             .catch_unwind()
             .await
@@ -2498,12 +2509,13 @@ pub async fn restore_poll_state(poll: &crate::PollState, mut state: TickState) {
 }
 
 pub async fn run_one_tick(config: &ServerConfig) -> TickSummary {
-    run_one_tick_with_notifications(config, true).await
+    run_one_tick_with_notifications(config, true, true).await
 }
 
 async fn run_one_tick_with_notifications(
     config: &ServerConfig,
     poll_notifications: bool,
+    force_linear: bool,
 ) -> TickSummary {
     let setup = match lazybox_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
@@ -2520,7 +2532,8 @@ async fn run_one_tick_with_notifications(
     // the serve loop's own `poll_state` users stay responsive while a
     // slow sync runs. See `checkout_poll_state`.
     let mut state = checkout_poll_state(&config.poll).await;
-    let summary = run_tick_inner(config, &setup, &mut state, poll_notifications).await;
+    let summary =
+        run_tick_inner(config, &setup, &mut state, poll_notifications, force_linear).await;
     restore_poll_state(&config.poll, state).await;
     // Level-triggered removal prompts (issue #292): after every tick,
     // re-offer cleanup for any workspace still merged/closed with
@@ -2546,6 +2559,7 @@ async fn run_tick_inner(
     setup: &lazybox_core::PersistedSetup,
     state: &mut TickState,
     poll_notifications: bool,
+    force_linear: bool,
 ) -> TickSummary {
     let engagement = refresh_github_engagement(config).await;
     let hot_count = if setup.enabled_providers.contains(lazybox_gh::SOURCE) {
@@ -2566,6 +2580,7 @@ async fn run_tick_inner(
         config.poll.gh_client_cache.clone(),
         &engagement,
         poll_notifications,
+        force_linear,
         Some(config.store.clone()),
     )
     .await;

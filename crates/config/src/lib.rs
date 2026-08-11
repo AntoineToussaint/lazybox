@@ -1992,6 +1992,34 @@ pub struct LinearConfig {
     /// by a fixed precedence (`fix` > `feat` > `chore` > `docs`).
     #[serde(default)]
     pub label_types: std::collections::BTreeMap<String, String>,
+
+    /// Base cadence, in seconds, for the Linear poll while tickets are
+    /// actively changing. Decoupled from GitHub's hot loop — Linear
+    /// issues change far less often than CI/PR state, so this defaults to
+    /// a full minute rather than inheriting the 15s GitHub hot cadence.
+    ///
+    /// ```yaml
+    /// providers:
+    ///   linear:
+    ///     poll_interval_secs: 60
+    ///     idle_poll_interval_secs: 300
+    /// ```
+    #[serde(default = "default_linear_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+
+    /// Cadence, in seconds, the Linear poll backs off to once several
+    /// consecutive sweeps returned an unchanged ticket set (idle/cold).
+    /// Clamped up to at least `poll_interval_secs`.
+    #[serde(default = "default_linear_idle_poll_interval_secs")]
+    pub idle_poll_interval_secs: u64,
+}
+
+fn default_linear_poll_interval_secs() -> u64 {
+    60
+}
+
+fn default_linear_idle_poll_interval_secs() -> u64 {
+    300
 }
 
 impl Default for LinearConfig {
@@ -2002,6 +2030,8 @@ impl Default for LinearConfig {
             teams: std::collections::BTreeMap::new(),
             branch_template: None,
             label_types: std::collections::BTreeMap::new(),
+            poll_interval_secs: default_linear_poll_interval_secs(),
+            idle_poll_interval_secs: default_linear_idle_poll_interval_secs(),
         }
     }
 }

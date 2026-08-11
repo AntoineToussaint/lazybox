@@ -18129,6 +18129,37 @@ mod spawn_focus_steal_tests {
         assert_eq!(s.scope, None, "global search is unscoped");
     }
 
+    /// End-to-end: a bare `Esc` on a *committed* (non-editing) search
+    /// clears it through the real key pipeline. Editing-time `Esc` is
+    /// intercepted before pane dispatch (`keys.rs`), so a committed
+    /// search only reaches the sidebar's Esc handler — which used to
+    /// drop it on the floor, trapping the user in a narrowed tree
+    /// (#1033).
+    #[test]
+    fn bare_esc_clears_a_committed_search() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        let k: SessionKey = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&k));
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenSearch);
+        assert!(m.sidebar.search_editing(), "search opens in editing mode");
+        // Type + commit through the real key pipeline.
+        m.dispatch_key(RealmKey::new(Key::Char('o'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
+        assert!(!m.sidebar.search_editing(), "Enter commits the search");
+        assert!(
+            m.sidebar.search().is_some(),
+            "committed filter stays applied"
+        );
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(
+            m.sidebar.search().is_none(),
+            "a bare Esc clears the committed search"
+        );
+    }
+
     #[test]
     fn spawn_never_steals_focus_while_search_is_being_typed() {
         let mut m = build_model();

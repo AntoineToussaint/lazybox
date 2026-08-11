@@ -1740,6 +1740,26 @@ impl Sidebar {
         }
     }
 
+    /// Clear a *committed* search — one `Enter` left applied as a filter
+    /// while it stopped capturing keys. This is the keyboard `Esc`
+    /// counterpart to the editing-time `Esc` (which `handle_search_key`
+    /// owns): without it a committed search could only be cleared by
+    /// re-editing first, so a bare `Esc` did nothing and the user was
+    /// stuck in a narrowed tree. Returns true when it cleared something,
+    /// so the caller consumes the key. No-op while editing (that `Esc`
+    /// belongs to `handle_search_key`) or with no search.
+    pub fn clear_committed_search(&mut self) -> bool {
+        match self.search.as_ref() {
+            Some(s) if !s.editing => {
+                self.search = None;
+                self.scroll_detached = false;
+                self.recompute_visible();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Feed one keystroke into the open search bar. Printable chars
     /// extend the query, `Backspace` trims it, `Enter` keeps the query
     /// applied while closing the editor, `Esc` clears + closes. Each

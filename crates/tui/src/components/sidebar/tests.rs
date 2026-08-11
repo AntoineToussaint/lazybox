@@ -1933,11 +1933,10 @@ mod search_tests {
         );
     }
 
-    /// `esc clear` is only promised while editing, where Esc actually
-    /// clears; a committed (non-editing) search is cleared by
-    /// re-editing, so the applied hint must not lie about it (#1033).
+    /// A committed (non-editing) search still advertises `esc clear`,
+    /// because Esc now clears it — the hint no longer lies (#1033).
     #[test]
-    fn applied_scoped_search_hint_does_not_promise_esc_clear() {
+    fn committed_scoped_search_hint_promises_esc_clear() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         sb.open_search();
         type_query(&mut sb, "al");
@@ -1945,10 +1944,28 @@ mod search_tests {
         assert!(!sb.search_editing(), "Enter commits the search");
         let bar = search_bar_row(&mut sb);
         assert!(
-            !bar.contains("esc clear"),
-            "no false esc-clear cue: {bar:?}"
+            bar.contains("esc clear"),
+            "esc-clear cue is honest now: {bar:?}"
         );
-        assert!(bar.contains("/ edit"), "re-edit is the real cue: {bar:?}");
+    }
+
+    /// A bare Esc clears a committed search filter (the pane-handler
+    /// path, distinct from the editing-time Esc). Without it a committed
+    /// search trapped the user in a narrowed tree (#1033).
+    #[test]
+    fn esc_clears_a_committed_search_via_the_pane_handler() {
+        let mut sb = sidebar_with_issues(&[("1", "Add search bar"), ("2", "Fix flaky test")]);
+        sb.open_search();
+        type_query(&mut sb, "search");
+        sb.handle_search_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!sb.search_editing(), "Enter commits");
+        assert_eq!(sb.workspace_count(), 1, "filter still applied");
+
+        let mut cmds = Vec::new();
+        let outcome = sb.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &mut cmds);
+        assert!(matches!(outcome, PaneOutcome::Consumed), "Esc is consumed");
+        assert!(sb.search().is_none(), "committed search cleared");
+        assert_eq!(sb.workspace_count(), 2, "full tree restored");
     }
 
     /// While a global query is applied the header box shows the query

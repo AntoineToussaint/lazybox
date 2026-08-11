@@ -46,10 +46,11 @@ impl Sidebar {
             // `ui.action_keys`, and surfaces in the footer hints.
 
             // Esc drops the broadcast multi-select set (the marks `v`
-            // toggled). With no selection it bubbles up so Esc keeps
-            // whatever meaning the outer layers give it.
+            // toggled), then clears a committed search filter. With
+            // neither it bubbles up so Esc keeps whatever meaning the
+            // outer layers give it.
             (KeyCode::Esc, KeyModifiers::NONE) => {
-                if self.clear_broadcast_selection() {
+                if self.clear_broadcast_selection() || self.clear_committed_search() {
                     PaneOutcome::Consumed
                 } else {
                     PaneOutcome::Pass

@@ -961,6 +961,11 @@ impl Sidebar {
             .enumerate()
             .map(|(i, k)| (k, i + 1))
             .collect();
+        // Aggregate runner badges + agent-model labels for every
+        // workspace once, so each row is an O(1) lookup instead of
+        // re-scanning all running terminals per row (#1031).
+        let badges_by_key = self.runner_badges_by_key();
+        let models_by_key = self.agent_models_by_key();
         let mut out: Vec<Option<Line<'static>>> = vec![None; self.visible.len()];
         // Partition workspace rows into groups delimited by their
         // top-level container header — a repo group, or the synthetic
@@ -974,6 +979,8 @@ impl Sidebar {
                     self.render_workspace_group(
                         &group,
                         &agent_numbers,
+                        &badges_by_key,
+                        &models_by_key,
                         row_budget,
                         theme,
                         now,
@@ -989,6 +996,8 @@ impl Sidebar {
         self.render_workspace_group(
             &group,
             &agent_numbers,
+            &badges_by_key,
+            &models_by_key,
             row_budget,
             theme,
             now,
@@ -1010,6 +1019,8 @@ impl Sidebar {
         &self,
         indices: &[usize],
         agent_numbers: &std::collections::HashMap<SessionKey, usize>,
+        badges_by_key: &std::collections::HashMap<SessionKey, Vec<(char, usize)>>,
+        models_by_key: &std::collections::HashMap<SessionKey, Vec<(char, String)>>,
         row_budget: usize,
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
@@ -1039,6 +1050,8 @@ impl Sidebar {
             self.render_provider_bucket(
                 bucket,
                 agent_numbers,
+                badges_by_key,
+                models_by_key,
                 row_budget,
                 theme,
                 now,
@@ -1056,6 +1069,8 @@ impl Sidebar {
         &self,
         indices: &[usize],
         agent_numbers: &std::collections::HashMap<SessionKey, usize>,
+        badges_by_key: &std::collections::HashMap<SessionKey, Vec<(char, usize)>>,
+        models_by_key: &std::collections::HashMap<SessionKey, Vec<(char, String)>>,
         row_budget: usize,
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
@@ -1121,8 +1136,8 @@ impl Sidebar {
                 working_glyph: crate::components::workspace_row::working_glyph(
                     self.working_spinner_frame,
                 ),
-                badges: self.runner_badges(key),
-                agent_models: self.agent_models(key),
+                badges: badges_by_key.get(key).cloned().unwrap_or_default(),
+                agent_models: models_by_key.get(key).cloned().unwrap_or_default(),
                 agent_number: agent_numbers.get(key).copied(),
                 ascii_glyphs: self.ascii_glyphs,
                 auto_merge_armed: workspace.is_some_and(|w| w.auto_merge_on_green),

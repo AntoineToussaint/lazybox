@@ -1998,3 +1998,162 @@ mod originating_issue_header_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod task_body_cache_tests {
+    use super::super::{PaneId, RightPane, TaskBodyView};
+    use chrono::Utc;
+    use lazybox_core::{Task, TaskId, Workspace};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use std::rc::Rc;
+
+    // A body long enough to render several wrapped rows.
+    const LONG_BODY: &str = "First paragraph of the description that is quite \
+long and will wrap across the pane width.\n\nSecond paragraph here with more \
+prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
+
+    fn task_with_body(body: &str) -> Task {
+        Task {
+            author: String::new(),
+            id: TaskId {
+                source: "github".into(),
+                key: "github:o/r#1".into(),
+            },
+            title: "an issue".into(),
+            body: Some(body.into()),
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/issues/1".into(),
+            repo: Some("o/r".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    fn ws_with_body(body: &str) -> Workspace {
+        Workspace::from_task(task_with_body(body), Utc::now())
+    }
+
+    fn draw(pane: &mut RightPane) {
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+    }
+
+    /// Identity (allocation address) of the memoized render for `width`,
+    /// so a reused memo and a fresh render are distinguishable without
+    /// naming the `Line` type.
+    fn memo_ptr(pane: &RightPane, width: u16) -> usize {
+        let (_, rc) = pane
+            .task_body_cache
+            .by_width
+            .iter()
+            .find(|(w, _)| *w == width)
+            .expect("width should be cached after a visible-body render");
+        Rc::as_ptr(rc) as *const () as usize
+    }
+
+    fn memo_len(pane: &RightPane, width: u16) -> usize {
+        pane.task_body_cache
+            .by_width
+            .iter()
+            .find(|(w, _)| *w == width)
+            .map(|(_, l)| l.len())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn render_reuses_the_body_memo_across_frames() {
+        // Pre-fix, `render_body` ran twice per frame with no cache — a
+        // large body was re-parsed on every paint. The memo must render
+        // once per (body, width) and reuse it on the next frame.
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with_body(LONG_BODY)));
+        pane.task_body_view = TaskBodyView::Preview;
+
+        draw(&mut pane);
+        assert_eq!(pane.task_body_cache.body, LONG_BODY);
+        // Sizing width (80) + pane render width (80 - 2) both cached.
+        assert!(memo_len(&pane, 78) > 0, "body should render some rows");
+        let sizing = memo_ptr(&pane, 80);
+        let pane_w = memo_ptr(&pane, 78);
+
+        draw(&mut pane);
+        // Same allocation ⇒ the second frame reused the memo instead of
+        // re-rendering the markdown.
+        assert_eq!(sizing, memo_ptr(&pane, 80));
+        assert_eq!(pane_w, memo_ptr(&pane, 78));
+    }
+
+    #[test]
+    fn changing_the_body_invalidates_the_memo() {
+        // The cache is content-addressed, so a new body must never serve
+        // the previous render (the stale-content failure mode).
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with_body("original body text")));
+        pane.task_body_view = TaskBodyView::Preview;
+        draw(&mut pane);
+        let first = memo_ptr(&pane, 78);
+        assert_eq!(pane.task_body_cache.body, "original body text");
+
+        pane.set_workspace(Some(ws_with_body("a completely different body")));
+        pane.task_body_view = TaskBodyView::Preview;
+        draw(&mut pane);
+        assert_eq!(pane.task_body_cache.body, "a completely different body");
+        assert_ne!(
+            first,
+            memo_ptr(&pane, 78),
+            "a changed body must re-render, not reuse the stale memo"
+        );
+    }
+
+    #[test]
+    fn rich_modal_flag_is_memoized_and_tracks_the_body() {
+        // `body_wants_rich_modal` was rescanned every frame; it's now
+        // computed once per body change and stored. Plain prose is not
+        // rich; a GFM table is.
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws_with_body("just plain prose, nothing fancy")));
+        pane.task_body_view = TaskBodyView::Preview;
+        draw(&mut pane);
+        assert!(!pane.task_body_cache.rich_modal);
+
+        pane.set_workspace(Some(ws_with_body("| a | b |\n| --- | --- |\n| 1 | 2 |")));
+        pane.task_body_view = TaskBodyView::Preview;
+        draw(&mut pane);
+        assert!(
+            pane.task_body_cache.rich_modal,
+            "a table body should be flagged for the reader modal"
+        );
+    }
+}

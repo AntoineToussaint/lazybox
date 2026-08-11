@@ -3465,6 +3465,59 @@ mod rebadge_attention_tests {
     }
 
     #[test]
+    fn bulk_badge_aggregation_matches_the_per_key_reference() {
+        // #1031: the sidebar render switched from a per-row
+        // O(terminals) scan (`runner_badges`/`agent_models`) to one
+        // aggregated pass (`*_by_key`). The bulk maps must agree with
+        // the per-key reference for every workspace, or rows badge wrong.
+        let a: SessionKey = (&WorkspaceKey::new("github:o/r#1")).into();
+        let b: SessionKey = (&WorkspaceKey::new("github:o/r#2")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.show_agent_model = true;
+        sb.running_terminals.insert(
+            TerminalId(1),
+            (a.clone(), TerminalKind::Agent("claude".into())),
+        );
+        sb.running_terminals.insert(
+            TerminalId(2),
+            (a.clone(), TerminalKind::Agent("codex".into())),
+        );
+        sb.running_terminals.insert(
+            TerminalId(3),
+            (b.clone(), TerminalKind::Agent("claude".into())),
+        );
+        sb.terminal_models.insert(TerminalId(1), "Opus".to_string());
+        sb.terminal_models
+            .insert(TerminalId(3), "Sonnet".to_string());
+
+        let badges = sb.runner_badges_by_key();
+        let models = sb.agent_models_by_key();
+        for key in [&a, &b] {
+            assert_eq!(
+                badges.get(key).cloned().unwrap_or_default(),
+                sb.runner_badges(key),
+                "bulk badges must match the per-key reference for {key:?}",
+            );
+            assert_eq!(
+                models.get(key).cloned().unwrap_or_default(),
+                sb.agent_models(key),
+                "bulk models must match the per-key reference for {key:?}",
+            );
+        }
+        // Sanity: the aggregation carried real content, not just agreed
+        // on emptiness. `a` has two distinct agents; only Claude's model
+        // is unambiguous (`codex` has no label).
+        assert_eq!(
+            badges.get(&a).cloned().unwrap_or_default(),
+            vec![('C', 1), ('X', 1)],
+        );
+        assert_eq!(
+            models.get(&a).cloned().unwrap_or_default(),
+            vec![('C', "Opus".to_string())],
+        );
+    }
+
+    #[test]
     fn rebadge_preserves_both_the_claude_and_codex_badges() {
         // #440 / #404: an issue→PR transfer must carry EVERY agent kind,
         // codex included, onto the PR row — not just Claude.

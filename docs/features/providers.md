@@ -108,7 +108,7 @@ events (state change, CI change, review change, new activity). CI is a
 
 **Status:** beta
 **Crate(s):** `linear-provider`
-**Config / flags:** `LINEAR_API_KEY` env
+**Config / flags:** `LINEAR_API_KEY` env; `providers.linear.poll_interval_secs` (default 60), `providers.linear.idle_poll_interval_secs` (default 300)
 **Key bindings:** —
 
 ### What it does
@@ -127,6 +127,15 @@ canceled appear in the inbox.
 20 pages), filters out completed/canceled server-side, and converts to `Task`.
 Errors map to `ProviderError` (auth → `Auth`, timeout/5xx/rate-limit →
 `Retryable`).
+
+Linear polls on its **own cadence**, decoupled from GitHub's hot loop: the
+daemon only runs a Linear sweep once `providers.linear.poll_interval_secs`
+(default 60) has elapsed, regardless of how fast the shared tick loop is
+firing for GitHub CI/PR state. After several consecutive sweeps return an
+unchanged ticket set the cadence backs off to
+`providers.linear.idle_poll_interval_secs` (default 300, cold/idle tier),
+snapping back to the active interval the moment a ticket changes. An explicit
+refresh (`Shift-R`) or a new client connecting polls Linear immediately.
 
 ### Test checklist
 - [ ] With `LINEAR_API_KEY` set, Linear issues appear in the inbox.

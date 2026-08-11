@@ -1528,11 +1528,133 @@ impl TaskSource for GhSource {
     }
 }
 
+/// Never let a misconfigured `poll_interval_secs: 0` collapse Linear
+/// back onto the every-tick cadence this whole change exists to avoid.
+const LINEAR_MIN_INTERVAL_SECS: u64 = 15;
+
+/// Consecutive sweeps with an unchanged ticket set before the Linear
+/// cadence backs off from `active` to `idle` (mirrors GitHub's cold
+/// tier: quiet sources poll less).
+const LINEAR_IDLE_AFTER: u32 = 3;
+
+/// Resolved Linear poll cadence: the active interval, plus the slower
+/// interval the poll backs off to once it goes idle.
+#[derive(Clone, Copy)]
+pub(crate) struct LinearCadence {
+    active: Duration,
+    idle: Duration,
+}
+
+impl LinearCadence {
+    pub(crate) fn from_config(cfg: &lazybox_config::LinearConfig) -> Self {
+        let active = cfg.poll_interval_secs.max(LINEAR_MIN_INTERVAL_SECS);
+        // Idle can only ever be as slow or slower than the active cadence.
+        let idle = cfg.idle_poll_interval_secs.max(active);
+        Self {
+            active: Duration::from_secs(active),
+            idle: Duration::from_secs(idle),
+        }
+    }
+}
+
+impl Default for LinearCadence {
+    fn default() -> Self {
+        Self::from_config(&lazybox_config::LinearConfig::default())
+    }
+}
+
+/// Cross-tick Linear poll schedule. Linear issues change far less often
+/// than GitHub CI/PR state, so the Linear source runs on its own cadence
+/// decoupled from the shared (GitHub-hot) tick loop: a tick only builds a
+/// `LinearSource` once [`LinearSchedule::is_due`] has elapsed, and
+/// [`LinearSource::fetch`] re-arms it via [`LinearSchedule::record`] —
+/// backing the interval off from `active` to `idle` after
+/// [`LINEAR_IDLE_AFTER`] consecutive sweeps returned an unchanged ticket
+/// set. Shared (an `Arc`) so the fresh `LinearSource` built each tick and
+/// the persistent `TickState` see the same next-due clock.
+#[derive(Clone, Default)]
+pub(crate) struct LinearSchedule {
+    inner: std::sync::Arc<parking_lot::Mutex<LinearScheduleInner>>,
+}
+
+#[derive(Default)]
+struct LinearScheduleInner {
+    next_due: Option<std::time::Instant>,
+    last_signature: Option<u64>,
+    idle_streak: u32,
+}
+
+impl LinearSchedule {
+    /// A never-armed schedule (`next_due == None`) is due immediately, so
+    /// the first tick after enabling Linear polls eagerly.
+    fn is_due(&self, now: std::time::Instant) -> bool {
+        match self.inner.lock().next_due {
+            Some(due) => now >= due,
+            None => true,
+        }
+    }
+
+    /// Re-arm after a sweep. An unchanged `signature` on a `complete`
+    /// sweep grows the idle streak and, past [`LINEAR_IDLE_AFTER`], backs
+    /// the next interval off to `cadence.idle`; a change resets to
+    /// `cadence.active`. A PARTIAL sweep (`complete == false`) saw only a
+    /// prefix of Linear's issues, so it must never accrue toward idle —
+    /// backing off on incomplete coverage would poll least exactly when we
+    /// can see least (#1032). It stays on the active cadence and resets the
+    /// streak so a stable partial prefix can't drift into the slow tier.
+    fn record(
+        &self,
+        now: std::time::Instant,
+        signature: u64,
+        complete: bool,
+        cadence: &LinearCadence,
+    ) {
+        let mut inner = self.inner.lock();
+        if complete && inner.last_signature == Some(signature) {
+            inner.idle_streak = inner.idle_streak.saturating_add(1);
+        } else {
+            inner.idle_streak = 0;
+        }
+        inner.last_signature = Some(signature);
+        let interval = if inner.idle_streak >= LINEAR_IDLE_AFTER {
+            cadence.idle
+        } else {
+            cadence.active
+        };
+        inner.next_due = Some(now + interval);
+    }
+}
+
+/// Order-independent fingerprint of a kept Linear ticket set, used to
+/// detect an idle (unchanged) sweep for cadence back-off. Hashing each
+/// task's full serialized form — not just `(key, updated_at)` — so a
+/// change to ANY surfaced field counts, including ones Linear may not
+/// bump `updatedAt` for (e.g. a newly-linked GitHub PR attachment). The
+/// tasks come straight from the provider (pre-upsert), so their
+/// serialization is deterministic for a given upstream state; identical
+/// state hashes identically and a real change resets the cadence to
+/// active.
+fn linear_signature(tasks: &[Task]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut entries: Vec<String> = tasks
+        .iter()
+        .map(|t| serde_json::to_string(t).unwrap_or_default())
+        .collect();
+    entries.sort_unstable();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    entries.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// `LinearClient` adapter.
 pub struct LinearSource {
     pub client: LinearClient,
     pub filter: ProviderConfig,
     pub bus: tokio::sync::broadcast::Sender<Event>,
+    /// Own-cadence schedule (see [`LinearSchedule`]). Shared with the
+    /// `TickState` that decides whether to build this source at all.
+    schedule: LinearSchedule,
+    cadence: LinearCadence,
     /// Set by `fetch` when pagination stopped before consuming every
     /// page (a later page errored or the safety cap truncated the
     /// tail). A workspace absent from a partial result may simply live
@@ -1553,8 +1675,22 @@ impl LinearSource {
             client,
             filter,
             bus,
+            schedule: LinearSchedule::default(),
+            cadence: LinearCadence::default(),
             last_coverage_partial: parking_lot::Mutex::new(false),
         }
+    }
+    /// Attach the cross-tick schedule + resolved cadence. Called by
+    /// `sources_for_with_engagement`; the bare `new` (used by tests)
+    /// keeps a default single-tick schedule.
+    pub(crate) fn with_schedule(
+        mut self,
+        schedule: LinearSchedule,
+        cadence: LinearCadence,
+    ) -> Self {
+        self.schedule = schedule;
+        self.cadence = cadence;
+        self
     }
     fn emit_progress(&self, message: impl Into<String>) {
         let message = message.into();
@@ -1598,6 +1734,7 @@ impl TaskSource for LinearSource {
                 .fetch_all_with_coverage()
                 .await
                 .map_err(lazybox_core::ProviderError::from)?;
+            let complete = !outcome.is_partial();
             *self.last_coverage_partial.lock() = outcome.is_partial();
             self.emit_progress(format!(
                 "Got {} issues, applying filters…",
@@ -1605,6 +1742,12 @@ impl TaskSource for LinearSource {
             ));
             let kept = filter_linear_tasks(outcome.items, &self.filter);
             self.emit_progress(format!("{} issues kept after filter", kept.len()));
+            self.schedule.record(
+                std::time::Instant::now(),
+                linear_signature(&kept),
+                complete,
+                &self.cadence,
+            );
             Ok(kept)
         })
     }
@@ -2000,6 +2143,7 @@ pub async fn sources_for(
         gh_client_cache,
         &EngagementSnapshot::default(),
         true,
+        true,
         None,
     )
     .await
@@ -2033,6 +2177,184 @@ mod linear_scope_filter_tests {
         assert_eq!(
             bridged, base,
             "no subscribed scope → role filter is unchanged"
+        );
+    }
+}
+
+#[cfg(test)]
+mod linear_cadence_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn cadence() -> LinearCadence {
+        LinearCadence {
+            active: Duration::from_secs(60),
+            idle: Duration::from_secs(300),
+        }
+    }
+
+    #[test]
+    fn unarmed_schedule_is_due_immediately() {
+        // First tick after enabling Linear must poll eagerly.
+        assert!(LinearSchedule::default().is_due(Instant::now()));
+    }
+
+    #[test]
+    fn record_gates_the_next_poll_by_the_active_interval() {
+        let sched = LinearSchedule::default();
+        let cad = cadence();
+        let t0 = Instant::now();
+        sched.record(t0, 1, true, &cad);
+        assert!(!sched.is_due(t0 + Duration::from_secs(59)));
+        assert!(sched.is_due(t0 + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn unchanged_signature_backs_off_to_idle_after_threshold() {
+        let sched = LinearSchedule::default();
+        let cad = cadence();
+        let t = Instant::now();
+        // The streak grows purely on repeated signatures; the
+        // LINEAR_IDLE_AFTER-th repeat crosses from active into idle.
+        for _ in 0..=LINEAR_IDLE_AFTER {
+            sched.record(t, 7, true, &cad);
+        }
+        assert!(
+            !sched.is_due(t + Duration::from_secs(299)),
+            "an idle Linear source waits out the slow cadence"
+        );
+        assert!(sched.is_due(t + Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn changed_signature_resets_to_active() {
+        let sched = LinearSchedule::default();
+        let cad = cadence();
+        let t = Instant::now();
+        for _ in 0..=(LINEAR_IDLE_AFTER + 1) {
+            sched.record(t, 7, true, &cad);
+        }
+        // A ticket changed → snap back to the fast cadence immediately.
+        sched.record(t, 99, true, &cad);
+        assert!(!sched.is_due(t + Duration::from_secs(59)));
+        assert!(sched.is_due(t + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn partial_sweeps_never_back_off() {
+        // A stable partial prefix (same signature every sweep) must NOT
+        // drift into the idle tier — backing off on incomplete coverage
+        // would poll least exactly when we can see least (#1032).
+        let sched = LinearSchedule::default();
+        let cad = cadence();
+        let t = Instant::now();
+        for _ in 0..=(LINEAR_IDLE_AFTER + 3) {
+            sched.record(t, 7, /*complete=*/ false, &cad);
+        }
+        assert!(
+            sched.is_due(t + Duration::from_secs(60)),
+            "partial sweeps stay on the active cadence, never idle"
+        );
+        assert!(
+            !sched.is_due(t + Duration::from_secs(59)),
+            "still gated by the active interval, just never the slow one"
+        );
+    }
+
+    #[test]
+    fn from_config_floors_active_and_orders_idle() {
+        let cfg = lazybox_config::LinearConfig {
+            poll_interval_secs: 0,
+            idle_poll_interval_secs: 10,
+            ..Default::default()
+        };
+        let cad = LinearCadence::from_config(&cfg);
+        assert_eq!(
+            cad.active,
+            Duration::from_secs(LINEAR_MIN_INTERVAL_SECS),
+            "a 0s interval is floored, never every-tick"
+        );
+        assert_eq!(
+            cad.idle, cad.active,
+            "idle can never be faster than the active cadence"
+        );
+    }
+
+    fn linear_task(key: &str) -> Task {
+        Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "linear".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Assignee,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://linear.app/x/issue/{key}"),
+            repo: Some("linear/ENG".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: Some(lazybox_core::TaskKind::Issue),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    #[test]
+    fn signature_is_order_independent() {
+        let a = linear_task("ENG-1");
+        let b = linear_task("ENG-2");
+        assert_eq!(
+            linear_signature(&[a.clone(), b.clone()]),
+            linear_signature(&[b, a]),
+            "reordering the same tickets is not a change"
+        );
+    }
+
+    #[test]
+    fn signature_detects_a_change_that_leaves_updated_at_fixed() {
+        // Regression for #1032: a newly-linked GitHub PR is an attachment
+        // change Linear may not bump `updatedAt` for. The old
+        // (key, updated_at) signature missed it, delaying the collapse up
+        // to the idle interval; the full-serialization signature catches
+        // any surfaced-field change even when the timestamp is unchanged.
+        let base = linear_task("ENG-1");
+        let mut linked = base.clone();
+        linked.linked_tasks = vec![lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#5".into(),
+        }];
+        assert_eq!(base.updated_at, linked.updated_at, "timestamp is identical");
+        assert_ne!(
+            linear_signature(&[base]),
+            linear_signature(&[linked]),
+            "a linked-PR change must reset the cadence to active"
         );
     }
 }
@@ -2381,6 +2703,7 @@ pub(super) async fn sources_for_with_engagement(
     gh_client_cache: crate::registries::GithubClientCache,
     engagement: &EngagementSnapshot,
     poll_notifications: bool,
+    force_linear: bool,
     cursor_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
@@ -2745,25 +3068,45 @@ pub(super) async fn sources_for_with_engagement(
     }
 
     if setup.enabled_providers.contains("linear") {
-        // Resolve through the full credential chain (env var, then
-        // `linear auth token`) rather than `from_env`, so a CLI-only
-        // Linear login polls just like the setup screen detects it.
-        match lazybox_linear::credential_chain()
-            .resolve(lazybox_linear::SOURCE)
-            .await
-        {
-            Ok(cred) => {
-                let scope = lazybox_config::Config::load()
-                    .map(|c| c.providers.linear.scope)
-                    .unwrap_or_else(|_| LinearScope::default_scopes());
-                let filter = linear_filter_for_scope(setup.provider_config("linear"), &scope);
-                sources.push(Box::new(LinearSource::new(
-                    LinearClient::from_credential(cred).with_scope(scope),
-                    filter,
-                    bus.clone(),
-                )))
+        // Linear runs on its own cadence, decoupled from the shared
+        // (GitHub-hot) tick loop: skip the sweep entirely — no credential
+        // resolution, no GraphQL, no upsert — until the schedule is due.
+        // An explicit user refresh (`force_linear`) bypasses the gate.
+        let schedule = state.linear_schedule.clone();
+        if !force_linear && !schedule.is_due(std::time::Instant::now()) {
+            tracing::debug!(source = "linear", "poll skipped: not due on Linear cadence");
+        } else {
+            // Resolve through the full credential chain (env var, then
+            // `linear auth token`) rather than `from_env`, so a CLI-only
+            // Linear login polls just like the setup screen detects it.
+            match lazybox_linear::credential_chain()
+                .resolve(lazybox_linear::SOURCE)
+                .await
+            {
+                Ok(cred) => {
+                    let linear_cfg = lazybox_config::Config::load()
+                        .map(|c| c.providers.linear)
+                        .ok();
+                    let scope = linear_cfg
+                        .as_ref()
+                        .map(|l| l.scope.clone())
+                        .unwrap_or_else(LinearScope::default_scopes);
+                    let cadence = linear_cfg
+                        .as_ref()
+                        .map(LinearCadence::from_config)
+                        .unwrap_or_default();
+                    let filter = linear_filter_for_scope(setup.provider_config("linear"), &scope);
+                    sources.push(Box::new(
+                        LinearSource::new(
+                            LinearClient::from_credential(cred).with_scope(scope),
+                            filter,
+                            bus.clone(),
+                        )
+                        .with_schedule(schedule, cadence),
+                    ))
+                }
+                Err(e) => tracing::info!("linear not configured: {e}"),
             }
-            Err(e) => tracing::info!("linear not configured: {e}"),
         }
     }
 

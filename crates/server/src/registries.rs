@@ -536,6 +536,13 @@ pub struct PollState {
     /// Interrupts the poll sleep for refresh, reconnect, and lazy mergeable retries.
     pub(crate) wake_signal: Arc<Notify>,
     poll_warm_requested: Arc<AtomicBool>,
+    /// Set only by an explicit user refresh (`Command::Refresh`) to force
+    /// providers that run on their own slow cadence (Linear) to poll this
+    /// tick. Kept separate from `poll_warm_requested`, which the many
+    /// post-mutation / subscribe `wake(true)` calls also set — folding
+    /// Linear's force into that flag would re-poll Linear on every GitHub
+    /// mutation, defeating its decoupled cadence (#1032).
+    poll_force_refresh_requested: Arc<AtomicBool>,
 }
 
 impl PollState {
@@ -617,6 +624,20 @@ impl PollState {
 
     pub(crate) fn take_warm_request(&self) -> bool {
         self.poll_warm_requested.swap(false, Ordering::AcqRel)
+    }
+
+    /// Request that the next tick force every slow-cadence provider
+    /// (Linear) to poll now, regardless of its own schedule. For an
+    /// explicit user refresh only — kept separate from the warm-poll flag
+    /// so post-mutation/subscribe wakes don't force Linear (#1032).
+    pub fn request_force_refresh(&self) {
+        self.poll_force_refresh_requested
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn take_force_refresh(&self) -> bool {
+        self.poll_force_refresh_requested
+            .swap(false, Ordering::AcqRel)
     }
 }
 

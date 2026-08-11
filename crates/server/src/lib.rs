@@ -1208,6 +1208,25 @@ mod mutation_admission_tests {
         assert!(!config.poll.take_warm_request());
     }
 
+    #[test]
+    fn warm_wake_does_not_force_linear_only_explicit_refresh_does() {
+        // Regression for #1032: the many post-mutation / subscribe
+        // `wake(true)` calls must NOT force Linear past its cadence gate —
+        // only an explicit `Command::Refresh` (which calls
+        // `request_force_refresh`) may. Folding Linear's force into the
+        // warm flag re-polled Linear on every GitHub mutation.
+        let config = ServerConfig::in_memory();
+        config.poll.wake(true);
+        assert!(
+            !config.poll.take_force_refresh(),
+            "a warm wake (mutation/subscribe) must not force Linear"
+        );
+
+        config.poll.request_force_refresh();
+        assert!(config.poll.take_force_refresh());
+        assert!(!config.poll.take_force_refresh(), "consumed once");
+    }
+
     #[tokio::test]
     async fn pending_connection_mutations_have_a_hard_task_cap() {
         let mut tasks = tokio::task::JoinSet::new();
@@ -1732,6 +1751,11 @@ pub async fn dispatch_command(
             if let Some(client) = config.poll.cached_gh_client() {
                 client.force_full_sweep();
             }
+            // An explicit refresh also bypasses Linear's slow cadence gate
+            // for this one tick (#1032). This is the ONLY caller of
+            // `request_force_refresh` — the generic `wake(true)` used by
+            // post-mutation/subscribe paths must not force Linear.
+            config.poll.request_force_refresh();
             config.poll.wake(true);
         }
         lazybox_ipc::Command::PostReply { session_key, body } => {

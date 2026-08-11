@@ -220,6 +220,8 @@ jobs:
       # the shipped config and runtime action catalog.
       - uses: ./.github/actions/rust-build-env
         if: needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true'
+        with:
+          shared-key: linux
       - uses: taiki-e/install-action@v2
         if: needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true'
         with:

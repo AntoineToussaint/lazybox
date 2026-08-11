@@ -550,6 +550,74 @@ fn render_shows_header_fields() {
     assert!(rendered.contains("@bob"), "bob listed");
 }
 
+fn linear_ticket(role: TaskRole) -> Task {
+    let mut t = make_task("ENG-1");
+    t.id = TaskId {
+        source: "linear".into(),
+        key: "ENG-1".into(),
+    };
+    t.title = "Fix the widget".into();
+    t.url = "https://linear.app/acme/issue/ENG-1".into();
+    t.repo = Some("linear/ENG".into());
+    t.branch = None;
+    t.base_branch = None;
+    t.reviewers = vec![];
+    t.kind = Some(lazybox_core::TaskKind::Issue);
+    t.role = role;
+    t
+}
+
+#[test]
+fn render_linear_ticket_shows_why_it_is_yours() {
+    // #1015: the user wants to SEE why a Linear ticket surfaced. The
+    // reason is the ticket's role — surface it in the detail view.
+    let mut rp = RightPane::new(PaneId::new(1));
+
+    rp.set_workspace(Some(Workspace::from_task(
+        linear_ticket(TaskRole::Assignee),
+        Utc::now(),
+    )));
+    let assigned = render_to_string(&mut rp, 60, 20, true);
+    assert!(
+        assigned.contains("assigned to you"),
+        "assignee ticket must say why it's yours:\n{assigned}"
+    );
+
+    rp.set_workspace(Some(Workspace::from_task(
+        linear_ticket(TaskRole::Author),
+        Utc::now(),
+    )));
+    let authored = render_to_string(&mut rp, 60, 20, true);
+    assert!(
+        authored.contains("created by you"),
+        "authored ticket must say why it's yours:\n{authored}"
+    );
+
+    // A ticket matching NEITHER (the "random ticket" case #1015 is
+    // about) must be flagged, not blend in as if it were legitimately
+    // yours — it's the tell that the token/identity is wrong.
+    rp.set_workspace(Some(Workspace::from_task(
+        linear_ticket(TaskRole::Mentioned),
+        Utc::now(),
+    )));
+    let neither = render_to_string(&mut rp, 60, 20, true);
+    assert!(
+        neither.contains("not assigned to or created by you"),
+        "a neither-assigned-nor-created ticket must be flagged:\n{neither}"
+    );
+}
+
+#[test]
+fn render_github_pr_has_no_linear_reason_line() {
+    // The reason line is Linear-only — GitHub PRs keep their existing
+    // header untouched.
+    let mut rp = RightPane::new(PaneId::new(1));
+    rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 1)));
+    let rendered = render_to_string(&mut rp, 60, 20, true);
+    assert!(!rendered.contains("assigned to you"));
+    assert!(!rendered.contains("created by you"));
+}
+
 #[test]
 fn render_shows_activity_count_in_title() {
     let mut rp = RightPane::new(PaneId::new(1));

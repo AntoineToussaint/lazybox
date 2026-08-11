@@ -1421,6 +1421,26 @@ impl RightPane {
             ]));
         }
 
+        // Why this ticket is in your inbox (#1015). Linear only ever
+        // returns issues assigned to or created by the token's viewer,
+        // so name that reason outright — and when a ticket matches
+        // neither (which the default `[assigned, created]` scope should
+        // make impossible) say so plainly rather than letting it read
+        // like any other "yours" row: a ticket you didn't create or get
+        // assigned is the tell that the token resolves to the wrong
+        // Linear identity, or that a subscribed scope is pulling it in.
+        if task.id.source == lazybox_core::LINEAR_SOURCE {
+            let (glyph_color, reason) = match task.role {
+                lazybox_core::TaskRole::Assignee => (theme.accent, "assigned to you"),
+                lazybox_core::TaskRole::Author => (theme.accent, "created by you"),
+                _ => (theme.warn, "not assigned to or created by you"),
+            };
+            lines.push(Line::from(vec![
+                Span::styled("◆ ", Style::default().fg(glyph_color)),
+                Span::styled(reason, Style::default().fg(theme.text_dim)),
+            ]));
+        }
+
         // Reviewers + assignees. When populated, render the @logins.
         // When empty AND the task is a PR, surface a discoverable
         // hint with the keyboard shortcut so the user doesn't have

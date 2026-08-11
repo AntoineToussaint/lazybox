@@ -2589,6 +2589,12 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // if the user presses it anyway.
         ActionKind::ToggleAutoMerge => workspace.map(|w| w.pr.is_some()).unwrap_or(false),
         ActionKind::ToggleAutoFix => workspace.map(|w| w.pr.is_some()).unwrap_or(false),
+        // Reviewers are a GitHub-PR concept. Issues have no reviewers —
+        // GitHub issues never did, and a Linear ticket has an assignee,
+        // creator, and subscribers but no reviewer field at all (#1015) —
+        // so `g r` only surfaces where a PR is present, matching the
+        // dispatcher's own `pr.is_some()` gate.
+        ActionKind::RequestReviewers => workspace.map(|w| w.pr.is_some()).unwrap_or(false),
         // Track-main applies to a GitHub-backed lazybox worktree — a
         // scratch/branch workspace under a github project. Gate on the
         // same predicate the resolver Notices on, so `g t` only surfaces
@@ -2694,7 +2700,6 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::RenameWorkspace
         | ActionKind::ToggleSnooze
         | ActionKind::LongSnooze
-        | ActionKind::RequestReviewers
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
         | ActionKind::OpenInBrowser
@@ -3556,6 +3561,85 @@ mod tests {
         // A PR present → act on the PR instead, not the issue.
         ws.pr = Some(task("acme/widget#8"));
         assert!(!availability(ActionKind::CloseIssue, Some(&ws)));
+    }
+
+    #[test]
+    fn request_reviewers_only_offered_on_pr_workspaces() {
+        // #1015: reviewers are a GitHub-PR concept. A Linear ticket has
+        // no reviewer field (assignee/creator/subscribers only), and a
+        // GitHub issue has none either — so `g r` must not surface on an
+        // issue-only workspace, only where a PR is present.
+        use chrono::Utc;
+        use lazybox_core::{
+            CiStatus, ReviewStatus, Task, TaskId, TaskKind, TaskRole, TaskState, Workspace,
+            WorkspaceKey,
+        };
+        let task = |source: &str, key: &str, kind: TaskKind| Task {
+            author: String::new(),
+            id: TaskId {
+                source: source.into(),
+                key: key.into(),
+            },
+            title: key.into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            node_id: Some("node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: Some(kind),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            priority: None,
+            state_label: None,
+        };
+
+        // No workspace → not offered.
+        assert!(!availability(ActionKind::RequestReviewers, None));
+
+        // A Linear ticket workspace → reviewers hidden (Linear has none).
+        let mut linear = Workspace::empty(WorkspaceKey("linear-ENG-1".into()), "main", Utc::now());
+        linear.attach_task(task("linear", "ENG-1", TaskKind::Issue));
+        assert!(!linear.linear_issues.is_empty() && linear.pr.is_none());
+        assert!(!availability(ActionKind::RequestReviewers, Some(&linear)));
+
+        // A GitHub issue-only workspace → reviewers hidden too.
+        let mut issue = Workspace::empty(
+            WorkspaceKey("github-acme-widget-7".into()),
+            "main",
+            Utc::now(),
+        );
+        issue.attach_task(task("github", "acme/widget#7", TaskKind::Issue));
+        assert!(!issue.gh_issues.is_empty() && issue.pr.is_none());
+        assert!(!availability(ActionKind::RequestReviewers, Some(&issue)));
+
+        // A PR workspace → reviewers offered.
+        issue.pr = Some(task("github", "acme/widget#8", TaskKind::Pr));
+        assert!(availability(ActionKind::RequestReviewers, Some(&issue)));
     }
 
     #[test]

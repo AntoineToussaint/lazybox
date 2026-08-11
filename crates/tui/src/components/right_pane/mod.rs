@@ -2389,14 +2389,24 @@ impl RightPane {
     /// was fetched and stored. The reader modal still lists every
     /// linked issue in full (see [`Self::task_body`]).
     fn task_body_str(&self) -> Option<&str> {
-        self.primary_body_str().or_else(|| {
-            self.linked_issue_tasks()
-                .into_iter()
-                .next()
-                .and_then(|t| t.body.as_deref())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-        })
+        self.primary_body_str()
+            .or_else(|| self.first_linked_issue_body())
+    }
+
+    /// The first folded-in issue / ticket description on a PR workspace,
+    /// in `gh_issues` → `linear_issues` order — the teaser fallback for a
+    /// PR with no body of its own. Mirrors [`Self::linked_issue_tasks`]'s
+    /// PR-gate and non-empty-body predicate, but short-circuits on the
+    /// first match instead of allocating the full list: `task_body_str`
+    /// (hence `has_task_body` / `has_visible_content` / the footer hints)
+    /// runs it every frame.
+    fn first_linked_issue_body(&self) -> Option<&str> {
+        let ws = self.workspace.as_ref()?;
+        ws.pr.as_ref()?;
+        ws.gh_issues
+            .iter()
+            .chain(ws.linear_issues.iter())
+            .find_map(|t| t.body.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     }
 
     /// Render the focused task's body using the same lightweight

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   TerminalFrameDecoder,
+  appendTerminalInput,
   decodeTerminalStreamItem,
   discardTerminalView,
   requiredTerminalResyncSequence,
@@ -108,6 +109,20 @@ describe("binary terminal protocol", () => {
     expect(() => decoder.push(bytes)).toThrow("invalid terminal frame length");
   });
 
+  it("drops a malformed prefix so the following valid frame can render", () => {
+    const malformed = new Uint8Array(4);
+    new DataView(malformed.buffer).setUint32(0, 2049);
+    const fresh = serverFrame(2, 7, 10, 10, new Uint8Array([9]));
+    const decoder = new TerminalFrameDecoder(2048);
+
+    expect(() => decoder.push(malformed)).toThrowError(
+      "invalid terminal frame length 2049",
+    );
+    expect(decoder.push(fresh)).toMatchObject([
+      { kind: "output", terminalId: 7, firstSeq: 10, seq: 10 },
+    ]);
+  });
+
   it("invalidates a discarded view and requests an attainable replay baseline", () => {
     const state = {
       replay: new Uint8Array(),
@@ -157,6 +172,29 @@ describe("binary terminal protocol", () => {
       kind: "data",
       payload: new Uint8Array([4, 5]),
     });
+    expect(
+      decodeTerminalStreamItem(
+        new Uint8Array([2, ...new TextEncoder().encode("connection lost")]),
+      ),
+    ).toEqual({ kind: "disconnected", message: "connection lost" });
+  });
+
+  it("bounds a large coalesced append without variadic array spreading", () => {
+    const pending: Array<{
+      bytes: number[];
+      intent: "compose" | "submit" | "view";
+    }> = [{ bytes: [1, 2], intent: "compose" }];
+    const bytes = new Uint8Array(300_000).fill(7);
+
+    appendTerminalInput(pending, bytes, "compose", 64 * 1024);
+
+    expect(pending.every((input) => input.bytes.length <= 64 * 1024)).toBe(
+      true,
+    );
+    expect(pending.reduce((sum, input) => sum + input.bytes.length, 0)).toBe(
+      300_002,
+    );
+    expect(pending.at(-1)?.intent).toBe("compose");
   });
 
   it("waits for each terminal frame before sending the next one", async () => {

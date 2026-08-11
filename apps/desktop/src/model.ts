@@ -545,6 +545,64 @@ export function shouldHandleWorkspaceEnter(
   return selectedWorkspace && !editableTarget && !interactiveTarget;
 }
 
+export type DesktopShortcut =
+  | "settings"
+  | "snippets"
+  | "navigate-down"
+  | "navigate-up"
+  | "open-workspace"
+  | "sort"
+  | "reply"
+  | "start-agent"
+  | "start-shell"
+  | "mark-read"
+  | "filter"
+  | "search"
+  | "focus-mode"
+  | "refresh";
+
+type ShortcutEvent = Pick<
+  KeyboardEvent,
+  "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"
+>;
+
+export function resolveDesktopShortcut(
+  event: ShortcutEvent,
+  keyboardOwned: boolean,
+): DesktopShortcut | null {
+  if (keyboardOwned) {
+    return null;
+  }
+  const primaryModifier =
+    event.metaKey !== event.ctrlKey && !event.altKey && !event.shiftKey;
+  if (primaryModifier && event.key === ",") {
+    return "settings";
+  }
+  if (primaryModifier && (event.key === "j" || event.key === "J")) {
+    return "snippets";
+  }
+  if (event.metaKey || event.ctrlKey || event.altKey) {
+    return null;
+  }
+  if (event.shiftKey) {
+    return event.key === "R" ? "refresh" : null;
+  }
+  const shortcuts: Record<string, DesktopShortcut | undefined> = {
+    ArrowDown: "navigate-down",
+    ArrowUp: "navigate-up",
+    Enter: "open-workspace",
+    o: "sort",
+    r: "reply",
+    a: "start-agent",
+    s: "start-shell",
+    m: "mark-read",
+    f: "filter",
+    "/": "search",
+    ".": "focus-mode",
+  };
+  return shortcuts[event.key] ?? null;
+}
+
 export function applyWorkspaceEvent(
   workspaces: Map<string, Workspace>,
   event: LazyboxEvent,

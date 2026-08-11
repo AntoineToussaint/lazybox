@@ -26,6 +26,7 @@ import {
   primaryTask,
   projectKeyLabel,
   rowSignals,
+  resolveDesktopShortcut,
   SNOOZE_PRESETS,
   shouldHandleWorkspaceEnter,
   sortModeLabel,
@@ -108,6 +109,8 @@ import {
 } from "./notifications";
 import {
   TerminalFrameDecoder,
+  appendTerminalInput,
+  type PendingTerminalInput,
   type TerminalBinaryFrame,
   type TerminalInputIntent,
   type TerminalReplayState,
@@ -333,6 +336,16 @@ const terminalTabs = element<HTMLDivElement>("terminal-tabs");
 const terminalEmpty = element<HTMLDivElement>("terminal-empty");
 const terminalTitle = element<HTMLHeadingElement>("terminal-title");
 const terminalState = element<HTMLSpanElement>("terminal-state");
+const terminalStreamHealth = element<HTMLButtonElement>(
+  "terminal-stream-health",
+);
+const terminalStreamNotice = element<HTMLDivElement>("terminal-stream-notice");
+const terminalStreamMessage = element<HTMLSpanElement>(
+  "terminal-stream-message",
+);
+const terminalStreamDismiss = element<HTMLButtonElement>(
+  "terminal-stream-dismiss",
+);
 const workspaceGrid = document.querySelector<HTMLElement>(".workspace-grid")!;
 const rightPane = document.querySelector<HTMLElement>(".right-pane")!;
 const rightPaneSplitter = element<HTMLDivElement>("right-pane-splitter");
@@ -533,17 +546,16 @@ let snippetViewState: SnippetPickerView | null = null;
 let snippetCursor = 0;
 let snippetQuery = "";
 let snippetTargetTerminal: number | null = null;
-interface PendingTerminalInput {
-  bytes: number[];
-  intent: TerminalInputIntent;
-}
-
 const pendingInput = new Map<number, PendingTerminalInput[]>();
 const inputTimers = new Map<number, number>();
 const inputSending = new Set<number>();
 const encoder = new TextEncoder();
 let terminalDecoder = new TerminalFrameDecoder(2 * 1024 * 1024 + 25);
 let maxTerminalWriteBytes = 128 * 1024;
+let terminalChannelHealthy = false;
+let terminalChannelEverOnline = false;
+let terminalInputDroppedWhileOffline = false;
+let terminalIncidentMessage: string | null = null;
 const pendingTerminalFrames = new Map<number, TerminalBinaryFrame[]>();
 let desktopMetadataLoaded = false;
 let buildVersion = "";
@@ -747,6 +759,16 @@ updateDismiss.addEventListener("click", () => {
   updateNotice.classList.add("hidden");
 });
 snippetButton.addEventListener("click", () => void openSnippetPicker());
+terminalStreamHealth.addEventListener("click", () => {
+  if (terminalIncidentMessage !== null) {
+    terminalStreamNotice.hidden = false;
+    terminalStreamHealth.setAttribute("aria-expanded", "true");
+  }
+});
+terminalStreamDismiss.addEventListener("click", () => {
+  terminalStreamNotice.hidden = true;
+  terminalStreamHealth.setAttribute("aria-expanded", "false");
+});
 snippetFilter.addEventListener("input", () => void onSnippetFilterInput());
 snippetDialog.addEventListener("keydown", handleSnippetKey);
 snippetDialog.addEventListener("close", onSnippetDialogClose);
@@ -831,7 +853,16 @@ async function initializeDesktopMetadata(): Promise<void> {
       invoke<DesktopBuildInfo>("desktop_build_info"),
     ]);
     terminalDecoder = new TerminalFrameDecoder(info.max_terminal_frame_bytes);
-    maxTerminalWriteBytes = info.max_terminal_write_bytes;
+    // Keep the built-in default on a non-positive/non-integer advertisement:
+    // this value feeds appendTerminalInput's bound, which throws on < 1, and
+    // that throw would land inside the xterm onData callback and break every
+    // keystroke. The frontend must not hard-fail on a contract it can't control.
+    if (
+      Number.isInteger(info.max_terminal_write_bytes) &&
+      info.max_terminal_write_bytes > 0
+    ) {
+      maxTerminalWriteBytes = info.max_terminal_write_bytes;
+    }
     defaultAgent = info.default_agent;
     configuredRepositories = info.repositories;
     agentLabel.textContent = defaultAgent;
@@ -1226,11 +1257,22 @@ async function synchronizeAttention(): Promise<void> {
 
 async function readTerminalData(): Promise<void> {
   while (!previewMode) {
+    let chunk: ArrayBuffer;
     try {
-      const chunk = await invoke<ArrayBuffer>("read_terminal_data");
+      chunk = await invoke<ArrayBuffer>("read_terminal_data");
+    } catch (error) {
+      handleTerminalDisconnect(String(error));
+      await new Promise((resolve) => window.setTimeout(resolve, 750));
+      continue;
+    }
+    try {
       const item = decodeTerminalStreamItem(chunk);
+      if (item.kind === "disconnected") {
+        handleTerminalDisconnect(item.message);
+        continue;
+      }
       if (item.kind === "reset") {
-        terminalDecoder.reset();
+        handleTerminalReset();
         continue;
       }
       for (const frame of terminalDecoder.push(item.payload)) {
@@ -1243,10 +1285,102 @@ async function readTerminalData(): Promise<void> {
         }
       }
     } catch (error) {
-      setStatus(String(error));
-      await new Promise((resolve) => window.setTimeout(resolve, 750));
+      handleMalformedTerminalData(String(error));
     }
   }
+}
+
+function handleTerminalDisconnect(message: string): void {
+  terminalChannelHealthy = false;
+  terminalDecoder.reset();
+  if (pendingInput.size > 0) {
+    terminalInputDroppedWhileOffline = true;
+  }
+  clearPendingTerminalInput();
+  showTerminalIncident(
+    `Terminal connection lost: ${message}. Input is disabled and will not be replayed.`,
+  );
+  terminalStreamHealth.textContent = "terminal offline · details";
+  terminalStreamHealth.dataset.state = "disconnected";
+  for (const live of liveTerminals.values()) {
+    live.resyncing = false;
+    setLiveState(live, "terminal offline");
+  }
+}
+
+function handleTerminalReset(): void {
+  // A Reset after we had already been online is a reconnect — a recovery
+  // from the outage that preceded it — regardless of whether an incident
+  // notice is still on screen. The very first Reset is a plain first
+  // connect, not a recovery, so it must not surface a recovery notice.
+  const recovered = terminalChannelEverOnline;
+  terminalChannelHealthy = true;
+  terminalChannelEverOnline = true;
+  terminalDecoder.reset();
+  terminalStreamHealth.textContent = recovered
+    ? "terminal recovered · details"
+    : "terminal live";
+  terminalStreamHealth.dataset.state = "connected";
+  if (recovered) {
+    showTerminalIncident(
+      terminalInputDroppedWhileOffline
+        ? "Terminal connection recovered. Input attempted while offline was not sent; terminal views are resynchronizing."
+        : "Terminal connection recovered. Terminal views are resynchronizing.",
+    );
+    terminalInputDroppedWhileOffline = false;
+  } else {
+    clearTerminalIncident();
+  }
+  for (const record of terminals.values()) {
+    discardTerminalView(record);
+    const live = liveTerminals.get(record.id);
+    if (live !== undefined) {
+      live.resyncing = false;
+    }
+    requestTerminalResync(record);
+  }
+}
+
+function handleMalformedTerminalData(message: string): void {
+  terminalDecoder.reset();
+  showTerminalIncident(
+    `Malformed terminal data was discarded (${message}). Requesting a fresh terminal snapshot.`,
+  );
+  setStatus(
+    "Malformed terminal data was discarded; terminal replay requested.",
+  );
+  for (const record of terminals.values()) {
+    discardTerminalView(record);
+    const live = liveTerminals.get(record.id);
+    if (live !== undefined) {
+      live.resyncing = false;
+    }
+    requestTerminalResync(record);
+  }
+}
+
+function showTerminalIncident(message: string): void {
+  terminalIncidentMessage = message;
+  terminalStreamMessage.textContent = message;
+  terminalStreamNotice.hidden = false;
+  terminalStreamHealth.setAttribute("aria-expanded", "true");
+}
+
+// Drop the recallable incident once the channel is cleanly live again, so
+// the health chip stops offering a stale notice on click.
+function clearTerminalIncident(): void {
+  terminalIncidentMessage = null;
+  terminalStreamMessage.textContent = "";
+  terminalStreamNotice.hidden = true;
+  terminalStreamHealth.setAttribute("aria-expanded", "false");
+}
+
+function clearPendingTerminalInput(): void {
+  pendingInput.clear();
+  for (const timer of inputTimers.values()) {
+    window.clearTimeout(timer);
+  }
+  inputTimers.clear();
 }
 
 function queuePendingTerminalFrame(frame: TerminalBinaryFrame): void {
@@ -2558,11 +2692,22 @@ function mountTerminal(record: TerminalRecord): void {
   }
 
   const inputDisposable = terminal.onData((data) => {
-    queueTerminalInput(
-      id,
-      [...encoder.encode(data)],
-      terminalInputIntent(data),
-    );
+    if (!terminalChannelHealthy) {
+      if (terminalChannelEverOnline) {
+        terminalInputDroppedWhileOffline = true;
+        showTerminalIncident(
+          "Terminal input was not sent because the terminal connection is offline. It will not be replayed after reconnect.",
+        );
+      } else {
+        // Never connected yet — refuse quietly rather than alarming the
+        // user with a lost-input notice on a healthy cold start.
+        setStatus(
+          "Terminal is still connecting; input will be enabled once it is live.",
+        );
+      }
+      return;
+    }
+    queueTerminalInput(id, encoder.encode(data), terminalInputIntent(data));
   });
   const resizeDisposable = terminal.onResize(({ cols, rows }) => {
     void sendTerminalFrame(resizeTerminalFrame(id, cols, rows));
@@ -2805,16 +2950,11 @@ function requestTerminalResync(
 
 function queueTerminalInput(
   id: number,
-  bytes: number[],
+  bytes: Uint8Array,
   intent: TerminalInputIntent,
 ): void {
   const pending = pendingInput.get(id) ?? [];
-  const tail = pending.at(-1);
-  if (tail?.intent === intent) {
-    tail.bytes.push(...bytes);
-  } else {
-    pending.push({ bytes, intent });
-  }
+  appendTerminalInput(pending, bytes, intent, maxTerminalWriteBytes);
   pendingInput.set(id, pending);
   if (inputTimers.has(id)) {
     return;
@@ -2839,6 +2979,13 @@ async function flushTerminalInput(id: number): Promise<void> {
         return;
       }
       for (const input of buffered) {
+        // The channel can drop while an earlier input's frames are in
+        // flight. Stop before emitting the rest: those frames would sit in
+        // the native command queue and could race the reconnect drain,
+        // replaying stale keystrokes at freshly-authoritative state.
+        if (!terminalChannelHealthy) {
+          return;
+        }
         await sendTerminalFramesSequentially(
           writeTerminalFrames(
             id,
@@ -3054,7 +3201,7 @@ function initActivitySplitter(): void {
 
 function isFocusModeShortcut(event: KeyboardEvent): boolean {
   return (
-    (event.metaKey || event.ctrlKey) &&
+    event.metaKey !== event.ctrlKey &&
     !event.altKey &&
     !event.shiftKey &&
     event.key === "."
@@ -3063,7 +3210,7 @@ function isFocusModeShortcut(event: KeyboardEvent): boolean {
 
 function isSnippetShortcut(event: KeyboardEvent): boolean {
   return (
-    (event.metaKey || event.ctrlKey) &&
+    event.metaKey !== event.ctrlKey &&
     !event.altKey &&
     !event.shiftKey &&
     (event.key === "j" || event.key === "J")
@@ -5057,18 +5204,6 @@ function recordAnalytics(event: AnalyticsEvent): void {
 }
 
 function handleKeyboard(event: KeyboardEvent): void {
-  if ((event.metaKey || event.ctrlKey) && event.key === ",") {
-    event.preventDefault();
-    if (!setupRequired && !setupDialog.open) {
-      void openSettings();
-    }
-    return;
-  }
-  if (isSnippetShortcut(event)) {
-    event.preventDefault();
-    void openSnippetPicker();
-    return;
-  }
   // Escape closes the filter menu or leaves the search box, ahead of
   // the editable guard so it works while the search input has focus.
   if (event.key === "Escape") {
@@ -5102,21 +5237,13 @@ function handleKeyboard(event: KeyboardEvent): void {
     replyForm.requestSubmit();
     return;
   }
-  if (
-    editable ||
-    setupDialog.open ||
-    confirmDialog.open ||
-    newWorkspaceDialog.open ||
-    snippetDialog.open ||
-    diffDialog.open ||
-    broadcastDialog.open ||
-    jumpDialog.open ||
-    cleanupDialog.open ||
-    inputDialog.open
-  ) {
-    return;
-  }
-  if (event.altKey && /^[1-9]$/.test(event.key)) {
+  const keyboardOwned =
+    editable || document.querySelector("dialog[open]") !== null;
+  // Alt+digit jumps to the Nth live-agent workspace (#975). It's an
+  // explicitly-assigned modifier shortcut, so it runs ahead of the general
+  // resolver (which rejects unassigned Alt/Cmd/Ctrl combos), and only when
+  // no modal/editor owns the keyboard.
+  if (!keyboardOwned && event.altKey && /^[1-9]$/.test(event.key)) {
     const key = liveAgentWorkspaceKeys()[Number(event.key) - 1];
     if (key !== undefined) {
       event.preventDefault();
@@ -5124,50 +5251,47 @@ function handleKeyboard(event: KeyboardEvent): void {
     }
     return;
   }
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    event.preventDefault();
-    navigateWorkspaces(event.key === "ArrowDown" ? 1 : -1);
+  const shortcut = resolveDesktopShortcut(event, keyboardOwned);
+  if (shortcut === null) {
     return;
   }
-  if (
-    event.key === "Enter" &&
-    selectedKey !== null &&
-    shouldHandleWorkspaceEnter(
-      true,
-      editable,
-      target instanceof Element && target.closest("button, a") !== null,
-    )
-  ) {
-    event.preventDefault();
-    selectWorkspace(selectedKey);
-    return;
-  }
-  if (event.key === "o") {
-    event.preventDefault();
+  event.preventDefault();
+  if (shortcut === "settings") {
+    if (!setupRequired) {
+      void openSettings();
+    }
+  } else if (shortcut === "snippets") {
+    void openSnippetPicker();
+  } else if (shortcut === "navigate-down" || shortcut === "navigate-up") {
+    navigateWorkspaces(shortcut === "navigate-down" ? 1 : -1);
+  } else if (shortcut === "open-workspace") {
+    if (
+      selectedKey !== null &&
+      shouldHandleWorkspaceEnter(
+        true,
+        editable,
+        target instanceof Element && target.closest("button, a") !== null,
+      )
+    ) {
+      selectWorkspace(selectedKey);
+    }
+  } else if (shortcut === "sort") {
     void cycleSortMode();
-  } else if (event.key === "r") {
-    event.preventDefault();
+  } else if (shortcut === "reply") {
     replyBody.focus();
-  } else if (event.key === "a") {
-    event.preventDefault();
+  } else if (shortcut === "start-agent") {
     void startAgent();
-  } else if (event.key === "s") {
-    event.preventDefault();
+  } else if (shortcut === "start-shell") {
     void startShell();
-  } else if (event.key === "m") {
-    event.preventDefault();
+  } else if (shortcut === "mark-read") {
     void markSelectedRead();
-  } else if (event.key === "f") {
-    event.preventDefault();
+  } else if (shortcut === "filter") {
     toggleFilterMenu();
-  } else if (event.key === "/") {
-    event.preventDefault();
+  } else if (shortcut === "search") {
     inboxSearch.focus();
-  } else if (event.key === ".") {
-    event.preventDefault();
+  } else if (shortcut === "focus-mode") {
     toggleFocusMode();
-  } else if (event.key === "R") {
-    event.preventDefault();
+  } else if (shortcut === "refresh") {
     void refreshInbox(true);
   } else if (event.key === "v" && selectedKey !== null) {
     event.preventDefault();

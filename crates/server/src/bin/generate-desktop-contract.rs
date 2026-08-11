@@ -3,10 +3,11 @@ compile_error!("run with --features desktop-contract");
 
 use lazybox_server::api_gateway::{
     DESKTOP_PROTOCOL_FINGERPRINT, DESKTOP_PROTOCOL_VERSION, DESKTOP_TERMINAL_STREAM_ITEM_DATA,
-    DESKTOP_TERMINAL_STREAM_ITEM_RESET, DesktopAgentInfo, DesktopAttentionSettings, DesktopCommand,
-    DesktopDaemonSettings, DesktopEvent, DesktopInboxView, DesktopInfo, DesktopModelTier,
-    DesktopRepository, DesktopStreamMessage, DesktopTerminalSnapshot, HealthResponse,
-    ProtocolResponse, TERMINAL_CLIENT_COMMAND_CLOSE, TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK,
+    DESKTOP_TERMINAL_STREAM_ITEM_DISCONNECTED, DESKTOP_TERMINAL_STREAM_ITEM_RESET,
+    DesktopAgentInfo, DesktopAttentionSettings, DesktopCommand, DesktopDaemonSettings,
+    DesktopEvent, DesktopInboxView, DesktopInfo, DesktopModelTier, DesktopRepository,
+    DesktopStreamMessage, DesktopTerminalSnapshot, HealthResponse, ProtocolResponse,
+    TERMINAL_CLIENT_COMMAND_CLOSE, TERMINAL_CLIENT_COMMAND_FETCH_SCROLLBACK,
     TERMINAL_CLIENT_COMMAND_RESIZE, TERMINAL_CLIENT_COMMAND_RESYNC, TERMINAL_CLIENT_COMMAND_WRITE,
     TERMINAL_CLIENT_FRAME_HEADER_BYTES, TERMINAL_CLIENT_FRAME_KIND_OFFSET,
     TERMINAL_CLIENT_FRAME_PAYLOAD_OFFSET, TERMINAL_CLIENT_FRAME_TERMINAL_ID_OFFSET,
@@ -175,6 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
          export const DESKTOP_TERMINAL_STREAM_ITEMS = {{\n\
          \u{20}\u{20}reset: {DESKTOP_TERMINAL_STREAM_ITEM_RESET},\n\
          \u{20}\u{20}data: {DESKTOP_TERMINAL_STREAM_ITEM_DATA},\n\
+         \u{20}\u{20}disconnected: {DESKTOP_TERMINAL_STREAM_ITEM_DISCONNECTED},\n\
          }} as const;\n"
     );
     std::fs::write(output.join("terminal-wire.ts"), terminal_wire)?;

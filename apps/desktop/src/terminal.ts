@@ -40,7 +40,13 @@ export type TerminalInputIntent = "compose" | "submit" | "view";
 
 export type TerminalStreamItem =
   | { kind: "reset" }
+  | { kind: "disconnected"; message: string }
   | { kind: "data"; payload: Uint8Array };
+
+export interface PendingTerminalInput {
+  bytes: number[];
+  intent: TerminalInputIntent;
+}
 
 const serverKinds: Record<number, TerminalBinaryFrameKind | undefined> = {
   [TERMINAL_SERVER_FRAME_KINDS.snapshot]: "snapshot",
@@ -84,6 +90,12 @@ export class TerminalFrameDecoder {
         bodyLength < TERMINAL_SERVER_FRAME_HEADER_BYTES ||
         bodyLength > this.maxFrameBytes
       ) {
+        // Reset clears the whole buffer, including any valid frames already
+        // parsed from this chunk into `frames` above and then discarded by
+        // the throw. That drop is transient, not lost: the caller's
+        // malformed-data handler requests a full resync, which re-delivers
+        // them from an attainable baseline.
+        this.reset();
         throw new Error(`invalid terminal frame length ${bodyLength}`);
       }
       if (
@@ -95,6 +107,7 @@ export class TerminalFrameDecoder {
       const kind =
         serverKinds[view.getUint8(TERMINAL_SERVER_FRAME_LAYOUT.kindOffset)];
       if (kind === undefined) {
+        this.reset();
         throw new Error(
           `unknown terminal frame kind ${view.getUint8(TERMINAL_SERVER_FRAME_LAYOUT.kindOffset)}`,
         );
@@ -148,7 +161,46 @@ export function decodeTerminalStreamItem(
   if (bytes[0] === DESKTOP_TERMINAL_STREAM_ITEMS.data) {
     return { kind: "data", payload: bytes.slice(1) };
   }
+  if (bytes[0] === DESKTOP_TERMINAL_STREAM_ITEMS.disconnected) {
+    return {
+      kind: "disconnected",
+      message: new TextDecoder().decode(bytes.slice(1)),
+    };
+  }
   throw new Error("invalid native terminal stream item");
+}
+
+export function appendTerminalInput(
+  pending: PendingTerminalInput[],
+  bytes: Uint8Array,
+  intent: TerminalInputIntent,
+  maxBufferedBytes: number,
+): void {
+  if (!Number.isInteger(maxBufferedBytes) || maxBufferedBytes < 1) {
+    throw new Error("terminal input buffer limit must be a positive integer");
+  }
+  let offset = 0;
+  const tail = pending.at(-1);
+  if (tail?.intent === intent && tail.bytes.length < maxBufferedBytes) {
+    const take = Math.min(maxBufferedBytes - tail.bytes.length, bytes.length);
+    for (; offset < take; offset += 1) {
+      tail.bytes.push(bytes[offset]!);
+    }
+    if (offset < bytes.length) {
+      tail.intent = "compose";
+    }
+  }
+  while (offset < bytes.length) {
+    const end = Math.min(offset + maxBufferedBytes, bytes.length);
+    const chunk: number[] = [];
+    for (; offset < end; offset += 1) {
+      chunk.push(bytes[offset]!);
+    }
+    pending.push({
+      bytes: chunk,
+      intent: offset === bytes.length ? intent : "compose",
+    });
+  }
 }
 
 export async function sendTerminalFramesSequentially(

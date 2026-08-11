@@ -89,6 +89,7 @@ pub const TERMINAL_WRITE_INTENT_SUBMIT: u8 = 1;
 pub const TERMINAL_WRITE_INTENT_VIEW: u8 = 2;
 pub const DESKTOP_TERMINAL_STREAM_ITEM_RESET: u8 = 0;
 pub const DESKTOP_TERMINAL_STREAM_ITEM_DATA: u8 = 1;
+pub const DESKTOP_TERMINAL_STREAM_ITEM_DISCONNECTED: u8 = 2;
 
 /// Advisory build-identity signal reported through `/v1/protocol`. It
 /// over-approximates the wire contract — a `Cargo.lock` bump or a comment

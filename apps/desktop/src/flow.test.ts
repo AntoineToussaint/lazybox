@@ -8,6 +8,7 @@ const harness = vi.hoisted(() => ({
   invoke: vi.fn(),
   channels: [] as Array<{ onmessage: (message: unknown) => void }>,
   terminalWrites: [] as string[],
+  terminalDataHandlers: [] as Array<(data: string) => void>,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -39,7 +40,8 @@ vi.mock("@xterm/xterm", () => ({
     reset(): void {}
     dispose(): void {}
     attachCustomKeyEventHandler(): void {}
-    onData(): { dispose: () => void } {
+    onData(handler: (data: string) => void): { dispose: () => void } {
+      harness.terminalDataHandlers.push(handler);
       return { dispose: () => {} };
     }
     onResize(): { dispose: () => void } {
@@ -59,6 +61,7 @@ describe("credential-free desktop workflow", () => {
     harness.invoke.mockReset();
     harness.channels.length = 0;
     harness.terminalWrites.length = 0;
+    harness.terminalDataHandlers.length = 0;
   });
 
   it("runs setup, empty-inbox creation, mutations, and terminal recovery", async () => {
@@ -575,6 +578,458 @@ describe("credential-free desktop workflow", () => {
     // leak to the inbox behind it. `f` (open filter menu) stays inert.
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "f" }));
     expect(element("filter-menu").classList.contains("hidden")).toBe(true);
+  });
+
+  it("does not dispatch modified action keys or shortcuts behind rename", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { Snapshot: { workspaces: [pr(42)], terminals: [] } },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "a", metaKey: true }),
+    );
+    expect(commandCalls().some(isSpawnAgentCommand)).toBe(false);
+
+    const rename = [
+      ...element("actions-menu").querySelectorAll<HTMLButtonElement>(
+        ".actions-menu-item",
+      ),
+    ].find((item) => item.textContent === "Rename…");
+    if (rename === undefined) {
+      openActionsMenuLabels();
+    }
+    const renameAction = [
+      ...element("actions-menu").querySelectorAll<HTMLButtonElement>(
+        ".actions-menu-item",
+      ),
+    ].find((item) => item.textContent === "Rename…");
+    renameAction?.click();
+    expect(dialog("rename-dialog").open).toBe(true);
+
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "f" }));
+    expect(commandCalls().some(isSpawnAgentCommand)).toBe(false);
+    expect(element("filter-menu").classList.contains("hidden")).toBe(true);
+  });
+
+  it("refuses terminal input across a native disconnect and resyncs on reconnect", async () => {
+    const terminalReads: Array<(bytes: Uint8Array) => void> = [];
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>((resolve) =>
+          terminalReads.push(resolve),
+        );
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [agentTerminal("github-o-r-42", 7)],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(harness.terminalDataHandlers).toHaveLength(1),
+    );
+
+    terminalReads.shift()?.(new Uint8Array([0]));
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toBe(
+        "terminal live",
+      ),
+    );
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    terminalReads.shift()?.(
+      new Uint8Array([
+        2,
+        ...new TextEncoder().encode("read terminal stream: connection reset"),
+      ]),
+    );
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toContain(
+        "offline",
+      ),
+    );
+
+    const writesBefore = terminalCommandKinds().filter(
+      (kind) => kind === 1,
+    ).length;
+    harness.terminalDataHandlers[0]?.("echo lost\r");
+    await settle();
+    expect(terminalCommandKinds().filter((kind) => kind === 1)).toHaveLength(
+      writesBefore,
+    );
+    expect(element("terminal-stream-message").textContent).toContain(
+      "was not sent",
+    );
+
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    terminalReads.shift()?.(new Uint8Array([0]));
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toContain(
+        "recovered",
+      ),
+    );
+    expect(terminalCommandKinds()).toContain(3);
+
+    harness.terminalDataHandlers[0]?.("echo sent\r");
+    await vi.waitFor(() =>
+      expect(terminalCommandKinds().filter((kind) => kind === 1)).toHaveLength(
+        writesBefore + 1,
+      ),
+    );
+
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    const resyncsBeforeMalformed = terminalCommandKinds().filter(
+      (kind) => kind === 3,
+    ).length;
+    const malformed = new Uint8Array(5);
+    malformed[0] = 1;
+    new DataView(malformed.buffer).setUint32(1, 2049);
+    terminalReads.shift()?.(malformed);
+    await vi.waitFor(() =>
+      expect(element("status-message").textContent).toContain(
+        "Malformed terminal data",
+      ),
+    );
+    expect(terminalCommandKinds().filter((kind) => kind === 3)).toHaveLength(
+      resyncsBeforeMalformed + 1,
+    );
+
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    terminalReads.shift()?.(
+      nativeTerminalData(serverFrame(3, 7, 0, 9, "fresh replay\r\n")),
+    );
+    await vi.waitFor(() =>
+      expect(harness.terminalWrites).toContain("fresh replay\r\n"),
+    );
+  });
+
+  it("refuses input quietly before the first connection without a lost-input notice", async () => {
+    const terminalReads: Array<(bytes: Uint8Array) => void> = [];
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>((resolve) =>
+          terminalReads.push(resolve),
+        );
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [agentTerminal("github-o-r-42", 7)],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(harness.terminalDataHandlers).toHaveLength(1),
+    );
+
+    // The terminal is mounted but the terminal stream has not sent its
+    // first Reset yet: typing must be refused *quietly*, not with the
+    // scary "will not be replayed" lost-input notice.
+    harness.terminalDataHandlers[0]?.("echo early\r");
+    await settle();
+    expect(terminalCommandKinds().filter((kind) => kind === 1)).toHaveLength(0);
+    expect(element("terminal-stream-notice").hidden).toBe(true);
+    expect(element("terminal-stream-message").textContent).toBe("");
+    expect(element("status-message").textContent).toContain("connecting");
+  });
+
+  it("recovers without claiming dropped input when none was attempted", async () => {
+    const terminalReads: Array<(bytes: Uint8Array) => void> = [];
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>((resolve) =>
+          terminalReads.push(resolve),
+        );
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [agentTerminal("github-o-r-42", 7)],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(harness.terminalDataHandlers).toHaveLength(1),
+    );
+
+    terminalReads.shift()?.(new Uint8Array([0]));
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toBe(
+        "terminal live",
+      ),
+    );
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    // Drop and reconnect without ever typing while offline.
+    terminalReads.shift()?.(
+      new Uint8Array([2, ...new TextEncoder().encode("connection reset")]),
+    );
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toContain(
+        "offline",
+      ),
+    );
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    terminalReads.shift()?.(new Uint8Array([0]));
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toContain(
+        "recovered",
+      ),
+    );
+    expect(element("terminal-stream-message").textContent).not.toContain(
+      "was not sent",
+    );
+  });
+
+  it("keeps sending input when the daemon advertises a bad write limit", async () => {
+    const terminalReads: Array<(bytes: Uint8Array) => void> = [];
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          // A non-positive limit would make appendTerminalInput throw inside
+          // the onData callback and break every keystroke without the clamp.
+          max_terminal_write_bytes: 0,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>((resolve) =>
+          terminalReads.push(resolve),
+        );
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [agentTerminal("github-o-r-42", 7)],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(harness.terminalDataHandlers).toHaveLength(1),
+    );
+
+    terminalReads.shift()?.(new Uint8Array([0]));
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toBe(
+        "terminal live",
+      ),
+    );
+    const writesBefore = terminalCommandKinds().filter(
+      (kind) => kind === 1,
+    ).length;
+    harness.terminalDataHandlers[0]?.("x");
+    await vi.waitFor(() =>
+      expect(terminalCommandKinds().filter((kind) => kind === 1)).toHaveLength(
+        writesBefore + 1,
+      ),
+    );
+  });
+
+  it("stops flushing buffered input when the channel drops mid-flush", async () => {
+    const terminalReads: Array<(bytes: Uint8Array) => void> = [];
+    const heldSends: Array<() => void> = [];
+    let holdNextSend = false;
+    harness.invoke.mockImplementation((command: string) => {
+      if (command === "desktop_setup_state") {
+        return Promise.resolve(
+          settingsStateFixture({ selected_scopes: ["github:o"] }),
+        );
+      }
+      if (command === "desktop_info") {
+        return Promise.resolve({
+          protocol_version: 1,
+          max_terminal_frame_bytes: 2048,
+          max_terminal_write_bytes: 1024,
+          agents: ["codex"],
+          default_agent: "codex",
+          repositories: [],
+        });
+      }
+      if (command === "list_workspaces") {
+        return Promise.resolve({ workspaces: [], warnings: [] });
+      }
+      if (command === "read_terminal_data") {
+        return new Promise<Uint8Array>((resolve) =>
+          terminalReads.push(resolve),
+        );
+      }
+      if (command === "send_terminal_frame" && holdNextSend) {
+        holdNextSend = false;
+        return new Promise<void>((resolve) => heldSends.push(resolve));
+      }
+      return Promise.resolve();
+    });
+
+    vi.resetModules();
+    await import("./main");
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [agentTerminal("github-o-r-42", 7)],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(harness.terminalDataHandlers).toHaveLength(1),
+    );
+
+    terminalReads.shift()?.(new Uint8Array([0]));
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toBe(
+        "terminal live",
+      ),
+    );
+
+    // Two distinct intents buffer as two entries in one flush batch; hold
+    // the first write frame in flight so the disconnect lands between them.
+    holdNextSend = true;
+    harness.terminalDataHandlers[0]?.("ab");
+    harness.terminalDataHandlers[0]?.("\r");
+    await vi.waitFor(() => expect(heldSends.length).toBe(1));
+    const writesInFlight = terminalCommandKinds().filter(
+      (kind) => kind === 1,
+    ).length;
+
+    await vi.waitFor(() => expect(terminalReads.length).toBe(1));
+    terminalReads.shift()?.(
+      new Uint8Array([2, ...new TextEncoder().encode("connection reset")]),
+    );
+    await vi.waitFor(() =>
+      expect(element("terminal-stream-health").textContent).toContain(
+        "offline",
+      ),
+    );
+
+    // Releasing the in-flight frame must not let the second buffered entry
+    // go out after the channel is known dead.
+    heldSends[0]?.();
+    await settle();
+    expect(terminalCommandKinds().filter((kind) => kind === 1)).toHaveLength(
+      writesInFlight,
+    );
   });
 
   it("sends automation, snooze, sync, and notes commands from the detail pane", async () => {
@@ -2015,6 +2470,19 @@ function terminalFrameCount(): number {
   return harness.invoke.mock.calls.filter(
     ([command]) => command === "send_terminal_frame",
   ).length;
+}
+
+function terminalCommandKinds(): number[] {
+  return harness.invoke.mock.calls
+    .filter(([command]) => command === "send_terminal_frame")
+    .map(([, frame]) => (frame as Uint8Array)[4])
+    .filter((kind): kind is number => kind !== undefined);
+}
+
+function isSpawnAgentCommand(command: unknown): boolean {
+  return (
+    typeof command === "object" && command !== null && "SpawnAgent" in command
+  );
 }
 
 // Wait out the 80ms debounced resize plus any queued microtasks.

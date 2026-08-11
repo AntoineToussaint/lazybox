@@ -1,5 +1,5 @@
 export const DESKTOP_PROTOCOL_VERSION = 3 as const;
-export const DESKTOP_PROTOCOL_FINGERPRINT = 2440182692 as const;
+export const DESKTOP_PROTOCOL_FINGERPRINT = 265974014 as const;
 export const TERMINAL_SERVER_FRAME_HEADER_BYTES = 25 as const;
 export const TERMINAL_CLIENT_FRAME_HEADER_BYTES = 9 as const;
 export const TERMINAL_SERVER_FRAME_LAYOUT = {
@@ -53,4 +53,5 @@ export const TERMINAL_CLIENT_COMMAND_KINDS = {
 export const DESKTOP_TERMINAL_STREAM_ITEMS = {
   reset: 0,
   data: 1,
+  disconnected: 2,
 } as const;

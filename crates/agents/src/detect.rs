@@ -126,6 +126,54 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
     "monthly limit reached",
 ];
 
+/// Best-effort extraction of the reset time Claude prints alongside a
+/// usage-limit block (`… resets 3pm`, `… resets at 3:00pm`, `… resets in
+/// 2h`) — the "time-to-reset" a proactive usage indicator surfaces
+/// (#1012). Returns a short, display-ready hint (`"3pm"`, `"3:00pm"`,
+/// `"2h"`) or `None` when the banner carries no parseable time.
+///
+/// Parsed from the compacted (space-free, lowercased) buffer, the only
+/// form that survives tmux's cursor-positioned repaint — the banner's
+/// inter-word gaps arrive as cursor moves, not space bytes, so `resets
+/// 3pm` reaches lazybox as `resets3pm`. Every `resets` occurrence is
+/// tried in order and the first that parses a time wins: the chooser's
+/// own "Wait until it resets" line also contains the word but is followed
+/// by a newline, not a digit, so it never captures. Deliberately
+/// conservative — only a leading digit run plus `:` and the am/pm + h/m/s/d
+/// time letters, stopping at the first byte outside that set — so the
+/// trailing `∙` / newline / `❯ 1. wait` never bleeds in, and an
+/// unrecognised phrasing (`resets tomorrow`) yields `None` rather than a
+/// garbled hint. The block still surfaces without a countdown: the
+/// documented degraded path where no usage API exists.
+pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
+    let s = strip_ansi_lossy(recent_output);
+    let compact = compact_lower(&s);
+    // Only meaningful under a live limit banner — never mine a stray
+    // "resets" out of ordinary scrollback. Matched against the space-free
+    // buffer (patterns compacted the same way), so the cursor-positioned
+    // banner still matches.
+    last_compact_match_pos(&compact, CLAUDE_USAGE_LIMIT_PHRASES)?;
+    compact
+        .match_indices("resets")
+        .find_map(|(i, kw)| reset_token(&compact[i + kw.len()..]))
+}
+
+/// The time token immediately after a `resets` keyword, or `None` when
+/// what follows isn't a digit-led time. Skips an `at`/`in` connective
+/// (`resets at 3pm`, `resets in 2h`).
+fn reset_token(after: &str) -> Option<String> {
+    let after = after
+        .strip_prefix("at")
+        .or_else(|| after.strip_prefix("in"))
+        .unwrap_or(after);
+    let token: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, ':' | 'a' | 'p' | 'm' | 'h' | 's' | 'd'))
+        .take(12)
+        .collect();
+    (token.len() >= 2 && token.starts_with(|c: char| c.is_ascii_digit())).then_some(token)
+}
+
 /// Substring "any-of" match. Plain text in; bytes should be passed
 /// through [`strip_ansi_lossy`] first so escape sequences don't split
 /// the markers.
@@ -1909,6 +1957,46 @@ mod tests {
         let bypass =
             "earlier you reached your usage limit\nbypass permissions on (shift+tab to cycle)";
         assert_eq!(claude_state(bypass.as_bytes()), Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn parses_reset_time_from_the_limit_banner() {
+        // The banner's reset countdown is the "time-to-reset" the proactive
+        // indicator surfaces (#1012). The chooser line below it ("Wait
+        // until it resets") also holds the word `resets` but is followed by
+        // a newline, so the banner's `resets 3pm` is what captures.
+        let blocked =
+            "Claude usage limit reached ∙ resets 3pm\n❯ 1. Wait until it resets\n  2. Exit";
+        assert_eq!(
+            parse_usage_limit_reset(blocked.as_bytes()),
+            Some("3pm".into())
+        );
+
+        // `at` / `in` connectives and a clock time are skipped/kept.
+        assert_eq!(
+            parse_usage_limit_reset(b"usage limit reached. resets at 3:00pm"),
+            Some("3:00pm".into()),
+        );
+        assert_eq!(
+            parse_usage_limit_reset(b"reached your usage limit - resets in 2h"),
+            Some("2h".into()),
+        );
+    }
+
+    #[test]
+    fn reset_time_degrades_to_none_when_absent_or_unparseable() {
+        // No banner at all: never mine a stray "resets" out of scrollback.
+        assert_eq!(
+            parse_usage_limit_reset(b"git resets the branch to HEAD"),
+            None
+        );
+        // Banner present but a phrasing the conservative scan can't read —
+        // the documented degraded path (block shows without a countdown).
+        assert_eq!(
+            parse_usage_limit_reset("usage limit reached ∙ resets tomorrow".as_bytes()),
+            None,
+        );
+        assert_eq!(parse_usage_limit_reset(b"usage limit reached"), None);
     }
 
     #[test]

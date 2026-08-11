@@ -804,6 +804,16 @@ pub struct UiSection {
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub show_agent_model: bool,
+    /// Raise an escalating footer alert as agents hit their provider
+    /// usage limit (#1012): a transient notice the moment the first agent
+    /// is rate-limited, escalating to a sticky banner naming the resume
+    /// action while any agent stays blocked, retracted once they all
+    /// recover. The `⏳ N limited` header count and the per-row `⏳` pill
+    /// are always shown; this only gates the footer escalation. Opt-out —
+    /// set `false` to keep the block to the passive header/pill signals.
+    /// Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub usage_limit_alerts: bool,
 }
 
 fn default_true() -> bool {
@@ -841,6 +851,7 @@ impl Default for UiSection {
             keep_awake: false,
             auto_wait_on_limit: false,
             show_agent_model: true,
+            usage_limit_alerts: true,
         }
     }
 }
@@ -884,6 +895,9 @@ pub struct UiDefaults {
     /// Show each agent's model + effort by its badge. See
     /// [`UiSection::show_agent_model`].
     pub show_agent_model: bool,
+    /// Escalate a footer alert as agents hit their usage limit. See
+    /// [`UiSection::usage_limit_alerts`].
+    pub usage_limit_alerts: bool,
     /// Per-pane client-VT scrollback depth, in lines. Mirrors the tmux
     /// backend's `history-limit` so a deep-scrollback fetch renders the
     /// full retained history instead of clipping it to a shallower local
@@ -911,6 +925,7 @@ impl Default for UiDefaults {
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
             show_agent_model: true,
+            usage_limit_alerts: true,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
     }
@@ -948,6 +963,7 @@ impl UiSection {
             confirm_default: self.confirm_default,
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
+            usage_limit_alerts: self.usage_limit_alerts,
             // Sourced from the `terminal` section (see
             // `Config::resolved_ui`); the default stands until that
             // override is applied.

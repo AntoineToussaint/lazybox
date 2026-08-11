@@ -1512,6 +1512,16 @@ pub struct Model<T: TerminalAdapter> {
     /// (Merged/Closed) or on `Event::WorkspaceRemoved`. The merge already
     /// succeeded, so holding MERGED is authoritative, never optimistic.
     merge_confirmed: std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    /// Last reset-time hint parsed from a usage-limit banner
+    /// (`Event::AgentUsageLimit`, #1012); folded into the escalating
+    /// footer alert as `· resets <hint>`. Cleared once no agent is
+    /// rate-limited (the banner it fed is retracted).
+    usage_limit_reset: Option<String>,
+    /// Rate-limited workspace count the escalating usage-limit alert
+    /// (#1012) last reacted to. The rising edge (`0 → ≥1`) raises the
+    /// alert once; the falling edge (`→ 0`) retracts it — so a repeating
+    /// `AgentState` ping at the detector's cadence never re-flashes.
+    usage_limit_count: usize,
     /// Recovered agent terminals whose tmux pane predates the native-
     /// scrollback config because an older lazybox build spawned it, so
     /// scrollback stays broken until the process is reopened (#544). The
@@ -1818,6 +1828,12 @@ const RECONNECTING_NOTICE: &str = "⟳ daemon connection lost — reconnecting�
 /// (e.g. after the daemon is restarted across a reconnect).
 const BUILD_MISMATCH_PREFIX: &str = "build mismatch: daemon ";
 
+/// Stable prefix of the escalating usage-limit banner (#1012). Used to
+/// recognise our own banner so a repeating ping refreshes it and the
+/// falling edge (all agents recovered) retracts it — without touching a
+/// build-mismatch / sync-error banner some other path raised.
+const USAGE_LIMIT_PREFIX: &str = "⏳ ";
+
 /// How many recently-used snippets the picker's "Recent" group holds
 /// (#252). Small enough to stay a shortcut list, not a second library —
 /// the group is a fast lane for the handful of snippets in active use.
@@ -1988,6 +2004,8 @@ impl<T: TerminalAdapter> Model<T> {
             shell_command_config: None,
             pr_details_fetched: std::collections::HashSet::new(),
             merge_confirmed: std::collections::HashSet::new(),
+            usage_limit_reset: None,
+            usage_limit_count: 0,
             outdated_scroll_terminals: std::collections::HashSet::new(),
             outdated_scroll_hinted: None,
             no_permission_hinted: None,
@@ -3630,6 +3648,64 @@ impl<T: TerminalAdapter> Model<T> {
             // mismatch banner instead of leaving it up forever.
             self.status.notice = None;
             self.redraw = true;
+        }
+    }
+
+    /// Reconcile the escalating usage-limit alert (#1012) with the number
+    /// of workspaces whose agent is currently blocked on its provider
+    /// usage limit. The passive `⏳ N limited` header count and the
+    /// per-row `⏳` pills always render; this is the escalation on top of
+    /// them: a sticky footer banner naming the resume action (and the
+    /// parsed reset time where one is known), raised while any agent is
+    /// blocked and retracted once they all recover. Gated by
+    /// `ui.usage_limit_alerts` — off leaves only the passive signals.
+    ///
+    /// Called on every `AgentState` and `AgentUsageLimit` event, both of
+    /// which repeat at the detector's cadence, so it must be edge-driven:
+    /// the banner is (re-)raised only on the rising edge or while our own
+    /// banner is still the one on screen, never clobbering a sync-error /
+    /// build-mismatch banner some other path owns on every ping.
+    pub(super) fn refresh_usage_limit_alert(&mut self) {
+        let count = self.sidebar.limit_reached_workspace_count();
+        let was = std::mem::replace(&mut self.usage_limit_count, count);
+        if count == 0 {
+            // All recovered: drop the stale reset hint and retract our
+            // banner if it's still the one up.
+            self.usage_limit_reset = None;
+            if self
+                .status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.starts_with(USAGE_LIMIT_PREFIX))
+            {
+                self.status.notice = None;
+                self.redraw = true;
+            }
+            return;
+        }
+        if !self.ui_defaults.usage_limit_alerts {
+            return;
+        }
+        let mine_up = self
+            .status
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.message.starts_with(USAGE_LIMIT_PREFIX));
+        // Rising edge raises it (over whatever was there — a block that
+        // can lose an agent's state mid-task is worth the interruption);
+        // while blocked we only refresh our own banner, so a later
+        // sync-error banner isn't fought back every ping.
+        if was == 0 || mine_up {
+            let reset = self
+                .usage_limit_reset
+                .as_deref()
+                .map(|r| format!(" · resets {r}"))
+                .unwrap_or_default();
+            let plural = if count == 1 { "" } else { "s" };
+            self.flash(
+                format!("{USAGE_LIMIT_PREFIX}{count} agent{plural} rate-limited{reset} — Shift-K to resume"),
+                crate::realm::components::footer::NoticeSeverity::Permanent,
+            );
         }
     }
 

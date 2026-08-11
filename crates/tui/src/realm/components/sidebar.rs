@@ -473,6 +473,11 @@ impl Sidebar {
         self.inner.limit_reached_terminals()
     }
 
+    /// See `Sidebar::limit_reached_workspace_count`.
+    pub fn limit_reached_workspace_count(&self) -> usize {
+        self.inner.limit_reached_workspace_count()
+    }
+
     /// Move the cursor onto the `n`th (1-based) agent workspace in
     /// sidebar order. Returns true when that slot exists. Backs the
     /// `]]<digit>` focus-mode jump.

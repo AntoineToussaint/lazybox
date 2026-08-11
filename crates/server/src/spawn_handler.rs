@@ -6083,6 +6083,30 @@ async fn commit_pty_reading(
         | lazybox_agents::Outcome::Unchanged
         | lazybox_agents::Outcome::Rejected => {}
     }
+    // A fresh entry into the usage-limit block: mine the reset countdown
+    // from the same detect window and broadcast it as the proactive
+    // "time-to-reset" (#1012). `Committed(LimitReached)` is already a
+    // change into the block, so this fires once per episode (mirroring
+    // `detect_and_broadcast_model`'s broadcast-on-change). Emitted only
+    // when a hint parses — the block itself rode `Event::AgentState`
+    // above; clients fold this countdown in where the banner named one,
+    // and degrade to the bare block where it didn't.
+    if let lazybox_agents::Outcome::Committed(lazybox_ipc::AgentState::LimitReached) = outcome
+        && let Some(reset_hint) = lazybox_agents::detect::parse_usage_limit_reset(detect_window)
+    {
+        let session_key = terminals
+            .terminal_meta
+            .lock()
+            .await
+            .get(&id)
+            .map(|(sk, _)| sk.clone())
+            .unwrap_or_else(|| session_key.clone());
+        let _ = bus.send(Event::AgentUsageLimit {
+            session_key,
+            terminal_id: id,
+            reset_hint,
+        });
+    }
 }
 
 /// Byte ceiling on a single `TerminalScrollback` reply. The out-of-process
@@ -15576,6 +15600,42 @@ mod tests {
             p.quiet().await,
             vec![Done],
             "a quiet working agent has finished — settle to Done, don't spin",
+        );
+    }
+
+    /// #1012: when the pump commits a usage-limit block it also mines the
+    /// reset countdown from the same screen and broadcasts it as
+    /// `Event::AgentUsageLimit`, so the proactive header/footer indicator
+    /// can show the time-to-reset. The `LimitReached` state rides its own
+    /// `AgentState` event as before.
+    #[tokio::test]
+    async fn usage_limit_commit_broadcasts_the_reset_hint() {
+        use lazybox_ipc::AgentState::LimitReached;
+        // "Claude usage limit reached ∙ resets 3pm" + the Wait/Exit chooser.
+        let banner = b"working...\n\x1b[2JClaude usage limit reached \xe2\x88\x99 resets 3pm\n\xe2\x9d\xaf 1. Wait until it resets\n  2. Exit";
+        let mut p = PumpDriver::new(Duration::ZERO, Duration::ZERO);
+        p.feed(b"thinking...\n").await;
+        p.feed(banner).await;
+        // Capture the raw bus from here: `quiet`'s `drain` keeps only
+        // `AgentState` events, so subscribe before it fires to see the
+        // `AgentUsageLimit` companion.
+        let mut raw = p.bus.subscribe();
+        assert!(
+            p.quiet().await.contains(&LimitReached),
+            "the resting banner classifies as the usage-limit block",
+        );
+        let hint = std::iter::from_fn(|| raw.try_recv().ok()).find_map(|ev| match ev {
+            Event::AgentUsageLimit {
+                terminal_id,
+                reset_hint,
+                ..
+            } if terminal_id == p.id => Some(reset_hint),
+            _ => None,
+        });
+        assert_eq!(
+            hint.as_deref(),
+            Some("3pm"),
+            "the reset countdown rides an AgentUsageLimit event",
         );
     }
 

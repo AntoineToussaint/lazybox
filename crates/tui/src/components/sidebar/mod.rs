@@ -1220,6 +1220,20 @@ impl Sidebar {
         ids
     }
 
+    /// Number of distinct workspaces with at least one agent terminal in
+    /// `LimitReached` — the `⏳ N limited` header count and the size the
+    /// escalating usage-limit alert (#1012) reports. Counts workspaces,
+    /// not terminals: two blocked agents in one workspace are one row's
+    /// worth of "act externally" signal.
+    pub fn limit_reached_workspace_count(&self) -> usize {
+        self.agent_terminal_states
+            .values()
+            .filter(|(_, state)| *state == lazybox_ipc::AgentState::LimitReached)
+            .map(|(sk, _)| sk)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    }
+
     /// The visible workspace keys in sidebar (top-down) order — shared by
     /// the attention jumps and the rate-limited target set.
     fn visible_workspace_keys(&self) -> Vec<SessionKey> {

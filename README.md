@@ -64,15 +64,10 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybo
 
 Then `gh auth login` (if you haven't) and run `lazybox`.
 
-**Desktop app (macOS):** the Tauri client ships as a signed + notarized
-Homebrew cask, released from the same tag as the TUI:
-
-```sh
-brew install --cask lazybox-desktop   # after `brew tap AntoineToussaint/lazybox`
-```
-
-Update it with `brew upgrade --cask lazybox-desktop`; the universal `.dmg` is
-also attached to each [GitHub Release](https://github.com/AntoineToussaint/lazybox/releases).
+**Desktop app (macOS):** a Tauri desktop client is in the works but **not yet
+released** — there is no `lazybox-desktop` Homebrew cask or `.dmg` to install
+today. Run the TUI above; the signed cask and `.dmg` download will land here with
+the first desktop release.
 
 Lazybox checks for newer builds at startup and shows an update notice when one
 is available. It never updates itself: the notice identifies Homebrew versus

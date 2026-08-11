@@ -48,8 +48,8 @@ users and only if it can run *alongside* the direct channel.
 | Universal (`arm64` + `x86_64`) | Required | Required | ✅ Yes |
 | **App Sandbox** | **Not required** | **Required** | ❌ Not sandboxed |
 | Hardened runtime | Not mandated | Required | Tauri default |
-| Spawn external processes (`claude`/`gh`/`git`) | **Allowed** (no sandbox) | Blocked without unavailable temp exceptions | Core dependency |
-| Arbitrary FS / git worktrees | **Allowed** | Blocked (user-selected scope only) | Core dependency |
+| Spawn external processes (`claude`/`gh`/`git`) | **No sandbox obstacle** (confirm w/ review team) | Blocked without unavailable temp exceptions | Core dependency |
+| Arbitrary FS / git worktrees | **No sandbox obstacle** (confirm w/ review team) | Blocked (user-selected scope only) | Core dependency |
 
 The [Setapp app-preparation requirements](https://docs.setapp.com/docs/preparing-your-application-for-setapp)
 list notarization, Developer ID signing, and a universal binary as the
@@ -71,12 +71,15 @@ policy-compliant build variant, and the review cycle.
    the user has an active Setapp subscription and (b) report usage after the
    user exercises the app's main functionality (Setapp computes revenue from
    these reports). The framework is **Swift/Objective-C first**, with wrappers
-   for Electron, Flutter, and Node — but **no first-class Tauri/Rust binding**.
-   For our Rust-shell Tauri app that means either linking the macOS
-   `xcframework` from Rust over an Objective-C FFI shim, or bundling a tiny
-   native helper the shell talks to. This is the bulk of the effort and the
-   main unknown. The check should run at launch / new session, matching
-   Setapp's guidance to re-verify each time the user accesses the app.
+   for Electron, Flutter, and Node — but, per the framework README's listed
+   integrations, **no first-class Tauri/Rust binding** (not verified beyond the
+   README — confirming this is spike step 1, since a community binding would
+   shrink the estimate). For our Rust-shell Tauri app that most likely means
+   either linking the macOS `xcframework` from Rust over an Objective-C FFI
+   shim, or bundling a tiny native helper the shell talks to. This is the bulk
+   of the effort and the main unknown. The check should run at launch / new
+   session, matching Setapp's guidance to re-verify each time the user accesses
+   the app.
 
 2. **A separate, policy-compliant build target.** Setapp **forbids proprietary
    installers, self-update frameworks, and activation/licensing mechanisms**,
@@ -173,7 +176,7 @@ packaging, which is solved.
 |---|---|---|---|---|---|
 | **Direct cask + own subscription** (Lane 1) | Full price, full margin | Owned | Scoped in #641 | Intact | **Primary — do this first** |
 | **Setapp** | Usage-pool share, unpredictable, diluted | Owned by Setapp | +M (framework + review) | Severed | Secondary experiment, later |
-| **Mac App Store** | 15–30% commission, direct | Apple-mediated | **XL / likely infeasible** | n/a | No — sandbox blocks process-spawning |
+| **Mac App Store** | Apple commission (15% under the Small Business Program, else 30%), direct | Apple-mediated | **XL / likely infeasible** | n/a | No — sandbox blocks process-spawning |
 
 **Recommendation:** proceed with the direct Homebrew-cask + own-license path
 already planned (Lane 1). **Defer Setapp** to a later, optional experiment once

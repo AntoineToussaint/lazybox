@@ -2292,6 +2292,22 @@ pub enum Event {
     ErrorInbox {
         errors: Vec<ErrorInboxRecord>,
     },
+    /// A terminal freshly entered a provider usage-limit block
+    /// (`AgentState::LimitReached`, #847) and its banner named a reset
+    /// time — the proactive "time-to-reset" a usage indicator surfaces
+    /// (#1012). Carries only the parsed hint; the `LimitReached` state
+    /// itself already rides `AgentState`, so a client tracks the blocked
+    /// set from that and folds this in as the countdown text where a
+    /// hint parsed. `reset_hint` is a display-ready fragment (`"3pm"`,
+    /// `"2h"`); it is `None`-worthy at the source, but the event is only
+    /// emitted when a hint parsed, so the field is always `Some` on the
+    /// wire and clears when the agent leaves the block. Appended last
+    /// (bincode is ordinal-sensitive).
+    AgentUsageLimit {
+        session_key: SessionKey,
+        terminal_id: TerminalId,
+        reset_hint: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -3274,6 +3274,112 @@ snippets:
         );
     }
 
+    /// #1012: the escalating usage-limit alert rides the count of
+    /// rate-limited workspaces — a sticky footer banner (naming the
+    /// resume action, plus the parsed reset time) raised as agents hit
+    /// the wall, updated as the count grows, retracted once they all
+    /// recover. The passive header count tracks the same set.
+    #[test]
+    fn usage_limit_alert_escalates_and_retracts_with_the_blocked_count() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        assert_eq!(m.sidebar.limit_reached_workspace_count(), 0);
+        assert!(m.status.notice.is_none(), "nothing blocked yet");
+
+        // First agent hits its usage limit → sticky banner + header count.
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::LimitReached,
+        });
+        assert_eq!(m.sidebar.limit_reached_workspace_count(), 1);
+        let n = m.status.notice.as_ref().expect("banner raised");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(n.message.contains("1 agent rate-limited"), "{}", n.message);
+
+        // The reset countdown folds into the same banner.
+        m.handle_daemon_event(IpcEvent::AgentUsageLimit {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            reset_hint: "3pm".into(),
+        });
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("resets 3pm"),
+            "{}",
+            m.status.notice.as_ref().unwrap().message,
+        );
+
+        // A second agent blocks → count and banner escalate together.
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[1].clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::LimitReached,
+        });
+        assert_eq!(m.sidebar.limit_reached_workspace_count(), 2);
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("2 agents rate-limited"),
+            "{}",
+            m.status.notice.as_ref().unwrap().message,
+        );
+
+        // Both recover → banner retracts, count clears.
+        for (k, t) in [
+            (keys[0].clone(), TerminalId(1)),
+            (keys[1].clone(), TerminalId(2)),
+        ] {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: k,
+                terminal_id: t,
+                state: AgentState::Working,
+            });
+        }
+        assert_eq!(m.sidebar.limit_reached_workspace_count(), 0);
+        assert!(
+            m.status.notice.is_none(),
+            "banner retracted once every agent recovered",
+        );
+    }
+
+    /// #1012: `ui.usage_limit_alerts = false` suppresses the escalating
+    /// sticky banner, but the passive `⏳ N limited` header count still
+    /// tracks the blocked set. The opt-out only silences the escalation —
+    /// the transient #847 rising-edge hint ("hit its usage limit —
+    /// Shift-L/Shift-K") still fires, so the assertion targets the sticky
+    /// (`Permanent`) banner specifically, not any footer notice.
+    #[test]
+    fn usage_limit_alert_disabled_keeps_header_count_but_raises_no_banner() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::LimitReached,
+        });
+        assert_eq!(m.sidebar.limit_reached_workspace_count(), 1);
+        assert!(
+            !m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.severity == NoticeSeverity::Permanent),
+            "escalation opted out — no sticky banner despite the block",
+        );
+    }
+
     /// #836: a session-less workspace with NO repo scope (nothing to
     /// spawn into) stays skipped — no confirm gate, named in the notice.
     #[test]

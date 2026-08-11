@@ -988,8 +988,19 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentResumeFallback { .. }
                 | IpcEvent::TerminalModelChanged { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. }
+                | IpcEvent::AgentUsageLimit { .. }
                 | IpcEvent::ErrorInbox { .. } => {}
             }
+        }
+        // The reset countdown parsed from a usage-limit banner (#1012):
+        // stash it and refresh the escalating alert so the sticky banner
+        // gains its `· resets <hint>` fragment. The `LimitReached` state
+        // itself rode an `AgentState` event (handled below); this only
+        // enriches the countdown text, so it's a leaf — no pane fan-out.
+        if let IpcEvent::AgentUsageLimit { reset_hint, .. } = &event {
+            self.usage_limit_reset = Some(reset_hint.clone());
+            self.refresh_usage_limit_alert();
+            return;
         }
         // Agent-state pings repeat at the detector's cadence while an
         // agent streams. Forward them (the asking/working sets and the
@@ -1011,6 +1022,10 @@ impl<T: TerminalAdapter> Model<T> {
             if let Some(msg) = self.sidebar.drain_pending_asking_notices().pop() {
                 self.flash_hint(msg);
             }
+            // The sidebar just folded this state in, so the rate-limited
+            // count is current: reconcile the escalating usage-limit alert
+            // (#1012) — raises/retracts its banner on the count's edges.
+            self.refresh_usage_limit_alert();
             self.right.on_daemon_event(&event);
             self.terminals.on_daemon_event(&event);
             if changed {
@@ -1779,6 +1794,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentResumeFallback { .. }
             | IpcEvent::TerminalModelChanged { .. }
             | IpcEvent::RecoveredTerminalsRequireRestart { .. }
+            | IpcEvent::AgentUsageLimit { .. }
             | IpcEvent::ErrorInbox { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -2043,6 +2059,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentResumeFallback { .. }
                 | IpcEvent::TerminalModelChanged { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. }
+                | IpcEvent::AgentUsageLimit { .. }
                 | IpcEvent::ErrorInbox { .. } => {}
             }
         }

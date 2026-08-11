@@ -1005,6 +1005,11 @@ fn all_events() -> Vec<Event> {
                 last_seen: sample_time(),
             }],
         },
+        Event::AgentUsageLimit {
+            session_key: key.clone(),
+            terminal_id: TerminalId(14),
+            reset_hint: "3pm".into(),
+        },
     ]
 }
 
@@ -1177,6 +1182,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentResumeFallback { .. } => "AgentResumeFallback",
         Event::TerminalModelChanged { .. } => "TerminalModelChanged",
         Event::ErrorInbox { .. } => "ErrorInbox",
+        Event::AgentUsageLimit { .. } => "AgentUsageLimit",
     }
 }
 
@@ -1193,7 +1199,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        80,
+        81,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

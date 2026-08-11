@@ -128,6 +128,24 @@ impl Sidebar {
             }
             signal_spans.push(Span::styled("☼ awake", Style::default().fg(theme.text_dim)));
         }
+        // Usage-limit indicator (#1012): the count of workspaces whose
+        // agent is blocked on its provider usage limit, so the proactive
+        // "act before more hit the wall" signal reads at a glance next to
+        // the `?` input count. Same `⏳` glyph as the per-row pill.
+        let limited = self.limit_reached_workspace_count();
+        if limited > 0 {
+            if !signal_spans.is_empty() {
+                signal_spans.push(Span::raw("  "));
+            }
+            signal_spans.push(Span::styled(
+                "⏳ ",
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            ));
+            signal_spans.push(Span::styled(
+                format!("{limited} limited"),
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            ));
+        }
 
         let mut summary_spans: Vec<Span> = Vec::with_capacity(4);
         summary_spans.push(Span::styled(

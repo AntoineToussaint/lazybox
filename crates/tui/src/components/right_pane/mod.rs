@@ -38,6 +38,58 @@ use lazybox_ipc::{Command, Event};
 use ratatui::Frame;
 use ratatui::prelude::*;
 use ratatui::widgets::*;
+use std::rc::Rc;
+
+/// Width the layout-sizing render (`task_body_content_rows`) uses — a
+/// conservative default column count, chosen before the real pane width
+/// is known (see `task_body_content_rows`).
+const TASK_BODY_SIZE_WIDTH: u16 = 80;
+
+/// Content-addressed cache of the rendered description body (#1031).
+/// `comment_render::render_body` is O(body size) with heavy per-word
+/// allocation and was previously run twice per frame — once to size the
+/// layout, once to draw — with no memoization, so a large PR/issue body
+/// with the description expanded was a per-frame render stall. The cache
+/// is keyed by the body text itself, so it can never render stale
+/// content; it holds the uncapped render per column width the layout
+/// asks for (the width-80 sizing pass plus the live pane width).
+#[derive(Default)]
+struct TaskBodyCache {
+    body: String,
+    /// `body_wants_rich_modal(&body)`, computed once per body change so
+    /// the per-frame header glyph doesn't rescan the whole body.
+    rich_modal: bool,
+    by_width: Vec<(u16, Rc<Vec<Line<'static>>>)>,
+}
+
+/// Cheap scan for markdown the inline teaser degrades badly enough that
+/// the full reader is worth offering even for a short body: fenced code
+/// blocks, GFM tables, and images. Pure over the body text, so the
+/// result is memoized per body in [`TaskBodyCache`] (#1031).
+fn body_wants_rich_modal(body: &str) -> bool {
+    if body.contains("![") {
+        return true; // markdown image
+    }
+    for line in body.lines() {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            return true; // fenced code block
+        }
+    }
+    // A GFM table delimiter row — `| --- | :--: |` — is unambiguous and
+    // is what the teaser flattens into an unreadable single line. Skip
+    // lines indented into an (unfenced) code block: 4+ leading spaces or
+    // a leading tab makes it indented code, where a `| --- |`-shaped
+    // line is literal text, not a table delimiter.
+    body.lines().any(|line| {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        if indent >= 4 || line.starts_with('\t') {
+            return false;
+        }
+        let t = line.trim();
+        t.contains('|') && t.contains('-') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+    })
+}
 
 pub struct RightPane {
     id: PaneId,
@@ -160,6 +212,9 @@ pub struct RightPane {
     /// (which only moves `comment_scroll`) reuses it untouched. See
     /// [`ActivityBuffer`] for why this is what keeps scroll responsive.
     activity_buffer: Option<ActivityBuffer>,
+    /// Content-addressed memo for the description-body render (#1031).
+    /// See [`TaskBodyCache`].
+    task_body_cache: TaskBodyCache,
     /// Revision counter for the workspace's activity *content*. Bumped
     /// by [`RightPane::refresh_activity_rev`] whenever the stored
     /// workspace's activity set actually mutates (new / edited /
@@ -384,6 +439,7 @@ impl RightPane {
             pending_open_description: false,
             body_overflows: false,
             activity_buffer: None,
+            task_body_cache: TaskBodyCache::default(),
             activity_rev: 0,
             activity_identity: 0,
             #[cfg(test)]
@@ -2216,6 +2272,10 @@ impl RightPane {
     }
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
+        // Refresh the description-body render memo (#1031) before the
+        // layout constraint and the body render both read it — otherwise
+        // each re-parses the raw markdown every frame.
+        self.refresh_task_body_cache();
         // Use ratatui's native layout solver to share the vertical
         // budget between the description (collapsible) and the
         // activity feed. `Constraint::Max(...)` lets the body shrink
@@ -2367,11 +2427,70 @@ impl RightPane {
         if cap == 0 {
             return 0;
         }
-        // Width-aware render so wrapping affects the count. 80 is a
-        // conservative default — actual render uses `area.width`,
-        // which is always ≥ this for any practical terminal.
-        let rendered = crate::components::comment_render::render_body(body, 80, cap);
-        (rendered.len() as u16).min(self.task_body_max_rows)
+        // Width-aware count so wrapping affects it. `TASK_BODY_SIZE_WIDTH`
+        // is a conservative default — actual render uses `area.width`,
+        // which is always ≥ this for any practical terminal. `render`
+        // primes this width in the cache (see `refresh_task_body_cache`),
+        // so this normally reads the memo; the direct render is a
+        // fallback for a `&self` caller that didn't run through `render`.
+        let len = self
+            .task_body_cache
+            .by_width
+            .iter()
+            .find(|(w, _)| *w == TASK_BODY_SIZE_WIDTH)
+            .map(|(_, lines)| lines.len())
+            .unwrap_or_else(|| {
+                crate::components::comment_render::render_body(body, TASK_BODY_SIZE_WIDTH, cap)
+                    .len()
+            });
+        (len as u16).min(self.task_body_max_rows)
+    }
+
+    /// Rebuild the description-body render memo when the body changed,
+    /// and pre-render the width-80 sizing pass the layout constraint
+    /// reads — but only while the body is actually shown, so a collapsed
+    /// description costs nothing. Content-addressed by the body text, so
+    /// the cache can never serve stale content.
+    fn refresh_task_body_cache(&mut self) {
+        let changed = match self.task_body_str() {
+            Some(body) => self.task_body_cache.body != body,
+            None => !self.task_body_cache.body.is_empty(),
+        };
+        if changed {
+            let body = self.task_body_str().map(str::to_owned).unwrap_or_default();
+            self.task_body_cache.rich_modal = !body.is_empty() && body_wants_rich_modal(&body);
+            self.task_body_cache.by_width.clear();
+            self.task_body_cache.body = body;
+        }
+        if self.task_body_view.is_visible() && !self.task_body_cache.body.is_empty() {
+            self.cache_body_at_width(TASK_BODY_SIZE_WIDTH);
+        }
+    }
+
+    /// Fetch (or render + memoize) the uncapped body render at `width`.
+    /// The cache holds at most the sizing width plus the current pane
+    /// width — a resize drops the prior pane-width entry rather than
+    /// letting `by_width` grow.
+    fn cache_body_at_width(&mut self, width: u16) -> Rc<Vec<Line<'static>>> {
+        if let Some((_, lines)) = self
+            .task_body_cache
+            .by_width
+            .iter()
+            .find(|(w, _)| *w == width)
+        {
+            return lines.clone();
+        }
+        self.task_body_cache
+            .by_width
+            .retain(|(w, _)| *w == TASK_BODY_SIZE_WIDTH || *w == width);
+        let body = self.task_body_cache.body.clone();
+        let lines = Rc::new(crate::components::comment_render::render_body(
+            &body,
+            width,
+            usize::MAX,
+        ));
+        self.task_body_cache.by_width.push((width, lines.clone()));
+        lines
     }
 
     fn has_task_body(&self) -> bool {
@@ -2397,19 +2516,15 @@ impl RightPane {
     /// work brief); PR descriptions get the same treatment.
     fn render_task_body(&mut self, area: Rect, frame: &mut Frame) {
         let theme = crate::theme::current();
-        let body: String = match self.task_body_str() {
-            Some(s) => s.to_string(),
-            None => {
-                self.click_hits.body_header_row = None;
-                self.click_hits.body_more_row = None;
-                self.body_overflows = false;
-                return;
-            }
-        };
+        if self.task_body_str().is_none() {
+            self.click_hits.body_header_row = None;
+            self.click_hits.body_more_row = None;
+            self.body_overflows = false;
+            return;
+        }
         // First row of the section is the toggle header — clicks
         // here toggle `task_body_view` (Collapsed ⇄ Preview).
         self.click_hits.body_header_row = if area.height > 0 { Some(area.y) } else { None };
-        let body = body.as_str();
 
         // Build the body rows first so we know whether the reader modal
         // is the right next action *before* labelling the header — the
@@ -2423,28 +2538,24 @@ impl RightPane {
             // more would overflow the rect ratatui carved out for us.
             let body_rows = area.height.saturating_sub(1) as usize;
             if body_rows > 0 {
-                // Render uncapped, then truncate here so we control
-                // the trailer — `render_body`'s own `+N more lines`
-                // row is inert; ours carries the read-full affordance
-                // and gets registered as a click target. (The cap
-                // only trims the tail, so rendering uncapped costs
-                // no more work.)
-                let rendered = crate::components::comment_render::render_body(
-                    body,
-                    area.width.saturating_sub(2),
-                    usize::MAX,
-                );
+                // Uncapped render from the memo, then truncate here so we
+                // control the trailer — `render_body`'s own `+N more
+                // lines` row is inert; ours carries the read-full
+                // affordance and gets registered as a click target. (The
+                // cap only trims the tail, so rendering uncapped costs no
+                // more work.)
+                let rendered = self.cache_body_at_width(area.width.saturating_sub(2));
                 if rendered.len() > body_rows {
                     self.body_overflows = true;
                     let kept = body_rows.saturating_sub(1);
                     let dropped = rendered.len() - kept;
-                    body_lines.extend(rendered.into_iter().take(kept));
+                    body_lines.extend(rendered.iter().take(kept).cloned());
                     // The trailer is the next row (header + body so far) —
                     // clicking it (or a second `d`) opens the reader modal.
                     self.click_hits.body_more_row = Some(area.y + 1 + body_lines.len() as u16);
                     body_lines.push(more_lines_trailer(dropped, theme));
                 } else {
-                    body_lines.extend(rendered);
+                    body_lines.extend(rendered.iter().cloned());
                 }
             }
         }
@@ -2453,8 +2564,12 @@ impl RightPane {
         // the "read it all" path (via the `+N more` trailer or a second
         // `d`), so there's no inline "full" state. In Preview the `d`
         // hint reflects whether `d` will open the reader (body truncated,
-        // or rich markdown the teaser degrades) or simply collapse.
-        let reader = self.wants_full_modal();
+        // or rich markdown the teaser degrades) or simply collapse. The
+        // richness scan is read from the memo (#1031) rather than
+        // rescanned per frame; `body_overflows` was just set above.
+        let reader = self.body_overflows
+            || self.task_body_cache.rich_modal
+            || !self.linked_issue_tasks().is_empty();
         let (glyph, suffix) = match self.task_body_view {
             TaskBodyView::Collapsed => ("▶", "  (d · expand)"),
             TaskBodyView::Preview if reader => ("▼", "  (d · read full)"),
@@ -2519,7 +2634,9 @@ impl RightPane {
         // A PR with a linked issue always earns the reader modal: that's
         // where both descriptions are shown together (#462), even when
         // the PR's own body is short and plain.
-        self.body_overflows || self.body_wants_rich_modal() || !self.linked_issue_tasks().is_empty()
+        self.body_overflows
+            || self.task_body_str().is_some_and(body_wants_rich_modal)
+            || !self.linked_issue_tasks().is_empty()
     }
 
     /// Linked issues whose descriptions the reader modal appends after
@@ -2545,39 +2662,6 @@ impl RightPane {
                     .is_some_and(|b| !b.is_empty())
             })
             .collect()
-    }
-
-    /// Cheap scan for markdown the inline teaser degrades badly enough
-    /// that the full reader is worth offering even for a short body:
-    /// fenced code blocks, GFM tables, and images.
-    fn body_wants_rich_modal(&self) -> bool {
-        let Some(body) = self.task_body_str() else {
-            return false;
-        };
-        if body.contains("![") {
-            return true; // markdown image
-        }
-        for line in body.lines() {
-            let t = line.trim_start();
-            if t.starts_with("```") || t.starts_with("~~~") {
-                return true; // fenced code block
-            }
-        }
-        // A GFM table delimiter row — `| --- | :--: |` — is unambiguous
-        // and is what the teaser flattens into an unreadable single line.
-        // Skip lines indented into an (unfenced) code block: 4+ leading
-        // spaces or a leading tab makes it indented code, where a
-        // `| --- |`-shaped line is literal text, not a table delimiter.
-        body.lines().any(|line| {
-            let indent = line.len() - line.trim_start_matches(' ').len();
-            if indent >= 4 || line.starts_with('\t') {
-                return false;
-            }
-            let t = line.trim();
-            t.contains('|')
-                && t.contains('-')
-                && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
-        })
     }
 
     /// Queue the reader modal for the focused body and fold the inline

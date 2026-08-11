@@ -82,6 +82,33 @@ impl Sidebar {
         }
     }
 
+    /// Bracket a daemon-event drain batch so a poll sweep of N workspace
+    /// upserts rebuilds the visible list once rather than N times (#1030).
+    /// Paired with [`Self::flush_recompute`], mirroring the model's
+    /// per-batch `flush_pane_sync`.
+    pub fn begin_recompute_batch(&mut self) {
+        self.inner.begin_recompute_batch();
+    }
+
+    /// Close the batch and rebuild the visible list once if any deferred
+    /// event asked for it.
+    pub fn flush_recompute(&mut self) {
+        self.inner.flush_recompute();
+    }
+
+    /// Test-only: number of full visible-list rebuilds performed so far —
+    /// lets the drain-coalescing regression assert one rebuild per batch.
+    #[cfg(test)]
+    pub fn recompute_count(&self) -> usize {
+        self.inner.recompute_count()
+    }
+
+    /// Test-only: number of workspace rows currently in the visible list.
+    #[cfg(test)]
+    pub fn visible_workspace_count(&self) -> usize {
+        self.inner.visible_workspace_count()
+    }
+
     /// Forward `displays_agent_state` — true when the inner sidebar
     /// already shows `state` for this session, so a repeated
     /// `AgentState` ping needs no redraw.

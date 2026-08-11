@@ -127,6 +127,20 @@ pub struct Sidebar {
     /// builder for the `⇗` indicator and by the merge dispatch to warn
     /// before merging a child ahead of its still-open parent.
     stacks: HashMap<SessionKey, lazybox_core::StackPosition>,
+    /// Batched-recompute state for a daemon-event drain (#1030). While
+    /// `defer_recompute` is set — the model brackets a whole drain batch
+    /// with `begin_recompute_batch` / `flush_recompute` — the O(N log N)
+    /// `recompute_visible` records that a rebuild is owed in
+    /// `recompute_pending` instead of running per event, so a poll sweep
+    /// of N workspace upserts rebuilds the visible list once rather than
+    /// N times. Removal and mailbox resets bypass it (they read the fresh
+    /// list to place the cursor).
+    defer_recompute: bool,
+    recompute_pending: bool,
+    /// Test-only count of full visible-list rebuilds, so the drain
+    /// coalescing regression can assert one rebuild per batch (#1030).
+    #[cfg(test)]
+    recompute_count: usize,
     /// Index into `visible`. Always points at a `Workspace` variant
     /// when there is at least one — `recompute_visible` and the
     /// j/k handlers maintain that invariant.
@@ -328,6 +342,10 @@ impl Sidebar {
             collapsed_spaces: BTreeSet::new(),
             repo_summaries: BTreeMap::new(),
             stacks: HashMap::new(),
+            defer_recompute: false,
+            recompute_pending: false,
+            #[cfg(test)]
+            recompute_count: 0,
             cursor: 0,
             scroll: 0,
             scroll_detached: false,
@@ -2269,7 +2287,45 @@ impl Sidebar {
     }
 
     fn recompute_visible(&mut self) {
+        // During a batched daemon-event drain, record that a rebuild is
+        // owed and defer it to `flush_recompute` — collapsing a poll
+        // sweep's N per-upsert rebuilds into one (#1030).
+        if self.defer_recompute {
+            self.recompute_pending = true;
+            return;
+        }
         self.recompute_visible_inner(true);
+    }
+
+    /// Enter batched-recompute mode for a daemon-event drain: subsequent
+    /// `recompute_visible` calls only mark a rebuild pending. Mirrors the
+    /// model's per-batch `flush_pane_sync` deferral (#1030).
+    pub fn begin_recompute_batch(&mut self) {
+        self.defer_recompute = true;
+    }
+
+    /// Leave batched mode and rebuild the visible list once if any
+    /// deferred event asked for it.
+    pub fn flush_recompute(&mut self) {
+        self.defer_recompute = false;
+        if self.recompute_pending {
+            self.recompute_visible_inner(true);
+        }
+    }
+
+    /// Test-only: number of full visible-list rebuilds performed so far.
+    #[cfg(test)]
+    pub fn recompute_count(&self) -> usize {
+        self.recompute_count
+    }
+
+    /// Test-only: number of workspace rows in the current visible list.
+    #[cfg(test)]
+    pub fn visible_workspace_count(&self) -> usize {
+        self.visible
+            .iter()
+            .filter(|r| matches!(r, VisibleRow::Workspace(_)))
+            .count()
     }
 
     /// Rebuild the stacked-PR index (#969) over the full workspace set.
@@ -2321,7 +2377,9 @@ impl Sidebar {
         } else {
             None
         };
-        self.recompute_visible();
+        // Rebuild immediately — the cursor fixup below reads the fresh
+        // `self.visible`, so this path must not be deferred by a batch.
+        self.recompute_visible_inner(true);
         let Some(removed_index) = removed_index else {
             return;
         };
@@ -2357,6 +2415,12 @@ impl Sidebar {
     }
 
     fn recompute_visible_inner(&mut self, preserve_header_park: bool) {
+        // This rebuild fulfills any recompute deferred during a batch.
+        self.recompute_pending = false;
+        #[cfg(test)]
+        {
+            self.recompute_count += 1;
+        }
         // Snapshot cursor anchors before the rebuild so we can
         // restore the user's focused row when the new visible list
         // is in place. Two anchors: (a) parked-on-header preserves

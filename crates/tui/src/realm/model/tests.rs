@@ -5223,6 +5223,56 @@ mod input_starvation_tests {
         assert_eq!(m.event_backlog.resyncs(), 3);
     }
 
+    /// A GitHub sync burst upserts many workspaces in one drain batch.
+    /// The sidebar's O(N log N) visible-list rebuild must run ONCE for the
+    /// whole batch, not once per upsert — otherwise a full sweep is
+    /// O(N²) on the single UI thread and the "drain" phase blows the
+    /// frame budget, freezing keyboard input during sync (#1030).
+    #[test]
+    fn sync_burst_rebuilds_visible_list_once() {
+        use chrono::Utc;
+        use lazybox_core::{Workspace, WorkspaceKey};
+
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+        let before = m.sidebar.recompute_count();
+
+        // Well under the per-tick drain cap so the whole burst drains in
+        // one iteration (exercising batch coalescing, not the cap).
+        let n = 20;
+        for i in 0..n {
+            let ws = Workspace::empty(
+                WorkspaceKey::new(format!("github:o/r#{i}")),
+                "main",
+                Utc::now(),
+            );
+            evt_tx
+                .try_send(Event::WorkspaceUpserted(Box::new(ws)))
+                .expect("bounded channel must have room for the burst");
+        }
+
+        assert!(
+            !drain_daemon_events(&mut m, None),
+            "a sub-cap burst must drain in a single tick"
+        );
+        assert!(
+            m.client.rx.try_recv().is_err(),
+            "the whole burst should have been consumed"
+        );
+        // Every upsert landed — coalescing must not drop workspaces.
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            n,
+            "all upserted workspaces must be in the visible list"
+        );
+        // …and the whole batch rebuilt the visible list exactly once,
+        // instead of once per upsert.
+        assert_eq!(
+            m.sidebar.recompute_count() - before,
+            1,
+            "a sync burst must coalesce to one visible-list rebuild"
+        );
+    }
+
     /// A daemon event the idle wait woke on (`Wake::Daemon`) is handed
     /// to the next drain as `carried` — it must be processed even when
     /// the channel itself is empty, and it counts toward the batch.

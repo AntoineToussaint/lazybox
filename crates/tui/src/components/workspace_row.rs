@@ -405,10 +405,25 @@ fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(role) = ctx.task.map(|t| t.role) else {
+    let Some(task) = ctx.task else {
         return Cell::empty();
     };
-    let (letter, color) = role_badge(ctx.theme, role);
+    // A Linear ticket only reaches the inbox when it's assigned to or
+    // created by the token's viewer (`A`/`@`), so anything else is the
+    // "why is this here?" anomaly (#1015) — a wrong token identity, a
+    // stale daemon, or a subscribed scope. Flag it in warn (`?`) so it
+    // stands out while scanning, instead of the quiet dim `·` a benign
+    // GitHub mention gets; mirrors the detail pane's "not assigned to or
+    // created by you" line. GitHub roles keep their usual badge.
+    let (letter, color) = if task.id.source == lazybox_core::LINEAR_SOURCE
+        && !matches!(
+            task.role,
+            lazybox_core::TaskRole::Author | lazybox_core::TaskRole::Assignee
+        ) {
+        ('?', ctx.theme.warn)
+    } else {
+        role_badge(ctx.theme, task.role)
+    };
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
@@ -2499,6 +2514,55 @@ mod tests {
         assert_eq!(
             same_window, "   ",
             "row B did not reserve the ` C ` column at the same x as row A",
+        );
+    }
+
+    /// #1015: a Linear ticket that is neither assigned to nor created
+    /// by the viewer is the "why is this here?" anomaly, so its row is
+    /// flagged with a warn `?` rather than the quiet dim `·` a benign
+    /// GitHub mention gets. Legitimate Linear rows keep `A` / `@`, and
+    /// the flag is Linear-only — a GitHub mention is untouched.
+    #[test]
+    fn linear_neither_assigned_nor_created_flags_the_row() {
+        let theme = theme();
+        let columns = build_columns(4);
+
+        let mut anomaly = make_task("OBI-9", "linear anomaly");
+        anomaly.id.source = "linear".into();
+        anomaly.role = TaskRole::Mentioned;
+        let ws_a = Workspace::from_task(anomaly.clone(), fixed_time());
+        let ctx_a = ctx_for(&ws_a, &anomaly, &theme);
+
+        let mut assigned = make_task("OBI-10", "linear assigned");
+        assigned.id.source = "linear".into();
+        assigned.role = TaskRole::Assignee;
+        let ws_b = Workspace::from_task(assigned.clone(), fixed_time());
+        let ctx_b = ctx_for(&ws_b, &assigned, &theme);
+
+        // A GitHub mention is a legitimate, benign state — it must keep
+        // the dim `·`, not get flagged.
+        let mut gh_mention = make_task("owner/repo#3", "gh mention");
+        gh_mention.role = TaskRole::Mentioned;
+        let ws_c = Workspace::from_task(gh_mention.clone(), fixed_time());
+        let ctx_c = ctx_for(&ws_c, &gh_mention, &theme);
+
+        let rows = vec![build_row(&ctx_a), build_row(&ctx_b), build_row(&ctx_c)];
+        let lines = crate::components::table::render_table(&rows, &columns, 80);
+        let joined =
+            |i: usize| -> String { lines[i].spans.iter().map(|s| s.content.as_ref()).collect() };
+        let (line_a, line_b, line_c) = (joined(0), joined(1), joined(2));
+
+        assert!(
+            line_a.contains('?'),
+            "linear anomaly row must be flagged with `?`: {line_a:?}"
+        );
+        assert!(
+            line_b.contains('@') && !line_b.contains('?'),
+            "assigned linear ticket keeps `@`, not the flag: {line_b:?}"
+        );
+        assert!(
+            line_c.contains('·') && !line_c.contains('?'),
+            "github mention keeps the dim `·` and is never flagged: {line_c:?}"
         );
     }
 

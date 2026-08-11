@@ -122,7 +122,7 @@ fn ci_parallel_rust_gates_share_one_build_cache() {
         assert_eq!(
             build_env["with"]["shared-key"].as_str(),
             Some("linux"),
-            "parallel rust gate `{job}` must share the Linux build cache, not mint a per-job one"
+            "Linux rust job `{job}` must share the Linux build cache, not mint a per-job one"
         );
     }
 }

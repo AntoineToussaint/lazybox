@@ -77,8 +77,8 @@ Manage the sidebar list itself — only while the sidebar has focus.
 | `f` | filter | Open the filter menu — toggle state (with-agent, CI-failing, conflict, unread, asking, …), role, and kind predicates. |
 | `o` | order | Cycle the sort order (recency → by-role → by-role with section headers). |
 | `Shift-S` | switch mailbox | Cycle the mailbox view (Inbox → Inactive → Snoozed). |
-| `/` | search | Open the incremental search bar scoped to the focused project. |
-| `#` | find | Open the header search box — an incremental search across every repo group at once. |
+| `/` | search project | Open the incremental search bar scoped to the focused project — only that repo group's workspaces are matched, every other project stays put. |
+| `#` | search all repos | Open the header search box — an incremental search across every repo group at once (unlike `/`, which is scoped to just the focused project). |
 | `Space` | collapse group | Collapse or expand the repo group the cursor is in — fold a project's workspaces into a single header row, and unfold it again. |
 | `p` | pin group | Pin or unpin the cursor's repo group to the top of the sidebar. |
 | `*` | focus | Star or unstar the cursor's workspace, lifting it into a ★ Focused section at the very top of the sidebar — a hand-picked shortlist of PRs/issues across repos, kept together above the repo groups. |

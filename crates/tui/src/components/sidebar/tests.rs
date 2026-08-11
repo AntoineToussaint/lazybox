@@ -1863,6 +1863,50 @@ mod search_tests {
         );
     }
 
+    /// Read the bottom `/` search bar row as a string.
+    fn search_bar_row(sb: &mut Sidebar) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let bar = sb.search_bar_rect.expect("search bar rect recorded");
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, bar.y)].symbol())
+            .collect()
+    }
+
+    /// A scoped `/` search names the project it's pinned to and points
+    /// at `#` for the wider reach, so its scope is never invisible
+    /// (#1033).
+    #[test]
+    fn scoped_search_bar_names_its_project_and_points_to_global() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "al");
+        let bar = search_bar_row(&mut sb);
+        assert!(bar.contains("o/r"), "scope named: {bar:?}");
+        assert!(bar.contains('#'), "points to global search: {bar:?}");
+    }
+
+    /// A scoped `/` search that matches nothing surfaces the `#`
+    /// escape hatch instead of reading as broken (#1033).
+    #[test]
+    fn scoped_search_empty_result_suggests_global() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "zzzqqq");
+        let bar = search_bar_row(&mut sb);
+        assert!(bar.contains("no matches in o/r"), "{bar:?}");
+        assert!(
+            bar.contains("search all repos"),
+            "suggests widening: {bar:?}"
+        );
+    }
+
     /// While a global query is applied the header box shows the query
     /// rather than the `[find]` placeholder.
     #[test]

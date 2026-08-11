@@ -1273,15 +1273,15 @@ impl ActionDef {
             ActionKind::OpenSearch => &Self {
                 kind: ActionKind::OpenSearch,
                 default_keys: "/",
-                label: "search",
-                describe: "Open the incremental search bar scoped to the focused project.",
+                label: "search project",
+                describe: "Open the incremental search bar scoped to the focused project — only that repo group's workspaces are matched, every other project stays put. The bar names the project it's pinned to, and an empty result points to `#` to widen the search to all repos. For a search across every project, use `#` (find).",
                 section: Section::Sidebar,
             },
             ActionKind::OpenGlobalSearch => &Self {
                 kind: ActionKind::OpenGlobalSearch,
                 default_keys: "#",
-                label: "find",
-                describe: "Open the header search box — an incremental search across every repo group at once. Type digits to jump straight to a PR/issue by number without knowing which repo it's in. Composes with the active filters and mailbox.",
+                label: "search all repos",
+                describe: "Open the header search box — an incremental search across every repo group at once (unlike `/`, which is scoped to just the focused project). Type digits to jump straight to a PR/issue by number without knowing which repo it's in. Composes with the active filters and mailbox.",
                 section: Section::Sidebar,
             },
             ActionKind::ToggleRepoGroup => &Self {

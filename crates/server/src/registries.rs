@@ -628,7 +628,8 @@ impl PollState {
 
     /// Request that the next tick force every slow-cadence provider
     /// (Linear) to poll now, regardless of its own schedule. For an
-    /// explicit user refresh only — see [`Self::poll_force_refresh_requested`].
+    /// explicit user refresh only — kept separate from the warm-poll flag
+    /// so post-mutation/subscribe wakes don't force Linear (#1032).
     pub fn request_force_refresh(&self) {
         self.poll_force_refresh_requested
             .store(true, Ordering::Release);

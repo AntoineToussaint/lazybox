@@ -543,9 +543,16 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(
         .iter()
         .filter(|e| matches!(e, IpcEvent::TerminalResync { .. }))
         .count();
+    // Coalesce the sidebar's visible-list rebuild across the batch: a
+    // full-sweep poll upserts every workspace, and each upsert otherwise
+    // triggers an O(N log N) `recompute_visible` — N upserts → O(N²) on
+    // the UI thread, the ~170ms "drain" stalls the watchdog reports
+    // (#1030). Batched, the whole drain rebuilds the list once.
+    model.sidebar.begin_recompute_batch();
     for evt in coalesce_adjacent_output(collected) {
         model.dispatch_daemon_event(evt);
     }
+    model.sidebar.flush_recompute();
     // One pane projection for the whole batch: a merge burst or a
     // multi-row poll moves the sidebar selection several times in a
     // single drain, but only the final selection needs projecting onto

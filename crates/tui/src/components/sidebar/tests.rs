@@ -2935,39 +2935,118 @@ mod done_alert_tests {
         (sb, key)
     }
 
-    /// Repo-group collapse surfaces in the footer wherever the cursor
-    /// resolves to a group, and its verb tracks the group's state:
-    /// `collapse group` while expanded, `expand group` once folded —
-    /// never a "collapse" hint over an already-collapsed group (#338).
+    /// On a WORKSPACE row the obvious always-on actions — repo-group
+    /// collapse (`Space`) and pin (`p`) — are kept OUT of the footer so
+    /// they can't crowd out the state-driven hints that matter on the
+    /// selected row (#1026). They stay mouse-discoverable (the header
+    /// ▾/▸ triangle) and in `?` help; the state-contextual `Work` action
+    /// leads instead.
     #[test]
-    fn repo_group_collapse_footer_verb_tracks_state() {
+    fn obvious_group_actions_absent_on_workspace_row() {
         let catalog =
             lazybox_tui_core::action::ActionDef::catalog(&[], &std::collections::BTreeMap::new());
         let (mut sb, key) = sidebar_with_one_workspace();
         assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
-        // The cursor sits inside a repo group.
+        // A workspace is selected — the OLD footer appended collapse +
+        // pin here unconditionally; the new footer must not.
+        assert!(sb.selected_workspace().is_some(), "workspace is selected");
         assert!(
             sb.cursor_repo().is_some(),
             "workspace row resolves to a group"
         );
 
+        let binds = sb.contextual_bindings(&catalog, false);
+        assert!(
+            !binds
+                .iter()
+                .any(|b| b.label == "collapse group" || b.label == "expand group"),
+            "collapse-group must not occupy a footer slot on a workspace row: {binds:?}",
+        );
+        assert!(
+            !binds
+                .iter()
+                .any(|b| b.label == "pin group" || b.label == "unpin group"),
+            "pin-group must not occupy a footer slot: {binds:?}",
+        );
+        // The state-contextual Work action leads the bar (its verb
+        // tracks the row's classification — never a group/pin hint).
+        let work_label = lazybox_tui_core::action::contextual_label(
+            &lazybox_tui_core::action::Action::Work,
+            sb.selected_workspace(),
+        );
+        assert_eq!(
+            binds.first().map(|b| b.label.as_ref()),
+            Some(work_label),
+            "footer leads with the state-driven Work hint: {binds:?}",
+        );
+    }
+
+    /// On a repo/space HEADER row no workspace is selected, so nothing
+    /// state-driven competes and folding the group you're sitting on is
+    /// the likely next action — collapse (`Space`) is surfaced there,
+    /// with a verb that tracks the group's state (#1026). Pin stays
+    /// dropped even here (it's the secondary action on a header).
+    #[test]
+    fn collapse_hint_returns_on_header_row() {
+        let catalog =
+            lazybox_tui_core::action::ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let (mut sb, _key) = sidebar_with_one_workspace();
+
+        // Park the cursor on the repo header row.
+        let header_idx = sb
+            .visible_rows()
+            .iter()
+            .position(|r| matches!(r, VisibleRow::RepoHeader(_)))
+            .expect("a repo header row exists");
+        sb.set_cursor(header_idx);
+        assert!(
+            sb.selected_workspace().is_none(),
+            "header row selects no workspace",
+        );
+        assert!(sb.cursor_repo().is_some(), "header resolves to its group");
+
         let expanded = sb.contextual_bindings(&catalog, false);
         assert!(
-            expanded
-                .iter()
-                .any(|b| b.keys == "Space" && b.label == "collapse group"),
-            "expanded group → `Space collapse group`: {expanded:?}",
+            expanded.iter().any(|b| b.label == "collapse group"),
+            "expanded group on a header → `collapse group`: {expanded:?}",
+        );
+        assert!(
+            !expanded.iter().any(|b| b.label.contains("pin")),
+            "pin stays dropped even on a header: {expanded:?}",
         );
 
-        // Fold it — the verb flips to expand.
+        // Fold it — the cursor re-parks on the header and the verb flips.
         sb.toggle_repo_at_cursor();
         assert_eq!(sb.cursor_repo_collapsed(), Some(true), "group is collapsed");
         let collapsed = sb.contextual_bindings(&catalog, false);
         assert!(
-            collapsed
-                .iter()
-                .any(|b| b.keys == "Space" && b.label == "expand group"),
-            "collapsed group → `Space expand group`: {collapsed:?}",
+            collapsed.iter().any(|b| b.label == "expand group"),
+            "collapsed group on a header → `expand group`: {collapsed:?}",
+        );
+    }
+
+    /// A live multi-select leads the footer with the broadcast action —
+    /// the one selection-only action with no single-row equivalent —
+    /// ahead of the per-row state hints, and never surfaces the obvious
+    /// group/pin cells (#1026, #932).
+    #[test]
+    fn multi_select_footer_leads_with_broadcast() {
+        let catalog =
+            lazybox_tui_core::action::ActionDef::catalog(&[], &std::collections::BTreeMap::new());
+        let (mut sb, key) = sidebar_with_one_workspace();
+        assert!(sb.focus_workspace_key(&key), "cursor on the workspace");
+        sb.toggle_broadcast_select();
+        assert!(sb.is_broadcast_selected(&key), "row is selected");
+
+        let binds = sb.contextual_bindings(&catalog, false);
+        assert_eq!(
+            binds.first().map(|b| b.label.as_ref()),
+            Some("broadcast"),
+            "multi-select footer leads with broadcast: {binds:?}",
+        );
+        assert!(
+            !binds.iter().any(|b| b.label.contains("group")),
+            "no obvious group/pin cells under selection: {binds:?}",
         );
     }
 

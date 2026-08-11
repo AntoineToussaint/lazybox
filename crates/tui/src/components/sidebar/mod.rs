@@ -2035,8 +2035,8 @@ impl Sidebar {
     }
 
     /// True when the cursor's repo group is currently collapsed. `None`
-    /// when the cursor isn't in a group at all. Drives the footer's
-    /// collapse-vs-expand verb (#338).
+    /// when the cursor isn't in a group at all. Drives the header-row
+    /// footer's collapse-vs-expand verb (#338).
     pub fn cursor_repo_collapsed(&self) -> Option<bool> {
         self.cursor_repo()
             .map(|repo| self.collapsed_repos.contains(&repo))
@@ -2136,14 +2136,6 @@ impl Sidebar {
             tracing::warn!("save spaces failed: {e}");
         }
         self.space_of_source(source)
-    }
-
-    /// True when the cursor's repo group is currently pinned. `None`
-    /// when the cursor isn't in a group at all. Drives the footer's
-    /// pin-vs-unpin verb (#760).
-    pub fn cursor_repo_pinned(&self) -> Option<bool> {
-        self.cursor_repo()
-            .map(|repo| self.pinned_repos.contains(&repo))
     }
 
     /// Pin / unpin the repo group at or above the cursor to the top of
@@ -2573,14 +2565,21 @@ impl Sidebar {
             actions.push(Action::Archive);
             actions.push(Action::ToggleFocusWorkspace);
         }
-        // Repo-group collapse/expand (`Space`) — the "group the
-        // sessions" shortcut users couldn't find (#338). Surfaces
-        // wherever the key would actually fold something: anywhere the
-        // cursor resolves to a repo group (header, workspace, session,
-        // or kind sub-row) — the same predicate the key dispatches on.
-        if self.cursor_repo().is_some() {
+        // Repo-group collapse/expand (`Space`) and pin (`p`) are
+        // dropped from the footer on WORKSPACE rows (#1026): there
+        // they're obvious, always-available, and mouse-discoverable
+        // (click the ▾/▸ header triangle), so a permanent cell just
+        // crowds out the state-driven hints (merge/work/mark-read/…)
+        // that matter on the selected row. They stay in `?` help
+        // (catalog-driven) and dispatch unchanged.
+        //
+        // Collapse is restored on a repo/space HEADER row, where no
+        // workspace is selected so nothing state-driven competes and
+        // folding the group you're sitting on IS the likely next action
+        // — the "show only when nothing better competes" case. Pin stays
+        // dropped even here: it's the secondary action on a header.
+        if workspace.is_none() && self.cursor_repo().is_some() {
             actions.push(Action::ToggleRepoGroup);
-            actions.push(Action::ToggleRepoPin);
         }
         // Focus mode (`.`) surfaces only when the selected workspace
         // has a coding agent to maximize — otherwise the key is a
@@ -2643,9 +2642,9 @@ impl Sidebar {
                         // A single-key remap of an agent row keeps its
                         // own name — there's no group cell to defer to.
                         Action::SpawnAgent(_) => entry.label.clone(),
-                        // The verb tracks the cursor's group state so the
-                        // footer never says "collapse" over an already-
-                        // collapsed group (#338).
+                        // On a header row the verb tracks the group's
+                        // state so the footer never says "collapse" over
+                        // an already-collapsed group (#338).
                         Action::ToggleRepoGroup => std::borrow::Cow::Borrowed(
                             if self.cursor_repo_collapsed() == Some(true) {
                                 "expand group"
@@ -2653,16 +2652,6 @@ impl Sidebar {
                                 "collapse group"
                             },
                         ),
-                        // The verb tracks the cursor's pin state so the
-                        // footer never says "pin" over an already-pinned
-                        // group.
-                        Action::ToggleRepoPin => {
-                            std::borrow::Cow::Borrowed(if self.cursor_repo_pinned() == Some(true) {
-                                "unpin group"
-                            } else {
-                                "pin group"
-                            })
-                        }
                         // The verb tracks the cursor workspace's star
                         // state so the footer never says "focus" over an
                         // already-starred row.

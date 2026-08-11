@@ -31,6 +31,12 @@
 #        HOMEBREW_TAP_TOKEN           already present — reused to push the cask
 #   2. Set the repository variable `DESKTOP_RELEASE_ENABLED` to `true`.
 # Until the variable is `true`, this workflow is a no-op.
+#
+# The full step-by-step (obtain the cert, derive the identity strings, set the
+# secrets, dry-run, verify) is docs/desktop-release-signing.md.
+# `scripts/preflight-desktop-signing.sh identity cert.p12` derives the exact
+# APPLE_SIGNING_IDENTITY/APPLE_TEAM_ID; `… check` audits that all six secrets
+# and the variable are set.
 
 name: Release desktop
 

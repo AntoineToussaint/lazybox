@@ -2324,7 +2324,7 @@ impl TerminalStack {
 
     /// Translate a screen `(col, row)` into 0-based grid-cell
     /// coordinates inside the focused terminal's grid, using the exact
-    /// grid rect the renderer drew ([`Self::grid_bounds`]) — the left
+    /// grid rect the renderer drew (`grid_bounds`) — the left
     /// border, the top chrome (tab strip + divider + blank), any recap
     /// rows, and the scrollbar gutter already removed. This is the
     /// coordinate space `encode_mouse_for_focused` expects. Returns

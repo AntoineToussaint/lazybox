@@ -1931,6 +1931,7 @@ impl Sidebar {
     /// (alphabetical by letter), shells last so the eye lands on the
     /// agent state first. Returns `[]` when the workspace has no live
     /// terminals.
+    #[cfg(test)]
     fn runner_badges(&self, key: &SessionKey) -> Vec<(char, usize)> {
         let mut counts: HashMap<char, usize> = HashMap::new();
         for (sk, kind) in self.running_terminals.values() {
@@ -1952,6 +1953,7 @@ impl Sidebar {
     /// agents in one workspace their models are ambiguous against the
     /// collapsed `C×2` badge, so it's dropped rather than guessed. Empty
     /// when `ui.show_agent_model` is off or nothing has a known model.
+    #[cfg(test)]
     fn agent_models(&self, key: &SessionKey) -> Vec<(char, String)> {
         if !self.show_agent_model {
             return Vec::new();
@@ -1973,6 +1975,72 @@ impl Sidebar {
             .filter_map(|(letter, (count, model))| match model {
                 Some(model) if count == 1 => Some((letter, model)),
                 _ => None,
+            })
+            .collect()
+    }
+
+    /// Every workspace's [`Self::runner_badges`] aggregated in a single
+    /// O(terminals) pass, so the sidebar render can look each row's
+    /// badges up in O(1) instead of re-scanning all running terminals
+    /// once per row (#1031 — the per-row scan was O(rows × terminals)).
+    /// The per-key result matches `runner_badges` exactly.
+    fn runner_badges_by_key(&self) -> HashMap<SessionKey, Vec<(char, usize)>> {
+        let mut counts: HashMap<SessionKey, HashMap<char, usize>> = HashMap::new();
+        for (sk, kind) in self.running_terminals.values() {
+            *counts
+                .entry(sk.clone())
+                .or_default()
+                .entry(self.badge_letter(kind))
+                .or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .map(|(key, letters)| {
+                let mut entries: Vec<(char, usize)> = letters.into_iter().collect();
+                entries.sort_by_key(|(c, _)| match *c {
+                    'S' => (1, 'S'),
+                    other => (0, other),
+                });
+                (key, entries)
+            })
+            .collect()
+    }
+
+    /// Every workspace's [`Self::agent_models`] aggregated in a single
+    /// O(terminals) pass (see [`Self::runner_badges_by_key`]). Empty when
+    /// `ui.show_agent_model` is off. The per-key result matches
+    /// `agent_models` exactly.
+    fn agent_models_by_key(&self) -> HashMap<SessionKey, Vec<(char, String)>> {
+        if !self.show_agent_model {
+            return HashMap::new();
+        }
+        let mut per_key: HashMap<SessionKey, HashMap<char, (usize, Option<String>)>> =
+            HashMap::new();
+        for (tid, (sk, kind)) in &self.running_terminals {
+            if !matches!(kind, TerminalKind::Agent(_)) {
+                continue;
+            }
+            let entry = per_key
+                .entry(sk.clone())
+                .or_default()
+                .entry(self.badge_letter(kind))
+                .or_default();
+            entry.0 += 1;
+            if let Some(model) = self.terminal_models.get(tid) {
+                entry.1 = Some(model.clone());
+            }
+        }
+        per_key
+            .into_iter()
+            .map(|(key, per_letter)| {
+                let labels = per_letter
+                    .into_iter()
+                    .filter_map(|(letter, (count, model))| match model {
+                        Some(model) if count == 1 => Some((letter, model)),
+                        _ => None,
+                    })
+                    .collect();
+                (key, labels)
             })
             .collect()
     }

@@ -763,13 +763,7 @@ impl RightPane {
         let Some(w) = self.workspace.as_ref() else {
             return false;
         };
-        if !w.activity.is_empty() {
-            return true;
-        }
-        w.primary_task()
-            .and_then(|t| t.body.as_deref())
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
+        !w.activity.is_empty() || self.has_task_body()
     }
 
     /// Apply the auto-collapse-on-empty rule. Honours the user
@@ -1980,11 +1974,7 @@ impl RightPane {
         let has_activity = workspace.map(|w| !w.activity.is_empty()).unwrap_or(false);
         let selected: Vec<usize> = self.feed.selected().iter().copied().collect();
         let has_selection = !selected.is_empty();
-        let has_body = workspace
-            .and_then(|w| w.primary_task())
-            .and_then(|t| t.body.as_deref())
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
+        let has_body = self.has_task_body();
 
         let mut actions: Vec<Action> = Vec::with_capacity(6);
         if has_activity {
@@ -2378,7 +2368,8 @@ impl RightPane {
         self.task_body_str().is_some()
     }
 
-    fn task_body_str(&self) -> Option<&str> {
+    /// The primary task's own description, trimmed, when non-empty.
+    fn primary_body_str(&self) -> Option<&str> {
         self.workspace
             .as_ref()?
             .primary_task()?
@@ -2386,6 +2377,26 @@ impl RightPane {
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
+    }
+
+    /// The description the inline teaser renders. The primary task's
+    /// own body normally; but a PR with no description of its own falls
+    /// back to a folded-in issue / Linear ticket's body (#1037) so the
+    /// section — and its `d` reader affordance — never vanishes just
+    /// because the PR body is blank. Without this, a Linear ticket
+    /// collapsed into a PR workspace (#922) whose PR carried no body
+    /// showed an empty Description even though the ticket's description
+    /// was fetched and stored. The reader modal still lists every
+    /// linked issue in full (see [`Self::task_body`]).
+    fn task_body_str(&self) -> Option<&str> {
+        self.primary_body_str().or_else(|| {
+            self.linked_issue_tasks()
+                .into_iter()
+                .next()
+                .and_then(|t| t.body.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
     }
 
     /// Render the focused task's body using the same lightweight
@@ -2607,7 +2618,11 @@ impl RightPane {
     /// (`Msg::OpenUrl`), so the embedded `[#N ↗](url)` lines open in the
     /// browser.
     pub fn task_body(&self) -> Option<String> {
-        let primary_body = self.task_body_str();
+        // The primary's OWN body here (not `task_body_str`, which may
+        // borrow a linked issue's body as a teaser fallback) — the
+        // linked descriptions are appended as their own sections below,
+        // so pulling the fallback in as the primary would double them.
+        let primary_body = self.primary_body_str();
         let linked = self.linked_issue_tasks();
         if linked.is_empty() {
             return primary_body.map(str::to_string);

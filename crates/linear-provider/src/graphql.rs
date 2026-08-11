@@ -515,4 +515,22 @@ mod tests {
         let issue = issue_with_attachments(&["https://figma.com/file/xyz"]);
         assert!(issue_to_task(&issue, "viewer").linked_tasks.is_empty());
     }
+
+    #[test]
+    fn issue_to_task_maps_description_to_body() {
+        // #1037: the fetched Linear description must land on `Task.body`
+        // so the right pane's Description section can render it.
+        let mut issue = issue_with_attachments(&[]);
+        issue.description = Some("## Context\n\nThe work brief.".into());
+        assert_eq!(
+            issue_to_task(&issue, "viewer").body.as_deref(),
+            Some("## Context\n\nThe work brief."),
+        );
+    }
+
+    #[test]
+    fn issue_to_task_leaves_body_none_without_description() {
+        let issue = issue_with_attachments(&[]);
+        assert_eq!(issue_to_task(&issue, "viewer").body, None);
+    }
 }

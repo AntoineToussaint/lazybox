@@ -2235,6 +2235,12 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
             tracing::info!("polling: tick #{tick_n} starting");
             let warm_requested = config.poll.take_warm_request();
             let poll_warm = Instant::now() >= next_warm_due || warm_requested;
+            // Force Linear past its cadence gate ONLY on an explicit user
+            // refresh — NOT on `warm_requested`, which the many
+            // post-mutation / subscribe `wake(true)` calls also set and
+            // would otherwise re-poll Linear on unrelated GitHub activity
+            // (#1032).
+            let force_linear = config.poll.take_force_refresh();
 
             // Tolerate panics inside `run_one_tick`. tokio swallows
             // panics from spawned tasks by default; without this
@@ -2244,13 +2250,10 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
             // at error level + the loop continues with a normal
             // interval — degraded behaviour is far better than
             // silent death.
-            // An explicit refresh/subscribe (`warm_requested`) forces the
-            // Linear sweep past its own cadence gate; the periodic warm
-            // cadence does not — that would defeat Linear's idle back-off.
             let summary = match std::panic::AssertUnwindSafe(run_one_tick_with_notifications(
                 &config,
                 poll_warm,
-                warm_requested,
+                force_linear,
             ))
             .catch_unwind()
             .await

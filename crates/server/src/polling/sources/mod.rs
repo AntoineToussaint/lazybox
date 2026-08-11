@@ -1594,12 +1594,23 @@ impl LinearSchedule {
         }
     }
 
-    /// Re-arm after a completed sweep. An unchanged `signature` grows the
-    /// idle streak and, past [`LINEAR_IDLE_AFTER`], backs the next
-    /// interval off to `cadence.idle`; a change resets to `cadence.active`.
-    fn record(&self, now: std::time::Instant, signature: u64, cadence: &LinearCadence) {
+    /// Re-arm after a sweep. An unchanged `signature` on a `complete`
+    /// sweep grows the idle streak and, past [`LINEAR_IDLE_AFTER`], backs
+    /// the next interval off to `cadence.idle`; a change resets to
+    /// `cadence.active`. A PARTIAL sweep (`complete == false`) saw only a
+    /// prefix of Linear's issues, so it must never accrue toward idle —
+    /// backing off on incomplete coverage would poll least exactly when we
+    /// can see least (#1032). It stays on the active cadence and resets the
+    /// streak so a stable partial prefix can't drift into the slow tier.
+    fn record(
+        &self,
+        now: std::time::Instant,
+        signature: u64,
+        complete: bool,
+        cadence: &LinearCadence,
+    ) {
         let mut inner = self.inner.lock();
-        if inner.last_signature == Some(signature) {
+        if complete && inner.last_signature == Some(signature) {
             inner.idle_streak = inner.idle_streak.saturating_add(1);
         } else {
             inner.idle_streak = 0;
@@ -1615,14 +1626,19 @@ impl LinearSchedule {
 }
 
 /// Order-independent fingerprint of a kept Linear ticket set, used to
-/// detect an idle (unchanged) sweep for cadence back-off. `updated_at`
-/// bumps on any upstream change to a ticket, so key + timestamp captures
-/// additions, removals, and edits.
+/// detect an idle (unchanged) sweep for cadence back-off. Hashing each
+/// task's full serialized form — not just `(key, updated_at)` — so a
+/// change to ANY surfaced field counts, including ones Linear may not
+/// bump `updatedAt` for (e.g. a newly-linked GitHub PR attachment). The
+/// tasks come straight from the provider (pre-upsert), so their
+/// serialization is deterministic for a given upstream state; identical
+/// state hashes identically and a real change resets the cadence to
+/// active.
 fn linear_signature(tasks: &[Task]) -> u64 {
     use std::hash::{Hash, Hasher};
-    let mut entries: Vec<(&str, i64)> = tasks
+    let mut entries: Vec<String> = tasks
         .iter()
-        .map(|t| (t.id.key.as_str(), t.updated_at.timestamp_millis()))
+        .map(|t| serde_json::to_string(t).unwrap_or_default())
         .collect();
     entries.sort_unstable();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1718,6 +1734,7 @@ impl TaskSource for LinearSource {
                 .fetch_all_with_coverage()
                 .await
                 .map_err(lazybox_core::ProviderError::from)?;
+            let complete = !outcome.is_partial();
             *self.last_coverage_partial.lock() = outcome.is_partial();
             self.emit_progress(format!(
                 "Got {} issues, applying filters…",
@@ -1728,6 +1745,7 @@ impl TaskSource for LinearSource {
             self.schedule.record(
                 std::time::Instant::now(),
                 linear_signature(&kept),
+                complete,
                 &self.cadence,
             );
             Ok(kept)
@@ -2186,7 +2204,7 @@ mod linear_cadence_tests {
         let sched = LinearSchedule::default();
         let cad = cadence();
         let t0 = Instant::now();
-        sched.record(t0, 1, &cad);
+        sched.record(t0, 1, true, &cad);
         assert!(!sched.is_due(t0 + Duration::from_secs(59)));
         assert!(sched.is_due(t0 + Duration::from_secs(60)));
     }
@@ -2199,7 +2217,7 @@ mod linear_cadence_tests {
         // The streak grows purely on repeated signatures; the
         // LINEAR_IDLE_AFTER-th repeat crosses from active into idle.
         for _ in 0..=LINEAR_IDLE_AFTER {
-            sched.record(t, 7, &cad);
+            sched.record(t, 7, true, &cad);
         }
         assert!(
             !sched.is_due(t + Duration::from_secs(299)),
@@ -2214,12 +2232,33 @@ mod linear_cadence_tests {
         let cad = cadence();
         let t = Instant::now();
         for _ in 0..=(LINEAR_IDLE_AFTER + 1) {
-            sched.record(t, 7, &cad);
+            sched.record(t, 7, true, &cad);
         }
         // A ticket changed → snap back to the fast cadence immediately.
-        sched.record(t, 99, &cad);
+        sched.record(t, 99, true, &cad);
         assert!(!sched.is_due(t + Duration::from_secs(59)));
         assert!(sched.is_due(t + Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn partial_sweeps_never_back_off() {
+        // A stable partial prefix (same signature every sweep) must NOT
+        // drift into the idle tier — backing off on incomplete coverage
+        // would poll least exactly when we can see least (#1032).
+        let sched = LinearSchedule::default();
+        let cad = cadence();
+        let t = Instant::now();
+        for _ in 0..=(LINEAR_IDLE_AFTER + 3) {
+            sched.record(t, 7, /*complete=*/ false, &cad);
+        }
+        assert!(
+            sched.is_due(t + Duration::from_secs(60)),
+            "partial sweeps stay on the active cadence, never idle"
+        );
+        assert!(
+            !sched.is_due(t + Duration::from_secs(59)),
+            "still gated by the active interval, just never the slow one"
+        );
     }
 
     #[test]
@@ -2238,6 +2277,84 @@ mod linear_cadence_tests {
         assert_eq!(
             cad.idle, cad.active,
             "idle can never be faster than the active cadence"
+        );
+    }
+
+    fn linear_task(key: &str) -> Task {
+        Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "linear".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Assignee,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://linear.app/x/issue/{key}"),
+            repo: Some("linear/ENG".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: Some(lazybox_core::TaskKind::Issue),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    #[test]
+    fn signature_is_order_independent() {
+        let a = linear_task("ENG-1");
+        let b = linear_task("ENG-2");
+        assert_eq!(
+            linear_signature(&[a.clone(), b.clone()]),
+            linear_signature(&[b, a]),
+            "reordering the same tickets is not a change"
+        );
+    }
+
+    #[test]
+    fn signature_detects_a_change_that_leaves_updated_at_fixed() {
+        // Regression for #1032: a newly-linked GitHub PR is an attachment
+        // change Linear may not bump `updatedAt` for. The old
+        // (key, updated_at) signature missed it, delaying the collapse up
+        // to the idle interval; the full-serialization signature catches
+        // any surfaced-field change even when the timestamp is unchanged.
+        let base = linear_task("ENG-1");
+        let mut linked = base.clone();
+        linked.linked_tasks = vec![lazybox_core::TaskId {
+            source: "github".into(),
+            key: "o/r#5".into(),
+        }];
+        assert_eq!(base.updated_at, linked.updated_at, "timestamp is identical");
+        assert_ne!(
+            linear_signature(&[base]),
+            linear_signature(&[linked]),
+            "a linked-PR change must reset the cadence to active"
         );
     }
 }

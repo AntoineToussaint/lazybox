@@ -10,9 +10,13 @@
 # check — each compile an independent artifact set (check .rmeta vs test bins vs
 # doc vs bench bins), so co-locating them in one job only serialized four
 # compiles behind each other (~8m wall-clock). They now run as four parallel
-# jobs (`test`, `clippy`, `rustdoc`, `benches`), each restoring the same warm
-# `main` cache, so wall-clock is the slowest single gate (~3m) instead of their
-# sum. `clippy`/`rustdoc` reclaim the required-check names the old stubs held.
+# jobs (`test`, `clippy`, `rustdoc`, `benches`), so wall-clock is the slowest
+# single gate instead of their sum: ~5m on a cold cache, ~3m once a `main` push
+# has seeded the shared cache. All four pass the same `shared-key: linux` to
+# `rust-build-env`, so they save/restore ONE dependency cache rather than four
+# per-job caches — the split stays within GitHub's 10GB LRU pool and every gate
+# restores the same warm build. `clippy`/`rustdoc` reclaim the required-check
+# names the old stubs held.
 #
 # `push: main` exists only to seed the cache, not to gate anything. GitHub
 # shares a cache with a PR only if it was created on the PR's base branch, so
@@ -123,6 +127,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/rust-build-env
+        with:
+          shared-key: linux
 
       - uses: taiki-e/install-action@v2
         with:
@@ -160,6 +166,7 @@ jobs:
       - uses: ./.github/actions/rust-build-env
         with:
           rust-components: clippy
+          shared-key: linux
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -287,13 +294,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/rust-build-env
+        with:
+          shared-key: linux
       - name: Rustdoc
         run: cargo doc --no-deps --workspace
 
   benches:
     # The workspace's two criterion benches (tui, server) type-check under the
     # clippy `--all-targets` gate but only this full build proves they still
-    # link. Its own runner keeps the ~2.5m bench link off the test critical path.
+    # link. Its own runner keeps the ~3m bench link off the test critical path.
     name: benches
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -301,6 +310,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/rust-build-env
+        with:
+          shared-key: linux
       - name: Link benchmark targets
         run: cargo build --workspace --benches
 

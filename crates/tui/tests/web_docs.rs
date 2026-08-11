@@ -99,6 +99,32 @@ fn ci_linux_lane_links_benchmark_targets() {
     );
 }
 
+// The Linux rust lane is split into four parallel jobs. `Swatinem/rust-cache`
+// keys on the job id by default, so without a common `shared-key` each job
+// would save its OWN multi-hundred-MB cache — four entries where there was one,
+// pushing the repo's caches past GitHub's 10GB LRU pool and evicting the warm
+// build every gate restores. They must share one cache key.
+#[test]
+fn ci_parallel_rust_gates_share_one_build_cache() {
+    let workflow: serde_yaml::Value =
+        serde_yaml::from_str(&read(".github/workflows/ci.yml")).expect("parse ci.yml");
+    let jobs = workflow["jobs"].as_mapping().expect("ci.yml jobs mapping");
+    for job in ["test", "clippy", "rustdoc", "benches"] {
+        let steps = jobs[job]["steps"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("job `{job}` has steps"));
+        let build_env = steps
+            .iter()
+            .find(|step| step["uses"].as_str() == Some("./.github/actions/rust-build-env"))
+            .unwrap_or_else(|| panic!("job `{job}` sets up the rust build env"));
+        assert_eq!(
+            build_env["with"]["shared-key"].as_str(),
+            Some("linux"),
+            "parallel rust gate `{job}` must share the Linux build cache, not mint a per-job one"
+        );
+    }
+}
+
 #[test]
 fn desktop_dogfood_artifact_preserves_the_app_executable() {
     let workflow = read(".github/workflows/ci.yml");

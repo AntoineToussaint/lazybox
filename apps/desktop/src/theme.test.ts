@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type ThemeColors, luminance, terminalTheme } from "./theme";
+import {
+  type ThemeColors,
+  contrastRatio,
+  luminance,
+  terminalTheme,
+} from "./theme";
 
 const dark: ThemeColors = {
   accent: "#7dcfff",
@@ -8,7 +13,7 @@ const dark: ThemeColors = {
   warn: "#e0af68",
   error: "#f7768e",
   text_strong: "#c0caf5",
-  text_dim: "#7a82a7",
+  text_dim: "#8088ad",
   chrome: "#3a4060",
   fill: "#292e42",
   surface: "#1a1d2e",
@@ -51,5 +56,30 @@ describe("terminalTheme", () => {
     expect(theme.black).toBe(light.text_strong);
     expect(theme.white).toBe(light.surface);
     expect(theme.background).toBe(light.surface);
+  });
+});
+
+describe("chrome palette", () => {
+  it.each([
+    ["dark", dark],
+    ["light", light],
+    [
+      "high contrast",
+      {
+        ...dark,
+        text_strong: "#ffffff",
+        text_dim: "#c8c8c8",
+        chrome: "#a0a0a0",
+        fill: "#3a3a3a",
+        surface: "#000000",
+      },
+    ],
+  ])("keeps primary control text at WCAG AA in %s", (_name, colors) => {
+    expect(
+      contrastRatio(colors.text_strong, colors.surface),
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      contrastRatio(colors.text_dim, colors.surface),
+    ).toBeGreaterThanOrEqual(4.5);
   });
 });

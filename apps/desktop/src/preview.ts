@@ -35,8 +35,7 @@ export function loadPreview(): PreviewState {
     pr: {
       id: { source: "github", key: "acme/relay#641" },
       title: "Ship a focused desktop client on the existing daemon",
-      body:
-        "Prove the client boundary with a live inbox and one interactive agent terminal. Keep the backend source-agnostic and reuse the existing replay contract.",
+      body: "Prove the client boundary with a live inbox and one interactive agent terminal. Keep the backend source-agnostic and reuse the existing replay contract.",
       state: "InReview",
       role: "Author",
       ci: "Success",
@@ -78,8 +77,7 @@ export function loadPreview(): PreviewState {
     activity: [
       {
         author: "mira",
-        body:
-          "The daemon boundary looks solid. Can the terminal recover after a slow consumer drops output?",
+        body: "The daemon boundary looks solid. Can the terminal recover after a slow consumer drops output?",
         created_at: reviewTime,
         kind: "Review",
         node_id: null,
@@ -147,11 +145,41 @@ export function loadPreview(): PreviewState {
   // in preview they are separate fixture data since `inboxView` here is
   // just the `ComputeOutcome`.
   const filterMenu: FilterMenuItem[] = [
-    { filter: "WithAgent", axis: "State", label: "with-agent", count: 1, active: false },
-    { filter: "CiFailing", axis: "State", label: "ci-failing", count: 0, active: false },
-    { filter: "Unread", axis: "State", label: "unread", count: 1, active: false },
-    { filter: "Author", axis: "Role", label: "author", count: 2, active: false },
-    { filter: "Reviewer", axis: "Role", label: "reviewer", count: 0, active: false },
+    {
+      filter: "WithAgent",
+      axis: "State",
+      label: "with-agent",
+      count: 1,
+      active: false,
+    },
+    {
+      filter: "CiFailing",
+      axis: "State",
+      label: "ci-failing",
+      count: 0,
+      active: false,
+    },
+    {
+      filter: "Unread",
+      axis: "State",
+      label: "unread",
+      count: 1,
+      active: false,
+    },
+    {
+      filter: "Author",
+      axis: "Role",
+      label: "author",
+      count: 2,
+      active: false,
+    },
+    {
+      filter: "Reviewer",
+      axis: "Role",
+      label: "reviewer",
+      count: 0,
+      active: false,
+    },
     { filter: "Pr", axis: "Kind", label: "PR", count: 2, active: false },
     { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
   ];
@@ -173,12 +201,12 @@ export function loadPreview(): PreviewState {
           sessionKey: selectedKey,
           kind: { Agent: "codex" },
           replay: new TextEncoder().encode(
-              "\u001b[1;36mCodex\u001b[0m  lazybox desktop client\n\n" +
-                "› Inspecting the API gateway and terminal replay contract\n" +
-                "  ✓ Inbox snapshot received\n" +
-                "  ✓ PTY attached through NDJSON\n" +
-                "  • Waiting for your next instruction\n\n",
-            ),
+            "\u001b[1;36mCodex\u001b[0m  lazybox desktop client\n\n" +
+              "› Inspecting the API gateway and terminal replay contract\n" +
+              "  ✓ Inbox snapshot received\n" +
+              "  ✓ PTY attached through NDJSON\n" +
+              "  • Waiting for your next instruction\n\n",
+          ),
           lastSeq: 4,
           replayAvailable: true,
           dirty: false,

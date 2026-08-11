@@ -94,8 +94,11 @@ function snippetRow(
   const button = document.createElement("button");
   button.type = "button";
   button.className = "snippet-row";
+  button.id = `snippet-option-${index}`;
   button.dataset.index = String(index);
+  button.setAttribute("role", "option");
   button.setAttribute("aria-selected", String(index === cursor));
+  button.tabIndex = -1;
   const key = document.createElement("span");
   key.className = "snippet-key";
   key.textContent = `]${row.key}`;

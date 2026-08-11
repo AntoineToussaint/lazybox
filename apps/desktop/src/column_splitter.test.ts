@@ -129,6 +129,44 @@ describe("workspace column splitter", () => {
     // …and this transient clamp never overwrites the stored preference.
     expect(localStorage.getItem("lazybox.sidebarWidth")).toBeNull();
   });
+
+  it("exposes splitter values and resizes both panes from the keyboard", async () => {
+    await import("./main");
+    stubGridRect(1400);
+    splitter().dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+    );
+    expect(splitter().getAttribute("aria-valuenow")).toBe("376");
+    expect(localStorage.getItem("lazybox.sidebarWidth")).toBe("376");
+
+    const activity = document.getElementById("right-pane-splitter")!;
+    activity.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect(activity.getAttribute("aria-valuenow")).toBe("136");
+    expect(localStorage.getItem("lazybox.activityHeight")).toBe("136");
+  });
+
+  it("clamps a saved activity height after moving to a shorter monitor", async () => {
+    const original = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      return this.classList.contains("right-pane")
+        ? ({ left: 0, top: 0, width: 800, height: 500 } as DOMRect)
+        : ({ left: 0, top: 0, width: 1000, height: 500 } as DOMRect);
+    };
+    try {
+      localStorage.setItem("lazybox.activityHeight", "4000");
+      await import("./main");
+      expect(
+        document
+          .querySelector<HTMLElement>(".right-pane")!
+          .style.getPropertyValue("--activity-height"),
+      ).toBe("340px");
+      expect(localStorage.getItem("lazybox.activityHeight")).toBe("4000");
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = original;
+    }
+  });
 });
 
 function loadDocument(): void {

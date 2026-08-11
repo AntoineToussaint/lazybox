@@ -35,6 +35,20 @@ export function luminance(hex: string): number {
   return 0.299 * r + 0.587 * g + 0.114 * b;
 }
 
+export function contrastRatio(foreground: string, background: string): number {
+  const linear = (channel: number) => {
+    const value = channel / 255;
+    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  };
+  const relative = (hex: string) => {
+    const [r, g, b] = parseHex(hex);
+    return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
+  };
+  const left = relative(foreground);
+  const right = relative(background);
+  return (Math.max(left, right) + 0.05) / (Math.min(left, right) + 0.05);
+}
+
 export interface XtermTheme {
   background: string;
   foreground: string;

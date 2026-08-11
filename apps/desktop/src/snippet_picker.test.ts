@@ -26,9 +26,17 @@ function recentView(): SnippetPickerView {
   return {
     filter: "",
     groups: [
-      { category: " Recent", label: "Recent", rows: [pick({ key: "pr", category: "Git & PR" })] },
+      {
+        category: " Recent",
+        label: "Recent",
+        rows: [pick({ key: "pr", category: "Git & PR" })],
+      },
       { category: "Review", label: "Review", rows: [pick({ key: "rev" })] },
-      { category: "Git & PR", label: "Git & PR", rows: [pick({ key: "pr", category: "Git & PR" })] },
+      {
+        category: "Git & PR",
+        label: "Git & PR",
+        rows: [pick({ key: "pr", category: "Git & PR" })],
+      },
     ],
     auto_submit: null,
     visible_count: 3,
@@ -51,7 +59,9 @@ describe("snippet picker helpers", () => {
   it("resolves the auto-submit key to a row, else null", () => {
     const view: SnippetPickerView = {
       filter: "rev",
-      groups: [{ category: "Review", label: "Review", rows: [pick({ key: "rev" })] }],
+      groups: [
+        { category: "Review", label: "Review", rows: [pick({ key: "rev" })] },
+      ],
       auto_submit: "rev",
       visible_count: 1,
       total: 3,
@@ -64,7 +74,10 @@ describe("snippet picker helpers", () => {
 describe("renderSnippetList", () => {
   it("draws category headers, rows, and marks the cursor selected", () => {
     const list = document.createElement("div");
-    renderSnippetList(list, recentView(), 1, { onPick: vi.fn(), onHover: vi.fn() });
+    renderSnippetList(list, recentView(), 1, {
+      onPick: vi.fn(),
+      onHover: vi.fn(),
+    });
 
     const headers = [...list.querySelectorAll(".snippet-group-label")].map(
       (el) => el.textContent,
@@ -91,11 +104,19 @@ describe("renderSnippetList", () => {
     const list = document.createElement("div");
     renderSnippetList(
       list,
-      { filter: "zz", groups: [], auto_submit: null, visible_count: 0, total: 3 },
+      {
+        filter: "zz",
+        groups: [],
+        auto_submit: null,
+        visible_count: 0,
+        total: 3,
+      },
       0,
       { onPick: vi.fn(), onHover: vi.fn() },
     );
-    expect(list.querySelector(".snippet-empty")?.textContent).toBe("No matches");
+    expect(list.querySelector(".snippet-empty")?.textContent).toBe(
+      "No matches",
+    );
   });
 });
 

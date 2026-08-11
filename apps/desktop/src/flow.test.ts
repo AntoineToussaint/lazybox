@@ -117,13 +117,18 @@ describe("credential-free desktop workflow", () => {
         return Promise.resolve();
       }
       if (command === "read_terminal_data") {
-        return new Promise<Uint8Array>((resolve) => terminalReads.push(resolve));
+        return new Promise<Uint8Array>((resolve) =>
+          terminalReads.push(resolve),
+        );
       }
       if (command === "send_command") {
         const payload = args as {
           command?: { PostReply?: { body: string } };
         };
-        if (payload.command?.PostReply !== undefined && replyAttempt === "fail") {
+        if (
+          payload.command?.PostReply !== undefined &&
+          replyAttempt === "fail"
+        ) {
           return new Promise((_resolve, reject) => {
             rejectReply = reject;
           });
@@ -136,7 +141,9 @@ describe("credential-free desktop workflow", () => {
     await import("./main");
     await vi.waitFor(() => expect(dialog("setup-dialog").open).toBe(true));
     await vi.waitFor(() =>
-      expect(document.querySelector('input[value="github:acme"]')).not.toBeNull(),
+      expect(
+        document.querySelector('input[value="github:acme"]'),
+      ).not.toBeNull(),
     );
 
     window.dispatchEvent(
@@ -317,15 +324,15 @@ describe("credential-free desktop workflow", () => {
       type: "Frame",
       payload: { Snapshot: { workspaces: [pr(42), pr(43)], terminals: [] } },
     });
-    eventChannel().onmessage(
-      inboxMessage(["github-o-r-42", "github-o-r-43"]),
-    );
+    eventChannel().onmessage(inboxMessage(["github-o-r-42", "github-o-r-43"]));
     await vi.waitFor(() =>
       expect(document.querySelectorAll(".workspace-row").length).toBe(2),
     );
 
     selectWorkspaceRow("PR o/r#42");
-    await vi.waitFor(() => expect(element("task-title").textContent).toBe("PR o/r#42"));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
     expect(button("reply-button").disabled).toBe(false);
 
     input("#reply-body").value = "Shipping now.";
@@ -336,12 +343,16 @@ describe("credential-free desktop workflow", () => {
     expect(button("reply-button").disabled).toBe(true);
 
     selectWorkspaceRow("PR o/r#43");
-    await vi.waitFor(() => expect(element("task-title").textContent).toBe("PR o/r#43"));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#43"),
+    );
     expect(button("reply-button").disabled).toBe(false);
     expect(input("#reply-body").disabled).toBe(false);
 
     selectWorkspaceRow("PR o/r#42");
-    await vi.waitFor(() => expect(element("task-title").textContent).toBe("PR o/r#42"));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
     expect(button("reply-button").disabled).toBe(true);
 
     releaseReply?.();
@@ -627,10 +638,10 @@ describe("credential-free desktop workflow", () => {
     });
 
     const snooze = commandCalls().find(
-      (command): command is { Snooze: { session_key: string; until: string } } =>
-        typeof command === "object" &&
-        command !== null &&
-        "Snooze" in command,
+      (
+        command,
+      ): command is { Snooze: { session_key: string; until: string } } =>
+        typeof command === "object" && command !== null && "Snooze" in command,
     );
     expect(snooze?.Snooze.session_key).toBe("github-o-r-42");
     expect(Number.isNaN(Date.parse(snooze?.Snooze.until ?? ""))).toBe(false);
@@ -705,7 +716,8 @@ describe("credential-free desktop workflow", () => {
     await vi.waitFor(() =>
       expect(
         commandCalls().some(
-          (c) => typeof c === "object" && c !== null && "SetAutoFixPolicies" in c,
+          (c) =>
+            typeof c === "object" && c !== null && "SetAutoFixPolicies" in c,
         ),
       ).toBe(true),
     );
@@ -963,9 +975,9 @@ describe("credential-free desktop workflow", () => {
     expect(
       document.querySelectorAll("#filter-menu .filter-section").length,
     ).toBe(3); // State / Role / Kind
-    expect(
-      document.querySelectorAll("#filter-menu .filter-row").length,
-    ).toBe(4);
+    expect(document.querySelectorAll("#filter-menu .filter-row").length).toBe(
+      4,
+    );
 
     // A single toggle delegates just that predicate to the daemon; the
     // optimistic chip shows immediately.
@@ -976,9 +988,7 @@ describe("credential-free desktop workflow", () => {
     // A second toggle with no intervening view push must COMPOSE — a
     // view-derived active set would drop the first.
     toggleFilterRow("author");
-    await vi.waitFor(() =>
-      expect(lastFilterCall()).toEqual(["Pr", "Author"]),
-    );
+    await vi.waitFor(() => expect(lastFilterCall()).toEqual(["Pr", "Author"]));
     expect(element("filter-button").textContent).toBe("Filter (2)");
 
     // `f` is a toggle: a second press closes the menu.
@@ -1050,7 +1060,9 @@ describe("credential-free desktop workflow", () => {
           max_terminal_write_bytes: 1024,
           agents: ["codex"],
           default_agent: "codex",
-          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+          repositories: [
+            { project_key: "github-acme-widget", label: "acme/widget" },
+          ],
         });
       }
       if (command === "list_workspaces") {
@@ -1107,7 +1119,9 @@ describe("credential-free desktop workflow", () => {
           max_terminal_write_bytes: 1024,
           agents: ["codex"],
           default_agent: "codex",
-          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+          repositories: [
+            { project_key: "github-acme-widget", label: "acme/widget" },
+          ],
         });
       }
       if (command === "list_workspaces") {
@@ -1117,7 +1131,9 @@ describe("credential-free desktop workflow", () => {
         return new Promise<Uint8Array>(() => {});
       }
       if (command === "snippet_view") {
-        return Promise.resolve(snippetView((args as { filter: string }).filter));
+        return Promise.resolve(
+          snippetView((args as { filter: string }).filter),
+        );
       }
       return Promise.resolve();
     });
@@ -1276,7 +1292,9 @@ describe("credential-free desktop workflow", () => {
           max_terminal_write_bytes: 1024,
           agents: ["claude"],
           default_agent: "claude",
-          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+          repositories: [
+            { project_key: "github-acme-widget", label: "acme/widget" },
+          ],
         });
       }
       if (command === "github_auth_status") {
@@ -1311,11 +1329,9 @@ describe("credential-free desktop workflow", () => {
     // Theme catalog and model menu seed from config.
     expect(document.querySelectorAll(".theme-swatch")).toHaveLength(2);
     expect(element("keymap-preset-label").textContent).toBe("Keymap: vim");
-    expect([...select("default-model-select").options].map((o) => o.value)).toEqual([
-      "S",
-      "M",
-      "L",
-    ]);
+    expect(
+      [...select("default-model-select").options].map((o) => o.value),
+    ).toEqual(["S", "M", "L"]);
     expect(select("default-model-select").value).toBe("L");
 
     themeSwatch("Lazybox Light").click();
@@ -1369,7 +1385,9 @@ describe("credential-free desktop workflow", () => {
           max_terminal_write_bytes: 1024,
           agents: ["custombot"],
           default_agent: "custombot",
-          repositories: [{ project_key: "github-acme-widget", label: "acme/widget" }],
+          repositories: [
+            { project_key: "github-acme-widget", label: "acme/widget" },
+          ],
         });
       }
       if (command === "github_auth_status") {
@@ -1482,12 +1500,12 @@ describe("credential-free desktop workflow", () => {
       "github, linear",
     );
     expect(select("default-agent-select").disabled).toBe(true);
-    expect([...select("default-agent-select").options].map((option) => option.value)).toEqual([
-      "remote-bot",
-    ]);
-    expect([...select("default-model-select").options].map((option) => option.value)).toEqual([
-      "R",
-    ]);
+    expect(
+      [...select("default-agent-select").options].map((option) => option.value),
+    ).toEqual(["remote-bot"]);
+    expect(
+      [...select("default-model-select").options].map((option) => option.value),
+    ).toEqual(["R"]);
     expect(harness.invoke).not.toHaveBeenCalledWith("github_auth_status");
     expect(harness.invoke).not.toHaveBeenCalledWith("list_github_repositories");
 
@@ -1636,9 +1654,9 @@ describe("credential-free desktop workflow", () => {
     expect(tiles()[0]?.classList.contains("focused")).toBe(true);
 
     // Clicking the shell tab moves focus to its tile.
-    const shellTab = [...document.querySelectorAll<HTMLElement>(".terminal-tab")].find(
-      (tab) => tab.textContent?.includes("shell"),
-    );
+    const shellTab = [
+      ...document.querySelectorAll<HTMLElement>(".terminal-tab"),
+    ].find((tab) => tab.textContent?.includes("shell"));
     shellTab?.click();
     expect(element("terminal-title").textContent).toContain("shell");
     expect(tiles()[1]?.classList.contains("focused")).toBe(true);
@@ -1751,10 +1769,14 @@ describe("credential-free desktop workflow", () => {
     expect(splitter.classList.contains("dragging")).toBe(true);
     // A move with no button held means the mouseup was swallowed (alt-tab out
     // mid-drag) — the drag must end rather than keep resizing on hover.
-    window.dispatchEvent(new MouseEvent("mousemove", { clientY: 200, buttons: 0 }));
+    window.dispatchEvent(
+      new MouseEvent("mousemove", { clientY: 200, buttons: 0 }),
+    );
     expect(splitter.classList.contains("dragging")).toBe(false);
     rightPane.style.removeProperty("--activity-height");
-    window.dispatchEvent(new MouseEvent("mousemove", { clientY: 400, buttons: 1 }));
+    window.dispatchEvent(
+      new MouseEvent("mousemove", { clientY: 400, buttons: 1 }),
+    );
     expect(rightPane.style.getPropertyValue("--activity-height")).toBe("");
     localStorage.removeItem("lazybox.activityHeight");
   });
@@ -1812,7 +1834,7 @@ describe("credential-free desktop workflow", () => {
     expect(terminalFrameCount()).toBeGreaterThan(before);
   });
 
-  it("renders each tab as a role=tab div with a nested close button", async () => {
+  it("renders each tab as a role=tab div with a non-focusable close affordance", async () => {
     mockDaemon();
     vi.resetModules();
     await import("./main");
@@ -1844,17 +1866,40 @@ describe("credential-free desktop workflow", () => {
     );
 
     const tab = document.querySelector<HTMLElement>(".terminal-tab")!;
-    // Not a <button>, so the close <button> can nest without invalid markup.
     expect(tab.tagName).toBe("DIV");
     expect(tab.getAttribute("role")).toBe("tab");
+    // The close affordance lives inside the tab but is NOT a nested interactive
+    // control: it is a non-focusable, aria-hidden span, so the tab is the only
+    // focus stop (WCAG "nested-interactive").
     const close = tab.querySelector<HTMLElement>(".terminal-tab-close")!;
-    expect(close.tagName).toBe("BUTTON");
+    expect(close.tagName).toBe("SPAN");
+    expect(close.getAttribute("aria-hidden")).toBe("true");
+    expect(close.hasAttribute("tabindex")).toBe(false);
+    // The Delete close shortcut is announced to assistive tech.
+    expect(tab.getAttribute("aria-keyshortcuts")).toBe("Delete");
 
-    // Close still works: it sends a frame and does not bubble a tab focus.
-    const before = terminalFrameCount();
-    (close as HTMLButtonElement).click();
+    // Close works by mouse click on the affordance…
+    const beforeClick = terminalFrameCount();
+    close.click();
     await settle();
-    expect(terminalFrameCount()).toBeGreaterThan(before);
+    expect(terminalFrameCount()).toBeGreaterThan(beforeClick);
+
+    // …and by keyboard: Delete on the focused tab closes it too.
+    const beforeKey = terminalFrameCount();
+    tab.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Delete", bubbles: true }),
+    );
+    await settle();
+    expect(terminalFrameCount()).toBeGreaterThan(beforeKey);
+
+    // Backspace must NOT close: it's a habitual back/delete keystroke and
+    // closing kills a running agent's PTY with no confirmation.
+    const beforeBackspace = terminalFrameCount();
+    tab.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Backspace", bubbles: true }),
+    );
+    await settle();
+    expect(terminalFrameCount()).toBe(beforeBackspace);
   });
 
   it("defaults focus to a live terminal, not a lower-id exited one", async () => {
@@ -1899,9 +1944,8 @@ describe("credential-free desktop workflow", () => {
     // Focus lands on the running terminal (id 8), not the exited id 7
     // (which `wanted[0]` would have picked before the fix).
     expect(
-      document
-        .querySelector<HTMLElement>(".terminal-tile.focused")
-        ?.dataset.terminalId,
+      document.querySelector<HTMLElement>(".terminal-tile.focused")?.dataset
+        .terminalId,
     ).toBe("8");
   });
 
@@ -2041,8 +2085,20 @@ function inboxMessage(
 // grouped menu; the counts are fixture data.
 function filterMenuFixture(): unknown[] {
   return [
-    { filter: "Unread", axis: "State", label: "unread", count: 0, active: false },
-    { filter: "Author", axis: "Role", label: "author", count: 2, active: false },
+    {
+      filter: "Unread",
+      axis: "State",
+      label: "unread",
+      count: 0,
+      active: false,
+    },
+    {
+      filter: "Author",
+      axis: "Role",
+      label: "author",
+      count: 2,
+      active: false,
+    },
     { filter: "Pr", axis: "Kind", label: "PR", count: 2, active: false },
     { filter: "Issue", axis: "Kind", label: "issue", count: 0, active: false },
   ];
@@ -2139,15 +2195,15 @@ function openActionsMenuLabels(): string[] {
   if (menu.classList.contains("hidden")) {
     button("actions-button").click();
   }
-  return [...menu.querySelectorAll<HTMLButtonElement>(".actions-menu-item")].map(
-    (item) => item.textContent ?? "",
-  );
+  return [
+    ...menu.querySelectorAll<HTMLButtonElement>(".actions-menu-item"),
+  ].map((item) => item.textContent ?? "");
 }
 
 function selectWorkspaceRow(title: string): void {
-  const row = [...document.querySelectorAll<HTMLButtonElement>(".workspace-row")].find(
-    (candidate) => candidate.textContent?.includes(title),
-  );
+  const row = [
+    ...document.querySelectorAll<HTMLButtonElement>(".workspace-row"),
+  ].find((candidate) => candidate.textContent?.includes(title));
   if (row === undefined) {
     throw new Error(`missing workspace row for ${title}`);
   }
@@ -2267,9 +2323,7 @@ function lastAutoFixCommand(): unknown {
 function replyCommands(): unknown[] {
   return commandCalls().filter(
     (command) =>
-      typeof command === "object" &&
-      command !== null &&
-      "PostReply" in command,
+      typeof command === "object" && command !== null && "PostReply" in command,
   );
 }
 
@@ -2356,7 +2410,7 @@ function darkColors(): Record<string, string> {
     warn: "#e0af68",
     error: "#f7768e",
     text_strong: "#c0caf5",
-    text_dim: "#7a82a7",
+    text_dim: "#8088ad",
     chrome: "#3a4060",
     fill: "#292e42",
     surface: "#1a1d2e",

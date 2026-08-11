@@ -63,7 +63,7 @@ pub const LAZYBOX_DARK: ThemePalette = ThemePalette {
     warn: (224, 175, 104),
     error: (247, 118, 142),
     text_strong: (192, 202, 245),
-    text_dim: (122, 130, 167),
+    text_dim: (128, 136, 173),
     chrome: (58, 64, 96),
     fill: (41, 46, 66),
     surface: (26, 29, 46),

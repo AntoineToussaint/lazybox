@@ -203,9 +203,7 @@ export function orderedWorkspaceKeys(view: ComputeOutcome): string[] {
 
 /** The repo label a `RepoHeader` row carries, else null. */
 export function repoHeaderLabel(row: VisibleRow): string | null {
-  return typeof row === "object" && "RepoHeader" in row
-    ? row.RepoHeader
-    : null;
+  return typeof row === "object" && "RepoHeader" in row ? row.RepoHeader : null;
 }
 
 export class ReplyDrafts {
@@ -291,10 +289,7 @@ export const SNOOZE_PRESETS: readonly SnoozePreset[] = [
 
 export function primaryTask(workspace: Workspace): Task | null {
   return (
-    workspace.pr ??
-    workspace.gh_issues[0] ??
-    workspace.linear_issues[0] ??
-    null
+    workspace.pr ?? workspace.gh_issues[0] ?? workspace.linear_issues[0] ?? null
   );
 }
 
@@ -413,8 +408,7 @@ export function broadcastDisposition(
     )
     .sort((left, right) => right.id - left.id);
   const agent = live.find(
-    (terminal) =>
-      typeof terminal.kind === "object" && "Agent" in terminal.kind,
+    (terminal) => typeof terminal.kind === "object" && "Agent" in terminal.kind,
   );
   if (agent !== undefined) {
     return { type: "agent", terminalId: agent.id };
@@ -470,7 +464,8 @@ export function workspaceRuntimeSignals(
 ): TaskSignal[] {
   const live = [...terminals].filter(
     (terminal) =>
-      terminal.sessionKey === sessionKey && !terminal.state.startsWith("exited"),
+      terminal.sessionKey === sessionKey &&
+      !terminal.state.startsWith("exited"),
   );
   if (live.some((terminal) => terminal.state === "inputneeded")) {
     return [{ label: "asking", tone: "attention" }];

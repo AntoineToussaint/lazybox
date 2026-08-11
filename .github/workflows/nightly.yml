@@ -50,3 +50,32 @@ jobs:
       # token + watch config no hosted runner has.
       - name: Ignored integration tier (real backends / live agents)
         run: cargo nextest run --workspace --profile nightly --run-ignored only -E 'test(/^e2e_/)'
+
+  desktop:
+    name: desktop (browser + packaged app)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: ./.github/actions/rust-build-env
+        with:
+          cache-workspaces: |
+            .
+            apps/desktop/src-tauri
+      - working-directory: apps/desktop
+        run: |
+          npm ci
+          npm run check
+          npm test
+          npm run build
+          npx playwright install chromium
+          npm run e2e
+          npm run tauri build -- --debug --bundles app
+      - name: Exercise packaged desktop identity
+        run: |
+          apps/desktop/src-tauri/target/debug/bundle/macos/lazybox.app/Contents/MacOS/lazybox-desktop --version \
+            | grep -E '^lazybox-desktop [0-9]+\.[0-9]+\.[0-9]+\+[0-9a-f]{12}$'

@@ -20,22 +20,22 @@ binds an authenticated loopback gateway on an ephemeral port, and points the
 webview at it. Complete setup in the first-run dialog on first launch (GitHub
 auth reuses the existing `gh` credential; no token is pasted into the webview).
 
-Headless verification of the same build (what CI gates, runnable without a
-GUI):
+Verification of the same build (what CI gates):
 
 ```sh
-make desktop-test     # npm test + npm run build + cargo test on the Tauri shell
+make desktop-test     # frontend tests/build + Rust shell tests
+cd apps/desktop && npm run check && npm run e2e
 ```
 
 The native integration test drives the real path end to end without a GitHub
 credential: persisted setup, the authenticated gateway, an inbox mutation, and
 a live shell PTY.
 
-**Status as of this commit:** all three headless checks pass on a clean
-checkout (`npm test` 74 passing, `npm run build` clean, `cargo test` on the
-shell 42 passing). That establishes the build is runnable; the empirical
-dogfooding — launching the GUI and driving the day-to-day loop — is ongoing,
-and its findings land in the ledger below as they happen.
+**Current status:** the frontend suite, browser accessibility/integration lane,
+build, and native shell suite are CI-gated. The exact test totals are reported
+by CI rather than copied here, so this log cannot become stale when coverage is
+added. Empirical day-to-day dogfooding is still ongoing, and its findings land
+in the ledger below as they happen.
 
 ## Fallback-to-TUI ledger
 
@@ -48,14 +48,12 @@ lists live gaps.
 
 | Gap | What I was trying to do | Tracked in |
 | --- | --- | --- |
-| View diff | Review a PR's changes before merging | [#843][issue-843] (Tier-A leftover — `InspectWorkspaceDiff` + a diff reader; [readiness §4][readiness]) |
 | Open in editor | Open a worktree in `$EDITOR` (`e`) | [#843][issue-843] (Tier-A leftover — terminal-spawn-with-command semantics; [readiness §4][readiness]) |
 | Reviewers / assignees / labels | Edit PR metadata (`g r` / `g a` / `g l`) | [#843][issue-843] |
 | Multi-select + broadcast | Act on several workspaces at once (`v`, `Shift-B`, `Shift-U`) | [#843][issue-843] |
 | Repo pin | Pin a repo group to the top of the sidebar (`p`) | [#843][issue-843] |
 | Session adopt / send / convert | Agent-to-agent handoff and adoption (`x a` / `x s` / `x j`) | [#843][issue-843] |
 | Quick-jump navigation | Jump to asking / failing-CI / by-digit workspace (`!`, `Shift-F`, `]]<n>`) | [#843][issue-843] |
-| Theme picker | Switch theme live (`t`) | [#843][issue-843] |
 | Activity-pane row interactions | Expand/collapse rows, description reader, per-row mark-read | [#843][issue-843] |
 
 **Landed, no longer a fallback:** connect-to-remote gateway + reconnect/resync
@@ -64,7 +62,8 @@ act-on-work — agent + model-tier + on-main spawn, merge, update branch, archiv
 close/delete, browser, mailbox, rename ([#816][issue-816]); the Tier-B/C
 automation & workspace-management slice — merge-on-green / auto-fix / track-main
 policies, snooze/unsnooze, targeted sync, notes ([#817][issue-817], via #826);
-concurrent terminals (tiles/tabs) + focus mode ([#818][issue-818]).
+concurrent terminals (tiles/tabs) + focus mode ([#818][issue-818]); read-only
+diff inspection; and the live theme picker.
 
 ## Phase tracking
 

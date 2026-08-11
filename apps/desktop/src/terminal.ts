@@ -92,9 +92,8 @@ export class TerminalFrameDecoder {
       ) {
         break;
       }
-      const kind = serverKinds[
-        view.getUint8(TERMINAL_SERVER_FRAME_LAYOUT.kindOffset)
-      ];
+      const kind =
+        serverKinds[view.getUint8(TERMINAL_SERVER_FRAME_LAYOUT.kindOffset)];
       if (kind === undefined) {
         throw new Error(
           `unknown terminal frame kind ${view.getUint8(TERMINAL_SERVER_FRAME_LAYOUT.kindOffset)}`,
@@ -108,16 +107,10 @@ export class TerminalFrameDecoder {
         view,
         TERMINAL_SERVER_FRAME_LAYOUT.firstSeqOffset,
       );
-      const seq = readSafeU64(
-        view,
-        TERMINAL_SERVER_FRAME_LAYOUT.lastSeqOffset,
-      );
-      const payloadStart =
-        offset + TERMINAL_SERVER_FRAME_LAYOUT.payloadOffset;
+      const seq = readSafeU64(view, TERMINAL_SERVER_FRAME_LAYOUT.lastSeqOffset);
+      const payloadStart = offset + TERMINAL_SERVER_FRAME_LAYOUT.payloadOffset;
       const payloadEnd =
-        offset +
-        TERMINAL_SERVER_FRAME_LAYOUT.lengthPrefixBytes +
-        bodyLength;
+        offset + TERMINAL_SERVER_FRAME_LAYOUT.lengthPrefixBytes + bodyLength;
       frames.push({
         kind,
         terminalId,
@@ -125,8 +118,7 @@ export class TerminalFrameDecoder {
         seq,
         payload: this.buffer.slice(payloadStart, payloadEnd),
       });
-      offset +=
-        TERMINAL_SERVER_FRAME_LAYOUT.lengthPrefixBytes + bodyLength;
+      offset += TERMINAL_SERVER_FRAME_LAYOUT.lengthPrefixBytes + bodyLength;
     }
     this.buffer = this.buffer.slice(offset);
     return frames;
@@ -150,10 +142,7 @@ export function decodeTerminalStreamItem(
   chunk: ArrayBuffer | Uint8Array,
 ): TerminalStreamItem {
   const bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
-  if (
-    bytes[0] === DESKTOP_TERMINAL_STREAM_ITEMS.reset &&
-    bytes.length === 1
-  ) {
+  if (bytes[0] === DESKTOP_TERMINAL_STREAM_ITEMS.reset && bytes.length === 1) {
     return { kind: "reset" };
   }
   if (bytes[0] === DESKTOP_TERMINAL_STREAM_ITEMS.data) {
@@ -182,7 +171,11 @@ export function writeTerminalFrame(
   body[TERMINAL_WRITE_PAYLOAD_LAYOUT.intentOffset] =
     TERMINAL_INPUT_INTENTS[intent];
   body.set(payload, TERMINAL_WRITE_PAYLOAD_LAYOUT.bytesOffset);
-  return encodeClientFrame(TERMINAL_CLIENT_COMMAND_KINDS.write, terminalId, body);
+  return encodeClientFrame(
+    TERMINAL_CLIENT_COMMAND_KINDS.write,
+    terminalId,
+    body,
+  );
 }
 
 export function writeTerminalFrames(
@@ -279,7 +272,9 @@ function encodeClientFrame(
 function readSafeU64(view: DataView, offset: number): number {
   const value = view.getBigUint64(offset);
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`terminal frame integer ${value} exceeds JavaScript precision`);
+    throw new Error(
+      `terminal frame integer ${value} exceeds JavaScript precision`,
+    );
   }
   return Number(value);
 }

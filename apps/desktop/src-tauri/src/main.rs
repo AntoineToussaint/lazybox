@@ -1796,10 +1796,127 @@ fn diagnostic_body(location: Option<&std::panic::Location<'_>>) -> String {
         .unwrap_or_else(|| "unknown".to_string());
     format!(
         "lazybox desktop crash\nversion={}\nplatform={}-{}\nlocation={location}\n",
-        env!("CARGO_PKG_VERSION"),
+        desktop_build_label(),
         std::env::consts::OS,
         std::env::consts::ARCH,
     )
+}
+
+fn desktop_build_label() -> String {
+    format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        env!("LAZYBOX_DESKTOP_BUILD_SHA")
+    )
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DesktopBuildInfo {
+    version: String,
+    build_sha: String,
+    update: Option<DesktopUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DesktopUpdate {
+    key: String,
+    message: String,
+}
+
+#[tauri::command]
+async fn desktop_build_info() -> DesktopBuildInfo {
+    DesktopBuildInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        build_sha: env!("LAZYBOX_DESKTOP_BUILD_SHA").to_string(),
+        update: available_desktop_update().await,
+    }
+}
+
+async fn available_desktop_update() -> Option<DesktopUpdate> {
+    if lazybox_ipc::IS_RELEASE_BUILD {
+        return latest_release_update().await;
+    }
+    source_update_in(lazybox_ipc::BUILD_SOURCE_DIR, lazybox_ipc::BUILD_GIT_SHA).await
+}
+
+async fn source_update_in(source_dir: &str, built_sha: &str) -> Option<DesktopUpdate> {
+    if source_dir.is_empty() || built_sha.is_empty() || built_sha == "unknown" {
+        return None;
+    }
+    let ancestor = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(source_dir)
+            .args(["merge-base", "--is-ancestor", built_sha, "HEAD"])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !ancestor.status.success() {
+        return None;
+    }
+    let range = format!("{built_sha}..HEAD");
+    let output = tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::process::Command::new("git")
+            .arg("-C")
+            .arg(source_dir)
+            .args(["rev-list", "--count", &range])
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let commits: u32 = String::from_utf8(output.stdout).ok()?.trim().parse().ok()?;
+    if commits == 0 {
+        return None;
+    }
+    let current = shell_quote(source_dir);
+    Some(DesktopUpdate {
+        key: format!("source:{built_sha}:{commits}"),
+        message: format!(
+            "This desktop build is {commits} commit{} behind its source. Update with: cd -- {current} && git pull --ff-only && make desktop-build",
+            if commits == 1 { "" } else { "s" }
+        ),
+    })
+}
+
+async fn latest_release_update() -> Option<DesktopUpdate> {
+    #[derive(Deserialize)]
+    struct Release {
+        tag_name: String,
+    }
+    let release = Client::new()
+        .get("https://api.github.com/repos/AntoineToussaint/lazybox/releases/latest")
+        .header("User-Agent", "lazybox-desktop")
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .ok()?
+        .json::<Release>()
+        .await
+        .ok()?;
+    let latest = semver::Version::parse(release.tag_name.trim_start_matches('v')).ok()?;
+    let current = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+    (latest > current).then(|| DesktopUpdate {
+        key: format!("release:{latest}"),
+        message: format!(
+            "lazybox desktop v{latest} is available. Download it from the latest GitHub release."
+        ),
+    })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn install_crash_diagnostics() {
@@ -2373,6 +2490,10 @@ fn main() {
         );
         return;
     }
+    if std::env::args().any(|argument| argument == "--version" || argument == "-V") {
+        println!("lazybox-desktop {}", desktop_build_label());
+        return;
+    }
     install_crash_diagnostics();
     let tracing_error = init_desktop_tracing().err();
     if matches!(args.first().map(String::as_str), Some("hook-ingest")) {
@@ -2389,6 +2510,8 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .setup(move |app| {
             if let Some(error) = &tracing_error {
                 app.dialog()
@@ -2424,6 +2547,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             desktop_info,
+            desktop_build_info,
             desktop_setup_state,
             github_auth_status,
             begin_github_login,
@@ -3833,5 +3957,77 @@ mod tests {
         // Clearing the query restores everything.
         model.set_search(String::new());
         assert_eq!(workspace_rows(&model.compute()), 2);
+    }
+
+    #[test]
+    fn desktop_versions_follow_the_workspace_release_version() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let root: toml::Value = std::fs::read_to_string(manifest.join("../../../Cargo.toml"))
+            .expect("read workspace manifest")
+            .parse()
+            .expect("parse workspace manifest");
+        let release = root["workspace"]["package"]["version"]
+            .as_str()
+            .expect("workspace package version");
+        let package: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest.join("../package.json"))
+                .expect("read desktop package"),
+        )
+        .expect("parse desktop package");
+        let tauri: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest.join("tauri.conf.json")).expect("read tauri config"),
+        )
+        .expect("parse tauri config");
+
+        assert_eq!(env!("CARGO_PKG_VERSION"), release);
+        assert_eq!(package["version"], release);
+        assert!(
+            tauri.get("version").is_none(),
+            "Tauri must inherit the crate version instead of declaring another source"
+        );
+        assert!(desktop_build_label().starts_with(&format!("{release}+")));
+    }
+
+    #[tokio::test]
+    async fn source_build_guard_detects_one_newer_commit_and_ignores_current() {
+        fn git(repo: &Path, args: &[&str]) -> String {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(output.status.success());
+            String::from_utf8(output.stdout)
+                .expect("utf-8 git output")
+                .trim()
+                .to_string()
+        }
+        let repo = tempfile::tempdir().expect("temp repo");
+        git(repo.path(), &["init", "-q"]);
+        git(
+            repo.path(),
+            &["config", "user.email", "lazybox@example.com"],
+        );
+        git(repo.path(), &["config", "user.name", "Lazybox Test"]);
+        std::fs::write(repo.path().join("state"), "old").expect("write fixture");
+        git(repo.path(), &["add", "state"]);
+        git(repo.path(), &["commit", "-qm", "old"]);
+        let built = git(repo.path(), &["rev-parse", "HEAD"]);
+        assert!(
+            source_update_in(repo.path().to_str().expect("utf-8 path"), &built)
+                .await
+                .is_none()
+        );
+
+        std::fs::write(repo.path().join("state"), "new").expect("update fixture");
+        git(repo.path(), &["add", "state"]);
+        git(repo.path(), &["commit", "-qm", "new"]);
+        let update = source_update_in(repo.path().to_str().expect("utf-8 path"), &built)
+            .await
+            .expect("stale build update");
+        assert!(update.key.starts_with("source:"));
+        assert!(update.message.contains("1 commit behind"));
+        assert!(update.message.contains("make desktop-build"));
     }
 }

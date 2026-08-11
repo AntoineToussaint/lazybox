@@ -34,11 +34,7 @@ describe("binary terminal protocol", () => {
   });
 
   it("chunks large writes at the daemon-advertised limit", () => {
-    const frames = writeTerminalFrames(
-      7,
-      new Uint8Array([0, 1, 2, 3, 4]),
-      2,
-    );
+    const frames = writeTerminalFrames(7, new Uint8Array([0, 1, 2, 3, 4]), 2);
 
     expect(frames).toHaveLength(3);
     expect(frames.map((frame) => [...frame.slice(13)])).toEqual([
@@ -129,10 +125,7 @@ describe("binary terminal protocol", () => {
       dirty: true,
     });
     expect(
-      requiredTerminalResyncSequence(
-        state.lastSeq,
-        state.replayAvailable,
-      ),
+      requiredTerminalResyncSequence(state.lastSeq, state.replayAvailable),
     ).toBe(42);
     expect(requiredTerminalResyncSequence(42, true)).toBe(43);
   });

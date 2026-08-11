@@ -97,7 +97,15 @@ import {
   renderSnippetPreview,
 } from "./snippet_picker";
 import { buildDiffView } from "./diff_view";
-import { terminalTheme } from "./theme";
+import { luminance, terminalTheme } from "./theme";
+import {
+  AttentionNotifier,
+  browserNotificationBackend,
+  nativeNotificationBackend,
+  type AttentionReason,
+  type NotificationPreferences,
+  type PermissionState,
+} from "./notifications";
 import {
   TerminalFrameDecoder,
   type TerminalBinaryFrame,
@@ -184,6 +192,12 @@ interface DesktopSetupState {
   collapsed_repos: string[];
 }
 
+interface DesktopBuildInfo {
+  version: string;
+  build_sha: string;
+  update: { key: string; message: string } | null;
+}
+
 interface GithubAuthStatus {
   authenticated: boolean;
   account: string | null;
@@ -215,7 +229,7 @@ const PREVIEW_THEMES: DesktopThemeOption[] = [
       warn: "#e0af68",
       error: "#f7768e",
       text_strong: "#c0caf5",
-      text_dim: "#7a82a7",
+      text_dim: "#8088ad",
       chrome: "#3a4060",
       fill: "#292e42",
       surface: "#1a1d2e",
@@ -234,6 +248,21 @@ const PREVIEW_THEMES: DesktopThemeOption[] = [
       chrome: "#c4c9d6",
       fill: "#dadfe9",
       surface: "#f7f8fa",
+    },
+  },
+  {
+    name: "High Contrast",
+    colors: {
+      accent: "#00e0ff",
+      hover: "#ff6ec8",
+      success: "#50f078",
+      warn: "#ffd640",
+      error: "#ff5c5c",
+      text_strong: "#ffffff",
+      text_dim: "#c8c8c8",
+      chrome: "#a0a0a0",
+      fill: "#3a3a3a",
+      surface: "#000000",
     },
   },
 ];
@@ -258,8 +287,7 @@ const broadcastButton = element<HTMLButtonElement>("broadcast-button");
 const jumpAskingButton = element<HTMLButtonElement>("jump-asking-button");
 const jumpFailingButton = element<HTMLButtonElement>("jump-failing-button");
 const jumpWorkspaceButton = element<HTMLButtonElement>("jump-workspace-button");
-const newWorkspaceButton =
-  element<HTMLButtonElement>("new-workspace-button");
+const newWorkspaceButton = element<HTMLButtonElement>("new-workspace-button");
 const workspaceEmpty = element<HTMLDivElement>("workspace-empty");
 const workspaceDetail = element<HTMLDivElement>("workspace-detail");
 const taskKicker = element<HTMLParagraphElement>("task-kicker");
@@ -315,17 +343,25 @@ const ACTIVITY_HEIGHT_KEY = "lazybox.activityHeight";
 const SIDEBAR_MIN_PX = 240;
 const RIGHT_MIN_PX = 360;
 const SIDEBAR_WIDTH_KEY = "lazybox.sidebarWidth";
+const NOTIFICATIONS_ENABLED_KEY = "lazybox.notifications.enabled";
+const NOTIFICATION_PREVIEWS_KEY = "lazybox.notifications.previews";
 const connectionDot = element<HTMLSpanElement>("connection-dot");
 const connectionLabel = element<HTMLSpanElement>("connection-label");
 const statusMessage = element<HTMLSpanElement>("status-message");
 const protocolNotice = element<HTMLSpanElement>("protocol-notice");
+const buildLabel = element<HTMLSpanElement>("build-label");
+const updateNotice = element<HTMLElement>("update-notice");
+const updateMessage = element<HTMLSpanElement>("update-message");
+const updateDismiss = element<HTMLButtonElement>("update-dismiss");
 const setupDialog = element<HTMLDialogElement>("setup-dialog");
 const setupForm = element<HTMLFormElement>("setup-form");
 const setupTitle = element<HTMLHeadingElement>("setup-title");
 const setupClose = element<HTMLButtonElement>("setup-close");
 const settingsAuthority = element<HTMLParagraphElement>("settings-authority");
 const githubSettingsSection = element<HTMLElement>("github-settings-section");
-const repositorySettingsSection = element<HTMLElement>("repository-settings-section");
+const repositorySettingsSection = element<HTMLElement>(
+  "repository-settings-section",
+);
 const agentSettingsSection = element<HTMLElement>("agent-settings-section");
 const githubAuthMessage = element<HTMLParagraphElement>("github-auth-message");
 const githubAuthBadge = element<HTMLSpanElement>("github-auth-badge");
@@ -337,30 +373,31 @@ const repositoryList = element<HTMLDivElement>("repository-list");
 const repositorySelectionCount = element<HTMLParagraphElement>(
   "repository-selection-count",
 );
-const defaultAgentSelect =
-  element<HTMLSelectElement>("default-agent-select");
-const defaultModelSelect =
-  element<HTMLSelectElement>("default-model-select");
+const defaultAgentSelect = element<HTMLSelectElement>("default-agent-select");
+const defaultModelSelect = element<HTMLSelectElement>("default-model-select");
 const defaultModelField = element<HTMLLabelElement>("default-model-field");
 const themeList = element<HTMLDivElement>("theme-list");
 const keymapPresetLabel = element<HTMLSpanElement>("keymap-preset-label");
 const analyticsEnabled = element<HTMLInputElement>("analytics-enabled");
+const notificationsEnabled = element<HTMLInputElement>("notifications-enabled");
+const notificationPreviews = element<HTMLInputElement>("notification-previews");
+const notificationPermission = element<HTMLSpanElement>(
+  "notification-permission",
+);
+const notificationPermissionButton = element<HTMLButtonElement>(
+  "notification-permission-button",
+);
 const setupError = element<HTMLParagraphElement>("setup-error");
 const diagnosticsPath = element<HTMLSpanElement>("diagnostics-path");
-const saveSettingsButton =
-  element<HTMLButtonElement>("save-settings-button");
-const newWorkspaceDialog =
-  element<HTMLDialogElement>("new-workspace-dialog");
+const aboutVersion = element<HTMLSpanElement>("about-version");
+const saveSettingsButton = element<HTMLButtonElement>("save-settings-button");
+const newWorkspaceDialog = element<HTMLDialogElement>("new-workspace-dialog");
 const newWorkspaceForm = element<HTMLFormElement>("new-workspace-form");
-const newWorkspaceProject =
-  element<HTMLSelectElement>("new-workspace-project");
+const newWorkspaceProject = element<HTMLSelectElement>("new-workspace-project");
 const newWorkspaceName = element<HTMLInputElement>("new-workspace-name");
-const newWorkspaceAgent =
-  element<HTMLInputElement>("new-workspace-agent");
-const newWorkspaceError =
-  element<HTMLParagraphElement>("new-workspace-error");
-const newWorkspaceCancel =
-  element<HTMLButtonElement>("new-workspace-cancel");
+const newWorkspaceAgent = element<HTMLInputElement>("new-workspace-agent");
+const newWorkspaceError = element<HTMLParagraphElement>("new-workspace-error");
+const newWorkspaceCancel = element<HTMLButtonElement>("new-workspace-cancel");
 const confirmDialog = element<HTMLDialogElement>("confirm-dialog");
 const confirmTitle = element<HTMLHeadingElement>("confirm-title");
 const confirmMessage = element<HTMLParagraphElement>("confirm-message");
@@ -431,7 +468,11 @@ const collapsedRepos = new Set<string>();
 // "superseded by an identical newer click"; only a sequence can.
 const repoCollapseSeq = new Map<string, number>();
 let defaultAgent = "claude";
-let previewMode = false;
+// Preview mode is a static property of the launch URL, so resolve it
+// synchronously at module load — boot() runs async and settings/theme code
+// may fire before it would otherwise be set.
+const previewMode =
+  import.meta.env.DEV && new URLSearchParams(location.search).has("preview");
 let inboxLoading = true;
 let inboxError: string | null = null;
 let filterMenuOpen = false;
@@ -505,6 +546,9 @@ let terminalDecoder = new TerminalFrameDecoder(2 * 1024 * 1024 + 25);
 let maxTerminalWriteBytes = 128 * 1024;
 const pendingTerminalFrames = new Map<number, TerminalBinaryFrame[]>();
 let desktopMetadataLoaded = false;
+let buildVersion = "";
+let dismissedUpdateKey: string | null = null;
+const dialogReturnFocus = new WeakMap<HTMLDialogElement, HTMLElement>();
 let terminalReaderStarted = false;
 let eventChannel: Channel<DesktopStreamMessage> | null = null;
 const inboxConnection = new InboxConnection(
@@ -516,6 +560,17 @@ const inboxConnection = new InboxConnection(
     if (!terminalReaderStarted) {
       terminalReaderStarted = true;
       void readTerminalData();
+    }
+  },
+);
+const notifier = new AttentionNotifier(
+  "__TAURI_INTERNALS__" in window
+    ? nativeNotificationBackend()
+    : browserNotificationBackend(),
+  notificationPreferences(),
+  (workspaceKey) => {
+    if (workspaces.has(workspaceKey)) {
+      selectWorkspace(workspaceKey);
     }
   },
 );
@@ -542,7 +597,10 @@ shellButton.addEventListener("click", () => {
 markReadButton.addEventListener("click", () => {
   void markSelectedRead();
 });
-workActivityButton.addEventListener("click", () => void workOnActivitySelection());
+workActivityButton.addEventListener(
+  "click",
+  () => void workOnActivitySelection(),
+);
 broadcastButton.addEventListener("click", openBroadcastDialog);
 jumpAskingButton.addEventListener("click", () => jumpToAttention("asking"));
 jumpFailingButton.addEventListener("click", () => jumpToAttention("failing"));
@@ -563,6 +621,36 @@ actionsButton.addEventListener("click", () => {
   // any other open menu (e.g. the filter menu), while its actions-menu
   // guard excludes clicks on this button so it can't self-close here.
   toggleActionsMenu();
+});
+actionsMenu.addEventListener("keydown", (event) => {
+  const items = [
+    ...actionsMenu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+  ];
+  const current = items.indexOf(document.activeElement as HTMLButtonElement);
+  let next: number | null = null;
+  if (event.key === "ArrowDown") {
+    next = (current + 1) % items.length;
+  } else if (event.key === "ArrowUp") {
+    next = (current - 1 + items.length) % items.length;
+  } else if (event.key === "Home") {
+    next = 0;
+  } else if (event.key === "End") {
+    next = items.length - 1;
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    // Trap the key so it can't also reach the global handler (which would
+    // navigate the sidebar out from under the open menu).
+    event.stopPropagation();
+    closeActionsMenu();
+    actionsButton.focus();
+    return;
+  }
+  const target = next === null ? undefined : items[next];
+  if (target !== undefined) {
+    event.preventDefault();
+    event.stopPropagation();
+    target.focus();
+  }
 });
 renameCancel.addEventListener("click", () => renameDialog.close());
 renameForm.addEventListener("submit", (event) => {
@@ -647,6 +735,17 @@ document.addEventListener("click", (event) => {
   closeFilterMenu();
 });
 settingsButton.addEventListener("click", () => void openSettings());
+notificationsEnabled.addEventListener("change", saveNotificationPreferences);
+notificationPreviews.addEventListener("change", saveNotificationPreferences);
+notificationPermissionButton.addEventListener("click", () => {
+  void refreshNotificationPermission(true);
+});
+updateDismiss.addEventListener("click", () => {
+  if (dismissedUpdateKey !== null) {
+    localStorage.setItem(`lazybox.updateDismissed.${dismissedUpdateKey}`, "1");
+  }
+  updateNotice.classList.add("hidden");
+});
 snippetButton.addEventListener("click", () => void openSnippetPicker());
 snippetFilter.addEventListener("input", () => void onSnippetFilterInput());
 snippetDialog.addEventListener("keydown", handleSnippetKey);
@@ -655,7 +754,10 @@ diffClose.addEventListener("click", () => diffDialog.close());
 setupClose.addEventListener("click", closeSettings);
 githubCheckButton.addEventListener("click", () => void refreshGithubAuth());
 githubLoginButton.addEventListener("click", () => void startGithubLogin());
-discoverReposButton.addEventListener("click", () => void discoverRepositories());
+discoverReposButton.addEventListener(
+  "click",
+  () => void discoverRepositories(),
+);
 repositorySearch.addEventListener("input", renderRepositories);
 defaultAgentSelect.addEventListener("change", () =>
   renderModelOptions(defaultAgentSelect.value),
@@ -672,6 +774,7 @@ setupDialog.addEventListener("cancel", (event) => {
 
 window.addEventListener("resize", () => {
   reclampSidebarWidth();
+  reclampActivityHeight();
   scheduleResize();
 });
 window.addEventListener("keydown", handleKeyboard);
@@ -681,10 +784,10 @@ initActivitySplitter();
 void boot();
 
 async function boot(): Promise<void> {
-  if (import.meta.env.DEV && new URLSearchParams(location.search).has("preview")) {
+  if (previewMode) {
     const { loadPreview } = await import("./preview");
     const preview = loadPreview();
-    previewMode = true;
+    await initializeNotifications();
     defaultAgent = preview.defaultAgent;
     workspaces = preview.workspaces;
     terminals = preview.terminals;
@@ -699,6 +802,7 @@ async function boot(): Promise<void> {
   }
 
   try {
+    await initializeNotifications();
     await initializeDesktopMetadata();
     if (await refreshInbox(false)) {
       recordAnalytics("app_opened");
@@ -708,12 +812,24 @@ async function boot(): Promise<void> {
   }
 }
 
+async function initializeNotifications(): Promise<void> {
+  try {
+    const permission = await notifier.initialize();
+    renderNotificationPermission(permission);
+  } catch {
+    renderNotificationPermission("denied");
+  }
+}
+
 async function initializeDesktopMetadata(): Promise<void> {
   if (desktopMetadataLoaded) {
     return;
   }
   try {
-    const info = await invoke<DesktopInfo>("desktop_info");
+    const [info, build] = await Promise.all([
+      invoke<DesktopInfo>("desktop_info"),
+      invoke<DesktopBuildInfo>("desktop_build_info"),
+    ]);
     terminalDecoder = new TerminalFrameDecoder(info.max_terminal_frame_bytes);
     maxTerminalWriteBytes = info.max_terminal_write_bytes;
     defaultAgent = info.default_agent;
@@ -726,11 +842,27 @@ async function initializeDesktopMetadata(): Promise<void> {
       openSetupDialog(true);
       void refreshGithubAuth();
     }
+    applyBuildInfo(build);
     desktopMetadataLoaded = true;
   } catch (error) {
     desktopMetadataLoaded = false;
     throw error;
   }
+}
+
+function applyBuildInfo(info: DesktopBuildInfo | undefined): void {
+  if (info === undefined) {
+    return;
+  }
+  buildVersion = `v${info.version}+${info.build_sha}`;
+  buildLabel.textContent = buildVersion;
+  aboutVersion.textContent = `lazybox desktop ${buildVersion}`;
+  dismissedUpdateKey = info.update?.key ?? null;
+  const dismissed =
+    info.update !== null &&
+    localStorage.getItem(`lazybox.updateDismissed.${info.update.key}`) === "1";
+  updateNotice.classList.toggle("hidden", info.update === null || dismissed);
+  updateMessage.textContent = info.update?.message ?? "";
 }
 
 async function refreshInbox(requestProviderRefresh: boolean): Promise<boolean> {
@@ -816,6 +948,10 @@ function handleStreamMessage(message: DesktopStreamMessage): void {
 }
 
 function handleEvent(event: LazyboxEvent): void {
+  const previousWorkspace =
+    "WorkspaceUpserted" in event
+      ? workspaces.get(event.WorkspaceUpserted.key)
+      : undefined;
   const workspaceChanged =
     "Snapshot" in event ||
     "WorkspaceUpserted" in event ||
@@ -855,6 +991,7 @@ function handleEvent(event: LazyboxEvent): void {
     }
     chooseInitialWorkspace();
     syncWorkspaceTerminals();
+    void synchronizeAttention();
     setStatus("Inbox and terminal replay are synchronized.");
   } else if ("TerminalSpawned" in event) {
     const payload = event.TerminalSpawned;
@@ -927,12 +1064,33 @@ function handleEvent(event: LazyboxEvent): void {
     if (live !== undefined) {
       setLiveState(live, record?.state ?? "running");
     }
+    if (record !== undefined) {
+      const needsAttention =
+        event.AgentState.state === "InputNeeded" ||
+        event.AgentState.state === "Done" ||
+        event.AgentState.state === "LimitReached";
+      if (needsAttention) {
+        const workspace = workspaces.get(record.sessionKey);
+        void notifier.signal({
+          workspaceKey: record.sessionKey,
+          workspaceName: workspace?.name ?? record.sessionKey,
+          reason: "asking",
+          fingerprint: `${record.id}:${formatAgentState(event.AgentState.state)}`,
+        });
+      } else {
+        void notifier.clear(record.sessionKey, "asking");
+      }
+    }
   } else if ("ProviderError" in event) {
     setStatus(`${event.ProviderError.source}: ${event.ProviderError.message}`);
   } else if ("CommandRejected" in event) {
-    setStatus(`${event.CommandRejected.command}: ${event.CommandRejected.message}`);
+    setStatus(
+      `${event.CommandRejected.command}: ${event.CommandRejected.message}`,
+    );
   } else if ("TerminalInputRejected" in event) {
-    setStatus(`Terminal input rejected: ${event.TerminalInputRejected.message}`);
+    setStatus(
+      `Terminal input rejected: ${event.TerminalInputRejected.message}`,
+    );
   } else if ("CommandFailed" in event) {
     setStatus(event.CommandFailed.message);
   } else if ("PollProgress" in event) {
@@ -986,9 +1144,84 @@ function handleEvent(event: LazyboxEvent): void {
     }
   }
 
+  if ("WorkspaceUpserted" in event) {
+    void reconcileWorkspaceAttention(
+      previousWorkspace,
+      event.WorkspaceUpserted,
+    );
+  } else if ("WorkspaceRemoved" in event) {
+    void notifier.clear(event.WorkspaceRemoved);
+  }
+
   if (workspaceChanged || terminalChanged) {
     render();
   }
+}
+
+function workspaceAttention(workspace: Workspace): AttentionReason[] {
+  const task = primaryTask(workspace);
+  if (task == null) {
+    return [];
+  }
+  const reasons: AttentionReason[] = [];
+  if (task.ci === "Failure" || task.ci === "Mixed") {
+    reasons.push("ci");
+  }
+  if (
+    task.review === "ChangesRequested" ||
+    task.needs_reply ||
+    (task.role === "Reviewer" && task.unread_count > 0)
+  ) {
+    reasons.push("review");
+  }
+  return reasons;
+}
+
+async function reconcileWorkspaceAttention(
+  previous: Workspace | undefined,
+  current: Workspace,
+): Promise<void> {
+  const before = new Set(
+    previous === undefined ? [] : workspaceAttention(previous),
+  );
+  const after = new Set(workspaceAttention(current));
+  const task = primaryTask(current);
+  // Dedup key: re-notify only when the underlying item advances, not on
+  // every poll. This is a notification fingerprint, not a recency sort.
+  const stamp = task?.updated_at;
+  for (const reason of ["ci", "review"] as const) {
+    if (!after.has(reason)) {
+      await notifier.clear(current.key, reason);
+    } else if (!before.has(reason)) {
+      await notifier.signal({
+        workspaceKey: current.key,
+        workspaceName: task?.title ?? current.name,
+        reason,
+        fingerprint: `${stamp ?? "unknown"}:${reason}`,
+      });
+    }
+  }
+}
+
+async function synchronizeAttention(): Promise<void> {
+  const active = new Map<string, AttentionReason[]>();
+  for (const workspace of workspaces.values()) {
+    active.set(workspace.key, workspaceAttention(workspace));
+  }
+  for (const terminal of terminals.values()) {
+    if (
+      ["inputneeded", "done", "limitreached"].includes(
+        terminal.state.replaceAll(" ", ""),
+      )
+    ) {
+      const reasons = active.get(terminal.sessionKey) ?? [];
+      if (!reasons.includes("asking")) {
+        reasons.push("asking");
+      }
+      active.set(terminal.sessionKey, reasons);
+    }
+  }
+  await notifier.replaceActive(active);
 }
 
 async function readTerminalData(): Promise<void> {
@@ -1393,12 +1626,17 @@ function renderInbox(): void {
   reconcileList(workspaceList, entries);
 }
 
-function renderRepoHeader(repo: string): HTMLDivElement {
-  const header = document.createElement("div");
+function renderRepoHeader(repo: string): HTMLButtonElement {
+  const header = document.createElement("button");
+  header.type = "button";
   header.className = "repo-header";
-  header.setAttribute("role", "presentation");
   const collapsed = collapsedRepos.has(repo);
   header.classList.toggle("collapsed", collapsed);
+  header.setAttribute("aria-expanded", String(!collapsed));
+  header.setAttribute(
+    "aria-label",
+    `${repo}, ${collapsed ? "collapsed" : "expanded"}`,
+  );
   const twisty = document.createElement("span");
   twisty.className = "repo-twisty";
   twisty.setAttribute("aria-hidden", "true");
@@ -1477,8 +1715,10 @@ function renderWorkspaceRow(workspace: Workspace): HTMLButtonElement {
   button.classList.toggle("selected", workspace.key === selectedKey);
   button.classList.toggle("marked", markedWorkspaces.has(workspace.key));
   button.type = "button";
-  button.role = "option";
-  button.ariaSelected = String(workspace.key === selectedKey);
+  button.setAttribute(
+    "aria-current",
+    workspace.key === selectedKey ? "true" : "false",
+  );
   button.tabIndex = workspace.key === selectedKey ? 0 : -1;
   const count = unreadCount(workspace);
   button.setAttribute(
@@ -1556,7 +1796,8 @@ function renderWorkspaceRow(workspace: Workspace): HTMLButtonElement {
 }
 
 function renderWorkspace(): void {
-  const workspace = selectedKey === null ? undefined : workspaces.get(selectedKey);
+  const workspace =
+    selectedKey === null ? undefined : workspaces.get(selectedKey);
   workspaceEmpty.classList.toggle("hidden", workspace !== undefined);
   workspaceDetail.classList.toggle("hidden", workspace === undefined);
   if (workspace === undefined) {
@@ -1564,7 +1805,8 @@ function renderWorkspace(): void {
   }
 
   const task = primaryTask(workspace);
-  taskKicker.textContent = task === null ? "Local workspace" : taskReference(task);
+  taskKicker.textContent =
+    task === null ? "Local workspace" : taskReference(task);
   taskTitle.textContent = task?.title ?? workspace.name;
   taskMeta.textContent = [
     task?.repo,
@@ -1845,7 +2087,13 @@ async function markActivityRead(
     return;
   }
   await runCommands(
-    [markActivityReadCommand(workspace.key, index, activityFingerprint(activity))],
+    [
+      markActivityReadCommand(
+        workspace.key,
+        index,
+        activityFingerprint(activity),
+      ),
+    ],
     "Marking activity read…",
     "Activity marked read.",
   );
@@ -2017,7 +2265,9 @@ function selectWorkspace(key: string): void {
   void sendCommand({ FocusWorkspace: { session_key: key } });
   if (changed) {
     const workspace = workspaces.get(key);
-    setStatus(`Opened workspace: ${primaryTask(workspace!)?.title ?? workspace?.name ?? key}`);
+    setStatus(
+      `Opened workspace: ${primaryTask(workspace!)?.title ?? workspace?.name ?? key}`,
+    );
     recordAnalytics("workspace_opened");
   }
 }
@@ -2069,15 +2319,15 @@ function chooseInitialWorkspace(): void {
     return;
   }
   const ordered = inboxView === null ? [] : orderedWorkspaceKeys(inboxView);
-  changeSelectedWorkspace(
-    ordered.find((key) => workspaces.has(key)) ?? null,
-  );
+  changeSelectedWorkspace(ordered.find((key) => workspaces.has(key)) ?? null);
 }
 
 /** Workspace keys of the rows currently rendered (skips collapsed
  * repos), in the shared view-model's order. Drives keyboard nav. */
 function navigableWorkspaceKeys(): string[] {
-  return [...workspaceList.querySelectorAll<HTMLButtonElement>(".workspace-row")]
+  return [
+    ...workspaceList.querySelectorAll<HTMLButtonElement>(".workspace-row"),
+  ]
     .map((row) => row.dataset.key)
     .filter((key): key is string => key !== undefined);
 }
@@ -2176,7 +2426,8 @@ function mountTerminal(record: TerminalRecord): void {
   const terminal = new Terminal({
     convertEol: false,
     cursorBlink: true,
-    fontFamily: '"SFMono-Regular", "Cascadia Code", "Liberation Mono", monospace',
+    fontFamily:
+      '"SFMono-Regular", "Cascadia Code", "Liberation Mono", monospace',
     fontSize: 13,
     lineHeight: 1.18,
     scrollback: 10_000,
@@ -2224,6 +2475,9 @@ function mountTerminal(record: TerminalRecord): void {
   const tile = document.createElement("div");
   tile.className = "terminal-tile";
   tile.dataset.terminalId = String(id);
+  tile.id = `terminal-panel-${id}`;
+  tile.setAttribute("role", "tabpanel");
+  tile.setAttribute("aria-labelledby", `terminal-tab-${id}`);
   tile.append(host);
   tile.addEventListener("mousedown", () => focusTerminal(id));
   terminalTiles.append(tile);
@@ -2239,23 +2493,58 @@ function mountTerminal(record: TerminalRecord): void {
   }
   const stateEl = document.createElement("span");
   stateEl.className = "terminal-tab-state";
-  const close = document.createElement("button");
-  close.type = "button";
+  // The close affordance stays inside the `role="tab"` chip, but as a
+  // non-focusable, aria-hidden element — never a nested interactive control
+  // (WCAG "nested-interactive"). Mouse users click it; keyboard users press
+  // Delete on the focused tab (handled below), so closing stays
+  // keyboard-operable without a second focus stop inside the tab. Backspace is
+  // deliberately NOT a close key: it's a habitual back/delete keystroke and
+  // closing tears down the PTY (killing a running agent) with no confirmation.
+  const close = document.createElement("span");
   close.className = "terminal-tab-close";
   close.textContent = "×";
-  close.setAttribute("aria-label", "Close terminal");
+  close.setAttribute("aria-hidden", "true");
+  const closeTerminal = () => void sendTerminalFrame(closeTerminalFrame(id));
   close.addEventListener("click", (event) => {
     event.stopPropagation();
-    void sendTerminalFrame(closeTerminalFrame(id));
+    closeTerminal();
   });
-  // A `role="tab"` div, not a <button>, so the close <button> can nest
-  // inside it without producing invalid button-in-button markup.
   const tab = document.createElement("div");
   tab.className = "terminal-tab";
+  tab.id = `terminal-tab-${id}`;
   tab.dataset.terminalId = String(id);
   tab.setAttribute("role", "tab");
+  tab.setAttribute("aria-controls", tile.id);
+  // Announce the close shortcut to assistive tech: the × affordance is
+  // aria-hidden, so the tab itself carries the operable close shortcut.
+  tab.setAttribute("aria-keyshortcuts", "Delete");
   tab.append(tabLabel, stateEl, close);
   tab.addEventListener("click", () => focusTerminal(id));
+  tab.addEventListener("keydown", (event) => {
+    if (event.key === "Delete") {
+      event.preventDefault();
+      closeTerminal();
+      return;
+    }
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    const records = workspaceTerminalRecords();
+    const current = records.findIndex((candidate) => candidate.id === id);
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? records.length - 1
+          : (current + (event.key === "ArrowRight" ? 1 : -1) + records.length) %
+            records.length;
+    const nextId = records[next]?.id;
+    if (nextId !== undefined) {
+      focusTerminal(nextId);
+      liveTerminals.get(nextId)?.tab.focus();
+    }
+  });
   terminalTabs.append(tab);
 
   terminal.open(host);
@@ -2269,7 +2558,11 @@ function mountTerminal(record: TerminalRecord): void {
   }
 
   const inputDisposable = terminal.onData((data) => {
-    queueTerminalInput(id, [...encoder.encode(data)], terminalInputIntent(data));
+    queueTerminalInput(
+      id,
+      [...encoder.encode(data)],
+      terminalInputIntent(data),
+    );
   });
   const resizeDisposable = terminal.onResize(({ cols, rows }) => {
     void sendTerminalFrame(resizeTerminalFrame(id, cols, rows));
@@ -2387,7 +2680,10 @@ function layoutTiles(): void {
       terminalTabs.insertBefore(live.tab, terminalTabs.children[index] ?? null);
     }
     if (terminalTiles.children[index] !== live.tile) {
-      terminalTiles.insertBefore(live.tile, terminalTiles.children[index] ?? null);
+      terminalTiles.insertBefore(
+        live.tile,
+        terminalTiles.children[index] ?? null,
+      );
     }
   });
   terminalEmpty.classList.toggle("hidden", hasTerminals);
@@ -2401,6 +2697,7 @@ function layoutTiles(): void {
     live.tile.classList.toggle("focused", focused);
     live.tab.classList.toggle("active", focused);
     live.tab.setAttribute("aria-selected", String(focused));
+    live.tab.tabIndex = focused ? 0 : -1;
   }
   const focusedRecord =
     focusedTerminalId === null ? undefined : terminals.get(focusedTerminalId);
@@ -2421,7 +2718,10 @@ function layoutTiles(): void {
 
 /** A tile is laid out (and worth fitting) unless focus mode hid it. */
 function isTileVisible(live: ActiveTerminal): boolean {
-  return !terminalTiles.classList.contains("focus-only") || live.id === focusedTerminalId;
+  return (
+    !terminalTiles.classList.contains("focus-only") ||
+    live.id === focusedTerminalId
+  );
 }
 
 function terminalForWorkspace(
@@ -2595,6 +2895,21 @@ function clampSidebarWidth(width: number): number {
   return Math.round(Math.min(Math.max(width, SIDEBAR_MIN_PX), max));
 }
 
+function setSidebarWidth(width: number, persist = false): void {
+  const clamped = clampSidebarWidth(width);
+  workspaceGrid.style.setProperty("--sidebar-width", `${clamped}px`);
+  columnSplitter.setAttribute("aria-valuenow", String(clamped));
+  const gridWidth = workspaceGrid.getBoundingClientRect().width;
+  columnSplitter.setAttribute(
+    "aria-valuemax",
+    String(Math.max(gridWidth - RIGHT_MIN_PX, SIDEBAR_MIN_PX)),
+  );
+  if (persist) {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clamped));
+  }
+  scheduleResize();
+}
+
 /**
  * Re-apply the clamp to the live (dragged or restored) width. A window that
  * shrinks below the persisted sidebar width would otherwise starve the right
@@ -2605,10 +2920,7 @@ function clampSidebarWidth(width: number): number {
 function reclampSidebarWidth(): void {
   const current = workspaceGrid.style.getPropertyValue("--sidebar-width");
   if (current.endsWith("px")) {
-    workspaceGrid.style.setProperty(
-      "--sidebar-width",
-      `${clampSidebarWidth(parseInt(current, 10))}px`,
-    );
+    setSidebarWidth(parseInt(current, 10));
   }
 }
 
@@ -2621,11 +2933,18 @@ function reclampSidebarWidth(): void {
 function initColumnSplitter(): void {
   const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
   if (Number.isFinite(stored) && stored >= SIDEBAR_MIN_PX) {
-    workspaceGrid.style.setProperty(
-      "--sidebar-width",
-      `${clampSidebarWidth(stored)}px`,
-    );
+    setSidebarWidth(stored);
+  } else {
+    setSidebarWidth(360);
   }
+  columnSplitter.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+      return;
+    }
+    event.preventDefault();
+    const current = Number(columnSplitter.getAttribute("aria-valuenow"));
+    setSidebarWidth(current + (event.key === "ArrowRight" ? 16 : -16), true);
+  });
   columnSplitter.addEventListener("mousedown", (event) => {
     event.preventDefault();
     columnSplitter.classList.add("dragging");
@@ -2636,8 +2955,7 @@ function initColumnSplitter(): void {
       }
       const rect = workspaceGrid.getBoundingClientRect();
       const width = clampSidebarWidth(move.clientX - rect.left);
-      workspaceGrid.style.setProperty("--sidebar-width", `${width}px`);
-      scheduleResize();
+      setSidebarWidth(width);
     };
     const onUp = () => {
       columnSplitter.classList.remove("dragging");
@@ -2645,13 +2963,47 @@ function initColumnSplitter(): void {
       window.removeEventListener("mouseup", onUp);
       const current = workspaceGrid.style.getPropertyValue("--sidebar-width");
       if (current.endsWith("px")) {
-        localStorage.setItem(SIDEBAR_WIDTH_KEY, String(parseInt(current, 10)));
+        setSidebarWidth(parseInt(current, 10), true);
       }
-      scheduleResize();
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   });
+}
+
+function clampActivityHeight(height: number): number {
+  const paneHeight = rightPane.getBoundingClientRect().height;
+  const max =
+    paneHeight > 0
+      ? Math.max(paneHeight - TERMINAL_MIN_PX, ACTIVITY_MIN_PX)
+      : Infinity;
+  return Math.round(Math.min(Math.max(height, ACTIVITY_MIN_PX), max));
+}
+
+function setActivityHeight(height: number, persist = false): void {
+  const clamped = clampActivityHeight(height);
+  rightPane.style.setProperty("--activity-height", `${clamped}px`);
+  rightPaneSplitter.setAttribute("aria-valuenow", String(clamped));
+  rightPaneSplitter.setAttribute(
+    "aria-valuemax",
+    String(
+      Math.max(
+        rightPane.getBoundingClientRect().height - TERMINAL_MIN_PX,
+        ACTIVITY_MIN_PX,
+      ),
+    ),
+  );
+  if (persist) {
+    localStorage.setItem(ACTIVITY_HEIGHT_KEY, String(clamped));
+  }
+  scheduleResize();
+}
+
+function reclampActivityHeight(): void {
+  const current = rightPane.style.getPropertyValue("--activity-height");
+  if (current.endsWith("px")) {
+    setActivityHeight(parseInt(current, 10));
+  }
 }
 
 /**
@@ -2662,8 +3014,19 @@ function initColumnSplitter(): void {
 function initActivitySplitter(): void {
   const stored = Number(localStorage.getItem(ACTIVITY_HEIGHT_KEY));
   if (Number.isFinite(stored) && stored >= ACTIVITY_MIN_PX) {
-    rightPane.style.setProperty("--activity-height", `${stored}px`);
+    setActivityHeight(stored);
+  } else {
+    const paneHeight = rightPane.getBoundingClientRect().height;
+    setActivityHeight(paneHeight > 0 ? paneHeight * 0.42 : ACTIVITY_MIN_PX);
   }
+  rightPaneSplitter.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+      return;
+    }
+    event.preventDefault();
+    const current = Number(rightPaneSplitter.getAttribute("aria-valuenow"));
+    setActivityHeight(current + (event.key === "ArrowDown" ? 16 : -16), true);
+  });
   rightPaneSplitter.addEventListener("mousedown", (event) => {
     event.preventDefault();
     rightPaneSplitter.classList.add("dragging");
@@ -2673,13 +3036,7 @@ function initActivitySplitter(): void {
         return;
       }
       const rect = rightPane.getBoundingClientRect();
-      const max = Math.max(rect.height - TERMINAL_MIN_PX, ACTIVITY_MIN_PX);
-      const height = Math.min(
-        Math.max(move.clientY - rect.top, ACTIVITY_MIN_PX),
-        max,
-      );
-      rightPane.style.setProperty("--activity-height", `${Math.round(height)}px`);
-      scheduleResize();
+      setActivityHeight(move.clientY - rect.top);
     };
     const onUp = () => {
       rightPaneSplitter.classList.remove("dragging");
@@ -2687,9 +3044,8 @@ function initActivitySplitter(): void {
       window.removeEventListener("mouseup", onUp);
       const current = rightPane.style.getPropertyValue("--activity-height");
       if (current.endsWith("px")) {
-        localStorage.setItem(ACTIVITY_HEIGHT_KEY, String(parseInt(current, 10)));
+        setActivityHeight(parseInt(current, 10), true);
       }
-      scheduleResize();
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -2733,7 +3089,7 @@ async function openSnippetPicker(): Promise<void> {
   snippetCursor = 0;
   renderSnippet();
   if (!snippetDialog.open) {
-    snippetDialog.showModal();
+    showModal(snippetDialog);
   }
   snippetFilter.focus();
 }
@@ -2811,6 +3167,15 @@ function renderSnippet(): void {
       renderSnippet();
     },
   });
+  snippetList.setAttribute(
+    "aria-activedescendant",
+    `snippet-option-${snippetCursor}`,
+  );
+  snippetFilter.setAttribute("aria-controls", "snippet-list");
+  snippetFilter.setAttribute(
+    "aria-activedescendant",
+    `snippet-option-${snippetCursor}`,
+  );
   renderSnippetPreview(snippetPreview, view, snippetCursor);
   snippetList
     .querySelector<HTMLElement>('[aria-selected="true"]')
@@ -2877,7 +3242,14 @@ function previewSnippetView(): SnippetPickerView {
     {
       category: "Review",
       label: "Review",
-      rows: [row("rev", "Review the current diff", "Review", "Review the current diff…")],
+      rows: [
+        row(
+          "rev",
+          "Review the current diff",
+          "Review",
+          "Review the current diff…",
+        ),
+      ],
     },
     {
       category: "Git & PR",
@@ -2893,7 +3265,9 @@ function openBroadcastDialog(): void {
     setStatus("Select at least one workspace to broadcast.");
     return;
   }
-  broadcastTargets.textContent = `${markedWorkspaces.size} target${markedWorkspaces.size === 1 ? "" : "s"}: ${[...markedWorkspaces]
+  broadcastTargets.textContent = `${markedWorkspaces.size} target${markedWorkspaces.size === 1 ? "" : "s"}: ${[
+    ...markedWorkspaces,
+  ]
     .map((key) => workspaces.get(key)?.name ?? key)
     .join(", ")}`;
   if (!broadcastDialog.open) {
@@ -2992,11 +3366,14 @@ function jumpToAttention(kind: "asking" | "failing"): void {
       return status === "Failure" || status === "Mixed";
     }
     return [...terminals.values()].some(
-      (terminal) => terminal.sessionKey === key && terminal.state === "inputneeded",
+      (terminal) =>
+        terminal.sessionKey === key && terminal.state === "inputneeded",
     );
   });
   if (next === null) {
-    setStatus(kind === "asking" ? "No agent is asking." : "No failing CI target.");
+    setStatus(
+      kind === "asking" ? "No agent is asking." : "No failing CI target.",
+    );
     return;
   }
   selectWorkspace(next);
@@ -3082,9 +3459,13 @@ async function offerWorkspaceCleanup(
   cleanupDialog.returnValue = "";
   cleanupDialog.showModal();
   const decision = await new Promise<string>((resolve) => {
-    cleanupDialog.addEventListener("close", () => resolve(cleanupDialog.returnValue), {
-      once: true,
-    });
+    cleanupDialog.addEventListener(
+      "close",
+      () => resolve(cleanupDialog.returnValue),
+      {
+        once: true,
+      },
+    );
   });
   // A concurrent WorkspaceCleanupCancelled (issue reopened) or a
   // superseding prompt clears/repoints the key while the modal was open;
@@ -3142,7 +3523,11 @@ async function startContextualAgent(
   renderWorkspace();
   focusRequestedSession = workspaceKey;
   try {
-    const prompt = await resolveWorkPrompt(workspaceKey, selectedActivity, agent);
+    const prompt = await resolveWorkPrompt(
+      workspaceKey,
+      selectedActivity,
+      agent,
+    );
     if (existing !== undefined && !existing.state.startsWith("exited")) {
       if (prompt === null) {
         focusTerminal(existing.id);
@@ -3228,6 +3613,7 @@ function openActionsMenu(): void {
   actionsMenu.classList.remove("hidden");
   actionsButton.setAttribute("aria-expanded", "true");
   actionsMenuOpen = true;
+  actionsMenu.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
 }
 
 function closeActionsMenu(): void {
@@ -3307,7 +3693,10 @@ function renderActionsMenu(): void {
     items.push({ label: "Open in browser", run: () => void openTaskUrl(url) });
   }
   if (workspace !== undefined && workspaceDiffTarget(workspace) !== null) {
-    items.push({ label: "Open in editor", run: () => void openWorkspaceEditor(key) });
+    items.push({
+      label: "Open in editor",
+      run: () => void openWorkspaceEditor(key),
+    });
   }
   if (workspace?.pr !== null && workspace?.pr !== undefined) {
     items.push({
@@ -3326,10 +3715,16 @@ function renderActionsMenu(): void {
     });
   }
   if ((workspace?.sessions.length ?? 0) > 0 && workspaces.size > 1) {
-    items.push({ label: "Adopt sessions into…", run: () => void adoptSessions(key) });
+    items.push({
+      label: "Adopt sessions into…",
+      run: () => void adoptSessions(key),
+    });
   }
   if (workspace !== undefined && workspaceDiffTarget(workspace) !== null) {
-    items.push({ label: "View diff", run: () => void requestWorkspaceDiff(key) });
+    items.push({
+      label: "View diff",
+      run: () => void requestWorkspaceDiff(key),
+    });
   }
   if (canMerge) {
     items.push({
@@ -3397,7 +3792,9 @@ function renderActionsMenu(): void {
         void confirmedMutation(
           key,
           deleteOrCloseCommand(key),
-          isPr ? "Close this PR without merging?" : "Delete or close this item?",
+          isPr
+            ? "Close this PR without merging?"
+            : "Delete or close this item?",
           isPr
             ? "The pull request is closed on GitHub without merging."
             : "The issue is deleted when your token has admin rights, else closed as not-planned.",
@@ -3671,7 +4068,7 @@ function showWorkspaceDiff(workspaceKey: string, diff: WorkspaceDiffDto): void {
   diffTitle.textContent =
     task !== null ? `Worktree diff · ${taskReference(task)}` : "Worktree diff";
   if (!diffDialog.open) {
-    diffDialog.showModal();
+    showModal(diffDialog);
   }
 }
 
@@ -3705,7 +4102,7 @@ function openRenameDialog(workspaceKey: string): void {
   renameNameInput.value = workspace.name;
   renameError.classList.add("hidden");
   renameDialog.dataset.key = workspaceKey;
-  renameDialog.showModal();
+  showModal(renameDialog);
   renameNameInput.focus();
   renameNameInput.select();
 }
@@ -3723,7 +4120,9 @@ async function submitRename(): Promise<void> {
     renameNameInput.focus();
     return;
   }
-  const succeeded = await sendCommand(renameWorkspaceCommand(workspaceKey, name));
+  const succeeded = await sendCommand(
+    renameWorkspaceCommand(workspaceKey, name),
+  );
   if (succeeded) {
     renameDialog.close();
     setStatus(`Renamed to ${name}.`);
@@ -3970,7 +4369,7 @@ function openNewWorkspaceDialog(): void {
   newWorkspaceName.value = "";
   newWorkspaceAgent.checked = true;
   newWorkspaceError.classList.add("hidden");
-  newWorkspaceDialog.showModal();
+  showModal(newWorkspaceDialog);
   newWorkspaceName.focus();
 }
 
@@ -4023,9 +4422,7 @@ async function runCommands(
   return true;
 }
 
-async function sendCommand(
-  command: LazyboxCommand,
-): Promise<boolean> {
+async function sendCommand(command: LazyboxCommand): Promise<boolean> {
   if (previewMode) {
     return true;
   }
@@ -4046,7 +4443,13 @@ async function openSettings(): Promise<void> {
       first_run: false,
       selected_scopes: ["github:acme/relay"],
       agents: [
-        { id: "codex", label: "Codex", available: true, models: [], default_tier: null },
+        {
+          id: "codex",
+          label: "Codex",
+          available: true,
+          models: [],
+          default_tier: null,
+        },
         {
           id: "claude",
           label: "Claude Code",
@@ -4112,22 +4515,79 @@ function applySetupState(state: DesktopSetupState): void {
   keymapPresetLabel.textContent = `Keymap: ${state.keymap_preset ?? "default"}`;
 
   analyticsEnabled.checked = state.analytics_enabled;
+  const preferences = notificationPreferences();
+  notificationsEnabled.checked = preferences.enabled;
+  notificationPreviews.checked = preferences.previews;
+  notifier.setPreferences(preferences);
   diagnosticsPath.textContent = `Logs: ${state.log_path} · Crash reports: ${state.diagnostics_path}`;
+  aboutVersion.textContent =
+    buildVersion === "" ? "lazybox desktop" : buildVersion;
   renderRepositories();
   const remote = authorityMode === "remote";
   settingsAuthority.textContent = remote
     ? `Connected to a remote daemon. ${state.providers.join(", ") || "No providers"}, repositories, agents, and models are read-only here; appearance and privacy belong to this client.`
     : "Embedded daemon settings and desktop preferences are stored on this machine.";
-  for (const section of [githubSettingsSection, repositorySettingsSection, agentSettingsSection]) {
+  for (const section of [
+    githubSettingsSection,
+    repositorySettingsSection,
+    agentSettingsSection,
+  ]) {
     section.classList.toggle("settings-readonly", remote);
-    for (const control of section.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button")) {
+    for (const control of section.querySelectorAll<
+      HTMLInputElement | HTMLSelectElement | HTMLButtonElement
+    >("input, select, button")) {
       control.disabled = remote;
     }
   }
   if (remote) {
     githubAuthBadge.textContent = "Remote";
-    githubAuthMessage.textContent = "GitHub access is managed by the connected daemon.";
+    githubAuthMessage.textContent =
+      "GitHub access is managed by the connected daemon.";
   }
+}
+
+function notificationPreferences(): NotificationPreferences {
+  return {
+    enabled: localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) !== "false",
+    previews: localStorage.getItem(NOTIFICATION_PREVIEWS_KEY) === "true",
+    quietWhenFocused: true,
+  };
+}
+
+function saveNotificationPreferences(): void {
+  localStorage.setItem(
+    NOTIFICATIONS_ENABLED_KEY,
+    String(notificationsEnabled.checked),
+  );
+  localStorage.setItem(
+    NOTIFICATION_PREVIEWS_KEY,
+    String(notificationPreviews.checked),
+  );
+  notifier.setPreferences(notificationPreferences());
+}
+
+async function refreshNotificationPermission(request: boolean): Promise<void> {
+  try {
+    renderNotificationPermission(await notifier.permission(request));
+  } catch {
+    renderNotificationPermission("denied");
+  }
+}
+
+function renderNotificationPermission(permission: PermissionState): void {
+  // Collapse the platform-specific states ("prompt-with-rationale") into the
+  // three the UI cares about.
+  const display =
+    permission === "granted"
+      ? "granted"
+      : permission === "denied"
+        ? "denied"
+        : "prompt";
+  notificationPermission.textContent = `Notification permission: ${display}`;
+  notificationPermissionButton.classList.toggle(
+    "hidden",
+    display === "granted",
+  );
 }
 
 function renderModelOptions(agentId: string): void {
@@ -4156,16 +4616,15 @@ function renderModelOptions(agentId: string): void {
 
 function renderThemeList(): void {
   themeList.replaceChildren();
-  for (const theme of availableThemes) {
+  const effectiveTheme = selectedTheme ?? availableThemes[0]?.name;
+  for (const [index, theme] of availableThemes.entries()) {
     const swatch = document.createElement("button");
     swatch.type = "button";
     swatch.className = "theme-swatch";
     swatch.role = "radio";
-    swatch.setAttribute(
-      "aria-checked",
-      String(theme.name === selectedTheme),
-    );
-    swatch.classList.toggle("selected", theme.name === selectedTheme);
+    swatch.setAttribute("aria-checked", String(theme.name === effectiveTheme));
+    swatch.classList.toggle("selected", theme.name === effectiveTheme);
+    swatch.tabIndex = theme.name === effectiveTheme ? 0 : -1;
     swatch.style.setProperty("--swatch-surface", theme.colors.surface);
     swatch.style.setProperty("--swatch-accent", theme.colors.accent);
     swatch.style.setProperty("--swatch-text", theme.colors.text_strong);
@@ -4185,12 +4644,40 @@ function renderThemeList(): void {
     name.className = "theme-swatch-name";
     name.textContent = theme.name;
     swatch.append(dots, name);
-    swatch.addEventListener("click", () => {
-      selectedTheme = theme.name;
-      renderThemeList();
-      applyThemeColors(theme.colors);
+    swatch.addEventListener("click", () => chooseTheme(index, false));
+    swatch.addEventListener("keydown", (event) => {
+      const last = availableThemes.length - 1;
+      let next: number | null = null;
+      if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+        next = (index + 1) % availableThemes.length;
+      } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+        next = (index - 1 + availableThemes.length) % availableThemes.length;
+      } else if (event.key === "Home") {
+        next = 0;
+      } else if (event.key === "End") {
+        next = last;
+      }
+      if (next !== null) {
+        event.preventDefault();
+        chooseTheme(next, true);
+      }
     });
     themeList.append(swatch);
+  }
+}
+
+function chooseTheme(index: number, focus: boolean): void {
+  const theme = availableThemes[index];
+  if (theme === undefined) {
+    return;
+  }
+  selectedTheme = theme.name;
+  renderThemeList();
+  applyThemeColors(theme.colors);
+  if (focus) {
+    themeList
+      .querySelector<HTMLButtonElement>('[aria-checked="true"]')
+      ?.focus();
   }
 }
 
@@ -4224,6 +4711,7 @@ function applyThemeColors(colors: DesktopThemeColors): void {
   root.style.setProperty("--theme-chrome", colors.chrome);
   root.style.setProperty("--theme-fill", colors.fill);
   root.style.setProperty("--theme-surface", colors.surface);
+  root.style.colorScheme = luminance(colors.surface) > 160 ? "light" : "dark";
   for (const live of liveTerminals.values()) {
     live.terminal.options.theme = terminalTheme(colors);
   }
@@ -4235,7 +4723,7 @@ function openSetupDialog(required: boolean): void {
   setupClose.classList.toggle("hidden", required);
   setupError.classList.add("hidden");
   if (!setupDialog.open) {
-    setupDialog.showModal();
+    showModal(setupDialog);
   }
   (authorityMode === "remote" ? setupClose : githubCheckButton).focus();
 }
@@ -4268,7 +4756,9 @@ async function refreshGithubAuth(): Promise<void> {
     return;
   }
   githubCheckButton.disabled = false;
-  githubAuthBadge.textContent = status.authenticated ? "Connected" : "Action needed";
+  githubAuthBadge.textContent = status.authenticated
+    ? "Connected"
+    : "Action needed";
   githubAuthBadge.classList.toggle("ready", status.authenticated);
   githubAuthMessage.textContent = status.authenticated
     ? `${status.message} for @${status.account ?? "unknown"}`
@@ -4350,7 +4840,9 @@ function renderRepositories(): void {
     }
   }
   const repositories = [...byId.values()]
-    .filter((repository) => repository.label.toLocaleLowerCase().includes(query))
+    .filter((repository) =>
+      repository.label.toLocaleLowerCase().includes(query),
+    )
     .sort((left, right) => left.label.localeCompare(right.label));
   repositoryList.replaceChildren();
   if (repositories.length === 0) {
@@ -4431,7 +4923,11 @@ function updateRepositorySelectionCount(): void {
 
 async function saveSettings(): Promise<void> {
   setupError.classList.add("hidden");
-  if (authorityMode === "embedded" && setupRequired && selectedScopes.size === 0) {
+  if (
+    authorityMode === "embedded" &&
+    setupRequired &&
+    selectedScopes.size === 0
+  ) {
     showSetupError("Select a GitHub organization or repository.");
     return;
   }
@@ -4461,7 +4957,8 @@ async function saveSettings(): Promise<void> {
           analytics_enabled: analyticsEnabled.checked,
           theme: selectedTheme,
           default_model_tier:
-            authorityMode === "remote" || defaultModelField.classList.contains("hidden") ||
+            authorityMode === "remote" ||
+            defaultModelField.classList.contains("hidden") ||
             defaultModelSelect.value.length === 0
               ? null
               : defaultModelSelect.value,
@@ -4489,7 +4986,9 @@ function showSetupError(message: string): void {
 }
 
 function capitalize(value: string): string {
-  return value.length === 0 ? value : `${value[0]?.toUpperCase()}${value.slice(1)}`;
+  return value.length === 0
+    ? value
+    : `${value[0]?.toUpperCase()}${value.slice(1)}`;
 }
 
 // In-app single-line text prompt, mirroring `confirmUserAction`. The
@@ -4518,7 +5017,8 @@ function promptText(options: {
   return new Promise((resolve) => {
     inputDialog.addEventListener(
       "close",
-      () => resolve(inputDialog.returnValue === "submit" ? inputField.value : null),
+      () =>
+        resolve(inputDialog.returnValue === "submit" ? inputField.value : null),
       { once: true },
     );
   });
@@ -4536,7 +5036,7 @@ function confirmUserAction(
   confirmPreview.textContent = preview ?? "";
   confirmPreview.classList.toggle("hidden", preview === undefined);
   confirmDialog.returnValue = "";
-  confirmDialog.showModal();
+  showModal(confirmDialog);
   confirmAccept.focus();
   return new Promise((resolve) => {
     confirmDialog.addEventListener(
@@ -4694,14 +5194,12 @@ function navigateWorkspaces(delta: number): void {
   }
   const current = keys.indexOf(selectedKey ?? "");
   const next =
-    current < 0
-      ? 0
-      : Math.max(0, Math.min(keys.length - 1, current + delta));
+    current < 0 ? 0 : Math.max(0, Math.min(keys.length - 1, current + delta));
   const key = keys[next];
   if (key !== undefined) {
     selectWorkspace(key);
     workspaceList
-      .querySelector<HTMLButtonElement>('[aria-selected="true"]')
+      .querySelector<HTMLButtonElement>('[aria-current="true"]')
       ?.focus();
   }
 }
@@ -4798,4 +5296,22 @@ function element<T extends HTMLElement>(id: string): T {
     throw new Error(`missing #${id}`);
   }
   return value as T;
+}
+
+function showModal(dialog: HTMLDialogElement): void {
+  if (document.activeElement instanceof HTMLElement) {
+    dialogReturnFocus.set(dialog, document.activeElement);
+  }
+  dialog.showModal();
+  dialog.addEventListener(
+    "close",
+    () => {
+      const target = dialogReturnFocus.get(dialog);
+      dialogReturnFocus.delete(dialog);
+      if (target?.isConnected && !target.closest("[inert]")) {
+        target.focus();
+      }
+    },
+    { once: true },
+  );
 }

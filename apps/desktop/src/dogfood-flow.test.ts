@@ -29,9 +29,9 @@ describe("desktop inbox-to-terminal workflow mapping", () => {
     expect(primaryTask(workspace!)?.needs_reply).toBe(true);
 
     const key = workspace!.key;
-    expect(
-      commandsForWorkspaceIntent(key, { type: "mark-read" }),
-    ).toHaveLength(1);
+    expect(commandsForWorkspaceIntent(key, { type: "mark-read" })).toHaveLength(
+      1,
+    );
     expect(
       commandsForWorkspaceIntent(key, {
         type: "reply",

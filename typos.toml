@@ -30,6 +30,7 @@ Shft = "Shft"                # deliberate typo'd chord in the unparseable-chord 
 mis = "mis"                  # hyphenated prefix: "mis-decode" etc.
 fo = "fo"                    # RFC 4648 base64 test vector (b"fo")
 hel = "hel"                  # composing-buffer test value ("hello" minus 2 chars)
+passin = "passin"            # openssl option: `-passin pass:…` (p12 signing preflight)
 
 [files]
 extend-exclude = [

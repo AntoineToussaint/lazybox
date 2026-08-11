@@ -55,6 +55,10 @@ enum TerminalStreamItem {
 /// drift on grouping or sort. The webview is a thin renderer over the
 /// emitted [`DesktopInboxView`].
 struct InboxModel {
+    revision: u64,
+    controller_id: String,
+    filter_generation: u64,
+    search_generation: u64,
     workspaces: HashMap<lazybox_core::SessionKey, lazybox_core::Workspace>,
     /// Per-terminal agent state, keyed by terminal id so one agent in a
     /// multi-session workspace can't clobber another (mirrors the TUI's
@@ -79,6 +83,10 @@ struct InboxModel {
 impl InboxModel {
     fn new(attention: lazybox_config::AttentionConfig) -> Self {
         Self {
+            revision: 0,
+            controller_id: String::new(),
+            filter_generation: 0,
+            search_generation: 0,
             workspaces: HashMap::new(),
             agent_terminal_states: HashMap::new(),
             agents: HashMap::new(),
@@ -92,13 +100,40 @@ impl InboxModel {
 
     /// Replace the active filter set (the multi-select filter menu's
     /// output). An empty list clears all filters (#733).
-    fn set_filters(&mut self, filters: impl IntoIterator<Item = Filter>) {
+    fn set_filters(
+        &mut self,
+        controller_id: &str,
+        generation: u64,
+        filters: impl IntoIterator<Item = Filter>,
+    ) -> bool {
+        self.activate_controller(controller_id);
+        if generation < self.filter_generation {
+            return false;
+        }
+        self.filter_generation = generation;
         self.filters.replace(filters);
+        self.revision += 1;
+        true
     }
 
     /// Set the global search query; an empty/blank query is inactive (#733).
-    fn set_search(&mut self, query: String) {
+    fn set_search(&mut self, controller_id: &str, generation: u64, query: String) -> bool {
+        self.activate_controller(controller_id);
+        if generation < self.search_generation {
+            return false;
+        }
+        self.search_generation = generation;
         self.search = query;
+        self.revision += 1;
+        true
+    }
+
+    fn activate_controller(&mut self, controller_id: &str) {
+        if self.controller_id != controller_id {
+            self.controller_id = controller_id.to_string();
+            self.filter_generation = 0;
+            self.search_generation = 0;
+        }
     }
 
     /// Seed the workspace map from the initial `list_workspaces`
@@ -109,12 +144,13 @@ impl InboxModel {
             .iter()
             .map(|w| ((&w.key).into(), w.clone()))
             .collect();
+        self.revision += 1;
     }
 
     /// Fold a desktop event into the model. Returns whether the inbox
     /// view should be recomputed + re-emitted.
     fn apply_event(&mut self, event: &DesktopEvent) -> bool {
-        match event {
+        let recompute = match event {
             DesktopEvent::Snapshot {
                 workspaces,
                 terminals,
@@ -173,7 +209,11 @@ impl InboxModel {
                 asking_before != self.asking_sessions()
             }
             _ => false,
+        };
+        if recompute {
+            self.revision += 1;
         }
+        recompute
     }
 
     /// The sessions currently aggregated to `InputNeeded` (asking) —
@@ -211,11 +251,13 @@ impl InboxModel {
 
     fn cycle_sort_mode(&mut self) -> SortMode {
         self.sort_mode = self.sort_mode.next();
+        self.revision += 1;
         self.sort_mode
     }
 
     fn cycle_mailbox(&mut self) -> Mailbox {
         self.mailbox = self.mailbox.next();
+        self.revision += 1;
         self.mailbox
     }
 
@@ -275,6 +317,7 @@ impl InboxModel {
             search: search.as_ref(),
         });
         DesktopInboxView {
+            revision: self.revision,
             outcome,
             sort_mode: self.sort_mode,
             mailbox: self.mailbox,
@@ -323,6 +366,17 @@ struct DesktopState {
     streams_started: AtomicBool,
     stream_shutdown: watch::Sender<bool>,
     stream_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The controller (webview instance) whose `read_terminal_data` drain
+    /// loop and filter/search requests are authoritative (#974). A stale
+    /// controller's requests are dropped; changing it wakes the parked
+    /// terminal reader (below).
+    active_controller: Mutex<Option<String>>,
+    /// Wakes any parked `read_terminal_data` call when the active controller
+    /// changes (subscribe / unsubscribe). Without it a superseded reader
+    /// holds the shared `terminal_rx` lock across `recv().await` forever,
+    /// pinning the whole reader loop alive and starving a re-initialized
+    /// controller of terminal frames (#974).
+    terminal_reader_wake: Arc<tokio::sync::Notify>,
     client_runtime: Mutex<Option<ClientRuntime>>,
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     gateway_shutdown: Mutex<Option<watch::Sender<bool>>>,
@@ -813,14 +867,14 @@ fn record_analytics_best_effort(path: &Path, enabled: bool, event: AnalyticsEven
 
 #[tauri::command]
 async fn list_workspaces(state: State<'_, DesktopState>) -> Result<WorkspacesResponse, String> {
+    let baseline_revision = state.inbox.lock().await.revision;
     let response = list_gateway_workspaces(&state.gateway).await?;
     // Seed the grouped-inbox model so `set_sort_mode` and the first
     // computed view have data even before the `Snapshot` event lands.
-    state
-        .inbox
-        .lock()
-        .await
-        .seed_workspaces(&response.workspaces);
+    let mut inbox = state.inbox.lock().await;
+    if inbox.revision == baseline_revision {
+        inbox.seed_workspaces(&response.workspaces);
+    }
     Ok(response)
 }
 
@@ -873,32 +927,56 @@ async fn snippet_view(
 /// Replace the active filter set from the multi-select filter menu and
 /// re-emit the recomputed view. An empty list clears all filters (#733).
 #[tauri::command]
-async fn set_filters(state: State<'_, DesktopState>, filters: Vec<Filter>) -> Result<(), String> {
+async fn set_filters(
+    state: State<'_, DesktopState>,
+    filters: Vec<Filter>,
+    generation: u64,
+    controller_id: String,
+) -> Result<(), String> {
+    // Drop a request from a superseded controller, and (via the generation)
+    // any request older than the newest already applied (#974).
+    if state.active_controller.lock().await.as_deref() != Some(&controller_id) {
+        return Ok(());
+    }
     let view = {
         let mut inbox = state.inbox.lock().await;
-        inbox.set_filters(filters);
-        inbox.compute()
+        inbox
+            .set_filters(&controller_id, generation, filters)
+            .then(|| inbox.compute())
     };
-    send_webview_event(
-        &state.event_channel,
-        DesktopStreamMessage::Inbox(Box::new(view)),
-    );
+    if let Some(view) = view {
+        send_webview_event(
+            &state.event_channel,
+            DesktopStreamMessage::Inbox(Box::new(view)),
+        );
+    }
     Ok(())
 }
 
 /// Set the global search query and re-emit the recomputed view. An
 /// empty query clears the search (#733).
 #[tauri::command]
-async fn set_search(state: State<'_, DesktopState>, query: String) -> Result<(), String> {
+async fn set_search(
+    state: State<'_, DesktopState>,
+    query: String,
+    generation: u64,
+    controller_id: String,
+) -> Result<(), String> {
+    if state.active_controller.lock().await.as_deref() != Some(&controller_id) {
+        return Ok(());
+    }
     let view = {
         let mut inbox = state.inbox.lock().await;
-        inbox.set_search(query);
-        inbox.compute()
+        inbox
+            .set_search(&controller_id, generation, query)
+            .then(|| inbox.compute())
     };
-    send_webview_event(
-        &state.event_channel,
-        DesktopStreamMessage::Inbox(Box::new(view)),
-    );
+    if let Some(view) = view {
+        send_webview_event(
+            &state.event_channel,
+            DesktopStreamMessage::Inbox(Box::new(view)),
+        );
+    }
     Ok(())
 }
 
@@ -1082,22 +1160,50 @@ async fn send_terminal_frame(
 #[tauri::command]
 async fn read_terminal_data(
     state: State<'_, DesktopState>,
+    controller_id: String,
 ) -> Result<tauri::ipc::Response, String> {
-    let item = state
-        .terminal_rx
-        .lock()
-        .await
-        .recv()
-        .await
-        .ok_or_else(|| "terminal stream stopped".to_string())?;
-    Ok(tauri::ipc::Response::new(encode_terminal_stream_item(item)))
+    // Arm the wake before the first lock/recv so a supersede that races the
+    // parking below is not missed (#974).
+    let woken = state.terminal_reader_wake.notified();
+    tokio::pin!(woken);
+    loop {
+        // A reader that no longer owns the active controller must not hold the
+        // shared receiver: it would block the live controller's reader and
+        // keep a disposed webview's loop alive.
+        let superseded = {
+            let active = state.active_controller.lock().await;
+            active.as_deref() != Some(&controller_id)
+        };
+        if superseded {
+            return Err("terminal reader superseded".to_string());
+        }
+        let mut rx = state.terminal_rx.lock().await;
+        tokio::select! {
+            item = rx.recv() => {
+                let item = item.ok_or_else(|| "terminal stream stopped".to_string())?;
+                return Ok(tauri::ipc::Response::new(encode_terminal_stream_item(item)));
+            }
+            () = &mut woken => {
+                // subscribe/unsubscribe changed the active controller: drop the
+                // lock, re-arm, and re-check ownership at the top.
+                drop(rx);
+                woken.set(state.terminal_reader_wake.notified());
+            }
+        }
+    }
 }
 
 #[tauri::command]
 async fn subscribe_events(
     state: State<'_, DesktopState>,
     on_event: Channel<DesktopStreamMessage>,
+    controller_id: String,
 ) -> Result<(), String> {
+    // Make this webview the authoritative controller and wake any terminal
+    // reader parked under the prior one so it releases the shared receiver
+    // before this controller's reader starts (#974).
+    *state.active_controller.lock().await = Some(controller_id);
+    state.terminal_reader_wake.notify_waiters();
     let start_streams =
         replace_event_subscription(&state.streams_started, &state.event_channel, on_event);
     if !start_streams {
@@ -1148,6 +1254,24 @@ async fn subscribe_events(
         .lock()
         .await
         .extend([control_task, terminal_task]);
+    Ok(())
+}
+
+/// Release this controller (#974). The daemon stream tasks intentionally
+/// outlive a webview reload (#972) and are torn down only at shutdown, so this
+/// clears the authoritative controller and wakes the parked terminal reader so
+/// its drain loop observes the change and stops — it does not stop the streams.
+#[tauri::command]
+async fn unsubscribe_events(
+    state: State<'_, DesktopState>,
+    controller_id: String,
+) -> Result<(), String> {
+    let mut active = state.active_controller.lock().await;
+    if active.as_deref() != Some(&controller_id) {
+        return Ok(());
+    }
+    *active = None;
+    state.terminal_reader_wake.notify_waiters();
     Ok(())
 }
 
@@ -2152,6 +2276,8 @@ async fn start_desktop_state() -> Result<DesktopState, String> {
         streams_started: AtomicBool::new(false),
         stream_shutdown,
         stream_tasks: Mutex::new(Vec::new()),
+        active_controller: Mutex::new(None),
+        terminal_reader_wake: Arc::new(tokio::sync::Notify::new()),
         protocol_notice,
         client_runtime: Mutex::new(local.client_runtime),
         gateway_task: Mutex::new(local.gateway_task),
@@ -2582,7 +2708,8 @@ fn main() {
             send_command,
             send_terminal_frame,
             read_terminal_data,
-            subscribe_events
+            subscribe_events,
+            unsubscribe_events
         ])
         .build(tauri::generate_context!());
     let app = match app {
@@ -3947,7 +4074,7 @@ mod tests {
         );
 
         // An Issue filter hides both PRs; the chip and active flag show.
-        model.set_filters([Filter::Issue]);
+        model.set_filters("controller", 1, [Filter::Issue]);
         let filtered = model.compute();
         assert_eq!(workspace_rows(&filtered), 0);
         assert_eq!(filtered.filter_chips, vec!["issue".to_string()]);
@@ -3960,8 +4087,28 @@ mod tests {
         );
 
         // Clearing restores the full view.
-        model.set_filters([]);
+        model.set_filters("controller", 2, []);
         assert_eq!(workspace_rows(&model.compute()), 2);
+    }
+
+    #[test]
+    fn request_generations_ignore_reordered_filter_and_search_calls() {
+        let mut model = empty_model();
+        assert!(model.set_filters("first", 2, [Filter::Issue]));
+        let revision = model.revision;
+        assert!(!model.set_filters("first", 1, [Filter::Pr]));
+        assert_eq!(model.revision, revision);
+        assert!(model.filters.iter().any(|filter| filter == Filter::Issue));
+        assert!(!model.filters.iter().any(|filter| filter == Filter::Pr));
+
+        assert!(model.set_search("first", 4, "new".into()));
+        let revision = model.revision;
+        assert!(!model.set_search("first", 3, "stale".into()));
+        assert_eq!(model.search, "new");
+        assert_eq!(model.revision, revision);
+
+        assert!(model.set_filters("reinitialized", 1, [Filter::Pr]));
+        assert!(model.filters.iter().any(|filter| filter == Filter::Pr));
     }
 
     #[test]
@@ -3977,10 +4124,10 @@ mod tests {
         });
         // A number search keeps only the matching workspace, even though the
         // two live in different repo groups (global scope, #733).
-        model.set_search("2".into());
+        model.set_search("controller", 1, "2".into());
         assert_eq!(workspace_rows(&model.compute()), 1);
         // Clearing the query restores everything.
-        model.set_search(String::new());
+        model.set_search("controller", 2, String::new());
         assert_eq!(workspace_rows(&model.compute()), 2);
     }
 

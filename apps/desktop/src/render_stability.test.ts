@@ -250,7 +250,7 @@ async function boot(workspaces: Array<Record<string, unknown>>): Promise<void> {
   });
 
   vi.resetModules();
-  await import("./main");
+  await import("./main").then(({ init }) => init(document));
   await vi.waitFor(() => expect(harness.channels.at(-1)).not.toBeUndefined());
 }
 

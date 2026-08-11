@@ -72,7 +72,7 @@ describe("desktop keyboard and ARIA patterns", () => {
   });
 
   it("makes repository expanders and terminal tabs keyboard focusable", async () => {
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(document.querySelector(".repo-header")).not.toBeNull(),
     );
@@ -98,7 +98,7 @@ describe("desktop keyboard and ARIA patterns", () => {
   });
 
   it("supports roving theme radio focus and restores dialog focus", async () => {
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     const settings = document.getElementById(
       "settings-button",
     ) as HTMLButtonElement;
@@ -128,7 +128,7 @@ describe("desktop keyboard and ARIA patterns", () => {
   });
 
   it("moves through action menus with arrows and returns focus on Escape", async () => {
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     // Wait for boot to settle (preview data rendered + a workspace selected)
     // before opening the menu — it only populates for a selected workspace.
     await vi.waitFor(() =>

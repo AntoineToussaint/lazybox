@@ -253,7 +253,7 @@ async function boot(
   });
 
   vi.resetModules();
-  await import("./main");
+  await import("./main").then(({ init }) => init(document));
   await vi.waitFor(() => expect(channelMaybe()).not.toBeUndefined());
 }
 

@@ -987,6 +987,10 @@ pub enum DesktopCleanupReason {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct DesktopInboxView {
+    /// Monotonic desktop-controller revision. A client must ignore a view
+    /// older than the newest revision it has already applied.
+    #[serde(default)]
+    pub revision: u64,
     /// Ordered rows (repo headers, PR/Issue/Other section headers, and
     /// workspace / session rows) plus the per-repo summaries.
     pub outcome: lazybox_tui_core::inbox::ComputeOutcome,

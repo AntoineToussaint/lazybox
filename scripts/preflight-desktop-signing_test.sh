@@ -28,6 +28,21 @@ make_p12() {
 		>/dev/null 2>&1 || fail "openssl pkcs12 export failed"
 }
 
+# Build a Keychain-style .p12: cert bag under PBE-SHA1-RC2-40, which OpenSSL 3.x
+# refuses to read without -legacy. `-legacy` only exists on OpenSSL 3.x; on
+# LibreSSL / 1.x RC2-40 is the native default, so fall back without the flag.
+make_legacy_p12() {
+	local out="$1" subject="$2" pass="$3"
+	local key="$WORK/lk-$$-${RANDOM}.pem" crt="$WORK/lc-$$-${RANDOM}.pem"
+	openssl req -x509 -newkey rsa:2048 -keyout "$key" -out "$crt" -days 2 -nodes \
+		-subj "$subject" >/dev/null 2>&1 || fail "openssl req failed (legacy)"
+	openssl pkcs12 -export -legacy -certpbe PBE-SHA1-RC2-40 -keypbe PBE-SHA1-3DES -macalg SHA1 \
+		-inkey "$key" -in "$crt" -out "$out" -passout "pass:$pass" >/dev/null 2>&1 \
+	|| openssl pkcs12 -export -certpbe PBE-SHA1-RC2-40 -keypbe PBE-SHA1-3DES -macalg SHA1 \
+		-inkey "$key" -in "$crt" -out "$out" -passout "pass:$pass" >/dev/null 2>&1 \
+	|| fail "openssl pkcs12 legacy export failed"
+}
+
 # ── Case 1: a real Developer ID Application .p12 yields the exact strings ──────
 devid="$WORK/devid.p12"
 make_p12 "$devid" "/CN=Developer ID Application: Jane Roe (ABCDE12345)/OU=ABCDE12345/O=Jane Roe/C=US" secret
@@ -37,6 +52,15 @@ printf '%s\n' "$out" | grep -qx 'APPLE_SIGNING_IDENTITY=Developer ID Application
 printf '%s\n' "$out" | grep -qx 'APPLE_TEAM_ID=ABCDE12345' \
 	|| fail "case 1: wrong team id: $out"
 echo "PASS case 1: Developer ID cert yields exact identity + team id"
+
+# ── Case 1b: a Keychain-format (RC2-40) .p12 reads via the -legacy retry ──────
+# The original single-attempt read failed on exactly this, macOS's real export.
+legacy="$WORK/legacy.p12"
+make_legacy_p12 "$legacy" "/CN=Developer ID Application: Jane Roe (ABCDE12345)/OU=ABCDE12345/O=Jane Roe/C=US" secret
+out="$(bash "$SCRIPT" identity "$legacy" secret)" || fail "case 1b: legacy .p12 could not be read"
+printf '%s\n' "$out" | grep -qx 'APPLE_TEAM_ID=ABCDE12345' \
+	|| fail "case 1b: wrong team id from legacy .p12: $out"
+echo "PASS case 1b: Keychain-format RC2-40 .p12 is read via the legacy retry"
 
 # ── Case 2: the wrong export password is rejected ─────────────────────────────
 if bash "$SCRIPT" identity "$devid" wrongpass >/dev/null 2>&1; then
@@ -64,9 +88,12 @@ if [ "${1:-}" = "--repo" ]; then shift 2; fi
 case "$1 ${2:-}" in
 	"secret list")
 		for n in $STUB_SECRETS; do printf '%s\t2026-01-01T00:00:00Z\n' "$n"; done ;;
-	"variable get")
-		[ -n "${STUB_ENABLED:-}" ] && { printf '%s\n' "$STUB_ENABLED"; exit 0; }
-		exit 1 ;;
+	"variable list")
+		# TSV: NAME<tab>VALUE<tab>UPDATED. A decoy row proves the name filter.
+		printf 'UNRELATED_VAR\tnope\t2026-01-01T00:00:00Z\n'
+		[ -n "${STUB_ENABLED:-}" ] \
+			&& printf 'DESKTOP_RELEASE_ENABLED\t%s\t2026-01-01T00:00:00Z\n' "$STUB_ENABLED"
+		exit 0 ;;
 	*) echo "unexpected gh args: $*" >&2; exit 2 ;;
 esac
 STUB

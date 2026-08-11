@@ -38,12 +38,22 @@ cmd_identity() {
 	[ -f "$p12" ] || die "no such file: $p12"
 	command -v openssl >/dev/null || die "openssl is required"
 
-	# `-nameopt multiline` prints one RDN per line, so a comma inside the CN
-	# (part of the account name) can't be mistaken for a field separator.
-	local subject
-	subject="$(openssl pkcs12 -in "$p12" -passin "pass:$pass" -nokeys -clcerts 2>/dev/null \
-		| openssl x509 -noout -subject -nameopt multiline 2>/dev/null)" \
-		|| die "could not read '$p12' — wrong password, or not a .p12 (pass the export password as arg 2)"
+	# macOS Keychain encrypts the certificate bag with PBE-SHA1-RC2-40, which
+	# OpenSSL 3.x moved to the legacy provider — so a valid Keychain export
+	# won't open without -legacy. Try the modern path, then legacy, before
+	# blaming the password. (-legacy only exists on OpenSSL 3.x; on LibreSSL /
+	# 1.x the first attempt already reads RC2-40 natively, so the retry is
+	# skipped.) `-nameopt multiline` prints one RDN per line, so a comma inside
+	# the CN (part of the account name) can't be mistaken for a field separator.
+	local subject="" prov
+	for prov in "" "-legacy"; do
+		if subject="$(openssl pkcs12 $prov -in "$p12" -passin "pass:$pass" -nokeys -clcerts 2>/dev/null \
+			| openssl x509 -noout -subject -nameopt multiline 2>/dev/null)" && [ -n "$subject" ]; then
+			break
+		fi
+		subject=""
+	done
+	[ -n "$subject" ] || die "could not read '$p12' — wrong password, or not a .p12 (pass the export password as arg 2)"
 
 	local cn ou
 	cn="$(printf '%s\n' "$subject" | sed -n 's/^ *commonName *= //p' | head -n1)"
@@ -79,7 +89,9 @@ cmd_check() {
 	command -v gh >/dev/null || die "gh (GitHub CLI) is required for 'check'"
 
 	local present
-	present="$(gh secret list "${repo_args[@]}" 2>/dev/null | awk 'NF{print $1}')" \
+	# bash 3.2 (macOS /bin/bash) errors on "${empty[@]}" under `set -u`, so guard
+	# the expansion — repo_args is empty whenever --repo is omitted.
+	present="$(gh secret list ${repo_args[@]+"${repo_args[@]}"} 2>/dev/null | awk 'NF{print $1}')" \
 		|| die "could not list repo secrets — is gh authenticated with admin access?"
 
 	local missing=() name
@@ -87,8 +99,12 @@ cmd_check() {
 		printf '%s\n' "$present" | grep -qx "$name" || missing+=("$name")
 	done
 
+	# Parse `gh variable list` (TSV: NAME<tab>VALUE<tab>UPDATED) rather than
+	# `gh variable get`, which only exists on gh >= 2.40 and would otherwise
+	# report an already-set variable as unset on older CLIs. Empty on absent.
 	local enabled
-	enabled="$(gh variable get DESKTOP_RELEASE_ENABLED "${repo_args[@]}" 2>/dev/null || true)"
+	enabled="$(gh variable list ${repo_args[@]+"${repo_args[@]}"} 2>/dev/null \
+		| awk -F'\t' '$1=="DESKTOP_RELEASE_ENABLED"{print $2; exit}')" || true
 
 	local ok=0
 	if [ "${#missing[@]}" -eq 0 ]; then

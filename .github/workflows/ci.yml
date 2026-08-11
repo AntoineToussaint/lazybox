@@ -6,8 +6,17 @@
 # CI on the repository's merge queue (or require branches be up to date) so
 # GitHub tests the exact candidate tree before advancing main.
 #
-# Stable Linux clippy, tests, and rustdoc run in one job so the slow native
-# build and target cache are restored once and reused by all three gates.
+# The stable Linux gates — clippy, nextest, rustdoc, and the benchmark link
+# check — each compile an independent artifact set (check .rmeta vs test bins vs
+# doc vs bench bins), so co-locating them in one job only serialized four
+# compiles behind each other (~8m wall-clock). They now run as four parallel
+# jobs (`test`, `clippy`, `rustdoc`, `benches`), so wall-clock is the slowest
+# single gate instead of their sum: ~5m on a cold cache, ~3m once a `main` push
+# has seeded the shared cache. All four pass the same `shared-key: linux` to
+# `rust-build-env`, so they save/restore ONE dependency cache rather than four
+# per-job caches — the split stays within GitHub's 10GB LRU pool and every gate
+# restores the same warm build. `clippy`/`rustdoc` reclaim the required-check
+# names the old stubs held.
 #
 # `push: main` exists only to seed the cache, not to gate anything. GitHub
 # shares a cache with a PR only if it was created on the PR's base branch, so
@@ -24,6 +33,14 @@ on:
   merge_group:
   push:
     branches: [main]
+
+# Cancel superseded PR runs on force-push so a re-push doesn't queue behind a
+# now-stale run. Only pull_request events cancel: each merge-queue entry gets a
+# unique group ref (no cancellation), and `push: main` runs stay independent so
+# a cache-seeding build is never killed by the next merge.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   changes:
@@ -107,19 +124,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
-    env:
-      RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/rust-build-env
         with:
-          rust-components: clippy
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Link benchmark targets
-        run: cargo build --workspace --benches
+          shared-key: linux
 
       - uses: taiki-e/install-action@v2
         with:
@@ -127,9 +136,6 @@ jobs:
 
       - name: Test with per-test timeout enforcement
         run: cargo nextest run --workspace --profile ci
-
-      - name: Rustdoc
-        run: cargo doc --no-deps --workspace
 
   macos:
     name: test (macos-14)
@@ -150,14 +156,19 @@ jobs:
       - name: Test with per-test timeout enforcement
         run: cargo nextest run --workspace --profile ci
 
-  # These required-check names now run inside the Linux test job. Keeping
-  # zero-run jobs lets existing branch protection recognize the transition.
   clippy:
     name: clippy
-    if: ${{ false }}
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - run: "true"
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/rust-build-env
+        with:
+          rust-components: clippy
+          shared-key: linux
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   fmt:
     name: fmt
@@ -284,10 +295,34 @@ jobs:
 
   rustdoc:
     name: rustdoc
-    if: ${{ false }}
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/rust-build-env
+        with:
+          shared-key: linux
+      - name: Rustdoc
+        run: cargo doc --no-deps --workspace
+
+  benches:
+    # The workspace's two criterion benches (tui, server) type-check under the
+    # clippy `--all-targets` gate but only this full build proves they still
+    # link. Its own runner keeps the ~3m bench link off the test critical path.
+    name: benches
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
-      - run: "true"
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/rust-build-env
+        with:
+          shared-key: linux
+      - name: Link benchmark targets
+        run: cargo build --workspace --benches
 
   deny:
     # cargo-deny gates on RustSec advisories, banned/duplicated deps,

@@ -34,6 +34,17 @@ inputs:
       otherwise recompile uncached every run.
     required: false
     default: "."
+  shared-key:
+    description: >-
+      Swatinem/rust-cache `shared-key`. Jobs that pass the SAME value share one
+      cache entry instead of each minting a per-job cache keyed on its job id.
+      The parallel Linux root-workspace gates (test/clippy/rustdoc/benches) set
+      a common key so they save ONE ~0.6GB cache — not four — keeping the split
+      within the 10GB LRU pool and letting all four restore the same warm
+      dependency build. Leave empty to keep the per-job-id default (desktop's
+      Darwin workspace, the merge-queue-only macOS/MSRV lanes).
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -89,4 +100,5 @@ runs:
     - uses: Swatinem/rust-cache@v2
       with:
         workspaces: ${{ inputs.cache-workspaces }}
+        shared-key: ${{ inputs.shared-key }}
         save-if: ${{ github.ref == 'refs/heads/main' }}

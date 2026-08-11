@@ -654,6 +654,26 @@ impl Snippets {
                      branch is in sync when done.",
                 ),
             ),
+            (
+                "handoff".to_string(),
+                entry(
+                    "Git & PR",
+                    "Write a HANDOFF doc so the next session resumes cold",
+                    "Write a HANDOFF document capturing the current state so another agent \
+                     — or a future you — can resume with zero context loss, and write it \
+                     *now*, before a usage limit or crash ends this session and takes the \
+                     context with it. Capture: what you were doing and why; what's done, \
+                     naming the commits and files; what's in progress and exactly where you \
+                     stopped; the next concrete steps, in order; any decisions or \
+                     assumptions you made; and the open questions or blockers. Ground every \
+                     line in the real state — run `git status` and `git branch --show-current` \
+                     and record the current branch, staged and uncommitted changes, and how \
+                     to verify the work (the build, test, and lint commands). Be specific and \
+                     actionable, not a vague recap: this document is the only thing the next \
+                     session will have. Write it to `HANDOFF.md` at the repo root; if you \
+                     can't write files, print the whole thing clearly instead.",
+                ),
+            ),
             // ── GitHub ──────────────────────────────────────────────
             (
                 "triage".to_string(),
@@ -1700,6 +1720,21 @@ snippets:
         assert_eq!(s.origin, SnippetOrigin::BuiltIn);
         assert!(s.body.contains("--force-with-lease"));
         assert!(s.body.contains("required status checks"));
+    }
+
+    /// `handoff` captures a durable resume document before a usage
+    /// limit / 429 kills the session (#1013). It ships as a Git & PR
+    /// built-in, writes to `HANDOFF.md`, and grounds itself in the real
+    /// git state.
+    #[test]
+    fn builtin_ships_handoff() {
+        let b = Snippets::builtin();
+        let s = b.get("handoff").expect("`handoff` ships built-in");
+        assert_eq!(s.category, "Git & PR");
+        assert_eq!(s.origin, SnippetOrigin::BuiltIn);
+        assert!(s.provider.is_none(), "handoff is generic, not scoped");
+        assert!(s.body.contains("HANDOFF.md"));
+        assert!(s.body.contains("next concrete steps"));
     }
 
     #[test]

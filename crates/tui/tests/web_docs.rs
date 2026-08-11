@@ -304,6 +304,32 @@ fn homepage_install_prioritizes_prebuilt_releases() {
 }
 
 #[test]
+fn readme_does_not_advertise_the_unreleased_desktop_cask() {
+    // `release-desktop.yml` is gated on the `DESKTOP_RELEASE_ENABLED`
+    // repository variable + Apple signing secrets (#1010), so no
+    // `lazybox-desktop` Homebrew cask or `.dmg` has shipped yet. Until it
+    // does, a runnable `brew ... lazybox-desktop` in the README sends users
+    // straight into "cask not found" (#1028). This is the hermetic half of
+    // the tap-existence guard: repo-variable state isn't in-tree, so the
+    // tripwire is the artifact name itself. Restore the cask instructions
+    // AND relax this guard together in the first signed desktop release PR.
+    let readme = read("README.md");
+    let offending: Vec<&str> = readme
+        .lines()
+        .filter(|line| {
+            line.contains("lazybox-desktop")
+                && (line.contains("brew install") || line.contains("brew upgrade"))
+        })
+        .collect();
+    assert!(
+        offending.is_empty(),
+        "README advertises a brew command for the not-yet-released desktop \
+         cask (#1010/#1028); gate it until the signed desktop release ships:\n{}",
+        offending.join("\n")
+    );
+}
+
+#[test]
 fn flagship_workflows_are_prominent_across_public_discovery_surfaces() {
     let homepage = read("web/src/pages/index.astro");
     // The homepage leads with real terminal recordings instead of CSS

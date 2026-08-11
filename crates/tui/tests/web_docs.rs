@@ -103,13 +103,15 @@ fn ci_linux_lane_links_benchmark_targets() {
 // keys on the job id by default, so without a common `shared-key` each job
 // would save its OWN multi-hundred-MB cache — four entries where there was one,
 // pushing the repo's caches past GitHub's 10GB LRU pool and evicting the warm
-// build every gate restores. They must share one cache key.
+// build every gate restores. They must share one cache key. The `web` job
+// builds the same Linux root workspace for its Rust-backed contract tests, so
+// it must join the shared key rather than mint its own `v0-rust-web` entry.
 #[test]
 fn ci_parallel_rust_gates_share_one_build_cache() {
     let workflow: serde_yaml::Value =
         serde_yaml::from_str(&read(".github/workflows/ci.yml")).expect("parse ci.yml");
     let jobs = workflow["jobs"].as_mapping().expect("ci.yml jobs mapping");
-    for job in ["test", "clippy", "rustdoc", "benches"] {
+    for job in ["test", "clippy", "rustdoc", "benches", "web"] {
         let steps = jobs[job]["steps"]
             .as_sequence()
             .unwrap_or_else(|| panic!("job `{job}` has steps"));

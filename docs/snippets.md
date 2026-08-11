@@ -7,10 +7,10 @@ workspace has already received.
 
 A snippet is a short key backed by a complete agent instruction. It is
 sent and **submitted** to the focused agent in one action, not merely
-pasted for you to finish. lazybox ships 57 categorized workflows, so
+pasted for you to finish. lazybox ships 58 categorized workflows, so
 the system is useful before you create anything: review (`deepreview`
 — the flagship deep review — plus `rev`, `fixall`, `audit`, `scout`), Git and PR
-(`pr`, `rebase`, `sync`, `conflicts`, `freshen`, `push`), GitHub (`triage`, `respond`, `convert`),
+(`pr`, `rebase`, `sync`, `conflicts`, `freshen`, `push`, `handoff`), GitHub (`triage`, `respond`, `convert`),
 Linear (`wip`, `done`, `attach`), testing (`test`, `tdd`, `repro`),
 debugging (`bug`, `bisect`, `trace`), security (`sec`, `deps`, `leaks`),
 and more. The GitHub and Linear workflows are **provider-scoped**: they
@@ -233,7 +233,7 @@ The three layers merge from least to most specific:
 
 | Scope          | Path                          | Use it for                                      |
 | -------------- | ----------------------------- | ----------------------------------------------- |
-| **Built-in**   | _(shipped with lazybox)_       | 57 categorized daily engineering workflows.    |
+| **Built-in**   | _(shipped with lazybox)_       | 58 categorized daily engineering workflows.    |
 | **Global**     | `~/.lazybox/snippets.yaml`     | Personal habits reused across every repository. |
 | **Launch directory** | `<launch-dir>/.lazybox/snippets.yaml` | Overrides for this lazybox client catalog. |
 

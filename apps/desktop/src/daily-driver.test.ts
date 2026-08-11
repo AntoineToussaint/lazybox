@@ -423,7 +423,7 @@ async function boot(workspaces: WorkspaceFixture[]): Promise<void> {
     return Promise.resolve();
   });
   vi.resetModules();
-  await import("./main");
+  await import("./main").then(({ init }) => init(document));
   await vi.waitFor(() => expect(harness.channels[0]).not.toBeUndefined());
 }
 

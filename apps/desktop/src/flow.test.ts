@@ -141,7 +141,7 @@ describe("credential-free desktop workflow", () => {
       return Promise.resolve();
     });
 
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() => expect(dialog("setup-dialog").open).toBe(true));
     await vi.waitFor(() =>
       expect(
@@ -174,7 +174,7 @@ describe("credential-free desktop workflow", () => {
     loadDocument();
     harness.channels.length = 0;
     terminalReads.length = 0;
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(button("new-workspace-button").disabled).toBe(false),
     );
@@ -318,7 +318,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -389,7 +389,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -491,7 +491,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -583,7 +583,7 @@ describe("credential-free desktop workflow", () => {
   it("does not dispatch modified action keys or shortcuts behind rename", async () => {
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -654,7 +654,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() => expect(terminalReads.length).toBe(1));
     eventChannel().onmessage({
       type: "Frame",
@@ -774,7 +774,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() => expect(terminalReads.length).toBe(1));
     eventChannel().onmessage({
       type: "Frame",
@@ -832,7 +832,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() => expect(terminalReads.length).toBe(1));
     eventChannel().onmessage({
       type: "Frame",
@@ -909,7 +909,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() => expect(terminalReads.length).toBe(1));
     eventChannel().onmessage({
       type: "Frame",
@@ -979,7 +979,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() => expect(terminalReads.length).toBe(1));
     eventChannel().onmessage({
       type: "Frame",
@@ -1036,7 +1036,7 @@ describe("credential-free desktop workflow", () => {
     mockAutomationHarness();
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -1105,7 +1105,7 @@ describe("credential-free desktop workflow", () => {
   it("shows notes edited elsewhere instead of pinning an untouched draft", async () => {
     mockAutomationHarness();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -1147,7 +1147,7 @@ describe("credential-free desktop workflow", () => {
   it("keeps a policy change optimistic when an unrelated upsert interleaves", async () => {
     mockAutomationHarness();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -1212,7 +1212,7 @@ describe("credential-free desktop workflow", () => {
   it("gates PR-only automation controls and enables track-main on a scratch workspace", async () => {
     mockAutomationHarness();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -1277,7 +1277,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -1345,7 +1345,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -1399,7 +1399,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -1457,6 +1457,8 @@ describe("credential-free desktop workflow", () => {
     await vi.waitFor(() =>
       expect(harness.invoke).toHaveBeenCalledWith("set_search", {
         query: "widget",
+        generation: 1,
+        controllerId: expect.any(String),
       }),
     );
   });
@@ -1488,7 +1490,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(harness.invoke).toHaveBeenCalledWith("desktop_info"),
     );
@@ -1539,7 +1541,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(button("new-workspace-button").disabled).toBe(false),
     );
@@ -1594,7 +1596,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -1688,7 +1690,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -1773,7 +1775,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(button("settings-button").disabled).toBe(false),
     );
@@ -1865,7 +1867,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(button("settings-button").disabled).toBe(false),
     );
@@ -1941,7 +1943,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(button("settings-button").disabled).toBe(false),
     );
@@ -2011,7 +2013,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -2055,7 +2057,7 @@ describe("credential-free desktop workflow", () => {
     });
 
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("workspace-list").textContent).toContain("inbox is empty"),
     );
@@ -2066,7 +2068,7 @@ describe("credential-free desktop workflow", () => {
   it("mounts a tile per workspace terminal and moves focus on tab click", async () => {
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2121,7 +2123,7 @@ describe("credential-free desktop workflow", () => {
   it("toggles focus mode with `.` and back off again", async () => {
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2178,7 +2180,7 @@ describe("credential-free desktop workflow", () => {
 
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2202,7 +2204,7 @@ describe("credential-free desktop workflow", () => {
     const rightPane = document.querySelector<HTMLElement>(".right-pane")!;
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2213,7 +2215,7 @@ describe("credential-free desktop workflow", () => {
   it("ends the drag when the mouseup is missed (#936)", async () => {
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2239,7 +2241,7 @@ describe("credential-free desktop workflow", () => {
   it("re-focusing the already-focused tile does no layout/resize work", async () => {
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2292,7 +2294,7 @@ describe("credential-free desktop workflow", () => {
   it("renders each tab as a role=tab div with a non-focusable close affordance", async () => {
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2360,7 +2362,7 @@ describe("credential-free desktop workflow", () => {
   it("defaults focus to a live terminal, not a lower-id exited one", async () => {
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2407,7 +2409,7 @@ describe("credential-free desktop workflow", () => {
   it("switches workspace (sending FocusWorkspace) on a cross-workspace focus request", async () => {
     mockDaemon();
     vi.resetModules();
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     await vi.waitFor(() =>
       expect(element("connection-label").textContent).toBe("Live"),
     );
@@ -2461,6 +2463,329 @@ describe("credential-free desktop workflow", () => {
             .FocusWorkspace.session_key === "github-o-r-43",
       ),
     ).toBe(true);
+  });
+
+  it("rebuilds only the bursting row, keeping a sibling focused and scrolled during an agent-state burst", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main").then(({ init }) => init(document));
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42), pr(43)],
+          terminals: [agentTerminal("github-o-r-42", 7)],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage({
+      ...inboxMessage(["github-o-r-42", "github-o-r-43"]),
+      payload: {
+        ...(inboxMessage(["github-o-r-42", "github-o-r-43"]).payload as object),
+        revision: 1,
+      },
+    });
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row")).toHaveLength(2),
+    );
+
+    const list = element("workspace-list");
+    // Focus the sibling whose agent state does NOT change during the burst;
+    // only workspace 42's live agent badge (running ⇄ ready) is churning.
+    const sibling = document.querySelector<HTMLButtonElement>(
+      '[data-key="github-o-r-43"]',
+    )!;
+    sibling.focus();
+    list.scrollTop = 41;
+    for (let index = 0; index < 10; index += 1) {
+      eventChannel().onmessage({
+        type: "Frame",
+        payload: {
+          AgentState: {
+            session_key: "github-o-r-42",
+            terminal_id: 7,
+            state: index % 2 === 0 ? "Working" : "Idle",
+          },
+        },
+      });
+    }
+
+    // The keyed reconciler rebuilds only workspace 42's row (its badge
+    // changed); the untouched sibling keeps its node identity, keyboard
+    // focus, and the list scroll position across the whole burst.
+    expect(document.querySelector('[data-key="github-o-r-43"]')).toBe(sibling);
+    expect(document.activeElement).toBe(sibling);
+    expect(list.scrollTop).toBe(41);
+  });
+
+  it("does not rebuild an unchanged inbox row when a sibling row updates (#974)", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main").then(({ init }) => init(document));
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42), pr(43)],
+          terminals: [],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42", "github-o-r-43"]));
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row")).toHaveLength(2),
+    );
+
+    const rowA = document.querySelector<HTMLButtonElement>(
+      '[data-key="github-o-r-42"]',
+    )!;
+    const titleA = rowA.querySelector(".workspace-row-title");
+
+    // Change only row B, which re-renders the whole inbox.
+    const updatedB = pr(43);
+    (updatedB.pr as { title: string }).title = "changed B title";
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { WorkspaceUpserted: updatedB },
+    });
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector(
+          '[data-key="github-o-r-43"] .workspace-row-title',
+        )?.textContent,
+      ).toBe("changed B title"),
+    );
+
+    // Row A's element AND its inner nodes must be the very same objects — an
+    // unchanged row is not rebuilt.
+    expect(document.querySelector('[data-key="github-o-r-42"]')).toBe(rowA);
+    expect(rowA.querySelector(".workspace-row-title")).toBe(titleA);
+  });
+
+  it("drops a lower-revision inbox view arriving out of order (#974)", async () => {
+    mockDaemon();
+    vi.resetModules();
+    await import("./main").then(({ init }) => init(document));
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42), pr(43)],
+          terminals: [],
+          recent_snippets: [],
+        },
+      },
+    });
+    const withRevision = (keys: string[], revision: number) => ({
+      ...inboxMessage(keys),
+      payload: { ...(inboxMessage(keys).payload as object), revision },
+    });
+    const order = (): Array<string | undefined> =>
+      [...document.querySelectorAll<HTMLElement>(".workspace-row")].map(
+        (row) => row.dataset.key,
+      );
+
+    eventChannel().onmessage(
+      withRevision(["github-o-r-42", "github-o-r-43"], 5),
+    );
+    await vi.waitFor(() =>
+      expect(document.querySelectorAll(".workspace-row")).toHaveLength(2),
+    );
+    expect(order()).toEqual(["github-o-r-42", "github-o-r-43"]);
+
+    // A stale (lower-revision) push that reorders the rows must be ignored.
+    eventChannel().onmessage(
+      withRevision(["github-o-r-43", "github-o-r-42"], 3),
+    );
+    expect(order()).toEqual(["github-o-r-42", "github-o-r-43"]);
+
+    // A genuinely newer revision is applied.
+    eventChannel().onmessage(
+      withRevision(["github-o-r-43", "github-o-r-42"], 6),
+    );
+    await vi.waitFor(() =>
+      expect(order()).toEqual(["github-o-r-43", "github-o-r-42"]),
+    );
+  });
+
+  it("does not let a deferred refresh overwrite a newer workspace event", async () => {
+    let listCalls = 0;
+    let resolveRefresh: ((value: unknown) => void) | undefined;
+    mockDaemon();
+    const baseImplementation = harness.invoke.getMockImplementation()!;
+    harness.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "list_workspaces" && ++listCalls === 2) {
+        return new Promise((resolve) => {
+          resolveRefresh = resolve;
+        });
+      }
+      return baseImplementation(command, args);
+    });
+    vi.resetModules();
+    await import("./main").then(({ init }) => init(document));
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+
+    button("refresh-button").click();
+    await vi.waitFor(() => expect(resolveRefresh).toBeTypeOf("function"));
+    const newest = pr(42);
+    (newest.pr as { title: string }).title = "new streamed title";
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { WorkspaceUpserted: newest },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    resolveRefresh?.({ workspaces: [pr(43)], warnings: [] });
+
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("new streamed title"),
+    );
+    expect(element("workspace-list").textContent).not.toContain("PR o/r#43");
+  });
+
+  it("preserves a dirty note when a remote edit arrives and marks the conflict", async () => {
+    mockAutomationHarness();
+    vi.resetModules();
+    await import("./main").then(({ init }) => init(document));
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+    const workspace = pr(42);
+    workspace.notes = "server base";
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [workspace],
+          terminals: [],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() => expect(notesField().value).toBe("server base"));
+
+    notesField().value = "local draft";
+    notesField().dispatchEvent(new Event("input", { bubbles: true }));
+    const remote = pr(42);
+    remote.notes = "remote edit";
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: { WorkspaceUpserted: remote },
+    });
+
+    expect(notesField().value).toBe("local draft");
+    expect(notesField().dataset.remoteConflict).toBe("true");
+    expect(element("status-message").textContent).toContain("changed remotely");
+  });
+
+  it("rolls back a rejected policy and retains the outcome in messages", async () => {
+    mockAutomationHarness();
+    vi.resetModules();
+    await import("./main").then(({ init }) => init(document));
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: { workspaces: [pr(42)], terminals: [], recent_snippets: [] },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(element("task-title").textContent).toBe("PR o/r#42"),
+    );
+
+    const toggle = input("#auto-merge-toggle");
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(toggle.checked).toBe(true));
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        CommandRejected: {
+          command: "SetAutoMergeOnGreen",
+          message: "queue full",
+        },
+      },
+    });
+
+    expect(toggle.checked).toBe(false);
+    button("messages-button").click();
+    expect(element("messages-list").textContent).toContain(
+      "auto_merge · rejected",
+    );
+    expect(element("messages-list").textContent).toContain("queue full");
+  });
+
+  it("drops a stale snippet result before it can render or auto-submit", async () => {
+    const deferred = new Map<string, (value: unknown) => void>();
+    mockDaemon();
+    const baseImplementation = harness.invoke.getMockImplementation()!;
+    harness.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "snippet_view") {
+        const filter = (args as { filter: string }).filter;
+        if (filter === "") {
+          return Promise.resolve(snippetView(filter));
+        }
+        return new Promise((resolve) => deferred.set(filter, resolve));
+      }
+      return baseImplementation(command, args);
+    });
+    vi.resetModules();
+    await import("./main").then(({ init }) => init(document));
+    await vi.waitFor(() =>
+      expect(element("connection-label").textContent).toBe("Live"),
+    );
+    eventChannel().onmessage({
+      type: "Frame",
+      payload: {
+        Snapshot: {
+          workspaces: [pr(42)],
+          terminals: [agentTerminal("github-o-r-42", 7)],
+          recent_snippets: [],
+        },
+      },
+    });
+    eventChannel().onmessage(inboxMessage(["github-o-r-42"]));
+    await vi.waitFor(() =>
+      expect(button("snippet-button").disabled).toBe(false),
+    );
+    button("snippet-button").click();
+    await vi.waitFor(() => expect(dialog("snippet-dialog").open).toBe(true));
+
+    const filter = input("#snippet-filter");
+    filter.value = "rev";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    filter.value = "pr";
+    filter.dispatchEvent(new Event("input", { bubbles: true }));
+    deferred.get("pr")?.(snippetView("pr"));
+    await vi.waitFor(() =>
+      expect(element("snippet-list").textContent).toContain("Open a PR"),
+    );
+    deferred.get("rev")?.(snippetView("rev"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(dialog("snippet-dialog").open).toBe(true);
+    expect(element("snippet-list").textContent).toContain("Open a PR");
+    expect(deliverCommands()).toHaveLength(0);
   });
 });
 

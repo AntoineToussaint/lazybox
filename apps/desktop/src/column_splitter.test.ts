@@ -73,12 +73,12 @@ describe("workspace column splitter", () => {
 
   it("restores a persisted sidebar width on load", async () => {
     localStorage.setItem("lazybox.sidebarWidth", "420");
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     expect(grid().style.getPropertyValue("--sidebar-width")).toBe("420px");
   });
 
   it("resizes and persists only on drag, clamped to bounds", async () => {
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     stubGridRect(1400);
 
     drag(520);
@@ -105,7 +105,7 @@ describe("workspace column splitter", () => {
       ({ left: 0, top: 0, width: 1000, height: 800 }) as DOMRect;
     try {
       localStorage.setItem("lazybox.sidebarWidth", "5000");
-      await import("./main");
+      await import("./main").then(({ init }) => init(document));
       // Displayed width clamps to viewport (1000 - 360 right-min = 640)…
       expect(grid().style.getPropertyValue("--sidebar-width")).toBe("640px");
       // …but the preferred width is preserved for a later, larger window.
@@ -116,7 +116,7 @@ describe("workspace column splitter", () => {
   });
 
   it("re-clamps a too-wide sidebar when the window shrinks, without persisting", async () => {
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     // A wide sidebar set on a large window (e.g. a prior drag while maximized).
     grid().style.setProperty("--sidebar-width", "900px");
     stubGridRect(1000);
@@ -131,7 +131,7 @@ describe("workspace column splitter", () => {
   });
 
   it("exposes splitter values and resizes both panes from the keyboard", async () => {
-    await import("./main");
+    await import("./main").then(({ init }) => init(document));
     stubGridRect(1400);
     splitter().dispatchEvent(
       new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
@@ -156,7 +156,7 @@ describe("workspace column splitter", () => {
     };
     try {
       localStorage.setItem("lazybox.activityHeight", "4000");
-      await import("./main");
+      await import("./main").then(({ init }) => init(document));
       expect(
         document
           .querySelector<HTMLElement>(".right-pane")!

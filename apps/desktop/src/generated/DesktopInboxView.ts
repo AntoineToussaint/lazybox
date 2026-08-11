@@ -20,6 +20,11 @@ import type { SortMode } from "./SortMode";
  */
 export type DesktopInboxView = {
 /**
+ * Monotonic desktop-controller revision. A client must ignore a view
+ * older than the newest revision it has already applied.
+ */
+revision: number,
+/**
  * Ordered rows (repo headers, PR/Issue/Other section headers, and
  * workspace / session rows) plus the per-repo summaries.
  */

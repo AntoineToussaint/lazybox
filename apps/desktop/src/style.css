@@ -1420,12 +1420,48 @@ h2 {
   font-size: 9px;
 }
 
-.statusbar span:first-child {
+#status-message {
   max-width: 55%;
   overflow: hidden;
   color: var(--color-text-muted);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.status-messages {
+  color: #8c9ba0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+.messages-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(640px, calc(100vh - 32px));
+}
+
+.messages-list {
+  display: grid;
+  gap: 8px;
+  max-height: 480px;
+  overflow: auto;
+  padding: 12px 18px 18px;
+}
+
+.message-record {
+  padding: 9px 10px;
+  border: 1px solid #273039;
+  border-radius: 7px;
+}
+
+.message-record[data-state="rejected"] {
+  border-color: #7c4249;
+}
+
+.message-record p {
+  margin: 4px 0 0;
+  color: #8c9ba0;
 }
 
 .protocol-notice {

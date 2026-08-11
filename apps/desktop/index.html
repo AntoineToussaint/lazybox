@@ -435,6 +435,14 @@
       </main>
 
       <footer class="statusbar">
+        <button
+          id="messages-button"
+          class="status-messages"
+          type="button"
+          aria-haspopup="dialog"
+        >
+          Messages <span id="messages-count">0</span>
+        </button>
         <span id="status-message" role="status" aria-live="polite">
           Loading persisted workspaces…
         </span>
@@ -457,6 +465,25 @@
         </button>
       </aside>
     </div>
+
+    <dialog
+      id="messages-dialog"
+      class="messages-dialog"
+      aria-labelledby="messages-title"
+    >
+      <div class="dialog-heading">
+        <h2 id="messages-title">Mutation messages</h2>
+        <button
+          id="messages-close"
+          class="diff-close"
+          type="button"
+          aria-label="Close messages"
+        >
+          ✕
+        </button>
+      </div>
+      <div id="messages-list" class="messages-list"></div>
+    </dialog>
 
     <dialog
       id="setup-dialog"
@@ -874,6 +901,6 @@
       </form>
     </dialog>
 
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="/src/entry.ts"></script>
   </body>
 </html>

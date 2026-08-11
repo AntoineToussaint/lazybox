@@ -8666,6 +8666,88 @@ mod merge_focus_follow_tests {
         )));
     }
 
+    /// #928 acceptance #3: the model-tier chords (`w S/M/L`) fan out over
+    /// a multi-select the same way bare `w w` does. Every *fresh* target
+    /// spawns at the picked tier; a target already running an agent is
+    /// injected into tier-less — a live session can't be retiered, so the
+    /// bulk inject drops the alias (unlike the single-target path, which
+    /// carries it in the fallback spawn). Both halves are asserted so the
+    /// asymmetry is a documented contract, not an accident.
+    #[test]
+    fn bulk_work_tier_fans_out_with_alias() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        // A row already running an agent → inject target.
+        let live = workspace("owner/repo#1", true, Duration::hours(1));
+        let live_sk: SessionKey = (&live.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(live)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(7),
+            session_key: live_sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        // Two rows with no agent → spawn targets (and `spawned > 0` gates
+        // the fan-out behind the confirm).
+        let fresh_a = workspace("owner/repo#2", true, Duration::hours(2));
+        let fresh_b = workspace("owner/repo#3", true, Duration::hours(3));
+        let fresh_a_sk: SessionKey = (&fresh_a.key).into();
+        let fresh_b_sk: SessionKey = (&fresh_b.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(fresh_a)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(fresh_b)));
+
+        for key in [&live_sk, &fresh_a_sk, &fresh_b_sk] {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
+
+        assert!(m.dispatch_action(&Action::WorkTier("M".into())).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::BulkSpawnConfirm));
+
+        let cmds = m.handle_confirmed(true);
+
+        let spawns: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c, IpcCommand::Spawn { .. }))
+            .collect();
+        assert_eq!(spawns.len(), 2, "one spawn per agent-less selected row");
+        assert!(
+            spawns.iter().all(|c| matches!(
+                c,
+                IpcCommand::Spawn {
+                    kind: TerminalKind::Agent(_),
+                    model_alias: Some(alias),
+                    ..
+                } if alias == "M"
+            )),
+            "every fresh-row spawn carries the picked tier: {spawns:?}",
+        );
+
+        let injects: Vec<_> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    fallback_spawn,
+                    ..
+                } => Some((terminal_id, fallback_spawn)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(injects.len(), 1, "the one live agent is injected into");
+        assert_eq!(*injects[0].0, TerminalId(7));
+        assert!(
+            injects[0].1.is_none(),
+            "a live agent is injected tier-less — its model can't be changed: {cmds:?}",
+        );
+
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
     /// #899 regression: an inherently single-target destructive action
     /// (`x c` close-issue) must stay focused-only even under a `v`
     /// selection — before the fix it swept the whole set behind the

@@ -65,6 +65,7 @@ fn make_task(repo: &str, key: &str, updated: DateTime<Utc>) -> Task {
         mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         merge_blocked: false,
+        approval_policy: Default::default(),
         node_id: None,
         needs_reply: false,
         last_commenter: None,

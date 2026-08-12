@@ -1803,6 +1803,7 @@ mod tests {
             mergeable: crate::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -2022,6 +2023,7 @@ mod tests {
         first.reviews = vec![crate::Reviewer {
             login: "alice".into(),
             state: crate::ReviewState::Approved,
+            is_bot: false,
         }];
         let mut ws = Workspace::from_task(first, now());
 
@@ -2035,6 +2037,7 @@ mod tests {
             vec![crate::Reviewer {
                 login: "alice".into(),
                 state: crate::ReviewState::Approved,
+                is_bot: false,
             }],
             "submitted reviews must survive an inbox-scan-shaped re-poll",
         );

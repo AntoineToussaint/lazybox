@@ -234,6 +234,7 @@
             },
             "pr": {
               "additions": 0,
+              "approval_policy": "Default",
               "assignees": [],
               "author": "",
               "auto_merge_enabled": false,
@@ -311,6 +312,7 @@
         },
         "pr": {
           "additions": 0,
+          "approval_policy": "Default",
           "assignees": [],
           "author": "",
           "auto_merge_enabled": false,
@@ -526,6 +528,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 2029338687,
+  "protocol_fingerprint": 3503761324,
   "protocol_version": 3
 }

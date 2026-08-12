@@ -787,6 +787,7 @@ mod tests {
             is_in_merge_queue: false,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,

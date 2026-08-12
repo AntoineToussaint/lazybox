@@ -10419,6 +10419,7 @@ mod tests {
                 scripts: vec![],
                 branch_prefix: None,
                 bringup: None,
+                approval: Default::default(),
             },
         );
 
@@ -13613,6 +13614,7 @@ mod tests {
                 scripts: vec![],
                 branch_prefix: None,
                 bringup: None,
+                approval: Default::default(),
             },
         );
         // Different case should miss.
@@ -13702,6 +13704,7 @@ mod tests {
             mergeable: lazybox_core::Mergeable::Unknown,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,

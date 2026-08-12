@@ -319,7 +319,10 @@ mod tests {
     ) -> crate::graphql::GqlComment {
         GqlComment {
             id: Some(id.into()),
-            author: author.map(|l| GqlAuthor { login: l.into() }),
+            author: author.map(|l| GqlAuthor {
+                login: l.into(),
+                typename: None,
+            }),
             body: body.into(),
             created_at: Utc::now(),
             path: None,
@@ -349,7 +352,10 @@ mod tests {
             created_at: None,
             closed_at: None,
             state: "OPEN".into(),
-            author: author.map(|l| GqlAuthor { login: l.into() }),
+            author: author.map(|l| GqlAuthor {
+                login: l.into(),
+                typename: None,
+            }),
             labels: GqlLabels { nodes: vec![] },
             assignees: GqlAssignees { nodes: vec![] },
             comments: GqlComments {

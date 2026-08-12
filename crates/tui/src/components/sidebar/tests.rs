@@ -185,6 +185,7 @@ mod status_pill_tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -705,6 +706,64 @@ mod status_pill_consistency_tests {
                  surface — below the 3:1 floor (must use a contrast-tuned theme tone)",
             );
         }
+    }
+
+    /// #1048: the live sidebar pill (`status_pills` → `lifecycle_pill`,
+    /// what the row actually renders) honors the per-repo approval
+    /// policy. A bot-only approval under `approval: human` must NOT read
+    /// as READY — it shows REVIEW-pending; a human approval restores
+    /// READY; and the default policy still treats a bot approval as
+    /// enough. Guards against the pill diverging from the merge gate /
+    /// `StatusTag::for_task`.
+    #[test]
+    fn human_approval_policy_governs_ready_pill() {
+        use super::super::status_pills;
+
+        // Compare against the tag→glyph mapping rather than a literal
+        // glyph so this test doesn't re-pin the #1046 glyph choices.
+        let ready_glyph = pill_for_tag(StatusTag::Ready).map(|p| p.label);
+        let review_glyph = pill_for_tag(StatusTag::ReviewPending).map(|p| p.label);
+
+        let mut t = base_task();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Success;
+        t.approval_policy = lazybox_core::ApprovalPolicy::Human;
+        t.reviews = vec![lazybox_core::Reviewer {
+            login: "claude".into(),
+            state: lazybox_core::ReviewState::Approved,
+            is_bot: true,
+        }];
+        let (review, _ci) = status_pills(&t);
+        assert_eq!(
+            review.map(|p| p.label),
+            review_glyph,
+            "bot-only approval under `human` shows REVIEW-pending, not READY",
+        );
+
+        // A human approval alongside the bot's flips it to the READY
+        // end-state (a single lifecycle pill, no separate CI slot).
+        t.reviews.push(lazybox_core::Reviewer {
+            login: "alice".into(),
+            state: lazybox_core::ReviewState::Approved,
+            is_bot: false,
+        });
+        let (ready, ci) = status_pills(&t);
+        assert_eq!(
+            ready.map(|p| p.label),
+            ready_glyph,
+            "a human approval restores READY under `human`",
+        );
+        assert!(ci.is_none(), "READY is a single lifecycle pill");
+
+        // Default policy: the bot approval alone is READY (unchanged).
+        t.reviews.truncate(1);
+        t.approval_policy = lazybox_core::ApprovalPolicy::Default;
+        let (ready, _) = status_pills(&t);
+        assert_eq!(
+            ready.map(|p| p.label),
+            ready_glyph,
+            "default policy counts a bot approval — pre-#1048 behavior",
+        );
     }
 }
 

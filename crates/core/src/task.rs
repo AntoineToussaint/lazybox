@@ -241,6 +241,14 @@ pub enum ReviewState {
 pub struct Reviewer {
     pub login: String,
     pub state: ReviewState,
+    /// Whether the review author is a GitHub App / Bot (e.g.
+    /// `claude[bot]`) rather than a person. Detected from the review
+    /// author's GraphQL `__typename`, since a bot's `login` drops the
+    /// `[bot]` suffix over GraphQL. Drives the bot-vs-human approval
+    /// display and the per-repo [`crate::ApprovalPolicy::Human`] gate.
+    /// `#[serde(default)]` so older snapshots read back as human.
+    #[serde(default)]
+    pub is_bot: bool,
 }
 
 /// Whether a PR's branch can merge cleanly into its base. Tristate
@@ -435,12 +443,21 @@ pub struct Task {
     pub reviewers: Vec<String>,
     /// Reviewers who have actually submitted a review, with their
     /// latest state. This is the only record of who reviewed and how,
-    /// since GitHub removes them from `reviewers` once they submit.
-    /// Lazy-fetched via the PR-details query (the inbox scan omits the
-    /// reviews connection), so empty until the workspace is opened.
+    /// since GitHub removes them from `reviewers` once they submit. The
+    /// decisive verdicts (approve / changes-requested, each tagged
+    /// bot-vs-human) are eager on the inbox scan; comment-only reviewers
+    /// back-fill via the PR-details query on workspace open.
     /// `#[serde(default)]` for older snapshots.
     #[serde(default)]
     pub reviews: Vec<Reviewer>,
+    /// The repo's approval policy (`repos.<owner/name>.approval`), stamped
+    /// by the daemon at ingest so the config-less TUI/core review gate can
+    /// honor it. Governs whether a bot-only approval satisfies READY /
+    /// merge-on-green ([`crate::approval_policy_blocks`]).
+    /// `#[serde(default)]` → older snapshots read back as
+    /// [`crate::ApprovalPolicy::Default`] (unchanged behavior).
+    #[serde(default)]
+    pub approval_policy: crate::ApprovalPolicy,
     /// Assignees (user logins).
     #[serde(default)]
     pub assignees: Vec<String>,
@@ -614,10 +631,24 @@ impl Task {
                 out.push(Reviewer {
                     login: login.clone(),
                     state: ReviewState::Pending,
+                    // Requested-but-pending reviewers are always people —
+                    // requested bot reviewers are dropped upstream.
+                    is_bot: false,
                 });
             }
         }
         out
+    }
+
+    /// Has at least one person (not a bot) submitted an approving
+    /// review? Drives the per-repo [`crate::ApprovalPolicy::Human`]
+    /// gate, which treats a bot-only approval as still awaiting review.
+    /// Reads the submitted `reviews` list, so it depends on the decisive
+    /// verdicts being present — they are eager on the inbox scan.
+    pub fn has_human_approval(&self) -> bool {
+        self.reviews
+            .iter()
+            .any(|r| r.state == ReviewState::Approved && !r.is_bot)
     }
 }
 
@@ -786,6 +817,12 @@ impl StatusTag {
             return Self::Draft;
         }
         if task.review == ReviewStatus::Approved {
+            // A repo requiring a human approval (per-repo policy) treats a
+            // bot-only approval as still awaiting review, even when
+            // GitHub's own review-decision reads APPROVED.
+            if crate::policy::approval_policy_blocks(task).is_some() {
+                return Self::ReviewPending;
+            }
             if matches!(task.ci, CiStatus::Success | CiStatus::None) {
                 return Self::Ready;
             }
@@ -934,6 +971,7 @@ mod status_tag_tests {
             mergeable: crate::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -958,6 +996,7 @@ mod status_tag_tests {
         t.reviews = vec![Reviewer {
             login: "alice".into(),
             state: ReviewState::Approved,
+            is_bot: false,
         }];
         t.reviewers = vec!["carol".into()];
 
@@ -968,10 +1007,12 @@ mod status_tag_tests {
                 Reviewer {
                     login: "alice".into(),
                     state: ReviewState::Approved,
+                    is_bot: false,
                 },
                 Reviewer {
                     login: "carol".into(),
                     state: ReviewState::Pending,
+                    is_bot: false,
                 },
             ],
             "submitted reviews come first, then still-pending requests",
@@ -987,6 +1028,7 @@ mod status_tag_tests {
         t.reviews = vec![Reviewer {
             login: "alice".into(),
             state: ReviewState::ChangesRequested,
+            is_bot: false,
         }];
         t.reviewers = vec!["alice".into()];
 
@@ -995,6 +1037,7 @@ mod status_tag_tests {
             vec![Reviewer {
                 login: "alice".into(),
                 state: ReviewState::ChangesRequested,
+                is_bot: false,
             }],
         );
     }
@@ -1157,6 +1200,53 @@ mod status_tag_tests {
         let mut t = base();
         t.ci = CiStatus::Success;
         assert_eq!(StatusTag::for_task(&t), StatusTag::CiOk);
+    }
+
+    /// Issue #1048: under `approval: human`, a bot-only approval reads as
+    /// still-awaiting-review (REVIEW), not READY — even though GitHub's
+    /// review-decision says APPROVED. A human approval flips it to READY.
+    #[test]
+    fn human_policy_downgrades_bot_only_approval_from_ready() {
+        let mut t = base();
+        t.review = ReviewStatus::Approved;
+        t.ci = CiStatus::Success;
+        t.approval_policy = crate::ApprovalPolicy::Human;
+        t.reviews = vec![Reviewer {
+            login: "claude".into(),
+            state: ReviewState::Approved,
+            is_bot: true,
+        }];
+        assert_eq!(StatusTag::for_task(&t), StatusTag::ReviewPending);
+
+        // A human approval alongside the bot's satisfies the policy.
+        t.reviews.push(Reviewer {
+            login: "alice".into(),
+            state: ReviewState::Approved,
+            is_bot: false,
+        });
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Ready);
+
+        // The default policy never downgrades — the bot approval counts.
+        t.reviews.truncate(1);
+        t.approval_policy = crate::ApprovalPolicy::Default;
+        assert_eq!(StatusTag::for_task(&t), StatusTag::Ready);
+    }
+
+    #[test]
+    fn has_human_approval_ignores_bots() {
+        let mut t = base();
+        t.reviews = vec![Reviewer {
+            login: "claude".into(),
+            state: ReviewState::Approved,
+            is_bot: true,
+        }];
+        assert!(!t.has_human_approval());
+        t.reviews.push(Reviewer {
+            login: "alice".into(),
+            state: ReviewState::Approved,
+            is_bot: false,
+        });
+        assert!(t.has_human_approval());
     }
 
     #[test]

@@ -149,6 +149,18 @@ pub(crate) fn merge_on_green_policy() -> lazybox_core::MergeOnGreenPolicy {
         .unwrap_or_default()
 }
 
+/// The configured approval policy for `owner/name`
+/// (`repos.<owner/name>.approval`). Loaded fresh at merge-attempt time,
+/// like [`merge_on_green_policy`], so an `approval: human` edit takes
+/// effect without a daemon restart.
+fn approval_policy_for(owner: &str, repo: &str) -> lazybox_core::ApprovalPolicy {
+    let key = format!("{owner}/{repo}");
+    lazybox_config::Config::load()
+        .ok()
+        .and_then(|c| c.repos.get(&key).map(|rc| rc.approval.to_policy()))
+        .unwrap_or_default()
+}
+
 /// Dispatch ticket for one attempt. `skip_if_head` carries the head a
 /// previous attempt already settled on — the attempt stands down
 /// without merging when the fresh fetch still reports that OID.
@@ -415,11 +427,15 @@ pub async fn run_attempt<B: MergeBackend>(
             return;
         }
     };
-    let Some((fresh, head)) = fetched else {
+    let Some((mut fresh, head)) = fetched else {
         tracing::warn!(workspace = %key, "auto-merge: PR no longer visible — standing down");
         settle(Some(Latch::Blocked(ticket.skip_if_head.clone())));
         return;
     };
+    // The fresh fetch doesn't know the repo's approval policy — stamp it
+    // so the re-verify below honors an `approval: human` repo (a bot-only
+    // approval must not auto-merge). Read fresh, like `merge_on_green_policy`.
+    fresh.approval_policy = approval_policy_for(&owner, &repo);
 
     // Same head a previous attempt already settled on: a red→re-green
     // of an unchanged head must not merge twice. Refresh local state
@@ -588,6 +604,7 @@ mod tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: Some("PR_node".into()),
             needs_reply: false,
             last_commenter: None,

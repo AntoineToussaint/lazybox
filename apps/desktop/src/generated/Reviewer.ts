@@ -7,4 +7,13 @@ import type { ReviewState } from "./ReviewState";
  * requested reviewer. `login` is a user login or a `team/<name>`
  * pseudo-login for a requested team.
  */
-export type Reviewer = { login: string, state: ReviewState, };
+export type Reviewer = { login: string, state: ReviewState,
+/**
+ * Whether the review author is a GitHub App / Bot (e.g.
+ * `claude[bot]`) rather than a person. Detected from the review
+ * author's GraphQL `__typename`, since a bot's `login` drops the
+ * `[bot]` suffix over GraphQL. Drives the bot-vs-human approval
+ * display and the per-repo [`crate::ApprovalPolicy::Human`] gate.
+ * `#[serde(default)]` so older snapshots read back as human.
+ */
+is_bot: boolean, };

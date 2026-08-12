@@ -52,11 +52,18 @@ pub(super) struct UpsertContext {
     /// inline as PR tasks flow through the batch so an issue polled
     /// AFTER its PR in the same tick still routes correctly.
     closes_index: std::collections::HashMap<lazybox_core::TaskId, WorkspaceKey>,
+    /// Per-repo approval policy (`repos.<owner/name>.approval`), resolved
+    /// once per tick and stamped onto each task so the config-less
+    /// TUI/core review gate can honor it. Only repos overriding the
+    /// default are present; a missing entry means
+    /// [`lazybox_core::ApprovalPolicy::Default`].
+    approvals: std::collections::HashMap<String, lazybox_core::ApprovalPolicy>,
 }
 
 impl UpsertContext {
     pub(super) fn build(config: &ServerConfig) -> Self {
         let archived = crate::workspace::load_archived_set(config);
+        let approvals = approval_policies();
         let mut closes_index = std::collections::HashMap::new();
         if let Ok(records) = config.store.list_workspaces() {
             for record in records {
@@ -82,15 +89,47 @@ impl UpsertContext {
         Self {
             archived,
             closes_index,
+            approvals,
         }
     }
+
+    /// The approval policy configured for `repo` (`owner/name`), or the
+    /// default when the repo has no override.
+    fn approval_for(&self, repo: Option<&str>) -> lazybox_core::ApprovalPolicy {
+        repo.and_then(|r| self.approvals.get(r))
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// Load the per-repo approval policies from `~/.lazybox/config.yaml`,
+/// keeping only repos that override the default. Read fresh at
+/// [`UpsertContext::build`] time (once per tick) so an edited policy
+/// takes effect without a daemon restart, mirroring
+/// [`crate::polling::auto_merge::merge_on_green_policy`].
+fn approval_policies() -> std::collections::HashMap<String, lazybox_core::ApprovalPolicy> {
+    let Ok(config) = lazybox_config::Config::load() else {
+        return std::collections::HashMap::new();
+    };
+    config
+        .repos
+        .iter()
+        .filter_map(|(repo, rc)| {
+            let policy = rc.approval.to_policy();
+            (policy != lazybox_core::ApprovalPolicy::Default).then(|| (repo.clone(), policy))
+        })
+        .collect()
 }
 
 pub(super) async fn upsert_with_context(
     config: &ServerConfig,
     ctx: &mut UpsertContext,
-    task: Task,
+    mut task: Task,
 ) -> CommitOutcome {
+    // Stamp the repo's approval policy so the config-less TUI/core review
+    // gate (READY tag, merge-on-green) can honor it off the task alone.
+    task.approval_policy = ctx.approval_for(task.repo.as_deref());
+
     // Skip re-creating workspaces the user explicitly archived
     // (`x x`). Without this, every 60s tick re-creates the row
     // from the upstream task and the dismiss feels broken. Cached

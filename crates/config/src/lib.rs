@@ -1205,6 +1205,51 @@ pub struct RepoConfig {
     /// per repo); `None` (the default) falls back to the global hook.
     #[serde(default)]
     pub bringup: Option<WorktreeBringup>,
+    /// What counts as "approved" for lazybox's READY / merge-on-green
+    /// gate on this repo's PRs. GitHub repos differ: some let a bot
+    /// reviewer (`claude[bot]`) satisfy the merge, others require a
+    /// person. `human` demands a human approval; `bot-ok` / `any` (and
+    /// the default) follow GitHub's own review-decision, where a bot
+    /// approval counts.
+    ///
+    /// ```yaml
+    /// repos:
+    ///   obin-ai/obin-platform:
+    ///     approval: human
+    /// ```
+    #[serde(default)]
+    pub approval: ApprovalConfig,
+}
+
+/// Per-repo approval policy (`repos.<owner/name>.approval`). Maps to the
+/// runtime [`lazybox_core::ApprovalPolicy`] the review gate enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalConfig {
+    /// Follow GitHub's own review-decision — a bot approval counts. The
+    /// default when `approval` is unset.
+    #[default]
+    Default,
+    /// Require a human approval; a bot-only approval does not read as
+    /// ready-to-merge.
+    Human,
+    /// A bot approval counts (the explicit form of the default). `any`
+    /// is accepted as a synonym.
+    #[serde(alias = "any")]
+    BotOk,
+}
+
+impl ApprovalConfig {
+    /// Build the runtime [`lazybox_core::ApprovalPolicy`]. Only `human`
+    /// imposes a gate; `default` / `bot-ok` / `any` follow GitHub.
+    pub fn to_policy(self) -> lazybox_core::ApprovalPolicy {
+        match self {
+            ApprovalConfig::Human => lazybox_core::ApprovalPolicy::Human,
+            ApprovalConfig::Default | ApprovalConfig::BotOk => {
+                lazybox_core::ApprovalPolicy::Default
+            }
+        }
+    }
 }
 
 /// Serializable form of `lazybox_git_ops::Mount`. Kept separate so
@@ -2389,6 +2434,49 @@ mod tests {
         assert!(policy.allows_author("dependabot[bot]"), "normalized match");
         assert!(policy.allows_author("renovate"), "case-insensitive match");
         assert!(!policy.allows_author("someone-else"));
+    }
+
+    /// Per-repo `approval` policy parses and maps to the runtime enum
+    /// (issue #1048). `human` gates; `bot-ok` / `any` / unset follow
+    /// GitHub.
+    #[test]
+    fn per_repo_approval_policy_parses_and_maps() {
+        use lazybox_core::ApprovalPolicy;
+
+        // Unset → default (bots count).
+        assert_eq!(
+            ApprovalConfig::default().to_policy(),
+            ApprovalPolicy::Default
+        );
+
+        let cfg = Config::parse(
+            "repos:\n  \
+             obin-ai/obin-platform:\n    approval: human\n  \
+             acme/widget:\n    approval: bot-ok\n  \
+             acme/gadget:\n    approval: any\n",
+        )
+        .expect("parse per-repo approval");
+
+        assert_eq!(
+            cfg.repos["obin-ai/obin-platform"].approval,
+            ApprovalConfig::Human
+        );
+        assert_eq!(
+            cfg.repos["obin-ai/obin-platform"].approval.to_policy(),
+            ApprovalPolicy::Human
+        );
+        assert_eq!(cfg.repos["acme/widget"].approval, ApprovalConfig::BotOk);
+        assert_eq!(
+            cfg.repos["acme/widget"].approval.to_policy(),
+            ApprovalPolicy::Default
+        );
+        // `any` is a synonym for `bot-ok`.
+        assert_eq!(cfg.repos["acme/gadget"].approval, ApprovalConfig::BotOk);
+
+        // A repo with no `approval` key defaults.
+        let bare =
+            Config::parse("repos:\n  o/r:\n    branch_prefix: at\n").expect("parse bare repo");
+        assert_eq!(bare.repos["o/r"].approval, ApprovalConfig::Default);
     }
 
     /// An unset `desktop.remote` must not serialize as `remote: null`

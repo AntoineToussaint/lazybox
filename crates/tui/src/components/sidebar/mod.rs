@@ -193,12 +193,14 @@ pub struct Sidebar {
     /// footer). Keyed by terminal so two agents in one workspace keep
     /// distinct labels; pruned on `TerminalExited`.
     terminal_models: HashMap<TerminalId, String>,
-    /// Agent-declared compact glyphs for the model badge: tier `label` →
-    /// `short` (`"Opus" → "O"`), aggregated across every agent's model
-    /// menu. The badge (`◆O`) reads a declared short here and falls back
-    /// to the label's first character when a label isn't present (#1068).
-    /// Refreshed whenever the model menus reload (`set_model_shorts`).
-    model_shorts: HashMap<String, String>,
+    /// Agent-declared compact glyphs for the model badge: tier
+    /// `(badge_letter, label)` → `short` (`('C', "Opus") → "O"`),
+    /// aggregated across every agent's model menu. The badge (`◆O`) reads a
+    /// declared short here and falls back to the label's first character
+    /// when a key isn't present (#1068). Keyed by the agent's badge letter
+    /// so two agents sharing a tier label keep distinct shorts. Refreshed
+    /// whenever the model menus reload (`set_model_shorts`).
+    model_shorts: HashMap<(char, String), String>,
     /// Built-in agent registry, consulted so an agent's display badge
     /// (`C` / `X` / `U`) comes from the agent itself rather than a
     /// hardcoded match here — a new agent declares its own letter and
@@ -439,10 +441,10 @@ impl Sidebar {
         self.show_agent_model = show;
     }
 
-    /// Replace the tier `label → short` map that abbreviates the model
-    /// badge (`◆O`). Built from every agent's model menu whenever the
-    /// menus reload (#1068).
-    pub fn set_model_shorts(&mut self, shorts: HashMap<String, String>) {
+    /// Replace the tier `(badge_letter, label) → short` map that
+    /// abbreviates the model badge (`◆O`). Built from every agent's model
+    /// menu whenever the menus reload (#1068).
+    pub fn set_model_shorts(&mut self, shorts: HashMap<(char, String), String>) {
         self.model_shorts = shorts;
     }
 

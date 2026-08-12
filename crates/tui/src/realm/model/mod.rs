@@ -3270,10 +3270,22 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         models: std::collections::BTreeMap<String, lazybox_core::AgentModels>,
     ) {
+        // Key each declared short by the agent's badge letter, not the
+        // label alone: two agents can declare the same tier label with
+        // different shorts, and the render side looks the short up by the
+        // letter it drew (#1068 review). `registry()` is the same source
+        // the sidebar's `badge_letter` uses, so the keys line up.
+        let registry = lazybox_tui_core::agents::registry();
         let shorts = models
-            .values()
-            .flat_map(|m| &m.tiers)
-            .filter_map(|t| t.short.clone().map(|short| (t.label.clone(), short)))
+            .iter()
+            .flat_map(|(agent_id, m)| {
+                let letter = registry.badge_for(agent_id);
+                m.tiers.iter().filter_map(move |t| {
+                    t.short
+                        .clone()
+                        .map(|short| ((letter, t.label.clone()), short))
+                })
+            })
             .collect();
         self.sidebar.set_model_shorts(shorts);
         self.agent_models = models;

@@ -215,9 +215,9 @@ impl Sidebar {
         self.inner.set_show_agent_model(show);
     }
 
-    /// Replace the tier `label → short` map that abbreviates the model
-    /// badge (`◆O`, #1068).
-    pub fn set_model_shorts(&mut self, shorts: std::collections::HashMap<String, String>) {
+    /// Replace the tier `(badge_letter, label) → short` map that
+    /// abbreviates the model badge (`◆O`, #1068).
+    pub fn set_model_shorts(&mut self, shorts: std::collections::HashMap<(char, String), String>) {
         self.inner.set_model_shorts(shorts);
     }
 

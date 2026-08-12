@@ -126,11 +126,13 @@ pub struct WorkspaceRowCtx<'a> {
     /// badge so a chain of stacked PRs reads as an ordered stack at a
     /// glance rather than unrelated rows. `None` for standalone PRs.
     pub stack: Option<&'a lazybox_core::StackPosition>,
-    /// Tier `label → short` map for the model badge (`"Opus" → "O"`),
-    /// aggregated from every agent's model menu. The badge reads a
-    /// declared short here and falls back to the label's first character
-    /// when a label is absent (#1068). Sourced from `Sidebar::model_shorts`.
-    pub model_shorts: &'a std::collections::HashMap<String, String>,
+    /// Tier `(badge_letter, label) → short` map for the model badge
+    /// (`('C', "Opus") → "O"`), aggregated from every agent's model menu.
+    /// The badge reads a declared short here and falls back to the label's
+    /// first character when a key is absent (#1068). Keyed by the agent's
+    /// badge letter so two agents sharing a tier label keep distinct
+    /// shorts. Sourced from `Sidebar::model_shorts`.
+    pub model_shorts: &'a std::collections::HashMap<(char, String), String>,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -729,7 +731,7 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // to the compact `C×2X` group with no room for a label, so it's
     // suppressed there.
     if agent_count == 1
-        && let Some(model) = ctx
+        && let Some((letter, model)) = ctx
             .badges
             .iter()
             .find(|(letter, _)| *letter != 'S')
@@ -737,10 +739,10 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 ctx.agent_models
                     .iter()
                     .find(|(l, _)| l == letter)
-                    .map(|(_, model)| model)
+                    .map(|(_, model)| (*letter, model))
             })
     {
-        spans.extend(model_badge_spans(ctx, model));
+        spans.extend(model_badge_spans(ctx, letter, model));
     }
     Cell::new(spans)
 }
@@ -752,8 +754,10 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// `<model> · <effort>` label keeps the abbreviated effort as a dimmer
 /// suffix (`◆g ·xhi`) so "how hard it's thinking" still reads. Leads with
 /// the `◆` glyph (the agent pill's trailing space supplies the gap) and
-/// closes with a trailing space before the next column.
-fn model_badge_spans(ctx: &WorkspaceRowCtx<'_>, model: &str) -> Vec<Span<'static>> {
+/// closes with a trailing space before the next column. `letter` is the
+/// agent's badge letter, keying the short lookup so two agents that share
+/// a tier label keep distinct shorts.
+fn model_badge_spans(ctx: &WorkspaceRowCtx<'_>, letter: char, model: &str) -> Vec<Span<'static>> {
     let (badge_style, effort_style) = if ctx.is_cursor {
         (ctx.row_style(), ctx.row_style())
     } else {
@@ -762,25 +766,34 @@ fn model_badge_spans(ctx: &WorkspaceRowCtx<'_>, model: &str) -> Vec<Span<'static
             Style::default().fg(ctx.theme.text_dim),
         )
     };
+    // Split a `<model> · <effort>` reading into a dim effort suffix — but
+    // only when the whole string isn't itself a declared tier label. A
+    // best tier whose own label carries an effort (`"Opus · max"`, #748)
+    // must resolve its declared short verbatim, not be split at the `·`
+    // and have the effort mistaken for a Codex reasoning suffix.
     match model.split_once(" · ") {
-        Some((name, effort)) => vec![
-            Span::styled(format!("◆{}", model_short(ctx, name)), badge_style),
-            Span::styled(format!(" ·{} ", abbreviate_effort(effort)), effort_style),
-        ],
-        None => vec![Span::styled(
-            format!("◆{} ", model_short(ctx, model)),
+        Some((name, effort)) if !ctx.model_shorts.contains_key(&(letter, model.to_string())) => {
+            vec![
+                Span::styled(format!("◆{}", model_short(ctx, letter, name)), badge_style),
+                Span::styled(format!(" ·{} ", abbreviate_effort(effort)), effort_style),
+            ]
+        }
+        _ => vec![Span::styled(
+            format!("◆{} ", model_short(ctx, letter, model)),
             badge_style,
         )],
     }
 }
 
 /// The compact one-glyph form of a model name for the `◆O` badge (#1068):
-/// the agent-declared `short` from its tier menu when `name` matches a
-/// tier label, else the name's first character. Keeps the sidebar badge to
-/// a single glyph (`◆O`, `◆g`) instead of the full model word — the full
-/// name stays in the terminal tab and the `?` markers legend.
-fn model_short(ctx: &WorkspaceRowCtx<'_>, name: &str) -> String {
-    if let Some(short) = ctx.model_shorts.get(name) {
+/// the agent-declared `short` from that agent's tier menu when `name`
+/// matches a tier label, else the name's first character. Keyed by the
+/// agent's badge `letter` so two agents declaring the same tier label keep
+/// their own shorts. Keeps the sidebar badge to a single glyph (`◆O`,
+/// `◆g`) instead of the full model word — the full name stays in the
+/// terminal tab and the `?` markers legend.
+fn model_short(ctx: &WorkspaceRowCtx<'_>, letter: char, name: &str) -> String {
+    if let Some(short) = ctx.model_shorts.get(&(letter, name.to_string())) {
         return short.clone();
     }
     name.chars().next().map(String::from).unwrap_or_default()
@@ -1201,11 +1214,11 @@ mod tests {
         }
     }
 
-    /// A shared empty `label → short` map for the ctx literals that don't
-    /// exercise the model badge. `&'static`, so it satisfies any ctx
-    /// lifetime; the badge's first-letter fallback still yields `◆O`.
-    fn empty_shorts() -> &'static std::collections::HashMap<String, String> {
-        static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+    /// A shared empty `(letter, label) → short` map for the ctx literals
+    /// that don't exercise the model badge. `&'static`, so it satisfies any
+    /// ctx lifetime; the badge's first-letter fallback still yields `◆O`.
+    fn empty_shorts() -> &'static std::collections::HashMap<(char, String), String> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashMap<(char, String), String>> =
             std::sync::OnceLock::new();
         EMPTY.get_or_init(std::collections::HashMap::new)
     }
@@ -1823,7 +1836,8 @@ mod tests {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
-        let shorts = std::collections::HashMap::from([("Sonnet".to_string(), "Sn".to_string())]);
+        let shorts =
+            std::collections::HashMap::from([(('C', "Sonnet".to_string()), "Sn".to_string())]);
 
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.model_shorts = &shorts;
@@ -1847,6 +1861,61 @@ mod tests {
         assert_eq!(
             text, " C ◆H ",
             "no declared short → the label's first letter"
+        );
+    }
+
+    /// #1068 review: a best tier whose own label carries an effort
+    /// (`"Opus · max"`, #748) must resolve its declared short verbatim —
+    /// not be split at the `·` with `max` mistaken for a Codex reasoning
+    /// suffix and the short dropped to a first letter.
+    #[test]
+    fn model_badge_honors_declared_short_on_a_model_dot_effort_label() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let shorts =
+            std::collections::HashMap::from([(('C', "Opus · max".to_string()), "B".to_string())]);
+
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.model_shorts = &shorts;
+        ctx.badges = vec![('C', 1)];
+        ctx.agent_models = vec![('C', "Opus · max".to_string())];
+        let text: String = cell_badge_agent(&ctx)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert_eq!(
+            text, " C ◆B ",
+            "the whole-label short wins over splitting at the ·"
+        );
+    }
+
+    /// #1068 review: two agents can declare the same tier label with
+    /// different shorts; the badge is keyed by the agent's letter, so each
+    /// resolves its own short instead of colliding on the bare label.
+    #[test]
+    fn model_badge_disambiguates_shared_label_by_agent_letter() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let shorts = std::collections::HashMap::from([
+            (('C', "Fast".to_string()), "F".to_string()),
+            (('X', "Fast".to_string()), "⚡".to_string()),
+        ]);
+
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.model_shorts = &shorts;
+        ctx.badges = vec![('X', 1)];
+        ctx.agent_models = vec![('X', "Fast".to_string())];
+        let text: String = cell_badge_agent(&ctx)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert_eq!(
+            text, " X ◆⚡ ",
+            "codex's `Fast` short must not pick up claude's"
         );
     }
 

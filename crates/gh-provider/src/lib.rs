@@ -7,6 +7,7 @@ mod client;
 mod graphql;
 pub mod mentions;
 mod notifications;
+pub mod oauth;
 pub mod rate_budget;
 
 pub use client::{BackgroundSweepForecast, GhClient, SelectedFetchOutcome, credential_fingerprint};
@@ -37,17 +38,24 @@ use std::sync::Arc;
 pub const SOURCE: &str = lazybox_core::GITHUB_SOURCE;
 
 /// Credential chain GitHub uses. Tried in order:
-/// `LAZYBOX_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `gh auth
-/// token`. The lazybox-specific variable is a credential override:
-/// spawned agents and interactive `gh` do not automatically read it,
-/// but same-user tokens still share GitHub's per-user API quota. The
-/// polling poller, mutation router, setup wizard's scope source, and
+/// `LAZYBOX_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, a token stored by
+/// the native OAuth device flow (`lazybox auth login github`), then
+/// `gh auth token`. The lazybox-specific variable is a credential
+/// override: spawned agents and interactive `gh` do not automatically
+/// read it, but same-user tokens still share GitHub's per-user API quota.
+///
+/// The OAuth provider sits above `gh` so a machine with the `gh` CLI
+/// absent still authenticates once the user has logged in, while an
+/// explicit env token still overrides and `gh auth token` remains the
+/// final fallback for existing users who never log in. The polling
+/// poller, mutation router, setup wizard's scope source, and
 /// fetch-PR-details handler all build clients from this chain.
 pub fn credential_chain() -> CredentialChain {
     CredentialChain::new()
         .with(EnvProvider::new("LAZYBOX_GITHUB_TOKEN"))
         .with(EnvProvider::new("GH_TOKEN"))
         .with(EnvProvider::new("GITHUB_TOKEN"))
+        .with(oauth::OAuthTokenProvider)
         .with(CommandProvider::new("gh", &["auth", "token"]))
 }
 

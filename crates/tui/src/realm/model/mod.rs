@@ -854,6 +854,11 @@ pub enum Msg {
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
     LoadingResolved(PayloadCarrier),
+    /// The `Loading` modal's liveness backstop fired — its awaited result
+    /// never landed (produced but dropped on an overflowed event channel,
+    /// or a stalled task). Flash a notice so the modal doesn't just vanish
+    /// unexplained, then dismiss it.
+    LoadingTimedOut,
     /// Spinner heartbeat from the `WorktreeProgress` modal. Carries no
     /// data — its only job is to be a non-empty message so the run loop
     /// repaints the advancing spinner during the silent checkout.
@@ -5176,6 +5181,14 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Msg::ModalDismissed => {
+                let cmds = self.handle_modal_dismissed();
+                self.dispatch_cmds(cmds);
+            }
+            Msg::LoadingTimedOut => {
+                self.flash(
+                    "a background step timed out with no response — dismissing",
+                    crate::realm::components::footer::NoticeSeverity::Retryable,
+                );
                 let cmds = self.handle_modal_dismissed();
                 self.dispatch_cmds(cmds);
             }

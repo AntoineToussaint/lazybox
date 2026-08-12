@@ -3270,6 +3270,12 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         models: std::collections::BTreeMap<String, lazybox_core::AgentModels>,
     ) {
+        let shorts = models
+            .values()
+            .flat_map(|m| &m.tiers)
+            .filter_map(|t| t.short.clone().map(|short| (t.label.clone(), short)))
+            .collect();
+        self.sidebar.set_model_shorts(shorts);
         self.agent_models = models;
         self.rebuild_catalog();
     }

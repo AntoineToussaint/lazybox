@@ -74,8 +74,9 @@ pub struct WorkspaceRowCtx<'a> {
     pub badges: Vec<(char, usize)>,
     /// `Sidebar::agent_models(key)` — the model + effort label to show
     /// beside a single agent badge (`[('C', "Opus")]`,
-    /// `[('X', "gpt-5.5 · xhigh")]`). Empty when `ui.show_agent_model` is
-    /// off, when no model is known, or when a badge collapses two agents.
+    /// `[('X', "gpt-5.5 · xhigh")]`). The label is abbreviated to a `◆O`
+    /// glyph at render (#1068). Empty when `ui.show_agent_model` is off,
+    /// when no model is known, or when a badge collapses two agents.
     pub agent_models: Vec<(char, String)>,
     /// This workspace's 1-based jump number — its slot in the
     /// sidebar-order agent roster (`Sidebar::agent_workspace_keys`).
@@ -125,6 +126,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// badge so a chain of stacked PRs reads as an ordered stack at a
     /// glance rather than unrelated rows. `None` for standalone PRs.
     pub stack: Option<&'a lazybox_core::StackPosition>,
+    /// Tier `label → short` map for the model badge (`"Opus" → "O"`),
+    /// aggregated from every agent's model menu. The badge reads a
+    /// declared short here and falls back to the label's first character
+    /// when a label is absent (#1068). Sourced from `Sidebar::model_shorts`.
+    pub model_shorts: &'a std::collections::HashMap<String, String>,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -208,10 +214,10 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///    when no row has unread, and lines up at a consistent x when any
 ///    row does.
 /// 7. Badge: agent slot — ` C ` / ` C×2 ` / ` CX ` / blank. Same
-///    Max semantics. A single agent's model+effort rides here as a subtle
-///    `◆ Opus` tier badge (#803), hard-capped (`compact_model_label`,
-///    #813) so one verbose `gpt-5.6-sol · xhigh` can't anchor this Max
-///    column table-wide.
+///    Max semantics. A single agent's model rides here as a compact
+///    `◆O` tier badge (#803, abbreviated to one glyph — #1068), so even
+///    a verbose `gpt-5.6-sol · xhigh` shrinks to `◆g ·xhi` and can't
+///    anchor this Max column table-wide.
 /// 8. Badge: shell slot — ` S ` / blank. Cell carries a leading space
 ///    so the two badges visually separate when both present.
 /// 9. Passive-info badge cluster — one right-aligned, Max-collapsing
@@ -715,14 +721,13 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 Span::styled(label, badge_pill_style(ctx.theme, letter))
             }),
     );
-    // A single agent shows its model + effort right after the badge, as a
-    // subtle `◆ Opus` / `◆ gpt-5.5 ·xhi` tier badge — the same `◆ tier`
-    // language as the terminal tab (#803) — so "which model" reads above
-    // the agent letter, with the effort as a dimmer suffix so it's a glance
-    // not a word. Multiple agents collapse to the compact `C×2X` group with
-    // no room for a label, so it's suppressed there. The label is still
-    // capped / abbreviated (`compact_model_label`, #813) so it can't anchor
-    // this Max column table-wide; the `◆` glyph adds a constant two cells.
+    // A single agent shows its model right after the badge as a compact
+    // `◆O` / `◆g ·xhi` tier badge — the `◆ tier` language of the terminal
+    // tab (#803), abbreviated to a single glyph (#1068) so the model reads
+    // above the agent letter without eating the row. The full tier word
+    // stays in the tab and the `?` markers legend. Multiple agents collapse
+    // to the compact `C×2X` group with no room for a label, so it's
+    // suppressed there.
     if agent_count == 1
         && let Some(model) = ctx
             .badges
@@ -740,13 +745,12 @@ fn cell_badge_agent(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::new(spans)
 }
 
-/// Styled spans for a single agent's model + effort, rendered as a subtle
-/// `◆ <model>` tier badge (the `◆ tier` language of the terminal tab,
-/// #803) with the effort as a dimmer suffix so the hierarchy — which model
-/// above how hard it's thinking — reads at a glance. The text is the capped
-/// / abbreviated [`compact_model_label`] (#813), re-split on its ` ·`
-/// effort separator only to tone the two parts differently; the model
-/// keeps the accent badge tone, the effort drops to `text_dim`. Leads with
+/// Styled spans for a single agent's model, rendered as a compact `◆O`
+/// tier badge (the `◆ tier` language of the terminal tab, #803, shrunk to
+/// one glyph — #1068). The model name is abbreviated to a single short
+/// glyph ([`model_short`]) that keeps the accent badge tone; a Codex-style
+/// `<model> · <effort>` label keeps the abbreviated effort as a dimmer
+/// suffix (`◆g ·xhi`) so "how hard it's thinking" still reads. Leads with
 /// the `◆` glyph (the agent pill's trailing space supplies the gap) and
 /// closes with a trailing space before the next column.
 fn model_badge_spans(ctx: &WorkspaceRowCtx<'_>, model: &str) -> Vec<Span<'static>> {
@@ -758,44 +762,28 @@ fn model_badge_spans(ctx: &WorkspaceRowCtx<'_>, model: &str) -> Vec<Span<'static
             Style::default().fg(ctx.theme.text_dim),
         )
     };
-    let compact = compact_model_label(model);
-    let mut spans = vec![Span::styled("◆ ", badge_style)];
-    match compact.split_once(" ·") {
-        Some((name, effort)) => {
-            spans.push(Span::styled(name.to_string(), badge_style));
-            spans.push(Span::styled(format!(" ·{effort} "), effort_style));
-        }
-        None => spans.push(Span::styled(format!("{compact} "), badge_style)),
+    match model.split_once(" · ") {
+        Some((name, effort)) => vec![
+            Span::styled(format!("◆{}", model_short(ctx, name)), badge_style),
+            Span::styled(format!(" ·{} ", abbreviate_effort(effort)), effort_style),
+        ],
+        None => vec![Span::styled(
+            format!("◆{} ", model_short(ctx, model)),
+            badge_style,
+        )],
     }
-    spans
 }
 
-/// Hard cap on the model name shown beside an agent badge. The effort
-/// suffix is abbreviated and kept; only the model portion is capped.
-const MODEL_NAME_MAX: usize = 10;
-
-/// Compact an agent's model+effort label so a single long model name
-/// can't anchor the agent column table-wide (#813). The column is
-/// `Column::max`, so its width is the widest cell across every row — one
-/// row's `gpt-5.6-sol · xhigh` used to reserve that width even on rows
-/// that just read `Opus`, shoving the status/time pills to the far edge
-/// and starving the title. Bounding the label keeps the column narrow and
-/// stable regardless of how verbose one row's model string is.
-///
-/// The `<model> · <effort>` shape (see `Sidebar::agent_models`) is
-/// compacted to `<model> ·<effort>` — the effort word abbreviated
-/// (`xhigh` → `xhi`) and the space before `·` dropped — then the model is
-/// truncated to `MODEL_NAME_MAX` with an ellipsis. A label with no effort
-/// suffix (`Opus`) is capped as a whole.
-fn compact_model_label(label: &str) -> String {
-    match label.split_once(" · ") {
-        Some((model, effort)) => format!(
-            "{} ·{}",
-            truncate_display(model, MODEL_NAME_MAX),
-            abbreviate_effort(effort),
-        ),
-        None => truncate_display(label, MODEL_NAME_MAX),
+/// The compact one-glyph form of a model name for the `◆O` badge (#1068):
+/// the agent-declared `short` from its tier menu when `name` matches a
+/// tier label, else the name's first character. Keeps the sidebar badge to
+/// a single glyph (`◆O`, `◆g`) instead of the full model word — the full
+/// name stays in the terminal tab and the `?` markers legend.
+fn model_short(ctx: &WorkspaceRowCtx<'_>, name: &str) -> String {
+    if let Some(short) = ctx.model_shorts.get(name) {
+        return short.clone();
     }
+    name.chars().next().map(String::from).unwrap_or_default()
 }
 
 /// Abbreviate a reasoning-effort token to a compact form. Covers every
@@ -812,30 +800,6 @@ fn abbreviate_effort(effort: &str) -> &str {
         "default" => "def",
         other => other,
     }
-}
-
-/// Truncate `s` to at most `max` display cells, appending `…` (itself one
-/// cell) when it was cut. Measures visual width, not byte or `char` count,
-/// so a wide glyph counts as the two cells the terminal actually draws —
-/// this is the guarantee that keeps the agent column bounded. Walks by
-/// `char` so the cut never splits a code point.
-fn truncate_display(s: &str, max: usize) -> String {
-    if crate::util::visual_width(s) <= max {
-        return s.to_string();
-    }
-    let budget = max.saturating_sub(1);
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in s.chars() {
-        let w = crate::util::char_visual_width(ch);
-        if used + w > budget {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push('…');
-    out
 }
 
 fn cell_badge_shell(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -1237,6 +1201,15 @@ mod tests {
         }
     }
 
+    /// A shared empty `label → short` map for the ctx literals that don't
+    /// exercise the model badge. `&'static`, so it satisfies any ctx
+    /// lifetime; the badge's first-letter fallback still yields `◆O`.
+    fn empty_shorts() -> &'static std::collections::HashMap<String, String> {
+        static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, String>> =
+            std::sync::OnceLock::new();
+        EMPTY.get_or_init(std::collections::HashMap::new)
+    }
+
     fn ctx_for<'a>(
         workspace: &'a Workspace,
         task: &'a Task,
@@ -1270,6 +1243,7 @@ mod tests {
             has_notes: false,
             sent_snippet_count: 0,
             stack: None,
+            model_shorts: empty_shorts(),
         }
     }
 
@@ -1626,6 +1600,7 @@ mod tests {
             has_notes: false,
             sent_snippet_count: 0,
             stack: None,
+            model_shorts: empty_shorts(),
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1819,9 +1794,10 @@ mod tests {
         assert_eq!(cell_badge_agent(&ctx).width(), 3);
     }
 
-    /// #779/#803: a single agent shows its model after the pill as a
-    /// subtle `◆ Opus` tier badge, matched to the badge letter and leaning
-    /// on the pill's trailing space for the gap.
+    /// #779/#803/#1068: a single agent shows its model after the pill as a
+    /// compact `◆O` tier badge — the tier word abbreviated to one glyph —
+    /// matched to the badge letter and leaning on the pill's trailing
+    /// space for the gap.
     #[test]
     fn cell_badge_agent_appends_model_for_single_agent() {
         let task = make_task("owner/repo#1", "x");
@@ -1833,14 +1809,50 @@ mod tests {
         let cell = cell_badge_agent(&ctx);
         let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(
-            text, " C ◆ Opus ",
-            "the model rides after the pill as a ◆ badge"
+            text, " C ◆O ",
+            "the model rides after the pill as a compact ◆ badge"
         );
     }
 
-    /// #803: the model reads as an accent `◆` tier badge while the effort
-    /// suffix drops to a dimmer tone, so "which model" sits visually above
-    /// "how hard it's thinking". The text stays the #813-capped label.
+    /// #1068: the model name abbreviates to its agent-declared `short`
+    /// when the tier menu supplies one — even when that differs from the
+    /// first letter (disambiguating two tiers that share it) — and to the
+    /// label's first character otherwise.
+    #[test]
+    fn model_badge_uses_declared_short_then_first_letter() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let shorts = std::collections::HashMap::from([("Sonnet".to_string(), "Sn".to_string())]);
+
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.model_shorts = &shorts;
+        ctx.badges = vec![('C', 1)];
+        ctx.agent_models = vec![('C', "Sonnet".to_string())];
+        let text: String = cell_badge_agent(&ctx)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert_eq!(text, " C ◆Sn ", "declared short wins over first-letter");
+
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('C', 1)];
+        ctx.agent_models = vec![('C', "Haiku".to_string())];
+        let text: String = cell_badge_agent(&ctx)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref().to_string())
+            .collect();
+        assert_eq!(
+            text, " C ◆H ",
+            "no declared short → the label's first letter"
+        );
+    }
+
+    /// #803/#1068: a Codex-style `<model> · <effort>` label keeps its
+    /// abbreviated effort as a dimmer suffix while the model shrinks to
+    /// one glyph — the accent `◆g` above the dim ` ·xhi `.
     #[test]
     fn cell_badge_agent_model_is_diamond_badge_with_dim_effort() {
         let task = make_task("owner/repo#1", "x");
@@ -1851,12 +1863,12 @@ mod tests {
         ctx.agent_models = vec![('X', "gpt-5.5 · xhigh".to_string())];
         let cell = cell_badge_agent(&ctx);
         let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, " X ◆ gpt-5.5 ·xhi ");
-        // The `◆` + model span is accent; the ` ·xhi ` effort span is dim.
+        assert_eq!(text, " X ◆g ·xhi ");
+        // The `◆g` model glyph is accent; the ` ·xhi ` effort span is dim.
         let diamond = cell
             .spans
             .iter()
-            .find(|s| s.content.as_ref() == "◆ ")
+            .find(|s| s.content.as_ref() == "◆g")
             .expect("a ◆ badge span");
         assert_eq!(diamond.style.fg, Some(theme.accent));
         let effort = cell
@@ -1867,55 +1879,9 @@ mod tests {
         assert_eq!(effort.style.fg, Some(theme.text_dim));
     }
 
-    /// #813: a verbose model+effort label is compacted so it can't anchor
-    /// the agent `Column::max` table-wide — the effort word abbreviates
-    /// and the model truncates, keeping the column narrow and stable.
-    #[test]
-    fn compact_model_label_bounds_verbose_models() {
-        // Short model + effort: only the effort abbreviates, the space
-        // before `·` is dropped.
-        assert_eq!(compact_model_label("gpt-5.5 · xhigh"), "gpt-5.5 ·xhi");
-        // A long model name truncates to MODEL_NAME_MAX with `…`, effort kept.
-        assert_eq!(
-            compact_model_label("gpt-5.6-sol · xhigh"),
-            "gpt-5.6-s… ·xhi"
-        );
-        // Every verbose Codex effort token abbreviates, `default` included —
-        // otherwise a `default`-effort row rides ~4 cells wider than its
-        // siblings even though the model itself is capped.
-        assert_eq!(compact_model_label("gpt-5.5 · default"), "gpt-5.5 ·def");
-        assert_eq!(compact_model_label("gpt-5.5 · medium"), "gpt-5.5 ·med");
-        // No effort suffix → the whole label is capped.
-        assert_eq!(compact_model_label("Opus"), "Opus");
-        assert_eq!(
-            compact_model_label("claude-opus-4-1"),
-            "claude-op…",
-            "a long no-effort label caps at MODEL_NAME_MAX",
-        );
-        // The compacted model portion never exceeds MODEL_NAME_MAX display
-        // cells — measured by visual width, not `char` count, so a wide
-        // glyph counts as the two cells the terminal draws.
-        let long = compact_model_label("some-really-long-model-name · high");
-        let model = long.split(" ·").next().unwrap();
-        assert!(
-            crate::util::visual_width(model) <= MODEL_NAME_MAX,
-            "{long:?}",
-        );
-        // A wide-glyph model is bounded by display cells: `ＡＢＣＤＥＦ` is 6
-        // chars but 12 cells, so it truncates to fit MODEL_NAME_MAX cells
-        // (a `char`-count cap would have kept all 6, leaving it 12 wide).
-        let wide = compact_model_label("ＡＢＣＤＥＦ");
-        assert!(
-            crate::util::visual_width(&wide) <= MODEL_NAME_MAX,
-            "wide-glyph model must be bounded by display cells: {wide:?} \
-             ({} cells)",
-            crate::util::visual_width(&wide),
-        );
-    }
-
-    /// #813: the capped label actually keeps the agent column narrow —
-    /// one row's `gpt-5.6-sol · xhigh` no longer widens the column on a
-    /// sibling row that just reads `Opus`.
+    /// #813/#1068: the abbreviated one-glyph badge keeps the agent column
+    /// narrow — one row's verbose `gpt-5.6-sol · xhigh` no longer widens
+    /// the column on a sibling row that just reads `Opus`.
     #[test]
     fn long_model_does_not_widen_agent_column_table_wide() {
         let theme = theme();
@@ -1932,18 +1898,18 @@ mod tests {
 
         // The verbose row's agent cell stays bounded — the raw
         // `gpt-5.6-sol · xhigh` (19) would have anchored the column that
-        // wide across the table; the capped label is well under it, even
-        // with the constant two cells the `◆` tier badge (#803) adds.
+        // wide across the table; abbreviated to `◆g ·xhi` it's a handful
+        // of cells regardless of how long the raw model string is.
         let verbose = cell_badge_agent(&ctx0);
         assert!(
-            verbose.width() <= 22,
-            "capped agent cell should stay narrow: {} cells",
+            verbose.width() <= 14,
+            "abbreviated agent cell should stay narrow: {} cells",
             verbose.width(),
         );
         let text: String = verbose.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            !text.contains("xhigh"),
-            "effort should be abbreviated: {text:?}"
+            !text.contains("xhigh") && !text.contains("gpt-5.6-sol"),
+            "the model and effort should be abbreviated: {text:?}"
         );
     }
 
@@ -2018,6 +1984,7 @@ mod tests {
             has_notes: false,
             sent_snippet_count: 0,
             stack: None,
+            model_shorts: empty_shorts(),
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -3167,6 +3134,7 @@ mod tests {
             has_notes: false,
             sent_snippet_count: 0,
             stack: None,
+            model_shorts: empty_shorts(),
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

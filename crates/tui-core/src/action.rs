@@ -4362,6 +4362,7 @@ mod tests {
         let tiers = vec![lazybox_core::ModelTier {
             alias: "S".to_string(),
             label: "Haiku".to_string(),
+            short: None,
             args: vec![],
         }];
         let mut overrides = BTreeMap::new();

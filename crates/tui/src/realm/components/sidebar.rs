@@ -215,6 +215,12 @@ impl Sidebar {
         self.inner.set_show_agent_model(show);
     }
 
+    /// Replace the tier `label → short` map that abbreviates the model
+    /// badge (`◆O`, #1068).
+    pub fn set_model_shorts(&mut self, shorts: std::collections::HashMap<String, String>) {
+        self.inner.set_model_shorts(shorts);
+    }
+
     /// Record whether `ui.usage_summary` is on — gates the always-visible
     /// per-provider usage row in the header (#1059).
     pub fn set_usage_summary(&mut self, show: bool) {

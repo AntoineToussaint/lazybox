@@ -1234,6 +1234,7 @@ impl Sidebar {
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.len()),
                 stack: self.stacks.get(key),
+                model_shorts: &self.model_shorts,
             };
             row_indices.push(i);
             rows.push(build_workspace_row(&ctx));

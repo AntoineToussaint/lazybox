@@ -5169,7 +5169,7 @@ mod input_starvation_tests {
 
         // One iteration's drain: must report a backlog (more queued)…
         assert!(
-            drain_daemon_events(&mut m, None),
+            drain_daemon_events(&mut m, &mut Vec::new(), || false),
             "drain should signal a backlog when the channel is over the cap"
         );
         // …and must have left events behind (didn't drain everything).
@@ -5194,7 +5194,7 @@ mod input_starvation_tests {
         let mut backlog = true;
         let mut iterations = 0;
         while backlog {
-            backlog = drain_daemon_events(&mut m, None);
+            backlog = drain_daemon_events(&mut m, &mut Vec::new(), || false);
             iterations += 1;
             assert!(iterations <= 64, "drain never converged — possible spin");
         }
@@ -5219,7 +5219,7 @@ mod input_starvation_tests {
                 })
                 .expect("room for resync");
         }
-        drain_daemon_events(&mut m, None);
+        drain_daemon_events(&mut m, &mut Vec::new(), || false);
         assert_eq!(m.event_backlog.resyncs(), 3);
     }
 
@@ -5251,7 +5251,7 @@ mod input_starvation_tests {
         }
 
         assert!(
-            !drain_daemon_events(&mut m, None),
+            !drain_daemon_events(&mut m, &mut Vec::new(), || false),
             "a sub-cap burst must drain in a single tick"
         );
         assert!(
@@ -5301,7 +5301,7 @@ mod input_starvation_tests {
             })
             .expect("room for the focus request");
 
-        drain_daemon_events(&mut m, None);
+        drain_daemon_events(&mut m, &mut Vec::new(), || false);
 
         assert_eq!(
             m.sidebar.selected_workspace_key(),
@@ -5322,11 +5322,91 @@ mod input_starvation_tests {
             replay: b"hello".to_vec(),
             seq: 1,
         };
-        let backlog = drain_daemon_events(&mut m, Some(carried));
+        let mut carried_in = vec![carried];
+        let backlog = drain_daemon_events(&mut m, &mut carried_in, || false);
         assert!(!backlog, "a single carried event is no backlog");
+        assert!(carried_in.is_empty(), "the carried event was consumed");
         // The resync was dispatched + observed — proof the carried
         // event didn't get dropped on the floor.
         assert_eq!(m.event_backlog.resyncs(), 1);
+    }
+
+    /// Seed the channel with `n` distinct workspace upserts (never
+    /// coalesced, unlike same-terminal output), so the dispatch loop has
+    /// `n` real iterations to be pre-empted between.
+    fn flood_upserts(tx: &mpsc::Sender<Event>, n: usize) {
+        use chrono::Utc;
+        use lazybox_core::{Workspace, WorkspaceKey};
+        for i in 0..n {
+            let ws = Workspace::empty(
+                WorkspaceKey::new(format!("github:o/r#{i}")),
+                "main",
+                Utc::now(),
+            );
+            tx.try_send(Event::WorkspaceUpserted(Box::new(ws)))
+                .expect("room for the upsert");
+        }
+    }
+
+    /// #1031 §6 / #1055: the collection cap bounds how much we pull off
+    /// the channel, but *handling* a batch is unbounded — so a keystroke
+    /// arriving mid-batch must pre-empt the dispatch loop, not wait out the
+    /// whole burst. With input already pending, the drain dispatches one
+    /// event (progress is guaranteed) and carries the rest over untouched.
+    #[test]
+    fn pending_input_preempts_the_dispatch_loop_and_carries_the_rest() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+        let n = 5;
+        flood_upserts(&evt_tx, n);
+
+        let mut carried = Vec::new();
+        // Input is waiting the whole time → yield after the first event.
+        let backlog = drain_daemon_events(&mut m, &mut carried, || true);
+
+        assert!(backlog, "an un-dispatched tail is a backlog");
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            1,
+            "exactly one event dispatched before yielding to the waiting keystroke",
+        );
+        assert_eq!(
+            carried.len(),
+            n - 1,
+            "the rest of the batch is carried, not dropped",
+        );
+    }
+
+    /// The pre-emption must still converge: even with input pending on
+    /// EVERY check, each drain dispatches at least one event, so repeated
+    /// drains eventually process the whole batch with nothing lost — the
+    /// daemon stream can't be starved by a busy keyboard either.
+    #[test]
+    fn constant_input_still_drains_every_event_one_at_a_time() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+        let n = 5;
+        flood_upserts(&evt_tx, n);
+
+        let mut carried = Vec::new();
+        let mut iterations = 0;
+        loop {
+            let backlog = drain_daemon_events(&mut m, &mut carried, || true);
+            iterations += 1;
+            assert!(
+                iterations <= 32,
+                "constant pre-emption never converged — no progress guarantee"
+            );
+            if !backlog {
+                break;
+            }
+        }
+        assert!(carried.is_empty(), "no event left carried");
+        assert!(m.client.rx.try_recv().is_err(), "channel fully consumed");
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            n,
+            "every upsert eventually landed despite pre-emption on every event",
+        );
+        assert_eq!(iterations, n, "one event per drain under constant input");
     }
 }
 
@@ -7561,7 +7641,7 @@ mod merge_focus_follow_tests {
             evt_tx.try_send(evt).expect("room in the bounded channel");
         }
 
-        let backlog = drain_daemon_events(&mut m, None);
+        let backlog = drain_daemon_events(&mut m, &mut Vec::new(), || false);
         assert!(!backlog, "a 3-event burst is well under the per-tick cap");
 
         assert_eq!(

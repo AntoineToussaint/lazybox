@@ -499,14 +499,27 @@ const DRAIN_BUDGET: Duration = Duration::from_millis(8);
 
 /// Drain queued daemon events, bounded by [`MAX_EVENTS_PER_TICK`] and
 /// [`DRAIN_BUDGET`], coalescing adjacent same-terminal `TerminalOutput`
-/// into a single dispatch before handling. Returns `true` when a cap
-/// was hit with events still likely queued, so the caller can skip the
-/// idle poll-wait and loop straight back — output keeps flowing at
-/// full speed while the keyboard is still checked between every batch.
+/// into a single dispatch before handling. Returns `true` when there is
+/// still work queued (in the channel, or carried over below), so the
+/// caller can skip the idle poll-wait and loop straight back — output
+/// keeps flowing at full speed while the keyboard is checked between
+/// every batch.
 ///
-/// `carried` is the daemon event the unified idle wait pulled off the
-/// channel to wake up (see [`wait_for_wake`]) — it's the oldest event
-/// of this batch, so it goes first to preserve daemon-stream order.
+/// `carried` is the un-dispatched tail of the previous drain (in/out):
+/// events the idle wait pulled off the channel to wake on, plus anything
+/// a mid-batch input pre-emption left behind. It leads the next batch so
+/// daemon-stream order is preserved.
+///
+/// `input_pending` reports whether host input (a keystroke, a click) is
+/// already waiting. The dispatch loop yields to it *between events*: the
+/// collection cap bounds how much we pull off the channel, but handling a
+/// coalesced batch — the VT feed and the sidebar/pane work each event
+/// drives — is itself unbounded, so a big poll sweep or a many-terminal
+/// burst could still hold the thread for the whole batch while a keystroke
+/// waits (#1031 §6). Breaking as soon as input appears lets that keystroke
+/// pre-empt the tail of the burst. At least one event is always dispatched
+/// per call, so the daemon stream keeps draining even under sustained
+/// input, and the leftover rides `carried` into the next drain.
 ///
 /// Coalescing is what keeps memory bounded under a chatty agent: the
 /// daemon emits one event per PTY chunk, and `vt.feed(a); vt.feed(b)`
@@ -517,41 +530,45 @@ const DRAIN_BUDGET: Duration = Duration::from_millis(8);
 /// consumer that's falling behind surfaces in the log.
 pub(super) fn drain_daemon_events<T: TerminalAdapter>(
     model: &mut Model<T>,
-    carried: Option<IpcEvent>,
+    carried: &mut Vec<IpcEvent>,
+    mut input_pending: impl FnMut() -> bool,
 ) -> bool {
     let start = std::time::Instant::now();
-    let mut collected: Vec<IpcEvent> = Vec::new();
-    if let Some(evt) = carried {
-        collected.push(evt);
-    }
-    let mut backlog = false;
-    while let Ok(evt) = model.client.rx.try_recv() {
-        collected.push(evt);
-        if collected.len() >= MAX_EVENTS_PER_TICK || start.elapsed() >= DRAIN_BUDGET {
-            // Hit a cap — there may be more queued. Signal a backlog so
-            // the loop comes right back here after servicing input.
-            backlog = true;
-            break;
+    // The previous drain's un-dispatched tail leads, oldest-first.
+    let mut collected: Vec<IpcEvent> = std::mem::take(carried);
+    while collected.len() < MAX_EVENTS_PER_TICK && start.elapsed() < DRAIN_BUDGET {
+        match model.client.rx.try_recv() {
+            Ok(evt) => collected.push(evt),
+            Err(_) => break,
         }
     }
-    // Count resyncs in this batch before dispatching — each one is a
-    // daemon-side overflow that dropped `TerminalOutput` and rebuilt the
-    // grid from the ring, so surfacing it makes drops observable in
-    // `/tmp/lazybox.log` (the #87 BacklogMonitor's remit, now extended to
-    // the actual drop signal rather than just a growing-backlog guess).
-    let resyncs = collected
-        .iter()
-        .filter(|e| matches!(e, IpcEvent::TerminalResync { .. }))
-        .count();
     // Coalesce the sidebar's visible-list rebuild across the batch: a
     // full-sweep poll upserts every workspace, and each upsert otherwise
     // triggers an O(N log N) `recompute_visible` — N upserts → O(N²) on
     // the UI thread, the ~170ms "drain" stalls the watchdog reports
     // (#1030). Batched, the whole drain rebuilds the list once.
     model.sidebar.begin_recompute_batch();
-    for evt in coalesce_adjacent_output(collected) {
+    // Dispatch the coalesced batch, but yield to pending host input
+    // between events so a keystroke pre-empts the burst's tail. Resyncs
+    // are counted here (not up front) so the tally reflects only what we
+    // actually dispatched when a pre-emption carries the rest over —
+    // each is a daemon-side overflow that dropped `TerminalOutput` and
+    // rebuilt the grid from the ring (#87 BacklogMonitor).
+    let mut resyncs = 0usize;
+    let mut batch = coalesce_adjacent_output(collected).into_iter();
+    for evt in batch.by_ref() {
+        if matches!(evt, IpcEvent::TerminalResync { .. }) {
+            resyncs += 1;
+        }
         model.dispatch_daemon_event(evt);
+        if input_pending() {
+            break;
+        }
     }
+    // Whatever we didn't reach rides to the next drain, ahead of newer
+    // events — bounded by the collection cap above, so `carried` can't grow
+    // without limit under a flood.
+    *carried = batch.collect();
     model.sidebar.flush_recompute();
     // One pane projection for the whole batch: a merge burst or a
     // multi-row poll moves the sidebar selection several times in a
@@ -563,7 +580,7 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(
     // consumer hasn't caught up on — feed it to the monitor.
     let residual = model.client.rx.len();
     model.event_backlog.observe(residual);
-    backlog
+    !carried.is_empty() || residual > 0
 }
 
 /// Merge runs of consecutive `TerminalOutput` events that target the
@@ -1231,9 +1248,11 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     let mut input_rx = spawn_input_reader()?;
     let mut input_open = true;
     let mut daemon_open = true;
-    // Daemon event the previous idle wait woke on — head of the next
-    // drain batch (see `Wake::Daemon`).
-    let mut carried: Option<IpcEvent> = None;
+    // Un-dispatched tail carried into the next `drain_daemon_events`: the
+    // event the idle wait woke on (see `Wake::Daemon`) plus anything a
+    // mid-batch input pre-emption left behind. Leads the next batch,
+    // oldest-first.
+    let mut carried: Vec<IpcEvent> = Vec::new();
     let mut stale_tally = StaleInputTally::default();
     let mut watchdog = LoopWatchdog::default();
     let mut perf = PerfMonitor::new();
@@ -1253,9 +1272,11 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     let mut timings = PhaseTimings::default();
     while !model.quit {
         // 1. Drain inbound daemon events — BOUNDED so heavy PTY output
-        // can never starve keyboard input (see `drain_daemon_events`).
+        // can never starve keyboard input, and pre-empted the instant a
+        // keystroke lands so it never waits out a burst's tail (see
+        // `drain_daemon_events`).
         let drain_start = std::time::Instant::now();
-        let had_backlog = drain_daemon_events(model, carried.take());
+        let had_backlog = drain_daemon_events(model, &mut carried, || !input_rx.is_empty());
         timings.drain = drain_start.elapsed();
 
         // 2. Polling-modal spinner heartbeat + retryable notice fade.
@@ -1448,7 +1469,10 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             // now rather than deferring it behind a busy agent stream.
             Wake::Daemon(event) => {
                 report_stale_drops(model, &mut stale_tally, &mut perf);
-                carried = Some(*event);
+                // `carried` is empty here — a pre-empted drain takes the
+                // `had_backlog` fast path and never reaches the idle wait —
+                // so this is the sole head of the next batch.
+                carried.push(*event);
             }
             Wake::Tick => report_stale_drops(model, &mut stale_tally, &mut perf),
         }

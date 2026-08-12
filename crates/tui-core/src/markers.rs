@@ -73,7 +73,9 @@ fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
             "Shows on a closed PR or issue.",
         ),
         StatusTag::Conflict => doc(
-            "⚠",
+            // Trailing U+FE0E pins `⚠` to one cell (see `pills::G_CONFLICT`);
+            // the label must match the renderer for the drift guard.
+            "⚠\u{fe0e}",
             "Conflict — the PR has merge conflicts with its base branch and can't merge until they're resolved.",
             "Shows when the PR conflicts with its base branch.",
         ),
@@ -118,7 +120,7 @@ fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
             "Shows while review is requested or pending with no verdict yet.",
         ),
         StatusTag::CiRunning => doc(
-            "…",
+            "◔",
             "CI running — checks are still in progress.",
             "Shows while checks are queued or in progress.",
         ),

@@ -44,31 +44,29 @@ pub(crate) struct StatusPill {
 const G_OK: &str = " ✓"; // CI green / approved / ready / merged
 const G_FAIL: &str = " ✗"; // CI failed / changes requested
 const G_MIXED: &str = " ±"; // CI partly green, partly failing
-const G_RUNNING: &str = " …"; // CI queued or in progress
+const G_RUNNING: &str = " ◔"; // CI queued or in progress — a partial-circle,
+// deliberately NOT `…`, which collides with the title's truncation ellipsis.
 const G_REVIEW: &str = " ◌"; // review requested / pending
-const G_CONFLICT: &str = " ⚠"; // merge conflict
+// U+FE0E (text-presentation selector) pins `⚠` to one cell: bare U+26A0 is
+// width-ambiguous and many emoji-capable terminals render it two cells wide
+// while `unicode-width` measures one, drifting the trailer by a cell on
+// conflict rows. The selector forces the narrow, measured form.
+const G_CONFLICT: &str = " ⚠\u{fe0e}"; // merge conflict
 const G_CLOSED: &str = " ⊘"; // closed without merging
 const G_DRAFT: &str = " ◇"; // draft PR
 const G_QUEUED: &str = " ⧖"; // sitting in the merge queue
 #[cfg(test)]
 const G_BEHIND: &str = " ↓"; // branch behind its base (tag-map only; no row pill)
 
-/// Indexed-palette severity colors — the terminal's bright red / amber /
-/// yellow / green, punchier than `Color::Red` on dark themes.
-fn c_red() -> Color {
-    Color::Indexed(196)
-}
-fn c_amber() -> Color {
-    Color::Indexed(214)
-}
-fn c_yellow() -> Color {
-    Color::Indexed(220)
-}
-fn c_green() -> Color {
-    Color::Indexed(40)
-}
-
 /// A fg-colored, bold status glyph with a leading-space separator.
+///
+/// `fg` MUST be a theme-derived tone (`theme.success`/`error`/`warn`/…),
+/// not a fixed `Color::Indexed(..)`: these are foreground glyphs on
+/// `theme.surface`, so — unlike the old black-on-color pill *fills*, which
+/// held contrast on any background — a bright fixed palette color (green
+/// `40`, amber `214`, yellow `220`) is unreadable on the near-white
+/// Lazybox Light surface. The theme tones are calibrated for contrast on
+/// both the light and dark backgrounds (#1046).
 fn glyph_pill(label: &'static str, fg: Color) -> StatusPill {
     StatusPill {
         label,
@@ -140,18 +138,20 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
         return (Some(lifecycle), None);
     }
     // Open PR in flight. Review + CI rendered separately, as adjacent
-    // single-cell glyphs (` ◌ ✗` = review pending + CI failing).
+    // single-cell glyphs (` ◌ ✗` = review pending + CI failing). Colors are
+    // theme-derived so they hold contrast on the light theme too (#1046).
+    let theme = crate::theme::current();
     let review = match task.review {
-        ReviewStatus::Approved => Some(glyph_pill(G_OK, crate::theme::current().accent)),
-        ReviewStatus::ChangesRequested => Some(glyph_pill(G_FAIL, c_red())),
-        ReviewStatus::Pending => Some(glyph_pill(G_REVIEW, crate::theme::current().warn)),
+        ReviewStatus::Approved => Some(glyph_pill(G_OK, theme.accent)),
+        ReviewStatus::ChangesRequested => Some(glyph_pill(G_FAIL, theme.error)),
+        ReviewStatus::Pending => Some(glyph_pill(G_REVIEW, theme.warn)),
         ReviewStatus::None => None,
     };
     let ci = match task.ci {
-        CiStatus::Failure => Some(glyph_pill(G_FAIL, c_red())),
-        CiStatus::Mixed => Some(glyph_pill(G_MIXED, c_amber())),
-        CiStatus::Pending | CiStatus::Running => Some(glyph_pill(G_RUNNING, c_yellow())),
-        CiStatus::Success => Some(glyph_pill(G_OK, c_green())),
+        CiStatus::Failure => Some(glyph_pill(G_FAIL, theme.error)),
+        CiStatus::Mixed => Some(glyph_pill(G_MIXED, theme.warn)),
+        CiStatus::Pending | CiStatus::Running => Some(glyph_pill(G_RUNNING, theme.accent)),
+        CiStatus::Success => Some(glyph_pill(G_OK, theme.success)),
         CiStatus::None => None,
     };
     // Open issue (no PR) or no signals at all → keep both columns
@@ -177,14 +177,18 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     match task.state {
         TaskState::Merged => return Some(glyph_pill(G_OK, theme.hover)),
         TaskState::Closed => return Some(glyph_pill(G_CLOSED, theme.text_dim)),
-        TaskState::Draft => return Some(glyph_pill(G_DRAFT, theme.chrome)),
+        // `theme.chrome` is a near-surface grey (the old draft pill used it
+        // as a *fill* behind `text_strong`); as a foreground glyph it's
+        // invisible on the light surface, so use the contrast-tuned
+        // `text_dim` — draft reads as "inactive," which fits (#1046).
+        TaskState::Draft => return Some(glyph_pill(G_DRAFT, theme.text_dim)),
         _ => {}
     }
     if task.mergeable.is_conflicting() {
-        return Some(glyph_pill(G_CONFLICT, c_red()));
+        return Some(glyph_pill(G_CONFLICT, theme.error));
     }
     if task.is_in_merge_queue {
-        return Some(glyph_pill(G_QUEUED, c_green()));
+        return Some(glyph_pill(G_QUEUED, theme.success));
     }
     // Approved + CI green = READY (one pill, end-state for "this PR
     // is good to go"). Approved-without-green-CI shows up as a
@@ -196,7 +200,7 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
         && matches!(task.ci, CiStatus::Success | CiStatus::None)
         && !task.merge_blocked
     {
-        return Some(glyph_pill(G_OK, c_green()));
+        return Some(glyph_pill(G_OK, theme.success));
     }
     // GitHub-native auto-merge (`task.auto_merge_enabled`) is a standing
     // automation policy, not a task status — it renders as its own row
@@ -220,17 +224,17 @@ pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
     match tag {
         Merged => Some(glyph_pill(G_OK, theme.hover)),
         Closed => Some(glyph_pill(G_CLOSED, theme.text_dim)),
-        Conflict => Some(glyph_pill(G_CONFLICT, c_red())),
-        CiFailed => Some(glyph_pill(G_FAIL, c_red())),
-        CiMixed => Some(glyph_pill(G_MIXED, c_amber())),
-        ChangesRequested => Some(glyph_pill(G_FAIL, c_red())),
-        Queued => Some(glyph_pill(G_QUEUED, c_green())),
-        Draft => Some(glyph_pill(G_DRAFT, theme.chrome)),
-        Ready => Some(glyph_pill(G_OK, c_green())),
+        Conflict => Some(glyph_pill(G_CONFLICT, theme.error)),
+        CiFailed => Some(glyph_pill(G_FAIL, theme.error)),
+        CiMixed => Some(glyph_pill(G_MIXED, theme.warn)),
+        ChangesRequested => Some(glyph_pill(G_FAIL, theme.error)),
+        Queued => Some(glyph_pill(G_QUEUED, theme.success)),
+        Draft => Some(glyph_pill(G_DRAFT, theme.text_dim)),
+        Ready => Some(glyph_pill(G_OK, theme.success)),
         Approved => Some(glyph_pill(G_OK, theme.accent)),
         ReviewPending => Some(glyph_pill(G_REVIEW, theme.warn)),
-        CiRunning => Some(glyph_pill(G_RUNNING, c_yellow())),
-        CiOk => Some(glyph_pill(G_OK, c_green())),
+        CiRunning => Some(glyph_pill(G_RUNNING, theme.accent)),
+        CiOk => Some(glyph_pill(G_OK, theme.success)),
         Behind => Some(glyph_pill(G_BEHIND, theme.text_dim)),
         None => Option::None,
     }
@@ -269,15 +273,15 @@ pub(crate) fn status_legend() -> Vec<LegendRow> {
         meaning,
     };
     vec![
-        row(G_OK.trim(), c_green(), "CI passing"),
-        row(G_FAIL.trim(), c_red(), "CI failing / changes requested"),
-        row(G_MIXED.trim(), c_amber(), "CI partly failing"),
-        row(G_RUNNING.trim(), c_yellow(), "CI running"),
+        row(G_OK.trim(), theme.success, "CI passing"),
+        row(G_FAIL.trim(), theme.error, "CI failing / changes requested"),
+        row(G_MIXED.trim(), theme.warn, "CI partly failing"),
+        row(G_RUNNING.trim(), theme.accent, "CI running"),
         row(G_OK.trim(), theme.accent, "approved"),
         row(G_REVIEW.trim(), theme.warn, "review requested / pending"),
-        row(G_CONFLICT.trim(), c_red(), "merge conflict"),
-        row(G_QUEUED.trim(), c_green(), "in the merge queue"),
-        row(G_DRAFT.trim(), theme.chrome, "draft"),
+        row(G_CONFLICT.trim(), theme.error, "merge conflict"),
+        row(G_QUEUED.trim(), theme.success, "in the merge queue"),
+        row(G_DRAFT.trim(), theme.text_dim, "draft"),
         row(G_OK.trim(), theme.hover, "merged"),
         row(G_CLOSED.trim(), theme.text_dim, "closed"),
         row(

@@ -627,7 +627,8 @@ fallback shouldn't resurrect it)",
         // A sampling of the other generated sources — the glyph labels.
         assert!(ctx.contains("## Status pills"));
         assert!(ctx.contains("`✓`"));
-        assert!(ctx.contains("`⚠`"));
+        // `⚠` carries a trailing U+FE0E text-presentation selector (#1046).
+        assert!(ctx.contains("`⚠\u{fe0e}`"));
         assert!(ctx.contains("## Agent state"));
         assert!(ctx.contains("Working"));
         assert!(ctx.contains("## Row badges"));

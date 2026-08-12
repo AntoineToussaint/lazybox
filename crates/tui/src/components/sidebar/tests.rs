@@ -259,9 +259,9 @@ mod status_pill_tests {
     fn ci_running_renders_running_glyph() {
         let mut t = base_task();
         t.ci = CiStatus::Running;
-        assert_eq!(status_pill(&t).unwrap().label, " …");
+        assert_eq!(status_pill(&t).unwrap().label, " ◔");
         t.ci = CiStatus::Pending;
-        assert_eq!(status_pill(&t).unwrap().label, " …");
+        assert_eq!(status_pill(&t).unwrap().label, " ◔");
     }
 
     #[test]
@@ -276,7 +276,9 @@ mod status_pill_tests {
         let mut t = base_task();
         t.mergeable = lazybox_core::Mergeable::Conflicting;
         t.ci = CiStatus::Success;
-        assert_eq!(status_pill(&t).unwrap().label, " ⚠");
+        // `⚠` carries a trailing U+FE0E text-presentation selector so it
+        // renders one cell wide on emoji-forcing terminals (#1046).
+        assert_eq!(status_pill(&t).unwrap().label, " ⚠\u{fe0e}");
     }
 
     #[test]
@@ -638,6 +640,69 @@ mod status_pill_consistency_tests {
             assert_eq!(
                 via_task, via_tag,
                 "status_pill must equal pill_for_tag(StatusTag::for_task(task))",
+            );
+        }
+    }
+
+    /// WCAG relative luminance of an sRGB color. Built-in theme colors are
+    /// always `Color::Rgb` (pinned by the theme module's own tests), so a
+    /// non-Rgb here means a status glyph reached for a fixed palette index
+    /// instead of a theme tone — the exact #1046 regression.
+    fn luminance(c: ratatui::style::Color) -> f32 {
+        let ratatui::style::Color::Rgb(r, g, b) = c else {
+            panic!("status glyph color {c:?} is not a theme-derived Color::Rgb");
+        };
+        let lin = |v: u8| {
+            let s = v as f32 / 255.0;
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    fn contrast_ratio(a: ratatui::style::Color, b: ratatui::style::Color) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// #1046 regression: status glyphs are foreground-colored on
+    /// `theme.surface`, so a fixed bright palette color (the old
+    /// `Color::Indexed(220)` yellow) or a near-surface theme grey (`chrome`,
+    /// the old draft tone) is unreadable on the near-white Lazybox Light
+    /// surface — where the old black-on-color pill *fills* always held
+    /// contrast. Every glyph a status column can emit must clear the 3:1
+    /// floor for graphical indicators on that surface. The old CI colors
+    /// (green `40` ~1.5:1, yellow `220` ~1.3:1) would fail this.
+    #[test]
+    fn status_glyph_colors_are_legible_on_the_light_theme() {
+        use crate::theme;
+        let prev = theme::current().name;
+        assert!(
+            theme::set_by_name("Lazybox Light"),
+            "light theme must exist"
+        );
+        // Sample every tag's fg while the light theme is active, then
+        // restore immediately so the brief global switch can't bleed into a
+        // concurrently-rendering test (same pattern the theme module uses).
+        let sampled: Vec<(StatusTag, ratatui::style::Color)> = ALL_TAGS
+            .iter()
+            .filter_map(|&tag| {
+                pill_for_tag(tag).map(|p| (tag, p.style.fg.expect("glyph has a fg")))
+            })
+            .collect();
+        let surface = theme::current().surface;
+        theme::set_by_name(prev);
+
+        for (tag, fg) in sampled {
+            let ratio = contrast_ratio(fg, surface);
+            assert!(
+                ratio >= 3.0,
+                "StatusTag::{tag:?} glyph color {fg:?} has {ratio:.2}:1 contrast on the light \
+                 surface — below the 3:1 floor (must use a contrast-tuned theme tone)",
             );
         }
     }

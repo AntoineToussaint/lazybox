@@ -155,9 +155,13 @@ async fn detect_github() -> ToolStatus {
                 && std::env::var("GH_TOKEN").is_err()
                 && std::env::var("GITHUB_TOKEN").is_err()
             {
+                // Lead with the gh-free path: this is exactly the zero-`gh`
+                // box the native OAuth login exists for, so pointing only at
+                // `brew install gh` would send the user to install the CLI
+                // this feature makes optional.
                 return mk(ToolState::Missing {
                     kind: MissingKind::CliNotInstalled,
-                    hint: "brew install gh".into(),
+                    hint: "lazybox auth login github (or brew install gh)".into(),
                 });
             }
             return mk(ToolState::Missing {

@@ -14,9 +14,13 @@
 //!
 //! The device flow needs a registered GitHub OAuth app's **client id**
 //! (public, not a secret). It is read from the `LAZYBOX_GITHUB_OAUTH_CLIENT_ID`
-//! environment variable, falling back to the baked-in [`BAKED_CLIENT_ID`].
-//! Refresh tokens are out of scope: classic OAuth-app device tokens do not
-//! expire, so there is nothing to refresh.
+//! environment variable, falling back to the baked-in `BAKED_CLIENT_ID`.
+//!
+//! Classic OAuth-app device tokens do not expire, but a **GitHub App** issues
+//! an 8-hour token plus a refresh token through the same flow. We capture the
+//! `expires_in` GitHub returns and treat an expired stored token as absent, so
+//! a mis-registered GitHub App fails loud (re-login prompt) instead of serving
+//! a dead token silently. Automatic refresh-token rotation is not implemented.
 //!
 //! [OAuth device flow]: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow
 
@@ -79,6 +83,25 @@ pub struct StoredToken {
     /// RFC 3339 timestamp of when the token was obtained (informational).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obtained_at: Option<String>,
+    /// RFC 3339 expiry, set only when GitHub returns `expires_in` (a GitHub
+    /// App token). Absent for classic OAuth-app tokens, which never expire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+impl StoredToken {
+    /// True when the token carries an expiry that has already passed. An
+    /// unparseable timestamp is treated as *not* expired so a serialization
+    /// quirk never discards an otherwise-usable token.
+    pub fn is_expired(&self) -> bool {
+        let Some(raw) = &self.expires_at else {
+            return false;
+        };
+        match chrono::DateTime::parse_from_rfc3339(raw) {
+            Ok(at) => chrono::Utc::now() >= at,
+            Err(_) => false,
+        }
+    }
 }
 
 impl fmt::Debug for StoredToken {
@@ -88,33 +111,57 @@ impl fmt::Debug for StoredToken {
             .field("token_type", &self.token_type)
             .field("scope", &self.scope)
             .field("obtained_at", &self.obtained_at)
+            .field("expires_at", &self.expires_at)
             .finish()
     }
 }
 
-/// Persist `token` to [`token_path`], creating the parent directory. The
-/// file holds a secret, so it is written `0600` on unix.
+/// Persist `token` to [`token_path`], creating the parent directory. The file
+/// holds a secret, so on unix it is created `0600` from the start via
+/// `OpenOptions` — never written at the umask default and tightened after,
+/// which would leave the token group/world-readable during the write.
 pub fn save_token(token: &StoredToken) -> std::io::Result<()> {
     let path = token_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(token)?;
-    std::fs::write(&path, json)?;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    // An existing loose-permission file (e.g. written by an older build)
+    // keeps its old mode through `open`; tighten it so a re-login repairs it.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
-    Ok(())
+    std::io::Write::write_all(&mut file, json.as_bytes())
 }
 
-/// Load the persisted token, or `None` when the file is absent, unreadable,
-/// or malformed. A corrupt file is treated as "not logged in" rather than a
-/// hard error so the credential chain can fall through to `gh`.
+/// Load the persisted token, or `None` when the file is absent or malformed.
+/// A corrupt file is treated as "not logged in" so the chain can fall through
+/// to `gh` — but it is logged, because on a `gh`-less box that silent `None`
+/// is the difference between "authenticated" and a baffling auth failure.
 pub fn load_token() -> Option<StoredToken> {
     let bytes = std::fs::read(token_path()).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    match serde_json::from_slice(&bytes) {
+        Ok(token) => Some(token),
+        Err(e) => {
+            tracing::warn!(
+                path = %token_path().display(),
+                error = %e,
+                "stored GitHub OAuth token is unreadable; treating as logged out"
+            );
+            None
+        }
+    }
 }
 
 /// Remove the persisted token. Missing file is success (idempotent logout).
@@ -138,10 +185,17 @@ impl CredentialProvider for OAuthTokenProvider {
 
     async fn resolve(&self, _scope: &str) -> Result<Credential, CredentialError> {
         match load_token() {
-            Some(t) if !t.access_token.is_empty() => {
-                Ok(Credential::new(t.access_token, "oauth:github"))
+            Some(t) if t.access_token.is_empty() => Err(CredentialError::NotFound(
+                "no stored GitHub OAuth token".into(),
+            )),
+            Some(t) if t.is_expired() => {
+                tracing::warn!("stored GitHub OAuth token has expired; run `lazybox auth login`");
+                Err(CredentialError::NotFound(
+                    "stored GitHub OAuth token expired".into(),
+                ))
             }
-            _ => Err(CredentialError::NotFound(
+            Some(t) => Ok(Credential::new(t.access_token, "oauth:github")),
+            None => Err(CredentialError::NotFound(
                 "no stored GitHub OAuth token".into(),
             )),
         }
@@ -167,6 +221,9 @@ pub enum PollOutcome {
         access_token: String,
         token_type: String,
         scope: String,
+        /// Seconds until the token expires, present only for GitHub App
+        /// tokens; `None` for non-expiring classic OAuth-app tokens.
+        expires_in: Option<u64>,
     },
     /// The user has not authorized yet — keep polling at the same interval.
     Pending,
@@ -226,6 +283,7 @@ pub fn parse_poll_body(body: &str) -> PollOutcome {
         access_token: Option<String>,
         token_type: Option<String>,
         scope: Option<String>,
+        expires_in: Option<u64>,
         error: Option<String>,
         error_description: Option<String>,
     }
@@ -238,6 +296,7 @@ pub fn parse_poll_body(body: &str) -> PollOutcome {
             access_token: token,
             token_type: resp.token_type.unwrap_or_default(),
             scope: resp.scope.unwrap_or_default(),
+            expires_in: resp.expires_in,
         };
     }
     match resp.error.as_deref() {
@@ -289,9 +348,19 @@ async fn post_form(url: &str, params: &[(&str, &str)]) -> Result<String, DeviceF
         .send()
         .await
         .map_err(|e| DeviceFlowError::Http(e.to_string()))?;
-    resp.text()
+    // A 5xx is a transient server-side blip, not a contract error — surface it
+    // as `Http` so the poll loop retries instead of aborting the login on a
+    // GitHub hiccup mid-flow. GitHub reports device-flow states (pending,
+    // slow_down, bad client) as 2xx/4xx JSON bodies, which fall through.
+    let status = resp.status();
+    let text = resp
+        .text()
         .await
-        .map_err(|e| DeviceFlowError::Http(e.to_string()))
+        .map_err(|e| DeviceFlowError::Http(e.to_string()))?;
+    if status.is_server_error() {
+        return Err(DeviceFlowError::Http(format!("GitHub returned {status}")));
+    }
+    Ok(text)
 }
 
 /// Request a device + user code from GitHub (device-flow stage 1).
@@ -321,8 +390,40 @@ pub async fn poll_once(client_id: &str, device_code: &str) -> Result<PollOutcome
     Ok(parse_poll_body(&body))
 }
 
+/// Whether a poll error is transient — a network blip or a GitHub 5xx that
+/// should be retried until the device code expires — rather than a terminal
+/// misconfiguration (bad client id, unsupported grant) that will never
+/// succeed and must abort the login now.
+fn poll_error_is_transient(e: &DeviceFlowError) -> bool {
+    matches!(e, DeviceFlowError::Http(_))
+}
+
+/// Build the stored token from an authorized poll, stamping `expires_at` when
+/// GitHub returned an `expires_in` (a GitHub App token).
+fn authorized_token(
+    access_token: String,
+    token_type: String,
+    scope: String,
+    expires_in: Option<u64>,
+) -> StoredToken {
+    let now = chrono::Utc::now();
+    let expires_at = expires_in
+        .and_then(|secs| i64::try_from(secs).ok())
+        .and_then(|secs| now.checked_add_signed(chrono::Duration::seconds(secs)))
+        .map(|at| at.to_rfc3339());
+    StoredToken {
+        access_token,
+        token_type,
+        scope,
+        obtained_at: Some(now.to_rfc3339()),
+        expires_at,
+    }
+}
+
 /// Poll until the user authorizes, respecting GitHub's interval and
-/// `slow_down` backoff and giving up when the device code expires.
+/// `slow_down` backoff and giving up when the device code expires. A
+/// transient network error or GitHub 5xx during the flow is retried (bounded
+/// by the code's TTL), not treated as a fatal login failure.
 pub async fn poll_for_token(
     client_id: &str,
     dc: &DeviceCodeResponse,
@@ -335,18 +436,27 @@ pub async fn poll_for_token(
         if start.elapsed() > ttl {
             return Err(DeviceFlowError::Expired);
         }
-        match poll_once(client_id, &dc.device_code).await? {
+        let outcome = match poll_once(client_id, &dc.device_code).await {
+            Ok(outcome) => outcome,
+            Err(e) if poll_error_is_transient(&e) => {
+                tracing::debug!(error = %e, "transient error polling for token; retrying");
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        match outcome {
             PollOutcome::Authorized {
                 access_token,
                 token_type,
                 scope,
+                expires_in,
             } => {
-                return Ok(StoredToken {
+                return Ok(authorized_token(
                     access_token,
                     token_type,
                     scope,
-                    obtained_at: Some(chrono::Utc::now().to_rfc3339()),
-                });
+                    expires_in,
+                ));
             }
             PollOutcome::Pending => continue,
             PollOutcome::SlowDown => {
@@ -434,8 +544,21 @@ mod tests {
                 access_token: "gho_secret".into(),
                 token_type: "bearer".into(),
                 scope: "repo,read:org".into(),
+                expires_in: None,
             }
         );
+    }
+
+    #[test]
+    fn poll_body_authorized_captures_github_app_expiry() {
+        // A GitHub App token carries `expires_in`; it must be captured so the
+        // stored token can be aged out instead of served dead forever.
+        let body =
+            r#"{"access_token":"ghs_secret","token_type":"bearer","scope":"","expires_in":28800}"#;
+        match parse_poll_body(body) {
+            PollOutcome::Authorized { expires_in, .. } => assert_eq!(expires_in, Some(28800)),
+            other => panic!("expected Authorized, got {other:?}"),
+        }
     }
 
     #[test]
@@ -456,6 +579,7 @@ mod tests {
                 token_type: "bearer".into(),
                 scope: "repo".into(),
                 obtained_at: Some("2026-08-12T00:00:00Z".into()),
+                expires_at: None,
             };
             save_token(&token).expect("save");
             let loaded = load_token().expect("token after save");
@@ -475,57 +599,144 @@ mod tests {
             token_type: "bearer".into(),
             scope: "repo".into(),
             obtained_at: None,
+            expires_at: None,
         };
         let dbg = format!("{token:?}");
         assert!(!dbg.contains("gho_supersecret"), "token must be redacted");
         assert!(dbg.contains("REDACTED"));
     }
 
-    #[tokio::test]
-    async fn provider_declines_when_no_token() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let out = {
-            let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var("LAZYBOX_HOME").ok();
-            unsafe { std::env::set_var("LAZYBOX_HOME", dir.path()) };
-            let out = OAuthTokenProvider.resolve("github").await;
-            unsafe {
-                match prev {
-                    Some(v) => std::env::set_var("LAZYBOX_HOME", v),
-                    None => std::env::remove_var("LAZYBOX_HOME"),
-                }
-            }
-            out
-        };
-        assert!(matches!(out, Err(CredentialError::NotFound(_))));
+    /// Resolve the provider synchronously under the env lock. A plain
+    /// `#[tokio::test]` holding `ENV_LOCK` across the `.await` trips
+    /// `clippy::await_holding_lock`; a current-thread `block_on` keeps the
+    /// env-var mutation serialized without an await in scope.
+    fn resolve_under_home(dir: &std::path::Path) -> Result<Credential, CredentialError> {
+        with_home(dir, || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("test runtime");
+            rt.block_on(OAuthTokenProvider.resolve("github"))
+        })
     }
 
-    #[tokio::test]
-    async fn provider_resolves_stored_token() {
+    #[test]
+    fn provider_declines_when_no_token() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let out = {
-            let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let prev = std::env::var("LAZYBOX_HOME").ok();
-            unsafe { std::env::set_var("LAZYBOX_HOME", dir.path()) };
+        assert!(matches!(
+            resolve_under_home(dir.path()),
+            Err(CredentialError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn provider_resolves_stored_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        with_home(dir.path(), || {
             save_token(&StoredToken {
                 access_token: "gho_live".into(),
                 token_type: "bearer".into(),
                 scope: "repo".into(),
                 obtained_at: None,
+                expires_at: None,
             })
             .expect("save");
-            let out = OAuthTokenProvider.resolve("github").await;
-            unsafe {
-                match prev {
-                    Some(v) => std::env::set_var("LAZYBOX_HOME", v),
-                    None => std::env::remove_var("LAZYBOX_HOME"),
-                }
-            }
-            out
-        };
-        let cred = out.expect("token resolves");
+        });
+        let cred = resolve_under_home(dir.path()).expect("token resolves");
         assert_eq!(cred.token(), "gho_live");
         assert_eq!(cred.source, "oauth:github");
+    }
+
+    #[test]
+    fn provider_declines_expired_token() {
+        // A GitHub App token past its expiry must be treated as absent so the
+        // chain re-falls-back (or prompts re-login) instead of serving a dead
+        // token that 401s every request.
+        let dir = tempfile::tempdir().expect("tempdir");
+        with_home(dir.path(), || {
+            save_token(&StoredToken {
+                access_token: "ghs_dead".into(),
+                token_type: "bearer".into(),
+                scope: "repo".into(),
+                obtained_at: None,
+                expires_at: Some("2000-01-01T00:00:00Z".into()),
+            })
+            .expect("save");
+        });
+        assert!(matches!(
+            resolve_under_home(dir.path()),
+            Err(CredentialError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn is_expired_reads_the_stamp() {
+        let mut token = StoredToken {
+            access_token: "t".into(),
+            token_type: "bearer".into(),
+            scope: String::new(),
+            obtained_at: None,
+            expires_at: None,
+        };
+        assert!(!token.is_expired(), "no expiry ⇒ never expired");
+        token.expires_at = Some("2000-01-01T00:00:00Z".into());
+        assert!(token.is_expired(), "past expiry ⇒ expired");
+        token.expires_at = Some("2999-01-01T00:00:00Z".into());
+        assert!(!token.is_expired(), "future expiry ⇒ live");
+        token.expires_at = Some("not-a-timestamp".into());
+        assert!(
+            !token.is_expired(),
+            "unparseable expiry ⇒ kept, not discarded"
+        );
+    }
+
+    #[test]
+    fn authorized_token_stamps_expiry_only_when_present() {
+        let plain = authorized_token("t".into(), "bearer".into(), "repo".into(), None);
+        assert!(plain.expires_at.is_none(), "classic OAuth token: no expiry");
+        assert!(plain.obtained_at.is_some());
+
+        let app = authorized_token("t".into(), "bearer".into(), "repo".into(), Some(28800));
+        assert!(app.expires_at.is_some(), "GitHub App token: expiry stamped");
+        assert!(!app.is_expired(), "a fresh 8h token is not already expired");
+    }
+
+    #[test]
+    fn transient_errors_retry_terminal_errors_abort() {
+        // Network blips / 5xx are retried; a GitHub OAuth error is terminal.
+        assert!(poll_error_is_transient(&DeviceFlowError::Http(
+            "blip".into()
+        )));
+        assert!(!poll_error_is_transient(&DeviceFlowError::Provider(
+            "incorrect_client_credentials".into()
+        )));
+        assert!(!poll_error_is_transient(&DeviceFlowError::Denied));
+        assert!(!poll_error_is_transient(&DeviceFlowError::Expired));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_token_creates_0600_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        with_home(dir.path(), || {
+            save_token(&StoredToken {
+                access_token: "gho_secret".into(),
+                token_type: "bearer".into(),
+                scope: "repo".into(),
+                obtained_at: None,
+                expires_at: None,
+            })
+            .expect("save");
+            let mode = std::fs::metadata(token_path())
+                .expect("token file exists")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "token file must never be group/world-readable"
+            );
+        });
     }
 
     #[test]

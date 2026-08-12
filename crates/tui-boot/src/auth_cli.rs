@@ -3,9 +3,11 @@
 //! Drives the GitHub OAuth device flow (see [`lazybox_gh::oauth`]) so a
 //! machine with no `gh` installed can still obtain a token:
 //!
-//!   lazybox auth login [github]   run the device flow and store the token
-//!   lazybox auth status           show whether a token is stored
-//!   lazybox auth logout [github]  remove the stored token
+//! ```text
+//! lazybox auth login [github]   run the device flow and store the token
+//! lazybox auth status           show whether a token is stored
+//! lazybox auth logout [github]  remove the stored token
+//! ```
 //!
 //! Linear OAuth is not yet wired here (its authorization-code flow needs a
 //! redirect callback); `lazybox auth login linear` reports that plainly.

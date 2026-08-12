@@ -19,7 +19,7 @@
 //!   lazybox sandbox ensure          provision a remote dev box (terraform);
 //!                                  wake/sleep/status/connect/destroy manage
 //!                                  its lifecycle (GCP; per-worktree handle)
-//!   lazybox auth login [github]     native GitHub OAuth device-flow login
+//!   lazybox auth login github       native GitHub OAuth device-flow login
 //!                                  (no `gh` CLI needed); `status` / `logout`
 //!                                  inspect and clear the stored token
 //!   lazybox slack init              interactive Slack token setup wizard

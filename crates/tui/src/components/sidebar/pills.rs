@@ -133,7 +133,7 @@ pub(crate) fn status_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
 /// row shows both. Either slot may be `None` (e.g. CI not yet
 /// configured → ci=None; new PR with no review activity → review=None).
 pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Option<StatusPill>) {
-    use lazybox_core::{CiStatus, ReviewStatus, TaskState};
+    use lazybox_core::{ReviewStatus, TaskState};
     let theme = crate::theme::current();
     // Draft is primary but must NOT swallow real blockers: a conflicting or
     // CI-failing draft looks fine at a glance otherwise, and you only find out
@@ -141,6 +141,9 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
     // blocker (conflict, else CI) rides the second — `◇ ⚠` — instead of the
     // draft glyph short-circuiting the whole pipeline.
     if task.state == TaskState::Draft {
+        // `text_dim` (not the near-surface `chrome` the old pill *fill* used):
+        // as a foreground glyph `chrome` is invisible on the light surface, and
+        // dim reads as "inactive," which fits a draft (#1046).
         let draft = glyph_pill(G_DRAFT, theme.text_dim);
         return (Some(draft), draft_blocker_pill(task, theme));
     }
@@ -169,13 +172,7 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
         ReviewStatus::Pending => Some(glyph_pill(G_REVIEW, theme.warn)),
         ReviewStatus::None => None,
     };
-    let ci = match task.ci {
-        CiStatus::Failure => Some(glyph_pill(G_FAIL, theme.error)),
-        CiStatus::Mixed => Some(glyph_pill(G_MIXED, theme.warn)),
-        CiStatus::Pending | CiStatus::Running => Some(glyph_pill(G_RUNNING, theme.accent)),
-        CiStatus::Success => Some(glyph_pill(G_OK, theme.success)),
-        CiStatus::None => None,
-    };
+    let ci = ci_pill(task.ci, theme);
     // Open issue (no PR) or no signals at all → keep both columns
     // empty rather than showing stale review/ci state from a
     // non-existent PR. Caller still reserves the column space so
@@ -236,11 +233,30 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     None
 }
 
+/// The single CI-status → glyph mapping, shared by the open-PR CI slot
+/// in `status_pills` and the draft blocker slot. One source of truth so
+/// a draft's CI glyph can never drift from a non-draft's when a color or
+/// a `CiStatus` variant changes.
+fn ci_pill(ci: lazybox_core::CiStatus, theme: &crate::theme::Theme) -> Option<StatusPill> {
+    use lazybox_core::CiStatus;
+    match ci {
+        CiStatus::Failure => Some(glyph_pill(G_FAIL, theme.error)),
+        CiStatus::Mixed => Some(glyph_pill(G_MIXED, theme.warn)),
+        CiStatus::Pending | CiStatus::Running => Some(glyph_pill(G_RUNNING, theme.accent)),
+        CiStatus::Success => Some(glyph_pill(G_OK, theme.success)),
+        CiStatus::None => None,
+    }
+}
+
 /// The blocker glyph composited into a draft row's second slot, so
 /// `◇` never hides an actual problem (#1058). Conflict wins over CI —
 /// same precedence as `lifecycle_pill` for a non-draft PR, where a
-/// conflict overrides the CI signal. `None` when the draft has nothing
-/// worth flagging (no conflict, CI not configured).
+/// conflict overrides the CI signal.
+///
+/// Only genuine blockers ride the slot: a green or in-flight check isn't
+/// something you must fix before marking ready, and `◇ ✓` on a PR that
+/// is explicitly not-ready reads as "good to go." So Success/Running
+/// leave the slot empty; a draft with clean-or-pending CI shows just `◇`.
 fn draft_blocker_pill(
     task: &lazybox_core::Task,
     theme: &crate::theme::Theme,
@@ -250,11 +266,8 @@ fn draft_blocker_pill(
         return Some(glyph_pill(G_CONFLICT, theme.error));
     }
     match task.ci {
-        CiStatus::Failure => Some(glyph_pill(G_FAIL, theme.error)),
-        CiStatus::Mixed => Some(glyph_pill(G_MIXED, theme.warn)),
-        CiStatus::Pending | CiStatus::Running => Some(glyph_pill(G_RUNNING, theme.accent)),
-        CiStatus::Success => Some(glyph_pill(G_OK, theme.success)),
-        CiStatus::None => None,
+        CiStatus::Failure | CiStatus::Mixed => ci_pill(task.ci, theme),
+        _ => None,
     }
 }
 

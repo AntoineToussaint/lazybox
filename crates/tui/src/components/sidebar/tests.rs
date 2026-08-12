@@ -371,6 +371,22 @@ mod status_pill_tests {
     }
 
     #[test]
+    fn draft_row_shows_mixed_ci_alongside_draft() {
+        // Mixed CI (partly failing) is a blocker too — surface it.
+        use super::super::status_pills;
+        let mut t = base_task();
+        t.state = TaskState::Draft;
+        t.ci = CiStatus::Mixed;
+        let (a, b) = status_pills(&t);
+        assert_eq!(a.unwrap().label, " ◇");
+        assert_eq!(
+            b.unwrap().label,
+            " ±",
+            "slot two surfaces mixed CI on a draft"
+        );
+    }
+
+    #[test]
     fn draft_row_quiet_ci_shows_only_draft() {
         // No conflict, CI not configured → just `◇`, second slot empty.
         use super::super::status_pills;
@@ -379,6 +395,25 @@ mod status_pill_tests {
         let (a, b) = status_pills(&t);
         assert_eq!(a.unwrap().label, " ◇");
         assert!(b.is_none(), "a clean draft carries no blocker glyph");
+    }
+
+    #[test]
+    fn draft_row_non_blocking_ci_shows_only_draft() {
+        // Green or in-flight CI is not a blocker — the second slot stays
+        // empty so `◇ ✓` never reads as "good to go" on a not-ready PR.
+        // Only conflict / failing / mixed CI earn the blocker slot.
+        use super::super::status_pills;
+        for ci in [CiStatus::Success, CiStatus::Running, CiStatus::Pending] {
+            let mut t = base_task();
+            t.state = TaskState::Draft;
+            t.ci = ci;
+            let (a, b) = status_pills(&t);
+            assert_eq!(a.unwrap().label, " ◇");
+            assert!(
+                b.is_none(),
+                "non-blocking CI {ci:?} must not add a glyph beside the draft marker",
+            );
+        }
     }
 
     #[test]

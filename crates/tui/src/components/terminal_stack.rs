@@ -4573,10 +4573,17 @@ impl TerminalStack {
         };
 
         let exited = slot.exited.is_some();
-        let asking = !exited && matches!(slot.agent_state, lazybox_ipc::AgentState::InputNeeded);
-        // Attention: a background tile whose agent is asking paints its
+        // Both states park the agent waiting on the user (a permission
+        // prompt, or a provider rate-limit block — #847), so both pull
+        // attention.
+        let needs_you = !exited
+            && matches!(
+                slot.agent_state,
+                lazybox_ipc::AgentState::InputNeeded | lazybox_ipc::AgentState::LimitReached
+            );
+        // Attention: a background tile whose agent needs you paints its
         // whole bar warn so it's noticeable without watching every tile.
-        let attention = asking && !is_focused_leaf;
+        let attention = needs_you && !is_focused_leaf;
         let base = if attention {
             theme.warn
         } else if is_focused_leaf {
@@ -4689,12 +4696,18 @@ impl TerminalStack {
                     .fg(theme.success)
                     .add_modifier(Modifier::BOLD),
             )),
+            // A provider usage / rate-limit block (#847) — the agent is
+            // parked waiting on the user just like `InputNeeded`, so it
+            // gets the same attention treatment, with the `⏳` glyph the
+            // sidebar pill already uses for it.
+            AgentState::LimitReached => Some((
+                "⏳ limited",
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            )),
             // Idle has nothing to act on; `Exited` is surfaced by the
             // `exited` flag above (the process-ended pill lives on the
-            // slot, not the live state); `LimitReached` surfaces via the
-            // sidebar pill / `!` jump and — as the tab strip did before
-            // this — shows no inline chip.
-            AgentState::Idle | AgentState::Exited { .. } | AgentState::LimitReached => None,
+            // slot, not the live state).
+            AgentState::Idle | AgentState::Exited { .. } => None,
         }
     }
 
@@ -10217,21 +10230,47 @@ mod zoom_and_tile_header_tests {
         );
 
         for compact in [true, false] {
-            // Working / Done are identical across both surfaces.
+            // Working / Done / LimitReached are identical across both
+            // surfaces (only the asking label differs).
             assert_eq!(
                 label(AgentState::Working, false, compact),
                 Some("· working")
             );
             assert_eq!(label(AgentState::Done, false, compact), Some("✓ done"));
-            // Silent states render nothing on BOTH surfaces — no per-surface
-            // drift, and (crucially) `LimitReached` is a deliberate None,
-            // not a wildcard-swallow.
+            // A rate-limited agent needs you too — it shows the `⏳` pill
+            // on both surfaces, not a blank slot.
+            assert_eq!(
+                label(AgentState::LimitReached, false, compact),
+                Some("⏳ limited")
+            );
+            // Silent states render nothing on BOTH surfaces — no
+            // per-surface drift.
             assert_eq!(label(AgentState::Idle, false, compact), None);
-            assert_eq!(label(AgentState::LimitReached, false, compact), None);
             assert_eq!(
                 label(AgentState::Exited { code: Some(0) }, false, compact),
                 None
             );
         }
+    }
+
+    #[test]
+    fn background_rate_limited_tile_is_highlighted_like_an_asking_one() {
+        let (mut stack, _sk) = two_tile_grid();
+        stack.terminals.get_mut(&TerminalId(2)).unwrap().agent_state =
+            lazybox_ipc::AgentState::LimitReached;
+        let theme = crate::theme::current();
+
+        // A background rate-limited tile pulls attention just like an
+        // asking one: whole bar warn+bold, with the `⏳ limited` chip.
+        let bg = stack.tile_header_line(TerminalId(2), false, false, 40);
+        assert!(
+            bg.spans
+                .iter()
+                .any(|s| s.style.fg == Some(theme.warn)
+                    && s.style.add_modifier.contains(Modifier::BOLD)),
+            "background rate-limited tile is warn+bold",
+        );
+        let text: String = bg.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("limited"), "shows the limited chip: {text}");
     }
 }

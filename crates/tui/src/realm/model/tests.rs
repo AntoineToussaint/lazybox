@@ -5333,7 +5333,7 @@ mod input_starvation_tests {
 
     /// Seed the channel with `n` distinct workspace upserts (never
     /// coalesced, unlike same-terminal output), so the dispatch loop has
-    /// `n` real iterations to be pre-empted between.
+    /// `n` real iterations a keystroke can interrupt between.
     fn flood_upserts(tx: &mpsc::Sender<Event>, n: usize) {
         use chrono::Utc;
         use lazybox_core::{Workspace, WorkspaceKey};

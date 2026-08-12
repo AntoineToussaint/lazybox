@@ -1272,7 +1272,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     let mut timings = PhaseTimings::default();
     while !model.quit {
         // 1. Drain inbound daemon events — BOUNDED so heavy PTY output
-        // can never starve keyboard input, and pre-empted the instant a
+        // can never starve keyboard input, and yielding the instant a
         // keystroke lands so it never waits out a burst's tail (see
         // `drain_daemon_events`).
         let drain_start = std::time::Instant::now();
@@ -1469,9 +1469,9 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             // now rather than deferring it behind a busy agent stream.
             Wake::Daemon(event) => {
                 report_stale_drops(model, &mut stale_tally, &mut perf);
-                // `carried` is empty here — a pre-empted drain takes the
-                // `had_backlog` fast path and never reaches the idle wait —
-                // so this is the sole head of the next batch.
+                // `carried` is empty here — a drain that yielded to input
+                // takes the `had_backlog` fast path and never reaches the
+                // idle wait — so this is the sole head of the next batch.
                 carried.push(*event);
             }
             Wake::Tick => report_stale_drops(model, &mut stale_tally, &mut perf),

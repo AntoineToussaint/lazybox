@@ -364,14 +364,20 @@ impl LinearClient {
     /// would assign the wrong person. `Err` names the ambiguity so the
     /// caller can retype a unique identifier (e.g. the email).
     pub async fn resolve_user_id(&self, name: &str) -> Result<Option<String>, LinearError> {
+        // Filter server-side on an exact (case-insensitive) match of
+        // any identifier. A blind `users(first: N)` fetch would miss a
+        // match sorted past the page — a member of a >N-user workspace
+        // would falsely resolve to "not found".
+        let target = name.trim();
         let req = serde_json::json!({
-            "query": "query { users(first: 250) { nodes { id name displayName email } } }",
+            "query": "query($q: String!) { users(first: 50, filter: { or: [ { name: { eqIgnoreCase: $q } }, { displayName: { eqIgnoreCase: $q } }, { email: { eqIgnoreCase: $q } } ] }) { nodes { id name displayName email } } }",
+            "variables": { "q": target },
         });
         let resp: serde_json::Value = self.graphql(&req).await?;
         if let Some(msg) = gql_errors(&resp) {
             return Err(LinearError::Graphql(msg));
         }
-        let target = name.trim().to_lowercase();
+        let target = target.to_lowercase();
         let Some(nodes) = resp
             .get("data")
             .and_then(|d| d.get("users"))

@@ -711,9 +711,20 @@ async fn set_assignees_resolves_name_then_updates_issue() {
         .unwrap();
 
     let bodies = mock.bodies();
+    let lookup = bodies
+        .iter()
+        .find(|b| b.contains("users("))
+        .expect("looked up user");
+    // The lookup must filter server-side (not fetch a bounded page and
+    // match client-side), else a match past the page is missed in a
+    // large workspace. The picked name rides through as the filter arg.
     assert!(
-        bodies.iter().any(|b| b.contains("users(")),
-        "looked up user"
+        lookup.contains("eqIgnoreCase") && lookup.contains("filter"),
+        "user lookup filters server-side: {lookup}"
+    );
+    assert!(
+        lookup.contains("Alice A"),
+        "sends the picked name: {lookup}"
     );
     let update = bodies
         .iter()

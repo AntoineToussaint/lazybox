@@ -1448,6 +1448,23 @@ impl<T: TerminalAdapter> Model<T> {
         if self.sidebar.workspace_by_key(&session_key).is_none() {
             return;
         }
+        // Async mount — this is the `PrMergeFailed { conflict }` reply to
+        // a `g m` press, which can land seconds later while the user has
+        // opened something else. Mounting a `default_yes()` confirm on top
+        // would steal keyboard focus and let a buffered/queued Enter spawn
+        // the resolution agent unprompted, so follow the same
+        // wait-for-empty-stack rule every other async daemon mount uses
+        // (labels, inspect, import): any modal already up wins, and the
+        // offer is dropped. The CONFLICT pill on the row stays accurate,
+        // so `g m` re-triggers it — the hint says so.
+        if let Some(top) = self.modal_stack.last() {
+            tracing::info!(
+                ?top,
+                "conflict-resolve prompt skipped — another modal owns the stack"
+            );
+            self.flash_hint("merge conflicts — close this dialog and press g m to resolve");
+            return;
+        }
         let prompt = format!(
             "{pr_label} has merge conflicts — resolve them?\n\n\
              [Y] spawns an agent in the worktree to bring the branch current \

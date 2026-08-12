@@ -5832,32 +5832,165 @@ mod stale_input_tests {
         );
     }
 
-    /// The stale-key exemption covers exactly the non-destructive,
-    /// user-opened filter-pickers and never a confirm — a stall must not
-    /// let a buffered `Enter` auto-confirm a merge/archive/removal (#1055).
+    /// Exhaustive classification of every modal `Id` for the stale-key
+    /// exemption (#1055). The `match` has no wildcard on purpose: a
+    /// newly-added `Id` fails to compile here until it is deliberately
+    /// classified, so the retain allowlist can never silently drift from
+    /// its criterion (a new picker keeping the latency bug, or — worse — a
+    /// new confirm quietly opting itself in). `true` iff a late buffered
+    /// `Enter` can only advance a local, single-step, reversible selection;
+    /// every confirm, destructive-action menu, and outward-effect input is
+    /// `false`.
     #[test]
-    fn only_filter_pickers_retain_stale_keys() {
+    fn stale_key_retention_is_classified_for_every_modal() {
         use crate::realm::model::Id;
+
+        let expected = |id: &Id| -> bool {
+            match id {
+                // Retain: local, single-step, reversible selections whose
+                // whole interaction is the keystroke.
+                Id::SnippetPicker
+                | Id::SkillPicker
+                | Id::SnippetBrowser
+                | Id::JumpPicker
+                | Id::PromptHistoryPicker
+                | Id::UrlPicker
+                | Id::ThemePicker
+                | Id::FilterMenu
+                | Id::SnoozeDuration
+                | Id::DefaultAgentPicker
+                | Id::DefaultModelPicker
+                | Id::WorkAgentPicker => true,
+                // Drop — confirms (a stale Enter must not confirm).
+                Id::AgentAuth
+                | Id::RemoveOutOfScope
+                | Id::MergeConfirm
+                | Id::CleanWorktreesConfirm
+                | Id::InspectConfirm
+                | Id::ImportCheckoutConfirm
+                | Id::ActionConfirm
+                | Id::ConflictResolve
+                | Id::ErrorInboxClearConfirm
+                | Id::BroadcastConfirm
+                | Id::BulkSpawnConfirm
+                | Id::HelpActionConfirm => false,
+                // Drop — destructive-action menus / delete-routing lists.
+                Id::SidebarContext | Id::InspectList | Id::ImportCheckoutList => false,
+                // Drop — outward-effect inputs (post/label/deliver).
+                Id::Reply
+                | Id::Notes
+                | Id::RequestReviewers
+                | Id::AddAssignees
+                | Id::ManageLabels
+                | Id::PolicyPicker
+                | Id::BroadcastText
+                | Id::HandoffText => false,
+                // Drop — text/config inputs and multi-step flow steps.
+                Id::NewWorkspace
+                | Id::RenameWorkspace
+                | Id::MoveToSpace
+                | Id::NewProject
+                | Id::NewWorkspaceRepo
+                | Id::LinearTeamRepo
+                | Id::Editor
+                | Id::Setup
+                | Id::AdoptTarget
+                | Id::StartAgentProject
+                | Id::LlmGatewayUrl
+                | Id::AddScanRoot
+                | Id::BroadcastSnippet
+                | Id::HandoffTarget
+                | Id::ConvertSessionRole => false,
+                // Drop — read-only / progress / streamed surfaces.
+                Id::Splash
+                | Id::Help
+                | Id::HelpAsk
+                | Id::Error
+                | Id::Update
+                | Id::Polling
+                | Id::Tour
+                | Id::SyncStatus
+                | Id::Messages
+                | Id::ErrorInbox
+                | Id::InspectLoading
+                | Id::WorktreeProgress
+                | Id::DescriptionModal
+                | Id::DiffReview
+                | Id::PrChat => false,
+            }
+        };
+
         for id in [
+            Id::Splash,
+            Id::Help,
+            Id::HelpAsk,
+            Id::Error,
+            Id::AgentAuth,
+            Id::Update,
+            Id::Polling,
+            Id::Reply,
+            Id::Notes,
+            Id::NewWorkspace,
+            Id::RenameWorkspace,
+            Id::MoveToSpace,
+            Id::NewProject,
+            Id::NewWorkspaceRepo,
+            Id::LinearTeamRepo,
+            Id::Editor,
+            Id::Setup,
+            Id::RemoveOutOfScope,
+            Id::MergeConfirm,
+            Id::AdoptTarget,
+            Id::StartAgentProject,
+            Id::RequestReviewers,
+            Id::AddAssignees,
+            Id::ManageLabels,
+            Id::FilterMenu,
+            Id::PolicyPicker,
+            Id::SnoozeDuration,
+            Id::LlmGatewayUrl,
+            Id::AddScanRoot,
+            Id::SidebarContext,
+            Id::CleanWorktreesConfirm,
+            Id::InspectLoading,
+            Id::InspectList,
+            Id::InspectConfirm,
+            Id::ImportCheckoutList,
+            Id::ImportCheckoutConfirm,
+            Id::ActionConfirm,
+            Id::ConflictResolve,
             Id::SnippetPicker,
             Id::SkillPicker,
-            Id::SnippetBrowser,
+            Id::Tour,
+            Id::SyncStatus,
+            Id::Messages,
+            Id::ErrorInbox,
+            Id::ErrorInboxClearConfirm,
+            Id::WorktreeProgress,
             Id::JumpPicker,
             Id::PromptHistoryPicker,
             Id::UrlPicker,
-        ] {
-            assert!(id.retains_stale_keys(), "{id:?} should retain stale keys");
-        }
-        for id in [
-            Id::MergeConfirm,
-            Id::ActionConfirm,
+            Id::ThemePicker,
+            Id::SnippetBrowser,
+            Id::BroadcastSnippet,
+            Id::BroadcastText,
+            Id::BroadcastConfirm,
             Id::BulkSpawnConfirm,
-            Id::RemoveOutOfScope,
-            Id::Reply,
+            Id::HandoffTarget,
+            Id::HandoffText,
+            Id::ConvertSessionRole,
+            Id::DefaultAgentPicker,
+            Id::DefaultModelPicker,
+            Id::HelpActionConfirm,
+            Id::WorkAgentPicker,
+            Id::DescriptionModal,
+            Id::DiffReview,
+            Id::PrChat,
         ] {
-            assert!(
-                !id.retains_stale_keys(),
-                "{id:?} must drop stale keys — a stale Enter can't auto-confirm",
+            assert_eq!(
+                id.retains_stale_keys(),
+                expected(&id),
+                "{id:?} classified inconsistently — update retains_stale_keys and this match together",
             );
         }
     }
@@ -9034,6 +9167,47 @@ mod merge_focus_follow_tests {
         assert!(
             m.status.notice.is_none(),
             "no dead-end error banner when we can offer a resolve",
+        );
+    }
+
+    /// #1055: the conflict-resolve prompt is an async `PrMergeFailed`
+    /// reply, so — like every other async daemon mount — it must not
+    /// preempt a modal the user already has open. A `default_yes()` confirm
+    /// popping onto the stack under a stall would let a buffered `Enter`
+    /// (aimed at the open picker) spawn the resolution agent unprompted.
+    /// The offer is dropped with a `g m` hint; the CONFLICT pill re-arms it.
+    #[test]
+    fn pr_merge_failed_with_conflict_does_not_preempt_an_open_modal() {
+        let mut m = build_model();
+        let ws = conflicting_pr("owner/repo#1");
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+
+        // The user has the snippet picker open (a retaining modal).
+        m.modal_stack.push(Id::SnippetPicker);
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key,
+            pr_label: "owner/repo#1".into(),
+            reason: "Can't merge — the branch has merge conflicts with its base.".into(),
+            conflict: true,
+        });
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::SnippetPicker),
+            "the open modal wins — the resolve confirm must not stack over it",
+        );
+        assert!(
+            !m.modal_stack.contains(&Id::ConflictResolve),
+            "no conflict-resolve confirm was mounted under the picker either",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("g m")),
+            "a hint points at re-triggering the resolve",
         );
     }
 

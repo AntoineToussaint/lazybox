@@ -11,9 +11,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand = "0.8"
-sha2 = "0.10"
+ed25519-dalek = { version = "3", features = ["rand_core"] }
+rand = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]

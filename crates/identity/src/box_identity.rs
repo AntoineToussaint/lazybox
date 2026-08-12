@@ -49,7 +49,7 @@ impl BoxIdentity {
             path: dir.to_path_buf(),
             source,
         })?;
-        let signing_key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = SigningKey::generate(&mut rand::rng());
         let seed_hex = hex::encode(signing_key.to_bytes());
 
         // Publish the seed atomically: write the full contents to a private

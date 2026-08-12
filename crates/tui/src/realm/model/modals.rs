@@ -2529,10 +2529,13 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.set_modal_flow(ModalFlow::LinearTeamRepo { team: team.clone() });
-        let modal = Choice::single(format!("Which repo does Linear team {team} use?"), repos)
-            .title("Map Linear team")
-            .label(|repo: &String| repo.clone())
-            .payload_for(|repo: &String| ChoicePayload::Text(repo.clone()));
+        let modal = Choice::single(
+            format!("Which repo should Linear team {team} use? (saved for its future tickets)"),
+            repos,
+        )
+        .title("Map Linear team")
+        .label(|repo: &String| repo.clone())
+        .payload_for(|repo: &String| ChoicePayload::Text(repo.clone()));
         self.mount_modal(Id::LinearTeamRepo, modal);
     }
 

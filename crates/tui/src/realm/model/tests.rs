@@ -14244,6 +14244,35 @@ mod worktree_progress_recovery_tests {
             ),
             "the picker stashes the team the pick will be persisted under",
         );
+
+        // The pick is remembered as `providers.linear.teams.OBI`, and undoing
+        // a mis-pick means hand-editing config — so the picker itself must
+        // say the choice persists, not leave the user to infer it.
+        let rendered = {
+            use tuirealm::ratatui::Terminal;
+            use tuirealm::ratatui::backend::TestBackend;
+            use tuirealm::ratatui::layout::Rect;
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    m.app
+                        .view(&Id::LinearTeamRepo, frame, Rect::new(0, 0, 100, 20))
+                })
+                .expect("render picker");
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|col| buffer[(col, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            rendered.contains("saved"),
+            "the picker must signal the choice is remembered: {rendered}",
+        );
     }
 
     /// With no GitHub repo tracked, the picker has nothing to offer, so the

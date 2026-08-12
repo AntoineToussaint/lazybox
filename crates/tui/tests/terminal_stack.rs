@@ -1016,17 +1016,21 @@ fn split_tiles_paint_focus_contrast_bars() {
     let buf = term.backend().buffer();
     let theme = lazybox_tui::theme::current();
 
-    // Tile bodies start at row 3 (title / divider / blank). The body
-    // spans x 1..59; a 50% HSplit puts the left tile around x=2 and
-    // the right tile past the divider column.
-    let left = &buf[(2u16, 3u16)];
-    let right = &buf[(w - 4, 3u16)];
+    // Tile headers occupy row 3 (title / divider / blank precede them).
+    // Each header opens with the rule glyph in the tile's focus colour,
+    // so sample the leading cell of each tile: the left tile starts at
+    // x=1, and the right tile just past the divider (a 50% HSplit of the
+    // x 1..59 body puts the divider at x=30, so the right tile opens at
+    // x=31).
+    let left = &buf[(1u16, 3u16)];
+    let right = &buf[(31u16, 3u16)];
     assert_eq!(left.symbol(), "─", "unfocused tile still gets a rule");
     assert_eq!(
         left.style().fg,
         Some(theme.chrome),
         "unfocused tile's rule is chrome"
     );
+    assert_eq!(right.symbol(), "─", "focused tile still gets a rule");
     assert_eq!(
         right.style().fg,
         Some(theme.accent),

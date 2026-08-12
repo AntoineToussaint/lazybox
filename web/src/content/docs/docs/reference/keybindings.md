@@ -133,6 +133,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]-` | Split the focused tile stacked |
 | `]]←↓↑→` | Move tile focus; Left/Right cycles tabs in Tabs mode |
 | `]]x` | Close the focused terminal (tile or active tab) |
+| `]]z` | Toggle tmux-style zoom of the focused tile (maximize / restore); Splits grid only |
 | `]]t` | Toggle whether the next terminal opens as a split or a tab; persists `ui.terminal_new_layout` |
 
 ### Scrollback

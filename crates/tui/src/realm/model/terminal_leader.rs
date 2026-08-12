@@ -55,6 +55,9 @@ pub(super) enum LeaderCmd {
     /// `]]x` — close the focused terminal (the focused tile in Splits,
     /// the active tab in Tabs).
     CloseTerminal,
+    /// `]]z` — tmux-style zoom: maximize the focused tile across the whole
+    /// pane and back. Only meaningful in a multi-tile Splits grid.
+    ZoomTile,
     /// `]]t` — flip the new-terminal layout preference (split ⇄ tabs)
     /// and persist it. Affects the *next* spawn, not open terminals.
     ToggleNewLayout,
@@ -157,6 +160,13 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         sidebar: false,
     },
     FixedCommandSpec {
+        key: 'z',
+        command: LeaderCmd::ZoomTile,
+        menu_label: "zoom tile",
+        reference: "Toggle tmux-style zoom of the focused tile (maximize / restore); Splits grid only",
+        sidebar: false,
+    },
+    FixedCommandSpec {
         key: 't',
         command: LeaderCmd::ToggleNewLayout,
         menu_label: "new shells",
@@ -225,6 +235,11 @@ impl LeaderCmd {
     ) -> Vec<(String, String)> {
         let mut rows = Vec::with_capacity(FIXED_COMMANDS.len() + 1);
         for spec in FIXED_COMMANDS {
+            // Zoom only does anything with a multi-tile grid — don't
+            // advertise it in Tabs mode where `]]z` is a no-op.
+            if spec.key == 'z' && !splits {
+                continue;
+            }
             // Tile/tab navigation sits next to the split controls and
             // before close, matching the established menu order.
             if spec.key == 'x' {
@@ -385,6 +400,31 @@ mod tests {
 
         let two_tabs = labels(LeaderCmd::menu_rows(false, 2, NewTerminalLayout::Split));
         assert!(two_tabs.iter().any(|l| l == "switch tab"));
+    }
+
+    /// `]]z` zoom is advertised only in a Splits grid — in Tabs mode it
+    /// would be a no-op — but the chord always resolves so dispatch and
+    /// the generated docs still know it.
+    #[test]
+    fn zoom_row_shows_only_in_splits_but_always_resolves() {
+        let splits = LeaderCmd::menu_rows(true, 2, NewTerminalLayout::Split);
+        assert!(
+            splits.iter().any(|(k, l)| k == "z" && l == "zoom tile"),
+            "the Splits menu advertises zoom",
+        );
+        let tabs = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split);
+        assert!(
+            !tabs.iter().any(|(k, _)| k == "z"),
+            "the Tabs menu hides the no-op zoom row",
+        );
+        assert!(matches!(
+            LeaderCmd::from_key(Key::Char('z'), KeyModifiers::NONE),
+            Some(LeaderCmd::ZoomTile),
+        ));
+        assert!(
+            LeaderCmd::reference_rows().iter().any(|(k, _)| k == "z"),
+            "the docs reference lists zoom regardless of layout",
+        );
     }
 
     /// The `]]t` row always shows and reflects the current default;

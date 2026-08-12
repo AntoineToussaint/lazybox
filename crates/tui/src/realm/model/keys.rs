@@ -869,6 +869,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::SplitHorizontal => self.terminals.split_tile(PendingSplit::Horizontal, cmds),
             LeaderCmd::MoveTile(dir) => self.terminals.move_tile_focus(dir, cmds),
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
+            LeaderCmd::ZoomTile => self.toggle_terminal_zoom(),
             LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(),
         }
     }

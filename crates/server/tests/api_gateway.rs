@@ -9,9 +9,10 @@ pub use lazybox_server::{Server, ServerConfig, dispatch_command};
 mod api_gateway;
 
 use api_gateway::{
-    AgentTaskKind, AgentsResponse, CommandResponse, DesktopCleanupReason, DesktopCommand,
-    DesktopEvent, DesktopEventFrame, DesktopInfo, DesktopTerminalSnapshot, GatewayOptions,
-    HealthResponse, JsonClientFrame, JsonServerFrame, ProtocolResponse,
+    AgentOutputResponse, AgentTaskInfo, AgentTaskKind, AgentsResponse, CommandResponse,
+    DesktopCleanupReason, DesktopCommand, DesktopEvent, DesktopEventFrame, DesktopInfo,
+    DesktopTerminalSnapshot, GatewayOptions, HealthResponse, InjectRequest, InjectResponse,
+    JsonClientFrame, JsonServerFrame, OutputRequest, ProtocolResponse, RunningAgent,
     UnsupportedProtocolResponse, WorkspacesResponse,
 };
 use bytes::Bytes;
@@ -116,6 +117,10 @@ const FAKE_API_STREAM_SCRIPT: &str = concat!(
     r#"{"type":"result","subtype":"success","session_id":"api-session","result":"done"}"#,
     "\n",
 );
+
+fn bearer(token: &str) -> HeaderValue {
+    HeaderValue::from_str(&format!("Bearer {token}")).expect("valid bearer header")
+}
 
 fn make_task(key: &str) -> Task {
     let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
@@ -568,6 +573,220 @@ fn desktop_compatibility_fixture_is_current() {
     );
 }
 
+/// The `/v1` endpoints the browser web-control client
+/// (`crates/server/src/api_client.html`) drives. Kept in lockstep with
+/// the fetch calls the page's inline script makes: the JS-side test
+/// (`web/scripts/api-client.test.mjs`) asserts the client touches
+/// exactly this set, and this constant is embedded in the committed
+/// contract fixture so a route the client depends on can't be renamed
+/// or dropped without failing this gate.
+const WEB_CONTROL_ENDPOINTS: &[&str] = &[
+    "/v1/health",
+    "/v1/workspaces",
+    "/v1/agents",
+    "/v1/info",
+    "/v1/events",
+    "/v1/commands",
+    "/v1/agents/inject",
+    "/v1/agents/output",
+];
+
+/// Web control shares the JSON gateway with the desktop, but consumes a
+/// narrower, text-oriented slice of it (no binary terminal stream). This
+/// pins the exact request/response shapes the browser client parses and
+/// sends, the same way `desktop_compatibility_fixture_is_current` pins
+/// the desktop boundary: a wire change to any of these DTOs forces a
+/// fixture regen (so it can't ride silently across a release), and the
+/// JS client test then re-drives the page against the regenerated
+/// fixture so a field the page reads can't disappear unnoticed.
+#[test]
+fn web_control_contract_fixture_is_current() {
+    let timestamp = Utc
+        .timestamp_opt(1_700_000_000, 0)
+        .single()
+        .expect("fixed fixture timestamp");
+    let session_key = lazybox_core::SessionKey::from("github:o/r#42");
+
+    // The page reads `default_agent` from `/v1/info` to spawn the daemon's
+    // configured agent instead of a hardcoded claude — pin a non-claude
+    // default so the JS test proves the value is read, not defaulted.
+    let info = {
+        let mut config = lazybox_config::Config::default();
+        config.setup.default_agent = Some("codex".into());
+        api_gateway::build_desktop_info(&config)
+    };
+
+    let responses = serde_json::json!({
+        "health": api_gateway::health_response(),
+        "workspaces": WorkspacesResponse {
+            workspaces: vec![desktop_contract_workspace()],
+            warnings: vec!["one persisted row could not be decoded".into()],
+        },
+        "agents": AgentsResponse {
+            agents: vec![RunningAgent {
+                terminal_id: TerminalId(7),
+                // Matches the workspace's key: `agents_response` joins on
+                // `Workspace::key`, so a running agent's `workspace_key`
+                // is the workspace key the browser client keys spawn /
+                // inject / output on.
+                workspace_key: desktop_contract_workspace().key.as_str().to_string(),
+                workspace_name: "PR o/r#42".into(),
+                repo: Some("o/r".into()),
+                agent: "claude".into(),
+                state: Some(AgentState::Working),
+                task: Some(AgentTaskInfo {
+                    id: "github:o/r#42".into(),
+                    kind: AgentTaskKind::Pr,
+                    number: Some(42),
+                    title: "PR o/r#42".into(),
+                    url: "https://github.com/o/r/pull/42".into(),
+                    repo: Some("o/r".into()),
+                    ci: CiStatus::Success,
+                }),
+                last_prompt: Some("Review the current diff.".into()),
+                last_prompt_at: Some(1_700_000_000_000),
+                model: Some("Opus".into()),
+                on_main: false,
+                no_permission: false,
+                session_started_at: Some(timestamp),
+            }],
+            warnings: vec![],
+        },
+        "inject": InjectResponse {
+            accepted: true,
+            workspace: "github:o/r#42".into(),
+            terminal_id: TerminalId(7),
+        },
+        "output": AgentOutputResponse {
+            workspace: "github:o/r#42".into(),
+            terminal_id: TerminalId(7),
+            output: "api-ok\n".into(),
+            lines: 1,
+        },
+        "command": CommandResponse {
+            ok: true,
+            completed: true,
+            error: None,
+            client_request_id: Some("web-1".into()),
+            events: vec![],
+        },
+        // Read by the page to spawn the daemon's configured default agent.
+        "info": info,
+    });
+
+    let requests = serde_json::json!({
+        "spawn_agent": JsonClientFrame::Command(Command::Spawn {
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: Some("web-1".into()),
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: None,
+            on_main: false,
+            model_alias: None,
+            access: Default::default(),
+        }),
+        "spawn_shell": JsonClientFrame::Command(Command::Spawn {
+            session_key,
+            session_id: None,
+            client_request_id: Some("web-2".into()),
+            kind: TerminalKind::Shell,
+            cwd: None,
+            initial_prompt: None,
+            on_main: false,
+            model_alias: None,
+            access: Default::default(),
+        }),
+    });
+
+    // The page POSTs these bodies verbatim; they must still deserialize
+    // into the gateway's (deserialize-only) request types, so a rename of
+    // `workspace`/`text`/`tail` is caught here rather than at runtime.
+    let inject_request: InjectRequest = serde_json::from_value(serde_json::json!({
+        "workspace": "github:o/r#42",
+        "text": "Take another pass at the failing test.",
+        "submit": true,
+    }))
+    .expect("inject request body still deserializes");
+    assert_eq!(inject_request.workspace, "github:o/r#42");
+    assert!(inject_request.submit);
+    let output_request: OutputRequest = serde_json::from_value(serde_json::json!({
+        "workspace": "github:o/r#42",
+        "tail": 200,
+    }))
+    .expect("output request body still deserializes");
+    assert_eq!(output_request.workspace, "github:o/r#42");
+    assert_eq!(output_request.tail, Some(200));
+
+    let fixture = serde_json::json!({
+        "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,
+        "endpoints": WEB_CONTROL_ENDPOINTS,
+        "event_frame": JsonServerFrame::Event(Event::PollCompleted {
+            source: "github".into(),
+            count: 3,
+        }),
+        "requests": requests,
+        "responses": responses,
+    });
+    let rendered = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&fixture).expect("serialize web-control contract fixture")
+    );
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/api_client_contract.json");
+
+    if std::env::var_os("UPDATE_WEB_CONTROL_CONTRACT").is_some() {
+        std::fs::write(&path, rendered).expect("write web-control contract fixture");
+        return;
+    }
+
+    let committed = std::fs::read_to_string(&path).expect(
+        "web-control contract fixture is missing; rerun with UPDATE_WEB_CONTROL_CONTRACT=1",
+    );
+    assert_eq!(
+        committed, rendered,
+        "web-control contract fixture is stale; rerun with UPDATE_WEB_CONTROL_CONTRACT=1"
+    );
+}
+
+/// The endpoint list embedded in the contract fixture is only as good as
+/// the router behind it. This drives every `WEB_CONTROL_ENDPOINTS` path
+/// through `handle_request` and asserts it resolves to a real handler
+/// (anything but the router's 404), so a renamed or deleted arm in
+/// `handle_request` fails the build here instead of 404-ing in the
+/// browser at runtime.
+#[tokio::test]
+async fn web_control_endpoints_are_all_served_by_the_router() {
+    let post_routes = ["/v1/commands", "/v1/agents/inject", "/v1/agents/output"];
+    for &path in WEB_CONTROL_ENDPOINTS {
+        let method = if post_routes.contains(&path) {
+            Method::POST
+        } else {
+            Method::GET
+        };
+        // An empty body makes the POST routes fail decoding with 400 —
+        // proving the route exists — rather than resolving a workspace,
+        // which could 404 on "no running agent" and be misread as a
+        // missing route.
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response = api_gateway::handle_request(
+            ServerConfig::in_memory(),
+            GatewayOptions::default(),
+            request,
+        )
+        .await;
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} is declared in WEB_CONTROL_ENDPOINTS but the router does not serve it"
+        );
+    }
+}
+
 #[test]
 fn desktop_boundary_rejects_internal_commands_and_private_events() {
     let internal_command = serde_json::json!({
@@ -765,8 +984,9 @@ async fn local_browser_shell_is_public_while_api_routes_stay_authenticated() {
     );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    assert!(html.contains("lazybox browser"));
+    assert!(html.contains("lazybox web control"));
     assert!(html.contains("/v1/workspaces"));
+    assert!(html.contains("/v1/commands"));
     assert!(html.contains("Authorization: `Bearer ${token}`"));
 
     let request = Request::builder()
@@ -1393,6 +1613,133 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
         .kill(&backend_key)
         .await
         .expect("close real PTY");
+    client_runtime.shutdown().await;
+}
+
+/// The browser web-control client's full loop, exercised against a live
+/// gateway with a real PTY and the configured bearer token: spawn an
+/// agent (`POST /v1/commands`), read its terminal output
+/// (`POST /v1/agents/output`), and hand it work (`POST /v1/agents/inject`)
+/// — the exact JSON round-trips `api_client.html` drives. Guards that a
+/// wire change can't quietly break web control end to end, and that the
+/// control endpoints honor the bearer token the same way `/v1/health`
+/// does.
+#[tokio::test]
+async fn web_control_json_loop_drives_a_live_agent_with_bearer_auth() {
+    let mut config = ServerConfig::with_store(Arc::new(MemoryStore::new()));
+    config.agents.register(Arc::new(FakePtyAgent));
+    let client_runtime = lazybox_server::client_runtime::ClientRuntime::start(
+        config.clone(),
+        lazybox_server::client_runtime::ClientRuntimeOptions {
+            poll_interval: std::time::Duration::from_secs(60),
+            restore_persisted_sessions: false,
+            slack: None,
+        },
+    )
+    .await;
+    let options = GatewayOptions {
+        bearer_token: Some("secret".into()),
+        ..GatewayOptions::default()
+    };
+    let workspace = "web:control-loop";
+    let temp = tempfile::tempdir().expect("temporary working directory");
+
+    // A control endpoint rejects an unauthenticated caller, exactly like
+    // the read routes — the token gates the whole surface, not just reads.
+    let unauthenticated = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/agents/output")
+        .body(Full::new(Bytes::from(
+            serde_json::to_vec(&serde_json::json!({ "workspace": workspace })).unwrap(),
+        )))
+        .unwrap();
+    let response =
+        api_gateway::handle_request(config.clone(), options.clone(), unauthenticated).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Spawn an agent with the same `{type:"Command",payload:{Spawn:…}}`
+    // frame the page posts to `/v1/commands`.
+    let spawn = JsonClientFrame::Command(Command::Spawn {
+        session_key: workspace.into(),
+        session_id: None,
+        client_request_id: Some("web-1".into()),
+        kind: TerminalKind::Agent("fake-api-pty".into()),
+        cwd: Some(temp.path().to_string_lossy().into_owned()),
+        initial_prompt: None,
+        on_main: false,
+        model_alias: None,
+        access: lazybox_ipc::AgentRunAccess::Default,
+    });
+    let spawn_request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/commands")
+        .header(AUTHORIZATION, bearer("secret"))
+        .body(Full::new(Bytes::from(serde_json::to_vec(&spawn).unwrap())))
+        .unwrap();
+    let response =
+        api_gateway::handle_request(config.clone(), options.clone(), spawn_request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let spawned: CommandResponse = read_json(response).await;
+    assert!(spawned.ok, "spawn command succeeded: {:?}", spawned.error);
+
+    // Poll the agent-output endpoint until the real PTY has produced its
+    // banner — "view a terminal" over the live JSON gateway.
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/v1/agents/output")
+                .header(AUTHORIZATION, bearer("secret"))
+                .body(Full::new(Bytes::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "workspace": workspace,
+                        "tail": 200,
+                    }))
+                    .unwrap(),
+                )))
+                .unwrap();
+            let response =
+                api_gateway::handle_request(config.clone(), options.clone(), request).await;
+            if response.status() == StatusCode::OK {
+                let payload: AgentOutputResponse = read_json(response).await;
+                if payload.output.contains("__LB_BEGIN__") {
+                    break payload;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("agent output surfaces over the JSON gateway");
+    assert_eq!(output.workspace, workspace);
+    assert!(output.lines > 0);
+
+    // Hand the agent work through the same inject path the page's Send
+    // button uses. `accepted` means the workspace resolved to a running
+    // agent and the settle-gated inject took the prompt.
+    let inject_request = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/agents/inject")
+        .header(AUTHORIZATION, bearer("secret"))
+        .body(Full::new(Bytes::from(
+            serde_json::to_vec(&serde_json::json!({
+                "workspace": workspace,
+                "text": "web-control-instruction",
+                "submit": true,
+            }))
+            .unwrap(),
+        )))
+        .unwrap();
+    let response = api_gateway::handle_request(config.clone(), options, inject_request).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let injected: InjectResponse = read_json(response).await;
+    assert!(injected.accepted, "inject resolved the workspace's agent");
+    assert_eq!(injected.workspace, workspace);
+    assert_eq!(injected.terminal_id, output.terminal_id);
+
+    if let Some(backend_key) = config.terminal.backend_key_for(output.terminal_id).await {
+        let _ = config.backend.kill(&backend_key).await;
+    }
     client_runtime.shutdown().await;
 }
 

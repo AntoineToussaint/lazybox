@@ -348,6 +348,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   const notesSaveButton = element<HTMLButtonElement>("notes-save-button");
   const refreshButton = element<HTMLButtonElement>("refresh-button");
   const settingsButton = element<HTMLButtonElement>("settings-button");
+  const webControlButton = element<HTMLButtonElement>("web-control-button");
   const terminalTiles = element<HTMLDivElement>("terminal");
   const terminalTabs = element<HTMLDivElement>("terminal-tabs");
   const terminalEmpty = element<HTMLDivElement>("terminal-empty");
@@ -912,6 +913,9 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     { signal: lifecycle.signal },
   );
   settingsButton.addEventListener("click", () => void openSettings(), {
+    signal: lifecycle.signal,
+  });
+  webControlButton.addEventListener("click", () => void openWebControl(), {
     signal: lifecycle.signal,
   });
   // #1007's notification + update-notice controls, lifecycle-signalled (#974).
@@ -4512,6 +4516,23 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     try {
       await invoke("open_url", { url });
       setStatus(`Opening ${url}…`);
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  // Open the browser web-control client (api_client.html) served at the
+  // gateway root. It drives the same /v1 gateway this desktop is attached
+  // to — including a remote, SSH-forwarded one — so the browser page is a
+  // first-class peer of this window rather than a separate un-chromed tool.
+  async function openWebControl(): Promise<void> {
+    if (previewMode) {
+      setStatus("Would open the browser web-control client.");
+      return;
+    }
+    try {
+      const url = await invoke<string>("open_web_control");
+      setStatus(`Opening web control at ${url}…`);
     } catch (error) {
       setStatus(String(error));
     }

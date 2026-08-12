@@ -74,12 +74,12 @@ pub struct WorkspaceRowCtx<'a> {
     /// setup, launching the agent) and no terminal has reported an
     /// `AgentState` yet (#1069). Renders the animated "spawning" arc in
     /// the shared state slot so the row reads as *coming up* rather than
-    /// blank until the agent is live. Outranks the at-rest `done` /
-    /// `exited` markers (which, when `spawning` is set, are stale state
-    /// from a *prior* reaped session — no terminal exists for the current
-    /// one), so re-spawning a finished or crashed agent shows the arc, not
-    /// a stale ✓/✗. Still yields to a live `working` / `asking` /
-    /// `limit_reached` signal — see `cell_state`.
+    /// blank until the agent is live. Yields to every live agent signal
+    /// (`working` / `done` / `asking` / `limit_reached`) — a second
+    /// session running beside the spawn keeps its glyph — and outranks
+    /// only the terminal `exited` marker: re-spawning a crashed agent,
+    /// whose sticky `Exited` (#356) lingers with no live terminal, shows
+    /// the arc rather than a stale ✗. See `cell_state`.
     pub spawning: bool,
     /// Current glyph for the `spawning` slot — a rotating arc, sharing
     /// the same frame counter as `working_glyph` but a distinct frame set
@@ -486,16 +486,17 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///   - `Idle`        → blank.
 /// Reserved width either way so the kind/title to the right don't
 /// jitter as a row moves between states. Precedence limit-reached >
-/// asking > working > spawning > done > exited. A spawn-in-flight
-/// outranks the at-rest markers (`done` / `exited`), because when
-/// `spawning` is set no terminal exists yet for this session — so any
-/// `done`/`exited` in the state map belongs to a *prior* reaped session
-/// and is stale (#356's sticky `Exited` / `Done` survive a reap). Showing
-/// the "coming up" arc there beats stranding a stale ✓/✗ over an agent
-/// that is actively restarting. It still yields to a genuinely live
-/// signal (`working` / `asking` / `limit-reached`) — the only way both
-/// can be set is a second session provisioning behind an already-live
-/// agent, where the live signal is the one worth surfacing.
+/// asking > working > done > spawning > exited. `spawning` yields to
+/// every *live* signal and outranks only the terminal `exited` marker.
+/// That split is exact, not defensive: a terminal's `Working` / `Done` /
+/// `InputNeeded` / `LimitReached` entry is dropped when it exits (only
+/// `Exited` is retained — the sidebar's `TerminalExited` handler), so any
+/// of those present while `spawning` is set belongs to a genuinely live
+/// *sibling* terminal (a second session running alongside this spawn) and
+/// rightly wins. `Exited` is the lone exception: retained as the #356
+/// restart affordance, it lingers with no live terminal after a crash, so
+/// on a cold re-provision `spawning > exited` shows the "coming up" arc
+/// instead of stranding a stale ✗ over an agent that is restarting.
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let (glyph, fg) = if ctx.limit_reached {
         ("⏳", ctx.theme.warn)
@@ -503,10 +504,10 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ("?", ctx.theme.warn)
     } else if ctx.working {
         (ctx.working_glyph, ctx.theme.accent)
-    } else if ctx.spawning {
-        (ctx.spawning_glyph, ctx.theme.text_dim)
     } else if ctx.done {
         ("✓", ctx.theme.success)
+    } else if ctx.spawning {
+        (ctx.spawning_glyph, ctx.theme.text_dim)
     } else if ctx.exited {
         ("✗", ctx.theme.text_dim)
     } else {
@@ -1569,20 +1570,22 @@ mod tests {
         assert_eq!(cell_text(&cell), format!(" {} ", spawning_glyph(1)));
     }
 
-    /// Same root cause for a re-spawn after the prior session finished:
-    /// a sticky `Done` is equally stale once no terminal exists, so the
-    /// in-flight arc wins over it too.
+    /// A *live* `done` wins over the arc: a second session that finished
+    /// (terminal still alive, → alert #80) beside a sibling session's
+    /// cold spawn shows `✓`, not the arc. A stale `done` never reaches
+    /// this arm — `Done` is dropped when its terminal exits (only `Exited`
+    /// is retained), so a `done` seen while spawning is a live sibling.
     #[test]
-    fn cell_state_spawning_wins_over_done() {
+    fn cell_state_done_wins_over_spawning() {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.done = true;
         ctx.spawning = true;
         ctx.spawning_glyph = spawning_glyph(2);
-        ctx.done = true;
         let cell = cell_state(&ctx);
-        assert_eq!(cell_text(&cell), format!(" {} ", spawning_glyph(2)));
+        assert_eq!(cell_text(&cell), " ✓ ");
     }
 
     /// But a genuinely live signal still wins: a second session

@@ -574,7 +574,7 @@ impl Sidebar {
     }
     /// True while `session_key`'s workspace is provisioning its first
     /// spawn and no terminal has reported an `AgentState` yet — drives
-    /// the row's "spawning" arc (#1069). See [`Self::spawning`].
+    /// the row's "spawning" arc (#1069). Reads the private `spawning` set.
     pub fn is_spawning(&self, session_key: &SessionKey) -> bool {
         self.spawning.contains(session_key)
     }

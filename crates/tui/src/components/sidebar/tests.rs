@@ -4496,3 +4496,91 @@ mod stack_tests {
         assert!(sb.stack_info(&key).is_none());
     }
 }
+
+#[cfg(test)]
+mod linear_team_repo_picker_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::{Project, TaskId, Workspace};
+
+    fn sidebar_tracking(repos: &[&str]) -> Sidebar {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let now = chrono::Utc::now();
+        let mut projects = std::collections::BTreeMap::new();
+        for repo in repos {
+            let (owner, name) = repo.split_once('/').expect("owner/repo");
+            let p = Project::github(owner, name, now);
+            projects.insert(p.key.clone(), p);
+        }
+        sb.apply_projects(projects);
+        sb
+    }
+
+    fn linear_ticket_linking(team: &str, id: &str, linked_repo: Option<&str>) -> Workspace {
+        let mut t = base_task();
+        t.id = TaskId {
+            source: "linear".into(),
+            key: id.into(),
+        };
+        t.repo = Some(format!("linear/{team}"));
+        t.branch = None;
+        t.linked_tasks = linked_repo
+            .into_iter()
+            .map(|repo| TaskId {
+                source: "github".into(),
+                key: format!("{repo}#42"),
+            })
+            .collect();
+        Workspace::from_task(t, chrono::Utc::now())
+    }
+
+    /// #1041 (reopened) smart proposals: a repo that another ticket in the
+    /// *same* Linear team already links a GitHub PR to floats to the top of
+    /// the picker — the team's real repo, learned from its own tickets —
+    /// while every tracked repo is still offered.
+    #[test]
+    fn ranks_repos_linked_by_sibling_team_tickets_first() {
+        let mut sb = sidebar_tracking(&["obin-ai/obin-platform", "obin-ai/obin-infra"]);
+        let ws = linear_ticket_linking("OBI", "OBI-1000", Some("obin-ai/obin-infra"));
+        sb.workspaces.insert(SessionKey::from(&ws.key), ws);
+
+        let ranked = sb.github_repos_ranked_for_linear_team("OBI");
+        assert_eq!(
+            ranked.first().map(String::as_str),
+            Some("obin-ai/obin-infra"),
+            "the repo a sibling ticket links floats first: {ranked:?}",
+        );
+        assert!(
+            ranked.iter().any(|r| r == "obin-ai/obin-platform"),
+            "the rest are still offered: {ranked:?}",
+        );
+    }
+
+    /// A different team's linked repo must not reorder this team's picker —
+    /// the signal is scoped to the team being mapped.
+    #[test]
+    fn ranking_ignores_other_teams_links() {
+        let mut sb = sidebar_tracking(&["obin-ai/obin-platform", "obin-ai/obin-infra"]);
+        let other = linear_ticket_linking("NYL", "NYL-1", Some("obin-ai/obin-infra"));
+        sb.workspaces.insert(SessionKey::from(&other.key), other);
+
+        // No OBI ticket links anything, so ordering stays the tracked order.
+        let ranked = sb.github_repos_ranked_for_linear_team("OBI");
+        assert_eq!(
+            ranked,
+            sb.github_repos_for_picker(),
+            "another team's link must not reorder OBI's picker: {ranked:?}",
+        );
+    }
+
+    /// With no signal at all the picker still lists every tracked repo —
+    /// never a blank picker.
+    #[test]
+    fn ranks_all_repos_even_without_a_signal() {
+        let sb = sidebar_tracking(&["obin-ai/obin-platform"]);
+        assert_eq!(
+            sb.github_repos_ranked_for_linear_team("OBI"),
+            vec!["obin-ai/obin-platform".to_string()],
+        );
+    }
+}

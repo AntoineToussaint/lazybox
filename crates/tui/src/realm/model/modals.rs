@@ -2216,6 +2216,22 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.worktree_progress_dismissed = None;
+        // #1041: an unmapped Linear team surfaces as a Failed provision
+        // step, but it's a missing *choice*, not a breakage. Open the repo
+        // picker directly — the primary path — instead of the "× spawn
+        // aborted / retry once fixed" checklist. `open_…` tears down the
+        // in-flight spinner itself; it returns false (falling through to the
+        // normal failed modal) only when there's genuinely no repo to
+        // propose — the true last resort.
+        if let lazybox_ipc::WorktreeStepStatus::Failed(message) = &status
+            && lazybox_ipc::WorktreeRecovery::classify(message)
+                == lazybox_ipc::WorktreeRecovery::LinearUnmapped
+        {
+            let message = message.clone();
+            if self.open_linear_team_repo_picker(&message) {
+                return;
+            }
+        }
         // A new spawn supersedes any stale checklist (e.g. the previous
         // one errored and the user re-pressed `w`).
         let state = match self.worktree_progress.as_mut() {
@@ -2384,6 +2400,17 @@ impl<T: TerminalAdapter> Model<T> {
         {
             return false;
         }
+        // #1041: an unmapped Linear team is not a failure to *show* — it's a
+        // missing choice to *make*. Open the repo picker directly as the
+        // primary path (persist + re-provision on pick), never the "× spawn
+        // aborted / retry once fixed" dead-end. Only when there's genuinely
+        // no repo to propose does it fall through to the failure modal below.
+        if lazybox_ipc::WorktreeRecovery::classify(message)
+            == lazybox_ipc::WorktreeRecovery::LinearUnmapped
+            && self.open_linear_team_repo_picker(message)
+        {
+            return true;
+        }
         let step = lazybox_ipc::WorktreeRecovery::classify(message).failed_step();
         let mut state = WorktreeProgressState::new(session_key);
         state.apply(
@@ -2422,6 +2449,22 @@ impl<T: TerminalAdapter> Model<T> {
         self.force_dismiss_worktree_progress();
         // A superseded checklist would otherwise be treated as
         // Esc-dismissed; clear the marker so the retry's events mount.
+        self.worktree_progress_dismissed = None;
+        self.flush_dispatched_cmds(vec![spawn]);
+    }
+
+    /// Re-issue the remembered spawn after mapping an unmapped Linear team
+    /// (#1041). Unlike `retry_worktree_provision`, this is not gated on a
+    /// failed checklist: the picker now opens *before* any failure modal, so
+    /// there is usually no failed state to observe — the pick alone must
+    /// carry the spawn into the freshly-mapped repo. Any stale progress
+    /// modal is torn down first so the retry's own events mount cleanly.
+    pub(super) fn reprovision_after_linear_map(&mut self) {
+        let Some(spawn) = self.last_spawn.clone() else {
+            self.flash_hint("nothing to retry");
+            return;
+        };
+        self.force_dismiss_worktree_progress();
         self.worktree_progress_dismissed = None;
         self.flush_dispatched_cmds(vec![spawn]);
     }
@@ -2521,14 +2564,12 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// `r` on a `LinearUnmapped` `WorktreeProgress` modal (#1041): open a
-    /// picker of tracked GitHub repos for the ticket's team. The pick
-    /// persists `providers.linear.teams.<team>` and re-provisions the
-    /// stuck spawn, so the mapping is asked once instead of demanding a
-    /// hand-edit of `config.yaml`. With no team parseable from the error,
-    /// or no GitHub repos to offer, it falls back to the manual hint.
+    /// picker of tracked GitHub repos for the ticket's team. Reached only as
+    /// the last-resort recovery — the picker normally opens *directly* from
+    /// `route_spawn_failure_to_recovery` before any failure modal, so `w w`
+    /// never dead-ends. With no team parseable from the error, or no GitHub
+    /// repos to offer, it falls back to the manual hint.
     pub(super) fn pick_repo_for_linear_team(&mut self) {
-        use crate::realm::components::choice::Choice;
-
         let Some(team) = self
             .worktree_progress
             .as_ref()
@@ -2538,14 +2579,52 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_hint("couldn't read the team — set providers.linear.teams by hand");
             return;
         };
-        let repos = self.sidebar.github_repos_for_picker();
-        if repos.is_empty() {
+        if !self.mount_linear_team_repo_picker(&team) {
             self.flash_info(format!(
                 "no GitHub repos tracked yet — set providers.linear.teams.{team} by hand"
             ));
-            return;
         }
-        self.set_modal_flow(ModalFlow::LinearTeamRepo { team: team.clone() });
+    }
+
+    /// An unmapped Linear team spawn failure (#1041): open the repo picker
+    /// **directly** as the primary path, in place of the "× spawn aborted"
+    /// failure modal. Returns `true` when the picker mounted (team parseable
+    /// and at least one tracked repo to propose); `false` lets the caller
+    /// fall back to the failure modal — the genuine last resort when there
+    /// is no repo to offer at all.
+    pub(super) fn open_linear_team_repo_picker(&mut self, message: &str) -> bool {
+        // One failed provision surfaces twice — a `WorktreeProgress::Failed`
+        // step *and* a `spawn:worktree` provider error — and both route
+        // here. The first opens the picker; the second must be a no-op, not
+        // a second stacked picker.
+        if self.modal_stack.contains(&Id::LinearTeamRepo) {
+            return true;
+        }
+        let Some(team) = lazybox_ipc::WorktreeRecovery::linear_team(message) else {
+            return false;
+        };
+        // Never fabricated failure state: a spinner from an earlier progress
+        // step is torn down so the picker — not a stuck checklist — is what
+        // the user sees.
+        self.force_dismiss_worktree_progress();
+        self.worktree_progress_dismissed = None;
+        self.mount_linear_team_repo_picker(&team)
+    }
+
+    /// Mount the team→repo `Choice` picker for `team`, ranking repos the
+    /// team's other tickets already link to first (#1041). Returns `false`
+    /// without mounting when no GitHub repo is tracked yet — a blank picker
+    /// helps no one.
+    fn mount_linear_team_repo_picker(&mut self, team: &str) -> bool {
+        use crate::realm::components::choice::Choice;
+
+        let repos = self.sidebar.github_repos_ranked_for_linear_team(team);
+        if repos.is_empty() {
+            return false;
+        }
+        self.set_modal_flow(ModalFlow::LinearTeamRepo {
+            team: team.to_string(),
+        });
         let modal = Choice::single(
             format!("Which repo should Linear team {team} use? (saved for its future tickets)"),
             repos,
@@ -2554,6 +2633,7 @@ impl<T: TerminalAdapter> Model<T> {
         .label(|repo: &String| repo.clone())
         .payload_for(|repo: &String| ChoicePayload::Text(repo.clone()));
         self.mount_modal(Id::LinearTeamRepo, modal);
+        true
     }
 
     /// Push a modal.

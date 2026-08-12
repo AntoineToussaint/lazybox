@@ -447,9 +447,13 @@ impl<T: TerminalAdapter> Model<T> {
                     Ok(()) => {
                         self.flash_info(format!("mapped Linear team {team} → {repo}"));
                         // The daemon reloads config on the next provision, so
-                        // re-issuing the failed spawn now resolves through the
-                        // freshly-persisted mapping (#1041).
-                        self.retry_worktree_provision();
+                        // re-issuing the spawn now resolves through the freshly-
+                        // persisted mapping (#1041) — no manual retry. Reached
+                        // whether the picker opened directly (the primary path,
+                        // no failure modal) or as the last-resort recovery, so
+                        // it re-sends unconditionally rather than gating on a
+                        // failed checklist.
+                        self.reprovision_after_linear_map();
                     }
                     Err(error) => self.flash_error(format!("couldn't save mapping: {error}")),
                 }

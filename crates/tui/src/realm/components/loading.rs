@@ -19,6 +19,7 @@ use crate::realm::Msg;
 use crate::realm::UserEvent;
 use std::any::Any;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::time::{Duration, Instant};
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
@@ -68,6 +69,14 @@ impl LoadingResult {
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Liveness backstop: even if the producer's value never lands — dropped
+/// on an overflowed event channel, or a background task that deadlocked on
+/// a daemon/network response — the modal dismisses itself rather than
+/// spinning forever. The producer resolving normally always wins this
+/// race. Generous so a slow-network scope listing still completes on its
+/// own; the user can Esc out at any point regardless.
+const TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Spinner modal. `pending(label)` builds it; the producer hand
 /// resolves via [`LoadingResult::send`].
 pub struct Loading {
@@ -75,6 +84,8 @@ pub struct Loading {
     label: String,
     spinner_idx: usize,
     rx: Option<Receiver<LoadingPayload>>,
+    started_at: Instant,
+    timeout: Duration,
 }
 
 impl Loading {
@@ -86,6 +97,8 @@ impl Loading {
             label: label.into(),
             spinner_idx: 0,
             rx: Some(rx),
+            started_at: Instant::now(),
+            timeout: TIMEOUT,
         };
         (modal, LoadingResult { tx: Some(tx) })
     }
@@ -93,6 +106,14 @@ impl Loading {
     /// Override the title.
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.title = title.into();
+        self
+    }
+
+    /// Override the liveness timeout. Callers should not normally need
+    /// this; it exists so the backstop can be exercised deterministically
+    /// in tests without waiting out the default.
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
         self
     }
 
@@ -217,10 +238,72 @@ impl AppComponent<Msg, UserEvent> for Loading {
                         );
                         Some(Msg::ModalDismissed)
                     }
+                    TakeOutcome::Pending if self.started_at.elapsed() >= self.timeout => {
+                        // The value never landed within budget — the
+                        // producer is still holding a live sender (so
+                        // this is not the Cancelled case) but its result
+                        // was dropped on an overflowed channel or its
+                        // task stalled on a daemon/network response.
+                        // Dismiss rather than spin forever; the caller
+                        // backs out gracefully, same as Esc/cancel.
+                        self.rx = None;
+                        tracing::warn!(
+                            label = %self.label,
+                            timeout_ms = self.timeout.as_millis() as u64,
+                            "Loading modal timed out awaiting a result — dismissing"
+                        );
+                        Some(Msg::ModalDismissed)
+                    }
                     TakeOutcome::Pending | TakeOutcome::Done => None,
                 }
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tick(modal: &mut Loading) -> Option<Msg> {
+        modal.on(&Event::Tick)
+    }
+
+    #[test]
+    fn esc_dismisses() {
+        let (mut modal, _result) = Loading::pending("working…");
+        let ev = Event::Keyboard(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(matches!(modal.on(&ev), Some(Msg::ModalDismissed)));
+    }
+
+    #[test]
+    fn times_out_when_result_never_arrives() {
+        // Hold the producer handle so its sender stays live — this is the
+        // "value never lands" case (dropped on an overflowed channel /
+        // stalled task), distinct from the producer dropping its sender.
+        let (modal, _result) = Loading::pending("stuck…");
+        let mut modal = modal.timeout(Duration::from_millis(5));
+
+        // Before the deadline: still pending, no dismiss.
+        assert!(tick(&mut modal).is_none());
+
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            matches!(tick(&mut modal), Some(Msg::ModalDismissed)),
+            "a Loading modal must never spin forever — it times out and dismisses"
+        );
+    }
+
+    #[test]
+    fn delivered_result_wins_even_past_the_timeout() {
+        let (modal, result) = Loading::pending("done…");
+        let mut modal = modal.timeout(Duration::from_millis(5));
+        result.send(42u32).expect("modal still open");
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(
+            matches!(tick(&mut modal), Some(Msg::LoadingResolved(_))),
+            "a value that landed must resolve, not be discarded as a timeout"
+        );
     }
 }

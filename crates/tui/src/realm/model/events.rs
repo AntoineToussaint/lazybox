@@ -371,6 +371,25 @@ impl<T: TerminalAdapter> Model<T> {
         self.flash_info(message);
     }
 
+    /// Feed the sidebar's per-provider usage tracker from the structured
+    /// agent-run stream (#1059): bind each run to its agent, accumulate
+    /// its token deltas, and drop the binding when it finishes. A pure
+    /// join over events every other handler leaves untouched.
+    fn record_agent_usage(&mut self, event: &IpcEvent) {
+        match event {
+            IpcEvent::AgentRunStarted { run_id, agent, .. } => {
+                self.sidebar.note_agent_run(*run_id, agent);
+            }
+            IpcEvent::AgentUsage { run_id, usage } => {
+                self.sidebar.add_agent_usage(*run_id, usage);
+            }
+            IpcEvent::AgentRunFinished { run_id, .. } => {
+                self.sidebar.finish_agent_run(*run_id);
+            }
+            _ => {}
+        }
+    }
+
     fn handle_conversion_agent_event(&mut self, event: &IpcEvent) -> bool {
         match event {
             IpcEvent::AgentRunStarted {
@@ -870,6 +889,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Fold structured-run token usage into the per-provider running
+        // total the header widget shows (#1059). Side-effect only — it
+        // never consumes the event, so it must run before the
+        // conversion/help/pr-chat handlers below (which `return` early for
+        // their own runs, and whose runs draw down the same plan window we
+        // are accounting).
+        self.record_agent_usage(&event);
         // Help-assistant run traffic (#302): structured agent JSONL
         // events no pane consumes. Route them into the shared help
         // conversation and stop — this must run before the general
@@ -997,8 +1023,18 @@ impl<T: TerminalAdapter> Model<T> {
         // gains its `· resets <hint>` fragment. The `LimitReached` state
         // itself rode an `AgentState` event (handled below); this only
         // enriches the countdown text, so it's a leaf — no pane fan-out.
-        if let IpcEvent::AgentUsageLimit { reset_hint, .. } = &event {
+        if let IpcEvent::AgentUsageLimit {
+            terminal_id,
+            reset_hint,
+            ..
+        } = &event
+        {
             self.usage_limit_reset = Some(reset_hint.clone());
+            // Also attribute the countdown to the limited terminal's
+            // agent, so the always-visible usage summary can show ` ·
+            // resets 3pm` for that provider (#1059).
+            self.sidebar
+                .note_usage_limit_reset(*terminal_id, reset_hint.clone());
             self.refresh_usage_limit_alert();
             return;
         }

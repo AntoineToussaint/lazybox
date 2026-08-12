@@ -7,6 +7,53 @@
 use super::*;
 use crate::components::table::Row as TableRow;
 use crate::components::workspace_row::{WorkspaceRowCtx, build_row as build_workspace_row};
+use lazybox_tui_core::usage::{UsageSpanKind, UsageSummary};
+
+/// Style-and-join the per-provider usage summaries into one header line,
+/// width-gated: a provider whose whole widget won't fit `inner_width` is
+/// dropped rather than clipped mid-glyph (like the row-2 stats groups).
+/// Empty when there is nothing to show, which the caller reads as "no
+/// usage row".
+fn usage_line_spans(
+    summaries: &[UsageSummary],
+    inner_width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
+    for summary in summaries {
+        let group: Vec<Span<'static>> = summary
+            .spans()
+            .into_iter()
+            .map(|(text, kind)| {
+                let style = match kind {
+                    UsageSpanKind::Label => Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                    UsageSpanKind::BarFilled => Style::default().fg(theme.accent),
+                    UsageSpanKind::BarEmpty => Style::default().fg(theme.text_dim),
+                    UsageSpanKind::Figure => Style::default().add_modifier(Modifier::BOLD),
+                    UsageSpanKind::Meta => Style::default().fg(theme.text_dim),
+                    UsageSpanKind::Reset => {
+                        Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)
+                    }
+                };
+                Span::styled(text, style)
+            })
+            .collect();
+        let group_width = spans_visual_width(&group);
+        let sep = if out.is_empty() { 0 } else { 2 };
+        if used + sep + group_width > inner_width {
+            continue;
+        }
+        if sep > 0 {
+            out.push(Span::raw("  "));
+        }
+        out.extend(group);
+        used += sep + group_width;
+    }
+    out
+}
 
 fn spans_visual_width(spans: &[Span<'_>]) -> usize {
     spans
@@ -29,6 +76,20 @@ fn extend_cursor_fill(spans: &mut Vec<Span<'_>>, row_budget: usize, style: Style
 }
 
 impl Sidebar {
+    /// Height the always-visible usage row adds to the header for a pane
+    /// of this width — `1` when it renders, `0` otherwise. The click
+    /// hit-tests fold this into their header offset so a click still lands
+    /// on the row actually drawn once the usage row shifts content down.
+    pub(super) fn usage_row_height(&self, area: Rect) -> u16 {
+        let inner_width = area.width.saturating_sub(2) as usize;
+        let theme = crate::theme::current();
+        if usage_line_spans(&self.usage_summaries(), inner_width, theme).is_empty() {
+            0
+        } else {
+            1
+        }
+    }
+
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
         // V1-style header strip:
         //   row 0: LAZYBOX vX.Y.Z  ● N new  ? N input        N items  7d
@@ -497,10 +558,26 @@ impl Sidebar {
             frame.render_widget(Paragraph::new(Line::from(stats_spans)), row2);
         }
 
-        // Row 3 — thin divider; accent-tinted while this pane has
-        // focus so the active pane reads at a glance (#286).
-        if area.height >= 4 {
-            let div_area = Rect::new(area.x + l_pad, area.y + 3, inner_width, 1);
+        // Row 3 (when present) — the always-visible per-provider usage
+        // summary (#1059). One compact `Claude ▓▓▓░░ 62% · 76k left`
+        // widget per agent with a live terminal, width-gated the same way
+        // as the stats row: a provider that can't fit whole is dropped
+        // rather than sliced. Sits above the divider so it reads as header
+        // chrome, not a list row; absent (no agents, or `ui.usage_summary`
+        // off) it takes no space and the layout is unchanged.
+        let usage_spans = usage_line_spans(&self.usage_summaries(), inner_width as usize, theme);
+        let usage_h: u16 = if usage_spans.is_empty() { 0 } else { 1 };
+        if usage_h == 1 && area.height >= 4 {
+            let usage_area = Rect::new(area.x + l_pad, area.y + 3, inner_width, 1);
+            frame.render_widget(Paragraph::new(Line::from(usage_spans)), usage_area);
+        }
+
+        // Divider — thin, accent-tinted while this pane has focus so the
+        // active pane reads at a glance (#286). Sits just under the usage
+        // row (or row 2 when there is none).
+        let divider_y = 3 + usage_h;
+        if area.height >= 4 + usage_h {
+            let div_area = Rect::new(area.x + l_pad, area.y + divider_y, inner_width, 1);
             let divider = "─".repeat(div_area.width as usize);
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
@@ -511,20 +588,20 @@ impl Sidebar {
             );
         }
 
-        // Content starts at row 5 (skipping a blank row for breathing
-        // room above the first item). When the `/` search bar is open
-        // it claims the bottom row, so the list loses one line — the
-        // bar is pinned to the bottom (fzf-style) so the repo tree
-        // doesn't shift as the user types.
-        const HEADER_HEIGHT: u16 = 5;
-        let search_bar = self.search.is_some() && area.height > HEADER_HEIGHT;
+        // Content starts one blank row below the divider (breathing room
+        // above the first item). When the `/` search bar is open it claims
+        // the bottom row, so the list loses one line — the bar is pinned to
+        // the bottom (fzf-style) so the repo tree doesn't shift as the user
+        // types.
+        let header_height: u16 = 5 + usage_h;
+        let search_bar = self.search.is_some() && area.height > header_height;
         let inner = Rect {
             x: area.x + l_pad,
-            y: area.y + HEADER_HEIGHT,
+            y: area.y + header_height,
             width: inner_width,
             height: area
                 .height
-                .saturating_sub(HEADER_HEIGHT + u16::from(search_bar)),
+                .saturating_sub(header_height + u16::from(search_bar)),
         };
 
         let row_budget = inner_width as usize;

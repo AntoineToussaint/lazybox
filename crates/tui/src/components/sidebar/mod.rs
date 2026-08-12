@@ -317,6 +317,20 @@ pub struct Sidebar {
     /// ([`terminal_models`](Self::terminal_models)); off keeps the sidebar
     /// compact. Refreshes on restart.
     show_agent_model: bool,
+    /// Running token totals per agent id, joined from `AgentRunStarted` +
+    /// `AgentUsage`. Drives the always-visible per-provider usage summary
+    /// in the header (#1059).
+    usage: lazybox_tui_core::usage::UsageTracker,
+    /// Last reset countdown parsed from a usage-limit banner, per agent
+    /// id (`AgentUsageLimit.reset_hint`). Shown as the summary's ` ·
+    /// resets 3pm` fragment while that agent is actually limited (the
+    /// hint is meaningless once it recovers).
+    usage_reset: HashMap<String, String>,
+    /// Mirror of `ui.usage_summary` (default on) — gates the header row.
+    usage_summary: bool,
+    /// Mirror of `ui.usage_budgets`: agent id → plan-window token budget,
+    /// the denominator for the summary's percentage.
+    usage_budgets: BTreeMap<String, u64>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -378,6 +392,10 @@ impl Sidebar {
             broadcast_selected: std::collections::HashSet::new(),
             keep_awake: false,
             show_agent_model: true,
+            usage: lazybox_tui_core::usage::UsageTracker::default(),
+            usage_reset: HashMap::new(),
+            usage_summary: true,
+            usage_budgets: BTreeMap::new(),
         }
     }
 
@@ -412,6 +430,102 @@ impl Sidebar {
     /// model + effort label rendered beside each runner badge.
     pub fn set_show_agent_model(&mut self, show: bool) {
         self.show_agent_model = show;
+    }
+
+    /// Record whether `ui.usage_summary` is on — gates the always-visible
+    /// per-provider usage row in the header.
+    pub fn set_usage_summary(&mut self, show: bool) {
+        self.usage_summary = show;
+    }
+
+    /// Load the per-agent plan-window token budgets (`ui.usage_budgets`),
+    /// the denominator for the usage summary's percentage.
+    pub fn set_usage_budgets(&mut self, budgets: BTreeMap<String, u64>) {
+        self.usage_budgets = budgets;
+    }
+
+    /// Bind a structured run to its agent so the run's later usage events
+    /// can be attributed (`AgentRunStarted`).
+    pub fn note_agent_run(&mut self, run_id: lazybox_ipc::AgentRunId, agent_id: &str) {
+        self.usage.note_run(run_id, agent_id);
+    }
+
+    /// Fold one usage event into the running per-provider total
+    /// (`AgentUsage`).
+    pub fn add_agent_usage(
+        &mut self,
+        run_id: lazybox_ipc::AgentRunId,
+        usage: &lazybox_ipc::AgentUsage,
+    ) {
+        self.usage.add_usage(run_id, usage);
+    }
+
+    /// Drop a finished run's binding; its accumulated total stays
+    /// (`AgentRunFinished`).
+    pub fn finish_agent_run(&mut self, run_id: lazybox_ipc::AgentRunId) {
+        self.usage.finish_run(&run_id);
+    }
+
+    /// Attribute a usage-limit reset hint to the terminal's agent, so the
+    /// summary can show ` · resets 3pm` while that provider is limited
+    /// (`AgentUsageLimit`). A hint for a terminal we don't track is
+    /// dropped.
+    pub fn note_usage_limit_reset(&mut self, terminal_id: TerminalId, reset_hint: String) {
+        if let Some(agent_id) = self.terminal_agent_id(terminal_id) {
+            self.usage_reset.insert(agent_id, reset_hint);
+        }
+    }
+
+    /// The agent id running in a terminal, if it is an agent terminal.
+    fn terminal_agent_id(&self, terminal_id: TerminalId) -> Option<String> {
+        match self.running_terminals.get(&terminal_id) {
+            Some((_, TerminalKind::Agent(id))) => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    /// True while any of `agent_id`'s live terminals sits in the
+    /// `LimitReached` block — the window in which its stored reset hint is
+    /// still meaningful.
+    fn agent_is_limited(&self, agent_id: &str) -> bool {
+        self.agent_terminal_states
+            .iter()
+            .any(|(terminal_id, (_, state))| {
+                *state == lazybox_ipc::AgentState::LimitReached
+                    && self.terminal_agent_id(*terminal_id).as_deref() == Some(agent_id)
+            })
+    }
+
+    /// The always-visible per-provider usage summaries, one per agent id
+    /// with a live terminal, in stable (id) order. Empty when the summary
+    /// is disabled or no agent terminal is running. The reset fragment is
+    /// folded in only while that agent is actually limited.
+    fn usage_summaries(&self) -> Vec<lazybox_tui_core::usage::UsageSummary> {
+        if !self.usage_summary {
+            return Vec::new();
+        }
+        let mut agent_ids: BTreeSet<&str> = BTreeSet::new();
+        for (_, kind) in self.running_terminals.values() {
+            if let TerminalKind::Agent(id) = kind {
+                agent_ids.insert(id.as_str());
+            }
+        }
+        agent_ids
+            .into_iter()
+            .map(|agent_id| {
+                let label = self.agent_registry.display_name_for(agent_id);
+                let reset = self
+                    .agent_is_limited(agent_id)
+                    .then(|| self.usage_reset.get(agent_id).cloned())
+                    .flatten();
+                lazybox_tui_core::usage::UsageSummary::new(
+                    label,
+                    self.usage.tokens_for(agent_id),
+                    self.usage_budgets.get(agent_id).copied(),
+                    reset,
+                )
+            })
+            .collect()
     }
 
     /// True while ≥1 agent in the sidebar is `Working` — the same
@@ -782,11 +896,11 @@ impl Sidebar {
     /// Additive, like [`extend_selection`](Self::extend_selection).
     /// Returns whether the click landed on a real row (#932).
     pub fn extend_selection_to(&mut self, area: Rect, click_row: u16) -> bool {
-        const HEADER_HEIGHT: u16 = 5;
-        if click_row < area.y + HEADER_HEIGHT {
+        let header_height = 5 + self.usage_row_height(area);
+        if click_row < area.y + header_height {
             return false;
         }
-        let idx = (click_row - area.y - HEADER_HEIGHT) as usize + self.rendered_scroll;
+        let idx = (click_row - area.y - header_height) as usize + self.rendered_scroll;
         if idx >= self.visible.len() {
             return false;
         }
@@ -978,16 +1092,18 @@ impl Sidebar {
     }
 
     pub fn click_to_select(&mut self, area: Rect, click_row: u16) -> bool {
-        // Mirror the constants from `render`.
-        const HEADER_HEIGHT: u16 = 5;
-        if click_row < area.y + HEADER_HEIGHT {
+        // Mirror the header layout from `render` — including the
+        // always-visible usage row, which shifts content down by one when
+        // present (#1059).
+        let header_height = 5 + self.usage_row_height(area);
+        if click_row < area.y + header_height {
             return false;
         }
         // Add the scroll offset the renderer applied so a click lands
         // on the row actually drawn under the cursor — `rendered_scroll`,
         // not `scroll`, because a wheel notch dispatched after the last
         // frame may have moved `scroll` past what's on screen.
-        let idx = (click_row - area.y - HEADER_HEIGHT) as usize + self.rendered_scroll;
+        let idx = (click_row - area.y - header_height) as usize + self.rendered_scroll;
         match self.visible.get(idx) {
             // Headers ARE selectable now (post-Stage-4): the user
             // needs to land cursor on a project header to fire

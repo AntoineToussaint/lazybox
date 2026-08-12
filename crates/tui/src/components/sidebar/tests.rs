@@ -1936,6 +1936,109 @@ mod search_tests {
         assert!(!sb.search_chip_hit(0, rect.y));
     }
 
+    /// Spawn a live agent terminal so its provider counts as "in use"
+    /// and the always-visible usage summary renders for it (#1059).
+    fn spawn_agent(sb: &mut Sidebar, terminal_id: u64, session_key: &SessionKey, agent: &str) {
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(terminal_id),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent(agent.into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+    }
+
+    fn agent_usage(input: u64, output: u64) -> lazybox_ipc::AgentUsage {
+        lazybox_ipc::AgentUsage {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+            cost_usd_micros: None,
+        }
+    }
+
+    fn usage_row(sb: &mut Sidebar) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(60, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        // The usage summary sits at row 3, just above the divider.
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, 3)].symbol())
+            .collect()
+    }
+
+    /// A live agent with a configured budget renders the full bar +
+    /// percentage widget, built from the accumulated token usage — the
+    /// proactive "how much is left" display, visible before any limit.
+    #[test]
+    fn header_renders_per_provider_usage_summary() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        spawn_agent(&mut sb, 1, &session_key, "claude");
+        sb.set_usage_budgets([("claude".to_string(), 200_000u64)].into_iter().collect());
+        sb.note_agent_run(lazybox_ipc::AgentRunId(1), "claude");
+        sb.add_agent_usage(lazybox_ipc::AgentRunId(1), &agent_usage(100_000, 24_000));
+
+        let row = usage_row(&mut sb);
+        assert!(row.contains("Claude"), "{row:?}");
+        assert!(row.contains("62%"), "{row:?}");
+        assert!(row.contains('▓') && row.contains('░'), "{row:?}");
+    }
+
+    /// Without a budget the widget degrades to a bare token total ("show
+    /// what's known"), and the reset hint is folded in only while the
+    /// agent is actually limited.
+    #[test]
+    fn usage_summary_degrades_without_a_budget_and_folds_in_the_reset() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        spawn_agent(&mut sb, 1, &session_key, "claude");
+        sb.note_agent_run(lazybox_ipc::AgentRunId(1), "claude");
+        sb.add_agent_usage(lazybox_ipc::AgentRunId(1), &agent_usage(120_000, 8_000));
+
+        // No budget → token total, no percentage, no reset yet.
+        let row = usage_row(&mut sb);
+        assert!(row.contains("Claude") && row.contains("128k"), "{row:?}");
+        assert!(!row.contains('%'), "{row:?}");
+        assert!(!row.contains("resets"), "{row:?}");
+
+        // The reset hint alone does not surface it — only a live limit does.
+        sb.note_usage_limit_reset(TerminalId(1), "3pm".into());
+        assert!(!usage_row(&mut sb).contains("resets"));
+        sb.on_event(&Event::AgentState {
+            session_key: session_key.clone(),
+            terminal_id: TerminalId(1),
+            state: lazybox_ipc::AgentState::LimitReached,
+        });
+        assert!(usage_row(&mut sb).contains("resets 3pm"));
+    }
+
+    /// `ui.usage_summary = false` hides the row entirely and reclaims its
+    /// line — content shifts back up, and the click hit-test agrees.
+    #[test]
+    fn usage_summary_can_be_disabled() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        spawn_agent(&mut sb, 1, &session_key, "claude");
+        sb.note_agent_run(lazybox_ipc::AgentRunId(1), "claude");
+        sb.add_agent_usage(lazybox_ipc::AgentRunId(1), &agent_usage(10_000, 0));
+
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.usage_row_height(area), 1);
+        assert!(usage_row(&mut sb).contains("Claude"));
+
+        sb.set_usage_summary(false);
+        assert_eq!(sb.usage_row_height(area), 0);
+        assert!(!usage_row(&mut sb).contains("Claude"));
+    }
+
     /// The bottom `/` search bar records its rect so a click on the
     /// input itself is distinguishable from a click that should dismiss
     /// the search (#780).

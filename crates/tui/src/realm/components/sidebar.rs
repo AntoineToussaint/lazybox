@@ -214,6 +214,44 @@ impl Sidebar {
     pub fn set_show_agent_model(&mut self, show: bool) {
         self.inner.set_show_agent_model(show);
     }
+
+    /// Record whether `ui.usage_summary` is on — gates the always-visible
+    /// per-provider usage row in the header (#1059).
+    pub fn set_usage_summary(&mut self, show: bool) {
+        self.inner.set_usage_summary(show);
+    }
+
+    /// Load the per-agent plan-window token budgets (`ui.usage_budgets`).
+    pub fn set_usage_budgets(&mut self, budgets: std::collections::BTreeMap<String, u64>) {
+        self.inner.set_usage_budgets(budgets);
+    }
+
+    /// Bind a structured run to its agent for usage accounting
+    /// (`AgentRunStarted`).
+    pub fn note_agent_run(&mut self, run_id: lazybox_ipc::AgentRunId, agent_id: &str) {
+        self.inner.note_agent_run(run_id, agent_id);
+    }
+
+    /// Fold one usage event into the per-provider running total
+    /// (`AgentUsage`).
+    pub fn add_agent_usage(
+        &mut self,
+        run_id: lazybox_ipc::AgentRunId,
+        usage: &lazybox_ipc::AgentUsage,
+    ) {
+        self.inner.add_agent_usage(run_id, usage);
+    }
+
+    /// Drop a finished run's usage binding (`AgentRunFinished`).
+    pub fn finish_agent_run(&mut self, run_id: lazybox_ipc::AgentRunId) {
+        self.inner.finish_agent_run(run_id);
+    }
+
+    /// Attribute a usage-limit reset hint to a terminal's agent
+    /// (`AgentUsageLimit`).
+    pub fn note_usage_limit_reset(&mut self, terminal_id: lazybox_ipc::TerminalId, hint: String) {
+        self.inner.note_usage_limit_reset(terminal_id, hint);
+    }
     /// True while the `/` search bar is capturing keystrokes. The
     /// orchestrator checks this before its normal key routing so a
     /// query can swallow keys that would otherwise fire shortcuts.

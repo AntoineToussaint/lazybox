@@ -769,6 +769,110 @@ async fn set_assignees_errors_when_name_unknown() {
 }
 
 #[tokio::test]
+async fn set_assignees_multi_select_assigns_the_last_login() {
+    // The picker lists the current assignee first; adding a second name
+    // must reassign to the one the user picked, not silently keep the
+    // existing assignee. Single-assignee → last login wins.
+    let mock = spawn_mock(vec![
+        serde_json::json!({ "data": { "users": { "nodes": [
+            { "id": "u-alice", "name": "Alice", "displayName": "Alice", "email": "alice@x.io" },
+            { "id": "u-bob", "name": "Bob", "displayName": "Bob", "email": "bob@x.io" }
+        ] } } })
+        .to_string(),
+        serde_json::json!({ "data": { "issueUpdate": { "success": true } } }).to_string(),
+    ])
+    .await;
+    let client = LinearClient::with_key("k").with_endpoint(mock.url());
+    let ws = linear_workspace("issue-uuid");
+
+    client
+        .set_assignees(&ws, &["Alice".to_string(), "Bob".to_string()])
+        .await
+        .unwrap();
+
+    let update = mock
+        .bodies()
+        .into_iter()
+        .find(|b| b.contains("issueUpdate"))
+        .expect("an issueUpdate mutation was sent");
+    assert!(
+        update.contains("u-bob"),
+        "the newly-added (last) assignee wins: {update}"
+    );
+    assert!(
+        !update.contains("u-alice"),
+        "the pre-existing assignee is not the one set: {update}"
+    );
+
+    mock.shutdown().await;
+}
+
+#[tokio::test]
+async fn set_assignees_errors_on_ambiguous_display_name() {
+    // Two distinct users share the display name "Sam". Picking the
+    // first arbitrarily would assign the wrong person, so resolution
+    // must refuse rather than guess.
+    let mock = spawn_mock(vec![
+        serde_json::json!({ "data": { "users": { "nodes": [
+            { "id": "u-1", "name": "Sam", "displayName": "Sam", "email": "sam1@x.io" },
+            { "id": "u-2", "name": "Sam", "displayName": "Sam", "email": "sam2@x.io" }
+        ] } } })
+        .to_string(),
+    ])
+    .await;
+    let client = LinearClient::with_key("k").with_endpoint(mock.url());
+    let ws = linear_workspace("issue-uuid");
+
+    let err = client
+        .set_assignees(&ws, &["Sam".to_string()])
+        .await
+        .expect_err("ambiguous name must error, not assign an arbitrary user");
+    let msg = err.to_string();
+    assert!(msg.contains("matches 2"), "names the ambiguity: {msg}");
+
+    // No issueUpdate fired — we never guessed an assignee.
+    assert!(
+        !mock.bodies().iter().any(|b| b.contains("issueUpdate")),
+        "must not mutate when the name is ambiguous"
+    );
+
+    mock.shutdown().await;
+}
+
+#[tokio::test]
+async fn set_assignees_email_disambiguates_a_shared_name() {
+    // The unique email resolves even when display names collide.
+    let mock = spawn_mock(vec![
+        serde_json::json!({ "data": { "users": { "nodes": [
+            { "id": "u-1", "name": "Sam", "displayName": "Sam", "email": "sam1@x.io" },
+            { "id": "u-2", "name": "Sam", "displayName": "Sam", "email": "sam2@x.io" }
+        ] } } })
+        .to_string(),
+        serde_json::json!({ "data": { "issueUpdate": { "success": true } } }).to_string(),
+    ])
+    .await;
+    let client = LinearClient::with_key("k").with_endpoint(mock.url());
+    let ws = linear_workspace("issue-uuid");
+
+    client
+        .set_assignees(&ws, &["sam2@x.io".to_string()])
+        .await
+        .unwrap();
+
+    let update = mock
+        .bodies()
+        .into_iter()
+        .find(|b| b.contains("issueUpdate"))
+        .expect("an issueUpdate mutation was sent");
+    assert!(
+        update.contains("u-2"),
+        "email picks the exact user: {update}"
+    );
+
+    mock.shutdown().await;
+}
+
+#[tokio::test]
 async fn close_issue_moves_issue_to_a_canceled_state() {
     let mock = spawn_mock(vec![
         serde_json::json!({ "data": { "issue": {

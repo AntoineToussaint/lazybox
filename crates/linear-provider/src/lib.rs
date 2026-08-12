@@ -356,8 +356,13 @@ impl LinearClient {
     /// The assignee picker's candidate strings are Linear display
     /// names (Linear has no GitHub-style login), so a mutation must
     /// map the picked name back to the id `issueUpdate` expects.
-    /// Matches `name`, `displayName`, or `email` case-insensitively;
-    /// `Ok(None)` when nobody matches.
+    /// Matches `name`, `displayName`, or `email` case-insensitively.
+    ///
+    /// `Ok(None)` when nobody matches. Display names are NOT unique in
+    /// Linear, so when more than one distinct user matches we refuse
+    /// rather than assign an arbitrary one — silently picking the first
+    /// would assign the wrong person. `Err` names the ambiguity so the
+    /// caller can retype a unique identifier (e.g. the email).
     pub async fn resolve_user_id(&self, name: &str) -> Result<Option<String>, LinearError> {
         let req = serde_json::json!({
             "query": "query { users(first: 250) { nodes { id name displayName email } } }",
@@ -375,17 +380,25 @@ impl LinearClient {
         else {
             return Ok(None);
         };
-        for node in nodes {
-            let matches = ["name", "displayName", "email"].iter().any(|field| {
-                node.get(*field)
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|v| v.to_lowercase() == target)
-            });
-            if matches {
-                return Ok(node.get("id").and_then(|v| v.as_str()).map(String::from));
-            }
+        let matched: Vec<&str> = nodes
+            .iter()
+            .filter(|node| {
+                ["name", "displayName", "email"].iter().any(|field| {
+                    node.get(*field)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|v| v.to_lowercase() == target)
+                })
+            })
+            .filter_map(|node| node.get("id").and_then(|v| v.as_str()))
+            .collect();
+        match matched.as_slice() {
+            [] => Ok(None),
+            [id] => Ok(Some((*id).to_string())),
+            _ => Err(LinearError::Graphql(format!(
+                "`{name}` matches {} Linear users; use a unique email to disambiguate",
+                matched.len()
+            ))),
         }
-        Ok(None)
     }
 
     /// Set (or clear, with `None`) the single assignee on a Linear
@@ -535,15 +548,19 @@ impl TaskProvider for LinearClient {
     }
 
     /// Replace the Linear issue's assignee. `logins` are Linear
-    /// display names (what the picker offers); the first is resolved
-    /// to a user id and set. An empty set clears the assignee.
+    /// display names (what the picker offers). Linear issues hold a
+    /// single assignee, so the LAST login wins — the picker lists the
+    /// existing assignee first, so a user who *adds* a name (leaving
+    /// the current one checked) still reassigns to the one they picked
+    /// rather than silently keeping the old one. An empty set clears
+    /// the assignee.
     async fn set_assignees(
         &self,
         workspace: &lazybox_core::Workspace,
         logins: &[String],
     ) -> Result<(), ProviderError> {
         let issue_id = self.issue_id_for(workspace)?;
-        let assignee_id = match logins.first() {
+        let assignee_id = match logins.last() {
             Some(login) => Some(
                 self.resolve_user_id(login)
                     .await

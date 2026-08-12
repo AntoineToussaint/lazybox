@@ -76,7 +76,7 @@ query($after: String) {{
       team {{ key }}
       labels(first: 10) {{ nodes {{ name }} }}
       attachments(first: 20) {{ nodes {{ url }} }}
-      comments(first: 50) {{ nodes {{ id body createdAt user {{ id name }} }} }}
+      comments(first: 20, orderBy: createdAt) {{ nodes {{ id body createdAt user {{ id name }} }} }}
     }}
   }}
 }}
@@ -693,5 +693,13 @@ mod tests {
     fn query_requests_comment_threads() {
         let q = query_for(&LinearScope::default_scopes());
         assert!(q.contains("comments("), "issue query must pull comments");
+        // Must pin `orderBy: createdAt` (Linear returns newest-first by
+        // default) so an issue with more comments than the page size
+        // yields the *newest* — not an arbitrary/oldest slice, which
+        // would compute `needs_reply` from a stale comment.
+        assert!(
+            q.contains("comments(first: 20, orderBy: createdAt)"),
+            "comments must be bounded + ordered by createdAt: {q}"
+        );
     }
 }

@@ -147,6 +147,11 @@ impl LeaderGroup {
 pub struct Help {
     leaders: Vec<LeaderGroup>,
     sections: Vec<HelpSection>,
+    /// Legend for the sidebar's compact status/policy icons (#1046) —
+    /// glyph + meaning, colored in the real theme tone so a green `✓` /
+    /// red `✗` reads the way it does on a row. Keeps the icon language
+    /// discoverable now that the wide text pills are gone.
+    legend: Vec<crate::components::sidebar::LegendRow>,
     /// Rows scrolled down from the top. Only meaningful when the whole
     /// panel doesn't fit the screen — the leader band plus five section
     /// grids overflow a short terminal, so the bottom (Terminal) rows
@@ -244,6 +249,7 @@ impl Help {
         Self {
             leaders,
             sections,
+            legend: crate::components::sidebar::status_legend(),
             scroll: 0,
         }
     }
@@ -263,9 +269,15 @@ impl Help {
             .filter(|s| !s.bindings.is_empty())
             .map(|s| 1 + s.bindings.len().div_ceil(cols) as u16)
             .sum();
+        // Sidebar-icon legend: a title row + its own grid (#1046).
+        let legend_rows = if self.legend.is_empty() {
+            0
+        } else {
+            1 + self.legend.len().div_ceil(cols) as u16
+        };
         // Two-row Ask Lazybox callout leads the reference. Help is a
         // discovery surface first, a table second.
-        2 + leader_rows + sep_rows + section_rows
+        2 + leader_rows + sep_rows + section_rows + legend_rows
     }
 
     fn flat(&self) -> Vec<&Binding> {
@@ -277,7 +289,10 @@ impl Help {
 }
 
 const MAX_MODAL_WIDTH: u16 = 132;
-const MAX_MODAL_HEIGHT: u16 = 38;
+// Tall enough that the full reference — leader index, five section grids,
+// and the sidebar-icon legend (#1046) — fits on a roomy terminal without
+// forcing the scroll affordance; short terminals still overflow and scroll.
+const MAX_MODAL_HEIGHT: u16 = 44;
 
 fn grid_columns(width: u16) -> usize {
     if width >= 108 {
@@ -478,6 +493,35 @@ impl Component for Help {
             lrow += 1;
             let items: Vec<&Binding> = section.bindings.iter().collect();
             lrow = draw_grid(frame, &items, lrow);
+        }
+
+        // Sidebar-icon legend (#1046): the compact status/policy glyphs
+        // painted in their real theme color, so `✓`/`✗`/`⚡`/… stay
+        // discoverable now that the wide text pills are gone.
+        if !self.legend.is_empty() {
+            full_line(frame, "Sidebar icons", lrow, section_title_style);
+            lrow += 1;
+            for (idx, entry) in self.legend.iter().enumerate() {
+                let grow = lrow + (idx / cols_count) as u16;
+                let Some(sy) = screen_y(grow) else { continue };
+                let col = cols[idx % cols_count];
+                let cell = Rect {
+                    x: col.x,
+                    y: sy,
+                    width: col.width,
+                    height: 1,
+                };
+                let line = Line::from(vec![
+                    Span::styled(" ", panel_bg),
+                    Span::styled(entry.glyph, entry.style.bg(theme.surface)),
+                    Span::styled("  ", panel_bg),
+                    Span::styled(
+                        entry.meaning,
+                        Style::default().bg(theme.surface).fg(theme.text_strong),
+                    ),
+                ]);
+                frame.render_widget(Paragraph::new(line), cell);
+            }
         }
 
         let mut hint = vec![

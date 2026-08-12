@@ -56,70 +56,75 @@ fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
             when,
         })
     };
+    // The `label` is the on-screen glyph (#1046) — several states share
+    // one (`✓` = CI ok / approved / ready / merged, distinguished by color
+    // and column), so each `meaning` leads with the state name to keep the
+    // generated Ask-Lazybox docs unambiguous. The glyph set is pinned to
+    // the renderer by `documented_status_pills_match_the_renderer` in `tui`.
     match tag {
         StatusTag::Merged => doc(
-            "MERGED",
-            "The pull request has been merged.",
+            "✓",
+            "Merged — the pull request has been merged.",
             "Shows on a PR whose branch was merged into its base.",
         ),
         StatusTag::Closed => doc(
-            "CLOSED",
-            "The pull request or issue was closed without merging.",
+            "⊘",
+            "Closed — the pull request or issue was closed without merging.",
             "Shows on a closed PR or issue.",
         ),
         StatusTag::Conflict => doc(
-            "CONFLICT",
-            "The PR has merge conflicts with its base branch and can't merge until they're resolved.",
+            "⚠",
+            "Conflict — the PR has merge conflicts with its base branch and can't merge until they're resolved.",
             "Shows when the PR conflicts with its base branch.",
         ),
         StatusTag::CiFailed => doc(
-            "CI FAIL",
-            "Continuous-integration checks are failing.",
+            "✗",
+            "CI failing — continuous-integration checks are failing.",
             "Shows when one or more required checks failed.",
         ),
         StatusTag::CiMixed => doc(
-            "CI MIX",
-            "CI is partly green and partly failing.",
+            "±",
+            "CI mixed — partly green and partly failing.",
             "Shows when some checks passed while others failed.",
         ),
         StatusTag::ChangesRequested => doc(
-            "CHANGES",
-            "A reviewer requested changes — the PR needs edits before it can be approved.",
+            "✗",
+            "Changes requested — a reviewer requested changes; the PR needs edits before it can be approved.",
             "Shows when a review left the \"changes requested\" verdict.",
         ),
         StatusTag::Queued => doc(
-            "QUEUED",
-            "The PR is sitting in GitHub's merge queue.",
+            "⧖",
+            "Queued — the PR is sitting in GitHub's merge queue.",
             "Shows once the PR has entered GitHub's merge queue.",
         ),
         StatusTag::Draft => doc(
-            "DRAFT",
-            "The PR is a draft and not yet ready for review.",
+            "◇",
+            "Draft — the PR is a draft and not yet ready for review.",
             "Shows while the PR is marked draft, even with green CI.",
         ),
         StatusTag::Ready => doc(
-            "READY",
-            "Approved with green (or no) CI — ready to merge now.",
+            "✓",
+            "Ready — approved with green (or no) CI, ready to merge now.",
             "Shows when the PR is approved and CI is green or unset.",
         ),
         StatusTag::Approved => doc(
-            "APPROVED",
-            "A reviewer approved the PR, but CI isn't green yet.",
+            "✓",
+            "Approved — a reviewer approved the PR, but CI isn't green yet.",
             "Shows when the PR is approved but CI is still pending or failing.",
         ),
         StatusTag::ReviewPending => doc(
-            "REVIEW",
-            "The PR is waiting on review — a review was requested or is pending.",
+            "◌",
+            "Review pending — the PR is waiting on review; a review was requested or is pending.",
             "Shows while review is requested or pending with no verdict yet.",
         ),
         StatusTag::CiRunning => doc(
-            "CI RUN",
-            "CI is still running.",
+            "…",
+            "CI running — checks are still in progress.",
             "Shows while checks are queued or in progress.",
         ),
         StatusTag::CiOk => doc(
-            "CI OK",
-            "CI is green and nothing more pressing applies.",
+            "✓",
+            "CI passing — CI is green and nothing more pressing applies.",
             "Shows when all checks passed and nothing more pressing applies.",
         ),
         // `Behind` and `None` render no status pill: the two-column
@@ -181,18 +186,18 @@ fn agent_state_doc(state: &AgentState) -> MarkerDoc {
 /// `lazybox_tui::components::workspace_row`'s badge cells.
 const ROW_BADGES: &[MarkerDoc] = &[
     MarkerDoc {
-        label: "ARM",
-        meaning: "This PR will auto-merge once CI goes green — lazybox's client-side merge, which only fires while lazybox is running.",
+        label: "⚡",
+        meaning: "ARM — this PR will auto-merge once CI goes green; lazybox's client-side merge, which only fires while lazybox is running.",
         when: "Shows once you arm merge-on-green (`g g`).",
     },
     MarkerDoc {
-        label: "AUTO",
-        meaning: "GitHub-native auto-merge is enabled — GitHub merges the PR server-side once checks pass, even with lazybox closed.",
+        label: "◆",
+        meaning: "AUTO — GitHub-native auto-merge is enabled; GitHub merges the PR server-side once checks pass, even with lazybox closed.",
         when: "Shows when auto-merge is enabled on the PR on GitHub.",
     },
     MarkerDoc {
-        label: "FIX",
-        meaning: "Auto-fix is armed — lazybox spawns an agent to fix failing CI and/or merge conflicts on this PR.",
+        label: "🔧",
+        meaning: "FIX — auto-fix is armed; lazybox spawns an agent to fix failing CI and/or merge conflicts on this PR.",
         when: "Shows once you arm auto-fix for this workspace (`g p`).",
     },
     MarkerDoc {
@@ -201,8 +206,8 @@ const ROW_BADGES: &[MarkerDoc] = &[
         when: "Shows on a linked (no-worktree) workspace.",
     },
     MarkerDoc {
-        label: "⤓main / behind",
-        meaning: "Track-main is on: the worktree auto-syncs with the default branch. `behind` warns it's stuck behind and can't auto-sync (dirty or diverged).",
+        label: "⤓",
+        meaning: "Track-main is on: the worktree auto-syncs with the default branch. In its warn color it's stuck behind and can't auto-sync (dirty or diverged).",
         when: "Shows when the workspace has track-main armed.",
     },
     MarkerDoc {
@@ -280,13 +285,19 @@ mod tests {
             assert!(!doc.meaning.is_empty(), "{}: empty meaning", doc.label);
             assert!(!doc.when.is_empty(), "{}: empty when", doc.label);
         }
-        // The quick win from #883: CHANGES must now be explainable.
-        assert!(docs.iter().any(|d| d.label == "CHANGES"));
-        // Regression for the review finding: BEHIND is not a rendered
-        // row pill, so it must not be documented as one.
+        // The quick win from #883: changes-requested must be explainable.
+        // Its label is the on-screen `✗` glyph (#1046); the meaning names
+        // the state.
         assert!(
-            !docs.iter().any(|d| d.label == "BEHIND"),
-            "BEHIND renders no status pill; documenting it reintroduces the drift #883 fixes"
+            docs.iter()
+                .any(|d| d.label == "✗" && d.meaning.starts_with("Changes requested"))
+        );
+        // Regression for the review finding: Behind is not a rendered row
+        // pill, so it must not be documented as one — no glyph gets a
+        // "behind" meaning here.
+        assert!(
+            !docs.iter().any(|d| d.meaning.contains("behind its base")),
+            "Behind renders no status pill; documenting it reintroduces the drift #883 fixes"
         );
     }
 

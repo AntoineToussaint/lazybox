@@ -89,28 +89,28 @@ pub struct WorkspaceRowCtx<'a> {
     /// `display.ascii_glyphs` in `~/.lazybox/config.yaml`.
     pub ascii_glyphs: bool,
     /// This workspace has "auto-merge on green" armed
-    /// (`Workspace::auto_merge_on_green`). Renders a distinct ` ARM `
-    /// pill ahead of the status pills so the user can see, at a glance,
-    /// which rows will merge themselves once CI goes green.
+    /// (`Workspace::auto_merge_on_green`). Renders a distinct `⚡` glyph
+    /// (#1046) ahead of the status glyphs so the user can see, at a
+    /// glance, which rows will merge themselves once CI goes green.
     pub auto_merge_armed: bool,
     /// GitHub-native auto-merge is enabled on the PR
-    /// (`Task::auto_merge_enabled`). Renders a distinct ` AUTO ` policy
-    /// pill alongside ` ARM ` — it's a standing automation *policy*, not
-    /// a task status, so it lives here instead of the status column and
-    /// never hides ` CI FAIL ` on an armed PR (#778).
+    /// (`Task::auto_merge_enabled`). Renders a distinct `◆` policy glyph
+    /// alongside `⚡` — it's a standing automation *policy*, not a task
+    /// status, so it lives here instead of the status column and never
+    /// hides the `✗` CI-fail glyph on an armed PR (#778).
     pub auto_merge_enabled: bool,
     /// This workspace has CI-failure auto-fix explicitly armed.
     pub auto_fix_ci_armed: bool,
     /// This workspace has merge-conflict auto-fix explicitly armed.
     pub auto_fix_conflict_armed: bool,
     /// This workspace has "track main" armed (`Workspace::track_main` —
-    /// issue #535). Renders a ` ⤓main ` pill so the user can see which
-    /// rows the daemon keeps fast-forwarded to the default branch.
+    /// issue #535). Renders a `⤓` glyph so the user can see which rows the
+    /// daemon keeps fast-forwarded to the default branch.
     pub track_main: bool,
     /// The tracked workspace is behind `origin/<default>` and couldn't be
     /// auto-synced (`Workspace::track_main_behind`). Flips the track-main
-    /// pill to a warn-colored ` behind ` so a stuck (dirty/diverged)
-    /// worktree reads at a glance. Only meaningful when `track_main`.
+    /// `⤓` glyph to its warn color so a stuck (dirty/diverged) worktree
+    /// reads at a glance. Only meaningful when `track_main`.
     pub track_main_behind: bool,
     /// This workspace carries a non-empty local note
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
@@ -257,13 +257,18 @@ pub fn build_columns(max_pr_num_width: usize) -> Vec<Column> {
     // per-column reserved gaps. The passive-info cluster (linked / notes /
     // snippet / track / fix) is low-signal decoration, so it sheds first —
     // right after the timestamp (which #328 keeps as the first trailer to
-    // go, `P_TIME` below `P_UNREAD`). The merge-arm cluster (`ARM`/`AUTO`)
-    // sheds one step later at `P_ARMS`, so the arms that decide whether the
-    // PR merges itself outlive the decoration exactly as the old per-badge
-    // priorities did — but the whole set still yields to the unread count
-    // and the CI/CONFLICT status pill.
+    // go, `P_TIME` below `P_UNREAD`).
     const P_BADGES: u8 = 20;
-    const P_ARMS: u8 = 21;
+    // The merge-arm cluster (`⚡`/`◆`) is now a one-glyph icon per arm
+    // (#1046), not the old five-cell ` ARM ` / ` AUTO ` blocks — so it costs
+    // almost nothing to keep. #813 had it at 21 (just above the passive
+    // decoration), where on a normal-width row carrying an agent badge, a
+    // model label and a CI pill the five-cell block was among the first
+    // columns shed: the "this PR will merge itself" signal silently vanished
+    // (#1046). Raised above the unread count so the arm icons outlive the
+    // columns that were squeezing them out; they still yield to the higher
+    // signals (shell / agent / role / state) and the CI-status pill.
+    const P_ARMS: u8 = 35;
     const P_UNREAD: u8 = 30;
     const P_BADGE_SHELL: u8 = 40;
     const P_BADGE_AGENT: u8 = 50;
@@ -933,13 +938,14 @@ fn cell_stack(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
-/// The merge-arm badge cluster (#813): ` ARM ` (lazybox client-side
-/// merge-on-green) then ` AUTO ` (GitHub-native, durable), packed into one
+/// The merge-arm badge cluster (#813): `⚡` (lazybox client-side
+/// merge-on-green) then `◆` (GitHub-native, durable), packed into one
 /// right-aligned cell. Kept out of [`cell_badges`] so its column carries a
 /// higher drop priority (`P_ARMS`): the arms that decide whether the PR
 /// merges itself outlive the low-signal decoration under width pressure,
 /// preserving the shed order (`… → track → arm → auto`) the per-badge
-/// columns had. Sits rightmost of the badges, nearest the status pill.
+/// columns had. As one-glyph icons (#1046) they almost never need to shed.
+/// Sits rightmost of the badges, nearest the status glyph.
 fn cell_merge_arms(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     pack_badges([cell_arm(ctx), cell_auto(ctx)])
 }
@@ -997,17 +1003,17 @@ fn cell_snippet(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
-/// The ` AUTO ` GitHub-native auto-merge badge (#778) — a filled accent
-/// block, the same slot family as ` ARM `/` FIX `. It's a standing
-/// automation *policy*, so it lives here rather than in the status
-/// column, where it used to hide ` CI FAIL ` on exactly the armed PRs
-/// that most need it. Packs into the merge-arm cluster (#813).
+/// The `◆` GitHub-native auto-merge glyph (#778, iconized #1046) — an
+/// accent-colored marker in the same slot family as `⚡`/`🔧`. It's a
+/// standing automation *policy*, so it lives here rather than in the
+/// status column, where it used to hide the `✗` CI-fail glyph on exactly
+/// the armed PRs that most need it. Packs into the merge-arm cluster.
 ///
-/// Accent-filled, deliberately *not* the same color as ` ARM ` (#794):
-/// ` AUTO ` is GitHub's server-side merge, so it lands the PR even while
-/// lazybox is closed. The accent block reads as the durable, "handled by
-/// GitHub" state; ` ARM ` carries the softer green of the lazybox-local
-/// arm that only fires while the client runs.
+/// Accent-colored, deliberately *not* the same as `⚡` (#794): `◆` is
+/// GitHub's server-side merge, so it lands the PR even while lazybox is
+/// closed. The accent reads as the durable, "handled by GitHub" state; `⚡`
+/// carries the softer green of the lazybox-local arm that only fires while
+/// the client runs.
 fn cell_auto(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if !ctx.auto_merge_enabled {
         return Cell::empty();
@@ -1016,23 +1022,25 @@ fn cell_auto(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.row_style()
     } else {
         Style::default()
-            .bg(ctx.theme.accent)
-            .fg(ratatui::style::Color::Black)
+            .fg(ctx.theme.accent)
             .add_modifier(Modifier::BOLD)
     };
-    Cell::from_span(Span::styled(" AUTO ", style))
+    Cell::from_span(Span::styled(
+        format!(" {} ", crate::components::sidebar::AUTO_GLYPH),
+        style,
+    ))
 }
 
-/// The ` ARM ` auto-merge-on-green badge — a filled block so the "this
-/// row will merge itself once CI goes green" signal reads at a glance.
-/// Packs into the merge-arm cluster (#813).
+/// The `⚡` auto-merge-on-green glyph (iconized #1046) so the "this row
+/// will merge itself once CI goes green" signal reads at a glance. Packs
+/// into the merge-arm cluster (#813).
 ///
-/// Filled with `success` (green), not the accent of ` AUTO ` (#794), so
-/// the two merge-on-green arms never blur into one pill: ` ARM ` is
-/// lazybox's *client-side* merge, fired by the daemon only while lazybox
-/// is running (quit lazybox and nothing merges), whereas ` AUTO ` is
-/// GitHub's durable server-side merge. Green doubles as a mnemonic — this
-/// is the arm that lands the PR "on green."
+/// Colored `success` (green), not the accent of `◆` (#794), so the two
+/// merge-on-green arms never blur into one marker: `⚡` is lazybox's
+/// *client-side* merge, fired by the daemon only while lazybox is running
+/// (quit lazybox and nothing merges), whereas `◆` is GitHub's durable
+/// server-side merge. Green doubles as a mnemonic — this is the arm that
+/// lands the PR "on green."
 fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if !ctx.auto_merge_armed {
         return Cell::empty();
@@ -1041,16 +1049,18 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.row_style()
     } else {
         Style::default()
-            .bg(ctx.theme.success)
-            .fg(ratatui::style::Color::Black)
+            .fg(ctx.theme.success)
             .add_modifier(Modifier::BOLD)
     };
-    Cell::from_span(Span::styled(" ARM ", style))
+    Cell::from_span(Span::styled(
+        format!(" {} ", crate::components::sidebar::ARM_GLYPH),
+        style,
+    ))
 }
 
-/// The compact ` FIX ` badge. Packs into the shared badge cluster (#813);
-/// the focused workspace's full trigger description lives in the sidebar
-/// header.
+/// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
+/// badge cluster (#813); the focused workspace's full trigger description
+/// lives in the sidebar header.
 fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if !ctx.auto_fix_ci_armed && !ctx.auto_fix_conflict_armed {
         return Cell::empty();
@@ -1059,11 +1069,13 @@ fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.row_style()
     } else {
         Style::default()
-            .bg(ctx.theme.warn)
-            .fg(ratatui::style::Color::Black)
+            .fg(ctx.theme.warn)
             .add_modifier(Modifier::BOLD)
     };
-    Cell::from_span(Span::styled(" FIX ", style))
+    Cell::from_span(Span::styled(
+        format!(" {} ", crate::components::sidebar::FIX_GLYPH),
+        style,
+    ))
 }
 
 /// The track-main badge (issue #535). A synced tracked workspace shows a
@@ -1080,18 +1092,23 @@ fn cell_track_main(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             ctx.row_style()
         } else {
             Style::default()
-                .bg(ctx.theme.warn)
-                .fg(ratatui::style::Color::Black)
+                .fg(ctx.theme.warn)
                 .add_modifier(Modifier::BOLD)
         };
-        return Cell::from_span(Span::styled(" behind ", style));
+        return Cell::from_span(Span::styled(
+            format!(" {} ", crate::components::sidebar::TRACK_GLYPH),
+            style,
+        ));
     }
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
         Style::default().fg(ctx.theme.accent)
     };
-    Cell::from_span(Span::styled(" ⤓main ", style))
+    Cell::from_span(Span::styled(
+        format!(" {} ", crate::components::sidebar::TRACK_GLYPH),
+        style,
+    ))
 }
 
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -2020,9 +2037,9 @@ mod tests {
         assert_eq!(cell_status(&ctx).width(), 0);
     }
 
-    /// A lone CI pill is sized to just its own ` CI FAIL ` block (9
-    /// cells) — no blank review-slot filler padding it out to 19 and
-    /// stacking dead space before the time trailer (issue #328).
+    /// A lone CI signal is sized to just its own `✗` glyph (#1046) — no
+    /// blank review-slot filler stacking dead space before the time
+    /// trailer (issue #328).
     #[test]
     fn cell_status_is_trimmed_to_the_present_pill() {
         let mut task = make_task("owner/repo#1", "x");
@@ -2031,14 +2048,14 @@ mod tests {
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_status(&ctx);
-        assert_eq!(cell.width(), 9);
+        assert_eq!(cell.width(), 2);
         assert_eq!(cell.spans.len(), 1);
-        assert_eq!(cell.spans[0].content.as_ref(), " CI FAIL ");
+        assert_eq!(cell.spans[0].content.as_ref(), " ✗");
     }
 
-    /// An armed workspace surfaces its ` ARM ` marker in its own slot
-    /// even when the PR has no CI / review pill yet — so a freshly-armed
-    /// row is visibly distinct before CI even starts (#524).
+    /// An armed workspace surfaces its `⚡` merge-on-green marker in its
+    /// own slot even when the PR has no CI / review pill yet — so a
+    /// freshly-armed row is visibly distinct before CI even starts (#524).
     #[test]
     fn cell_arm_shows_pill_when_armed_without_ci() {
         let mut task = make_task("owner/repo#1", "x");
@@ -2051,14 +2068,14 @@ mod tests {
         assert_eq!(cell_arm(&ctx).width(), 0, "unarmed row has no ARM slot");
         ctx.auto_merge_armed = true;
         let cell = cell_arm(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " ARM ");
+        assert_eq!(cell.spans[0].content.as_ref(), " ⚡ ");
         // The status cell stays empty — no CI/review pill here.
         assert_eq!(cell_status(&ctx).width(), 0);
     }
 
     /// #778: GitHub-native auto-merge is a policy, not a status. An
-    /// armed PR with failing CI must show BOTH the ` AUTO ` policy pill
-    /// (its own column) AND the ` CI FAIL ` status pill — the whole
+    /// armed PR with failing CI must show BOTH the `◆` policy glyph
+    /// (its own column) AND the `✗` CI-fail status glyph — the whole
     /// point of the fix is that AUTO no longer hides the red CI it's
     /// blocked on.
     #[test]
@@ -2074,21 +2091,21 @@ mod tests {
         ctx.auto_merge_enabled = true;
         assert_eq!(
             cell_auto(&ctx).spans[0].content.as_ref(),
-            " AUTO ",
-            "armed PR shows its AUTO policy pill",
+            " ◆ ",
+            "armed PR shows its AUTO policy glyph",
         );
         assert_eq!(
             cell_status(&ctx).spans[0].content.as_ref(),
-            " CI FAIL ",
-            "…and the failing-CI status pill is no longer hidden",
+            " ✗",
+            "…and the failing-CI status glyph is no longer hidden",
         );
     }
 
-    /// #794: ` ARM ` (lazybox client-side merge-on-green) and ` AUTO `
-    /// (GitHub-native, durable) must not render as the same pill. They sit
-    /// in adjacent columns and both mean "merges itself on green," so a
-    /// shared accent-on-black block hid the durability difference — ` ARM `
-    /// dies when lazybox closes, ` AUTO ` doesn't. Pin the distinct fills so
+    /// #794: `⚡` (lazybox client-side merge-on-green) and `◆`
+    /// (GitHub-native, durable) must not render as the same marker. They
+    /// sit in adjacent columns and both mean "merges itself on green," so
+    /// they carry distinct glyphs AND distinct colors — `⚡` in lazybox
+    /// green (dies when lazybox closes), `◆` in GitHub accent. Pin both so
     /// they never collapse back to one look.
     #[test]
     fn arm_and_auto_pills_are_visually_distinct() {
@@ -2099,13 +2116,20 @@ mod tests {
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.auto_merge_armed = true;
         ctx.auto_merge_enabled = true;
-        let arm_style = cell_arm(&ctx).spans[0].style;
-        let auto_style = cell_auto(&ctx).spans[0].style;
-        assert_eq!(arm_style.bg, Some(theme.success), "ARM is lazybox-green");
-        assert_eq!(auto_style.bg, Some(theme.accent), "AUTO is GitHub-accent");
+        let arm = cell_arm(&ctx);
+        let auto = cell_auto(&ctx);
         assert_ne!(
-            arm_style.bg, auto_style.bg,
-            "ARM and AUTO must not share a fill color"
+            arm.spans[0].content.as_ref(),
+            auto.spans[0].content.as_ref(),
+            "ARM and AUTO must not share a glyph"
+        );
+        let arm_style = arm.spans[0].style;
+        let auto_style = auto.spans[0].style;
+        assert_eq!(arm_style.fg, Some(theme.success), "ARM is lazybox-green");
+        assert_eq!(auto_style.fg, Some(theme.accent), "AUTO is GitHub-accent");
+        assert_ne!(
+            arm_style.fg, auto_style.fg,
+            "ARM and AUTO must not share a color"
         );
     }
 
@@ -2119,16 +2143,17 @@ mod tests {
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
+        let fix = format!(" {} ", crate::components::sidebar::FIX_GLYPH);
         assert_eq!(cell_fix(&ctx).width(), 0, "unarmed row has no FIX slot");
         ctx.is_cursor = true;
         ctx.auto_fix_ci_armed = true;
-        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
+        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), fix);
         ctx.auto_fix_conflict_armed = true;
-        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
+        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), fix);
         ctx.auto_fix_ci_armed = false;
-        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
+        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), fix);
         ctx.is_cursor = false;
-        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), " FIX ");
+        assert_eq!(cell_fix(&ctx).spans[0].content.as_ref(), fix);
     }
 
     #[test]
@@ -2152,16 +2177,19 @@ mod tests {
         let focused_line = line_text(&lines[0]);
         let other_line = line_text(&lines[1]);
 
-        assert!(focused_line.contains("FIX"), "{focused_line:?}");
+        assert!(
+            focused_line.contains(crate::components::sidebar::FIX_GLYPH),
+            "{focused_line:?}"
+        );
         assert!(
             other_line.contains("Another readable"),
             "focused auto-fix must not reserve a long blank column on sibling rows: {other_line:?}"
         );
     }
 
-    /// The track-main badge (issue #535): empty when untracked, a calm
-    /// ` ⤓main ` when tracked-and-synced, and a warn ` behind ` when the
-    /// worktree fell behind and couldn't auto-sync.
+    /// The track-main badge (issue #535): empty when untracked, and a
+    /// `⤓` glyph when tracked — calm accent when synced, warn-colored
+    /// when the worktree fell behind and couldn't auto-sync (#1046).
     #[test]
     fn cell_track_main_reflects_tracked_and_behind_state() {
         let mut task = make_task("owner/repo#1", "x");
@@ -2170,6 +2198,7 @@ mod tests {
         task.state = TaskState::Open;
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
+        let track = format!(" {} ", crate::components::sidebar::TRACK_GLYPH);
         let mut ctx = ctx_for(&ws, &task, &theme);
         assert_eq!(
             cell_track_main(&ctx).width(),
@@ -2177,9 +2206,17 @@ mod tests {
             "untracked row has no track slot"
         );
         ctx.track_main = true;
-        assert_eq!(cell_track_main(&ctx).spans[0].content.as_ref(), " ⤓main ");
+        let synced = cell_track_main(&ctx);
+        assert_eq!(synced.spans[0].content.as_ref(), track);
+        assert_eq!(synced.spans[0].style.fg, Some(theme.accent));
         ctx.track_main_behind = true;
-        assert_eq!(cell_track_main(&ctx).spans[0].content.as_ref(), " behind ");
+        let behind = cell_track_main(&ctx);
+        assert_eq!(behind.spans[0].content.as_ref(), track);
+        assert_eq!(
+            behind.spans[0].style.fg,
+            Some(theme.warn),
+            "a stuck (behind) track-main flips to the warn color"
+        );
     }
 
     /// A workspace carrying a local note surfaces a ` ✎ ` badge (issue
@@ -2258,9 +2295,9 @@ mod tests {
         );
     }
 
-    /// The ARM badge rides in its own column ahead of the live CI pill
-    /// rather than replacing it — an armed PR with running/red CI shows
-    /// both, in separate cells now (#524).
+    /// The `⚡` merge-on-green badge rides in its own column ahead of the
+    /// live CI glyph rather than replacing it — an armed PR with running/red
+    /// CI shows both, in separate cells (#524, #1046).
     #[test]
     fn arm_badge_coexists_with_ci_pill() {
         let mut task = make_task("owner/repo#1", "x");
@@ -2269,13 +2306,13 @@ mod tests {
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.auto_merge_armed = true;
-        assert_eq!(cell_arm(&ctx).spans[0].content.as_ref(), " ARM ");
+        assert_eq!(cell_arm(&ctx).spans[0].content.as_ref(), " ⚡ ");
         assert!(
             cell_status(&ctx)
                 .spans
                 .iter()
-                .any(|s| s.content.as_ref().contains("CI")),
-            "live CI pill still present alongside the arm"
+                .any(|s| s.content.as_ref().contains('✗')),
+            "live CI glyph still present alongside the arm"
         );
     }
 
@@ -2572,7 +2609,7 @@ mod tests {
     #[test]
     fn wide_width_keeps_status_time_and_title() {
         let mut task = make_task("owner/repo#42", "Fix the broken sidebar layout");
-        task.ci = CiStatus::Failure; // " CI FAIL " status pill
+        task.ci = CiStatus::Failure; // `✗` CI-fail status glyph
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
@@ -2586,8 +2623,8 @@ mod tests {
             "title truncated on wide pane: {line:?}",
         );
         assert!(
-            line.contains("CI FAIL"),
-            "status pill missing on wide pane: {line:?}"
+            line.contains('✗'),
+            "status glyph missing on wide pane: {line:?}"
         );
     }
 
@@ -2595,7 +2632,9 @@ mod tests {
     /// KEPT — it's the actionable signal, so it sheds nearly last —
     /// while the timestamp is the first column to go. (Before the
     /// shed-priority swap the status pill dropped out ahead of the
-    /// less-important columns, exactly backwards.)
+    /// less-important columns, exactly backwards.) With the compact icon
+    /// (#1046) the status barely costs anything, so the squeeze only
+    /// bites at a tighter width than the old 9-cell pill needed.
     #[test]
     fn narrow_width_keeps_status_and_sheds_time_first() {
         let mut task = make_task("owner/repo#42", "Fix the broken sidebar layout");
@@ -2606,7 +2645,7 @@ mod tests {
         let ctx = ctx_for(&ws, &task, &theme);
         let columns = build_columns(2);
         let rows = vec![build_row(&ctx)];
-        let lines = crate::components::table::render_table(&rows, &columns, 40);
+        let lines = crate::components::table::render_table(&rows, &columns, 30);
         let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             line.contains("42"),
@@ -2617,7 +2656,7 @@ mod tests {
             "title squeezed to nothing at narrow width: {line:?}",
         );
         assert!(
-            line.contains("CI FAIL"),
+            line.contains('✗'),
             "status must survive — it now sheds nearly last: {line:?}",
         );
         assert!(
@@ -2635,7 +2674,7 @@ mod tests {
     #[test]
     fn short_title_keeps_status_instead_of_leaving_empty_gap() {
         let mut task = make_task("owner/repo#7", "Fix bug");
-        task.ci = CiStatus::Failure; // " CI FAIL " status pill
+        task.ci = CiStatus::Failure; // `✗` CI-fail status glyph
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
@@ -2649,7 +2688,7 @@ mod tests {
             "short title should render in full: {line:?}",
         );
         assert!(
-            line.contains("CI FAIL"),
+            line.contains('✗'),
             "status must survive when the short title leaves room: {line:?}",
         );
     }
@@ -2682,10 +2721,7 @@ mod tests {
             line.contains('…'),
             "title should elide at tiny width: {line:?}"
         );
-        assert!(
-            !line.contains("CI FAIL"),
-            "status pill must be gone: {line:?}"
-        );
+        assert!(!line.contains('✗'), "status glyph must be gone: {line:?}");
         assert!(
             !line.contains('?'),
             "state slot must shed before the title: {line:?}"
@@ -2874,13 +2910,13 @@ mod tests {
     }
 
     /// Issue #328, part 2: under width pressure the labels shed before
-    /// the CONFLICT / CI status — the tags are the least important thing
+    /// the conflict / CI status — the tags are the least important thing
     /// on the row, the merge-conflict signal is the most. A width that
-    /// can't fit both keeps CONFLICT and drops the chips.
+    /// can't fit both keeps the `⚠` conflict glyph and drops the chips.
     #[test]
     fn narrow_width_sheds_labels_before_status() {
         let mut task = make_task("owner/repo#42", "Fix bug");
-        task.mergeable = lazybox_core::Mergeable::Conflicting; // " CONFLICT "
+        task.mergeable = lazybox_core::Mergeable::Conflicting; // `⚠`
         task.labels = vec![
             lazybox_core::Label::new("bug"),
             lazybox_core::Label::new("ci"),
@@ -2890,39 +2926,41 @@ mod tests {
         let ctx = ctx_for(&ws, &task, &theme);
         let columns = build_columns(2);
         let rows = vec![build_row(&ctx)];
-        let lines = crate::components::table::render_table(&rows, &columns, 34);
+        let lines = crate::components::table::render_table(&rows, &columns, 28);
         let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            line.contains("CONFLICT"),
+            line.contains('⚠'),
             "the actionable status must survive: {line:?}",
         );
         assert!(
             !line.contains("[bug]") && !line.contains("[ci]"),
-            "labels should shed before the status pill: {line:?}",
+            "labels should shed before the status glyph: {line:?}",
         );
         assert!(line.contains("Fix bug"), "title dropped: {line:?}");
     }
 
-    /// #813 regression: the badges pack into two priority tiers, not one
-    /// atomic cluster, so they shed *graduated* under width pressure — the
-    /// low-signal passive-info badges (`⤓main`) drop first, the
-    /// merge-when-green arms (`ARM`/`AUTO`) outlive them, and the actionable
-    /// CI status pill outlives every badge. Packing all seven into a single
-    /// cell regressed this: the arms that decide whether the PR merges
-    /// itself vanished together with the decoration the moment the row got
-    /// tight (the invariant the retired per-badge `merge_arms_outlive_*`
-    /// test guarded).
+    /// #813 / #1046 regression: the badges pack into two priority tiers,
+    /// not one atomic cluster, so they shed *graduated* under width
+    /// pressure — the low-signal passive-info badges (`⤓`) drop first, the
+    /// merge-when-green arms (`⚡`/`◆`) outlive them, and the actionable CI
+    /// status glyph outlives every badge. #813 packed all seven into one
+    /// cell (regressing the graduated order); #1046 additionally raised the
+    /// merge-arm tier above the unread count so the "will it merge itself"
+    /// signal reliably shows. Asserted via a width sweep — the compact
+    /// icons make the exact shed widths glyph-width-dependent, so we pin the
+    /// ORDER (which token needs the most room to appear, hence sheds first)
+    /// rather than three hardcoded widths.
     #[test]
     fn merge_arms_outlive_passive_badges_then_status_survives() {
         let mut task = make_task("owner/repo#1", "Readable title text here");
         task.state = TaskState::Open;
-        task.ci = CiStatus::Failure; // " CI FAIL " status pill
+        task.ci = CiStatus::Failure; // `✗` status glyph
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.track_main = true; // ⤓main — passive-info tier
-        ctx.auto_merge_armed = true; // ARM — merge-arm tier
-        ctx.auto_merge_enabled = true; // AUTO — merge-arm tier
+        ctx.track_main = true; // ⤓ — passive-info tier
+        ctx.auto_merge_armed = true; // ⚡ — merge-arm tier
+        ctx.auto_merge_enabled = true; // ◆ — merge-arm tier
 
         let columns = build_columns(4);
         let render = |w: usize| -> String {
@@ -2930,42 +2968,39 @@ mod tests {
             let lines = crate::components::table::render_table(&rows, &columns, w);
             lines[0].spans.iter().map(|s| s.content.as_ref()).collect()
         };
+        // Narrowest width at which `needle` still renders. A token that
+        // needs a wider pane to appear sheds first under pressure.
+        let present_from = |needle: char| -> usize {
+            (10..=120)
+                .find(|&w| render(w).contains(needle))
+                .unwrap_or(usize::MAX)
+        };
+        let passive = present_from('⤓');
+        let arm = present_from('⚡');
+        let auto = present_from('◆');
+        let status = present_from('✗');
 
-        // Wide: every badge and the status pill show.
-        let wide = render(100);
+        // Everything shows on a wide pane.
         assert!(
-            wide.contains("⤓main")
-                && wide.contains("ARM")
-                && wide.contains("AUTO")
-                && wide.contains("CI FAIL"),
-            "all badges + status visible when wide: {wide:?}",
+            render(120).contains('⤓')
+                && render(120).contains('⚡')
+                && render(120).contains('◆')
+                && render(120).contains('✗'),
+            "all badges + status visible when wide: {:?}",
+            render(120),
         );
-
-        // Mid: the passive-info tier sheds first; the merge arms survive.
-        let mid = render(55);
+        // The two merge arms shed together.
+        assert_eq!(arm, auto, "ARM and AUTO shed at the same width");
+        // Passive decoration sheds before the merge arms…
         assert!(
-            !mid.contains("⤓main"),
-            "passive-info badge must shed first: {mid:?}",
+            passive > arm,
+            "passive `⤓` must shed before the merge arms (passive_from={passive}, arm_from={arm})",
         );
+        // …and the merge arms shed before the actionable CI status.
         assert!(
-            mid.contains("ARM") && mid.contains("AUTO"),
-            "merge arms must outlive the passive-info badges: {mid:?}",
-        );
-        assert!(
-            mid.contains("CI FAIL"),
-            "status still present at mid width: {mid:?}",
-        );
-
-        // Narrow: the merge arms shed too, but the actionable status
-        // outlives every badge.
-        let narrow = render(44);
-        assert!(
-            !narrow.contains("ARM") && !narrow.contains("AUTO"),
-            "merge arms shed under enough pressure: {narrow:?}",
-        );
-        assert!(
-            narrow.contains("CI FAIL"),
-            "status must outlive every badge: {narrow:?}",
+            arm > status,
+            "merge arms must outlive nothing below status but shed before it \
+             (arm_from={arm}, status_from={status})",
         );
     }
 
@@ -2987,11 +3022,11 @@ mod tests {
         let lines = crate::components::table::render_table(&rows, &columns, 80);
         let line: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
-            line.contains("CI FAIL  5m"),
+            line.contains("✗ 5m"),
             "expected a single clean gap between status and time: {line:?}",
         );
         assert!(
-            !line.contains("CI FAIL   5m"),
+            !line.contains("✗  5m"),
             "status↔time gap is still oversized: {line:?}",
         );
     }
@@ -3191,13 +3226,13 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(info, " ⎇ local  ✎  ]2  FIX ");
+        assert_eq!(info, " ⎇ local  ✎  ]2  🔧 ");
         let arms: String = cell_merge_arms(&ctx0)
             .spans
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(arms, " ARM ");
+        assert_eq!(arms, " ⚡ ");
 
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx0), build_row(&ctx1), build_row(&ctx2)];
@@ -3214,10 +3249,10 @@ mod tests {
 
         // The all-badges row shows both clusters, arms right of the info;
         // the badge-less row shows none of them.
-        assert!(l0.contains(" ⎇ local  ✎  ]2  FIX  ARM "), "{l0:?}");
+        assert!(l0.contains(" ⎇ local  ✎  ]2  🔧  ⚡ "), "{l0:?}");
         assert!(l1.contains('✎'), "{l1:?}");
         assert!(
-            !l2.contains('✎') && !l2.contains('⎇') && !l2.contains("ARM"),
+            !l2.contains('✎') && !l2.contains('⎇') && !l2.contains('⚡'),
             "badge-less row must carry no passive badges: {l2:?}",
         );
     }
@@ -3236,7 +3271,7 @@ mod tests {
         ctx0.has_notes = true; // wider info cluster: ⎇ local + ✎
         ctx0.auto_merge_armed = true;
         let mut ctx1 = ctx_for(&ws1, &task1, &theme);
-        ctx1.auto_merge_armed = true; // no info cluster, just the ARM arm
+        ctx1.auto_merge_armed = true; // no info cluster, just the ⚡ arm
 
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx0), build_row(&ctx1)];
@@ -3244,10 +3279,10 @@ mod tests {
         let l0 = line_text(&lines[0]);
         let l1 = line_text(&lines[1]);
 
-        // Both rows end their trailing ` ARM ` at the same offset: the
+        // Both rows end their trailing `⚡` at the same offset: the
         // narrower cluster is padded on the LEFT to the shared column
         // width, keeping the arm flush-right.
-        let arm_end = |s: &str| s.find("ARM").map(|b| s[..b].chars().count());
+        let arm_end = |s: &str| s.find('⚡').map(|b| s[..b].chars().count());
         assert_eq!(
             arm_end(&l0),
             arm_end(&l1),

@@ -16,16 +16,64 @@
 use lazybox_core::Workspace;
 use ratatui::style::{Color, Modifier, Style};
 
-/// Right-side status pill showing the most actionable problem on the
-/// PR. One pill at a time, ordered by severity: merge conflict beats
-/// CI failure beats CI mixed beats CI running beats CI ok beats
-/// "behind base" beats nothing. The pill is a colored block
-/// (` CONFLICT ` / ` CI FAIL ` / ` CI OK ` / etc.) with strong fg +
-/// colored bg — the v1 design that the user actually likes; subtle
-/// text-only failed visually.
+/// Right-side status glyph showing the most actionable signal on the
+/// PR. Two slots at most — one review glyph, one CI glyph — unless a
+/// terminal/blocker lifecycle state (merged, closed, conflict, …)
+/// overrides both. Each glyph is a single fg-colored cell (`✓` / `✗` /
+/// `±` / `⚠` / …) rather than the wide text pills the row used to carry
+/// (` CI FAIL `, ` APPROVED `): color is the primary signal, the glyph
+/// the secondary, and the reclaimed cells go to the title (#1046). The
+/// full meaning stays discoverable in the `?` help legend
+/// ([`status_legend`]) and the Ask Lazybox marker docs.
 pub(crate) struct StatusPill {
+    /// The rendered glyph, with a leading space so two slots separate
+    /// visually (` ✓ ✗`). Trimmed, this is what the marker docs pin to.
     pub(crate) label: &'static str,
     pub(crate) style: Style,
+}
+
+// ── Status glyphs ─────────────────────────────────────────────────────
+//
+// Single-cell BMP symbols (not Nerd-Font PUA — those render as tofu
+// without a patched font), colored by severity so the glyph reads even
+// where two adjacent slots share one (approved `✓` beside CI-ok `✓`).
+// Kept in sync with `lazybox_tui_core::markers` by the
+// `documented_status_pills_match_the_renderer` drift test.
+// Each carries a leading-space separator so two adjacent slots read as
+// ` ✓ ✗`; trimmed, the glyph is what the marker docs pin to.
+const G_OK: &str = " ✓"; // CI green / approved / ready / merged
+const G_FAIL: &str = " ✗"; // CI failed / changes requested
+const G_MIXED: &str = " ±"; // CI partly green, partly failing
+const G_RUNNING: &str = " …"; // CI queued or in progress
+const G_REVIEW: &str = " ◌"; // review requested / pending
+const G_CONFLICT: &str = " ⚠"; // merge conflict
+const G_CLOSED: &str = " ⊘"; // closed without merging
+const G_DRAFT: &str = " ◇"; // draft PR
+const G_QUEUED: &str = " ⧖"; // sitting in the merge queue
+#[cfg(test)]
+const G_BEHIND: &str = " ↓"; // branch behind its base (tag-map only; no row pill)
+
+/// Indexed-palette severity colors — the terminal's bright red / amber /
+/// yellow / green, punchier than `Color::Red` on dark themes.
+fn c_red() -> Color {
+    Color::Indexed(196)
+}
+fn c_amber() -> Color {
+    Color::Indexed(214)
+}
+fn c_yellow() -> Color {
+    Color::Indexed(220)
+}
+fn c_green() -> Color {
+    Color::Indexed(40)
+}
+
+/// A fg-colored, bold status glyph with a leading-space separator.
+fn glyph_pill(label: &'static str, fg: Color) -> StatusPill {
+    StatusPill {
+        label,
+        style: Style::default().fg(fg).add_modifier(Modifier::BOLD),
+    }
 }
 
 /// Single-cell type marker rendered immediately before the number
@@ -71,17 +119,17 @@ pub(crate) fn status_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     pill_for_tag(lazybox_core::StatusTag::for_task(task))
 }
 
-/// Two-column status: a (review-or-lifecycle, ci) pair. Review and
-/// CI are conceptually orthogonal — squashing them into one pill
-/// hides one of the two signals. A PR with `REVIEW pending + CI
-/// FAIL` is something the user needs to see BOTH of.
+/// Two-column status: a (review-or-lifecycle, ci) pair of glyphs. Review
+/// and CI are conceptually orthogonal — squashing them into one signal
+/// hides one of the two. A PR with review-pending + CI-failing (`◌ ✗`)
+/// is something the user needs to see BOTH of.
 ///
-/// **Terminal / blocker** states (`MERGED`, `CLOSED`, `DRAFT`,
-/// `CONFLICT`, `READY`, `QUEUED`) are single-purpose — they
-/// override both signals — so they return as the first slot with
-/// the CI slot empty. GitHub-native auto-merge is *not* one of them:
-/// it's a policy, rendered as its own ` AUTO ` row pill (#778), so a
-/// red-CI armed PR still shows `CI FAIL` here.
+/// **Terminal / blocker** states (merged `✓`, closed `⊘`, draft `◇`,
+/// conflict `⚠`, ready `✓`, queued `⧖`) are single-purpose — they
+/// override both signals — so they return as the first slot with the CI
+/// slot empty. GitHub-native auto-merge is *not* one of them: it's a
+/// policy, rendered as its own `◆` row glyph (#778), so a red-CI armed PR
+/// still shows its `✗` here.
 ///
 /// **Open PRs in flight** return `(review_pill, ci_pill)` so the
 /// row shows both. Either slot may be `None` (e.g. CI not yet
@@ -91,60 +139,19 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
     if let Some(lifecycle) = lifecycle_pill(task) {
         return (Some(lifecycle), None);
     }
-    // Open PR in flight. Review + CI rendered separately.
+    // Open PR in flight. Review + CI rendered separately, as adjacent
+    // single-cell glyphs (` ◌ ✗` = review pending + CI failing).
     let review = match task.review {
-        ReviewStatus::Approved => Some(StatusPill {
-            label: " APPROVED ",
-            style: Style::default()
-                .bg(crate::theme::current().accent)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        }),
-        ReviewStatus::ChangesRequested => Some(StatusPill {
-            label: " CHANGES ",
-            style: Style::default()
-                .bg(Color::Indexed(196))
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        }),
-        ReviewStatus::Pending => Some(StatusPill {
-            label: " REVIEW ",
-            style: Style::default()
-                .bg(crate::theme::current().warn)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        }),
+        ReviewStatus::Approved => Some(glyph_pill(G_OK, crate::theme::current().accent)),
+        ReviewStatus::ChangesRequested => Some(glyph_pill(G_FAIL, c_red())),
+        ReviewStatus::Pending => Some(glyph_pill(G_REVIEW, crate::theme::current().warn)),
         ReviewStatus::None => None,
     };
     let ci = match task.ci {
-        CiStatus::Failure => Some(StatusPill {
-            label: " CI FAIL ",
-            style: Style::default()
-                .bg(Color::Indexed(196))
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        }),
-        CiStatus::Mixed => Some(StatusPill {
-            label: " CI MIX ",
-            style: Style::default()
-                .bg(Color::Indexed(214))
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        }),
-        CiStatus::Pending | CiStatus::Running => Some(StatusPill {
-            label: " CI RUN ",
-            style: Style::default()
-                .bg(Color::Indexed(220))
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        }),
-        CiStatus::Success => Some(StatusPill {
-            label: " CI OK ",
-            style: Style::default()
-                .bg(Color::Indexed(40))
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        }),
+        CiStatus::Failure => Some(glyph_pill(G_FAIL, c_red())),
+        CiStatus::Mixed => Some(glyph_pill(G_MIXED, c_amber())),
+        CiStatus::Pending | CiStatus::Running => Some(glyph_pill(G_RUNNING, c_yellow())),
+        CiStatus::Success => Some(glyph_pill(G_OK, c_green())),
         CiStatus::None => None,
     };
     // Open issue (no PR) or no signals at all → keep both columns
@@ -162,60 +169,22 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
 /// `None` for normal open PRs in flight.
 fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     use lazybox_core::{CiStatus, ReviewStatus, TaskState};
-    let pill_red = Style::default()
-        .bg(Color::Indexed(196))
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
-    let pill_green = Style::default()
-        .bg(Color::Indexed(40))
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
     let theme = crate::theme::current();
     // Match the priority chain in StatusTag::for_task for the
     // terminal / blocker bands. The non-blocker tags
     // (CiFailed/CiMixed/CiRunning/CiOk + Approved/Changes/Review)
     // are handled by the side-by-side pills in `status_pills`.
     match task.state {
-        TaskState::Merged => {
-            return Some(StatusPill {
-                label: " MERGED ",
-                style: Style::default()
-                    .bg(theme.hover)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            });
-        }
-        TaskState::Closed => {
-            return Some(StatusPill {
-                label: " CLOSED ",
-                style: Style::default()
-                    .bg(theme.error)
-                    .fg(Color::Black)
-                    .add_modifier(Modifier::BOLD),
-            });
-        }
-        TaskState::Draft => {
-            return Some(StatusPill {
-                label: " DRAFT ",
-                style: Style::default()
-                    .bg(theme.chrome)
-                    .fg(theme.text_strong)
-                    .add_modifier(Modifier::BOLD),
-            });
-        }
+        TaskState::Merged => return Some(glyph_pill(G_OK, theme.hover)),
+        TaskState::Closed => return Some(glyph_pill(G_CLOSED, theme.text_dim)),
+        TaskState::Draft => return Some(glyph_pill(G_DRAFT, theme.chrome)),
         _ => {}
     }
     if task.mergeable.is_conflicting() {
-        return Some(StatusPill {
-            label: " CONFLICT ",
-            style: pill_red,
-        });
+        return Some(glyph_pill(G_CONFLICT, c_red()));
     }
     if task.is_in_merge_queue {
-        return Some(StatusPill {
-            label: " QUEUED ",
-            style: pill_green,
-        });
+        return Some(glyph_pill(G_QUEUED, c_green()));
     }
     // Approved + CI green = READY (one pill, end-state for "this PR
     // is good to go"). Approved-without-green-CI shows up as a
@@ -227,15 +196,12 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
         && matches!(task.ci, CiStatus::Success | CiStatus::None)
         && !task.merge_blocked
     {
-        return Some(StatusPill {
-            label: " READY ",
-            style: pill_green,
-        });
+        return Some(glyph_pill(G_OK, c_green()));
     }
     // GitHub-native auto-merge (`task.auto_merge_enabled`) is a standing
     // automation policy, not a task status — it renders as its own row
-    // pill (` AUTO `, see `workspace_row::cell_auto`) alongside ` ARM ` /
-    // ` FIX `, never here. Placing it in this chain hid ` CI FAIL ` on
+    // glyph (`◆`, see `workspace_row::cell_auto`) alongside `⚡` / `🔧`,
+    // never here. Placing it in this chain hid the `✗` CI-fail glyph on
     // exactly the armed PRs that need it most (#778).
     //
     // Everything else — behind-base and plain open PRs — has no lifecycle
@@ -251,79 +217,82 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
 pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
     use lazybox_core::StatusTag::*;
     let theme = crate::theme::current();
-    // Indexed palette colors render as the terminal's "bright"
-    // red/yellow on most setups — punchy without the muddy mid-red
-    // `Color::Red` produces on dark themes. Black-on-color reads
-    // cleaner than white-on-color at this size.
-    let pill_red = Style::default()
-        .bg(Color::Indexed(196))
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
-    let pill_amber = Style::default()
-        .bg(Color::Indexed(214))
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
-    let pill_yellow = Style::default()
-        .bg(Color::Indexed(220))
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
-    let pill_green = Style::default()
-        .bg(Color::Indexed(40))
-        .fg(Color::Black)
-        .add_modifier(Modifier::BOLD);
-    let pill = |label: &'static str, style: Style| Some(StatusPill { label, style });
     match tag {
-        Merged => pill(
-            " MERGED   ",
-            Style::default()
-                .bg(theme.hover)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Closed => pill(
-            " CLOSED   ",
-            Style::default()
-                .bg(theme.error)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Conflict => pill(" CONFLICT ", pill_red),
-        CiFailed => pill(" CI FAIL  ", pill_red),
-        CiMixed => pill(" CI MIX   ", pill_amber),
-        ChangesRequested => pill(" CHANGES  ", pill_red),
-        Queued => pill(" QUEUED   ", pill_green),
-        Draft => pill(
-            " DRAFT    ",
-            Style::default()
-                .bg(theme.chrome)
-                .fg(theme.text_strong)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Ready => pill(" READY    ", pill_green),
-        Approved => pill(
-            " APPROVED ",
-            Style::default()
-                .bg(theme.accent)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        ReviewPending => pill(
-            " REVIEW   ",
-            Style::default()
-                .bg(theme.warn)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
-        ),
-        CiRunning => pill(" CI RUN   ", pill_yellow),
-        CiOk => pill(" CI OK    ", pill_green),
-        Behind => pill(
-            " BEHIND   ",
-            Style::default()
-                .fg(theme.text_dim)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Merged => Some(glyph_pill(G_OK, theme.hover)),
+        Closed => Some(glyph_pill(G_CLOSED, theme.text_dim)),
+        Conflict => Some(glyph_pill(G_CONFLICT, c_red())),
+        CiFailed => Some(glyph_pill(G_FAIL, c_red())),
+        CiMixed => Some(glyph_pill(G_MIXED, c_amber())),
+        ChangesRequested => Some(glyph_pill(G_FAIL, c_red())),
+        Queued => Some(glyph_pill(G_QUEUED, c_green())),
+        Draft => Some(glyph_pill(G_DRAFT, theme.chrome)),
+        Ready => Some(glyph_pill(G_OK, c_green())),
+        Approved => Some(glyph_pill(G_OK, theme.accent)),
+        ReviewPending => Some(glyph_pill(G_REVIEW, theme.warn)),
+        CiRunning => Some(glyph_pill(G_RUNNING, c_yellow())),
+        CiOk => Some(glyph_pill(G_OK, c_green())),
+        Behind => Some(glyph_pill(G_BEHIND, theme.text_dim)),
         None => Option::None,
     }
+}
+
+// ── Policy-badge glyphs ───────────────────────────────────────────────
+//
+// The merge-on-green arms and auto-fix badge, rendered by
+// `workspace_row` and described in the `?` legend. `◆` (auto-merge) and
+// `⤓` (track-main) are already trusted single-cell glyphs elsewhere in
+// the sidebar.
+pub(crate) const ARM_GLYPH: &str = "⚡"; // lazybox client-side merge-on-green
+pub(crate) const AUTO_GLYPH: &str = "◆"; // GitHub-native auto-merge
+pub(crate) const FIX_GLYPH: &str = "🔧"; // auto-fix armed
+pub(crate) const TRACK_GLYPH: &str = "⤓"; // track-main (auto-sync to default branch)
+
+/// One row of the sidebar status-icon legend shown in the `?` help
+/// modal: the glyph in its real theme color plus a one-line meaning.
+/// Built here (client side) so the colors come straight from the active
+/// theme — the tui-core marker docs carry the same meanings as plain
+/// text for Ask Lazybox, but only the UI can paint the swatch.
+pub(crate) struct LegendRow {
+    pub(crate) glyph: &'static str,
+    pub(crate) style: Style,
+    pub(crate) meaning: &'static str,
+}
+
+/// The full sidebar status-icon legend, grouped CI → review → lifecycle
+/// → policy. Every glyph a workspace row's status/policy columns can
+/// carry, so the compact icons stay discoverable (#1046).
+pub(crate) fn status_legend() -> Vec<LegendRow> {
+    let theme = crate::theme::current();
+    let row = |glyph: &'static str, fg: Color, meaning: &'static str| LegendRow {
+        glyph,
+        style: Style::default().fg(fg).add_modifier(Modifier::BOLD),
+        meaning,
+    };
+    vec![
+        row(G_OK.trim(), c_green(), "CI passing"),
+        row(G_FAIL.trim(), c_red(), "CI failing / changes requested"),
+        row(G_MIXED.trim(), c_amber(), "CI partly failing"),
+        row(G_RUNNING.trim(), c_yellow(), "CI running"),
+        row(G_OK.trim(), theme.accent, "approved"),
+        row(G_REVIEW.trim(), theme.warn, "review requested / pending"),
+        row(G_CONFLICT.trim(), c_red(), "merge conflict"),
+        row(G_QUEUED.trim(), c_green(), "in the merge queue"),
+        row(G_DRAFT.trim(), theme.chrome, "draft"),
+        row(G_OK.trim(), theme.hover, "merged"),
+        row(G_CLOSED.trim(), theme.text_dim, "closed"),
+        row(
+            ARM_GLYPH,
+            theme.success,
+            "merge-on-green armed (lazybox, g g)",
+        ),
+        row(AUTO_GLYPH, theme.accent, "GitHub auto-merge enabled"),
+        row(FIX_GLYPH, theme.warn, "auto-fix armed"),
+        row(
+            TRACK_GLYPH,
+            theme.accent,
+            "track-main (auto-sync to default)",
+        ),
+    ]
 }
 
 /// Compact relative time for the right-side trailer. `now` < 1m → "now",

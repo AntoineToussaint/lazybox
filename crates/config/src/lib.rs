@@ -274,6 +274,12 @@ pub struct SandboxConfig {
     /// bring-your-own-stack deployment sets it `false` to manage its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_lazybox: Option<bool>,
+    /// How the provider authenticates to the cloud (#1047). The provider
+    /// injects these credentials explicitly into every `gcloud`/`terraform`
+    /// call, so no ambient `gcloud auth login`/ADC is a hidden prerequisite.
+    /// Empty → ambient credentials (the legacy path). See [`SandboxAuthConfig`].
+    #[serde(default, skip_serializing_if = "SandboxAuthConfig::is_empty")]
+    pub auth: SandboxAuthConfig,
 }
 
 impl SandboxConfig {
@@ -281,6 +287,49 @@ impl SandboxConfig {
     /// out of a written config rather than serializing as `sandbox: {}`.
     pub fn is_empty(&self) -> bool {
         *self == SandboxConfig::default()
+    }
+}
+
+/// `sandbox.auth:` block — how the provider authenticates, so the box
+/// lifecycle runs in the background off configured credentials rather than
+/// whatever ambient `gcloud auth login`/ADC the machine happens to have
+/// (#1047). Credentials are injected explicitly into every provider call and
+/// scoped to a lazybox-owned gcloud config, so the user's own `gcloud` is
+/// never touched. Everything is optional; an empty block means ambient
+/// credentials (the legacy behavior).
+///
+/// ```yaml
+/// sandbox:
+///   auth:
+///     service_account_key: ~/.lazybox/gcp-sa.json
+///     impersonate_service_account: deploy@my-proj.iam.gserviceaccount.com
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct SandboxAuthConfig {
+    /// Path to a service-account key (or any `GOOGLE_APPLICATION_CREDENTIALS`
+    /// -compatible credential file). The headless / CI / SaaS path: no
+    /// interactive login, credentials injected verbatim into gcloud/terraform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account_key: Option<PathBuf>,
+    /// Service account to impersonate (workload-identity / hosted tier). The
+    /// base credentials (a `service_account_key`, else ambient) mint tokens
+    /// for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impersonate_service_account: Option<String>,
+    /// Override the provider-scoped `CLOUDSDK_CONFIG` directory. Unset → a
+    /// lazybox-owned dir, so activating a service account never clobbers or
+    /// leaks into the user's own `~/.config/gcloud`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<PathBuf>,
+}
+
+impl SandboxAuthConfig {
+    /// True when no credentials are configured — ambient auth, and the whole
+    /// block round-trips out of a written config rather than serializing as
+    /// `auth: {}`.
+    pub fn is_empty(&self) -> bool {
+        *self == SandboxAuthConfig::default()
     }
 }
 
@@ -3219,6 +3268,35 @@ repos:
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
         assert_eq!(reparsed.slack.allowed_users, vec!["U111", "U222"]);
+    }
+
+    /// `sandbox.auth` defaults to empty (ambient credentials, so the block
+    /// round-trips out of a written config) and parses the provider's own
+    /// credentials so lifecycle ops need no ambient `gcloud auth login`
+    /// (#1047).
+    #[test]
+    fn sandbox_auth_defaults_empty_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.sandbox.auth.is_empty(), "no auth on a fresh config");
+        // An empty auth block must not serialize back out.
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        assert!(!written.contains("auth:"), "empty auth stays unwritten");
+
+        let yaml = "sandbox:\n  auth:\n    service_account_key: /keys/sa.json\n    \
+                    impersonate_service_account: deploy@p.iam.gserviceaccount.com\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert!(!cfg.sandbox.auth.is_empty());
+        assert_eq!(
+            cfg.sandbox.auth.service_account_key.as_deref(),
+            Some(std::path::Path::new("/keys/sa.json"))
+        );
+        assert_eq!(
+            cfg.sandbox.auth.impersonate_service_account.as_deref(),
+            Some("deploy@p.iam.gserviceaccount.com")
+        );
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.sandbox.auth, cfg.sandbox.auth);
     }
 
     #[test]

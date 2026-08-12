@@ -33,10 +33,17 @@ pub type CommandFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SandboxErr
 /// init→apply→output, connect's wake-then-forward — is unit-tested against
 /// scripted output without a real GCP project (see this module's tests).
 pub trait CommandRunner: Send + Sync + std::fmt::Debug {
-    /// Run `program` with `args`, resolving to captured stdout on a zero
-    /// exit or a [`SandboxError`] carrying the program name and stderr
-    /// otherwise. Spawn failures surface as [`SandboxError::Spawn`].
-    fn run<'a>(&'a self, program: &'a str, args: &'a [String]) -> CommandFuture<'a, String>;
+    /// Run `program` with `args` and the extra `env` overlaid on the
+    /// inherited environment, resolving to captured stdout on a zero exit or
+    /// a [`SandboxError`] carrying the program name and stderr otherwise.
+    /// `env` is the provider's explicitly-injected credentials (#1047), never
+    /// ambient state. Spawn failures surface as [`SandboxError::Spawn`].
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+        env: &'a [(String, String)],
+    ) -> CommandFuture<'a, String>;
 }
 
 /// The production runner: shells out with stdin closed and captures output.
@@ -44,10 +51,16 @@ pub trait CommandRunner: Send + Sync + std::fmt::Debug {
 pub struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
-    fn run<'a>(&'a self, program: &'a str, args: &'a [String]) -> CommandFuture<'a, String> {
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+        env: &'a [(String, String)],
+    ) -> CommandFuture<'a, String> {
         Box::pin(async move {
             let output = Command::new(program)
                 .args(args)
+                .envs(env.iter().map(|(k, v)| (k, v)))
                 .stdin(Stdio::null())
                 .output()
                 .await
@@ -64,6 +77,73 @@ impl CommandRunner for SystemRunner {
             }
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         })
+    }
+}
+
+/// How the GCP provider authenticates, threaded explicitly into every
+/// `gcloud`/`terraform` call so the box lifecycle never depends on ambient
+/// `gcloud auth login`/ADC and never mutates the user's own gcloud config
+/// (#1047). All fields optional; nothing set → [ambient](Self::is_ambient)
+/// credentials, the legacy behavior.
+#[derive(Debug, Clone, Default)]
+pub struct GcpAuth {
+    /// A service-account key (or any `GOOGLE_APPLICATION_CREDENTIALS`
+    /// -compatible credential file). Used for gcloud (via
+    /// `CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE`) and for the terraform
+    /// `google` provider (via `GOOGLE_APPLICATION_CREDENTIALS`) alike.
+    pub service_account_key: Option<PathBuf>,
+    /// Service account to impersonate; the base credentials mint tokens for
+    /// it (gcloud + terraform both honor the matching env).
+    pub impersonate_service_account: Option<String>,
+    /// Provider-scoped `CLOUDSDK_CONFIG` dir. Set whenever credentials are
+    /// configured so lazybox's gcloud state is isolated from the user's own
+    /// `~/.config/gcloud`; `None` leaves gcloud on its default config
+    /// (ambient path).
+    pub config_dir: Option<PathBuf>,
+}
+
+impl GcpAuth {
+    /// True when no credentials are configured — the provider falls back to
+    /// whatever ambient auth the machine has, exactly as before #1047. In
+    /// this mode [`env`](Self::env) injects nothing, so today's behavior is
+    /// preserved byte-for-byte.
+    pub fn is_ambient(&self) -> bool {
+        self.service_account_key.is_none() && self.impersonate_service_account.is_none()
+    }
+
+    /// The environment overlaid on every `gcloud`/`terraform` invocation.
+    /// Empty in the ambient path; otherwise a provider-scoped
+    /// `CLOUDSDK_CONFIG` plus the credential envs both tools read, so auth is
+    /// explicit and isolated rather than inherited from the user's shell.
+    fn env(&self) -> Vec<(String, String)> {
+        if self.is_ambient() {
+            return Vec::new();
+        }
+        let mut env = Vec::new();
+        if let Some(dir) = &self.config_dir {
+            env.push(("CLOUDSDK_CONFIG".to_string(), dir.display().to_string()));
+        }
+        if let Some(key) = &self.service_account_key {
+            let path = key.display().to_string();
+            // gcloud reads its own credential store, not GOOGLE_APPLICATION_
+            // CREDENTIALS; the override points it at the key statelessly (no
+            // `activate-service-account` write, so concurrent CLI + r-spawn
+            // processes never race the scoped credential db).
+            env.push((
+                "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE".to_string(),
+                path.clone(),
+            ));
+            // The terraform `google` provider reads this one.
+            env.push(("GOOGLE_APPLICATION_CREDENTIALS".to_string(), path));
+        }
+        if let Some(sa) = &self.impersonate_service_account {
+            env.push((
+                "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT".to_string(),
+                sa.clone(),
+            ));
+            env.push(("GOOGLE_IMPERSONATE_SERVICE_ACCOUNT".to_string(), sa.clone()));
+        }
+        env
     }
 }
 
@@ -102,6 +182,10 @@ pub struct GcpProvider {
     /// literal stays the construction path — no positional constructor to
     /// transpose the two `PathBuf`s through.
     pub runner: Arc<dyn CommandRunner>,
+    /// Credentials injected into every `gcloud`/`terraform` call, so the
+    /// lifecycle authenticates off configured creds rather than ambient
+    /// `gcloud auth login`/ADC (#1047).
+    pub auth: GcpAuth,
 }
 
 impl GcpProvider {
@@ -365,9 +449,22 @@ fn parse_tf_outputs(json: &str) -> Result<(String, String), SandboxError> {
 }
 
 impl GcpProvider {
-    /// Run a command through the injected runner.
+    /// Run a command through the injected runner, overlaying the provider's
+    /// credentials env on every call — the single choke point that makes auth
+    /// explicit rather than ambient (#1047).
     async fn run(&self, program: &str, args: &[String]) -> Result<String, SandboxError> {
-        self.runner.run(program, args).await
+        self.runner.run(program, args, &self.auth.env()).await
+    }
+
+    /// `gcloud auth print-access-token` — the preflight probe. It mints a
+    /// token from whatever [`GcpAuth`] resolves to (the injected key, an
+    /// impersonation target, or ambient creds), so it fails fast and locally
+    /// when credentials are absent or unusable.
+    fn auth_probe_command() -> (String, Vec<String>) {
+        (
+            "gcloud".to_string(),
+            vec!["auth".to_string(), "print-access-token".to_string()],
+        )
     }
 
     /// Read the box's power state (describe only — no reachability probe),
@@ -379,9 +476,51 @@ impl GcpProvider {
     }
 }
 
+/// The actionable message a failed [`GcpProvider::check_auth`] carries — its
+/// remedy depends on whether credentials were configured at all. Pure so both
+/// branches are unit-tested.
+fn auth_failure_message(auth: &GcpAuth, detail: &str) -> String {
+    if auth.is_ambient() {
+        format!(
+            "gcp credentials not configured: set `sandbox.auth.service_account_key` (headless) \
+             or run `gcloud auth login` — {detail}"
+        )
+    } else {
+        format!("gcp credentials not usable (misconfigured or expired): {detail}")
+    }
+}
+
 impl SandboxProvider for GcpProvider {
     fn id(&self) -> &str {
         "gcp"
+    }
+
+    async fn check_auth(&self) -> Result<(), SandboxError> {
+        // A key path that doesn't exist is the common misconfiguration; catch
+        // it with a precise message before spawning gcloud at all.
+        if let Some(key) = &self.auth.service_account_key
+            && !key.exists()
+        {
+            return Err(SandboxError::Config(format!(
+                "gcp credentials: service account key {} not found — point \
+                 `sandbox.auth.service_account_key` at a readable key file",
+                key.display()
+            )));
+        }
+        // The scoped gcloud config dir must exist before gcloud writes into it.
+        if let Some(dir) = &self.auth.config_dir {
+            std::fs::create_dir_all(dir).map_err(|e| {
+                SandboxError::Config(format!("create gcloud config dir {}: {e}", dir.display()))
+            })?;
+        }
+        // Then confirm the credentials actually mint a token, so an expired /
+        // insufficient credential surfaces here — with a fix hint — instead of
+        // as raw gcloud/terraform stderr from inside the first real op.
+        let (prog, args) = Self::auth_probe_command();
+        self.run(&prog, &args)
+            .await
+            .map_err(|e| SandboxError::Config(auth_failure_message(&self.auth, &e.to_string())))?;
+        Ok(())
     }
 
     async fn ensure(&self, spec: &SandboxSpec) -> Result<BoxHandle, SandboxError> {
@@ -464,6 +603,7 @@ mod tests {
             remote_socket: "/home/me/.lazybox/run/daemon.sock".into(),
             local_socket: PathBuf::from("/tmp/lazybox.sock"),
             runner: Arc::new(SystemRunner),
+            auth: GcpAuth::default(),
         }
     }
 
@@ -473,12 +613,13 @@ mod tests {
         Fail,
     }
 
-    /// Returns queued outputs in order and records every `(program, args)`
-    /// so a sequencing test can assert both the commands run and their order.
+    /// Returns queued outputs in order and records every `(program, args,
+    /// env)` so a sequencing test can assert both the commands run and their
+    /// order, plus the credential env injected into each.
     #[derive(Debug)]
     struct ScriptedRunner {
         queue: Mutex<VecDeque<Result<String, ()>>>,
-        calls: Mutex<Vec<(String, Vec<String>)>>,
+        calls: Mutex<Vec<(String, Vec<String>, Vec<(String, String)>)>>,
     }
 
     impl ScriptedRunner {
@@ -496,17 +637,23 @@ mod tests {
             })
         }
 
-        fn calls(&self) -> Vec<(String, Vec<String>)> {
+        fn calls(&self) -> Vec<(String, Vec<String>, Vec<(String, String)>)> {
             self.calls.lock().expect("calls lock").clone()
         }
     }
 
     impl CommandRunner for ScriptedRunner {
-        fn run<'a>(&'a self, program: &'a str, args: &'a [String]) -> CommandFuture<'a, String> {
-            self.calls
-                .lock()
-                .expect("calls lock")
-                .push((program.to_string(), args.to_vec()));
+        fn run<'a>(
+            &'a self,
+            program: &'a str,
+            args: &'a [String],
+            env: &'a [(String, String)],
+        ) -> CommandFuture<'a, String> {
+            self.calls.lock().expect("calls lock").push((
+                program.to_string(),
+                args.to_vec(),
+                env.to_vec(),
+            ));
             let step = self
                 .queue
                 .lock()
@@ -532,8 +679,8 @@ mod tests {
     /// The action of a `gcloud compute …` call — `instances <verb>` yields
     /// the verb (`describe`/`start`/…), `ssh` yields `"ssh"`. Used to assert
     /// lifecycle sequencing across calls.
-    fn gcloud_action(call: &(String, Vec<String>)) -> Option<&str> {
-        let (prog, args) = call;
+    fn gcloud_action(call: &(String, Vec<String>, Vec<(String, String)>)) -> Option<&str> {
+        let (prog, args, _env) = call;
         if prog != "gcloud" || args.first().map(String::as_str) != Some("compute") {
             return None;
         }
@@ -775,7 +922,7 @@ mod tests {
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 3, "ensure runs init→apply→output");
-        assert!(calls.iter().all(|(prog, _)| prog == "terraform"));
+        assert!(calls.iter().all(|(prog, _, _)| prog == "terraform"));
         assert!(calls[0].1.contains(&"init".to_string()));
         assert!(calls[1].1.contains(&"apply".to_string()));
         assert!(calls[2].1.contains(&"output".to_string()));
@@ -860,5 +1007,133 @@ mod tests {
         let status = provider.status(&handle()).await.unwrap();
         assert_eq!(status.power, PowerState::Running);
         assert!(!status.reachable, "a failed probe reads as unreachable");
+    }
+
+    fn env_of(call: &(String, Vec<String>, Vec<(String, String)>)) -> Vec<(String, String)> {
+        call.2.clone()
+    }
+
+    #[test]
+    fn ambient_auth_injects_no_env() {
+        // Nothing configured → the legacy path: not a single env override, so
+        // the box lifecycle behaves exactly as before #1047.
+        let auth = GcpAuth::default();
+        assert!(auth.is_ambient());
+        assert!(auth.env().is_empty());
+    }
+
+    #[test]
+    fn service_account_key_injects_gcloud_and_terraform_creds() {
+        let auth = GcpAuth {
+            service_account_key: Some(PathBuf::from("/keys/sa.json")),
+            impersonate_service_account: None,
+            config_dir: Some(PathBuf::from("/scoped/gcloud")),
+        };
+        assert!(!auth.is_ambient());
+        let env = auth.env();
+        // Isolated gcloud config so the user's own is never touched…
+        assert!(env.contains(&("CLOUDSDK_CONFIG".into(), "/scoped/gcloud".into())));
+        // …gcloud reads the key via the override…
+        assert!(env.contains(&(
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE".into(),
+            "/keys/sa.json".into()
+        )));
+        // …and terraform's google provider via GOOGLE_APPLICATION_CREDENTIALS.
+        assert!(env.contains(&(
+            "GOOGLE_APPLICATION_CREDENTIALS".into(),
+            "/keys/sa.json".into()
+        )));
+    }
+
+    #[test]
+    fn impersonation_sets_both_gcloud_and_terraform_env() {
+        let auth = GcpAuth {
+            service_account_key: None,
+            impersonate_service_account: Some("deploy@p.iam.gserviceaccount.com".into()),
+            config_dir: Some(PathBuf::from("/scoped/gcloud")),
+        };
+        let env = auth.env();
+        assert!(env.contains(&(
+            "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT".into(),
+            "deploy@p.iam.gserviceaccount.com".into()
+        )));
+        assert!(env.contains(&(
+            "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT".into(),
+            "deploy@p.iam.gserviceaccount.com".into()
+        )));
+    }
+
+    #[tokio::test]
+    async fn every_op_carries_the_injected_credentials() {
+        // The whole point of #1047: credentials ride *every* gcloud/terraform
+        // call, not just the first. A real, existing key file so check_auth's
+        // existence guard passes and we exercise the injection end to end.
+        let key = std::env::temp_dir().join("lazybox-1047-sa.json");
+        std::fs::write(&key, b"{}").expect("write fake key");
+        let runner = ScriptedRunner::new(vec![Step::Out("token".to_string())]);
+        let mut provider = with_runner(runner.clone());
+        provider.auth = GcpAuth {
+            service_account_key: Some(key.clone()),
+            impersonate_service_account: None,
+            config_dir: None,
+        };
+
+        provider
+            .check_auth()
+            .await
+            .expect("valid creds pass preflight");
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1, "check_auth probes exactly once");
+        assert_eq!(calls[0].1, vec!["auth", "print-access-token"]);
+        let env = env_of(&calls[0]);
+        assert!(env.contains(&(
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE".into(),
+            key.display().to_string()
+        )));
+        std::fs::remove_file(&key).ok();
+    }
+
+    #[tokio::test]
+    async fn check_auth_flags_a_missing_key_before_spawning_gcloud() {
+        // A configured-but-absent key is the common misconfiguration; it must
+        // fail with a precise message and never reach the runner.
+        let runner = ScriptedRunner::new(vec![]);
+        let mut provider = with_runner(runner.clone());
+        provider.auth = GcpAuth {
+            service_account_key: Some(PathBuf::from("/definitely/not/here.json")),
+            impersonate_service_account: None,
+            config_dir: None,
+        };
+
+        let err = provider.check_auth().await.unwrap_err();
+        assert!(matches!(err, SandboxError::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("not found"), "{err}");
+        assert!(runner.calls().is_empty(), "no gcloud spawn on a bad path");
+    }
+
+    #[tokio::test]
+    async fn check_auth_maps_a_probe_failure_to_an_actionable_message() {
+        // Ambient path: the probe fails (no login) → the actionable "configure
+        // credentials or run gcloud auth login" message, not raw stderr.
+        let runner = ScriptedRunner::new(vec![Step::Fail]);
+        let provider = with_runner(runner);
+        let err = provider.check_auth().await.unwrap_err();
+        assert!(matches!(err, SandboxError::Config(_)), "{err:?}");
+        assert!(err.to_string().contains("not configured"), "{err}");
+    }
+
+    #[test]
+    fn auth_failure_message_depends_on_whether_creds_were_configured() {
+        let ambient = auth_failure_message(&GcpAuth::default(), "boom");
+        assert!(ambient.contains("gcloud auth login"), "{ambient}");
+        let configured = auth_failure_message(
+            &GcpAuth {
+                service_account_key: Some(PathBuf::from("/k.json")),
+                ..GcpAuth::default()
+            },
+            "boom",
+        );
+        assert!(configured.contains("expired"), "{configured}");
     }
 }

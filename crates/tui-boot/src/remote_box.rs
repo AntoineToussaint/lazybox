@@ -31,7 +31,7 @@ use lazybox_config::SandboxConfig;
 use lazybox_core::SessionKey;
 use lazybox_ipc::{Client, Command, socket};
 use lazybox_sandbox::gcp::GcpProvider;
-use lazybox_sandbox::{SandboxSpec, connect_box, persist};
+use lazybox_sandbox::{SandboxProvider, SandboxSpec, connect_box, persist};
 use lazybox_store::Store;
 use lazybox_tui_core::remote::RemoteBoxNotice;
 use tokio::sync::mpsc;
@@ -175,6 +175,9 @@ async fn bring_up(
     store: &dyn Store,
     ports: &[u16],
 ) -> anyhow::Result<(Client, tokio::task::JoinHandle<()>)> {
+    // Preflight the provider's own credentials so a missing/expired one drops
+    // as an actionable UI notice, not a raw terraform/gcloud failure (#1047).
+    provider.check_auth().await?;
     if let Some(parent) = provider.state_file.parent() {
         std::fs::create_dir_all(parent)?;
     }

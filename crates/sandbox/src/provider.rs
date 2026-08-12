@@ -63,6 +63,17 @@ pub trait SandboxProvider {
     /// Provider id, e.g. `"gcp"`.
     fn id(&self) -> &str;
 
+    /// Verify the provider's own credentials before the first lifecycle op,
+    /// failing with an actionable message ("gcp credentials not configured /
+    /// expired: <how to fix>") rather than a raw CLI stderr from deep inside
+    /// a later call. Auth is a per-provider concern (GCP = service-account
+    /// key / impersonation, E2B = API key, …), so it lives on the contract
+    /// (#1047). The default is a no-op: a provider whose credentials are
+    /// implicit needs no preflight.
+    async fn check_auth(&self) -> Result<(), SandboxError> {
+        Ok(())
+    }
+
     /// Create the box if it is absent (Terraform apply), returning a handle
     /// that later lifecycle ops address. Idempotent: a second `ensure` of
     /// the same spec converges rather than duplicating.

@@ -83,6 +83,7 @@ jobs:
             web:
               - ".github/workflows/ci.yml"
               - "crates/server/src/api_client.html"
+              - "crates/server/src/api_client_contract.json"
               - "web/**"
             desktop:
               - ".cargo/**"

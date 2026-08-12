@@ -1,0 +1,190 @@
+{
+  "endpoints": [
+    "/v1/health",
+    "/v1/workspaces",
+    "/v1/agents",
+    "/v1/events",
+    "/v1/commands",
+    "/v1/agents/inject",
+    "/v1/agents/output"
+  ],
+  "event_frame": {
+    "payload": {
+      "PollCompleted": {
+        "count": 3,
+        "source": "github"
+      }
+    },
+    "type": "Event"
+  },
+  "protocol_version": 3,
+  "requests": {
+    "spawn_agent": {
+      "payload": {
+        "Spawn": {
+          "access": "Default",
+          "client_request_id": "web-1",
+          "cwd": null,
+          "initial_prompt": null,
+          "kind": {
+            "Agent": "claude"
+          },
+          "model_alias": null,
+          "on_main": false,
+          "session_id": null,
+          "session_key": "github:o/r#42"
+        }
+      },
+      "type": "Command"
+    },
+    "spawn_shell": {
+      "payload": {
+        "Spawn": {
+          "access": "Default",
+          "client_request_id": "web-2",
+          "cwd": null,
+          "initial_prompt": null,
+          "kind": "Shell",
+          "model_alias": null,
+          "on_main": false,
+          "session_id": null,
+          "session_key": "github:o/r#42"
+        }
+      },
+      "type": "Command"
+    }
+  },
+  "responses": {
+    "agents": {
+      "agents": [
+        {
+          "agent": "claude",
+          "last_prompt": "Review the current diff.",
+          "last_prompt_at": 1700000000000,
+          "model": "Opus",
+          "no_permission": false,
+          "on_main": false,
+          "repo": "o/r",
+          "session_started_at": "2023-11-14T22:13:20Z",
+          "state": "Working",
+          "task": {
+            "ci": "Success",
+            "id": "github:o/r#42",
+            "kind": "pr",
+            "number": 42,
+            "repo": "o/r",
+            "title": "PR o/r#42",
+            "url": "https://github.com/o/r/pull/42"
+          },
+          "terminal_id": 7,
+          "workspace_key": "github-o-r-42",
+          "workspace_name": "PR o/r#42"
+        }
+      ],
+      "warnings": []
+    },
+    "command": {
+      "client_request_id": "web-1",
+      "completed": true,
+      "error": null,
+      "events": [],
+      "ok": true
+    },
+    "health": {
+      "ok": true,
+      "service": "lazybox-api-gateway"
+    },
+    "inject": {
+      "accepted": true,
+      "terminal_id": 7,
+      "workspace": "github:o/r#42"
+    },
+    "output": {
+      "lines": 1,
+      "output": "api-ok\n",
+      "terminal_id": 7,
+      "workspace": "github:o/r#42"
+    },
+    "workspaces": {
+      "warnings": [
+        "one persisted row could not be decoded"
+      ],
+      "workspaces": [
+        {
+          "activity": [],
+          "auto_merge_on_green": false,
+          "base_branch": null,
+          "branch": "github-o-r-42",
+          "cleanup_prompt": "unresolved",
+          "created_at": "2023-11-14T22:13:20Z",
+          "gh_issues": [],
+          "key": "github-o-r-42",
+          "last_viewed_at": null,
+          "linear_issues": [],
+          "linked_checkout": null,
+          "local": false,
+          "name": "PR o/r#42",
+          "notes": "",
+          "policies": {
+            "auto_fix_ci": "Default",
+            "auto_fix_conflict": "Default"
+          },
+          "pr": {
+            "additions": 0,
+            "approval_policy": "Default",
+            "assignees": [],
+            "author": "",
+            "auto_merge_enabled": false,
+            "base_branch": null,
+            "body": null,
+            "branch": null,
+            "changed_files": 0,
+            "checks": [],
+            "ci": "Success",
+            "closed_at": null,
+            "closes_issues": [],
+            "created_at": null,
+            "deletions": 0,
+            "id": {
+              "key": "o/r#42",
+              "source": "github"
+            },
+            "is_behind_base": false,
+            "is_in_merge_queue": false,
+            "kind": null,
+            "labels": [],
+            "last_commenter": null,
+            "linked_tasks": [],
+            "merge_blocked": false,
+            "mergeable": "Mergeable",
+            "needs_reply": false,
+            "node_id": null,
+            "priority": null,
+            "recent_activity": [],
+            "repo": "o/r",
+            "review": "Pending",
+            "reviewers": [],
+            "reviews": [],
+            "role": "Reviewer",
+            "state": "Open",
+            "state_label": null,
+            "title": "PR o/r#42",
+            "unread_count": 0,
+            "updated_at": "2023-11-14T22:13:20Z",
+            "url": "https://github.com/o/r/pull/42"
+          },
+          "project_key": "github-o-r",
+          "read_indices": [],
+          "remote": null,
+          "schema": 3,
+          "seen_count": 0,
+          "sent_snippets": [],
+          "sessions": [],
+          "snoozed_until": null,
+          "track_main": false,
+          "track_main_behind": false
+        }
+      ]
+    }
+  }
+}

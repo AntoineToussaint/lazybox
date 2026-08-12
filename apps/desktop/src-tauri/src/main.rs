@@ -1098,6 +1098,26 @@ fn open_url(url: String) -> Result<(), String> {
     lazybox_tui_core::editors::open_url(&url, None).map_err(|error| format!("open {url}: {error}"))
 }
 
+/// The URL of the browser web-control client (`api_client.html`), served
+/// at the root of the gateway this desktop is attached to. Splitting the
+/// derivation out keeps it unit-testable without a running gateway.
+fn web_control_url(base_url: &str) -> String {
+    format!("{}/", base_url.trim_end_matches('/'))
+}
+
+/// Open the browser web-control client in the user's default browser. It
+/// drives the same `/v1` gateway this desktop uses — embedded loopback or
+/// a remote, SSH-forwarded one — so web control is a first-class peer of
+/// this window, not a separate un-chromed page. Returns the opened URL so
+/// the frontend can flash it.
+#[tauri::command]
+fn open_web_control(state: State<'_, DesktopState>) -> Result<String, String> {
+    let url = web_control_url(&state.gateway.base_url);
+    lazybox_tui_core::editors::open_url(&url, None)
+        .map_err(|error| format!("open {url}: {error}"))?;
+    Ok(url)
+}
+
 #[tauri::command]
 async fn open_workspace_editor(
     state: State<'_, DesktopState>,
@@ -2703,6 +2723,7 @@ fn main() {
             set_search,
             snippet_view,
             open_url,
+            open_web_control,
             open_workspace_editor,
             resolve_work_prompt,
             send_command,
@@ -2894,6 +2915,19 @@ mod tests {
             "http://127.0.0.1:1234/v1/terminal"
         );
         assert!(!gateway.url("/v1/terminal").contains("secret"));
+    }
+
+    #[test]
+    fn web_control_url_points_at_the_gateway_root_without_a_double_slash() {
+        assert_eq!(
+            web_control_url("http://127.0.0.1:1808"),
+            "http://127.0.0.1:1808/"
+        );
+        // A trailing slash on the base must not double up.
+        assert_eq!(
+            web_control_url("http://127.0.0.1:1808/"),
+            "http://127.0.0.1:1808/"
+        );
     }
 
     #[test]

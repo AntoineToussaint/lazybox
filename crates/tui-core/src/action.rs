@@ -2638,16 +2638,17 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_kill(workspace),
             intent::Intent::KillWorkspace { .. },
         ),
-        // Only on GitHub issue-only workspaces whose issue is still
-        // open — a workspace with a PR acts on the PR, an
-        // already-closed issue has nothing to close, and Linear closes
-        // aren't wired through the provider yet, so gate on a still-open
-        // github issue.
+        // Only on issue-only workspaces whose issue is still open — a
+        // workspace with a PR acts on the PR, and an already-closed
+        // issue has nothing to close. Both GitHub and Linear issues
+        // route through the provider's `close_issue` now (#1060).
         ActionKind::CloseIssue => workspace
             .map(|w| {
                 w.pr.is_none()
                     && w.gh_issues
-                        .first()
+                        .iter()
+                        .chain(w.linear_issues.iter())
+                        .next()
                         .is_some_and(|i| i.state != lazybox_core::TaskState::Closed)
             })
             .unwrap_or(false),

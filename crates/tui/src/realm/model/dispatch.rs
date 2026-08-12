@@ -604,7 +604,9 @@ impl<T: TerminalAdapter> Model<T> {
                                 "closing issue{}…",
                                 task_number_suffix(
                                     ws.gh_issues
-                                        .first()
+                                        .iter()
+                                        .chain(ws.linear_issues.iter())
+                                        .next()
                                         .map(|i| i.id.key.as_str())
                                         .unwrap_or("")
                                 )
@@ -1635,13 +1637,15 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::AddAssignees => {
                 if let Some(ws) = self.sidebar.selected_workspace() {
-                    // Assignment requires a GraphQL Assignable id —
-                    // PR or gh issue with a node_id. Empty pre-PR
-                    // workspaces don't qualify.
+                    // Assignment requires a provider assignable id — a
+                    // PR, gh issue, or Linear issue with a node_id.
+                    // Empty pre-PR workspaces don't qualify.
                     let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
                         || ws
                             .gh_issues
-                            .first()
+                            .iter()
+                            .chain(ws.linear_issues.iter())
+                            .next()
                             .map(|i| i.node_id.is_some())
                             .unwrap_or(false);
                     if has_target {

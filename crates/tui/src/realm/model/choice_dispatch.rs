@@ -537,7 +537,11 @@ impl<T: TerminalAdapter> Model<T> {
                 self.optimistic_chip_edit(&workspace_key, "assignees", |workspace| {
                     if let Some(pr) = workspace.pr.as_mut() {
                         pr.assignees = logins.clone();
-                    } else if let Some(issue) = workspace.gh_issues.first_mut() {
+                    } else if let Some(issue) = workspace
+                        .gh_issues
+                        .first_mut()
+                        .or_else(|| workspace.linear_issues.first_mut())
+                    {
                         issue.assignees = logins.clone();
                     }
                 });

@@ -76,6 +76,7 @@ query($after: String) {{
       team {{ key }}
       labels(first: 10) {{ nodes {{ name }} }}
       attachments(first: 20) {{ nodes {{ url }} }}
+      comments(first: 50) {{ nodes {{ id body createdAt user {{ id name }} }} }}
     }}
   }}
 }}
@@ -170,6 +171,28 @@ pub struct Issue {
     /// GitHub URL — the authoritative cross-provider link (#922).
     #[serde(default)]
     pub attachments: Option<Attachments>,
+    /// The issue's comment thread — drives `recent_activity` and the
+    /// real `needs_reply` / `last_commenter` signals (#1060).
+    #[serde(default)]
+    pub comments: Option<Comments>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Comments {
+    pub nodes: Vec<Comment>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Comment {
+    pub id: String,
+    pub body: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: DateTime<Utc>,
+    /// The commenter. `None` for system/integration comments with no
+    /// backing user — dropped from the activity feed, mirroring the
+    /// GitHub mapper's author filter.
+    #[serde(default)]
+    pub user: Option<Person>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -255,9 +278,48 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         .map(|n| vec![n])
         .unwrap_or_default();
 
-    // Linear has no "activity" endpoint in this simple query — we skip
-    // comment threads for now. A richer query can fill them in later.
-    let activity: Vec<Activity> = vec![];
+    // Comment thread → source-agnostic activity, oldest-first so
+    // `.last()` is the newest comment (matching the GitHub issue
+    // mapper). Comments with no backing user (system/integration
+    // events) are dropped.
+    let mut comments: Vec<&Comment> = issue
+        .comments
+        .as_ref()
+        .map(|c| c.nodes.iter().filter(|n| n.user.is_some()).collect())
+        .unwrap_or_default();
+    comments.sort_by_key(|c| c.created_at);
+    let activity: Vec<Activity> = comments
+        .iter()
+        .filter_map(|c| {
+            let user = c.user.as_ref()?;
+            Some(Activity {
+                author: user.name.clone().unwrap_or_default(),
+                body: c.body.clone(),
+                created_at: c.created_at,
+                kind: ActivityKind::Comment,
+                node_id: Some(c.id.clone()),
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            })
+        })
+        .collect();
+
+    // The newest comment being from someone other than the viewer
+    // means the ball is in our court; `last_commenter` names that
+    // person. Compared by user id (stable) rather than display name.
+    let needs_reply = comments
+        .last()
+        .and_then(|c| c.user.as_ref())
+        .map(|u| u.id != viewer_id)
+        .unwrap_or(false);
+    let last_commenter = comments
+        .iter()
+        .rev()
+        .filter_map(|c| c.user.as_ref())
+        .find(|u| u.id != viewer_id)
+        .and_then(|u| u.name.clone());
 
     // Cross-provider link (#922): Linear's GitHub integration records a
     // linked PR as an attachment whose URL is the PR's GitHub URL. Parse
@@ -286,7 +348,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         ci: CiStatus::None,
         review: ReviewStatus::None,
         checks: vec![],
-        unread_count: 0,
+        unread_count: activity.len() as u32,
         url: issue.url.clone(),
         repo: issue.team.as_ref().map(|t| format!("linear/{}", t.key)),
         branch: None,
@@ -310,8 +372,8 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         merge_blocked: false,
         approval_policy: Default::default(),
         node_id: Some(issue.id.clone()),
-        needs_reply: false,
-        last_commenter: None,
+        needs_reply,
+        last_commenter,
         recent_activity: activity,
         additions: 0,
         deletions: 0,
@@ -356,13 +418,6 @@ fn github_pr_id_from_url(url: &str) -> Option<TaskId> {
         source: "github".into(),
         key: format!("{owner}/{repo}#{number}"),
     })
-}
-
-/// Suppress lint for unused `ActivityKind` import since Linear's simple
-/// query doesn't surface activities yet.
-#[allow(dead_code)]
-fn _activity_kind_imported() {
-    let _ = ActivityKind::Comment;
 }
 
 #[cfg(test)]
@@ -491,6 +546,7 @@ mod tests {
                     .map(|u| Attachment { url: (*u).into() })
                     .collect(),
             }),
+            comments: None,
         }
     }
 
@@ -533,5 +589,109 @@ mod tests {
     fn issue_to_task_leaves_body_none_without_description() {
         let issue = issue_with_attachments(&[]);
         assert_eq!(issue_to_task(&issue, "viewer").body, None);
+    }
+
+    fn comment(id: &str, user_id: &str, name: &str, secs: i64) -> Comment {
+        Comment {
+            id: id.into(),
+            body: format!("comment {id}"),
+            created_at: DateTime::from_timestamp(secs, 0).expect("valid timestamp"),
+            user: Some(Person {
+                id: user_id.into(),
+                name: Some(name.into()),
+            }),
+        }
+    }
+
+    #[test]
+    fn issue_to_task_maps_comment_threads_to_activity() {
+        // #1060: comment threads land on `recent_activity`, oldest-first
+        // by created_at regardless of the order Linear returned them.
+        let mut issue = issue_with_attachments(&[]);
+        issue.comments = Some(Comments {
+            nodes: vec![
+                comment("c2", "them", "Them", 200),
+                comment("c1", "me", "Me", 100),
+            ],
+        });
+        let task = issue_to_task(&issue, "me");
+        assert_eq!(task.recent_activity.len(), 2);
+        assert_eq!(task.recent_activity[0].node_id.as_deref(), Some("c1"));
+        assert_eq!(task.recent_activity[1].node_id.as_deref(), Some("c2"));
+        assert_eq!(task.recent_activity[0].author, "Me");
+        assert!(matches!(
+            task.recent_activity[0].kind,
+            ActivityKind::Comment
+        ));
+        assert_eq!(task.unread_count, 2);
+    }
+
+    #[test]
+    fn issue_to_task_needs_reply_when_last_comment_is_from_other() {
+        let mut issue = issue_with_attachments(&[]);
+        issue.comments = Some(Comments {
+            nodes: vec![
+                comment("c1", "me", "Me", 100),
+                comment("c2", "them", "Them", 200),
+            ],
+        });
+        let task = issue_to_task(&issue, "me");
+        assert!(task.needs_reply, "newest comment is from someone else");
+        assert_eq!(task.last_commenter.as_deref(), Some("Them"));
+    }
+
+    #[test]
+    fn issue_to_task_no_reply_when_last_comment_is_mine() {
+        let mut issue = issue_with_attachments(&[]);
+        issue.comments = Some(Comments {
+            nodes: vec![
+                comment("c1", "them", "Them", 100),
+                comment("c2", "me", "Me", 200),
+            ],
+        });
+        let task = issue_to_task(&issue, "me");
+        assert!(!task.needs_reply, "I had the last word");
+        // last_commenter is the most recent commenter that isn't me.
+        assert_eq!(task.last_commenter.as_deref(), Some("Them"));
+    }
+
+    #[test]
+    fn issue_to_task_drops_authorless_comments() {
+        // System / integration comments carry no user; they must not
+        // appear in the activity feed nor drive needs_reply.
+        let mut issue = issue_with_attachments(&[]);
+        issue.comments = Some(Comments {
+            nodes: vec![
+                comment("c1", "them", "Them", 100),
+                Comment {
+                    id: "system".into(),
+                    body: "moved to In Progress".into(),
+                    created_at: DateTime::from_timestamp(300, 0).expect("valid timestamp"),
+                    user: None,
+                },
+            ],
+        });
+        let task = issue_to_task(&issue, "me");
+        assert_eq!(task.recent_activity.len(), 1);
+        assert!(
+            task.needs_reply,
+            "the authorless system event is ignored; last real comment is theirs"
+        );
+    }
+
+    #[test]
+    fn issue_to_task_no_activity_without_comments() {
+        let issue = issue_with_attachments(&[]);
+        let task = issue_to_task(&issue, "me");
+        assert!(task.recent_activity.is_empty());
+        assert!(!task.needs_reply);
+        assert_eq!(task.last_commenter, None);
+        assert_eq!(task.unread_count, 0);
+    }
+
+    #[test]
+    fn query_requests_comment_threads() {
+        let q = query_for(&LinearScope::default_scopes());
+        assert!(q.contains("comments("), "issue query must pull comments");
     }
 }

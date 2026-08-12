@@ -450,6 +450,37 @@ impl Id {
     pub(crate) fn consumes_scroll(&self) -> bool {
         matches!(self, Id::DescriptionModal)
     }
+
+    /// Whether a *buffered* keystroke should still be delivered to this
+    /// modal after a run-loop stall, rather than dropped by the
+    /// stale-input guard (`should_drop_stale_input`, #1055).
+    ///
+    /// The guard drops key/mouse events older than `STALE_INPUT_MAX_AGE`
+    /// so a recovered UI doesn't burst-fire a pane backlog against a
+    /// selection that moved while the loop was behind (#49). That
+    /// rationale is a *pane* concern: it does not hold for these modals,
+    /// which are user-invoked, non-destructive, and render stable,
+    /// centered content that a stall does not change. Their keystrokes
+    /// are the whole interaction — filter chars and the Enter that picks
+    /// — so dropping them makes the picker read as frozen ("can't send
+    /// snippets", the #1055 report) exactly when an agent stream is busy
+    /// enough to age a keystroke past the bound.
+    ///
+    /// Deliberately excludes the confirm modals (a stale `Enter` must
+    /// never auto-confirm a merge/archive/removal) and anything a daemon
+    /// event can auto-mount under a stall, so replaying buffered keys can
+    /// only ever advance a picker the user opened themselves.
+    pub(crate) fn retains_stale_keys(&self) -> bool {
+        matches!(
+            self,
+            Id::SnippetPicker
+                | Id::SkillPicker
+                | Id::SnippetBrowser
+                | Id::JumpPicker
+                | Id::PromptHistoryPicker
+                | Id::UrlPicker
+        )
+    }
 }
 
 /// The PR/issue an open "Ask about this PR" chat is about (#945),

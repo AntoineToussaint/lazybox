@@ -5776,10 +5776,11 @@ mod stale_input_tests {
     #[test]
     fn fresh_input_is_never_dropped() {
         for ev in [key_event(), mouse_event(), Event::Paste("hi".into())] {
-            assert!(!should_drop_stale_input(&ev, Duration::ZERO));
+            assert!(!should_drop_stale_input(&ev, Duration::ZERO, false));
             assert!(!should_drop_stale_input(
                 &ev,
-                STALE_INPUT_MAX_AGE - Duration::from_millis(1)
+                STALE_INPUT_MAX_AGE - Duration::from_millis(1),
+                false,
             ));
         }
     }
@@ -5790,8 +5791,8 @@ mod stale_input_tests {
     #[test]
     fn stale_keys_and_mouse_are_dropped() {
         let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
-        assert!(should_drop_stale_input(&key_event(), age));
-        assert!(should_drop_stale_input(&mouse_event(), age));
+        assert!(should_drop_stale_input(&key_event(), age, false));
+        assert!(should_drop_stale_input(&mouse_event(), age, false));
     }
 
     /// Paste is deliberate content (dropping it loses user data) and
@@ -5800,9 +5801,65 @@ mod stale_input_tests {
     #[test]
     fn stale_paste_and_focus_are_kept() {
         let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
-        assert!(!should_drop_stale_input(&Event::Paste("body".into()), age));
-        assert!(!should_drop_stale_input(&Event::FocusGained, age));
-        assert!(!should_drop_stale_input(&Event::FocusLost, age));
+        assert!(!should_drop_stale_input(
+            &Event::Paste("body".into()),
+            age,
+            false
+        ));
+        assert!(!should_drop_stale_input(&Event::FocusGained, age, false));
+        assert!(!should_drop_stale_input(&Event::FocusLost, age, false));
+    }
+
+    /// #1055: while a filter-picker owns input, a buffered keystroke is
+    /// kept, not dropped — its content is stable so the key still lands
+    /// where the user aimed it. A stale *mouse* click stays dropped even
+    /// then (its target coordinates can be wrong), and the picker
+    /// exemption never rescues pane input.
+    #[test]
+    fn stale_key_survives_for_a_retaining_modal() {
+        let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
+        assert!(
+            !should_drop_stale_input(&key_event(), age, true),
+            "a picker's buffered key must reach it",
+        );
+        assert!(
+            should_drop_stale_input(&mouse_event(), age, true),
+            "a stale click's coordinates can still be wrong",
+        );
+        assert!(
+            should_drop_stale_input(&key_event(), age, false),
+            "pane input is unaffected by the picker exemption",
+        );
+    }
+
+    /// The stale-key exemption covers exactly the non-destructive,
+    /// user-opened filter-pickers and never a confirm — a stall must not
+    /// let a buffered `Enter` auto-confirm a merge/archive/removal (#1055).
+    #[test]
+    fn only_filter_pickers_retain_stale_keys() {
+        use crate::realm::model::Id;
+        for id in [
+            Id::SnippetPicker,
+            Id::SkillPicker,
+            Id::SnippetBrowser,
+            Id::JumpPicker,
+            Id::PromptHistoryPicker,
+            Id::UrlPicker,
+        ] {
+            assert!(id.retains_stale_keys(), "{id:?} should retain stale keys");
+        }
+        for id in [
+            Id::MergeConfirm,
+            Id::ActionConfirm,
+            Id::BulkSpawnConfirm,
+            Id::RemoveOutOfScope,
+            Id::Reply,
+        ] {
+            assert!(
+                !id.retains_stale_keys(),
+                "{id:?} must drop stale keys — a stale Enter can't auto-confirm",
+            );
+        }
     }
 
     /// The tally batches a whole recovery burst into one report:

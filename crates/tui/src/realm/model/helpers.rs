@@ -746,14 +746,27 @@ pub(super) const STALE_INPUT_MAX_AGE: Duration = Duration::from_millis(500);
 /// a stall. Paste stays: it's deliberate content, not an action, and
 /// dropping it silently loses user data. Focus/resize stay: they
 /// describe *current* terminal state regardless of when they fired.
-pub(super) fn should_drop_stale_input(event: &crossterm::event::Event, age: Duration) -> bool {
+///
+/// `modal_retains_keys` is set when a modal that owns input keeps its
+/// buffered keys across a stall (`Id::retains_stale_keys` — the
+/// non-destructive filter-pickers, #1055): their content is stable and
+/// centered, so a queued keystroke still lands where the user aimed it.
+/// It only exempts keys — a stale mouse click's target coordinates can
+/// still be wrong — and only for those modals; pane input and the
+/// confirm modals keep dropping.
+pub(super) fn should_drop_stale_input(
+    event: &crossterm::event::Event,
+    age: Duration,
+    modal_retains_keys: bool,
+) -> bool {
     if age < STALE_INPUT_MAX_AGE {
         return false;
     }
-    matches!(
-        event,
-        crossterm::event::Event::Key(_) | crossterm::event::Event::Mouse(_)
-    )
+    match event {
+        crossterm::event::Event::Key(_) => !modal_retains_keys,
+        crossterm::event::Event::Mouse(_) => true,
+        _ => false,
+    }
 }
 
 /// Whether a host-terminal event is a mouse-wheel scroll. Scroll is the
@@ -1402,7 +1415,14 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 // must never burst-fire seconds of queued clicks and
                 // keystrokes (least of all a buffered quit chord).
                 let age = timed.read_at.elapsed();
-                if should_drop_stale_input(&timed.event, age) {
+                // A user-opened filter-picker keeps its buffered keys
+                // across a stall — its content is stable, so a queued
+                // keystroke still lands where it was aimed (#1055).
+                let modal_retains_keys = model
+                    .modal_stack
+                    .last()
+                    .is_some_and(super::Id::retains_stale_keys);
+                if should_drop_stale_input(&timed.event, age, modal_retains_keys) {
                     stale_tally.note(age);
                 } else {
                     report_stale_drops(model, &mut stale_tally, &mut perf);

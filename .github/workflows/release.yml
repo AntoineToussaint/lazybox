@@ -227,6 +227,10 @@ jobs:
 
   desktop-release-check:
     needs: plan
+    # Temporarily disabled alongside the desktop MVP CI job (see
+    # ci.yml). The publish gate below tolerates this job being skipped;
+    # re-enable by dropping `if: false` when desktop ships again.
+    if: false
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
@@ -273,7 +277,7 @@ jobs:
       - custom-smoke-release-artifacts
       - desktop-release-check
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.desktop-release-check.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-smoke-release-artifacts.result == 'skipped' || needs.custom-smoke-release-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.desktop-release-check.result == 'skipped' || needs.desktop-release-check.result == 'success') && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-smoke-release-artifacts.result == 'skipped' || needs.custom-smoke-release-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

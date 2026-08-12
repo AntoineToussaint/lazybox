@@ -6,6 +6,17 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-12
+
+A reliability and responsiveness patch on top of 0.1.9. Highlights: the UI no
+longer freezes during heavy GitHub sync (input stays live under poll bursts and
+on wake-from-sleep), multi-select actions fan out to every selected workspace,
+and merge failures are humanized with actionable next steps. Linear support is
+steadier — tighter scope, saner sync cadence, description rendering, and
+`w w` repo routing. The desktop client gets a two-column layout and stops
+auto-resizing, and CI/build hygiene improves. Numerous smaller inbox, snippet,
+and terminal-rendering fixes round it out.
+
 ## [0.1.9] - 2026-07-30
 
 This release makes lazybox a steadier control surface for long-running agent
@@ -219,6 +230,8 @@ Then run `gh auth login` if needed and launch `lazybox`.
   have explicit capacity and shutdown bounds instead of growing or hanging
   indefinitely under load.
 
-[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.10...HEAD
+[0.1.10]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.6...v0.1.7

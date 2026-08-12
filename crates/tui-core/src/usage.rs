@@ -27,14 +27,17 @@ use lazybox_ipc::{AgentRunId, AgentUsage};
 /// Cells in the `▓▓▓░░` progress bar.
 const BAR_WIDTH: usize = 5;
 
-/// Every token field a usage event reports, summed. A running proxy for
-/// "tokens processed against the plan window" — input, output, and both
-/// cache legs all draw down the same allowance.
+/// New tokens a usage event reports: input, output, and cache *creation*.
+/// Cache *reads* are deliberately excluded — they re-read
+/// already-counted context every turn and balloon with conversation
+/// length, so folding them in would let a long session's re-read dominate
+/// the total and read far higher than the work actually drawn from the
+/// plan window. Cache creation stays because it is genuinely new content
+/// written to the cache, bounded by the turn's real input.
 fn event_tokens(usage: &AgentUsage) -> u64 {
     usage.input_tokens.unwrap_or(0)
         + usage.output_tokens.unwrap_or(0)
         + usage.cache_creation_input_tokens.unwrap_or(0)
-        + usage.cache_read_input_tokens.unwrap_or(0)
 }
 
 /// Running token totals per agent id, joined from the two disjoint daemon
@@ -47,15 +50,17 @@ pub struct UsageTracker {
     runs: HashMap<AgentRunId, String>,
     /// `agent id → committed tokens`, summed across finished turns.
     tokens: BTreeMap<String, u64>,
-    /// Per-run high-water mark for the turn in flight, not yet committed.
+    /// Latest usage reported for the turn in flight, not yet committed.
     ///
     /// A single Claude turn reports usage more than once — one or more
     /// streaming `message_delta` events (each carrying the message's
     /// *cumulative* usage) plus a final `result` total — all arriving as
     /// `Event::AgentUsage`. Summing every event double-counts the turn.
-    /// Instead we keep the turn's high-water mark here and commit it once,
-    /// when the turn (or the run) ends, so the total gains each turn's
-    /// authoritative figure exactly once.
+    /// The authoritative per-turn figure is the `result` total, which the
+    /// daemon emits last (immediately before `AgentTurnFinished`). So we
+    /// keep the *latest* report here and commit it once, when the turn (or
+    /// the run) ends — the total gains each turn's `result` figure exactly
+    /// once, without assuming any ordering between the report magnitudes.
     pending: HashMap<AgentRunId, u64>,
 }
 
@@ -66,17 +71,16 @@ impl UsageTracker {
         self.runs.insert(run_id, agent_id.into());
     }
 
-    /// Observe one usage report for a run's in-flight turn, keeping the
-    /// turn's high-water mark rather than adding — repeated cumulative
-    /// reports within a turn must not multiply. A report for an unknown
-    /// run (its start was missed) is dropped rather than bucketed under a
-    /// placeholder.
+    /// Observe one usage report for a run's in-flight turn, keeping only
+    /// the latest — repeated cumulative reports within a turn must not
+    /// multiply, and the last report is the authoritative `result` total
+    /// (see [`Self::pending`]). A report for an unknown run (its start was
+    /// missed) is dropped rather than bucketed under a placeholder.
     pub fn observe_usage(&mut self, run_id: AgentRunId, usage: &AgentUsage) {
         if !self.runs.contains_key(&run_id) {
             return;
         }
-        let mark = self.pending.entry(run_id).or_default();
-        *mark = (*mark).max(event_tokens(usage));
+        self.pending.insert(run_id, event_tokens(usage));
     }
 
     /// Commit the in-flight turn's high-water mark into its agent total
@@ -294,6 +298,19 @@ mod tests {
     }
 
     #[test]
+    fn latest_report_is_committed_not_the_largest() {
+        // The final `result` is authoritative even if a mid-turn report
+        // happened to read higher — we commit the last report, not a
+        // high-water mark, so no ordering-of-magnitude assumption is made.
+        let mut tracker = UsageTracker::default();
+        tracker.note_run(AgentRunId(1), "claude");
+        tracker.observe_usage(AgentRunId(1), &usage(0, 900));
+        tracker.observe_usage(AgentRunId(1), &usage(400, 200)); // result total
+        tracker.commit_turn(&AgentRunId(1));
+        assert_eq!(tracker.tokens_for("claude"), 600);
+    }
+
+    #[test]
     fn multi_turn_run_accrues_each_turn() {
         let mut tracker = UsageTracker::default();
         tracker.note_run(AgentRunId(1), "claude");
@@ -305,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn every_token_leg_counts() {
+    fn counts_new_tokens_but_not_cache_reads() {
         let mut tracker = UsageTracker::default();
         tracker.note_run(AgentRunId(7), "claude");
         tracker.observe_usage(
@@ -314,12 +331,14 @@ mod tests {
                 input_tokens: Some(1),
                 output_tokens: Some(2),
                 cache_creation_input_tokens: Some(4),
-                cache_read_input_tokens: Some(8),
+                // Re-read context — excluded, or a long session's re-reads
+                // would dominate the total.
+                cache_read_input_tokens: Some(1_000_000),
                 cost_usd_micros: None,
             },
         );
         tracker.commit_turn(&AgentRunId(7));
-        assert_eq!(tracker.tokens_for("claude"), 15);
+        assert_eq!(tracker.tokens_for("claude"), 7);
     }
 
     #[test]

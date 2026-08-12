@@ -70,6 +70,18 @@ pub struct WorkspaceRowCtx<'a> {
     /// the animation costs one glyph lookup per working row, no
     /// per-tick row rebuild.
     pub working_glyph: &'static str,
+    /// This workspace is provisioning its first spawn (cloning, worktree,
+    /// setup, launching the agent) and no terminal has reported an
+    /// `AgentState` yet (#1069). Renders the animated "spawning" arc in
+    /// the shared state slot so the row reads as *coming up* rather than
+    /// blank until the agent is live. Lowest precedence — any live agent
+    /// signal (asking/working/done/exited) wins, though they're disjoint
+    /// upstream (a spawning workspace has no agent state yet).
+    pub spawning: bool,
+    /// Current glyph for the `spawning` slot — a rotating arc, sharing
+    /// the same frame counter as `working_glyph` but a distinct frame set
+    /// so a starting-up row reads differently from a running one.
+    pub spawning_glyph: &'static str,
     /// `Sidebar::runner_badges(key)` — `[('C', n), ('S', m)]` etc.
     pub badges: Vec<(char, usize)>,
     /// `Sidebar::agent_models(key)` — the model + effort label to show
@@ -464,12 +476,16 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///   - `Exited`      → ` ✗ ` (dim) — a static glyph: the agent process
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
+///   - `Spawning`    → ` <arc> ` (dim) — an animated glyph: the workspace
+///     is provisioning (clone / worktree / launch) and the agent is
+///     *coming*, before any terminal reports state (#1069). A distinct
+///     spinner from `Working` so "starting up" doesn't read as "running".
 ///   - `Idle`        → blank.
 /// Reserved width either way so the kind/title to the right don't
 /// jitter as a row moves between states. Precedence limit-reached >
-/// asking > working > done > exited, applied defensively though the
-/// states are disjoint upstream (a live signal always wins over the
-/// terminal exit marker).
+/// asking > working > done > exited > spawning, applied defensively
+/// though the states are disjoint upstream (a live signal always wins
+/// over the terminal exit marker and over the pre-terminal spawn arc).
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let (glyph, fg) = if ctx.limit_reached {
         ("⏳", ctx.theme.warn)
@@ -481,6 +497,8 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ("✓", ctx.theme.success)
     } else if ctx.exited {
         ("✗", ctx.theme.text_dim)
+    } else if ctx.spawning {
+        (ctx.spawning_glyph, ctx.theme.text_dim)
     } else {
         return Cell::empty();
     };
@@ -511,6 +529,18 @@ pub(crate) const WORKING_SPINNER_FRAMES: &[&str] =
 /// caller's counter can grow unbounded.
 pub(crate) fn working_glyph(frame: usize) -> &'static str {
     WORKING_SPINNER_FRAMES[frame % WORKING_SPINNER_FRAMES.len()]
+}
+
+/// Spinner frames for the "spawning" state slot (#1069) — a rotating
+/// arc, deliberately distinct from the `Working` braille cycle so a row
+/// that is *coming up* (cloning / worktree / launching the agent) reads
+/// differently from one actively running.
+pub(crate) const SPAWNING_SPINNER_FRAMES: &[&str] = &["◜", "◠", "◝", "◞", "◡", "◟"];
+
+/// Resolve the spawning arc glyph for a given frame index. Wraps, so the
+/// shared frame counter can grow unbounded.
+pub(crate) fn spawning_glyph(frame: usize) -> &'static str {
+    SPAWNING_SPINNER_FRAMES[frame % SPAWNING_SPINNER_FRAMES.len()]
 }
 
 fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -1243,6 +1273,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -1600,6 +1632,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -2040,6 +2074,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -3190,6 +3226,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,

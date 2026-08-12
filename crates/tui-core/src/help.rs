@@ -308,7 +308,9 @@ fn section_scope(section: crate::action::Section) -> &'static str {
 /// gives keybindings (#883). This is why Ask Lazybox can explain a pill
 /// like `CHANGES` without anyone hand-writing it into the prose docs.
 fn push_markers(out: &mut String) {
-    use crate::markers::{MarkerDoc, agent_state_docs, row_badge_docs, status_pill_docs};
+    use crate::markers::{
+        MarkerDoc, agent_state_docs, row_badge_docs, spawning_doc, status_pill_docs,
+    };
 
     fn write_group(out: &mut String, docs: &[MarkerDoc]) {
         for doc in docs {
@@ -333,6 +335,10 @@ terminal/blocker state (merged, closed, conflict, …) overrides both. Most seve
 badge) showing what the workspace's agent is doing:\n",
     );
     write_group(out, &agent_state_docs());
+    // The pre-terminal "spawning" arc (#1069) — a row-level provisioning
+    // indicator, not an `AgentState`, so it's documented by hand right
+    // alongside the enum-backed states it shares the slot with.
+    write_group(out, std::slice::from_ref(&spawning_doc()));
 
     out.push_str(
         "\n## Row badges\n\nPassive badges packed to the right of the title, before the status \
@@ -631,6 +637,12 @@ fallback shouldn't resurrect it)",
         assert!(ctx.contains("`⚠\u{fe0e}`"));
         assert!(ctx.contains("## Agent state"));
         assert!(ctx.contains("Working"));
+        // The pre-terminal "spawning" arc (#1069) is documented in the
+        // agent-state section even though no `AgentState` backs it.
+        assert!(
+            ctx.contains("The workspace is provisioning"),
+            "spawning glyph must be explained from the generated registry"
+        );
         assert!(ctx.contains("## Row badges"));
         assert!(ctx.contains("`⚡`"));
         assert!(ctx.contains("`🔧`"));

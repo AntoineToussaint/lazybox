@@ -183,6 +183,21 @@ fn agent_state_doc(state: &AgentState) -> MarkerDoc {
     }
 }
 
+/// The row-level "spawning" glyph (#1069). Not an [`AgentState`] variant
+/// — it's a client-side provisioning indicator driven by the
+/// `WorktreeStep` events, shown in the same row slot as the agent-state
+/// glyphs from the moment a spawn starts until the agent reports its
+/// first state (or setup fails). Documented here by hand, alongside the
+/// enum-backed states, so `spawning` is looked-up-able in the `?` help
+/// legend and via Ask Lazybox even though no `AgentState` backs it.
+pub fn spawning_doc() -> MarkerDoc {
+    MarkerDoc {
+        label: "◜ Spawning (an animated arc)",
+        meaning: "The workspace is provisioning — cloning, creating the worktree, running setup, launching the agent — before any terminal exists to report a state.",
+        when: "Shows from the moment a spawn starts until the agent reports its first state, or setup fails.",
+    }
+}
+
 /// The passive row badges rendered from `Workspace` fields (not an
 /// enum), left to right. Hand-curated: keep this in step with
 /// `lazybox_tui::components::workspace_row`'s badge cells.
@@ -317,6 +332,15 @@ mod tests {
             .find(|d| d.label.contains("◆O"))
             .expect("the model badge must be documented");
         assert!(doc.meaning.contains("Opus"), "names the full tier word");
+    }
+
+    /// The pre-terminal "spawning" arc (#1069) is documented like the
+    /// enum-backed states, with a filled-in meaning + when-clause.
+    #[test]
+    fn spawning_glyph_is_documented() {
+        let doc = spawning_doc();
+        assert!(doc.label.contains("Spawning"));
+        assert!(doc.meaning.contains("provisioning"));
         assert!(!doc.when.is_empty());
     }
 

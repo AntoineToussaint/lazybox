@@ -280,16 +280,17 @@ mod tests {
 
     #[test]
     fn times_out_when_result_never_arrives() {
+        // Before the deadline (default 60s): still pending, no dismiss.
+        let (modal, _keep) = Loading::pending("waiting…");
+        let mut modal = modal.timeout(Duration::from_secs(60));
+        assert!(tick(&mut modal).is_none());
+
+        // A zero deadline crosses on the next tick with no real waiting.
         // Hold the producer handle so its sender stays live — this is the
         // "value never lands" case (dropped on an overflowed channel /
         // stalled task), distinct from the producer dropping its sender.
         let (modal, _result) = Loading::pending("stuck…");
-        let mut modal = modal.timeout(Duration::from_millis(5));
-
-        // Before the deadline: still pending, no dismiss.
-        assert!(tick(&mut modal).is_none());
-
-        std::thread::sleep(Duration::from_millis(10));
+        let mut modal = modal.timeout(Duration::ZERO);
         assert!(
             matches!(tick(&mut modal), Some(Msg::LoadingTimedOut)),
             "a Loading modal must never spin forever — it times out and dismisses"
@@ -298,10 +299,11 @@ mod tests {
 
     #[test]
     fn delivered_result_wins_even_past_the_timeout() {
+        // Past the deadline AND a value delivered: the value must win,
+        // because `take_result` is checked before the timeout guard.
         let (modal, result) = Loading::pending("done…");
-        let mut modal = modal.timeout(Duration::from_millis(5));
+        let mut modal = modal.timeout(Duration::ZERO);
         result.send(42u32).expect("modal still open");
-        std::thread::sleep(Duration::from_millis(10));
         assert!(
             matches!(tick(&mut modal), Some(Msg::LoadingResolved(_))),
             "a value that landed must resolve, not be discarded as a timeout"

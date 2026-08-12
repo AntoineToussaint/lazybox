@@ -323,6 +323,9 @@ fn accent_for(kind: InfoKind) -> Accent {
     }
 }
 
+// Tests may block (tokio::test bodies run via block_on); the crate-wide
+// disallowed-methods ban is for the run loop, not test harnesses.
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,7 +354,7 @@ mod tests {
         assert_eq!(repo_pick_row_label(&repo("acme/web", false)), "acme/web");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn bounded_scopes_passes_a_result_through_before_the_deadline() {
         let out = bounded_scopes(Duration::from_secs(5), "github", async {
             Ok(vec![repo("acme/web", false)])
@@ -360,7 +363,7 @@ mod tests {
         assert_eq!(out.unwrap().len(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn bounded_scopes_times_out_into_a_retryable_error() {
         // A provider that never responds must not hang the wizard — it
         // must surface as a Retryable error (the variant the runner turns

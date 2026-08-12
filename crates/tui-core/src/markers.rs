@@ -242,6 +242,11 @@ const ROW_BADGES: &[MarkerDoc] = &[
         meaning: "The workspace's source: `⇄` pull request, `○` GitHub issue, `◆` Linear ticket.",
         when: "Sits before the number on each workspace row.",
     },
+    MarkerDoc {
+        label: "Model badge (◆O / ◆S / ◆H)",
+        meaning: "The agent's model/tier, abbreviated to one glyph: `◆O` Opus, `◆S` Sonnet, `◆H` Haiku for Claude; other agents show their model's first letter (or a declared short) with a dim effort suffix (`◆g ·xhi`). The full model name shows on the terminal tab.",
+        when: "Rides after a single agent's runner letter when it has a known model.",
+    },
 ];
 
 /// Every status pill that renders (all [`StatusTag`] variants but
@@ -301,6 +306,18 @@ mod tests {
             !docs.iter().any(|d| d.meaning.contains("behind its base")),
             "Behind renders no status pill; documenting it reintroduces the drift #883 fixes"
         );
+    }
+
+    /// #1068: the compact model/tier badge (`◆O`) is documented in the
+    /// row-badge legend, so a user can look up what the glyph means.
+    #[test]
+    fn model_tier_badge_is_documented() {
+        let doc = row_badge_docs()
+            .iter()
+            .find(|d| d.label.contains("◆O"))
+            .expect("the model badge must be documented");
+        assert!(doc.meaning.contains("Opus"), "names the full tier word");
+        assert!(!doc.when.is_empty());
     }
 
     /// Every agent state has a non-empty meaning, one doc per variant.

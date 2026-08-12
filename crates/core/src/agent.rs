@@ -74,6 +74,7 @@ mod tests {
             tiers: vec![ModelTier {
                 alias: "B".into(),
                 label: "Opus · max".into(),
+                short: None,
                 args: vec![
                     "--model".into(),
                     "opus".into(),
@@ -183,6 +184,7 @@ mod tests {
         let fable = ModelTier {
             alias: "F".into(),
             label: "Fable".into(),
+            short: None,
             args: vec!["--model".into(), "claude-fable-5".into()],
         };
         assert!(fable.excluded_from_default());
@@ -293,6 +295,12 @@ pub struct ModelTier {
     pub alias: String,
     /// Display name of the model (`"Haiku"`, `"Sonnet"`, `"Opus"`).
     pub label: String,
+    /// Compact one-glyph form for the sidebar model badge (`◆O` for
+    /// `"Opus"`). Optional — the badge falls back to the label's first
+    /// character when unset, so a tier only declares this to override
+    /// that default or disambiguate two tiers sharing a first letter.
+    #[serde(default)]
+    pub short: Option<String>,
     /// Args appended to the agent's spawn argv to select this model.
     #[serde(default)]
     pub args: Vec<String>,
@@ -462,16 +470,19 @@ impl AgentModels {
                     ModelTier {
                         alias: "S".into(),
                         label: "Haiku".into(),
+                        short: Some("H".into()),
                         args: vec!["--model".into(), "claude-haiku-4-5".into()],
                     },
                     ModelTier {
                         alias: "M".into(),
                         label: "Sonnet".into(),
+                        short: Some("S".into()),
                         args: vec!["--model".into(), "claude-sonnet-5".into()],
                     },
                     ModelTier {
                         alias: "L".into(),
                         label: "Opus".into(),
+                        short: Some("O".into()),
                         args: vec!["--model".into(), "claude-opus-4-8".into()],
                     },
                 ],

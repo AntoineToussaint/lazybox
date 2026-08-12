@@ -6813,6 +6813,7 @@ mod modal_input_responsiveness_tests {
         let fable = lazybox_core::ModelTier {
             alias: "F".into(),
             label: "Fable".into(),
+            short: None,
             args: vec!["--model".into(), "claude-fable-5".into()],
         };
         assert!(
@@ -6919,6 +6920,7 @@ mod modal_input_responsiveness_tests {
                         tiers: vec![lazybox_core::ModelTier {
                             alias: "M".into(),
                             label: "GPT-5".into(),
+                            short: None,
                             args: vec![],
                         }],
                         ..Default::default()

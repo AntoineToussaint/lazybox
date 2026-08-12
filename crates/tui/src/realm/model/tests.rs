@@ -5169,7 +5169,7 @@ mod input_starvation_tests {
 
         // One iteration's drain: must report a backlog (more queued)…
         assert!(
-            drain_daemon_events(&mut m, None),
+            drain_daemon_events(&mut m, &mut Vec::new(), || false),
             "drain should signal a backlog when the channel is over the cap"
         );
         // …and must have left events behind (didn't drain everything).
@@ -5194,7 +5194,7 @@ mod input_starvation_tests {
         let mut backlog = true;
         let mut iterations = 0;
         while backlog {
-            backlog = drain_daemon_events(&mut m, None);
+            backlog = drain_daemon_events(&mut m, &mut Vec::new(), || false);
             iterations += 1;
             assert!(iterations <= 64, "drain never converged — possible spin");
         }
@@ -5219,7 +5219,7 @@ mod input_starvation_tests {
                 })
                 .expect("room for resync");
         }
-        drain_daemon_events(&mut m, None);
+        drain_daemon_events(&mut m, &mut Vec::new(), || false);
         assert_eq!(m.event_backlog.resyncs(), 3);
     }
 
@@ -5251,7 +5251,7 @@ mod input_starvation_tests {
         }
 
         assert!(
-            !drain_daemon_events(&mut m, None),
+            !drain_daemon_events(&mut m, &mut Vec::new(), || false),
             "a sub-cap burst must drain in a single tick"
         );
         assert!(
@@ -5301,7 +5301,7 @@ mod input_starvation_tests {
             })
             .expect("room for the focus request");
 
-        drain_daemon_events(&mut m, None);
+        drain_daemon_events(&mut m, &mut Vec::new(), || false);
 
         assert_eq!(
             m.sidebar.selected_workspace_key(),
@@ -5322,11 +5322,91 @@ mod input_starvation_tests {
             replay: b"hello".to_vec(),
             seq: 1,
         };
-        let backlog = drain_daemon_events(&mut m, Some(carried));
+        let mut carried_in = vec![carried];
+        let backlog = drain_daemon_events(&mut m, &mut carried_in, || false);
         assert!(!backlog, "a single carried event is no backlog");
+        assert!(carried_in.is_empty(), "the carried event was consumed");
         // The resync was dispatched + observed — proof the carried
         // event didn't get dropped on the floor.
         assert_eq!(m.event_backlog.resyncs(), 1);
+    }
+
+    /// Seed the channel with `n` distinct workspace upserts (never
+    /// coalesced, unlike same-terminal output), so the dispatch loop has
+    /// `n` real iterations a keystroke can interrupt between.
+    fn flood_upserts(tx: &mpsc::Sender<Event>, n: usize) {
+        use chrono::Utc;
+        use lazybox_core::{Workspace, WorkspaceKey};
+        for i in 0..n {
+            let ws = Workspace::empty(
+                WorkspaceKey::new(format!("github:o/r#{i}")),
+                "main",
+                Utc::now(),
+            );
+            tx.try_send(Event::WorkspaceUpserted(Box::new(ws)))
+                .expect("room for the upsert");
+        }
+    }
+
+    /// #1031 §6 / #1055: the collection cap bounds how much we pull off
+    /// the channel, but *handling* a batch is unbounded — so a keystroke
+    /// arriving mid-batch must pre-empt the dispatch loop, not wait out the
+    /// whole burst. With input already pending, the drain dispatches one
+    /// event (progress is guaranteed) and carries the rest over untouched.
+    #[test]
+    fn pending_input_preempts_the_dispatch_loop_and_carries_the_rest() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+        let n = 5;
+        flood_upserts(&evt_tx, n);
+
+        let mut carried = Vec::new();
+        // Input is waiting the whole time → yield after the first event.
+        let backlog = drain_daemon_events(&mut m, &mut carried, || true);
+
+        assert!(backlog, "an un-dispatched tail is a backlog");
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            1,
+            "exactly one event dispatched before yielding to the waiting keystroke",
+        );
+        assert_eq!(
+            carried.len(),
+            n - 1,
+            "the rest of the batch is carried, not dropped",
+        );
+    }
+
+    /// The pre-emption must still converge: even with input pending on
+    /// EVERY check, each drain dispatches at least one event, so repeated
+    /// drains eventually process the whole batch with nothing lost — the
+    /// daemon stream can't be starved by a busy keyboard either.
+    #[test]
+    fn constant_input_still_drains_every_event_one_at_a_time() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+        let n = 5;
+        flood_upserts(&evt_tx, n);
+
+        let mut carried = Vec::new();
+        let mut iterations = 0;
+        loop {
+            let backlog = drain_daemon_events(&mut m, &mut carried, || true);
+            iterations += 1;
+            assert!(
+                iterations <= 32,
+                "constant pre-emption never converged — no progress guarantee"
+            );
+            if !backlog {
+                break;
+            }
+        }
+        assert!(carried.is_empty(), "no event left carried");
+        assert!(m.client.rx.try_recv().is_err(), "channel fully consumed");
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            n,
+            "every upsert eventually landed despite pre-emption on every event",
+        );
+        assert_eq!(iterations, n, "one event per drain under constant input");
     }
 }
 
@@ -5776,10 +5856,11 @@ mod stale_input_tests {
     #[test]
     fn fresh_input_is_never_dropped() {
         for ev in [key_event(), mouse_event(), Event::Paste("hi".into())] {
-            assert!(!should_drop_stale_input(&ev, Duration::ZERO));
+            assert!(!should_drop_stale_input(&ev, Duration::ZERO, false));
             assert!(!should_drop_stale_input(
                 &ev,
-                STALE_INPUT_MAX_AGE - Duration::from_millis(1)
+                STALE_INPUT_MAX_AGE - Duration::from_millis(1),
+                false,
             ));
         }
     }
@@ -5790,8 +5871,8 @@ mod stale_input_tests {
     #[test]
     fn stale_keys_and_mouse_are_dropped() {
         let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
-        assert!(should_drop_stale_input(&key_event(), age));
-        assert!(should_drop_stale_input(&mouse_event(), age));
+        assert!(should_drop_stale_input(&key_event(), age, false));
+        assert!(should_drop_stale_input(&mouse_event(), age, false));
     }
 
     /// Paste is deliberate content (dropping it loses user data) and
@@ -5800,9 +5881,198 @@ mod stale_input_tests {
     #[test]
     fn stale_paste_and_focus_are_kept() {
         let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
-        assert!(!should_drop_stale_input(&Event::Paste("body".into()), age));
-        assert!(!should_drop_stale_input(&Event::FocusGained, age));
-        assert!(!should_drop_stale_input(&Event::FocusLost, age));
+        assert!(!should_drop_stale_input(
+            &Event::Paste("body".into()),
+            age,
+            false
+        ));
+        assert!(!should_drop_stale_input(&Event::FocusGained, age, false));
+        assert!(!should_drop_stale_input(&Event::FocusLost, age, false));
+    }
+
+    /// #1055: while a filter-picker owns input, a buffered keystroke is
+    /// kept, not dropped — its content is stable so the key still lands
+    /// where the user aimed it. A stale *mouse* click stays dropped even
+    /// then (its target coordinates can be wrong), and the picker
+    /// exemption never rescues pane input.
+    #[test]
+    fn stale_key_survives_for_a_retaining_modal() {
+        let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
+        assert!(
+            !should_drop_stale_input(&key_event(), age, true),
+            "a picker's buffered key must reach it",
+        );
+        assert!(
+            should_drop_stale_input(&mouse_event(), age, true),
+            "a stale click's coordinates can still be wrong",
+        );
+        assert!(
+            should_drop_stale_input(&key_event(), age, false),
+            "pane input is unaffected by the picker exemption",
+        );
+    }
+
+    /// Exhaustive classification of every modal `Id` for the stale-key
+    /// exemption (#1055). The `match` has no wildcard on purpose: a
+    /// newly-added `Id` fails to compile here until it is deliberately
+    /// classified, so the retain allowlist can never silently drift from
+    /// its criterion (a new picker keeping the latency bug, or — worse — a
+    /// new confirm quietly opting itself in). `true` iff a late buffered
+    /// `Enter` can only advance a local, single-step, reversible selection;
+    /// every confirm, destructive-action menu, and outward-effect input is
+    /// `false`.
+    #[test]
+    fn stale_key_retention_is_classified_for_every_modal() {
+        use crate::realm::model::Id;
+
+        let expected = |id: &Id| -> bool {
+            match id {
+                // Retain: local, single-step, reversible selections whose
+                // whole interaction is the keystroke.
+                Id::SnippetPicker
+                | Id::SkillPicker
+                | Id::SnippetBrowser
+                | Id::JumpPicker
+                | Id::PromptHistoryPicker
+                | Id::UrlPicker
+                | Id::ThemePicker
+                | Id::FilterMenu
+                | Id::SnoozeDuration
+                | Id::DefaultAgentPicker
+                | Id::DefaultModelPicker
+                | Id::WorkAgentPicker => true,
+                // Drop — confirms (a stale Enter must not confirm).
+                Id::AgentAuth
+                | Id::RemoveOutOfScope
+                | Id::MergeConfirm
+                | Id::CleanWorktreesConfirm
+                | Id::InspectConfirm
+                | Id::ImportCheckoutConfirm
+                | Id::ActionConfirm
+                | Id::ConflictResolve
+                | Id::ErrorInboxClearConfirm
+                | Id::BroadcastConfirm
+                | Id::BulkSpawnConfirm
+                | Id::HelpActionConfirm => false,
+                // Drop — destructive-action menus / delete-routing lists.
+                Id::SidebarContext | Id::InspectList | Id::ImportCheckoutList => false,
+                // Drop — outward-effect inputs (post/label/deliver).
+                Id::Reply
+                | Id::Notes
+                | Id::RequestReviewers
+                | Id::AddAssignees
+                | Id::ManageLabels
+                | Id::PolicyPicker
+                | Id::BroadcastText
+                | Id::HandoffText => false,
+                // Drop — text/config inputs and multi-step flow steps.
+                Id::NewWorkspace
+                | Id::RenameWorkspace
+                | Id::MoveToSpace
+                | Id::NewProject
+                | Id::NewWorkspaceRepo
+                | Id::LinearTeamRepo
+                | Id::Editor
+                | Id::Setup
+                | Id::AdoptTarget
+                | Id::StartAgentProject
+                | Id::LlmGatewayUrl
+                | Id::AddScanRoot
+                | Id::BroadcastSnippet
+                | Id::HandoffTarget
+                | Id::ConvertSessionRole => false,
+                // Drop — read-only / progress / streamed surfaces.
+                Id::Splash
+                | Id::Help
+                | Id::HelpAsk
+                | Id::Error
+                | Id::Update
+                | Id::Polling
+                | Id::Tour
+                | Id::SyncStatus
+                | Id::Messages
+                | Id::ErrorInbox
+                | Id::InspectLoading
+                | Id::WorktreeProgress
+                | Id::DescriptionModal
+                | Id::DiffReview
+                | Id::PrChat => false,
+            }
+        };
+
+        for id in [
+            Id::Splash,
+            Id::Help,
+            Id::HelpAsk,
+            Id::Error,
+            Id::AgentAuth,
+            Id::Update,
+            Id::Polling,
+            Id::Reply,
+            Id::Notes,
+            Id::NewWorkspace,
+            Id::RenameWorkspace,
+            Id::MoveToSpace,
+            Id::NewProject,
+            Id::NewWorkspaceRepo,
+            Id::LinearTeamRepo,
+            Id::Editor,
+            Id::Setup,
+            Id::RemoveOutOfScope,
+            Id::MergeConfirm,
+            Id::AdoptTarget,
+            Id::StartAgentProject,
+            Id::RequestReviewers,
+            Id::AddAssignees,
+            Id::ManageLabels,
+            Id::FilterMenu,
+            Id::PolicyPicker,
+            Id::SnoozeDuration,
+            Id::LlmGatewayUrl,
+            Id::AddScanRoot,
+            Id::SidebarContext,
+            Id::CleanWorktreesConfirm,
+            Id::InspectLoading,
+            Id::InspectList,
+            Id::InspectConfirm,
+            Id::ImportCheckoutList,
+            Id::ImportCheckoutConfirm,
+            Id::ActionConfirm,
+            Id::ConflictResolve,
+            Id::SnippetPicker,
+            Id::SkillPicker,
+            Id::Tour,
+            Id::SyncStatus,
+            Id::Messages,
+            Id::ErrorInbox,
+            Id::ErrorInboxClearConfirm,
+            Id::WorktreeProgress,
+            Id::JumpPicker,
+            Id::PromptHistoryPicker,
+            Id::UrlPicker,
+            Id::ThemePicker,
+            Id::SnippetBrowser,
+            Id::BroadcastSnippet,
+            Id::BroadcastText,
+            Id::BroadcastConfirm,
+            Id::BulkSpawnConfirm,
+            Id::HandoffTarget,
+            Id::HandoffText,
+            Id::ConvertSessionRole,
+            Id::DefaultAgentPicker,
+            Id::DefaultModelPicker,
+            Id::HelpActionConfirm,
+            Id::WorkAgentPicker,
+            Id::DescriptionModal,
+            Id::DiffReview,
+            Id::PrChat,
+        ] {
+            assert_eq!(
+                id.retains_stale_keys(),
+                expected(&id),
+                "{id:?} classified inconsistently — update retains_stale_keys and this match together",
+            );
+        }
     }
 
     /// The tally batches a whole recovery burst into one report:
@@ -7372,7 +7642,7 @@ mod merge_focus_follow_tests {
             evt_tx.try_send(evt).expect("room in the bounded channel");
         }
 
-        let backlog = drain_daemon_events(&mut m, None);
+        let backlog = drain_daemon_events(&mut m, &mut Vec::new(), || false);
         assert!(!backlog, "a 3-event burst is well under the per-tick cap");
 
         assert_eq!(
@@ -8978,6 +9248,47 @@ mod merge_focus_follow_tests {
         assert!(
             m.status.notice.is_none(),
             "no dead-end error banner when we can offer a resolve",
+        );
+    }
+
+    /// #1055: the conflict-resolve prompt is an async `PrMergeFailed`
+    /// reply, so — like every other async daemon mount — it must not
+    /// preempt a modal the user already has open. A `default_yes()` confirm
+    /// popping onto the stack under a stall would let a buffered `Enter`
+    /// (aimed at the open picker) spawn the resolution agent unprompted.
+    /// The offer is dropped with a `g m` hint; the CONFLICT pill re-arms it.
+    #[test]
+    fn pr_merge_failed_with_conflict_does_not_preempt_an_open_modal() {
+        let mut m = build_model();
+        let ws = conflicting_pr("owner/repo#1");
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+
+        // The user has the snippet picker open (a retaining modal).
+        m.modal_stack.push(Id::SnippetPicker);
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key,
+            pr_label: "owner/repo#1".into(),
+            reason: "Can't merge — the branch has merge conflicts with its base.".into(),
+            conflict: true,
+        });
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::SnippetPicker),
+            "the open modal wins — the resolve confirm must not stack over it",
+        );
+        assert!(
+            !m.modal_stack.contains(&Id::ConflictResolve),
+            "no conflict-resolve confirm was mounted under the picker either",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("g m")),
+            "a hint points at re-triggering the resolve",
         );
     }
 

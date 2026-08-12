@@ -450,6 +450,61 @@ impl Id {
     pub(crate) fn consumes_scroll(&self) -> bool {
         matches!(self, Id::DescriptionModal)
     }
+
+    /// Whether a *buffered* keystroke should still be delivered to this
+    /// modal after a run-loop stall, rather than dropped by the
+    /// stale-input guard (`should_drop_stale_input`, #1055).
+    ///
+    /// The guard drops key/mouse events older than `STALE_INPUT_MAX_AGE`
+    /// so a recovered UI doesn't burst-fire a pane backlog against a
+    /// selection that moved while the loop was behind (#49). That
+    /// rationale is a *pane* concern: it does not hold for a modal that is
+    /// a stable, centered surface a stall does not change, whose whole
+    /// interaction is its keystrokes — filter chars and the Enter that
+    /// picks. Dropping those makes the picker read as frozen ("can't send
+    /// snippets", the #1055 report) exactly when an agent stream is busy
+    /// enough to age a keystroke past the bound.
+    ///
+    /// The line is drawn on what a *late* `Enter` can do to this modal: it
+    /// may only advance a **local, single-step, reversible** selection — a
+    /// filter, a picker over local/config state, a navigation jump, a
+    /// send-to-my-own-agent. It must **not** reach:
+    /// - a confirm (`RemoveOutOfScope`, `MergeConfirm`, `ActionConfirm`,
+    ///   `ConflictResolve`, the `*Confirm` gates, `AgentAuth`, …): a stale
+    ///   `Enter` must never confirm a merge / archive / removal;
+    /// - a destructive-action *menu* whose highlighted row is destructive
+    ///   (`SidebarContext` lists archive/merge; `InspectList` /
+    ///   `ImportCheckoutList` route to a delete/import confirm);
+    /// - an outward-effect input (`Reply`/`Notes`/`RequestReviewers`/
+    ///   `AddAssignees`/`ManageLabels`/`BroadcastText`/`HandoffText`): a
+    ///   stale submit posts a comment / requests review / sets labels;
+    /// - a multi-step flow's intermediate step, where a stale mid-flow key
+    ///   is disorienting rather than helpful.
+    ///
+    /// Kept a positive allowlist on purpose: a new picker that forgets to
+    /// opt in merely keeps the #1055 latency bug (mild, self-evident),
+    /// whereas a new confirm that forgot to opt *out* of a denylist would
+    /// be a data-loss hazard. Additions must be justified against the
+    /// criterion above; `only_filter_pickers_retain_stale_keys` (tests.rs)
+    /// is an exhaustive match, so a newly-added `Id` cannot compile until
+    /// it is classified here.
+    pub(crate) fn retains_stale_keys(&self) -> bool {
+        matches!(
+            self,
+            Id::SnippetPicker
+                | Id::SkillPicker
+                | Id::SnippetBrowser
+                | Id::JumpPicker
+                | Id::PromptHistoryPicker
+                | Id::UrlPicker
+                | Id::ThemePicker
+                | Id::FilterMenu
+                | Id::SnoozeDuration
+                | Id::DefaultAgentPicker
+                | Id::DefaultModelPicker
+                | Id::WorkAgentPicker
+        )
+    }
 }
 
 /// The PR/issue an open "Ask about this PR" chat is about (#945),

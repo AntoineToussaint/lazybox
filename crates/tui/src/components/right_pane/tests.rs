@@ -1195,6 +1195,177 @@ mod description_expand_tests {
         assert_eq!(pane.task_body_view, TaskBodyView::Collapsed);
     }
 
+    fn linear_ticket_with_body(body: &str) -> Task {
+        let mut task = task_with_body(body);
+        task.id.source = "linear".into();
+        task.id.key = "ENG-1".into();
+        task.url = "https://linear.app/acme/issue/ENG-1".into();
+        task
+    }
+
+    fn pr_with_body(body: &str) -> Task {
+        let mut task = task_with_body(body);
+        task.id.key = "o/r#7".into();
+        task.url = "https://github.com/o/r/pull/7".into();
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task
+    }
+
+    fn rendered_text(pane: &mut RightPane) -> String {
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        draw(pane, &mut term);
+        term.backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn standalone_linear_ticket_renders_its_description() {
+        let ws = Workspace::from_task(
+            linear_ticket_with_body("Ticket description text"),
+            Utc::now(),
+        );
+        assert_eq!(ws.linear_issues.len(), 1, "routed to the linear slot");
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        pane.toggle_task_body();
+        let text = rendered_text(&mut pane);
+        assert!(
+            text.contains("Ticket description"),
+            "standalone Linear description must render; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn linked_linear_ticket_shows_when_pr_body_is_empty() {
+        // #1037: a Linear ticket folded into a PR workspace (via #922)
+        // whose PR carries no description. The teaser used to key on the
+        // primary (PR) body alone, hiding the whole Description section —
+        // and with it the ticket's description that lives in
+        // `linear_issues`. It must fall back to the linked ticket's body.
+        let mut ws = Workspace::from_task(pr_with_body(""), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        assert!(ws.pr.is_some(), "primary is the PR");
+        assert_eq!(ws.linear_issues.len(), 1);
+
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        assert!(
+            pane.has_visible_content(),
+            "the linked ticket's description keeps the pane visible",
+        );
+        pane.toggle_task_body();
+        let text = rendered_text(&mut pane);
+        assert!(
+            text.contains("Description"),
+            "the Description section header must render; got:\n{text}"
+        );
+        assert!(
+            text.contains("Ticket work brief"),
+            "the linked ticket description must render in the teaser; got:\n{text}"
+        );
+        let bindings = pane.contextual_bindings(&std::collections::BTreeMap::new());
+        assert!(
+            bindings.iter().any(|b| b.keys == "d"),
+            "the `d` description toggle must be offered; got: {bindings:?}"
+        );
+    }
+
+    #[test]
+    fn pr_body_wins_over_linked_ticket_in_the_teaser() {
+        // When the PR has its own description, the teaser shows it (the
+        // linked ticket rides the reader modal, unchanged from #462).
+        let mut ws = Workspace::from_task(pr_with_body("PR description"), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        pane.toggle_task_body();
+        let text = rendered_text(&mut pane);
+        assert!(
+            text.contains("PR description"),
+            "the PR's own body wins the teaser; got:\n{text}"
+        );
+        assert!(
+            !text.contains("Ticket work brief"),
+            "the linked ticket stays in the reader, not the teaser; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn reader_does_not_duplicate_the_linked_ticket_body() {
+        // The reader appends linked issue descriptions; with an empty PR
+        // body the teaser fallback must not make the ticket body appear
+        // twice in the reader source.
+        let mut ws = Workspace::from_task(pr_with_body(""), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let reader = pane.task_body().expect("reader body present");
+        assert_eq!(
+            reader.matches("Ticket work brief").count(),
+            1,
+            "the ticket body must appear exactly once; got:\n{reader}"
+        );
+    }
+
+    #[test]
+    fn reader_title_names_the_ticket_when_the_pr_has_no_body() {
+        // #1037: the reader's content is entirely the linked ticket, so
+        // its header must name the ticket — not the empty-bodied PR that
+        // merely roots the workspace.
+        let mut ws = Workspace::from_task(pr_with_body(""), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let title = pane.task_body_title().expect("title present");
+        assert!(
+            title.contains("ENG-1"),
+            "the sole linked ticket titles the reader; got: {title}"
+        );
+        assert!(
+            !title.contains("o/r#7"),
+            "the empty-bodied PR must not title the reader; got: {title}"
+        );
+    }
+
+    #[test]
+    fn reader_title_stays_the_pr_when_it_has_its_own_body() {
+        let mut ws = Workspace::from_task(pr_with_body("PR description"), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let title = pane.task_body_title().expect("title present");
+        assert!(
+            title.contains("o/r#7"),
+            "a PR with its own body still heads the composite reader; got: {title}"
+        );
+    }
+
+    #[test]
+    fn reader_title_stays_the_pr_with_multiple_linked_issues() {
+        // More than one folded-in issue makes the reader a genuine
+        // composite the PR heads — keep the PR title so no single section
+        // masquerades as the whole.
+        let mut ws = Workspace::from_task(pr_with_body(""), Utc::now());
+        ws.attach_task(linear_ticket_with_body("Ticket work brief"));
+        let mut gh = task_with_body("Second brief");
+        gh.id.key = "o/r#42".into();
+        gh.url = "https://github.com/o/r/issues/42".into();
+        ws.attach_task(gh);
+        assert_eq!(ws.gh_issues.len(), 1);
+        assert_eq!(ws.linear_issues.len(), 1);
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let title = pane.task_body_title().expect("title present");
+        assert!(
+            title.contains("o/r#7"),
+            "a multi-issue composite stays PR-titled; got: {title}"
+        );
+    }
+
     #[test]
     fn table_shaped_line_in_indented_code_is_not_treated_as_a_table() {
         // A `| --- |`-shaped line indented into a code block (4 spaces)

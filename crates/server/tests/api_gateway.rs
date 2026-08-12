@@ -584,6 +584,7 @@ const WEB_CONTROL_ENDPOINTS: &[&str] = &[
     "/v1/health",
     "/v1/workspaces",
     "/v1/agents",
+    "/v1/info",
     "/v1/events",
     "/v1/commands",
     "/v1/agents/inject",
@@ -605,6 +606,15 @@ fn web_control_contract_fixture_is_current() {
         .single()
         .expect("fixed fixture timestamp");
     let session_key = lazybox_core::SessionKey::from("github:o/r#42");
+
+    // The page reads `default_agent` from `/v1/info` to spawn the daemon's
+    // configured agent instead of a hardcoded claude — pin a non-claude
+    // default so the JS test proves the value is read, not defaulted.
+    let info = {
+        let mut config = lazybox_config::Config::default();
+        config.setup.default_agent = Some("codex".into());
+        api_gateway::build_desktop_info(&config)
+    };
 
     let responses = serde_json::json!({
         "health": api_gateway::health_response(),
@@ -660,6 +670,8 @@ fn web_control_contract_fixture_is_current() {
             client_request_id: Some("web-1".into()),
             events: vec![],
         },
+        // Read by the page to spawn the daemon's configured default agent.
+        "info": info,
     });
 
     let requests = serde_json::json!({
@@ -735,6 +747,44 @@ fn web_control_contract_fixture_is_current() {
         committed, rendered,
         "web-control contract fixture is stale; rerun with UPDATE_WEB_CONTROL_CONTRACT=1"
     );
+}
+
+/// The endpoint list embedded in the contract fixture is only as good as
+/// the router behind it. This drives every `WEB_CONTROL_ENDPOINTS` path
+/// through `handle_request` and asserts it resolves to a real handler
+/// (anything but the router's 404), so a renamed or deleted arm in
+/// `handle_request` fails the build here instead of 404-ing in the
+/// browser at runtime.
+#[tokio::test]
+async fn web_control_endpoints_are_all_served_by_the_router() {
+    let post_routes = ["/v1/commands", "/v1/agents/inject", "/v1/agents/output"];
+    for &path in WEB_CONTROL_ENDPOINTS {
+        let method = if post_routes.contains(&path) {
+            Method::POST
+        } else {
+            Method::GET
+        };
+        // An empty body makes the POST routes fail decoding with 400 —
+        // proving the route exists — rather than resolving a workspace,
+        // which could 404 on "no running agent" and be misread as a
+        // missing route.
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let response = api_gateway::handle_request(
+            ServerConfig::in_memory(),
+            GatewayOptions::default(),
+            request,
+        )
+        .await;
+        assert_ne!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{path} is declared in WEB_CONTROL_ENDPOINTS but the router does not serve it"
+        );
+    }
 }
 
 #[test]

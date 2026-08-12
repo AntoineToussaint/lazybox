@@ -3,6 +3,7 @@
     "/v1/health",
     "/v1/workspaces",
     "/v1/agents",
+    "/v1/info",
     "/v1/events",
     "/v1/commands",
     "/v1/agents/inject",
@@ -93,6 +94,59 @@
     "health": {
       "ok": true,
       "service": "lazybox-api-gateway"
+    },
+    "info": {
+      "agents": [
+        {
+          "default_tier": "L",
+          "id": "claude",
+          "label": "Claude Code",
+          "models": [
+            {
+              "alias": "S",
+              "label": "Haiku"
+            },
+            {
+              "alias": "M",
+              "label": "Sonnet"
+            },
+            {
+              "alias": "L",
+              "label": "Opus"
+            }
+          ]
+        },
+        {
+          "default_tier": null,
+          "id": "codex",
+          "label": "Codex",
+          "models": []
+        },
+        {
+          "default_tier": null,
+          "id": "cursor-agent",
+          "label": "Cursor Agent",
+          "models": []
+        }
+      ],
+      "default_agent": "codex",
+      "max_terminal_frame_bytes": 2097177,
+      "max_terminal_write_bytes": 131072,
+      "protocol_notice": null,
+      "protocol_version": 3,
+      "providers": [],
+      "repositories": [],
+      "settings": {
+        "attention": {
+          "agent_asking": true,
+          "ci_failing": true,
+          "mentioned": true,
+          "review_pending": true,
+          "unread": true
+        },
+        "github_scopes": [],
+        "keymap_preset": null
+      }
     },
     "inject": {
       "accepted": true,

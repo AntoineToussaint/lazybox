@@ -96,7 +96,23 @@ const SELECTORS = [
   '#agent-output',
 ];
 
-function loadClient({ eventStream = 'open' } = {}) {
+// A ReadableStream reader stub: 'eof' closes immediately, 'chunk' yields
+// one encoded frame then parks, 'open' parks forever (no events).
+function eventReader(mode, chunk) {
+  if (mode === 'eof') return { read: async () => ({ done: true }) };
+  if (mode === 'chunk') {
+    let sent = false;
+    return {
+      read: () =>
+        sent
+          ? new Promise(() => {})
+          : ((sent = true), Promise.resolve({ done: false, value: chunk })),
+    };
+  }
+  return { read: () => new Promise(() => {}) };
+}
+
+function loadClient({ eventStream = 'open', eventChunk } = {}) {
   const elements = new Map(SELECTORS.map((selector) => [selector, new Element()]));
   const tokenInput = elements.get('#token');
   const tokenTag = html.match(/<input\b[^>]*\bid="token"[^>]*>/)?.[0] ?? '';
@@ -117,24 +133,12 @@ function loadClient({ eventStream = 'open' } = {}) {
     if (path === '/v1/health') return json(contract.responses.health);
     if (path === '/v1/workspaces') return json(contract.responses.workspaces);
     if (path === '/v1/agents') return json(contract.responses.agents);
+    if (path === '/v1/info') return json(contract.responses.info);
     if (path === '/v1/commands') return json(contract.responses.command);
     if (path === '/v1/agents/inject') return json(contract.responses.inject);
     if (path === '/v1/agents/output') return json(contract.responses.output);
     if (path === '/v1/events') {
-      return {
-        ok: true,
-        status: 200,
-        body: {
-          getReader() {
-            return {
-              read:
-                eventStream === 'eof'
-                  ? async () => ({ done: true })
-                  : () => new Promise(() => {}),
-            };
-          },
-        },
-      };
+      return { ok: true, status: 200, body: { getReader: () => eventReader(eventStream, eventChunk) } };
     }
     throw new Error(`unexpected request: ${path}`);
   };
@@ -196,7 +200,7 @@ test('connects without an authorization header when the gateway has no token', a
 
   assert.deepEqual(
     client.requests.map(({ path }) => path),
-    ['/v1/health', '/v1/workspaces', '/v1/agents', '/v1/events']
+    ['/v1/health', '/v1/workspaces', '/v1/info', '/v1/agents', '/v1/events']
   );
   for (const request of client.requests) {
     assert.equal(request.headers.Authorization, undefined);
@@ -208,7 +212,7 @@ test('the connect handshake carries the bearer token on every request', async ()
 
   assert.deepEqual(
     client.requests.map(({ path }) => path),
-    ['/v1/health', '/v1/workspaces', '/v1/agents', '/v1/events']
+    ['/v1/health', '/v1/workspaces', '/v1/info', '/v1/agents', '/v1/events']
   );
   for (const request of client.requests) {
     assert.equal(request.headers.Authorization, 'Bearer secret');
@@ -269,7 +273,12 @@ test('spawning an agent posts a Spawn command bound to the selected workspace', 
   assert.equal(spawn.headers['Content-Type'], 'application/json');
   assert.equal(spawn.body.type, 'Command');
   assert.equal(spawn.body.payload.Spawn.session_key, workspace.key);
-  assert.deepEqual(spawn.body.payload.Spawn.kind, { Agent: 'claude' });
+  // The agent must be the daemon's configured default (from /v1/info),
+  // not a hardcoded claude — the fixture pins a non-claude default so this
+  // fails if the client regresses to a constant.
+  const defaultAgent = contract.responses.info.default_agent;
+  assert.notEqual(defaultAgent, 'claude', 'fixture pins a non-claude default to make this test meaningful');
+  assert.deepEqual(spawn.body.payload.Spawn.kind, { Agent: defaultAgent });
 
   // Every field the client sends must be a known Spawn field on the wire
   // the gate pins (the client omits the serde-defaulted fields).
@@ -351,6 +360,32 @@ test('every request the client makes stays within the declared /v1 contract', as
   for (const { path } of client.requests) {
     assert.ok(allowed.has(path), `${path} is outside the declared web-control contract`);
   }
+});
+
+test('the agent button reflects the daemon default agent from /v1/info', async () => {
+  const client = await connected();
+  const defaultAgent = contract.responses.info.default_agent;
+  assert.equal(
+    client.elements.get('#spawn-agent').textContent,
+    `Start ${defaultAgent}`
+  );
+});
+
+test('an agent-lifecycle event re-polls the running-agent projection', async () => {
+  const frame = JSON.stringify({
+    type: 'Event',
+    payload: { AgentState: { terminal_id: 7, state: 'InputNeeded' } },
+  });
+  const eventChunk = new TextEncoder().encode(`${frame}\n`);
+  const client = await connected({ eventStream: 'chunk', eventChunk });
+  // Let the parked stream deliver the frame and its refresh land.
+  await settle();
+
+  const agentPolls = client.requests.filter(({ path }) => path === '/v1/agents');
+  assert.ok(
+    agentPolls.length >= 2,
+    `expected a fresh /v1/agents poll after the event, saw ${agentPolls.length}`
+  );
 });
 
 test('reports a clean event-stream EOF as disconnected', async () => {

@@ -288,6 +288,11 @@
       let receivedEvents = 0;
       let selectedWorkspace = null;
       let requestCounter = 0;
+      let agentsRefreshInFlight = false;
+      // The agent "Start agent" spawns — resolved from the daemon's own
+      // /v1/info.default_agent so a codex/cursor daemon spawns its default,
+      // not a hardcoded claude. Falls back to claude only if /v1/info omits it.
+      let defaultAgent = "claude";
 
       function setStatus(message, tone = "") {
         status.textContent = message;
@@ -379,6 +384,16 @@
         }
       }
 
+      // Event names whose delta changes which agent runs where, or its
+      // lifecycle state — the workspace badges must re-derive from a fresh
+      // /v1/agents projection when one arrives, not go stale until reconnect.
+      const AGENT_LIFECYCLE_EVENTS = new Set([
+        "AgentState",
+        "TerminalSpawned",
+        "TerminalExited",
+        "TerminalReplaced",
+      ]);
+
       function eventName(frame) {
         if (frame?.type !== "Event") return frame?.type ?? "Unknown";
         const payload = frame.payload;
@@ -424,16 +439,24 @@
           buffer = lines.pop() ?? "";
           for (const line of lines) {
             if (!line.trim()) continue;
-            recordEvent(JSON.parse(line));
+            const frame = JSON.parse(line);
+            recordEvent(frame);
+            if (AGENT_LIFECYCLE_EVENTS.has(eventName(frame))) refreshAgents();
           }
         }
       }
 
       async function refreshAgents() {
+        // Coalesce bursts (an event storm) into at most one in-flight poll
+        // so live event-driven refreshes can't pile up requests.
+        if (agentsRefreshInFlight) return;
+        agentsRefreshInFlight = true;
         try {
           renderAgents(await requestJson("/v1/agents", currentToken));
         } catch (error) {
           // A missing agents projection must not tear down the page.
+        } finally {
+          agentsRefreshInFlight = false;
         }
       }
 
@@ -505,10 +528,13 @@
         button.disabled = true;
 
         try {
-          const [health, workspaces] = await Promise.all([
+          const [health, workspaces, info] = await Promise.all([
             requestJson("/v1/health", token),
             requestJson("/v1/workspaces", token),
+            requestJson("/v1/info", token),
           ]);
+          if (info.default_agent) defaultAgent = info.default_agent;
+          spawnAgentButton.textContent = `Start ${defaultAgent}`;
           renderWorkspaces(workspaces);
           await refreshAgents();
           setStatus(`Connected to ${health.service}.`, "ok");
@@ -532,7 +558,7 @@
         connect(currentToken);
       });
 
-      spawnAgentButton.addEventListener("click", () => spawn({ Agent: "claude" }));
+      spawnAgentButton.addEventListener("click", () => spawn({ Agent: defaultAgent }));
       spawnShellButton.addEventListener("click", () => spawn("Shell"));
       injectButton.addEventListener("click", () => inject());
       refreshOutputButton.addEventListener("click", () => refreshOutput());

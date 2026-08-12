@@ -107,6 +107,12 @@ pub enum PickFlow {
     },
     StartAgentProject,
     NewWorkspaceRepo,
+    /// Repo picker for an unmapped Linear team (#1041). Each row carries a
+    /// [`PickPayload::as_text`] `owner/repo`; the pick persists
+    /// `providers.linear.teams.<team>` and re-provisions.
+    LinearTeamRepo {
+        team: String,
+    },
     Reviewers {
         workspace_key: Option<WorkspaceKey>,
     },
@@ -203,6 +209,12 @@ pub enum PickOutcome<F> {
     },
     MountNewWorkspace(ProjectKey),
     MountNewProject,
+    /// Persist `providers.linear.teams.<team> = repo` and re-provision the
+    /// stuck Linear spawn (#1041).
+    MapLinearTeam {
+        team: String,
+        repo: String,
+    },
     Reviewers {
         workspace_key: WorkspaceKey,
         logins: Vec<String>,
@@ -415,6 +427,14 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 .unwrap_or(PickOutcome::NoOp),
             None => PickOutcome::NoOp,
         },
+        PickFlow::LinearTeamRepo { team } => picks
+            .first()
+            .and_then(P::as_text)
+            .map(|repo| PickOutcome::MapLinearTeam {
+                team,
+                repo: repo.to_string(),
+            })
+            .unwrap_or(PickOutcome::NoOp),
         PickFlow::Reviewers { workspace_key } => {
             let logins = text_values(picks);
             match (workspace_key, logins.is_empty()) {
@@ -965,6 +985,25 @@ mod tests {
         assert!(matches!(
             resolve_pick(&[Payload::NewLocal], PickFlow::NewWorkspaceRepo),
             PickOutcome::MountNewProject
+        ));
+    }
+
+    /// #1041: the unmapped-team repo picker resolves the picked `owner/repo`
+    /// text into a `MapLinearTeam` outcome carrying the team it was opened
+    /// for; an empty pick is a no-op rather than a partial mapping.
+    #[test]
+    fn linear_team_repo_pick_maps_the_team() {
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::Text("obin-ai/obin-platform".into())],
+                PickFlow::LinearTeamRepo { team: "OBI".into() },
+            ),
+            PickOutcome::MapLinearTeam { team, repo }
+                if team == "OBI" && repo == "obin-ai/obin-platform"
+        ));
+        assert!(matches!(
+            resolve_pick::<Payload>(&[], PickFlow::LinearTeamRepo { team: "OBI".into() }),
+            PickOutcome::NoOp
         ));
     }
 

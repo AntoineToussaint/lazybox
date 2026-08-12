@@ -356,6 +356,9 @@ pub struct WorktreeProgress {
     /// Whether the conflict is a live session holding the branch, so the
     /// modal offers a jump to that session instead of a recreate.
     jump: bool,
+    /// Whether the failure is an unmapped Linear team, so the modal offers
+    /// a repo pick that persists the mapping and re-provisions (#1041).
+    picks_repo: bool,
     warning: Option<String>,
     spinner_idx: usize,
 }
@@ -374,6 +377,7 @@ impl WorktreeProgress {
             jump: state
                 .recovery
                 .is_some_and(|recovery| recovery.jump_to_holder()),
+            picks_repo: state.recovery.is_some_and(|recovery| recovery.picks_repo()),
             warning: state.warning.clone(),
             spinner_idx: 0,
         }
@@ -444,6 +448,8 @@ impl Component for WorktreeProgress {
                 "  r recreate · Esc dismiss"
             } else if self.jump {
                 "  g go to holder · Esc dismiss"
+            } else if self.picks_repo {
+                "  r pick repo · Esc dismiss"
             } else {
                 "  Esc dismiss"
             };
@@ -527,6 +533,11 @@ impl AppComponent<Msg, UserEvent> for WorktreeProgress {
                 code: Key::Char('g'),
                 ..
             }) if self.jump => Some(Msg::WorktreeJumpToHolder),
+            // `r` on an unmapped Linear team opens the repo picker (#1041).
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('r'),
+                ..
+            }) if self.picks_repo => Some(Msg::WorktreePickRepo),
             // Advance the spinner and ask the run loop to repaint — the
             // checkout phase emits no events for seconds, so without a
             // per-tick redraw the spinner would look frozen.
@@ -978,6 +989,33 @@ mod tests {
                 .is_none(),
             "r must not recreate a live holder"
         );
+    }
+
+    /// Issue #1041: an unmapped-Linear-team failure offers a repo pick
+    /// (not a bare retry, which can't fix it); `r` dispatches the pick.
+    #[test]
+    fn unmapped_linear_team_modal_offers_a_repo_pick() {
+        let mut st = state();
+        st.apply(
+            WorktreeStep::Fetch,
+            WorktreeStepStatus::Failed(
+                "workspace: Linear team `OBI` has no repo mapping and the ticket has no \
+                 linked GitHub PR — set providers.linear.teams.OBI in ~/.lazybox/config.yaml"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::LinearUnmapped));
+        let out = render(&mut WorktreeProgress::from_state(&st), 72, 20);
+        assert!(out.contains("r pick repo"), "pick-repo affordance: {out}");
+        assert!(
+            !out.contains("r retry"),
+            "must not advertise a bare retry: {out}"
+        );
+        let mut comp = WorktreeProgress::from_state(&st);
+        assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('r')))),
+            Some(Msg::WorktreePickRepo)
+        ));
     }
 
     /// The `r` key only fires for a retryable failure — a stray `r`

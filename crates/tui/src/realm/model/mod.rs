@@ -128,6 +128,13 @@ pub enum Id {
     /// `Msg::ChoicePicked` either funnels into the new-workspace name
     /// input under the chosen repo, or mounts `NewProject`.
     NewWorkspaceRepo,
+    /// Repo picker for an unmapped Linear team (#1041), mounted when the
+    /// worktree-provision modal's `LinearUnmapped` failure offers a pick.
+    /// Lists the tracked GitHub repos; each row carries a
+    /// [`ChoicePayload::Text`] `owner/repo`. The team lives in
+    /// `ModalFlow::LinearTeamRepo`; `Msg::ChoicePicked` persists
+    /// `providers.linear.teams.<team>` and re-provisions the stuck spawn.
+    LinearTeamRepo,
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
@@ -730,6 +737,10 @@ pub(crate) enum ModalFlow {
     ImportConfirm {
         target: lazybox_ipc::DiscoveredCheckoutDto,
     },
+    /// Repo picker for an unmapped Linear team (#1041), carrying the team
+    /// key the picked `owner/repo` will be persisted under. Consumed by
+    /// `Msg::ChoicePicked` → `PickOutcome::MapLinearTeam`.
+    LinearTeamRepo { team: String },
     /// New-workspace name input, carrying the project to create under.
     NewWorkspaceProject { project: lazybox_core::ProjectKey },
     /// Rename-workspace name input (#744), carrying the workspace to
@@ -878,6 +889,10 @@ pub enum Msg {
     /// to the live session already holding the branch instead of fighting
     /// for it (issue #787).
     WorktreeJumpToHolder,
+    /// `r` pressed on a `LinearUnmapped` `WorktreeProgress` modal (#1041) —
+    /// open a repo picker for the ticket's team; the pick persists
+    /// `providers.linear.teams.<team>` and re-provisions.
+    WorktreePickRepo,
     PollingError((String, String, String, String)),
     PollingTimeout,
     PollingEmptyInbox(Vec<String>),
@@ -5263,6 +5278,7 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::WorktreeRetry => self.retry_worktree_provision(),
             Msg::WorktreeRecreate => self.recreate_worktree_provision(),
             Msg::WorktreeJumpToHolder => self.jump_to_worktree_holder(),
+            Msg::WorktreePickRepo => self.pick_repo_for_linear_team(),
             Msg::Confirmed(yes) => {
                 let cmds = self.handle_confirmed(yes);
                 self.dispatch_cmds(cmds);

@@ -1603,6 +1603,18 @@ impl Sidebar {
             .collect()
     }
 
+    /// Every tracked GitHub repo as its canonical `owner/repo`, in the
+    /// sidebar's stable `BTreeMap` order. Drives the unmapped-Linear-team
+    /// repo picker (#1041), which persists the pick as
+    /// `providers.linear.teams.<team>` — so it offers only real,
+    /// clonable GitHub repos, never `linear/<team>` or local projects.
+    pub fn github_repos_for_picker(&self) -> Vec<String> {
+        self.projects
+            .values()
+            .filter_map(|p| p.github_repo().map(str::to_string))
+            .collect()
+    }
+
     /// The Project the cursor is currently "in" — drives the `n` (new
     /// workspace) flow. Resolution:
     ///

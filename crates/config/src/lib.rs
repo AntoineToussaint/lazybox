@@ -3212,6 +3212,65 @@ repos:
         );
     }
 
+    /// Issue #1041: the unmapped-Linear-team picker persists its choice by
+    /// inserting into `providers.linear.teams` through the same
+    /// read-modify-write the theme/sidebar callers use. A fresh insert
+    /// lands and survives reload; a second team merges in without clobbering
+    /// the first, so the daemon's next provision (which reloads from disk)
+    /// resolves the mapping directly.
+    #[test]
+    fn linear_team_mapping_persists_through_save_with() {
+        let dir = std::env::temp_dir().join(format!("lazybox-teams-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("config.yaml");
+
+        Config::save_with_at(&path, |cfg| {
+            cfg.providers
+                .linear
+                .teams
+                .insert("OBI".into(), "obin-ai/obin-platform".into());
+        })
+        .expect("first insert");
+
+        let reloaded = Config::load_from(&path).expect("reload");
+        assert_eq!(
+            reloaded
+                .providers
+                .linear
+                .teams
+                .get("OBI")
+                .map(String::as_str),
+            Some("obin-ai/obin-platform"),
+            "the picked mapping is persisted for the next provision",
+        );
+
+        Config::save_with_at(&path, |cfg| {
+            cfg.providers
+                .linear
+                .teams
+                .insert("NYL360".into(), "obin-ai/nyl-fork".into());
+        })
+        .expect("second insert");
+
+        let merged = Config::load_from(&path).expect("reload merged");
+        assert_eq!(
+            merged.providers.linear.teams.get("OBI").map(String::as_str),
+            Some("obin-ai/obin-platform"),
+            "a second team must not clobber the first mapping",
+        );
+        assert_eq!(
+            merged
+                .providers
+                .linear
+                .teams
+                .get("NYL360")
+                .map(String::as_str),
+            Some("obin-ai/nyl-fork"),
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Tips are on by default (opt-out), and a fresh config starts
     /// with no tips marked seen. Both survive a save/load round-trip.
     #[test]

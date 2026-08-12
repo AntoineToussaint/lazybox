@@ -221,6 +221,13 @@ impl Terminals {
         self.inner.close_focused_tile(cmds);
     }
 
+    /// `]]z` — toggle tmux-style zoom of the focused tile. Returns the
+    /// resulting state (`Some(true/false)`), or `None` when there is
+    /// nothing to zoom (Tabs, or a single tile).
+    pub fn toggle_zoom(&mut self) -> Option<bool> {
+        self.inner.toggle_zoom()
+    }
+
     /// Whether the active session renders as a tile tree (vs Tabs).
     /// Drives the layout-tailored rows of the `]]` leader popup.
     pub fn layout_is_splits(&self) -> bool {

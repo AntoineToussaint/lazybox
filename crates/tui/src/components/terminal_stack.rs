@@ -595,6 +595,14 @@ pub struct TerminalStack {
     /// the timestamp keeps a marker whose spawn failed daemon-side from
     /// hijacking an unrelated spawn much later.
     pending_split: Option<(PendingSplit, std::time::Instant)>,
+    /// tmux-style zoom (#1057): while set, the Splits grid renders only
+    /// the focused tile across the whole pane, then restores the grid on
+    /// the next `]]z`. A transient view state — deliberately NOT persisted
+    /// (it's a momentary "read one closely" motion, not a layout), and
+    /// cleared whenever the tree changes underfoot (split, close, focus
+    /// move, session switch, daemon-synced layout) so it can't outlive the
+    /// tile it maximized.
+    zoomed: bool,
     /// The last layout applied via [`Self::set_layout`] for the active
     /// session — i.e. the persisted daemon-side state as this client
     /// last saw it. `set_layout` skips re-projections equal to it so
@@ -1319,6 +1327,7 @@ impl TerminalStack {
             collapse_user_set: false,
             layout: lazybox_core::SessionLayout::default(),
             pending_split: None,
+            zoomed: false,
             synced_layout: None,
             pending_resizes: Vec::new(),
             pending_resync_requests: Vec::new(),
@@ -1406,10 +1415,34 @@ impl TerminalStack {
         }
         self.layout = layout;
         self.pending_split = None;
+        self.zoomed = false;
     }
 
     pub fn layout(&self) -> &lazybox_core::SessionLayout {
         &self.layout
+    }
+
+    /// Toggle tmux-style zoom of the focused tile (#1057): maximize it
+    /// across the whole pane and back. Only meaningful in a multi-tile
+    /// Splits grid — returns `Some(true/false)` for the resulting state
+    /// so the caller can flash a hint, or `None` when there is nothing to
+    /// zoom (Tabs, or a single tile).
+    pub fn toggle_zoom(&mut self) -> Option<bool> {
+        let multi = matches!(
+            &self.layout,
+            lazybox_core::SessionLayout::Splits { tree, .. } if tree.leaves().len() >= 2
+        );
+        if !multi {
+            self.zoomed = false;
+            return None;
+        }
+        self.zoomed = !self.zoomed;
+        Some(self.zoomed)
+    }
+
+    /// Whether the Splits grid is currently zoomed to its focused tile.
+    pub fn is_zoomed(&self) -> bool {
+        self.zoomed
     }
 
     /// Terminal id at the focused leaf (Splits mode), or the active
@@ -1507,6 +1540,8 @@ impl TerminalStack {
         // The synced-layout memo is per-session; carrying it across a
         // switch could suppress applying the new session's layout.
         self.synced_layout = None;
+        // Zoom is a transient view of the session we're leaving.
+        self.zoomed = false;
         self.auto_collapse_on_emptiness();
     }
 
@@ -3781,22 +3816,28 @@ impl TerminalStack {
                 tree,
                 focused: focus_path,
             } => {
-                // Recursive tile renderer. Dividers are drawn on the
-                // boundary between adjacent leaves; the focused leaf
-                // gets a brighter border so the user can tell where
-                // typing lands.
-                let theme_chrome = theme.chrome;
-                let theme_accent = theme.accent;
-                self.render_tile_tree(
-                    &tree,
-                    body,
-                    frame,
-                    focused,
-                    &focus_path,
-                    &[],
-                    theme_chrome,
-                    theme_accent,
-                );
+                if self.zoomed {
+                    // tmux-style zoom: the focused tile fills the pane; the
+                    // rest of the grid is hidden until `]]z` restores it.
+                    if let Some(id) = self.focused_terminal_id() {
+                        self.render_tile_leaf(id, body, frame, focused, true);
+                    }
+                } else {
+                    // Recursive tile renderer. Dividers are drawn on the
+                    // boundary between adjacent leaves; the focused leaf
+                    // gets a brighter border so the user can tell where
+                    // typing lands.
+                    let theme_chrome = theme.chrome;
+                    self.render_tile_tree(
+                        &tree,
+                        body,
+                        frame,
+                        focused,
+                        &focus_path,
+                        &[],
+                        theme_chrome,
+                    );
+                }
             }
         }
     }
@@ -3885,6 +3926,9 @@ impl TerminalStack {
         let Some(session_key) = self.active_session.clone() else {
             return;
         };
+        // A new split reveals the grid — a maximized tile would hide the
+        // very tile being spawned.
+        self.zoomed = false;
         self.pending_split = Some((direction, std::time::Instant::now()));
         cmds.push(Command::Spawn {
             model_alias: None,
@@ -3904,6 +3948,9 @@ impl TerminalStack {
     /// Move focus across the tile tree (`]]<arrow>`), or cycle through
     /// tabs in Tabs mode. Persists the new layout via `SetSessionLayout`.
     pub fn move_tile_focus(&mut self, dir: lazybox_core::TileDirection, cmds: &mut Vec<Command>) {
+        // Moving focus un-zooms so the grid is visible to navigate — the
+        // tmux `select-pane` motion. Re-zoom the new tile with `]]z`.
+        self.zoomed = false;
         // The tab strip shows the ACTIVE session's terminals, so the
         // cycle length is the visible set — the raw `terminals` map
         // also holds other sessions' slots and would overshoot.
@@ -4110,6 +4157,9 @@ impl TerminalStack {
     /// and re-clamps the strip). Either way the terminal's PTY is
     /// killed daemon-side via `Command::Close`.
     pub fn close_focused_tile(&mut self, cmds: &mut Vec<Command>) {
+        // Closing a tile collapses the tree — drop any zoom so the
+        // surviving grid is what renders.
+        self.zoomed = false;
         let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout else {
             if let Some(id) = self.active_terminal_id() {
                 if self.terminals.get(&id).is_some_and(|s| s.exited.is_some()) {
@@ -4463,6 +4513,177 @@ impl TerminalStack {
         );
     }
 
+    /// Render one tile: a one-row status header carved off the top, then
+    /// the PTY grid in the remainder. Shared by the grid renderer and the
+    /// zoomed view so both show the same header. `zoomed` adds a `⛶`
+    /// marker so a maximized tile is distinguishable from a lone terminal.
+    ///
+    /// The header row is CARVED off the tile's rect (the PTY is sized to
+    /// the remainder), never painted over content — overdrawing hid the
+    /// tile's top grid row and the agent recap. A one-row tile keeps its
+    /// content instead.
+    fn render_tile_leaf(
+        &mut self,
+        terminal_id: TerminalId,
+        rect: Rect,
+        frame: &mut Frame,
+        is_focused_leaf: bool,
+        zoomed: bool,
+    ) {
+        let body = if rect.height >= 2 && rect.width > 0 {
+            let bar = Rect {
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: 1,
+            };
+            let header = self.tile_header_line(terminal_id, is_focused_leaf, zoomed, bar.width);
+            frame.render_widget(Paragraph::new(header), bar);
+            Rect {
+                x: rect.x,
+                y: rect.y + 1,
+                width: rect.width,
+                height: rect.height - 1,
+            }
+        } else {
+            rect
+        };
+        self.render_one_terminal(terminal_id, body, rect, frame, is_focused_leaf);
+    }
+
+    /// The one-row tile header for the Splits grid (#1057). Reads as a
+    /// divider rule that also carries the runner, its agent-state chip,
+    /// and the model badge — so a grid of agents tells you at a glance
+    /// which is which and which one needs you.
+    ///
+    /// Focus colouring mirrors the old bare rule: accent on the focused
+    /// tile, chrome on the rest (#286) — the contrast is what makes "where
+    /// does my typing land" legible. On top of that, a *background* tile
+    /// whose agent is asking for input paints its whole bar warn+bold, so
+    /// it stands out in the grid even while you type in another tile.
+    fn tile_header_line(
+        &self,
+        id: TerminalId,
+        is_focused_leaf: bool,
+        zoomed: bool,
+        width: u16,
+    ) -> Line<'static> {
+        let theme = crate::theme::current();
+        let width = width as usize;
+        let Some(slot) = self.terminals.get(&id) else {
+            return Line::from(Span::styled(
+                "─".repeat(width),
+                Style::default().fg(theme.chrome),
+            ));
+        };
+
+        let exited = slot.exited.is_some();
+        let asking = !exited && matches!(slot.agent_state, lazybox_ipc::AgentState::InputNeeded);
+        // Attention: a background tile whose agent is asking paints its
+        // whole bar warn so it's noticeable without watching every tile.
+        let attention = asking && !is_focused_leaf;
+        let base = if attention {
+            theme.warn
+        } else if is_focused_leaf {
+            theme.accent
+        } else {
+            theme.chrome
+        };
+        let base_style = if attention || is_focused_leaf {
+            Style::default().fg(base).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(base)
+        };
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut used = 0usize;
+
+        let icon = match &slot.kind {
+            TerminalKind::Agent(agent_id) => crate::components::icons::agent_icon(agent_id),
+            _ => crate::components::icons::SHELL,
+        };
+        let lead = format!("─ {icon} {} ", Self::tab_label(&slot.kind));
+        used += lead.chars().count();
+        spans.push(Span::styled(lead, base_style));
+
+        if let Some((chip, style)) = Self::tile_state_chip(slot.agent_state, exited, theme) {
+            let chip = format!("{chip} ");
+            used += chip.chars().count();
+            spans.push(Span::styled(chip, style));
+        }
+
+        if let Some(tier) = &slot.model_label {
+            let badge = format!("◆ {tier} ");
+            used += badge.chars().count();
+            spans.push(Span::styled(
+                badge,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        if slot.on_main {
+            let main = "⎇ main ".to_string();
+            used += main.chars().count();
+            spans.push(Span::styled(
+                main,
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            ));
+        }
+
+        if zoomed {
+            let zoom = "⛶ zoom ".to_string();
+            used += zoom.chars().count();
+            spans.push(Span::styled(zoom, base_style));
+        }
+
+        // Fill the remainder with the rule so the header keeps reading as
+        // a divider between tiles.
+        if used < width {
+            spans.push(Span::styled(
+                "─".repeat(width - used),
+                Style::default().fg(base),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
+    /// The agent-state chip for a tile header: which agent needs you at a
+    /// glance. `● asking` (warn) is the attention state; `· working`,
+    /// `✓ done`, and `✗ exited` round it out. Idle shows nothing.
+    fn tile_state_chip(
+        state: lazybox_ipc::AgentState,
+        exited: bool,
+        theme: &crate::theme::Theme,
+    ) -> Option<(&'static str, Style)> {
+        if exited {
+            return Some((
+                "✗ exited",
+                Style::default()
+                    .fg(theme.error)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        match state {
+            lazybox_ipc::AgentState::InputNeeded => Some((
+                "● asking",
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            )),
+            lazybox_ipc::AgentState::Working => {
+                Some(("· working", Style::default().fg(theme.accent)))
+            }
+            lazybox_ipc::AgentState::Done => Some((
+                "✓ done",
+                Style::default()
+                    .fg(theme.success)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            _ => None,
+        }
+    }
+
     /// Recursive walk of the tile tree. Each Leaf gets its own rect
     /// rendered via the existing per-terminal pipeline; each Split
     /// divides its rect according to `ratio` and recurses, drawing a
@@ -4477,50 +4698,16 @@ impl TerminalStack {
         focus_path: &[u8],
         current_path: &[u8],
         chrome: Color,
-        accent: Color,
     ) {
         match node {
             lazybox_core::TileTree::Leaf { terminal_id } => {
                 let is_focused_leaf = pane_focused && current_path == focus_path;
-                // Every leaf gets a one-cell top rule: accent on the
-                // focused tile, chrome on the rest (#286). The contrast
-                // between the two is what makes "where does my typing
-                // land" legible at a glance — an accent bar with nothing
-                // to compare against read as decoration, not focus. The
-                // rule row is CARVED off the tile's rect (the PTY is
-                // sized to the remainder), never painted over content —
-                // overdrawing hid the tile's top grid row and the agent
-                // recap. A one-row tile keeps its content instead.
-                let body = if rect.height >= 2 && rect.width > 0 {
-                    let bar = Rect {
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.width,
-                        height: 1,
-                    };
-                    let color = if is_focused_leaf { accent } else { chrome };
-                    frame.render_widget(
-                        Paragraph::new(Line::from(Span::styled(
-                            "─".repeat(bar.width as usize),
-                            Style::default().fg(color),
-                        ))),
-                        bar,
-                    );
-                    Rect {
-                        x: rect.x,
-                        y: rect.y + 1,
-                        width: rect.width,
-                        height: rect.height - 1,
-                    }
-                } else {
-                    rect
-                };
-                self.render_one_terminal(
+                self.render_tile_leaf(
                     TerminalId(*terminal_id),
-                    body,
                     rect,
                     frame,
                     is_focused_leaf,
+                    false,
                 );
             }
             lazybox_core::TileTree::HSplit { left, right, ratio } => {
@@ -4552,7 +4739,6 @@ impl TerminalStack {
                     focus_path,
                     &p_left,
                     chrome,
-                    accent,
                 );
                 self.render_tile_tree(
                     right,
@@ -4562,7 +4748,6 @@ impl TerminalStack {
                     focus_path,
                     &p_right,
                     chrome,
-                    accent,
                 );
                 // Vertical divider between the two halves.
                 if rect.height > 0 {
@@ -4607,7 +4792,6 @@ impl TerminalStack {
                     focus_path,
                     &p_top,
                     chrome,
-                    accent,
                 );
                 self.render_tile_tree(
                     bottom,
@@ -4617,7 +4801,6 @@ impl TerminalStack {
                     focus_path,
                     &p_bot,
                     chrome,
-                    accent,
                 );
                 // Horizontal divider.
                 if rect.width > 0 {
@@ -9721,6 +9904,201 @@ mod agent_crash_tests {
         assert!(
             stack.terminals.get(&TerminalId(1)).is_none(),
             "a zero grace window makes even an instant clean exit auto-close",
+        );
+    }
+}
+
+/// tmux-style zoom (`]]z`) and the per-tile status headers of the
+/// multi-agent grid (#1057).
+#[cfg(test)]
+mod zoom_and_tile_header_tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    const W: u16 = 80;
+    const H: u16 = 24;
+
+    /// A single session with two agent tiles side-by-side; focus on the
+    /// left (terminal 1).
+    fn two_tile_grid() -> (TerminalStack, SessionKey) {
+        let sk = SessionKey::new("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        for id in [1u64, 2] {
+            stack.on_event(&Event::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(id),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        stack.set_active_session(Some(sk.clone()));
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        });
+        (stack, sk)
+    }
+
+    fn feed(stack: &mut TerminalStack, id: u64, text: &str) {
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: TerminalId(id),
+            bytes: format!("{text}\r\n").into_bytes(),
+            first_seq: 1,
+            seq: 1,
+        });
+    }
+
+    fn rows(stack: &mut TerminalStack) -> Vec<String> {
+        let backend = TestBackend::new(W, H);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, W, H), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..H)
+            .map(|y| {
+                (0..W)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn zoom_toggles_only_in_a_multi_tile_grid() {
+        // Tabs (single terminal): nothing to zoom.
+        let sk = SessionKey::new("github:o/r#9");
+        let mut tabs = TerminalStack::new(PaneId::new(0));
+        tabs.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        tabs.set_active_session(Some(sk));
+        assert_eq!(tabs.toggle_zoom(), None);
+        assert!(!tabs.is_zoomed());
+
+        // Splits grid: toggle in and back out.
+        let (mut stack, _sk) = two_tile_grid();
+        assert_eq!(stack.toggle_zoom(), Some(true));
+        assert!(stack.is_zoomed());
+        assert_eq!(stack.toggle_zoom(), Some(false));
+        assert!(!stack.is_zoomed());
+    }
+
+    #[test]
+    fn zoom_clears_when_the_tree_changes_underfoot() {
+        // Moving tile focus un-zooms so the grid is visible to navigate.
+        let (mut stack, _sk) = two_tile_grid();
+        stack.toggle_zoom();
+        let mut cmds = Vec::new();
+        stack.move_tile_focus(lazybox_core::TileDirection::Right, &mut cmds);
+        assert!(!stack.is_zoomed(), "moving focus restores the grid");
+
+        // Closing a tile collapses the tree — drop zoom.
+        let (mut stack, _sk) = two_tile_grid();
+        stack.toggle_zoom();
+        let mut cmds = Vec::new();
+        stack.close_focused_tile(&mut cmds);
+        assert!(!stack.is_zoomed(), "closing a tile restores the grid");
+
+        // A new split reveals the freshly-spawned tile.
+        let (mut stack, _sk) = two_tile_grid();
+        stack.toggle_zoom();
+        let mut cmds = Vec::new();
+        stack.split_tile(PendingSplit::Vertical, &mut cmds);
+        assert!(!stack.is_zoomed(), "a new split restores the grid");
+
+        // Switching workspaces drops the zoom of the one we left.
+        let (mut stack, _sk) = two_tile_grid();
+        stack.toggle_zoom();
+        stack.set_active_session(Some(SessionKey::new("github:o/r#2")));
+        assert!(!stack.is_zoomed(), "a session switch clears zoom");
+    }
+
+    #[test]
+    fn zoomed_grid_renders_only_the_focused_tile() {
+        let (mut stack, _sk) = two_tile_grid();
+        feed(&mut stack, 1, "LEFTAGENT");
+        feed(&mut stack, 2, "RIGHTAGENT");
+
+        let grid = rows(&mut stack);
+        assert!(
+            grid.iter().any(|r| r.contains("LEFTAGENT"))
+                && grid.iter().any(|r| r.contains("RIGHTAGENT")),
+            "the grid shows both tiles: {grid:?}",
+        );
+
+        // Focus is on the left tile (terminal 1); zoom hides the right.
+        stack.toggle_zoom();
+        let zoomed = rows(&mut stack);
+        assert!(
+            zoomed.iter().any(|r| r.contains("LEFTAGENT")),
+            "the focused tile stays visible when zoomed: {zoomed:?}",
+        );
+        assert!(
+            !zoomed.iter().any(|r| r.contains("RIGHTAGENT")),
+            "the background tile is hidden when zoomed: {zoomed:?}",
+        );
+        assert!(
+            zoomed.iter().any(|r| r.contains("zoom")),
+            "the zoomed tile is marked: {zoomed:?}",
+        );
+    }
+
+    #[test]
+    fn tile_header_carries_runner_state_and_model() {
+        let (mut stack, _sk) = two_tile_grid();
+        {
+            let slot = stack.terminals.get_mut(&TerminalId(2)).unwrap();
+            slot.agent_state = lazybox_ipc::AgentState::InputNeeded;
+            slot.model_label = Some("Opus".into());
+        }
+        let header = stack.tile_header_line(TerminalId(2), false, false, 60);
+        let text: String = header.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("claude"), "runner name in header: {text}");
+        assert!(
+            text.contains("asking"),
+            "agent-state chip in header: {text}"
+        );
+        assert!(text.contains("Opus"), "model badge in header: {text}");
+    }
+
+    #[test]
+    fn background_asking_tile_header_is_highlighted() {
+        let (mut stack, _sk) = two_tile_grid();
+        stack.terminals.get_mut(&TerminalId(2)).unwrap().agent_state =
+            lazybox_ipc::AgentState::InputNeeded;
+        let theme = crate::theme::current();
+
+        // A background asking tile paints its whole bar warn+bold so it
+        // stands out while you type in another tile.
+        let bg = stack.tile_header_line(TerminalId(2), false, false, 40);
+        assert!(
+            bg.spans
+                .iter()
+                .any(|s| s.style.fg == Some(theme.warn)
+                    && s.style.add_modifier.contains(Modifier::BOLD)),
+            "background asking tile is warn+bold",
+        );
+
+        // The same agent while focused uses the accent focus colour — you
+        // are already looking at it, so no attention pull.
+        let fg = stack.tile_header_line(TerminalId(2), true, false, 40);
+        assert!(
+            fg.spans.iter().any(|s| s.style.fg == Some(theme.accent)),
+            "the focused tile uses the accent rule, not the attention warn",
         );
     }
 }

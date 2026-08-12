@@ -2241,6 +2241,20 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
+    /// Toggle tmux-style zoom (`]]z`, #1057) of the focused tile: the
+    /// "read one closely, then zoom out to the grid" motion. Only the
+    /// multi-tile Splits grid can zoom — flash a hint otherwise so the
+    /// chord isn't a silent no-op. Restoring the grid is its own feedback,
+    /// so only the zoom-in and the nothing-to-zoom cases flash.
+    pub(super) fn toggle_terminal_zoom(&mut self) {
+        match self.terminals.toggle_zoom() {
+            Some(true) => self.flash_hint("zoomed tile — ]]z to restore"),
+            Some(false) => {}
+            None => self.flash_hint("nothing to zoom — split first (]]| / ]]-)"),
+        }
+        self.redraw = true;
+    }
+
     /// Switch the displayed terminal to the Nth agent workspace,
     /// counting in sidebar (top-down) order — the deterministic
     /// `]]<digit>` jump that replaced the old `F3` cycle. `n` is

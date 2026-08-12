@@ -56,7 +56,7 @@ jobs:
       contracts: ${{ steps.filter.outputs.contracts }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4.0.2
+      - uses: dorny/paths-filter@v4.0.3
         id: filter
         with:
           filters: |
@@ -353,7 +353,7 @@ jobs:
       # Pinned to a tagged release rather than `@master` so CI is
       # reproducible across re-runs and a silent upstream change
       # can't flip behavior. Bump when typos.dev cuts a new release.
-      - uses: crate-ci/typos@v1.48.0
+      - uses: crate-ci/typos@v1.49.0
 
   machete:
     # Dependency hygiene is a real gate: a stale direct dependency expands

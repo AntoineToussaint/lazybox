@@ -16,6 +16,14 @@ pub struct Tunnel {
     /// Program to spawn (`gcloud`, `ssh`).
     pub program: String,
     pub args: Vec<String>,
+    /// Credentials overlaid on the forward's environment (#1047). The
+    /// long-lived `gcloud compute ssh` that carries the daemon socket is
+    /// spawned by the *caller* (the client's keepalive supervisor), not
+    /// through the provider's `CommandRunner`, so the auth env must ride the
+    /// tunnel to reach it — otherwise the forward falls back to ambient
+    /// credentials the rest of the lifecycle no longer uses. Empty on the
+    /// ambient path.
+    pub env: Vec<(String, String)>,
     /// Local socket the forward binds; the path `--connect` should dial.
     pub local_socket: PathBuf,
     /// Workload TCP ports forwarded to `localhost` on the client.
@@ -62,6 +70,17 @@ pub enum SandboxError {
 pub trait SandboxProvider {
     /// Provider id, e.g. `"gcp"`.
     fn id(&self) -> &str;
+
+    /// Verify the provider's own credentials before the first lifecycle op,
+    /// failing with an actionable message (`gcp credentials not configured /
+    /// expired: <how to fix>`) rather than a raw CLI stderr from deep inside
+    /// a later call. Auth is a per-provider concern (GCP = service-account
+    /// key / impersonation, E2B = API key, …), so it lives on the contract
+    /// (#1047). The default is a no-op: a provider whose credentials are
+    /// implicit needs no preflight.
+    async fn check_auth(&self) -> Result<(), SandboxError> {
+        Ok(())
+    }
 
     /// Create the box if it is absent (Terraform apply), returning a handle
     /// that later lifecycle ops address. Idempotent: a second `ensure` of

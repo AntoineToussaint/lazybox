@@ -27,6 +27,33 @@ full deployment recipe. The deployment overlay's keys map 1:1 to the
 remaining variables (`machine_type`, `image_family`, `workload_ports`,
 `service_account_roles`, `repo`, `bringup`, …).
 
+## Authentication
+
+The provider carries its **own** credentials (#1047): configure them once and
+`ensure`/`wake`/`sleep`/`status`/`connect`/`destroy` — and the TUI's `r`-spawn
+— authenticate in the background. There is **no** `gcloud auth login` step, and
+lazybox never touches your own `~/.config/gcloud`; credentials are injected
+explicitly into every `gcloud`/`terraform` call under a provider-scoped
+`CLOUDSDK_CONFIG`.
+
+```yaml
+sandbox:
+  project: my-proj
+  auth:
+    # Headless / CI / SaaS: a service-account key (or any
+    # GOOGLE_APPLICATION_CREDENTIALS-compatible credential file).
+    service_account_key: ~/.lazybox/gcp-sa.json
+    # Hosted tier: impersonate a service account (base creds — the key above,
+    # else ambient — mint tokens for it).
+    impersonate_service_account: deploy@my-proj.iam.gserviceaccount.com
+```
+
+Each field is also a per-command flag (`--service-account-key`,
+`--impersonate-service-account`, `--gcloud-config-dir`). With no `auth` block
+the provider falls back to whatever ambient credentials the machine has (the
+legacy path). A preflight verifies the credentials before the first op and
+fails with a fix hint rather than a raw `gcloud` error.
+
 ## Manual run
 
 ```bash

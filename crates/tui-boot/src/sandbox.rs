@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lazybox_config::{Config, SandboxConfig};
-use lazybox_sandbox::gcp::{GcpProvider, SystemRunner};
+use lazybox_sandbox::gcp::{GcpAuth, GcpProvider, SystemRunner};
 use lazybox_sandbox::{
     BoxHandle, Deployment, PowerState, SandboxProvider, SandboxSpec, connect_box, persist,
 };
@@ -301,7 +301,44 @@ pub(crate) fn resolve_provider(
         remote_socket: remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
         local_socket,
         runner: Arc::new(SystemRunner),
+        auth: resolve_auth(sc, args),
     })
+}
+
+/// The lazybox-owned `CLOUDSDK_CONFIG` dir credentials activate into, so
+/// lazybox's gcloud state is isolated from the user's own `~/.config/gcloud`
+/// (#1047). Under the state root, next to the per-box tfstate.
+fn default_gcloud_config_dir() -> PathBuf {
+    lazybox_core::paths::state_root()
+        .join("sandbox")
+        .join("gcloud")
+}
+
+/// Build the provider's credentials from config + flags. Flags override the
+/// `sandbox.auth` block. The scoped config dir defaults to a lazybox-owned
+/// directory only when a `service_account_key` is the base credential it
+/// isolates — impersonation whose base is ambient/metadata must NOT scope
+/// gcloud away from that base, and the ambient path keeps the user's own
+/// config untouched.
+pub(crate) fn resolve_auth(sc: &SandboxConfig, args: &mut Vec<String>) -> GcpAuth {
+    let service_account_key = take_value(args, "--service-account-key")
+        .map(PathBuf::from)
+        .or_else(|| sc.auth.service_account_key.clone());
+    let impersonate_service_account = take_value(args, "--impersonate-service-account")
+        .or_else(|| sc.auth.impersonate_service_account.clone());
+    let config_dir = take_value(args, "--gcloud-config-dir")
+        .map(PathBuf::from)
+        .or_else(|| sc.auth.config_dir.clone())
+        .or_else(|| {
+            service_account_key
+                .is_some()
+                .then(default_gcloud_config_dir)
+        });
+    GcpAuth {
+        service_account_key,
+        impersonate_service_account,
+        config_dir,
+    }
 }
 
 /// Build the full spec for `ensure` from config + flags.
@@ -428,6 +465,9 @@ async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let spec = resolve_spec(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
+    // Preflight the provider's credentials so a missing/expired credential
+    // fails here with a fix hint, not minutes into a terraform apply (#1047).
+    provider.check_auth().await?;
 
     // Terraform's `-state=<path>` writes the file but not its parent dir.
     if let Some(parent) = provider.state_file.parent() {
@@ -458,6 +498,7 @@ async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    provider.check_auth().await?;
 
     println!("Waking {}…", handle.id);
     provider.start(&handle).await?;
@@ -473,6 +514,7 @@ async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    provider.check_auth().await?;
 
     println!("Sleeping {}…", handle.id);
     provider.stop(&handle).await?;
@@ -488,6 +530,7 @@ async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    provider.check_auth().await?;
 
     let status = provider.status(&handle).await?;
     handle.observe(status.power, chrono::Utc::now());
@@ -547,6 +590,7 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
              (the absolute daemon-socket path on the box)"
         );
     }
+    provider.check_auth().await?;
     let store = open_store()?;
 
     let existing = persist::load_handle(store.as_ref(), &worktree)?;
@@ -577,7 +621,14 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     handle.observe(PowerState::Running, chrono::Utc::now());
     persist::save_handle(store.as_ref(), &worktree, &handle)?;
 
-    let shown = std::iter::once(tunnel.program.clone())
+    // Prefix the injected credential env (#1047) so a copy-pasted `--print`
+    // command runs the same authenticated forward this process would spawn —
+    // without it, the printed line works only on an ambient-auth machine.
+    let shown = tunnel
+        .env
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .chain(std::iter::once(tunnel.program.clone()))
         .chain(tunnel.args.iter().cloned())
         .collect::<Vec<_>>()
         .join(" ");
@@ -592,8 +643,11 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
         tunnel.local_socket.display()
     );
     // Run the forward in the foreground; Ctrl-C tears it (and the child) down.
+    // The credential env rides the spawn so the IAP SSH authenticates off the
+    // configured creds, not ambient state (#1047).
     let status = Command::new(&tunnel.program)
         .args(&tunnel.args)
+        .envs(tunnel.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .kill_on_drop(true)
         .status()
@@ -666,6 +720,7 @@ async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    provider.check_auth().await?;
 
     // The rebuild runs over SSH, so the box must be awake AND accepting SSH.
     if !provider.status(&handle).await?.power.is_running() {
@@ -690,9 +745,12 @@ async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
     );
     let (program, cmd_args) = provider.rebuild_command(&handle, &sha);
     // Foreground with inherited stdout/stderr so the build streams; only
-    // stdin is closed (the box build is non-interactive).
+    // stdin is closed (the box build is non-interactive). The rebuild's IAP
+    // SSH is spawned here, outside the `CommandRunner`, so it carries the
+    // injected credentials too (#1047).
     let status = Command::new(&program)
         .args(&cmd_args)
+        .envs(provider.auth.command_env().iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .status()
         .await
@@ -717,6 +775,7 @@ async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
     let handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    provider.check_auth().await?;
 
     println!("Destroying {} (terraform destroy)…", handle.id);
     provider.destroy(&handle).await?;
@@ -869,6 +928,82 @@ mod tests {
             p.state_file
         );
         assert!(p.state_file.starts_with(lazybox_core::paths::state_root()));
+    }
+
+    #[test]
+    fn resolve_auth_is_ambient_by_default_and_scopes_when_configured() {
+        // Nothing configured → ambient: no scoped config dir (gcloud stays on
+        // the user's own config), the legacy path.
+        let ambient = resolve_auth(&SandboxConfig::default(), &mut vec![]);
+        assert!(ambient.is_ambient());
+        assert!(
+            ambient.config_dir.is_none(),
+            "ambient keeps the user's gcloud"
+        );
+
+        // A configured key auto-scopes the gcloud config to a lazybox-owned
+        // dir so the user's own is never touched.
+        let sc = SandboxConfig {
+            auth: lazybox_config::SandboxAuthConfig {
+                service_account_key: Some(PathBuf::from("/keys/sa.json")),
+                ..Default::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let auth = resolve_auth(&sc, &mut vec![]);
+        assert!(!auth.is_ambient());
+        assert_eq!(
+            auth.service_account_key.as_deref(),
+            Some(std::path::Path::new("/keys/sa.json"))
+        );
+        assert_eq!(auth.config_dir, Some(default_gcloud_config_dir()));
+        assert!(
+            auth.config_dir
+                .unwrap()
+                .starts_with(lazybox_core::paths::state_root())
+        );
+
+        // Impersonation whose base is ambient/metadata must NOT auto-scope —
+        // scoping to an empty dir would strand the base credential (finding #2).
+        let sc = SandboxConfig {
+            auth: lazybox_config::SandboxAuthConfig {
+                impersonate_service_account: Some("deploy@p.iam.gserviceaccount.com".into()),
+                ..Default::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let auth = resolve_auth(&sc, &mut vec![]);
+        assert!(!auth.is_ambient());
+        assert!(
+            auth.config_dir.is_none(),
+            "impersonation-only must not scope gcloud away from its base"
+        );
+    }
+
+    #[test]
+    fn resolve_auth_takes_flags_over_config() {
+        let sc = SandboxConfig {
+            auth: lazybox_config::SandboxAuthConfig {
+                service_account_key: Some(PathBuf::from("/cfg/sa.json")),
+                ..Default::default()
+            },
+            ..SandboxConfig::default()
+        };
+        let mut args = vec![
+            "--service-account-key".into(),
+            "/flag/sa.json".into(),
+            "--impersonate-service-account".into(),
+            "deploy@p.iam.gserviceaccount.com".into(),
+        ];
+        let auth = resolve_auth(&sc, &mut args);
+        assert_eq!(
+            auth.service_account_key.as_deref(),
+            Some(std::path::Path::new("/flag/sa.json"))
+        );
+        assert_eq!(
+            auth.impersonate_service_account.as_deref(),
+            Some("deploy@p.iam.gserviceaccount.com")
+        );
     }
 
     #[test]

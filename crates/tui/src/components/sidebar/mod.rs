@@ -450,18 +450,23 @@ impl Sidebar {
         self.usage.note_run(run_id, agent_id);
     }
 
-    /// Fold one usage event into the running per-provider total
-    /// (`AgentUsage`).
+    /// Observe one usage report for a run's in-flight turn (`AgentUsage`).
     pub fn add_agent_usage(
         &mut self,
         run_id: lazybox_ipc::AgentRunId,
         usage: &lazybox_ipc::AgentUsage,
     ) {
-        self.usage.add_usage(run_id, usage);
+        self.usage.observe_usage(run_id, usage);
     }
 
-    /// Drop a finished run's binding; its accumulated total stays
-    /// (`AgentRunFinished`).
+    /// Commit a completed turn's usage into the running per-provider total
+    /// (`AgentTurnFinished`).
+    pub fn commit_agent_turn(&mut self, run_id: lazybox_ipc::AgentRunId) {
+        self.usage.commit_turn(&run_id);
+    }
+
+    /// Drop a finished run's binding, committing any turn still in flight
+    /// first; its accumulated total stays (`AgentRunFinished`).
     pub fn finish_agent_run(&mut self, run_id: lazybox_ipc::AgentRunId) {
         self.usage.finish_run(&run_id);
     }
@@ -496,10 +501,13 @@ impl Sidebar {
             })
     }
 
-    /// The always-visible per-provider usage summaries, one per agent id
-    /// with a live terminal, in stable (id) order. Empty when the summary
-    /// is disabled or no agent terminal is running. The reset fragment is
-    /// folded in only while that agent is actually limited.
+    /// The always-visible per-provider usage summaries, in stable (id)
+    /// order. The display set is every agent with a live terminal *or* any
+    /// accumulated usage — the latter so a structured run's tokens surface
+    /// even when no interactive terminal for that agent is open (usage
+    /// events come only from structured runs, which spawn no terminal).
+    /// Empty when the summary is disabled or nothing qualifies. The reset
+    /// fragment is folded in only while that agent is actually limited.
     fn usage_summaries(&self) -> Vec<lazybox_tui_core::usage::UsageSummary> {
         if !self.usage_summary {
             return Vec::new();
@@ -510,6 +518,7 @@ impl Sidebar {
                 agent_ids.insert(id.as_str());
             }
         }
+        agent_ids.extend(self.usage.agents_with_usage());
         agent_ids
             .into_iter()
             .map(|agent_id| {

@@ -45,8 +45,18 @@ pub struct UsageTracker {
     /// carries its `run_id`, so this is the sole way to know which
     /// provider it draws down.
     runs: HashMap<AgentRunId, String>,
-    /// `agent id → accumulated tokens`.
+    /// `agent id → committed tokens`, summed across finished turns.
     tokens: BTreeMap<String, u64>,
+    /// Per-run high-water mark for the turn in flight, not yet committed.
+    ///
+    /// A single Claude turn reports usage more than once — one or more
+    /// streaming `message_delta` events (each carrying the message's
+    /// *cumulative* usage) plus a final `result` total — all arriving as
+    /// `Event::AgentUsage`. Summing every event double-counts the turn.
+    /// Instead we keep the turn's high-water mark here and commit it once,
+    /// when the turn (or the run) ends, so the total gains each turn's
+    /// authoritative figure exactly once.
+    pending: HashMap<AgentRunId, u64>,
 }
 
 impl UsageTracker {
@@ -56,25 +66,57 @@ impl UsageTracker {
         self.runs.insert(run_id, agent_id.into());
     }
 
-    /// Fold one usage event into its run's agent total. A usage event for
-    /// an unknown run (its start was missed) is dropped rather than
-    /// bucketed under a placeholder — an unattributable total is worse
-    /// than a slightly low one.
-    pub fn add_usage(&mut self, run_id: AgentRunId, usage: &AgentUsage) {
-        if let Some(agent) = self.runs.get(&run_id) {
-            *self.tokens.entry(agent.clone()).or_default() += event_tokens(usage);
+    /// Observe one usage report for a run's in-flight turn, keeping the
+    /// turn's high-water mark rather than adding — repeated cumulative
+    /// reports within a turn must not multiply. A report for an unknown
+    /// run (its start was missed) is dropped rather than bucketed under a
+    /// placeholder.
+    pub fn observe_usage(&mut self, run_id: AgentRunId, usage: &AgentUsage) {
+        if !self.runs.contains_key(&run_id) {
+            return;
         }
+        let mark = self.pending.entry(run_id).or_default();
+        *mark = (*mark).max(event_tokens(usage));
     }
 
-    /// Forget a finished run's binding. The accumulated total stays — the
-    /// window it counts toward outlives the individual run.
+    /// Commit the in-flight turn's high-water mark into its agent total
+    /// and reset the turn accumulator (`AgentTurnFinished`). The next turn
+    /// on the same run starts fresh, so a multi-turn run accrues each
+    /// turn's figure.
+    pub fn commit_turn(&mut self, run_id: &AgentRunId) {
+        self.commit_pending(run_id);
+    }
+
+    /// Forget a finished run's binding, committing any turn still in
+    /// flight first (a run that dies mid-turn never sent
+    /// `AgentTurnFinished`). The accumulated total stays — the window it
+    /// counts toward outlives the individual run.
     pub fn finish_run(&mut self, run_id: &AgentRunId) {
+        self.commit_pending(run_id);
         self.runs.remove(run_id);
     }
 
-    /// Tokens accumulated for `agent_id` this window (`0` when none).
+    fn commit_pending(&mut self, run_id: &AgentRunId) {
+        if let Some(pending) = self.pending.remove(run_id)
+            && let Some(agent) = self.runs.get(run_id)
+        {
+            *self.tokens.entry(agent.clone()).or_default() += pending;
+        }
+    }
+
+    /// Tokens committed for `agent_id` this window (`0` when none).
     pub fn tokens_for(&self, agent_id: &str) -> u64 {
         self.tokens.get(agent_id).copied().unwrap_or(0)
+    }
+
+    /// Agent ids that have accrued any committed usage this window — the
+    /// data-driven half of the summary's display set, so structured-run
+    /// totals surface even for an agent with no live interactive terminal.
+    pub fn agents_with_usage(&self) -> impl Iterator<Item = &str> {
+        self.tokens
+            .iter()
+            .filter(|(_, tokens)| **tokens > 0)
+            .map(|(agent, _)| agent.as_str())
     }
 }
 
@@ -228,20 +270,45 @@ mod tests {
         let mut tracker = UsageTracker::default();
         tracker.note_run(AgentRunId(1), "claude");
         tracker.note_run(AgentRunId(2), "codex");
-        tracker.add_usage(AgentRunId(1), &usage(100, 20));
-        tracker.add_usage(AgentRunId(1), &usage(30, 10));
-        tracker.add_usage(AgentRunId(2), &usage(5, 5));
+        tracker.observe_usage(AgentRunId(1), &usage(100, 20));
+        tracker.commit_turn(&AgentRunId(1));
+        tracker.observe_usage(AgentRunId(2), &usage(5, 5));
+        tracker.commit_turn(&AgentRunId(2));
 
-        assert_eq!(tracker.tokens_for("claude"), 160);
+        assert_eq!(tracker.tokens_for("claude"), 120);
         assert_eq!(tracker.tokens_for("codex"), 10);
         assert_eq!(tracker.tokens_for("cursor"), 0);
+    }
+
+    #[test]
+    fn repeated_cumulative_reports_in_a_turn_count_once() {
+        // One Claude turn reports usage twice: a streaming `message_delta`
+        // (output so far) then the final `result` total. Summing them
+        // double-counts; the high-water mark counts the turn once.
+        let mut tracker = UsageTracker::default();
+        tracker.note_run(AgentRunId(1), "claude");
+        tracker.observe_usage(AgentRunId(1), &usage(0, 500)); // message_delta
+        tracker.observe_usage(AgentRunId(1), &usage(1_000, 500)); // result total
+        tracker.commit_turn(&AgentRunId(1));
+        assert_eq!(tracker.tokens_for("claude"), 1_500);
+    }
+
+    #[test]
+    fn multi_turn_run_accrues_each_turn() {
+        let mut tracker = UsageTracker::default();
+        tracker.note_run(AgentRunId(1), "claude");
+        tracker.observe_usage(AgentRunId(1), &usage(1_000, 500));
+        tracker.commit_turn(&AgentRunId(1));
+        tracker.observe_usage(AgentRunId(1), &usage(900, 500));
+        tracker.commit_turn(&AgentRunId(1));
+        assert_eq!(tracker.tokens_for("claude"), 2_900);
     }
 
     #[test]
     fn every_token_leg_counts() {
         let mut tracker = UsageTracker::default();
         tracker.note_run(AgentRunId(7), "claude");
-        tracker.add_usage(
+        tracker.observe_usage(
             AgentRunId(7),
             &AgentUsage {
                 input_tokens: Some(1),
@@ -251,25 +318,44 @@ mod tests {
                 cost_usd_micros: None,
             },
         );
+        tracker.commit_turn(&AgentRunId(7));
         assert_eq!(tracker.tokens_for("claude"), 15);
     }
 
     #[test]
     fn usage_for_an_unknown_run_is_dropped() {
         let mut tracker = UsageTracker::default();
-        tracker.add_usage(AgentRunId(99), &usage(500, 500));
+        tracker.observe_usage(AgentRunId(99), &usage(500, 500));
+        tracker.commit_turn(&AgentRunId(99));
         assert_eq!(tracker.tokens_for("claude"), 0);
     }
 
     #[test]
-    fn finishing_a_run_keeps_the_total_but_stops_attribution() {
+    fn finishing_a_run_commits_the_in_flight_turn_then_stops_attribution() {
         let mut tracker = UsageTracker::default();
         tracker.note_run(AgentRunId(1), "claude");
-        tracker.add_usage(AgentRunId(1), &usage(100, 0));
+        tracker.observe_usage(AgentRunId(1), &usage(100, 0));
+        // A run that dies mid-turn never sent `AgentTurnFinished`; the
+        // in-flight turn is still committed.
         tracker.finish_run(&AgentRunId(1));
         // A stray late usage event for the finished run no longer lands.
-        tracker.add_usage(AgentRunId(1), &usage(100, 0));
+        tracker.observe_usage(AgentRunId(1), &usage(100, 0));
+        tracker.commit_turn(&AgentRunId(1));
         assert_eq!(tracker.tokens_for("claude"), 100);
+    }
+
+    #[test]
+    fn agents_with_usage_lists_only_those_with_committed_tokens() {
+        let mut tracker = UsageTracker::default();
+        tracker.note_run(AgentRunId(1), "claude");
+        tracker.note_run(AgentRunId(2), "codex");
+        tracker.observe_usage(AgentRunId(1), &usage(100, 0));
+        tracker.commit_turn(&AgentRunId(1));
+        // Codex observed a zero-token report — it must not appear.
+        tracker.observe_usage(AgentRunId(2), &usage(0, 0));
+        tracker.commit_turn(&AgentRunId(2));
+        let agents: Vec<&str> = tracker.agents_with_usage().collect();
+        assert_eq!(agents, vec!["claude"]);
     }
 
     #[test]

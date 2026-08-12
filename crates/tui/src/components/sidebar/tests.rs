@@ -1959,6 +1959,15 @@ mod search_tests {
         }
     }
 
+    /// One structured-run turn's worth of usage: bind the run, report the
+    /// turn's usage, and commit it (the total only moves on turn commit).
+    fn run_turn(sb: &mut Sidebar, run_id: u64, agent: &str, input: u64, output: u64) {
+        let run = lazybox_ipc::AgentRunId(run_id);
+        sb.note_agent_run(run, agent);
+        sb.add_agent_usage(run, &agent_usage(input, output));
+        sb.commit_agent_turn(run);
+    }
+
     fn usage_row(sb: &mut Sidebar) -> String {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -1983,13 +1992,54 @@ mod search_tests {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         spawn_agent(&mut sb, 1, &session_key, "claude");
         sb.set_usage_budgets([("claude".to_string(), 200_000u64)].into_iter().collect());
-        sb.note_agent_run(lazybox_ipc::AgentRunId(1), "claude");
-        sb.add_agent_usage(lazybox_ipc::AgentRunId(1), &agent_usage(100_000, 24_000));
+        run_turn(&mut sb, 1, "claude", 100_000, 24_000);
 
         let row = usage_row(&mut sb);
         assert!(row.contains("Claude"), "{row:?}");
         assert!(row.contains("62%"), "{row:?}");
         assert!(row.contains('▓') && row.contains('░'), "{row:?}");
+    }
+
+    /// A structured run reports usage twice per turn (a streaming
+    /// `message_delta` then the `result` total); the header must count the
+    /// turn once, not double it.
+    #[test]
+    fn usage_summary_counts_a_turn_once_not_per_report() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        spawn_agent(&mut sb, 1, &session_key, "claude");
+        let run = lazybox_ipc::AgentRunId(1);
+        sb.note_agent_run(run, "claude");
+        sb.add_agent_usage(run, &agent_usage(0, 24_000)); // message_delta
+        sb.add_agent_usage(run, &agent_usage(100_000, 24_000)); // result total
+        sb.commit_agent_turn(run);
+        // 124k, not 148k (delta+result).
+        assert!(
+            usage_row(&mut sb).contains("124k"),
+            "{:?}",
+            usage_row(&mut sb)
+        );
+    }
+
+    /// Usage from a structured run surfaces even with no interactive
+    /// terminal for that agent — usage events come only from structured
+    /// runs, which spawn no terminal, so gating on live terminals alone
+    /// would hide every real total.
+    #[test]
+    fn usage_summary_shows_a_structured_run_with_no_terminal() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        // No spawn_agent — a headless run only.
+        run_turn(&mut sb, 1, "claude", 60_000, 8_000);
+        assert!(
+            usage_row(&mut sb).contains("Claude"),
+            "{:?}",
+            usage_row(&mut sb)
+        );
+        assert!(
+            usage_row(&mut sb).contains("68k"),
+            "{:?}",
+            usage_row(&mut sb)
+        );
     }
 
     /// Without a budget the widget degrades to a bare token total ("show
@@ -2000,8 +2050,7 @@ mod search_tests {
         let session_key = SessionKey::from("gh:owner/repo#1");
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         spawn_agent(&mut sb, 1, &session_key, "claude");
-        sb.note_agent_run(lazybox_ipc::AgentRunId(1), "claude");
-        sb.add_agent_usage(lazybox_ipc::AgentRunId(1), &agent_usage(120_000, 8_000));
+        run_turn(&mut sb, 1, "claude", 120_000, 8_000);
 
         // No budget → token total, no percentage, no reset yet.
         let row = usage_row(&mut sb);
@@ -2020,6 +2069,39 @@ mod search_tests {
         assert!(usage_row(&mut sb).contains("resets 3pm"));
     }
 
+    /// A reset hint clears once the agent recovers, so a later limit
+    /// episode whose banner has no parseable countdown can't resurface the
+    /// stale time.
+    #[test]
+    fn usage_reset_clears_when_the_agent_recovers() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        spawn_agent(&mut sb, 1, &session_key, "claude");
+        run_turn(&mut sb, 1, "claude", 1_000, 0);
+
+        let limit = |sb: &mut Sidebar, state: lazybox_ipc::AgentState| {
+            sb.on_event(&Event::AgentState {
+                session_key: session_key.clone(),
+                terminal_id: TerminalId(1),
+                state,
+            });
+        };
+
+        sb.note_usage_limit_reset(TerminalId(1), "3pm".into());
+        limit(&mut sb, lazybox_ipc::AgentState::LimitReached);
+        assert!(usage_row(&mut sb).contains("resets 3pm"));
+
+        // Recover — the stale hint is dropped.
+        limit(&mut sb, lazybox_ipc::AgentState::Working);
+        // A fresh limit with no new parseable countdown must not re-show it.
+        limit(&mut sb, lazybox_ipc::AgentState::LimitReached);
+        assert!(
+            !usage_row(&mut sb).contains("resets"),
+            "{:?}",
+            usage_row(&mut sb)
+        );
+    }
+
     /// `ui.usage_summary = false` hides the row entirely and reclaims its
     /// line — content shifts back up, and the click hit-test agrees.
     #[test]
@@ -2027,8 +2109,7 @@ mod search_tests {
         let session_key = SessionKey::from("gh:owner/repo#1");
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         spawn_agent(&mut sb, 1, &session_key, "claude");
-        sb.note_agent_run(lazybox_ipc::AgentRunId(1), "claude");
-        sb.add_agent_usage(lazybox_ipc::AgentRunId(1), &agent_usage(10_000, 0));
+        run_turn(&mut sb, 1, "claude", 10_000, 0);
 
         let area = Rect::new(0, 0, 60, 14);
         assert_eq!(sb.usage_row_height(area), 1);

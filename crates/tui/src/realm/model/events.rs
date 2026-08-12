@@ -372,9 +372,12 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Feed the sidebar's per-provider usage tracker from the structured
-    /// agent-run stream (#1059): bind each run to its agent, accumulate
-    /// its token deltas, and drop the binding when it finishes. A pure
-    /// join over events every other handler leaves untouched.
+    /// agent-run stream (#1059): bind each run to its agent, keep its
+    /// turn's high-water mark, commit that once per turn, and drop the
+    /// binding when the run finishes. A single turn reports usage more
+    /// than once (streaming `message_delta` + final `result`), so usage is
+    /// committed on `AgentTurnFinished`, not summed per event. A pure join
+    /// over events every other handler leaves untouched.
     fn record_agent_usage(&mut self, event: &IpcEvent) {
         match event {
             IpcEvent::AgentRunStarted { run_id, agent, .. } => {
@@ -382,6 +385,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
             IpcEvent::AgentUsage { run_id, usage } => {
                 self.sidebar.add_agent_usage(*run_id, usage);
+            }
+            IpcEvent::AgentTurnFinished { run_id, .. } => {
+                self.sidebar.commit_agent_turn(*run_id);
             }
             IpcEvent::AgentRunFinished { run_id, .. } => {
                 self.sidebar.finish_agent_run(*run_id);

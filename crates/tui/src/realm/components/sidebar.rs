@@ -232,14 +232,19 @@ impl Sidebar {
         self.inner.note_agent_run(run_id, agent_id);
     }
 
-    /// Fold one usage event into the per-provider running total
-    /// (`AgentUsage`).
+    /// Observe one usage report for a run's in-flight turn (`AgentUsage`).
     pub fn add_agent_usage(
         &mut self,
         run_id: lazybox_ipc::AgentRunId,
         usage: &lazybox_ipc::AgentUsage,
     ) {
         self.inner.add_agent_usage(run_id, usage);
+    }
+
+    /// Commit a completed turn's usage into the running total
+    /// (`AgentTurnFinished`).
+    pub fn commit_agent_turn(&mut self, run_id: lazybox_ipc::AgentRunId) {
+        self.inner.commit_agent_turn(run_id);
     }
 
     /// Drop a finished run's usage binding (`AgentRunFinished`).

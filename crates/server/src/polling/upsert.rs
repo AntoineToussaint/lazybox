@@ -94,9 +94,10 @@ impl UpsertContext {
     }
 
     /// The approval policy configured for `repo` (`owner/name`), or the
-    /// default when the repo has no override.
+    /// default when the repo has no override. Matches case-insensitively
+    /// (the map is keyed lowercase) — see [`approval_map_from_config`].
     fn approval_for(&self, repo: Option<&str>) -> lazybox_core::ApprovalPolicy {
-        repo.and_then(|r| self.approvals.get(r))
+        repo.and_then(|r| self.approvals.get(&r.to_ascii_lowercase()))
             .copied()
             .unwrap_or_default()
     }
@@ -108,15 +109,32 @@ impl UpsertContext {
 /// takes effect without a daemon restart, mirroring
 /// [`crate::polling::auto_merge::merge_on_green_policy`].
 fn approval_policies() -> std::collections::HashMap<String, lazybox_core::ApprovalPolicy> {
-    let Ok(config) = lazybox_config::Config::load() else {
-        return std::collections::HashMap::new();
-    };
+    lazybox_config::Config::load()
+        .map(|config| approval_map_from_config(&config))
+        .unwrap_or_default()
+}
+
+/// Build the `owner/name → policy` map from a parsed config, keeping
+/// only repos that override the default.
+///
+/// Keys are canonicalized to lowercase (and looked up the same way in
+/// [`UpsertContext::approval_for`]): GitHub repo full-names are
+/// case-insensitive-unique, so a config key cased differently from
+/// GitHub's own `nameWithOwner` — which is what `Task::repo` carries —
+/// must still apply its policy. Without this an `approval: human` key
+/// like `Obin-AI/Obin-Platform` would silently fail to match
+/// `obin-ai/obin-platform` and leave the stricter policy unenforced
+/// (issue #1048).
+fn approval_map_from_config(
+    config: &lazybox_config::Config,
+) -> std::collections::HashMap<String, lazybox_core::ApprovalPolicy> {
     config
         .repos
         .iter()
         .filter_map(|(repo, rc)| {
             let policy = rc.approval.to_policy();
-            (policy != lazybox_core::ApprovalPolicy::Default).then(|| (repo.clone(), policy))
+            (policy != lazybox_core::ApprovalPolicy::Default)
+                .then(|| (repo.to_ascii_lowercase(), policy))
         })
         .collect()
 }
@@ -1090,5 +1108,61 @@ pub(crate) fn load_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Optio
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod approval_lookup_tests {
+    use super::*;
+    use lazybox_core::ApprovalPolicy;
+
+    /// A per-repo `approval` key cased differently from GitHub's
+    /// canonical `nameWithOwner` (which is what `Task::repo` carries)
+    /// must still apply its policy — the lookup is case-insensitive
+    /// (issue #1048). Without this the stricter `human` gate silently
+    /// falls back to the default and a bot-only PR reads as READY.
+    #[test]
+    fn approval_lookup_is_case_insensitive() {
+        let config = lazybox_config::Config::parse(
+            "repos:\n  Obin-AI/Obin-Platform:\n    approval: human\n",
+        )
+        .expect("parse repos.approval");
+        let map = approval_map_from_config(&config);
+        assert_eq!(
+            map.get("obin-ai/obin-platform"),
+            Some(&ApprovalPolicy::Human)
+        );
+
+        let ctx = UpsertContext {
+            archived: Default::default(),
+            closes_index: Default::default(),
+            approvals: map,
+        };
+        // Resolve regardless of the casing the task's repo carries.
+        assert_eq!(
+            ctx.approval_for(Some("obin-ai/obin-platform")),
+            ApprovalPolicy::Human,
+        );
+        assert_eq!(
+            ctx.approval_for(Some("Obin-AI/Obin-Platform")),
+            ApprovalPolicy::Human,
+        );
+        assert_eq!(
+            ctx.approval_for(Some("other/repo")),
+            ApprovalPolicy::Default
+        );
+        assert_eq!(ctx.approval_for(None), ApprovalPolicy::Default);
+    }
+
+    /// Only repos that override the default land in the map — a default
+    /// / `bot-ok` repo, or one with no `approval` key, is omitted so the
+    /// per-task lookup is a cheap miss.
+    #[test]
+    fn default_and_bot_ok_repos_are_omitted() {
+        let config = lazybox_config::Config::parse(
+            "repos:\n  a/b:\n    approval: bot-ok\n  c/d:\n    branch_prefix: x\n",
+        )
+        .expect("parse repos");
+        assert!(approval_map_from_config(&config).is_empty());
     }
 }

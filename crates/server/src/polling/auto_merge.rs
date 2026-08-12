@@ -154,10 +154,29 @@ pub(crate) fn merge_on_green_policy() -> lazybox_core::MergeOnGreenPolicy {
 /// like [`merge_on_green_policy`], so an `approval: human` edit takes
 /// effect without a daemon restart.
 fn approval_policy_for(owner: &str, repo: &str) -> lazybox_core::ApprovalPolicy {
-    let key = format!("{owner}/{repo}");
     lazybox_config::Config::load()
         .ok()
-        .and_then(|c| c.repos.get(&key).map(|rc| rc.approval.to_policy()))
+        .map(|c| approval_from_config(&c, owner, repo))
+        .unwrap_or_default()
+}
+
+/// Resolve `owner/name`'s approval policy from a parsed config, matching
+/// the `repos` key case-insensitively. GitHub repo full-names are
+/// case-insensitive-unique, so a config key cased differently from the
+/// `owner`/`repo` GitHub reports must still apply its policy — otherwise
+/// the merge-time re-verify would silently drop an `approval: human`
+/// gate and auto-merge a bot-only approval (issue #1048).
+fn approval_from_config(
+    config: &lazybox_config::Config,
+    owner: &str,
+    repo: &str,
+) -> lazybox_core::ApprovalPolicy {
+    let key = format!("{owner}/{repo}");
+    config
+        .repos
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+        .map(|(_, rc)| rc.approval.to_policy())
         .unwrap_or_default()
 }
 
@@ -629,6 +648,31 @@ mod tests {
     /// The default (own-PRs-only) allowlist.
     fn own_policy() -> lazybox_core::MergeOnGreenPolicy {
         lazybox_core::MergeOnGreenPolicy::default()
+    }
+
+    /// The merge-time approval re-verify must resolve a `repos.<repo>`
+    /// key case-insensitively: a config key cased differently from the
+    /// `owner`/`repo` GitHub reports must still block a bot-only merge
+    /// under `human`, else the re-check silently drops the gate (#1048).
+    #[test]
+    fn approval_from_config_is_case_insensitive() {
+        use lazybox_core::ApprovalPolicy;
+        let config = lazybox_config::Config::parse(
+            "repos:\n  Obin-AI/Obin-Platform:\n    approval: human\n",
+        )
+        .expect("parse repos.approval");
+        assert_eq!(
+            approval_from_config(&config, "obin-ai", "obin-platform"),
+            ApprovalPolicy::Human,
+        );
+        assert_eq!(
+            approval_from_config(&config, "Obin-AI", "Obin-Platform"),
+            ApprovalPolicy::Human,
+        );
+        assert_eq!(
+            approval_from_config(&config, "other", "repo"),
+            ApprovalPolicy::Default,
+        );
     }
 
     fn seed(store: &MemoryStore, ws: &Workspace) {

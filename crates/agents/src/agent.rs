@@ -537,6 +537,16 @@ impl Registry {
             .map_or_else(|| default_badge(id), |a| a.badge())
     }
 
+    /// Display name for an agent id: the registered agent's declared
+    /// [`Agent::display_name`], or the bare id for one this registry
+    /// doesn't know (a YAML `GenericCli`). Lets a consumer that can't
+    /// name the `Agent` trait (the UI library, which reaches the registry
+    /// through `lazybox-tui-core`) resolve a human label from an id.
+    pub fn display_name_for(&self, id: &str) -> String {
+        self.get(id)
+            .map_or_else(|| id.to_string(), |a| a.display_name().to_string())
+    }
+
     pub fn ids(&self) -> impl Iterator<Item = &str> {
         self.agents.keys().map(String::as_str)
     }

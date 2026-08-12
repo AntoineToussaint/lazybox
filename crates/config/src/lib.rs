@@ -863,6 +863,21 @@ pub struct UiSection {
     /// Defaults to `true`.
     #[serde(default = "default_true")]
     pub usage_limit_alerts: bool,
+    /// Show the always-visible per-provider usage summary in the sidebar
+    /// header (#1059): a compact `Claude ▓▓▓░░ 62% · 76k left` widget per
+    /// agent with a live terminal, visible before any limit is hit. It is
+    /// the proactive baseline the reactive `⏳ N limited` count escalates
+    /// from. Opt-out — set `false` to hide the row. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub usage_summary: bool,
+    /// Plan-window token budget per agent id (`claude: 200000000`), the
+    /// denominator for the usage summary's percentage. OAuth/plan agents
+    /// expose no usage API, so the window size can't be inferred — set it
+    /// here to unlock the `62% · 76k left` bar. Agents without a budget
+    /// degrade to a bare token total (`Claude 128k used`). Defaults to
+    /// empty.
+    #[serde(default)]
+    pub usage_budgets: std::collections::BTreeMap<String, u64>,
 }
 
 fn default_true() -> bool {
@@ -901,6 +916,8 @@ impl Default for UiSection {
             auto_wait_on_limit: false,
             show_agent_model: true,
             usage_limit_alerts: true,
+            usage_summary: true,
+            usage_budgets: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -947,6 +964,12 @@ pub struct UiDefaults {
     /// Escalate a footer alert as agents hit their usage limit. See
     /// [`UiSection::usage_limit_alerts`].
     pub usage_limit_alerts: bool,
+    /// Show the always-visible per-provider usage summary. See
+    /// [`UiSection::usage_summary`].
+    pub usage_summary: bool,
+    /// Per-agent plan-window token budgets. See
+    /// [`UiSection::usage_budgets`].
+    pub usage_budgets: std::collections::BTreeMap<String, u64>,
     /// Per-pane client-VT scrollback depth, in lines. Mirrors the tmux
     /// backend's `history-limit` so a deep-scrollback fetch renders the
     /// full retained history instead of clipping it to a shallower local
@@ -975,6 +998,8 @@ impl Default for UiDefaults {
             keep_awake: false,
             show_agent_model: true,
             usage_limit_alerts: true,
+            usage_summary: true,
+            usage_budgets: std::collections::BTreeMap::new(),
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
     }
@@ -1013,6 +1038,8 @@ impl UiSection {
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
             usage_limit_alerts: self.usage_limit_alerts,
+            usage_summary: self.usage_summary,
+            usage_budgets: self.usage_budgets.clone(),
             // Sourced from the `terminal` section (see
             // `Config::resolved_ui`); the default stands until that
             // override is applied.

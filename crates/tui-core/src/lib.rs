@@ -36,4 +36,5 @@ pub mod remote;
 pub mod snippets;
 pub mod theme;
 pub mod tips;
+pub mod usage;
 pub mod util;

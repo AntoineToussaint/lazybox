@@ -375,6 +375,15 @@ impl Sidebar {
                 // `osascript` / `notify-send`).
                 self.agent_terminal_states
                     .insert(*terminal_id, (session_key.clone(), *state));
+                // Clear a stale reset hint once this agent leaves the limit
+                // block, so a later limit episode whose banner carries no
+                // parseable countdown can't resurface a prior episode's time
+                // (#1059). Mirrors the Model's "clears on recovery".
+                if let Some(agent_id) = self.terminal_agent_id(*terminal_id)
+                    && !self.agent_is_limited(&agent_id)
+                {
+                    self.usage_reset.remove(&agent_id);
+                }
                 let change = self.refresh_agent_aggregate(session_key);
                 if change.now_asking {
                     if let Some(workspace) = self.workspaces.get(session_key) {

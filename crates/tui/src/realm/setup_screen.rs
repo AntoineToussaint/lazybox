@@ -24,8 +24,10 @@ use crate::setup;
 use crate::setup_flow::{
     Effect, FilterOption, InfoKind, LoadResult, Screen, ToolChoice, provider_display,
 };
-use lazybox_core::{Scope, ScopeSource};
+use lazybox_core::{ProviderError, Scope, ScopeSource};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 use tuirealm::component::AppComponent;
 
 /// The list of registered scope sources — the executor finds the right
@@ -164,6 +166,17 @@ pub fn render(screen: Screen) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<
     }
 }
 
+/// How long an effect may run before it is abandoned as a retryable
+/// error. A hung scope listing (provider that never responds, e.g. after
+/// a sleep/wake stalls its connection) must not leave the wizard stuck on
+/// the spinner: on expiry we deliver a `Retryable` error so the runner
+/// shows a dismissable error screen and the user continues setup, rather
+/// than a bare dismiss that cancels the whole wizard. Kept below the
+/// `Loading` modal's own liveness backstop so this graceful path always
+/// wins; the modal timeout only covers a result that is produced but
+/// *lost* (dropped on an overflowed event channel).
+const EFFECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Run an [`Effect`] in the background and deliver its [`LoadResult`]
 /// into `result`. The boxed `LoadResult` is later recovered by
 /// [`downcast_load_result`] when the Loading modal's tick fires
@@ -178,7 +191,20 @@ pub fn run_effect(
         let value: LoadResult = match effect {
             Effect::Detect => {
                 let report = match detector {
-                    Some(detect) => detect().await,
+                    // Tool detection is mostly local but can still stall
+                    // (a spawned probe that hangs); bound it and fall back
+                    // to an empty report so the wizard advances instead of
+                    // spinning.
+                    Some(detect) => match tokio::time::timeout(EFFECT_TIMEOUT, detect()).await {
+                        Ok(report) => report,
+                        Err(_) => {
+                            tracing::warn!(
+                                timeout_ms = EFFECT_TIMEOUT.as_millis() as u64,
+                                "setup detect timed out — yielding an empty report"
+                            );
+                            setup::SetupReport { tools: Vec::new() }
+                        }
+                    },
                     // No detector installed (a wizard driven without the
                     // boot crate's detection hook): yield an empty report
                     // rather than pretending everything is present.
@@ -189,17 +215,57 @@ pub fn run_effect(
                 };
                 LoadResult::Detected(report)
             }
-            Effect::ListScopes { provider_id } => {
-                LoadResult::Scopes(list_scopes(&sources, &provider_id).await)
-            }
+            Effect::ListScopes { provider_id } => LoadResult::Scopes(
+                bounded_scopes(
+                    EFFECT_TIMEOUT,
+                    &provider_id,
+                    list_scopes(&sources, &provider_id),
+                )
+                .await,
+            ),
             Effect::ListChildren {
                 provider_id,
                 parent_id,
-            } => LoadResult::Scopes(list_children(&sources, &provider_id, &parent_id).await),
+            } => LoadResult::Scopes(
+                bounded_scopes(
+                    EFFECT_TIMEOUT,
+                    &provider_id,
+                    list_children(&sources, &provider_id, &parent_id),
+                )
+                .await,
+            ),
         };
         // Modal already dismissed (user hit Esc) → drop silently.
         let _ = result.send(value);
     });
+}
+
+/// Await a scope-listing future under a timeout. On expiry, return a
+/// `Retryable` [`ProviderError`] — the variant the runner turns into a
+/// dismissable error screen that continues the wizard — instead of
+/// letting the caller hang.
+async fn bounded_scopes(
+    timeout: Duration,
+    source: &str,
+    fut: impl Future<Output = Result<Vec<Scope>, ProviderError>>,
+) -> Result<Vec<Scope>, ProviderError> {
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(res) => res,
+        Err(_) => {
+            tracing::warn!(
+                source,
+                timeout_ms = timeout.as_millis() as u64,
+                "setup scope listing timed out — surfacing a retryable error"
+            );
+            Err(ProviderError::retryable(
+                source,
+                format!(
+                    "timed out after {}s — the provider didn't respond",
+                    timeout.as_secs()
+                ),
+            ))
+        }
+    }
 }
 
 /// Recover the typed [`LoadResult`] from the opaque loading payload.
@@ -283,5 +349,31 @@ mod tests {
     #[test]
     fn public_repo_row_is_plain() {
         assert_eq!(repo_pick_row_label(&repo("acme/web", false)), "acme/web");
+    }
+
+    #[tokio::test]
+    async fn bounded_scopes_passes_a_result_through_before_the_deadline() {
+        let out = bounded_scopes(Duration::from_secs(5), "github", async {
+            Ok(vec![repo("acme/web", false)])
+        })
+        .await;
+        assert_eq!(out.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bounded_scopes_times_out_into_a_retryable_error() {
+        // A provider that never responds must not hang the wizard — it
+        // must surface as a Retryable error (the variant the runner turns
+        // into a dismissable "continue" screen), not spin until the modal
+        // backstop cancels setup outright.
+        let never = async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(Vec::new())
+        };
+        let out = bounded_scopes(Duration::from_millis(20), "github", never).await;
+        assert!(
+            matches!(out, Err(ProviderError::Retryable { .. })),
+            "a timed-out scope listing must be a retryable error, got {out:?}"
+        );
     }
 }

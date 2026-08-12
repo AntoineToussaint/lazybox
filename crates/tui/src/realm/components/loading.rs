@@ -109,9 +109,10 @@ impl Loading {
         self
     }
 
-    /// Override the liveness timeout. Callers should not normally need
-    /// this; it exists so the backstop can be exercised deterministically
-    /// in tests without waiting out the default.
+    /// Override the liveness timeout so the backstop can be exercised
+    /// deterministically in tests without waiting out the default. Not
+    /// needed in production — every caller gets the fixed [`TIMEOUT`].
+    #[cfg(test)]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
@@ -252,7 +253,7 @@ impl AppComponent<Msg, UserEvent> for Loading {
                             timeout_ms = self.timeout.as_millis() as u64,
                             "Loading modal timed out awaiting a result — dismissing"
                         );
-                        Some(Msg::ModalDismissed)
+                        Some(Msg::LoadingTimedOut)
                     }
                     TakeOutcome::Pending | TakeOutcome::Done => None,
                 }
@@ -290,7 +291,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(10));
         assert!(
-            matches!(tick(&mut modal), Some(Msg::ModalDismissed)),
+            matches!(tick(&mut modal), Some(Msg::LoadingTimedOut)),
             "a Loading modal must never spin forever — it times out and dismisses"
         );
     }

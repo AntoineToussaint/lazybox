@@ -64,15 +64,37 @@ channel, or the task stalled on a daemon/network response. The channel stays
 `Empty`, `Cancelled` never fires, and with the run loop behind, `Esc` isn't
 serviced either → forever spinner.
 
-**Fix (this PR):** `Loading` now carries a `started_at: Instant` + `TIMEOUT`
-(60 s) and, on `Tick`, dismisses with a warn once the deadline passes while
-still `Pending`. A delivered value always wins the race (the `Got` arm is
-checked first). 60 s clears any legitimate slow-network scope listing while
-guaranteeing the modal is never permanent; `Esc` remains available
-throughout. This is the exact pattern `Polling` already uses
-(`polling.rs:165`) — `Loading` was simply missing it. Regression tests:
-`loading.rs` `times_out_when_result_never_arrives` and
-`delivered_result_wins_even_past_the_timeout`.
+**Fix (this PR) — two layers, by responsibility:**
+
+- **Effect-level timeout (the graceful path).** The setup executor
+  (`setup_screen.rs`, `run_effect`) now wraps each effect in a 30 s
+  `EFFECT_TIMEOUT`. A scope listing that never responds resolves as a
+  `Retryable` `ProviderError` — the variant the runner already turns into a
+  dismissable error screen that **continues** the wizard
+  (`setup_flow.rs:889-893`, `930-939`) — rather than hanging until the modal
+  backstop cancels setup outright. `Detect` falls back to an empty report on
+  expiry. This is where a timeout *belongs*: the layer that can express a
+  retryable error the runner knows how to recover from. Tests:
+  `setup_screen.rs` `bounded_scopes_times_out_into_a_retryable_error` /
+  `…_passes_a_result_through_before_the_deadline`.
+- **Modal-level backstop (the last resort).** `Loading` itself carries a
+  `started_at: Instant` + a 60 s `TIMEOUT` and, on `Tick`, emits
+  `Msg::LoadingTimedOut` once the deadline passes while still `Pending`. A
+  delivered value always wins the race (the `Got` arm is checked first).
+  Because the effect timeout (30 s) fires first for the current caller, this
+  backstop only covers a result that was *produced but lost* — dropped on an
+  overflowed event channel, the #1045 wake signature — or a future caller
+  that forgets its own timeout. `Msg::LoadingTimedOut` flashes a Retryable
+  notice (`model/mod.rs`) so the modal never vanishes unexplained, then
+  dismisses. This mirrors the pattern `Polling` already uses
+  (`polling.rs:165`) — `Loading` was simply missing it. Tests: `loading.rs`
+  `times_out_when_result_never_arrives`,
+  `delivered_result_wins_even_past_the_timeout`.
+
+`Esc` remains available throughout both layers. Note the backstop is driven
+by `Instant`, whose accounting of system-sleep time is platform-dependent;
+either way the deadline is finite, so the modal is bounded on any platform —
+it is not guaranteed to fire the *instant* the machine wakes.
 
 `Polling`, `WorktreeProgress`, `PrChat`, and `HelpAsk` already satisfy L2
 (timeout or user-dismissable terminal state) — verified, no change.
@@ -162,8 +184,11 @@ The wake path was audited against the incident's three log signatures:
    handling", #1031 §3) — tracked there, not re-fixed here.
 3. **Orphaned modal on a pre-sleep request.** This is the one net-new
    liveness hole and is what this PR closes: a modal awaiting a result
-   issued before the sleep, whose reply is lost across the wake, now times
-   out (L2) instead of orphaning.
+   issued before the sleep, whose reply is lost across the wake. The
+   effect-level timeout resolves the common "provider stalled" case into a
+   retryable error that continues the wizard; the modal backstop covers the
+   residual "result produced but dropped on the overflowed channel" case
+   with a notice + dismiss. Either way it no longer orphans.
 
 No modal is tied to a terminal resync, so signatures 1–2 cannot orphan a
 modal directly; only the generic `Loading`-await case (signature 3) could,
@@ -174,7 +199,7 @@ and it is now bounded.
 | Property | State | Owner |
 |----------|-------|-------|
 | L1 — every modal `Esc`-dismissable from local state | **holds** (audited) | — |
-| L2 — every awaiting modal has a timeout | **closed** — `Loading` timeout + tests (this PR); others already had one | this PR |
+| L2 — every awaiting modal has a timeout | **closed** — setup effects get a retryable 30 s timeout that continues the wizard, plus a `Loading` modal backstop with a user notice (this PR); other modals already had one | this PR |
 | L3 — no UI-thread block on daemon/network | **holds** (audited) | — |
 | Sleep/wake — resync-not-found handled without an error storm | **holds** (audited) | — |
 | Sleep/wake — orphaned pre-sleep modal | **closed** by L2 (this PR) | this PR |

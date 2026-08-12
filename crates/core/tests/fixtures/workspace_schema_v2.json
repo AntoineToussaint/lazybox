@@ -118,9 +118,11 @@
     "reviews": [
       {
         "login": "dave",
-        "state": "Approved"
+        "state": "Approved",
+        "is_bot": false
       }
     ],
+    "approval_policy": "Default",
     "assignees": [
       "alice"
     ],
@@ -198,9 +200,11 @@
       "reviews": [
         {
           "login": "dave",
-          "state": "Approved"
+          "state": "Approved",
+          "is_bot": false
         }
       ],
+      "approval_policy": "Default",
       "assignees": [
         "alice"
       ],
@@ -274,9 +278,11 @@
       "reviews": [
         {
           "login": "dave",
-          "state": "Approved"
+          "state": "Approved",
+          "is_bot": false
         }
       ],
+      "approval_policy": "Default",
       "assignees": [
         "alice"
       ],

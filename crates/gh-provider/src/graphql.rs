@@ -106,6 +106,18 @@ query($query: String!, $first: Int!, $after: String) {
             }
           }
         }
+        # Decisive reviews (APPROVED / CHANGES_REQUESTED), one node per
+        # reviewer, kept eager so the inbox can distinguish a human from a
+        # bot approval (`claude[bot]`) — the per-repo `approval: human`
+        # policy and the Reviewers line both read this on the scan. The
+        # heavier full reviews history and comment-only reviewers stay
+        # lazy (PR_DETAILS_QUERY).
+        latestOpinionatedReviews(first: 30) {
+          nodes {
+            author { login __typename }
+            state
+          }
+        }
         comments(last: 1) {
           totalCount
           nodes {
@@ -406,7 +418,9 @@ pub struct GqlPr {
     /// Latest APPROVED / CHANGES_REQUESTED per reviewer — GitHub's own
     /// per-author collapse, so it never misses a verdict older than a
     /// `reviews(first: N)` slice would reach. Drives the Reviewers
-    /// line's ✓/✗ state. Lazy-only (absent from the inbox scan).
+    /// line's ✓/✗ state and the bot-vs-human approval distinction.
+    /// Eager on the inbox scan too (the decisive verdicts are cheap and
+    /// the per-repo `approval` policy needs them there).
     #[serde(default, rename = "latestOpinionatedReviews")]
     pub latest_opinionated_reviews: GqlLatestReviews,
     /// Latest review per reviewer regardless of verdict — used only to
@@ -498,6 +512,23 @@ pub enum GqlCheckContext {
 #[derive(Deserialize, Debug)]
 pub struct GqlAuthor {
     pub login: String,
+    /// GraphQL `__typename` of the actor — `"Bot"` for a GitHub App
+    /// reviewer like `claude[bot]`, `"User"` for a person. Only the
+    /// review-author selections request it; every other `author { login }`
+    /// selection leaves it `None`. Needed because a bot's `login` drops
+    /// the `[bot]` suffix over GraphQL, so the suffix alone can't tell
+    /// bot from human. See [`GqlAuthor::is_bot`].
+    #[serde(default, rename = "__typename")]
+    pub typename: Option<String>,
+}
+
+impl GqlAuthor {
+    /// Whether this actor is a GitHub App / Bot. Primary signal is the
+    /// GraphQL `__typename == "Bot"`; the `[bot]` login suffix is a
+    /// belt-and-suspenders fallback for any REST-shaped login.
+    pub fn is_bot(&self) -> bool {
+        self.typename.as_deref() == Some("Bot") || self.login.ends_with("[bot]")
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -1257,13 +1288,13 @@ query($id: ID!) {
       }
       latestOpinionatedReviews(first: 30) {
         nodes {
-          author { login }
+          author { login __typename }
           state
         }
       }
       latestReviews(first: 30) {
         nodes {
-          author { login }
+          author { login __typename }
           state
         }
       }
@@ -1630,13 +1661,13 @@ query($owner: String!, $name: String!, $number: Int!) {
       }
       latestOpinionatedReviews(first: 30) {
         nodes {
-          author { login }
+          author { login __typename }
           state
         }
       }
       latestReviews(first: 30) {
         nodes {
-          author { login }
+          author { login __typename }
           state
         }
       }
@@ -1859,13 +1890,13 @@ query($ids: [ID!]!) {
       }
       latestOpinionatedReviews(first: 30) {
         nodes {
-          author { login }
+          author { login __typename }
           state
         }
       }
       latestReviews(first: 30) {
         nodes {
-          author { login }
+          author { login __typename }
           state
         }
       }
@@ -2299,6 +2330,7 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         },
         is_behind_base: pr.merge_state_status.as_deref() == Some("BEHIND"),
         merge_blocked: pr.merge_state_status.as_deref() == Some("BLOCKED"),
+        approval_policy: Default::default(),
         node_id: pr.id.clone(),
         needs_reply,
         last_commenter,
@@ -2919,9 +2951,9 @@ fn derive_role_inner(
 ///   decisive verdict, surfacing comment-only reviewers.
 ///
 /// `PENDING` (an unsubmitted draft) and `DISMISSED` reviews contribute
-/// nothing. Decisive reviewers come first, then comment-only ones. Empty
-/// on the inbox-scan path (both connections are lazy-only) — back-filled
-/// on workspace open.
+/// nothing. Decisive reviewers come first, then comment-only ones. The
+/// decisive (`opinionated`) verdicts are eager on the inbox scan; the
+/// comment-only (`latest`) ones are lazy and back-fill on workspace open.
 fn submitted_reviewers(
     opinionated: &[GqlReviewerVerdict],
     latest: &[GqlReviewerVerdict],
@@ -2942,6 +2974,7 @@ fn submitted_reviewers(
             out.push(Reviewer {
                 login: author.login.clone(),
                 state,
+                is_bot: author.is_bot(),
             });
         }
     }
@@ -2953,6 +2986,7 @@ fn submitted_reviewers(
             out.push(Reviewer {
                 login: author.login.clone(),
                 state: ReviewState::Commented,
+                is_bot: author.is_bot(),
             });
         }
     }
@@ -3339,6 +3373,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         mergeable: lazybox_core::Mergeable::Mergeable,
         is_behind_base: false,
         merge_blocked: false,
+        approval_policy: Default::default(),
         node_id: issue.id.clone(),
         needs_reply,
         last_commenter,
@@ -3635,12 +3670,16 @@ mod tests {
             state: "OPEN".into(),
             author: author.map(|login| GqlAuthor {
                 login: login.into(),
+                typename: None,
             }),
             labels: GqlLabels { nodes: vec![] },
             assignees: GqlAssignees {
                 nodes: assignees
                     .iter()
-                    .map(|l| GqlAuthor { login: (*l).into() })
+                    .map(|l| GqlAuthor {
+                        login: (*l).into(),
+                        typename: None,
+                    })
                     .collect(),
             },
             comments: GqlComments {
@@ -3739,6 +3778,7 @@ mod tests {
                     id: Some("c1".into()),
                     author: Some(GqlAuthor {
                         login: "bob".into(),
+                        typename: None,
                     }),
                     body: "first".into(),
                     created_at: chrono::Utc::now(),
@@ -3752,6 +3792,7 @@ mod tests {
                     id: Some("c2".into()),
                     author: Some(GqlAuthor {
                         login: "alice".into(),
+                        typename: None,
                     }),
                     body: "reply".into(),
                     created_at: chrono::Utc::now(),
@@ -3780,6 +3821,7 @@ mod tests {
                 id: Some("c1".into()),
                 author: Some(GqlAuthor {
                     login: "bob".into(),
+                    typename: None,
                 }),
                 body: "question".into(),
                 created_at: chrono::Utc::now(),
@@ -3822,6 +3864,7 @@ mod tests {
             is_in_merge_queue: false,
             author: Some(GqlAuthor {
                 login: author.into(),
+                typename: None,
             }),
             labels: GqlLabels { nodes: vec![] },
             assignees: GqlAssignees { nodes: vec![] },
@@ -3847,6 +3890,7 @@ mod tests {
         GqlReviewerVerdict {
             author: Some(GqlAuthor {
                 login: login.into(),
+                typename: None,
             }),
             state: state.into(),
         }
@@ -3863,6 +3907,7 @@ mod tests {
                 GqlReview {
                     author: Some(GqlAuthor {
                         login: "bob".into(),
+                        typename: None,
                     }),
                     body: Some("please review".into()),
                     state: "COMMENTED".into(),
@@ -3873,6 +3918,7 @@ mod tests {
                 GqlReview {
                     author: Some(GqlAuthor {
                         login: "alice".into(),
+                        typename: None,
                     }),
                     body: Some("looks good".into()),
                     state: "APPROVED".into(),
@@ -3898,6 +3944,7 @@ mod tests {
                 GqlReview {
                     author: Some(GqlAuthor {
                         login: "alice".into(),
+                        typename: None,
                     }),
                     body: Some("approve".into()),
                     state: "APPROVED".into(),
@@ -3908,6 +3955,7 @@ mod tests {
                 GqlReview {
                     author: Some(GqlAuthor {
                         login: "bob".into(),
+                        typename: None,
                     }),
                     body: Some("nit found".into()),
                     state: "CHANGES_REQUESTED".into(),
@@ -4301,13 +4349,10 @@ mod tests {
         // is deliberately NOT in this list — it's a shallow,
         // authoritative field kept eager so issue→PR transfer fires
         // on the poll path (#559); see `search_query_fetches_closing_issue_refs`.
-        for field in [
-            "reviewThreads",
-            "reviews(",
-            "contexts(",
-            "latestOpinionatedReviews",
-            "latestReviews",
-        ] {
+        // `latestOpinionatedReviews` is ALSO deliberately not here — it's
+        // kept eager for the bot-vs-human approval distinction (#1048);
+        // see `search_query_fetches_decisive_reviews`.
+        for field in ["reviewThreads", "reviews(", "contexts(", "latestReviews"] {
             assert!(
                 !SEARCH_QUERY.contains(field),
                 "`{field}` must not appear in the inbox-scan query — see PR_DETAILS_QUERY",
@@ -4440,6 +4485,7 @@ mod tests {
                                 id: Some("C_first".into()),
                                 author: Some(GqlAuthor {
                                     login: "alice".into(),
+                                    typename: None,
                                 }),
                                 body: "needs nil check".into(),
                                 created_at: when,
@@ -4453,6 +4499,7 @@ mod tests {
                                 id: Some("C_reply".into()),
                                 author: Some(GqlAuthor {
                                     login: "bob".into(),
+                                    typename: None,
                                 }),
                                 body: "good catch".into(),
                                 created_at: when,
@@ -4712,6 +4759,24 @@ mod tests {
         );
     }
 
+    /// The decisive-reviews connection is kept eager (unlike the heavier
+    /// full reviews list / comment-only `latestReviews`) so the inbox can
+    /// tell a bot approval from a human one and honor a repo's
+    /// `approval: human` policy (#1048). Author `__typename` rides along
+    /// — that's how a bot is detected (its login lacks `[bot]` on GraphQL).
+    #[test]
+    fn search_query_fetches_decisive_reviews() {
+        assert!(
+            SEARCH_QUERY.contains("latestOpinionatedReviews(first: 30)"),
+            "SEARCH_QUERY must select decisive reviews eagerly for the bot-vs-human \
+             approval distinction (#1048)",
+        );
+        assert!(
+            SEARCH_QUERY.contains("author { login __typename }"),
+            "the review author's __typename must be selected — bot detection depends on it",
+        );
+    }
+
     /// A quiet PR that links a **cross-repo** issue only through its
     /// body (GitHub resolves it into `closingIssuesReferences`; the
     /// title parsers can't, since they're same-repo only) transfers on
@@ -4886,6 +4951,7 @@ mod tests {
                 id: None,
                 author: Some(GqlAuthor {
                     login: "carol".into(),
+                    typename: None,
                 }),
                 body: "".into(), // blank → not in activities
                 created_at: chrono::Utc::now(),
@@ -4949,6 +5015,7 @@ mod tests {
         pr.assignees = GqlAssignees {
             nodes: vec![GqlAuthor {
                 login: "alice".into(),
+                typename: None,
             }],
         };
         let task = pr_to_task(&pr, "alice");
@@ -4967,12 +5034,14 @@ mod tests {
         let assigned = GqlAssignees {
             nodes: vec![GqlAuthor {
                 login: "alice".into(),
+                typename: None,
             }],
         };
         let my_approval = GqlReviews {
             nodes: vec![GqlReview {
                 author: Some(GqlAuthor {
                     login: "alice".into(),
+                    typename: None,
                 }),
                 body: None,
                 state: "APPROVED".into(),
@@ -4991,6 +5060,7 @@ mod tests {
         lazy.assignees = GqlAssignees {
             nodes: vec![GqlAuthor {
                 login: "alice".into(),
+                typename: None,
             }],
         };
         lazy.reviews = my_approval;
@@ -5023,6 +5093,7 @@ mod tests {
         let review = |login: &str, state: &str| GqlReview {
             author: Some(GqlAuthor {
                 login: login.into(),
+                typename: None,
             }),
             body: None,
             state: state.into(),
@@ -5076,10 +5147,12 @@ mod tests {
                 Reviewer {
                     login: "claude".into(),
                     state: ReviewState::Approved,
+                    is_bot: false,
                 },
                 Reviewer {
                     login: "lukazhupa".into(),
                     state: ReviewState::Approved,
+                    is_bot: false,
                 },
             ],
             "the reviewers line renders the approvers, not \"none\"",
@@ -5096,6 +5169,7 @@ mod tests {
         let noise = |login: &str| GqlReview {
             author: Some(GqlAuthor {
                 login: login.into(),
+                typename: None,
             }),
             body: None,
             state: "COMMENTED".into(),
@@ -5118,6 +5192,7 @@ mod tests {
             vec![Reviewer {
                 login: "dave".into(),
                 state: ReviewState::Approved,
+                is_bot: false,
             }],
             "dave's approval must render even though it's outside the raw reviews slice",
         );
@@ -5142,10 +5217,12 @@ mod tests {
                 Reviewer {
                     login: "alice".into(),
                     state: ReviewState::Approved,
+                    is_bot: false,
                 },
                 Reviewer {
                     login: "bob".into(),
                     state: ReviewState::Commented,
+                    is_bot: false,
                 },
             ],
         );
@@ -5162,6 +5239,69 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    /// Issue #1048: an approving review from a `Bot` actor is recorded as
+    /// `is_bot`, a person's as human. GitHub reports a bot's login without
+    /// the `[bot]` suffix over GraphQL, so detection rides `__typename`.
+    #[test]
+    fn submitted_reviewers_records_bot_vs_human() {
+        let bot_verdict = |login: &str, state: &str| GqlReviewerVerdict {
+            author: Some(GqlAuthor {
+                login: login.into(),
+                typename: Some("Bot".into()),
+            }),
+            state: state.into(),
+        };
+        let out = submitted_reviewers(
+            &[
+                bot_verdict("claude", "APPROVED"),
+                verdict("alice", "APPROVED"),
+            ],
+            &[],
+        );
+        assert_eq!(
+            out,
+            vec![
+                Reviewer {
+                    login: "claude".into(),
+                    state: ReviewState::Approved,
+                    is_bot: true,
+                },
+                Reviewer {
+                    login: "alice".into(),
+                    state: ReviewState::Approved,
+                    is_bot: false,
+                },
+            ],
+        );
+    }
+
+    /// `is_bot` also honors the `[bot]` login suffix as a fallback for a
+    /// REST-shaped author that carries no `__typename`.
+    #[test]
+    fn gql_author_is_bot_detects_typename_and_suffix() {
+        assert!(
+            GqlAuthor {
+                login: "claude".into(),
+                typename: Some("Bot".into()),
+            }
+            .is_bot()
+        );
+        assert!(
+            GqlAuthor {
+                login: "dependabot[bot]".into(),
+                typename: None,
+            }
+            .is_bot()
+        );
+        assert!(
+            !GqlAuthor {
+                login: "alice".into(),
+                typename: Some("User".into()),
+            }
+            .is_bot()
+        );
+    }
+
     /// Regression (#800, finding 5): my *latest* decisive review wins.
     /// An approval I later dismissed with a CHANGES_REQUESTED review must
     /// resolve to Reviewer, not Mentioned — `contains("APPROVED")` over
@@ -5171,6 +5311,7 @@ mod tests {
         let review = |state: &str, at: DateTime<Utc>| GqlReview {
             author: Some(GqlAuthor {
                 login: "alice".into(),
+                typename: None,
             }),
             body: None,
             state: state.into(),
@@ -5210,6 +5351,7 @@ mod tests {
             nodes: vec![GqlReview {
                 author: Some(GqlAuthor {
                     login: "alice".into(),
+                    typename: None,
                 }),
                 body: None,
                 state: "APPROVED".into(),
@@ -5270,6 +5412,7 @@ mod tests {
             review_decision: Some("APPROVED".into()),
             author: Some(GqlAuthor {
                 login: "bob".into(),
+                typename: None,
             }),
             assignees: GqlAssignees::default(),
             review_requests: GqlReviewRequests::default(),
@@ -5295,6 +5438,7 @@ mod tests {
                 nodes: vec![GqlReview {
                     author: Some(GqlAuthor {
                         login: "alice".into(),
+                        typename: None,
                     }),
                     body: Some("lgtm".into()),
                     state: "APPROVED".into(),
@@ -5364,6 +5508,7 @@ mod tests {
                     id: Some("PRR_pending1".into()),
                     author: Some(GqlAuthor {
                         login: "carol".into(),
+                        typename: None,
                     }),
                     body: Some("wip: still looking".into()),
                     state: "PENDING".into(),
@@ -5414,6 +5559,7 @@ mod tests {
                     id: None,
                     author: Some(GqlAuthor {
                         login: "carol".into(),
+                        typename: None,
                     }),
                     body: Some("legacy pending".into()),
                     state: "PENDING".into(),
@@ -5446,6 +5592,7 @@ mod tests {
                 id: Some("PRR_eager1".into()),
                 author: Some(GqlAuthor {
                     login: "carol".into(),
+                    typename: None,
                 }),
                 body: Some("wip note".into()),
                 state: "PENDING".into(),

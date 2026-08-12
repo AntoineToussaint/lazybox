@@ -132,6 +132,44 @@ impl MergeOnGreenPolicy {
 /// [`auto_merge_block_reason`] all name the block identically.
 pub const NON_AUTHOR_BLOCK: &str = "only your own PRs auto-merge";
 
+/// What a repository requires before lazybox treats a PR's approval as
+/// satisfying its READY / merge-on-green gate. Configured per repo via
+/// `repos.<owner/name>.approval` and carried on [`crate::Task::approval_policy`]
+/// so the review gate — which runs in the config-less TUI/core layer —
+/// can honor it without a config lookup.
+///
+/// The policy only ever makes the gate **stricter**. GitHub's own
+/// review-decision already counts an eligible bot's approval, and a
+/// branch-protection rule a bot can't satisfy surfaces as
+/// [`crate::Task::merge_blocked`] (issue #998). So `Default` (and the
+/// explicit `bot-ok` / `any` config values, which map to it) impose
+/// nothing beyond that — only `Human` adds a requirement, so a bot-only
+/// approval from a reviewer like `claude[bot]` no longer reads as ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum ApprovalPolicy {
+    /// Follow GitHub's review-decision; a bot approval counts. The
+    /// default, and what the `bot-ok` / `any` config values resolve to.
+    #[default]
+    Default,
+    /// A human approval is required — a bot-only (or absent) approval
+    /// does not satisfy READY or arm merge-on-green.
+    Human,
+}
+
+/// Why this repo's approval policy holds a PR back from READY /
+/// merge-on-green — or `None` when the policy is satisfied. Only the
+/// [`ApprovalPolicy::Human`] policy can block: it requires a submitted
+/// human approval ([`crate::Task::has_human_approval`]), so a PR that
+/// GitHub reports as approved purely on a bot's review stays "not yet".
+pub fn approval_policy_blocks(pr: &Task) -> Option<&'static str> {
+    match pr.approval_policy {
+        ApprovalPolicy::Default => None,
+        ApprovalPolicy::Human if pr.has_human_approval() => None,
+        ApprovalPolicy::Human => Some("a human approval is required by this repo's policy"),
+    }
+}
+
 /// Does the merge-on-green **author gate** alone block this PR — it isn't
 /// yours ([`crate::TaskRole::Author`]) and its author isn't opted in via
 /// `policy`? Unlike the CI / review / conflict guards, this is *stable*
@@ -152,11 +190,14 @@ pub fn author_gate_blocks(pr: &Task, policy: &MergeOnGreenPolicy) -> bool {
 /// because the daemon's auto-merge path re-verifies eligibility with
 /// the same predicate before every automatic merge.
 ///
-/// We deliberately do NOT require a formal `Approved` review. Repos
-/// without required reviews — a personal repo, your own PR — let you
-/// merge with no approval, so demanding one here produced false
+/// We deliberately do NOT require a formal `Approved` review by default.
+/// Repos without required reviews — a personal repo, your own PR — let
+/// you merge with no approval, so demanding one here produced false
 /// "not merge-ready" blocks. We only veto on `ChangesRequested`, which
-/// is an unambiguous "not yet" regardless of branch protection.
+/// is an unambiguous "not yet" regardless of branch protection — and,
+/// when a repo opts into [`ApprovalPolicy::Human`], on a bot-only
+/// approval that doesn't meet that stricter policy
+/// ([`approval_policy_blocks`]).
 ///
 /// We DO veto when GitHub itself reports the merge blocked by a
 /// branch-protection rule or repository ruleset ([`Task::merge_blocked`],
@@ -176,6 +217,9 @@ pub fn merge_block_reason(pr: &Task) -> Option<&'static str> {
     }
     if matches!(pr.review, crate::ReviewStatus::ChangesRequested) {
         return Some("changes were requested — address the review first");
+    }
+    if let Some(reason) = approval_policy_blocks(pr) {
+        return Some(reason);
     }
     if !matches!(pr.ci, crate::CiStatus::Success | crate::CiStatus::None) {
         return Some("CI isn't green yet");
@@ -519,6 +563,7 @@ mod merge_gate_tests {
             mergeable: crate::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -759,5 +804,87 @@ mod merge_gate_tests {
         let allowed = MergeOnGreenPolicy::from_allow_authors(["dependabot"]);
         assert!(!allowed.allows_author(""));
         assert!(!allowed.allows_author("   "));
+    }
+
+    fn reviewer(login: &str, state: crate::ReviewState, is_bot: bool) -> crate::Reviewer {
+        crate::Reviewer {
+            login: login.into(),
+            state,
+            is_bot,
+        }
+    }
+
+    /// Issue #1048: under `approval: human`, a bot-only approval is NOT
+    /// merge-ready, but the same PR IS ready under the default (bot-ok)
+    /// policy — GitHub's review-decision already counted the bot.
+    #[test]
+    fn bot_only_approval_ready_under_default_not_human() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.pr.as_mut().unwrap().reviews =
+            vec![reviewer("claude", crate::ReviewState::Approved, true)];
+
+        // Default policy: the bot approval satisfies the gate.
+        ws.pr.as_mut().unwrap().approval_policy = ApprovalPolicy::Default;
+        assert_eq!(merge_block_reason(ws.pr.as_ref().unwrap()), None);
+
+        // Human policy: a bot-only approval no longer satisfies it.
+        ws.pr.as_mut().unwrap().approval_policy = ApprovalPolicy::Human;
+        assert_eq!(
+            merge_block_reason(ws.pr.as_ref().unwrap()),
+            Some("a human approval is required by this repo's policy")
+        );
+    }
+
+    /// A human approval satisfies the `human` policy even when a bot also
+    /// approved.
+    #[test]
+    fn human_approval_satisfies_human_policy() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.pr.as_mut().unwrap().approval_policy = ApprovalPolicy::Human;
+        ws.pr.as_mut().unwrap().reviews = vec![
+            reviewer("claude", crate::ReviewState::Approved, true),
+            reviewer("alice", crate::ReviewState::Approved, false),
+        ];
+        assert!(ws.pr.as_ref().unwrap().has_human_approval());
+        assert_eq!(merge_block_reason(ws.pr.as_ref().unwrap()), None);
+    }
+
+    /// Auto-merge inherits the per-repo approval gate (it delegates to
+    /// [`merge_block_reason`]): an armed, green, own PR with only a bot
+    /// approval must not auto-merge under `human`, but does once a human
+    /// approves.
+    #[test]
+    fn auto_merge_honors_human_approval_policy() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().unwrap().approval_policy = ApprovalPolicy::Human;
+        ws.pr.as_mut().unwrap().reviews =
+            vec![reviewer("claude", crate::ReviewState::Approved, true)];
+        assert!(
+            !should_auto_merge(&ws, &own()),
+            "bot-only approval must not auto-merge under `human`"
+        );
+
+        ws.pr.as_mut().unwrap().reviews.push(reviewer(
+            "alice",
+            crate::ReviewState::Approved,
+            false,
+        ));
+        assert!(
+            should_auto_merge(&ws, &own()),
+            "a human approval arms the merge"
+        );
+    }
+
+    /// The default policy imposes no approval requirement at all — an own
+    /// PR with no approval still merges (the pre-#1048 behavior).
+    #[test]
+    fn default_policy_requires_no_approval() {
+        let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
+        assert_eq!(
+            ws.pr.as_ref().unwrap().approval_policy,
+            ApprovalPolicy::Default
+        );
+        assert_eq!(merge_block_reason(ws.pr.as_ref().unwrap()), None);
     }
 }

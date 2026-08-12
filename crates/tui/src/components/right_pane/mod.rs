@@ -1530,6 +1530,12 @@ impl RightPane {
                     format!("@{}", reviewer.login),
                     Style::default().fg(color),
                 ));
+                // Distinguish a bot approval (e.g. `claude[bot]`) from a
+                // human one — a repo on the `approval: human` policy
+                // treats a bot-only approval as not-yet-ready.
+                if reviewer.is_bot {
+                    spans.push(Span::styled(" (bot)", Style::default().fg(theme.text_dim)));
+                }
             }
             lines.push(Line::from(spans));
         } else if is_pr {

@@ -770,6 +770,7 @@ mod has_visible_content_tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -869,6 +870,7 @@ mod summary_render_tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -995,6 +997,7 @@ mod mark_workspace_merged_tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: Some("PR_node".into()),
             needs_reply: false,
             last_commenter: None,
@@ -1092,6 +1095,7 @@ mod description_expand_tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -1561,10 +1565,12 @@ mod description_expand_tests {
             lazybox_core::Reviewer {
                 login: "alice".into(),
                 state: lazybox_core::ReviewState::Approved,
+                is_bot: false,
             },
             lazybox_core::Reviewer {
                 login: "carol".into(),
                 state: lazybox_core::ReviewState::ChangesRequested,
+                is_bot: false,
             },
         ];
         let ws = Workspace::from_task(task, Utc::now());
@@ -1578,6 +1584,44 @@ mod description_expand_tests {
         assert!(
             !text.contains("g r to request"),
             "the empty-reviewers hint must not show when reviewers exist: {text}",
+        );
+    }
+
+    #[test]
+    fn reviewers_line_marks_bot_approvals() {
+        // #1048: a bot approver (`claude[bot]`) is tagged `(bot)` so the
+        // user can tell a bot approval from a human one at a glance.
+        let mut task = task_with_body("body");
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task.url = "https://github.com/o/r/pull/1".into();
+        task.reviewers = vec![];
+        task.reviews = vec![
+            lazybox_core::Reviewer {
+                login: "claude".into(),
+                state: lazybox_core::ReviewState::Approved,
+                is_bot: true,
+            },
+            lazybox_core::Reviewer {
+                login: "alice".into(),
+                state: lazybox_core::ReviewState::Approved,
+                is_bot: false,
+            },
+        ];
+        let ws = Workspace::from_task(task, Utc::now());
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(Some(ws));
+        let text = full_buffer_text(&mut pane, 80, 24);
+        let reviewers_line = text
+            .lines()
+            .find(|l| l.contains("Reviewers:"))
+            .expect("reviewers line renders");
+        assert!(
+            reviewers_line.contains("@claude (bot)"),
+            "a bot approval is tagged (bot): {reviewers_line:?}",
+        );
+        assert!(
+            reviewers_line.contains("@alice") && !reviewers_line.contains("@alice (bot)"),
+            "a human approval carries no (bot) tag: {reviewers_line:?}",
         );
     }
 
@@ -1764,6 +1808,7 @@ mod linked_issue_modal_tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -1888,6 +1933,7 @@ mod originating_issue_header_tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -2216,6 +2262,7 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: Default::default(),
             node_id: None,
             needs_reply: false,
             last_commenter: None,

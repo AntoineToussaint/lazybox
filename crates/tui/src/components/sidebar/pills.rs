@@ -140,8 +140,21 @@ pub(crate) fn status_pills(task: &lazybox_core::Task) -> (Option<StatusPill>, Op
     // Open PR in flight. Review + CI rendered separately, as adjacent
     // single-cell glyphs (` ◌ ✗` = review pending + CI failing). Colors are
     // theme-derived so they hold contrast on the light theme too (#1046).
+    //
+    // A repo requiring a human approval (`approval: human`) treats a
+    // bot-only approval as still awaiting review, so a GitHub-APPROVED
+    // PR reads as REVIEW-pending here — mirroring `StatusTag::for_task`
+    // and the merge gate so the pill, the tag, and `g m` never disagree
+    // (issue #1048).
     let theme = crate::theme::current();
-    let review = match task.review {
+    let effective_review = if task.review == ReviewStatus::Approved
+        && lazybox_core::approval_policy_blocks(task).is_some()
+    {
+        ReviewStatus::Pending
+    } else {
+        task.review
+    };
+    let review = match effective_review {
         ReviewStatus::Approved => Some(glyph_pill(G_OK, theme.accent)),
         ReviewStatus::ChangesRequested => Some(glyph_pill(G_FAIL, theme.error)),
         ReviewStatus::Pending => Some(glyph_pill(G_REVIEW, theme.warn)),
@@ -195,10 +208,13 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     // separate APPROVED pill in the review slot via `status_pills`.
     // A ruleset/branch-protection block (`merge_blocked`) withholds
     // READY even when approved + green — GitHub would bounce the merge,
-    // so it isn't "good to go" (issue #998).
+    // so it isn't "good to go" (issue #998). A per-repo `approval: human`
+    // policy independently withholds it when only a bot approved
+    // (`approval_policy_blocks`, issue #1048).
     if task.review == ReviewStatus::Approved
         && matches!(task.ci, CiStatus::Success | CiStatus::None)
         && !task.merge_blocked
+        && lazybox_core::approval_policy_blocks(task).is_none()
     {
         return Some(glyph_pill(G_OK, theme.success));
     }

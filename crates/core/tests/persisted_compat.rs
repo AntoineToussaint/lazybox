@@ -97,6 +97,7 @@ fn maximal_pr_task() -> Task {
         reviews: vec![Reviewer {
             login: "dave".into(),
             state: ReviewState::Approved,
+            is_bot: false,
         }],
         assignees: vec!["alice".into()],
         auto_merge_enabled: true,
@@ -104,6 +105,7 @@ fn maximal_pr_task() -> Task {
         mergeable: Mergeable::Conflicting,
         is_behind_base: true,
         merge_blocked: false,
+        approval_policy: Default::default(),
         node_id: Some("PR_kwDOtest001".into()),
         needs_reply: true,
         last_commenter: Some("carol".into()),

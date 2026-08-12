@@ -159,6 +159,23 @@ pub const HIGH_CONTRAST: ThemePalette = ThemePalette {
     surface: (0, 0, 0),
 };
 
+/// Bloomberg Terminal — the hallmark amber-on-black. Signature amber
+/// text/accent, financial red (down) / teal-green (up), gold warn, and
+/// a warm cyan contrast pole, all on a pure-black surface.
+pub const BLOOMBERG_TERMINAL: ThemePalette = ThemePalette {
+    name: "Bloomberg Terminal",
+    accent: (250, 128, 0),
+    hover: (41, 217, 217),
+    success: (74, 246, 195),
+    warn: (224, 192, 16),
+    error: (255, 67, 61),
+    text_strong: (255, 160, 40),
+    text_dim: (161, 124, 70),
+    chrome: (92, 74, 48),
+    fill: (46, 36, 22),
+    surface: (0, 0, 0),
+};
+
 /// Built-in palettes in cycle order. Index 0 is the default. The
 /// ratatui crate's `BUILT_IN_THEMES` and the desktop theme picker both
 /// read this ordering.
@@ -170,6 +187,7 @@ pub const BUILT_IN_PALETTES: &[ThemePalette] = &[
     ROSE_PINE,
     LAZYBOX_LIGHT,
     HIGH_CONTRAST,
+    BLOOMBERG_TERMINAL,
 ];
 
 #[cfg(test)]

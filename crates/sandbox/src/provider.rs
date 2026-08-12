@@ -16,6 +16,14 @@ pub struct Tunnel {
     /// Program to spawn (`gcloud`, `ssh`).
     pub program: String,
     pub args: Vec<String>,
+    /// Credentials overlaid on the forward's environment (#1047). The
+    /// long-lived `gcloud compute ssh` that carries the daemon socket is
+    /// spawned by the *caller* (the client's keepalive supervisor), not
+    /// through the provider's `CommandRunner`, so the auth env must ride the
+    /// tunnel to reach it — otherwise the forward falls back to ambient
+    /// credentials the rest of the lifecycle no longer uses. Empty on the
+    /// ambient path.
+    pub env: Vec<(String, String)>,
     /// Local socket the forward binds; the path `--connect` should dial.
     pub local_socket: PathBuf,
     /// Workload TCP ports forwarded to `localhost` on the client.

@@ -283,13 +283,21 @@ pub async fn supervise(tunnel: Tunnel) {
 /// capped-backoff keepalive as [`supervise`]. `socket` is the local Unix
 /// socket the forward binds; a stale copy left by an earlier process is
 /// cleared before each (re)spawn so `ssh -L` doesn't refuse to bind it.
-/// The `r`-spawn box lifecycle (`remote_box`) drives this: `connect_box`
-/// builds the argv, this keeps it up for the session.
-pub async fn supervise_argv(program: String, args: Vec<String>, socket: PathBuf) {
+/// `env` is the provider's injected credentials (#1047), overlaid on every
+/// (re)spawn so the forward authenticates off configured creds rather than
+/// ambient state. The `r`-spawn box lifecycle (`remote_box`) drives this:
+/// `connect_box` builds the argv + env, this keeps it up for the session.
+pub async fn supervise_argv(
+    program: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+    socket: PathBuf,
+) {
     supervise_with(move || {
         let _ = std::fs::remove_file(&socket);
         Command::new(&program)
             .args(&args)
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

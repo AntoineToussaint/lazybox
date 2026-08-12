@@ -79,6 +79,7 @@ mod tests {
             Ok(Tunnel {
                 program: "gcloud".into(),
                 args: vec![h.id.clone()],
+                env: Vec::new(),
                 local_socket: PathBuf::from("/tmp/box.sock"),
                 ports: ports.to_vec(),
             })

@@ -196,6 +196,7 @@ async fn bring_up(
     let supervisor = tokio::spawn(crate::tunnel::supervise_argv(
         tunnel.program,
         tunnel.args,
+        tunnel.env,
         local_socket.clone(),
     ));
     if !crate::tunnel::wait_for_socket(&local_socket, CONNECT_TIMEOUT).await {

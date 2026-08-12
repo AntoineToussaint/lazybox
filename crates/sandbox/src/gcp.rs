@@ -95,36 +95,42 @@ pub struct GcpAuth {
     /// Service account to impersonate; the base credentials mint tokens for
     /// it (gcloud + terraform both honor the matching env).
     pub impersonate_service_account: Option<String>,
-    /// Provider-scoped `CLOUDSDK_CONFIG` dir. Set whenever credentials are
-    /// configured so lazybox's gcloud state is isolated from the user's own
-    /// `~/.config/gcloud`; `None` leaves gcloud on its default config
-    /// (ambient path).
+    /// Provider-scoped `CLOUDSDK_CONFIG` dir, honored only alongside a
+    /// `service_account_key` (the base credential it isolates); scoping
+    /// without a base would strand impersonation, so it is ignored there.
+    /// `None` leaves gcloud on its default config (ambient path).
     pub config_dir: Option<PathBuf>,
 }
 
 impl GcpAuth {
     /// True when no credentials are configured — the provider falls back to
     /// whatever ambient auth the machine has, exactly as before #1047. In
-    /// this mode [`env`](Self::env) injects nothing, so today's behavior is
-    /// preserved byte-for-byte.
+    /// this mode [`command_env`](Self::command_env) injects nothing, so
+    /// today's behavior is preserved byte-for-byte.
     pub fn is_ambient(&self) -> bool {
         self.service_account_key.is_none() && self.impersonate_service_account.is_none()
     }
 
     /// The environment overlaid on every `gcloud`/`terraform` invocation.
-    /// Empty in the ambient path; otherwise a provider-scoped
-    /// `CLOUDSDK_CONFIG` plus the credential envs both tools read, so auth is
-    /// explicit and isolated rather than inherited from the user's shell.
-    fn env(&self) -> Vec<(String, String)> {
+    /// Empty in the ambient path; otherwise the credential envs both tools
+    /// read, so auth is explicit rather than inherited from the user's shell.
+    pub fn command_env(&self) -> Vec<(String, String)> {
         if self.is_ambient() {
             return Vec::new();
         }
         let mut env = Vec::new();
-        if let Some(dir) = &self.config_dir {
-            env.push(("CLOUDSDK_CONFIG".to_string(), dir.display().to_string()));
-        }
         if let Some(key) = &self.service_account_key {
             let path = key.display().to_string();
+            // Scope gcloud's config *only* when we supply our own base
+            // credential (this key). Scoping to an empty dir with no base —
+            // e.g. impersonation with no key — would cut off the ambient /
+            // metadata credentials the token exchange needs, so the
+            // impersonation could never resolve a base. With a key present,
+            // the scoped dir isolates lazybox's gcloud state from the user's
+            // own `~/.config/gcloud`.
+            if let Some(dir) = &self.config_dir {
+                env.push(("CLOUDSDK_CONFIG".to_string(), dir.display().to_string()));
+            }
             // gcloud reads its own credential store, not GOOGLE_APPLICATION_
             // CREDENTIALS; the override points it at the key statelessly (no
             // `activate-service-account` write, so concurrent CLI + r-spawn
@@ -404,6 +410,10 @@ impl GcpProvider {
         Tunnel {
             program: "gcloud".to_string(),
             args,
+            // The forward is spawned outside the `CommandRunner`, so carry the
+            // credentials on it — the IAP SSH authenticates off the same
+            // injected creds as every other op (#1047).
+            env: self.auth.command_env(),
             local_socket: self.local_socket.clone(),
             ports: ports.to_vec(),
         }
@@ -453,7 +463,9 @@ impl GcpProvider {
     /// credentials env on every call — the single choke point that makes auth
     /// explicit rather than ambient (#1047).
     async fn run(&self, program: &str, args: &[String]) -> Result<String, SandboxError> {
-        self.runner.run(program, args, &self.auth.env()).await
+        self.runner
+            .run(program, args, &self.auth.command_env())
+            .await
     }
 
     /// `gcloud auth print-access-token` — the preflight probe. It mints a
@@ -496,26 +508,33 @@ impl SandboxProvider for GcpProvider {
     }
 
     async fn check_auth(&self) -> Result<(), SandboxError> {
-        // A key path that doesn't exist is the common misconfiguration; catch
-        // it with a precise message before spawning gcloud at all.
-        if let Some(key) = &self.auth.service_account_key
-            && !key.exists()
-        {
-            return Err(SandboxError::Config(format!(
-                "gcp credentials: service account key {} not found — point \
-                 `sandbox.auth.service_account_key` at a readable key file",
-                key.display()
-            )));
-        }
-        // The scoped gcloud config dir must exist before gcloud writes into it.
-        if let Some(dir) = &self.auth.config_dir {
-            std::fs::create_dir_all(dir).map_err(|e| {
-                SandboxError::Config(format!("create gcloud config dir {}: {e}", dir.display()))
+        // A configured key is validated *offline*: open it (catching a wrong
+        // path or an unreadable file — the common misconfiguration) rather
+        // than mint a token. A service-account key is a long-lived credential
+        // that doesn't expire, so a network probe on every op — including the
+        // deliberately snappy `status` — would add a token round-trip that
+        // catches almost nothing the first real op wouldn't. The scoped config
+        // dir it isolates into must exist before gcloud writes there.
+        if let Some(key) = &self.auth.service_account_key {
+            std::fs::File::open(key).map_err(|e| {
+                SandboxError::Config(format!(
+                    "gcp credentials: service account key {} unreadable: {e} — point \
+                     `sandbox.auth.service_account_key` at a readable key file",
+                    key.display()
+                ))
             })?;
+            if let Some(dir) = &self.auth.config_dir {
+                std::fs::create_dir_all(dir).map_err(|e| {
+                    SandboxError::Config(format!("create gcloud config dir {}: {e}", dir.display()))
+                })?;
+            }
+            return Ok(());
         }
-        // Then confirm the credentials actually mint a token, so an expired /
-        // insufficient credential surfaces here — with a fix hint — instead of
-        // as raw gcloud/terraform stderr from inside the first real op.
+        // No offline-checkable base credential (ambient, or impersonation whose
+        // base is ambient/metadata): a token probe is the only way to tell a
+        // configured-and-working setup from a missing login, and it yields the
+        // actionable fix hint instead of raw gcloud/terraform stderr deep in
+        // the first real op.
         let (prog, args) = Self::auth_probe_command();
         self.run(&prog, &args)
             .await
@@ -1019,7 +1038,7 @@ mod tests {
         // the box lifecycle behaves exactly as before #1047.
         let auth = GcpAuth::default();
         assert!(auth.is_ambient());
-        assert!(auth.env().is_empty());
+        assert!(auth.command_env().is_empty());
     }
 
     #[test]
@@ -1030,7 +1049,7 @@ mod tests {
             config_dir: Some(PathBuf::from("/scoped/gcloud")),
         };
         assert!(!auth.is_ambient());
-        let env = auth.env();
+        let env = auth.command_env();
         // Isolated gcloud config so the user's own is never touched…
         assert!(env.contains(&("CLOUDSDK_CONFIG".into(), "/scoped/gcloud".into())));
         // …gcloud reads the key via the override…
@@ -1046,13 +1065,16 @@ mod tests {
     }
 
     #[test]
-    fn impersonation_sets_both_gcloud_and_terraform_env() {
+    fn impersonation_without_a_key_sets_the_impersonate_env_but_does_not_scope() {
+        // Impersonation whose base is ambient/metadata must NOT scope
+        // CLOUDSDK_CONFIG: an empty scoped dir has no base credential, so the
+        // token exchange could never resolve one (#1047 review finding #2).
         let auth = GcpAuth {
             service_account_key: None,
             impersonate_service_account: Some("deploy@p.iam.gserviceaccount.com".into()),
             config_dir: Some(PathBuf::from("/scoped/gcloud")),
         };
-        let env = auth.env();
+        let env = auth.command_env();
         assert!(env.contains(&(
             "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT".into(),
             "deploy@p.iam.gserviceaccount.com".into()
@@ -1061,16 +1083,61 @@ mod tests {
             "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT".into(),
             "deploy@p.iam.gserviceaccount.com".into()
         )));
+        assert!(
+            !env.iter().any(|(k, _)| k == "CLOUDSDK_CONFIG"),
+            "must not strand impersonation's base by scoping: {env:?}"
+        );
+    }
+
+    #[test]
+    fn impersonation_with_a_key_scopes_off_that_base_key() {
+        // A key IS a base credential, so scoping is safe and desirable here.
+        let auth = GcpAuth {
+            service_account_key: Some(PathBuf::from("/keys/sa.json")),
+            impersonate_service_account: Some("deploy@p.iam.gserviceaccount.com".into()),
+            config_dir: Some(PathBuf::from("/scoped/gcloud")),
+        };
+        let env = auth.command_env();
+        assert!(env.contains(&("CLOUDSDK_CONFIG".into(), "/scoped/gcloud".into())));
+        assert!(env.contains(&(
+            "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT".into(),
+            "deploy@p.iam.gserviceaccount.com".into()
+        )));
     }
 
     #[tokio::test]
-    async fn every_op_carries_the_injected_credentials() {
-        // The whole point of #1047: credentials ride *every* gcloud/terraform
-        // call, not just the first. A real, existing key file so check_auth's
-        // existence guard passes and we exercise the injection end to end.
-        let key = std::env::temp_dir().join("lazybox-1047-sa.json");
+    async fn injected_credentials_ride_a_real_provider_op() {
+        // The #1047 core: credentials ride *every* gcloud/terraform call, not
+        // just the preflight. `status` of a stopped box is one describe call —
+        // it must carry the injected override.
+        let runner = ScriptedRunner::new(vec![Step::Out("TERMINATED".to_string())]);
+        let mut provider = with_runner(runner.clone());
+        provider.auth = GcpAuth {
+            service_account_key: Some(PathBuf::from("/keys/sa.json")),
+            impersonate_service_account: None,
+            config_dir: Some(PathBuf::from("/scoped/gcloud")),
+        };
+
+        provider.status(&handle()).await.unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1, "a stopped box is one describe call");
+        let env = env_of(&calls[0]);
+        assert!(env.contains(&(
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE".into(),
+            "/keys/sa.json".into()
+        )));
+        assert!(env.contains(&("CLOUDSDK_CONFIG".into(), "/scoped/gcloud".into())));
+    }
+
+    #[tokio::test]
+    async fn check_auth_with_a_key_validates_offline_without_a_token_probe() {
+        // A service-account key is long-lived; check_auth validates it by
+        // reading the file, spawning no gcloud — so the snappy `status` never
+        // pays a network token mint (#1047 review finding #3).
+        let key = std::env::temp_dir().join("lazybox-1047-sa-offline.json");
         std::fs::write(&key, b"{}").expect("write fake key");
-        let runner = ScriptedRunner::new(vec![Step::Out("token".to_string())]);
+        let runner = ScriptedRunner::new(vec![]);
         let mut provider = with_runner(runner.clone());
         provider.auth = GcpAuth {
             service_account_key: Some(key.clone()),
@@ -1081,23 +1148,19 @@ mod tests {
         provider
             .check_auth()
             .await
-            .expect("valid creds pass preflight");
-
-        let calls = runner.calls();
-        assert_eq!(calls.len(), 1, "check_auth probes exactly once");
-        assert_eq!(calls[0].1, vec!["auth", "print-access-token"]);
-        let env = env_of(&calls[0]);
-        assert!(env.contains(&(
-            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE".into(),
-            key.display().to_string()
-        )));
+            .expect("a readable key passes preflight offline");
+        assert!(
+            runner.calls().is_empty(),
+            "no token probe when a key is configured"
+        );
         std::fs::remove_file(&key).ok();
     }
 
     #[tokio::test]
-    async fn check_auth_flags_a_missing_key_before_spawning_gcloud() {
-        // A configured-but-absent key is the common misconfiguration; it must
-        // fail with a precise message and never reach the runner.
+    async fn check_auth_flags_an_unreadable_key_before_spawning_gcloud() {
+        // A configured-but-absent/unreadable key is the common misconfiguration;
+        // it must fail with a precise message and never reach the runner. A bad
+        // path exercises the unreadable branch (#1047 review finding #4).
         let runner = ScriptedRunner::new(vec![]);
         let mut provider = with_runner(runner.clone());
         provider.auth = GcpAuth {
@@ -1108,19 +1171,52 @@ mod tests {
 
         let err = provider.check_auth().await.unwrap_err();
         assert!(matches!(err, SandboxError::Config(_)), "{err:?}");
-        assert!(err.to_string().contains("not found"), "{err}");
+        assert!(err.to_string().contains("unreadable"), "{err}");
         assert!(runner.calls().is_empty(), "no gcloud spawn on a bad path");
     }
 
     #[tokio::test]
-    async fn check_auth_maps_a_probe_failure_to_an_actionable_message() {
-        // Ambient path: the probe fails (no login) → the actionable "configure
-        // credentials or run gcloud auth login" message, not raw stderr.
+    async fn check_auth_probes_only_the_no_key_path_and_maps_failure_to_a_fix_hint() {
+        // Ambient path (no offline-checkable base): the probe fails (no login)
+        // → the actionable "configure credentials or run gcloud auth login"
+        // message, not raw stderr.
         let runner = ScriptedRunner::new(vec![Step::Fail]);
-        let provider = with_runner(runner);
+        let provider = with_runner(runner.clone());
         let err = provider.check_auth().await.unwrap_err();
         assert!(matches!(err, SandboxError::Config(_)), "{err:?}");
         assert!(err.to_string().contains("not configured"), "{err}");
+        assert_eq!(
+            runner.calls().len(),
+            1,
+            "the no-key path probes exactly once"
+        );
+        assert_eq!(runner.calls()[0].1, vec!["auth", "print-access-token"]);
+    }
+
+    #[test]
+    fn connect_tunnel_carries_the_injected_credentials() {
+        // The forward is spawned outside the CommandRunner (by the client's
+        // keepalive supervisor), so the tunnel itself must carry the creds or
+        // the IAP SSH falls back to ambient auth (#1047 review finding #1).
+        // Ambient → no env on the tunnel, exactly as before #1047.
+        assert!(provider().connect_tunnel(&handle(), &[]).env.is_empty());
+
+        let mut authed = provider();
+        authed.auth = GcpAuth {
+            service_account_key: Some(PathBuf::from("/keys/sa.json")),
+            impersonate_service_account: None,
+            config_dir: Some(PathBuf::from("/scoped/gcloud")),
+        };
+        let tunnel = authed.connect_tunnel(&handle(), &[3000]);
+        assert!(tunnel.env.contains(&(
+            "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE".into(),
+            "/keys/sa.json".into()
+        )));
+        assert!(
+            tunnel
+                .env
+                .contains(&("CLOUDSDK_CONFIG".into(), "/scoped/gcloud".into()))
+        );
     }
 
     #[test]

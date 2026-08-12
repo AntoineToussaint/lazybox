@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -247,7 +247,7 @@ impl DeviceRegistry {
 
 fn random_hex(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     hex::encode(buf)
 }
 

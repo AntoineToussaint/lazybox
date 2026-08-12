@@ -2895,7 +2895,8 @@ pub(crate) use lazybox_tui_core::inbox::workspace_needs_attention;
 // Re-export the ratatui-styled pills.rs items so callers in the rest of
 // the crate keep their `crate::components::sidebar::*` import paths.
 pub(crate) use pills::{
-    badge_pill_style, relative_time, role_badge, status_pills, workspace_type_label,
+    ARM_GLYPH, AUTO_GLYPH, FIX_GLYPH, LegendRow, TRACK_GLYPH, badge_pill_style, relative_time,
+    role_badge, status_legend, status_pills, workspace_type_label,
 };
 #[cfg(test)]
 pub(crate) use pills::{pill_for_tag, status_pill};

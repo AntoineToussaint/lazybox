@@ -200,10 +200,12 @@ mod status_pill_tests {
         }
     }
 
-    /// All pill labels render in a fixed 10-cell column so the time
-    /// column lines up across rows. Regression-guard the width.
+    /// Status pills are now single-glyph icons (#1046), each a leading
+    /// space + one BMP symbol, so the trailer stays narrow and hands its
+    /// old width to the title. Guard that every pill is compact (≤ 3
+    /// cells) rather than a wide text block.
     #[test]
-    fn every_pill_label_is_ten_cells_wide() {
+    fn every_pill_label_is_a_compact_glyph() {
         let ci_cases: &[CiStatus] = &[
             CiStatus::Failure,
             CiStatus::Mixed,
@@ -215,10 +217,9 @@ mod status_pill_tests {
             let mut t = base_task();
             t.ci = *ci;
             let pill = status_pill(&t).expect("CI status should produce a pill");
-            assert_eq!(
-                pill.label.chars().count(),
-                10,
-                "label {:?} for {:?} is not 10 cells wide",
+            assert!(
+                crate::util::visual_width(pill.label) <= 3,
+                "label {:?} for {:?} is not a compact glyph",
                 pill.label,
                 ci,
             );
@@ -228,64 +229,46 @@ mod status_pill_tests {
             let mut t = base_task();
             t.state = *state;
             let pill = status_pill(&t).expect("state should produce a pill");
-            assert_eq!(
-                pill.label.chars().count(),
-                10,
-                "label {:?} for {:?} is not 10 cells wide",
+            assert!(
+                crate::util::visual_width(pill.label) <= 3,
+                "label {:?} for {:?} is not a compact glyph",
                 pill.label,
                 state,
             );
         }
-        // Approval pills.
-        for ci in [CiStatus::Success, CiStatus::Running] {
-            let mut t = base_task();
-            t.review = ReviewStatus::Approved;
-            t.ci = ci;
-            let pill = status_pill(&t).expect("approval should produce a pill");
-            assert_eq!(
-                pill.label.chars().count(),
-                10,
-                "label {:?} for approval + {:?} is not 10 cells wide",
-                pill.label,
-                ci,
-            );
-        }
     }
 
     #[test]
-    fn ci_failure_renders_ci_fail() {
+    fn ci_failure_renders_fail_glyph() {
         let mut t = base_task();
         t.ci = CiStatus::Failure;
-        assert_eq!(status_pill(&t).unwrap().label, " CI FAIL  ");
+        assert_eq!(status_pill(&t).unwrap().label, " ✗");
     }
 
     #[test]
-    fn ci_success_renders_ci_ok() {
-        // New behaviour: CI passing now renders an explicit green
-        // ` CI OK    ` pill instead of an empty status column.
+    fn ci_success_renders_ok_glyph() {
+        // CI passing renders a green `✓` glyph instead of an empty
+        // status column or a wide ` CI OK ` block (#1046).
         let mut t = base_task();
         t.ci = CiStatus::Success;
         let pill = status_pill(&t).expect("Success should produce a pill");
-        assert_eq!(pill.label, " CI OK    ");
+        assert_eq!(pill.label, " ✓");
     }
 
     #[test]
-    fn ci_running_renders_ci_run() {
-        // New behaviour: Running was previously a barely-visible amber
-        // fg `       CI `. Now it renders a yellow-bg ` CI RUN   ` pill
-        // matching the FAIL / MIX styling so users actually see it.
+    fn ci_running_renders_running_glyph() {
         let mut t = base_task();
         t.ci = CiStatus::Running;
-        assert_eq!(status_pill(&t).unwrap().label, " CI RUN   ");
+        assert_eq!(status_pill(&t).unwrap().label, " ◔");
         t.ci = CiStatus::Pending;
-        assert_eq!(status_pill(&t).unwrap().label, " CI RUN   ");
+        assert_eq!(status_pill(&t).unwrap().label, " ◔");
     }
 
     #[test]
-    fn ci_mixed_renders_ci_mix() {
+    fn ci_mixed_renders_mixed_glyph() {
         let mut t = base_task();
         t.ci = CiStatus::Mixed;
-        assert_eq!(status_pill(&t).unwrap().label, " CI MIX   ");
+        assert_eq!(status_pill(&t).unwrap().label, " ±");
     }
 
     #[test]
@@ -293,18 +276,19 @@ mod status_pill_tests {
         let mut t = base_task();
         t.mergeable = lazybox_core::Mergeable::Conflicting;
         t.ci = CiStatus::Success;
-        assert_eq!(status_pill(&t).unwrap().label, " CONFLICT ");
+        // `⚠` carries a trailing U+FE0E text-presentation selector so it
+        // renders one cell wide on emoji-forcing terminals (#1046).
+        assert_eq!(status_pill(&t).unwrap().label, " ⚠\u{fe0e}");
     }
 
     #[test]
     fn merged_renders_merged_pill_overriding_ci() {
         // A closed PR's CI history is frozen; the user can't act on
-        // it. Show the inactive-state badge instead of a stale
-        // CI FAIL.
+        // it. Show the merged glyph instead of a stale CI fail.
         let mut t = base_task();
         t.state = TaskState::Merged;
         t.ci = CiStatus::Failure;
-        assert_eq!(status_pill(&t).unwrap().label, " MERGED   ");
+        assert_eq!(status_pill(&t).unwrap().label, " ✓");
     }
 
     #[test]
@@ -312,27 +296,27 @@ mod status_pill_tests {
         let mut t = base_task();
         t.state = TaskState::Closed;
         t.ci = CiStatus::Failure;
-        assert_eq!(status_pill(&t).unwrap().label, " CLOSED   ");
+        assert_eq!(status_pill(&t).unwrap().label, " ⊘");
     }
 
     #[test]
     fn draft_renders_draft_pill_when_ci_is_quiet() {
-        // CI green or running, state Draft → DRAFT wins so the user
-        // remembers the PR isn't ready for review.
+        // CI green or running, state Draft → the draft glyph wins so the
+        // user remembers the PR isn't ready for review.
         let mut t = base_task();
         t.state = TaskState::Draft;
         t.ci = CiStatus::Success;
-        assert_eq!(status_pill(&t).unwrap().label, " DRAFT    ");
+        assert_eq!(status_pill(&t).unwrap().label, " ◇");
     }
 
     #[test]
     fn ci_failure_beats_draft() {
         // A draft with red CI still needs the user's attention more
-        // urgently than the draft state itself — CI FAIL wins.
+        // urgently than the draft state itself — the fail glyph wins.
         let mut t = base_task();
         t.state = TaskState::Draft;
         t.ci = CiStatus::Failure;
-        assert_eq!(status_pill(&t).unwrap().label, " CI FAIL  ");
+        assert_eq!(status_pill(&t).unwrap().label, " ✗");
     }
 
     #[test]
@@ -344,22 +328,23 @@ mod status_pill_tests {
     #[test]
     fn approved_plus_green_ci_renders_ready() {
         // The "this is mergeable right now" signal — both the human
-        // half (review) and the machine half (CI) are done.
+        // half (review) and the machine half (CI) are done → the ready
+        // glyph (green `✓`).
         let mut t = base_task();
         t.review = ReviewStatus::Approved;
         t.ci = CiStatus::Success;
-        assert_eq!(status_pill(&t).unwrap().label, " READY    ");
+        assert_eq!(status_pill(&t).unwrap().label, " ✓");
     }
 
     #[test]
     fn approved_with_no_ci_yet_still_renders_ready() {
         // Some repos don't run CI on every PR (or the rollup is still
         // empty after a fresh push). Approval alone is enough to call
-        // it READY rather than holding back forever.
+        // it ready rather than holding back forever.
         let mut t = base_task();
         t.review = ReviewStatus::Approved;
         t.ci = CiStatus::None;
-        assert_eq!(status_pill(&t).unwrap().label, " READY    ");
+        assert_eq!(status_pill(&t).unwrap().label, " ✓");
     }
 
     #[test]
@@ -369,7 +354,7 @@ mod status_pill_tests {
         let mut t = base_task();
         t.review = ReviewStatus::Approved;
         t.ci = CiStatus::Running;
-        assert_eq!(status_pill(&t).unwrap().label, " APPROVED ");
+        assert_eq!(status_pill(&t).unwrap().label, " ✓");
     }
 
     #[test]
@@ -379,7 +364,7 @@ mod status_pill_tests {
         let mut t = base_task();
         t.review = ReviewStatus::Approved;
         t.ci = CiStatus::Failure;
-        assert_eq!(status_pill(&t).unwrap().label, " CI FAIL  ");
+        assert_eq!(status_pill(&t).unwrap().label, " ✗");
     }
 }
 
@@ -395,8 +380,8 @@ mod status_pill_consistency_tests {
     //!   skip `ChangesRequested` / `Queued` / `ReviewPending`
     //!   entirely).
     //!
-    //! - Every pill label is the same 10-cell width so the time
-    //!   column stays right-aligned across rows.
+    //! - Every pill label is a compact single glyph (#1046) so the
+    //!   reclaimed width goes to the title.
     //!
     //! - The `None` tag is the only tag that renders no pill.
     //!
@@ -478,17 +463,16 @@ mod status_pill_consistency_tests {
     }
 
     #[test]
-    fn every_pill_label_is_ten_cells_wide() {
-        // The right-trailer reserves 10 cells for the status pill
-        // so the time column stays aligned. Width is checked here
-        // for every tag, not just the ones reachable from a Task —
-        // the renderer is the truth, the producer is the input.
+    fn every_pill_label_is_a_compact_glyph() {
+        // The status trailer is a single-glyph icon per slot now (#1046),
+        // not a fixed 10-cell text block. Guard that every tag's pill is
+        // compact (≤ 3 cells: a leading space + one BMP symbol) so the
+        // reclaimed width goes to the title.
         for tag in ALL_TAGS {
             if let Some(p) = pill_for_tag(*tag) {
-                assert_eq!(
-                    p.label.chars().count(),
-                    10,
-                    "StatusTag::{tag:?} label {:?} is not 10 cells wide",
+                assert!(
+                    crate::util::visual_width(p.label) <= 3,
+                    "StatusTag::{tag:?} label {:?} is not a compact glyph",
                     p.label,
                 );
             }
@@ -503,13 +487,13 @@ mod status_pill_consistency_tests {
         let mut t = base_task();
         t.review = ReviewStatus::ChangesRequested;
         let pill = status_pill(&t).expect("changes-requested must produce a pill");
-        assert_eq!(pill.label, " CHANGES  ");
+        assert_eq!(pill.label, " ✗");
     }
 
     #[test]
     fn auto_merge_is_not_a_status_pill() {
         // #778: GitHub-native auto-merge is a policy, not a status —
-        // it renders as its own ` AUTO ` row pill (see
+        // it renders as its own `◆` row pill (see
         // `workspace_row::cell_auto`), never in the status column. With
         // no other signal, an armed PR shows no status pill at all…
         let mut t = base_task();
@@ -521,7 +505,7 @@ mod status_pill_consistency_tests {
         // …and, crucially, it never suppresses a red-CI status pill.
         t.ci = lazybox_core::CiStatus::Failure;
         let pill = status_pill(&t).expect("failing CI must still produce a pill");
-        assert_eq!(pill.label, " CI FAIL  ");
+        assert_eq!(pill.label, " ✗");
     }
 
     #[test]
@@ -529,7 +513,7 @@ mod status_pill_consistency_tests {
         let mut t = base_task();
         t.is_in_merge_queue = true;
         let pill = status_pill(&t).expect("in-merge-queue must produce a pill");
-        assert_eq!(pill.label, " QUEUED   ");
+        assert_eq!(pill.label, " ⧖");
     }
 
     #[test]
@@ -537,7 +521,7 @@ mod status_pill_consistency_tests {
         let mut t = base_task();
         t.review = ReviewStatus::Pending;
         let pill = status_pill(&t).expect("review-pending must produce a pill");
-        assert_eq!(pill.label, " REVIEW   ");
+        assert_eq!(pill.label, " ◌");
     }
 
     /// The pills Ask Lazybox documents (`lazybox_tui_core::markers`)
@@ -656,6 +640,69 @@ mod status_pill_consistency_tests {
             assert_eq!(
                 via_task, via_tag,
                 "status_pill must equal pill_for_tag(StatusTag::for_task(task))",
+            );
+        }
+    }
+
+    /// WCAG relative luminance of an sRGB color. Built-in theme colors are
+    /// always `Color::Rgb` (pinned by the theme module's own tests), so a
+    /// non-Rgb here means a status glyph reached for a fixed palette index
+    /// instead of a theme tone — the exact #1046 regression.
+    fn luminance(c: ratatui::style::Color) -> f32 {
+        let ratatui::style::Color::Rgb(r, g, b) = c else {
+            panic!("status glyph color {c:?} is not a theme-derived Color::Rgb");
+        };
+        let lin = |v: u8| {
+            let s = v as f32 / 255.0;
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    fn contrast_ratio(a: ratatui::style::Color, b: ratatui::style::Color) -> f32 {
+        let (la, lb) = (luminance(a), luminance(b));
+        let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// #1046 regression: status glyphs are foreground-colored on
+    /// `theme.surface`, so a fixed bright palette color (the old
+    /// `Color::Indexed(220)` yellow) or a near-surface theme grey (`chrome`,
+    /// the old draft tone) is unreadable on the near-white Lazybox Light
+    /// surface — where the old black-on-color pill *fills* always held
+    /// contrast. Every glyph a status column can emit must clear the 3:1
+    /// floor for graphical indicators on that surface. The old CI colors
+    /// (green `40` ~1.5:1, yellow `220` ~1.3:1) would fail this.
+    #[test]
+    fn status_glyph_colors_are_legible_on_the_light_theme() {
+        use crate::theme;
+        let prev = theme::current().name;
+        assert!(
+            theme::set_by_name("Lazybox Light"),
+            "light theme must exist"
+        );
+        // Sample every tag's fg while the light theme is active, then
+        // restore immediately so the brief global switch can't bleed into a
+        // concurrently-rendering test (same pattern the theme module uses).
+        let sampled: Vec<(StatusTag, ratatui::style::Color)> = ALL_TAGS
+            .iter()
+            .filter_map(|&tag| {
+                pill_for_tag(tag).map(|p| (tag, p.style.fg.expect("glyph has a fg")))
+            })
+            .collect();
+        let surface = theme::current().surface;
+        theme::set_by_name(prev);
+
+        for (tag, fg) in sampled {
+            let ratio = contrast_ratio(fg, surface);
+            assert!(
+                ratio >= 3.0,
+                "StatusTag::{tag:?} glyph color {fg:?} has {ratio:.2}:1 contrast on the light \
+                 surface — below the 3:1 floor (must use a contrast-tuned theme tone)",
             );
         }
     }
@@ -2403,7 +2450,10 @@ mod broadcast_select_tests {
             .collect();
 
         assert!(header.contains("AUTO-FIX ON · CI+CONFLICT"), "{header:?}");
-        assert!(screen.contains("FIX"), "compact row pill is still visible");
+        assert!(
+            screen.contains(crate::components::sidebar::FIX_GLYPH),
+            "compact auto-fix row glyph is still visible"
+        );
     }
 
     /// #794: the focused row's merge automation is spelled out in the

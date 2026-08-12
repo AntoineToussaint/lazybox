@@ -617,21 +617,23 @@ fallback shouldn't resurrect it)",
     fn agent_context_includes_generated_markers() {
         let ctx = agent_context(&catalog(), ']');
         assert!(ctx.contains("# Sidebar markers and pills"));
-        // The motivating bug: CHANGES was undocumented, so the agent
-        // couldn't explain it. It now comes straight from the code.
+        // The motivating bug: changes-requested was undocumented, so the
+        // agent couldn't explain it. It now comes straight from the code —
+        // the label is the on-screen glyph (#1046), the meaning the words.
         assert!(
-            ctx.contains("`CHANGES` — A reviewer requested changes"),
-            "CHANGES pill must be explained from the generated registry"
+            ctx.contains("Changes requested — a reviewer requested changes"),
+            "changes-requested pill must be explained from the generated registry"
         );
-        // A sampling of the other generated sources.
+        // A sampling of the other generated sources — the glyph labels.
         assert!(ctx.contains("## Status pills"));
-        assert!(ctx.contains("`CI OK`"));
-        assert!(ctx.contains("`CONFLICT`"));
+        assert!(ctx.contains("`✓`"));
+        // `⚠` carries a trailing U+FE0E text-presentation selector (#1046).
+        assert!(ctx.contains("`⚠\u{fe0e}`"));
         assert!(ctx.contains("## Agent state"));
         assert!(ctx.contains("Working"));
         assert!(ctx.contains("## Row badges"));
-        assert!(ctx.contains("`ARM`"));
-        assert!(ctx.contains("`FIX`"));
+        assert!(ctx.contains("`⚡`"));
+        assert!(ctx.contains("`🔧`"));
     }
 
     /// Every status pill and agent state reaches the generated context —

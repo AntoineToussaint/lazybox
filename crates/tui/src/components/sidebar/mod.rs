@@ -631,6 +631,17 @@ impl Sidebar {
         session_key: &SessionKey,
         state: lazybox_ipc::AgentState,
     ) -> bool {
+        // While a spawn is in flight the row shows the "spawning" arc, not
+        // the agent-state glyph — so folding in the agent's first reading
+        // *does* change the display: it clears the arc. This holds even
+        // for `Idle`, which the absent-entry default below also maps to,
+        // so without this the orchestrator's `changed` gate (which reads
+        // this) would skip the repaint and strand the arc on screen when
+        // the `TerminalSpawned` event was dropped on the lossy bus and the
+        // agent's first `AgentState` is `Idle` (#1069).
+        if self.spawning.contains(session_key) {
+            return false;
+        }
         // "Already displays it" = the stored state already equals this
         // reading, so folding it in would be a no-op. An absent entry
         // renders as `Idle`, so treat it as such.

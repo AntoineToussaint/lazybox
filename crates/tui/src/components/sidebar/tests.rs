@@ -3516,6 +3516,37 @@ mod spawning_tests {
         assert!(!sb.is_spawning(&key), "the live agent owns the slot now");
     }
 
+    /// #1069 redraw gate: while spawning, the row shows the arc, not the
+    /// agent glyph — so the orchestrator's `changed` check (which reads
+    /// `displays_agent_state`) must repaint when the first `AgentState`
+    /// arrives, *even for `Idle`*. Without this, an `Idle`-first agent
+    /// whose `TerminalSpawned` was dropped on the lossy bus would clear
+    /// the spawning set with no repaint, stranding the arc on screen.
+    #[test]
+    fn displays_agent_state_forces_repaint_out_of_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        // Absent entry and `Idle` both map to "no glyph", but the row
+        // currently shows the arc — so folding `Idle` in *does* change it.
+        assert!(
+            !sb.displays_agent_state(&key, AgentState::Idle),
+            "spawning row must repaint when the first (Idle) state lands"
+        );
+        // Once the state is folded and spawning cleared, the normal
+        // no-op dedup applies again so repeated pings don't churn redraws.
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Idle,
+        });
+        assert!(!sb.is_spawning(&key));
+        assert!(sb.displays_agent_state(&key, AgentState::Idle));
+    }
+
     #[test]
     fn terminal_spawned_clears_spawning() {
         let (mut sb, key) = one_workspace();

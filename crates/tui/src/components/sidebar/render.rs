@@ -1213,7 +1213,7 @@ impl Sidebar {
                 working_glyph: crate::components::workspace_row::working_glyph(
                     self.working_spinner_frame,
                 ),
-                spawning: self.spawning.contains(key),
+                spawning: self.is_spawning(key),
                 spawning_glyph: crate::components::workspace_row::spawning_glyph(
                     self.working_spinner_frame,
                 ),

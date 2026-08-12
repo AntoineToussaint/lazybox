@@ -632,13 +632,16 @@ mod tests {
         Fail,
     }
 
+    /// One recorded invocation: `(program, args, injected env)`.
+    type RecordedCall = (String, Vec<String>, Vec<(String, String)>);
+
     /// Returns queued outputs in order and records every `(program, args,
     /// env)` so a sequencing test can assert both the commands run and their
     /// order, plus the credential env injected into each.
     #[derive(Debug)]
     struct ScriptedRunner {
         queue: Mutex<VecDeque<Result<String, ()>>>,
-        calls: Mutex<Vec<(String, Vec<String>, Vec<(String, String)>)>>,
+        calls: Mutex<Vec<RecordedCall>>,
     }
 
     impl ScriptedRunner {
@@ -656,7 +659,7 @@ mod tests {
             })
         }
 
-        fn calls(&self) -> Vec<(String, Vec<String>, Vec<(String, String)>)> {
+        fn calls(&self) -> Vec<RecordedCall> {
             self.calls.lock().expect("calls lock").clone()
         }
     }
@@ -698,7 +701,7 @@ mod tests {
     /// The action of a `gcloud compute …` call — `instances <verb>` yields
     /// the verb (`describe`/`start`/…), `ssh` yields `"ssh"`. Used to assert
     /// lifecycle sequencing across calls.
-    fn gcloud_action(call: &(String, Vec<String>, Vec<(String, String)>)) -> Option<&str> {
+    fn gcloud_action(call: &RecordedCall) -> Option<&str> {
         let (prog, args, _env) = call;
         if prog != "gcloud" || args.first().map(String::as_str) != Some("compute") {
             return None;
@@ -1028,7 +1031,7 @@ mod tests {
         assert!(!status.reachable, "a failed probe reads as unreachable");
     }
 
-    fn env_of(call: &(String, Vec<String>, Vec<(String, String)>)) -> Vec<(String, String)> {
+    fn env_of(call: &RecordedCall) -> Vec<(String, String)> {
         call.2.clone()
     }
 

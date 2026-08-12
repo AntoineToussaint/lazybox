@@ -72,8 +72,8 @@ pub trait SandboxProvider {
     fn id(&self) -> &str;
 
     /// Verify the provider's own credentials before the first lifecycle op,
-    /// failing with an actionable message ("gcp credentials not configured /
-    /// expired: <how to fix>") rather than a raw CLI stderr from deep inside
+    /// failing with an actionable message (`gcp credentials not configured /
+    /// expired: <how to fix>`) rather than a raw CLI stderr from deep inside
     /// a later call. Auth is a per-provider concern (GCP = service-account
     /// key / impersonation, E2B = API key, …), so it lives on the contract
     /// (#1047). The default is a no-op: a provider whose credentials are

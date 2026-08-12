@@ -37,6 +37,52 @@ convention-less:
    injected for Linear. *(Fixed: Linear tickets now classify
    `ImplementLinear` and get a real prompt.)*
 
+## Resolution order & the unmapped-team picker (#1041)
+
+`repo_for_workspace_provision` → `linear_repo_for_task`
+(`spawn_handler.rs`) resolves a Linear ticket's repo in this order:
+
+1. **Linked GitHub PR** under the team mapping's owner *refines* the
+   mapping (the precise repo for a multi-repo team).
+2. **`providers.linear.teams` mapping** (team key → `owner/repo`) — a
+   trusted, explicit signal; a foreign-org linked PR never overrides it.
+3. **Linked GitHub PR** alone resolves an unmapped or teamless ticket.
+4. Otherwise: a **hard error** naming the missing config key.
+
+Step 4 used to dead-end `w w` for a fresh user or a new team: the only
+way forward was hand-editing `config.yaml`. It no longer does. The error
+is classified `WorktreeRecovery::LinearUnmapped` (`crates/ipc`), and the
+worktree-progress modal offers **`r` pick repo** instead of a bare retry.
+The pick lists the tracked GitHub repos, persists the choice as
+`providers.linear.teams.<team>` via `Config::save_with`, and re-provisions
+— the daemon reloads `config.yaml` on the next provision, so the retry
+resolves through step 2. The mapping is asked **once** per team.
+
+### Inference: what auto-resolves today, and what doesn't (#1041 investigation)
+
+Only **one** inference path is wired: `linked_github_repo(task)` reads the
+ticket's *own* `linked_tasks` attachment (a `github.com/<owner>/<repo>/pull/<n>`
+URL surfaced by #922) and routes to that repo. That is the entirety of
+"inference" in the resolution order — steps 1 and 3 above.
+
+Why `OBI` isn't auto-resolved: the ticket the user pressed `w w` on has
+**no linked GitHub PR** (the work hasn't started, so no PR exists to
+attach), and lazybox learns nothing about a team's repos from *other*
+tickets. Neither of the doc's speculative sources is implemented:
+
+- **Learning from sibling tickets** — scanning the same team's other
+  tickets for their linked PRs to derive the team's repo set — is *not*
+  wired. Each ticket is resolved in isolation.
+- **Org-repo inference** — deriving the repo from the org's repo list plus
+  the ticket identifier/branch — is *not* wired either.
+
+Both would need a repo-candidate index the spawn path doesn't build today,
+and both are heuristic (a team legitimately spans several repos). The
+persisted picker sidesteps this: one deterministic choice teaches the
+mapping for good, which is strictly better than a guess that can be wrong.
+Auto-inference from sibling tickets remains a possible future refinement
+(it could *pre-select* the picker's most-likely repo), tracked as deferred.
+
 ## What obin actually does (the convention to honor)
 
 Observed across `obin-ai/obin-platform` + `obin-ai/obin-infra` (30 recent
@@ -207,7 +253,9 @@ the box for this repo, overridable everywhere.
 - `{type}` — trust the label map, or let the router/agent set it?
 - Router auto-accept threshold vs. always-confirm.
 - Where a repo has no CLAUDE.md **and** no README — skip from `about`?
-- Non-obin fallback when no team mapping exists at all.
+- ~~Non-obin fallback when no team mapping exists at all.~~ **Resolved
+  (#1041):** the unmapped-team repo picker resolves and persists a mapping
+  in-app on the first `w w`, so no hand-edit is needed.
 
 ## Non-goals (for now)
 

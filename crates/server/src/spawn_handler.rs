@@ -13837,13 +13837,27 @@ mod tests {
     }
 
     /// An unmapped team is a hard error, not a clone of `linear/<team>`.
+    /// The error's wire text is also the client's contract (#1041): it must
+    /// classify `LinearUnmapped` and yield the team back, so the modal
+    /// offers the repo picker instead of a dead-end retry. Pinning it here —
+    /// against the *real* emitted string, not a hand-copy — fails the build
+    /// if the wording drifts out from under the client-side parser.
     #[test]
     fn linear_repo_for_task_unmapped_team_errors() {
         let cfg = lazybox_config::Config::default();
         let mut t = task_for("linear", "OBI-1749");
         t.repo = Some("linear/OBI".into());
         let err = linear_repo_for_task(&cfg, &t).unwrap_err();
-        assert!(err.to_string().contains("OBI"), "{err}");
+        let message = err.to_string();
+        assert!(message.contains("OBI"), "{message}");
+        assert_eq!(
+            lazybox_ipc::WorktreeRecovery::classify(&message),
+            lazybox_ipc::WorktreeRecovery::LinearUnmapped,
+        );
+        assert_eq!(
+            lazybox_ipc::WorktreeRecovery::linear_team(&message).as_deref(),
+            Some("OBI"),
+        );
     }
 
     /// A Linear ticket with no team at all is likewise a hard error.

@@ -2503,6 +2503,42 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// `r` on a `LinearUnmapped` `WorktreeProgress` modal (#1041): open a
+    /// picker of tracked GitHub repos for the ticket's team. The pick
+    /// persists `providers.linear.teams.<team>` and re-provisions the
+    /// stuck spawn, so the mapping is asked once instead of demanding a
+    /// hand-edit of `config.yaml`. With no team parseable from the error,
+    /// or no GitHub repos to offer, it falls back to the manual hint.
+    pub(super) fn pick_repo_for_linear_team(&mut self) {
+        use crate::realm::components::choice::Choice;
+
+        let Some(team) = self
+            .worktree_progress
+            .as_ref()
+            .and_then(|state| state.error())
+            .and_then(lazybox_ipc::WorktreeRecovery::linear_team)
+        else {
+            self.flash_hint("couldn't read the team — set providers.linear.teams by hand");
+            return;
+        };
+        let repos = self.sidebar.github_repos_for_picker();
+        if repos.is_empty() {
+            self.flash_info(format!(
+                "no GitHub repos tracked yet — set providers.linear.teams.{team} by hand"
+            ));
+            return;
+        }
+        self.set_modal_flow(ModalFlow::LinearTeamRepo { team: team.clone() });
+        let modal = Choice::single(
+            format!("Which repo should Linear team {team} use? (saved for its future tickets)"),
+            repos,
+        )
+        .title("Map Linear team")
+        .label(|repo: &String| repo.clone())
+        .payload_for(|repo: &String| ChoicePayload::Text(repo.clone()));
+        self.mount_modal(Id::LinearTeamRepo, modal);
+    }
+
     /// Push a modal.
     pub fn push_modal(&mut self, id: Id) {
         self.modal_stack.push(id.clone());

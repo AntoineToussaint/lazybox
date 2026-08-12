@@ -101,6 +101,12 @@ impl<T: TerminalAdapter> Model<T> {
             },
             Id::StartAgentProject => PickFlow::StartAgentProject,
             Id::NewWorkspaceRepo => PickFlow::NewWorkspaceRepo,
+            Id::LinearTeamRepo => match &self.modal_flow {
+                Some(ModalFlow::LinearTeamRepo { team }) => {
+                    PickFlow::LinearTeamRepo { team: team.clone() }
+                }
+                _ => PickFlow::Plain,
+            },
             Id::RequestReviewers => PickFlow::Reviewers {
                 workspace_key: match &self.modal_flow {
                     Some(ModalFlow::ReviewRequest { workspace }) => Some(workspace.clone()),
@@ -200,6 +206,7 @@ impl<T: TerminalAdapter> Model<T> {
             | Id::SnoozeDuration
             | Id::AddAssignees
             | Id::ImportCheckoutList
+            | Id::LinearTeamRepo
             | Id::InspectList => {
                 self.modal_flow = None;
             }
@@ -432,6 +439,21 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_new_workspace_input(project_key);
             }
             PickOutcome::MountNewProject => self.mount_new_project_input(),
+            PickOutcome::MapLinearTeam { team, repo } => {
+                let (team_key, repo_slug) = (team.clone(), repo.clone());
+                match lazybox_config::Config::save_with(move |config| {
+                    config.providers.linear.teams.insert(team_key, repo_slug);
+                }) {
+                    Ok(()) => {
+                        self.flash_info(format!("mapped Linear team {team} → {repo}"));
+                        // The daemon reloads config on the next provision, so
+                        // re-issuing the failed spawn now resolves through the
+                        // freshly-persisted mapping (#1041).
+                        self.retry_worktree_provision();
+                    }
+                    Err(error) => self.flash_error(format!("couldn't save mapping: {error}")),
+                }
+            }
             PickOutcome::Reviewers {
                 workspace_key,
                 logins,

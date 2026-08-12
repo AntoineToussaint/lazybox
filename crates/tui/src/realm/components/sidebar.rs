@@ -394,6 +394,12 @@ impl Sidebar {
         self.inner.projects_for_picker()
     }
 
+    /// Every tracked GitHub repo as `owner/repo`. Backs the unmapped-
+    /// Linear-team repo picker (#1041).
+    pub fn github_repos_for_picker(&self) -> Vec<String> {
+        self.inner.github_repos_for_picker()
+    }
+
     /// Apply `~/.lazybox/config.yaml` overrides to the inner pane in
     /// place. Used by `Model::apply_sidebar_config` once at startup.
     #[allow(clippy::too_many_arguments)]

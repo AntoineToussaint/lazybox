@@ -14196,6 +14196,107 @@ mod worktree_progress_recovery_tests {
         }
     }
 
+    /// Issue #1041: an unmapped Linear team no longer dead-ends `w w`. The
+    /// daemon's "has no repo mapping" failure classifies `LinearUnmapped`
+    /// (offering `r pick repo`, not a bare retry), and opening the picker
+    /// stashes the team so the pick can persist `providers.linear.teams.OBI`
+    /// against the tracked GitHub repos.
+    #[test]
+    fn unmapped_linear_team_opens_a_repo_picker_stashing_the_team() {
+        let mut m = build_model();
+        // A tracked GitHub repo the picker can offer.
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![],
+            terminals: vec![],
+            projects: vec![lazybox_core::Project::github(
+                "obin-ai",
+                "obin-platform",
+                Utc::now(),
+            )],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        let key = WorkspaceKey::new("linear:OBI-1749");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(remembered_spawn(session_key));
+
+        m.handle_daemon_event(IpcEvent::provider_error_permanent(
+            "spawn:worktree",
+            "workspace: Linear team `OBI` has no repo mapping and the ticket has no \
+             linked GitHub PR — set providers.linear.teams.OBI in ~/.lazybox/config.yaml",
+        ));
+        assert_eq!(
+            m.worktree_progress.as_ref().and_then(|s| s.recovery()),
+            Some(lazybox_ipc::WorktreeRecovery::LinearUnmapped),
+            "the modal carries the unmapped-team recovery so it offers a repo pick",
+        );
+
+        m.pick_repo_for_linear_team();
+        assert!(
+            m.modal_stack.contains(&Id::LinearTeamRepo),
+            "pressing r mounts the repo picker",
+        );
+        assert!(
+            matches!(
+                &m.modal_flow,
+                Some(super::super::ModalFlow::LinearTeamRepo { team }) if team == "OBI",
+            ),
+            "the picker stashes the team the pick will be persisted under",
+        );
+
+        // The pick is remembered as `providers.linear.teams.OBI`, and undoing
+        // a mis-pick means hand-editing config — so the picker itself must
+        // say the choice persists, not leave the user to infer it.
+        let rendered = {
+            use tuirealm::ratatui::Terminal;
+            use tuirealm::ratatui::backend::TestBackend;
+            use tuirealm::ratatui::layout::Rect;
+            let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    m.app
+                        .view(&Id::LinearTeamRepo, frame, Rect::new(0, 0, 100, 20))
+                })
+                .expect("render picker");
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|row| {
+                    (0..buffer.area.width)
+                        .map(|col| buffer[(col, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert!(
+            rendered.contains("saved"),
+            "the picker must signal the choice is remembered: {rendered}",
+        );
+    }
+
+    /// With no GitHub repo tracked, the picker has nothing to offer, so the
+    /// unmapped-team recovery falls back to the manual hint instead of
+    /// mounting an empty picker (#1041).
+    #[test]
+    fn unmapped_linear_team_without_repos_does_not_mount_an_empty_picker() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("linear:OBI-1749");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(remembered_spawn(session_key));
+        m.handle_daemon_event(IpcEvent::provider_error_permanent(
+            "spawn:worktree",
+            "workspace: Linear team `OBI` has no repo mapping and the ticket has no \
+             linked GitHub PR — set providers.linear.teams.OBI in ~/.lazybox/config.yaml",
+        ));
+
+        m.pick_repo_for_linear_team();
+        assert!(
+            !m.modal_stack.contains(&Id::LinearTeamRepo),
+            "no tracked repos means no picker to mount",
+        );
+    }
+
     /// Issue #594: some spawn paths (retry, fast spawn, a dismissed
     /// checklist) never mount a live `WorktreeProgress`, so a
     /// worktree-provisioning failure the daemon labels `spawn:worktree`

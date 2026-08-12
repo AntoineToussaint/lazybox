@@ -2567,6 +2567,13 @@ pub enum WorktreeRecovery {
     /// B11: the repo string isn't `owner/name` — a config/source problem
     /// upstream of git that a retry can't fix.
     BadRepo,
+    /// A Linear ticket's team has no `providers.linear.teams` mapping and
+    /// the ticket carries no linked GitHub PR, so provisioning can't
+    /// resolve a repo to clone. A bare retry can't fix it, but the client
+    /// can: pick a repo for the team and persist the mapping, then
+    /// re-provision (issue #1041). The team key is recovered from the
+    /// message via [`Self::linear_team`].
+    LinearUnmapped,
     /// B14/B17: disk, permission, or generic I/O error (out of space,
     /// read-only mount, `git init` half-write). Retryable once the
     /// filesystem problem is cleared.
@@ -2597,6 +2604,12 @@ impl WorktreeRecovery {
         // B3 — the only message that tells the user to move a dir aside.
         if message.contains("move the directory aside") {
             return Self::DirtyLeftover;
+        }
+        // #1041 — an unmapped Linear team, caught before any git runs. The
+        // picker fallback needs this distinct from the generic pre-git
+        // config errors so the modal can offer a repo pick.
+        if message.contains("has no repo mapping") {
+            return Self::LinearUnmapped;
         }
         // B11 — malformed repo string, caught before any git runs.
         if message.contains("is not owner/name") {
@@ -2647,6 +2660,7 @@ impl WorktreeRecovery {
     pub fn failed_step(&self) -> WorktreeStep {
         match self {
             Self::BadRepo
+            | Self::LinearUnmapped
             | Self::DefaultBranchUnresolved
             | Self::BranchMissing
             | Self::Transient => WorktreeStep::Fetch,
@@ -2691,6 +2705,24 @@ impl WorktreeRecovery {
             self,
             Self::BranchMismatch | Self::DirtyLeftover | Self::BranchHeldManaged
         )
+    }
+
+    /// Whether the modal can offer a one-keypress **repo pick**: an
+    /// unmapped Linear team, where the fix is to choose the repo its
+    /// tickets should use and persist the mapping, then re-provision
+    /// (issue #1041). Only `LinearUnmapped`.
+    pub fn picks_repo(&self) -> bool {
+        matches!(self, Self::LinearUnmapped)
+    }
+
+    /// The Linear team key named in a `LinearUnmapped` message. The daemon
+    /// writes it back-quoted (``Linear team `OBI` has no repo mapping…``);
+    /// the client needs it to persist `providers.linear.teams.<team>`.
+    /// `None` when the message has no such quoted team.
+    pub fn linear_team(message: &str) -> Option<String> {
+        let after = message.split_once("Linear team `")?.1;
+        let team = after.split_once('`')?.0.trim();
+        (!team.is_empty()).then(|| team.to_string())
     }
 
     /// Whether the modal can offer a one-keypress **jump** to the live
@@ -2758,6 +2790,10 @@ impl WorktreeRecovery {
             Self::BadRepo => {
                 "This workspace's repo isn't in owner/name form — fix its source \
                  config; a retry won't help."
+            }
+            Self::LinearUnmapped => {
+                "This Linear team has no repo mapping. Press r to pick the repo its \
+                 tickets use — lazybox remembers the choice."
             }
             Self::Disk => "Disk or permission error. Free space or fix permissions, then press r.",
             Self::Unknown => "Press r to retry, or Esc to dismiss.",
@@ -3322,6 +3358,12 @@ mod worktree_recovery_tests {
                 WorktreeStep::Fetch,
             ),
             (
+                "Linear team `OBI` has no repo mapping and the ticket has no linked \
+                 GitHub PR — set providers.linear.teams.OBI in ~/.lazybox/config.yaml",
+                WorktreeRecovery::LinearUnmapped,
+                WorktreeStep::Fetch,
+            ),
+            (
                 "init_standalone_at: I/O error: No space left on device (os error 28)",
                 WorktreeRecovery::Disk,
                 WorktreeStep::WorktreeAdd,
@@ -3386,6 +3428,7 @@ mod worktree_recovery_tests {
             WorktreeRecovery::DirtyLeftover,
             WorktreeRecovery::BranchMissing,
             WorktreeRecovery::BadRepo,
+            WorktreeRecovery::LinearUnmapped,
         ] {
             assert!(!c.retryable(), "{c:?} needs a manual fix first");
         }
@@ -3440,6 +3483,34 @@ mod worktree_recovery_tests {
         ] {
             assert!(c.retryable() && !c.recreatable() && !c.jump_to_holder());
         }
+    }
+
+    /// Issue #1041: an unmapped Linear team is its own recovery class —
+    /// not retryable/recreatable/jumpable, but `picks_repo`, and the team
+    /// key is recovered from the daemon's back-quoted phrasing so the
+    /// client can persist the mapping.
+    #[test]
+    fn linear_unmapped_offers_a_repo_pick_and_names_the_team() {
+        let c = WorktreeRecovery::LinearUnmapped;
+        assert!(c.picks_repo());
+        assert!(!c.retryable() && !c.recreatable() && !c.jump_to_holder());
+        assert_eq!(
+            WorktreeRecovery::linear_team(
+                "Linear team `OBI` has no repo mapping and the ticket has no linked \
+                 GitHub PR — set providers.linear.teams.OBI in ~/.lazybox/config.yaml"
+            )
+            .as_deref(),
+            Some("OBI"),
+        );
+        // Every other class parses no team, and only this one picks a repo.
+        for other in [
+            WorktreeRecovery::BranchHeldLive,
+            WorktreeRecovery::BadRepo,
+            WorktreeRecovery::Unknown,
+        ] {
+            assert!(!other.picks_repo(), "{other:?} must not pick a repo");
+        }
+        assert_eq!(WorktreeRecovery::linear_team("no team here"), None);
     }
 
     /// The holder path is parsed out of the daemon's actual `BranchHeldLive`

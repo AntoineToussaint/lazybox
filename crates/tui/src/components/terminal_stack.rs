@@ -3678,34 +3678,16 @@ impl TerminalStack {
             // a stale "working" on a crashed tab would be actively
             // misleading.
             let exited = self.terminals.get(id).is_some_and(|s| s.exited.is_some());
-            let (hint, hint_style) = if exited {
-                (
-                    " ✗ exited",
-                    Style::default()
-                        .fg(theme.error)
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                match agent_state {
-                    Some(lazybox_ipc::AgentState::InputNeeded) => (
-                        " ! needs input",
-                        Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-                    ),
-                    Some(lazybox_ipc::AgentState::Working) => {
-                        (" · working", Style::default().fg(theme.accent))
-                    }
-                    Some(lazybox_ipc::AgentState::Done) => (
-                        " ✓ done",
-                        Style::default()
-                            .fg(theme.success)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    _ => ("", Style::default()),
-                }
-            };
-            if !hint.is_empty() {
+            if let Some((label, hint_style)) = Self::agent_state_badge(
+                agent_state.unwrap_or(lazybox_ipc::AgentState::Idle),
+                exited,
+                false,
+                theme,
+            ) {
+                let hint = format!(" {label}");
+                let hint_w = hint.chars().count() as u16;
                 title_spans.push(Span::styled(hint, hint_style));
-                cursor = cursor.saturating_add(hint.chars().count() as u16);
+                cursor = cursor.saturating_add(hint_w);
             }
             // No-permission / bypass mode: this session auto-accepts
             // tool-use prompts and runs unattended. A compact `⚠` glyph
@@ -4017,6 +3999,19 @@ impl TerminalStack {
     }
 
     fn drop_slot(&mut self, terminal_id: TerminalId) {
+        // Removing a tile from the active grid reshuffles focus (the
+        // collapse below re-points `focused` at the removed tile's
+        // sibling) and can drop the tree back to Tabs — so a live zoom can
+        // no longer trust which tile it maximizes. Drop back to the grid
+        // rather than silently retargeting the zoom onto a sibling (#1057
+        // review). A terminal in another session isn't part of this tree,
+        // so its exit leaves the zoom intact.
+        if self.zoomed
+            && let lazybox_core::SessionLayout::Splits { tree, .. } = &self.layout
+            && tree.path_to(terminal_id.0).is_some()
+        {
+            self.zoomed = false;
+        }
         self.terminals.remove(&terminal_id);
         // Prune the tile tree so the removal surfaces visually: a
         // single-leaf split collapses to a Leaf root; an n-way split
@@ -4606,7 +4601,8 @@ impl TerminalStack {
         used += lead.chars().count();
         spans.push(Span::styled(lead, base_style));
 
-        if let Some((chip, style)) = Self::tile_state_chip(slot.agent_state, exited, theme) {
+        if let Some((chip, style)) = Self::agent_state_badge(slot.agent_state, exited, true, theme)
+        {
             let chip = format!("{chip} ");
             used += chip.chars().count();
             spans.push(Span::styled(chip, style));
@@ -4650,14 +4646,25 @@ impl TerminalStack {
         Line::from(spans)
     }
 
-    /// The agent-state chip for a tile header: which agent needs you at a
-    /// glance. `● asking` (warn) is the attention state; `· working`,
-    /// `✓ done`, and `✗ exited` round it out. Idle shows nothing.
-    fn tile_state_chip(
+    /// The agent-state badge (`label`, `style`) shared by the tab strip
+    /// and the tile-grid headers: which agent needs you at a glance.
+    /// `exited` overrides the live state with the process-ended pill.
+    /// `compact` selects the tile grid's terse `● asking` glyph over the
+    /// tab strip's wordier `! needs input`; every other label and colour
+    /// is identical across both surfaces, so they can't drift.
+    ///
+    /// The `match` is deliberately exhaustive — no `_` wildcard — so a new
+    /// [`lazybox_ipc::AgentState`] variant is a compile error here rather
+    /// than silently rendering blank on both surfaces (the failure mode
+    /// the previous per-surface `_ =>` arms had). The label carries no
+    /// surrounding whitespace; each caller adds its own spacing.
+    fn agent_state_badge(
         state: lazybox_ipc::AgentState,
         exited: bool,
+        compact: bool,
         theme: &crate::theme::Theme,
     ) -> Option<(&'static str, Style)> {
+        use lazybox_ipc::AgentState;
         if exited {
             return Some((
                 "✗ exited",
@@ -4667,20 +4674,27 @@ impl TerminalStack {
             ));
         }
         match state {
-            lazybox_ipc::AgentState::InputNeeded => Some((
-                "● asking",
+            AgentState::InputNeeded => Some((
+                if compact {
+                    "● asking"
+                } else {
+                    "! needs input"
+                },
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             )),
-            lazybox_ipc::AgentState::Working => {
-                Some(("· working", Style::default().fg(theme.accent)))
-            }
-            lazybox_ipc::AgentState::Done => Some((
+            AgentState::Working => Some(("· working", Style::default().fg(theme.accent))),
+            AgentState::Done => Some((
                 "✓ done",
                 Style::default()
                     .fg(theme.success)
                     .add_modifier(Modifier::BOLD),
             )),
-            _ => None,
+            // Idle has nothing to act on; `Exited` is surfaced by the
+            // `exited` flag above (the process-ended pill lives on the
+            // slot, not the live state); `LimitReached` surfaces via the
+            // sidebar pill / `!` jump and — as the tab strip did before
+            // this — shows no inline chip.
+            AgentState::Idle | AgentState::Exited { .. } | AgentState::LimitReached => None,
         }
     }
 
@@ -10100,5 +10114,124 @@ mod zoom_and_tile_header_tests {
             fg.spans.iter().any(|s| s.style.fg == Some(theme.accent)),
             "the focused tile uses the accent rule, not the attention warn",
         );
+    }
+
+    /// Three tiles: tile 1 on the left, tiles 2 & 3 stacked on the right;
+    /// focus on tile 1. Big enough that removing one tile leaves a real
+    /// Splits grid (not a downgrade to Tabs).
+    fn three_tile_grid() -> TerminalStack {
+        let sk = SessionKey::new("github:o/r#3");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        for id in [1u64, 2, 3] {
+            stack.on_event(&Event::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(id),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+            });
+        }
+        stack.set_active_session(Some(sk));
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                right: Box::new(lazybox_core::TileTree::HSplit {
+                    left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                    right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 3 }),
+                    ratio: 50,
+                }),
+                ratio: 50,
+            },
+            focused: vec![0],
+        });
+        stack
+    }
+
+    #[test]
+    fn zoom_exits_when_a_grid_tile_is_removed_but_survives_another_sessions_exit() {
+        // Removing the zoomed (focused) tile → zoom drops back to the grid.
+        let mut stack = three_tile_grid();
+        assert_eq!(stack.toggle_zoom(), Some(true));
+        assert_eq!(stack.focused_terminal_id(), Some(TerminalId(1)));
+        stack.drop_slot(TerminalId(1));
+        assert!(!stack.is_zoomed(), "removing the zoomed tile exits zoom");
+
+        // Removing a BACKGROUND tile also exits zoom: `drop_slot` re-points
+        // focus at the removed tile's sibling, so holding the zoom would
+        // silently show a different agent than the user chose. Dropping
+        // back to the grid is the honest outcome.
+        let mut stack = three_tile_grid();
+        stack.toggle_zoom();
+        stack.drop_slot(TerminalId(2));
+        assert!(
+            !stack.is_zoomed(),
+            "removing a background grid tile also exits zoom",
+        );
+
+        // A terminal in a DIFFERENT session isn't part of this grid — its
+        // exit leaves the active session's zoom untouched.
+        let mut stack = three_tile_grid();
+        stack.toggle_zoom();
+        let other = SessionKey::new("github:o/r#99");
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(42),
+            session_key: other,
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        assert!(
+            stack.is_zoomed(),
+            "spawning another session must not clear zoom"
+        );
+        stack.drop_slot(TerminalId(42));
+        assert!(
+            stack.is_zoomed(),
+            "an unrelated session's terminal exit keeps the zoom",
+        );
+    }
+
+    #[test]
+    fn agent_state_badge_is_one_exhaustive_mapping_for_both_surfaces() {
+        use lazybox_ipc::AgentState;
+        let t = crate::theme::current();
+        let label = |s, exited, compact| {
+            TerminalStack::agent_state_badge(s, exited, compact, t).map(|(l, _)| l)
+        };
+
+        // `exited` overrides the live state on both surfaces.
+        assert_eq!(label(AgentState::Working, true, true), Some("✗ exited"));
+        assert_eq!(label(AgentState::Working, true, false), Some("✗ exited"));
+
+        // The asking state is the ONLY label that differs by surface: the
+        // tile grid's terse `● asking` vs the tab strip's `! needs input`.
+        assert_eq!(
+            label(AgentState::InputNeeded, false, true),
+            Some("● asking")
+        );
+        assert_eq!(
+            label(AgentState::InputNeeded, false, false),
+            Some("! needs input")
+        );
+
+        for compact in [true, false] {
+            // Working / Done are identical across both surfaces.
+            assert_eq!(
+                label(AgentState::Working, false, compact),
+                Some("· working")
+            );
+            assert_eq!(label(AgentState::Done, false, compact), Some("✓ done"));
+            // Silent states render nothing on BOTH surfaces — no per-surface
+            // drift, and (crucially) `LimitReached` is a deliberate None,
+            // not a wildcard-swallow.
+            assert_eq!(label(AgentState::Idle, false, compact), None);
+            assert_eq!(label(AgentState::LimitReached, false, compact), None);
+            assert_eq!(
+                label(AgentState::Exited { code: Some(0) }, false, compact),
+                None
+            );
+        }
     }
 }

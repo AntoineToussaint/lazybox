@@ -48,6 +48,40 @@ pub enum Ack {
     Unavailable,
     /// The box does not have an active hosted-relay subscription.
     SubscriptionRequired,
+    /// The box failed to prove possession of its claimed private key.
+    AuthenticationFailed,
+}
+
+/// A one-time challenge a registering box must sign with its Ed25519 key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct RegistrationChallenge {
+    pub nonce: Uuid,
+}
+
+/// The box's signature over [`registration_payload`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct RegistrationProof {
+    pub signature: Vec<u8>,
+}
+
+const REGISTRATION_DOMAIN: &[u8] = b"lazybox-relay-register-v1\0";
+
+/// Build the unambiguous, domain-separated message a box signs to register.
+pub fn registration_payload(
+    challenge: &RegistrationChallenge,
+    box_id: &str,
+    box_public_key: &str,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(
+        REGISTRATION_DOMAIN.len() + 16 + 8 + box_id.len() + box_public_key.len(),
+    );
+    payload.extend_from_slice(REGISTRATION_DOMAIN);
+    payload.extend_from_slice(challenge.nonce.as_bytes());
+    payload.extend_from_slice(&(box_id.len() as u32).to_be_bytes());
+    payload.extend_from_slice(box_id.as_bytes());
+    payload.extend_from_slice(&(box_public_key.len() as u32).to_be_bytes());
+    payload.extend_from_slice(box_public_key.as_bytes());
+    payload
 }
 
 /// A control message pushed from the relay down a box's held control
@@ -123,6 +157,26 @@ mod tests {
         write_msg(&mut a, &Ack::SubscriptionRequired).await.unwrap();
         let got: Ack = read_msg(&mut b).await.unwrap();
         assert_eq!(got, Ack::SubscriptionRequired);
+    }
+
+    #[test]
+    fn registration_payload_binds_every_claim_field() {
+        let challenge = RegistrationChallenge {
+            nonce: Uuid::new_v4(),
+        };
+        let payload = registration_payload(&challenge, "box-a", "key-a");
+        assert_ne!(payload, registration_payload(&challenge, "box-b", "key-a"));
+        assert_ne!(payload, registration_payload(&challenge, "box-a", "key-b"));
+        assert_ne!(
+            payload,
+            registration_payload(
+                &RegistrationChallenge {
+                    nonce: Uuid::new_v4()
+                },
+                "box-a",
+                "key-a"
+            )
+        );
     }
 
     #[tokio::test]

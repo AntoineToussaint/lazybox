@@ -34,6 +34,14 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 /// the relay's own `handshake_timeout` enforces on its protocol frame.
 const E2E_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[derive(Debug)]
+struct ServeOptions {
+    relay_addr: String,
+    socket_path: PathBuf,
+    box_id: Option<String>,
+    insecure_no_auth: bool,
+}
+
 /// `lazybox serve --relay <host:port> [--box-id <id>]
 /// [--socket <path>] [--insecure-no-auth]`.
 ///
@@ -42,10 +50,39 @@ const E2E_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// channel is encrypted by default; `--insecure-no-auth` is a
 /// loopback-testing escape hatch that forwards plaintext.
 pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
+    let options = parse_serve_options(args, std::env::var("LAZYBOX_RELAY").ok())?;
+    let ServeOptions {
+        relay_addr,
+        socket_path,
+        box_id,
+        insecure_no_auth,
+    } = options;
+    let box_id = match box_id {
+        Some(id) => id,
+        None => load_or_create_box_id(&box_id_file())?,
+    };
+    let box_identity = Arc::new(lazybox_identity::BoxIdentity::load_or_generate(
+        lazybox_core::paths::identity_dir(),
+    )?);
+
+    serve(
+        relay_addr,
+        socket_path,
+        box_id,
+        box_identity,
+        insecure_no_auth,
+    )
+    .await
+}
+
+fn parse_serve_options(
+    args: &[String],
+    relay_from_env: Option<String>,
+) -> anyhow::Result<ServeOptions> {
     let mut args = args.to_vec();
     let insecure_no_auth = take_flag(&mut args, "--insecure-no-auth");
     let relay_addr = take_value(&mut args, "--relay")
-        .or_else(|| std::env::var("LAZYBOX_RELAY").ok())
+        .or(relay_from_env)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let Some(relay_addr) = relay_addr else {
@@ -54,14 +91,25 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
     let socket_path = take_value(&mut args, "--socket")
         .map(PathBuf::from)
         .unwrap_or_else(lifecycle::socket_path);
-    let box_id = match take_value(&mut args, "--box-id") {
-        Some(id) => id.trim().to_string(),
-        None => load_or_create_box_id(&box_id_file())?,
-    };
-    let box_public_key =
-        lazybox_identity::BoxIdentity::load_or_generate(lazybox_core::paths::identity_dir())?
-            .public_key_base64();
+    let box_id = take_value(&mut args, "--box-id").map(|id| id.trim().to_string());
+    if let Some(argument) = args.first() {
+        anyhow::bail!("unrecognized `lazybox serve` argument: {argument}");
+    }
+    Ok(ServeOptions {
+        relay_addr,
+        socket_path,
+        box_id,
+        insecure_no_auth,
+    })
+}
 
+async fn serve(
+    relay_addr: String,
+    socket_path: PathBuf,
+    box_id: String,
+    box_identity: Arc<lazybox_identity::BoxIdentity>,
+    insecure_no_auth: bool,
+) -> anyhow::Result<()> {
     // Secure by default: load (or generate on first run) the box's
     // persistent X25519 channel identity and terminate the Noise channel
     // on every brokered stream. `--insecure-no-auth` forwards plaintext —
@@ -109,7 +157,7 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
         match lazybox_relay::serve_box(
             relay_addr.clone(),
             box_id.clone(),
-            box_public_key.clone(),
+            Arc::clone(&box_identity),
             Arc::clone(&on_client),
         )
         .await
@@ -227,6 +275,20 @@ mod tests {
         std::fs::write(&path, "   \n").unwrap();
         let id = load_or_create_box_id(&path).unwrap();
         assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn removed_account_option_is_rejected_instead_of_ignored() {
+        let args = vec![
+            "--relay".to_string(),
+            "relay.example:9443".to_string(),
+            "--account".to_string(),
+            "legacy-account".to_string(),
+        ];
+
+        let error = parse_serve_options(&args, None).unwrap_err();
+
+        assert!(error.to_string().contains("--account"));
     }
 
     /// A brokered client whose E2E handshake fails must never cause the box

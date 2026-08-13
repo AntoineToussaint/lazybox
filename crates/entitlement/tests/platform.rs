@@ -21,6 +21,7 @@ enum Reply {
     Json(&'static str),
     Status(StatusCode),
     Hang,
+    Wait(Arc<tokio::sync::Notify>, &'static str),
 }
 
 #[derive(Debug)]
@@ -124,6 +125,15 @@ async fn spawn_mock(reply: Reply) -> MockPlatform {
                                     Reply::Hang => {
                                         std::future::pending::<()>().await;
                                         unreachable!()
+                                    }
+                                    Reply::Wait(release, body) => {
+                                        release.notified().await;
+                                        Response::builder()
+                                            .status(StatusCode::OK)
+                                            .header(hyper::header::CONTENT_TYPE, "application/json")
+                                            .header(hyper::header::CONNECTION, "close")
+                                            .body(Full::new(Bytes::from(body)))
+                                            .unwrap()
                                     }
                                 };
                                 Ok::<_, Infallible>(response)
@@ -273,4 +283,38 @@ async fn inactive_cache_refreshes_after_fifteen_seconds() {
     tokio::time::resume();
     assert_eq!(gate.check(&account).await.unwrap(), Entitlement::Active);
     assert_eq!(mock.request_count(), 2);
+}
+
+#[tokio::test]
+async fn concurrent_misses_for_one_box_share_one_platform_result() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mock = spawn_mock(Reply::Wait(Arc::clone(&release), ACTIVE)).await;
+    let gate = Arc::new(PlatformEntitlementGate::new(mock.url(), "key"));
+    let account = AccountId::new("same-box-key");
+
+    let first = {
+        let gate = Arc::clone(&gate);
+        let account = account.clone();
+        tokio::spawn(async move { gate.check(&account).await })
+    };
+    while mock.request_count() == 0 {
+        tokio::task::yield_now().await;
+    }
+    let second = {
+        let gate = Arc::clone(&gate);
+        let account = account.clone();
+        tokio::spawn(async move { gate.check(&account).await })
+    };
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        mock.request_count(),
+        1,
+        "same-key cache misses must not race independent platform responses"
+    );
+    release.notify_one();
+
+    assert_eq!(first.await.unwrap().unwrap(), Entitlement::Active);
+    assert_eq!(second.await.unwrap().unwrap(), Entitlement::Active);
+    assert_eq!(mock.request_count(), 1);
 }

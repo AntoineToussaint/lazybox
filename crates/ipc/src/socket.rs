@@ -443,14 +443,14 @@ fn next_backoff_after_drop(current: Duration, served: Duration) -> Duration {
 /// backoff and re-sends [`Command::Subscribe`], so the daemon replays a
 /// fresh [`Event::Snapshot`] (workspaces plus terminal ring buffers) and
 /// the client resyncs without the caller ever observing the drop. A wire
-/// fingerprint mismatch on reconnect (the daemon came back from an
-/// incompatible build) is terminal: the supervisor stops and drops the
-/// event stream, which the UI surfaces as its usual disconnect state.
+/// fingerprint mismatch or a terminal redial error is terminal: the
+/// supervisor publishes the actionable failure reason and stops.
 ///
 /// The returned [`Client`] tracks live [`ConnectionState`]: it flips to
 /// [`ConnectionStatus::Reconnecting`] while re-dialing (so the UI can say
 /// so instead of freezing), back to `Connected` with the reconnected
-/// daemon's build on success.
+/// daemon's build on success, or to [`ConnectionStatus::Failed`] with
+/// the terminal reason when retrying cannot help.
 pub async fn connect_reconnecting(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
     let path = path.to_path_buf();
     let redial: Redial = Arc::new(move || {
@@ -458,7 +458,7 @@ pub async fn connect_reconnecting(path: &Path) -> std::io::Result<(Client, PeerI
         Box::pin(async move {
             transport::connect(&path)
                 .await
-                .map_err(|e| std::io::Error::other(e.to_string()))
+                .map_err(|error| RedialError::retryable(std::io::Error::other(error.to_string())))
         })
     });
     connect_reconnecting_with(redial).await
@@ -475,12 +475,37 @@ pub type Redial = Arc<
     dyn Fn() -> Pin<
             Box<
                 dyn std::future::Future<
-                        Output = std::io::Result<(transport::BoxRead, transport::BoxWrite)>,
+                        Output = Result<(transport::BoxRead, transport::BoxWrite), RedialError>,
                     > + Send,
             >,
         > + Send
         + Sync,
 >;
+
+/// Whether a failed transport dial can recover without user action.
+#[derive(Debug, thiserror::Error)]
+pub enum RedialError {
+    #[error("{0}")]
+    Retryable(#[source] std::io::Error),
+    #[error("{0}")]
+    Terminal(#[source] std::io::Error),
+}
+
+impl RedialError {
+    pub fn retryable(error: std::io::Error) -> Self {
+        Self::Retryable(error)
+    }
+
+    pub fn terminal(error: std::io::Error) -> Self {
+        Self::Terminal(error)
+    }
+
+    fn into_io(self) -> std::io::Error {
+        match self {
+            Self::Retryable(error) | Self::Terminal(error) => error,
+        }
+    }
+}
 
 /// Like [`connect_reconnecting`], but the caller supplies how to reach
 /// the daemon. The Unix-socket path is `connect_reconnecting`; the relay
@@ -488,7 +513,7 @@ pub type Redial = Arc<
 /// stream in the E2E channel, so a relay flap reconnects transparently
 /// the same way a tunnel reset does.
 pub async fn connect_reconnecting_with(redial: Redial) -> std::io::Result<(Client, PeerInfo)> {
-    let (mut rd, mut wr) = redial().await?;
+    let (mut rd, mut wr) = redial().await.map_err(RedialError::into_io)?;
     let peer = client_handshake_with_timeout(&mut rd, &mut wr, HANDSHAKE_TIMEOUT).await?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
@@ -529,9 +554,9 @@ enum ReconnectResult {
         conn: (transport::BoxRead, transport::BoxWrite),
         peer: PeerInfo,
     },
-    /// The daemon is reachable but wire-incompatible; retrying can't
-    /// help, so stop and let the event stream close.
-    Fatal,
+    /// The failure cannot recover without user action; publish its reason
+    /// and stop reconnecting.
+    Fatal(std::io::Error),
     /// The caller dropped its `Client` while we were retrying.
     CallerGone,
 }
@@ -574,8 +599,14 @@ async fn reconnect_supervisor(
                         });
                         conn
                     }
-                    ReconnectResult::Fatal => {
-                        tracing::warn!("reconnect: daemon is wire-incompatible; giving up");
+                    ReconnectResult::Fatal(error) => {
+                        tracing::warn!(%error, "reconnect: terminal connection failure; giving up");
+                        status_tx.send_replace(ConnectionState {
+                            status: ConnectionStatus::Failed {
+                                message: error.to_string(),
+                            },
+                            daemon_build,
+                        });
                         return;
                     }
                     ReconnectResult::CallerGone => return,
@@ -673,7 +704,7 @@ async fn reconnect_with_backoff(
         }
         match try_reconnect(redial).await {
             Ok((conn, peer)) => return ReconnectResult::Connected { conn, peer },
-            Err(ReconnectError::Fatal) => return ReconnectResult::Fatal,
+            Err(ReconnectError::Fatal(error)) => return ReconnectResult::Fatal(error),
             Err(ReconnectError::Retryable) => {
                 *backoff = grow_backoff(*backoff);
             }
@@ -703,20 +734,26 @@ enum ReconnectError {
     /// Transient: socket refused/absent or peer closed mid-handshake
     /// (a daemon that is restarting). Worth another attempt.
     Retryable,
-    /// The daemon answered but its wire fingerprint doesn't match — a
-    /// different, incompatible build. Retrying won't fix it.
-    Fatal,
+    /// The failure cannot recover without user action, such as an
+    /// incompatible wire protocol or denied relay entitlement.
+    Fatal(std::io::Error),
 }
 
 async fn try_reconnect(
     redial: &Redial,
 ) -> Result<((transport::BoxRead, transport::BoxWrite), PeerInfo), ReconnectError> {
-    let (mut rd, mut wr) = redial().await.map_err(|_| ReconnectError::Retryable)?;
+    let (mut rd, mut wr) = match redial().await {
+        Ok(connection) => connection,
+        Err(RedialError::Retryable(_)) => return Err(ReconnectError::Retryable),
+        Err(RedialError::Terminal(error)) => return Err(ReconnectError::Fatal(error)),
+    };
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, client_handshake(&mut rd, &mut wr)).await {
         Ok(Ok(peer)) => Ok(((rd, wr), peer)),
-        Ok(Err(HandshakeError::FingerprintMismatch { .. } | HandshakeError::BadMagic(_))) => {
-            Err(ReconnectError::Fatal)
-        }
+        Ok(Err(
+            error @ (HandshakeError::FingerprintMismatch { .. } | HandshakeError::BadMagic(_)),
+        )) => Err(ReconnectError::Fatal(std::io::Error::other(
+            error.to_string(),
+        ))),
         // Peer closed mid-handshake (restarting daemon) or the handshake
         // timed out — both worth retrying.
         Ok(Err(HandshakeError::Io(_))) | Err(_) => Err(ReconnectError::Retryable),
@@ -1495,6 +1532,59 @@ mod batching_tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn reconnecting_client_surfaces_a_terminal_redial_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("terminal-redial.sock");
+        let listener = transport::Listener::bind(&path).await.expect("bind");
+        let server = tokio::spawn(async move {
+            let (mut rd, mut wr) = listener.accept().await.expect("accept");
+            server_handshake(&mut rd, &mut wr)
+                .await
+                .expect("initial handshake");
+            drop((rd, wr));
+        });
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let redial_path = path.clone();
+        let redial: Redial = Arc::new(move || {
+            let attempts = Arc::clone(&attempts);
+            let path = redial_path.clone();
+            Box::pin(async move {
+                if attempts.fetch_add(1, Ordering::SeqCst) > 0 {
+                    return Err(RedialError::terminal(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "subscription required — https://lazybox.ai/pricing",
+                    )));
+                }
+                transport::connect(&path).await.map_err(|error| {
+                    RedialError::retryable(std::io::Error::other(error.to_string()))
+                })
+            })
+        });
+        let (client, _peer) = connect_reconnecting_with(redial)
+            .await
+            .expect("initial connection");
+        server.await.expect("server task");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match client.connection_status() {
+                ConnectionStatus::Failed { message } => {
+                    assert_eq!(
+                        message,
+                        "subscription required — https://lazybox.ai/pricing"
+                    );
+                    break;
+                }
+                _ if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                status => panic!("terminal redial error was not surfaced: {status:?}"),
+            }
+        }
     }
 
     /// When the caller drops its `Client`, the supervisor tears the

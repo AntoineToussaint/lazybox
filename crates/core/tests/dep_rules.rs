@@ -75,6 +75,7 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-config",
                 "lazybox-e2e-channel",
                 "lazybox-entitlement",
+                "lazybox-identity",
             ]),
         ),
         // The remote-box lifecycle crate (#931): it persists a `BoxHandle`

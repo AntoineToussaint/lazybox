@@ -158,6 +158,23 @@ pub fn verify(public_key_hex: &str, message: &[u8], signature: &Signature) -> bo
     key.verify(message, signature).is_ok()
 }
 
+/// Verify a byte-encoded signature against a standard-base64 Ed25519 public key.
+pub fn verify_base64(public_key_base64: &str, message: &[u8], signature: &[u8]) -> bool {
+    let Ok(bytes) = STANDARD.decode(public_key_base64) else {
+        return false;
+    };
+    let Ok(bytes) = <[u8; 32]>::try_from(bytes) else {
+        return false;
+    };
+    let Ok(key) = VerifyingKey::from_bytes(&bytes) else {
+        return false;
+    };
+    let Ok(signature) = Signature::from_slice(signature) else {
+        return false;
+    };
+    key.verify(message, &signature).is_ok()
+}
+
 /// Create a new file exclusively (`O_EXCL`, mode `0600`) and write
 /// `bytes`: fails with `AlreadyExists` rather than truncating an
 /// existing file.
@@ -233,6 +250,16 @@ mod tests {
             &signature
         ));
         assert!(!verify(&identity.public_key_hex(), b"tampered", &signature));
+        assert!(verify_base64(
+            &identity.public_key_base64(),
+            b"pair this device",
+            &signature.to_bytes(),
+        ));
+        assert!(!verify_base64(
+            &identity.public_key_base64(),
+            b"tampered",
+            &signature.to_bytes(),
+        ));
     }
 
     #[cfg(unix)]

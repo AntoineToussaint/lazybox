@@ -15,11 +15,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lazybox_entitlement::{AccountId, AllowAll, Entitlement, EntitlementGate};
+use lazybox_identity::verify_base64;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::protocol::{Ack, Hello, ToBox, read_msg, write_msg};
+use crate::protocol::{
+    Ack, Hello, RegistrationChallenge, RegistrationProof, ToBox, read_msg, registration_payload,
+    write_msg,
+};
 
 /// How long a client waits for the box's data connection after it has
 /// been announced, before giving up and closing.
@@ -125,6 +129,25 @@ impl Relay {
         box_id: String,
         box_public_key: String,
     ) -> std::io::Result<()> {
+        let challenge = RegistrationChallenge {
+            nonce: Uuid::new_v4(),
+        };
+        write_msg(&mut stream, &challenge).await?;
+        let proof = tokio::time::timeout(
+            self.handshake_timeout,
+            read_msg::<_, RegistrationProof>(&mut stream),
+        )
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "registration proof timed out")
+        })??;
+        let payload = registration_payload(&challenge, &box_id, &box_public_key);
+        if !verify_base64(&box_public_key, &payload, &proof.signature) {
+            tracing::warn!(%box_id, "box registration refused: invalid identity proof");
+            write_msg(&mut stream, &Ack::AuthenticationFailed).await?;
+            return Ok(());
+        }
+
         let account = AccountId::new(box_public_key);
         if !self.is_entitled(&box_id, &account).await {
             tracing::info!(%box_id, "box registration refused: not entitled");

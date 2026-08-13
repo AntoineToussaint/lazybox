@@ -17960,6 +17960,28 @@ mod reconnect_banner_tests {
     }
 
     #[test]
+    fn terminal_reconnect_failure_renders_its_actionable_message() {
+        let (mut m, status_tx, _io) = model_with_status();
+        let message = "subscription required — https://lazybox.ai/pricing";
+        status_tx.send_replace(ConnectionState {
+            status: ConnectionStatus::Failed {
+                message: message.into(),
+            },
+            ..connected()
+        });
+
+        // The event channel can close before the next health tick observes
+        // the watch state; that path must still prefer the terminal reason.
+        m.note_daemon_disconnected();
+        m.tick_daemon_health();
+
+        let notice = m.status.notice.as_ref().expect("terminal failure banner");
+        assert_eq!(notice.message, message);
+        assert_eq!(notice.severity, NoticeSeverity::Permanent);
+        assert!(m.daemon_disconnect_notified);
+    }
+
+    #[test]
     fn reconnect_to_a_different_build_warns_about_the_mismatch() {
         let (mut m, status_tx, _io) = model_with_status();
         status_tx.send_replace(ConnectionState {

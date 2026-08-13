@@ -1961,6 +1961,7 @@ dependencies = [
  "lazybox-config",
  "lazybox-e2e-channel",
  "lazybox-entitlement",
+ "lazybox-identity",
  "serde",
  "tempfile",
  "thiserror 2.0.20",

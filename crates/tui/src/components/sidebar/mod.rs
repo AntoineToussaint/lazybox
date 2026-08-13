@@ -631,15 +631,26 @@ impl Sidebar {
         session_key: &SessionKey,
         state: lazybox_ipc::AgentState,
     ) -> bool {
-        // While a spawn is in flight the row shows the "spawning" arc, not
-        // the agent-state glyph — so folding in the agent's first reading
-        // *does* change the display: it clears the arc. This holds even
-        // for `Idle`, which the absent-entry default below also maps to,
-        // so without this the orchestrator's `changed` gate (which reads
-        // this) would skip the repaint and strand the arc on screen when
-        // the `TerminalSpawned` event was dropped on the lossy bus and the
-        // agent's first `AgentState` is `Idle` (#1069).
-        if self.spawning.contains(session_key) {
+        // While a spawn is in flight and the arc is what's actually on
+        // screen, folding in the agent's first reading *does* change the
+        // display: it clears the arc. This holds even for `Idle`, which the
+        // absent-entry default below also maps to, so without this the
+        // orchestrator's `changed` gate (which reads this) would skip the
+        // repaint and strand the arc when the `TerminalSpawned` event was
+        // dropped on the lossy bus and the first `AgentState` is `Idle`
+        // (#1069). Gate it on the arc *actually being displayed* — matching
+        // `cell_state`'s precedence, the arc shows only when no higher live
+        // signal does, i.e. the stored state is absent / `Idle` / `Exited`.
+        // A live sibling session (`Working`/`Done`/`InputNeeded`/
+        // `LimitReached`) owns the slot instead, so its repeated pings must
+        // still dedup here rather than force a needless repaint every tick.
+        if self.spawning.contains(session_key)
+            && matches!(
+                self.agents.get(session_key),
+                None | Some(lazybox_ipc::AgentState::Idle)
+                    | Some(lazybox_ipc::AgentState::Exited { .. })
+            )
+        {
             return false;
         }
         // "Already displays it" = the stored state already equals this

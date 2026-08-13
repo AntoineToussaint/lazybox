@@ -512,6 +512,21 @@ impl Sidebar {
                     | lazybox_ipc::WorktreeStepStatus::Warned(_) => {}
                 }
             }
+            Event::ProviderError { source, .. } if source.starts_with("spawn") => {
+                // A spawn failed. Worktree-*provisioning* failures also emit
+                // a `WorktreeStepStatus::Failed` that clears the specific
+                // workspace's arc above — but a post-provisioning
+                // agent-*launch* failure (`execute_spawn_plan` erroring after
+                // the worktree is ready) emits only this `ProviderError`,
+                // which carries a `source` string and no session key. Without
+                // a target the arc would spin forever, so drop every in-flight
+                // arc: a genuinely systemic launch failure (missing agent
+                // binary, PTY exhaustion) fails all concurrent spawns anyway,
+                // and any healthy concurrent provision re-shows its glyph on
+                // its own `TerminalSpawned`. Fixes the "not stuck spinning
+                // forever" acceptance for #1069.
+                self.spawning.clear();
+            }
             Event::TerminalsRebadged { from, to } => {
                 // The daemon moved every terminal owned by `from` onto
                 // `to` (issue→PR collapse, manual adopt). The transient

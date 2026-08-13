@@ -3586,6 +3586,90 @@ mod spawning_tests {
         );
     }
 
+    fn spawn_error(source: &str) -> Event {
+        Event::ProviderError {
+            source: source.into(),
+            message: "agent binary not found".into(),
+            detail: String::new(),
+            kind: String::new(),
+        }
+    }
+
+    /// A post-provisioning agent-*launch* failure emits only a keyless
+    /// `ProviderError` (source `"spawn"`) — never a `WorktreeStepStatus::
+    /// Failed` — so the arc, set while the worktree provisioned, would
+    /// otherwise spin forever. The spawn error must clear it (#1069).
+    #[test]
+    fn spawn_provider_error_clears_the_arc() {
+        let (mut sb, key) = one_workspace();
+        // Provisioning ran (arc set); the daemon then failed to launch the
+        // agent — no `Failed` step, only the keyless spawn `ProviderError`.
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        sb.on_event(&spawn_error("spawn"));
+        assert!(
+            !sb.is_spawning(&key),
+            "a keyless launch-failure spawn error must clear the arc"
+        );
+    }
+
+    /// An unrelated provider (sync) error must NOT touch the arc — only
+    /// `spawn*`-sourced failures mean a spawn ended.
+    #[test]
+    fn non_spawn_provider_error_leaves_the_arc() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&spawn_error("github"));
+        assert!(
+            sb.is_spawning(&key),
+            "a sync-provider error is unrelated to the spawn arc"
+        );
+    }
+
+    /// Finding 2: a workspace with a *live* `Working` agent and a second
+    /// session cold-provisioning shows the working spinner (working >
+    /// spawning), so the live agent's repeated pings must still dedup —
+    /// `displays_agent_state` must not force a repaint just because the
+    /// key is in the spawning set (#1069).
+    #[test]
+    fn live_sibling_pings_dedup_during_a_concurrent_spawn() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        });
+        // A second session for the same workspace starts provisioning.
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key), "the second session is provisioning");
+        // The row shows the live working spinner, so a repeated Working
+        // ping is a no-op that must NOT force a redraw.
+        assert!(
+            sb.displays_agent_state(&key, AgentState::Working),
+            "a live sibling's repeated ping must still dedup during a spawn"
+        );
+    }
+
     /// Removing a workspace mid-spawn drops its spawning entry so a
     /// cancelled/closed workspace can't leak a stuck spinner.
     #[test]

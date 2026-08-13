@@ -21149,7 +21149,7 @@ mod remote_spawn_tests {
     use lazybox_core::{SessionKey, Task, TaskId, Workspace};
     use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
     use lazybox_tui_core::action::Action;
-    use lazybox_tui_core::remote::RemoteBoxNotice;
+    use lazybox_tui_core::remote::{RemoteBoxNotice, RemoteConnState, RemoteControl};
     use tuirealm::ratatui::layout::Size;
 
     fn task(key: &str, age: Duration) -> Task {
@@ -21396,5 +21396,235 @@ mod remote_spawn_tests {
             );
         }
         assert!(m.remote_marks.is_empty(), "the latch is released too");
+    }
+
+    /// A configured box shows a persistent `disconnected` indicator from
+    /// launch — not the hidden `NotConfigured` state (#1066).
+    #[test]
+    fn a_configured_box_starts_disconnected_and_visible() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        assert_eq!(m.status.remote_conn, RemoteConnState::Disconnected);
+    }
+
+    /// Auto-connect (the default) fires a background `Connect` on startup
+    /// and paints the indicator `connecting…` immediately (#1066).
+    #[test]
+    fn auto_connect_requests_connect_on_startup() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let m = m.with_remote_control(ctrl_tx, true);
+        assert_eq!(
+            ctrl_rx.try_recv().expect("a Connect was queued"),
+            RemoteControl::Connect
+        );
+        assert_eq!(m.status.remote_conn, RemoteConnState::Connecting);
+    }
+
+    /// With auto-connect off (the hard-gate opt-out), startup does NOT
+    /// connect — the box waits for an explicit action (#1066).
+    #[test]
+    fn auto_connect_off_does_not_connect_on_startup() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let m = m.with_remote_control(ctrl_tx, false);
+        assert!(
+            ctrl_rx.try_recv().is_err(),
+            "no Connect should be sent when auto_connect is off"
+        );
+        assert_eq!(m.status.remote_conn, RemoteConnState::Disconnected);
+    }
+
+    /// The `ConnectBox` action toggles: a `Connect` when disconnected,
+    /// then a `Disconnect` when connected (#1066).
+    #[test]
+    fn connect_box_action_toggles_connect_and_disconnect() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(8);
+        // auto_connect off so startup doesn't pre-send a Connect.
+        let mut m = m.with_remote_control(ctrl_tx, false);
+
+        m.dispatch_action(&Action::ConnectBox);
+        assert_eq!(ctrl_rx.try_recv().unwrap(), RemoteControl::Connect);
+        assert_eq!(m.status.remote_conn, RemoteConnState::Connecting);
+
+        // Simulate the worker reporting the link came up.
+        m.status
+            .note_remote_state(RemoteConnState::Connected { name: "box".into() });
+        m.dispatch_action(&Action::ConnectBox);
+        assert_eq!(ctrl_rx.try_recv().unwrap(), RemoteControl::Disconnect);
+        assert_eq!(m.status.remote_conn, RemoteConnState::Disconnected);
+    }
+
+    /// `ConnectBox` with no `sandbox:` box flashes an error rather than
+    /// silently doing nothing.
+    #[test]
+    fn connect_box_without_a_box_flashes_an_error() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.dispatch_action(&Action::ConnectBox);
+        assert!(
+            m.status.notice.is_some(),
+            "a missing box surfaces a footer notice"
+        );
+    }
+
+    /// A worker `State` notice drives the persistent indicator only — no
+    /// transient flash steals the footer (#1066).
+    #[test]
+    fn state_notice_updates_the_persistent_indicator() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (notice_tx, notice_rx) = tokio::sync::mpsc::channel(8);
+        let mut m = m.with_remote_notices(notice_rx);
+
+        notice_tx
+            .try_send(RemoteBoxNotice::State(RemoteConnState::Connected {
+                name: "obin".into(),
+            }))
+            .expect("test channel");
+        m.tick_remote_notices();
+
+        assert_eq!(
+            m.status.remote_conn,
+            RemoteConnState::Connected {
+                name: "obin".into()
+            }
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "a state transition is durable, not a transient flash"
+        );
+    }
+
+    /// With the hard-gate on (`require_connect: true`), a remote spawn while
+    /// disconnected is refused instead of lazily triggering a bring-up:
+    /// nothing reaches the box and a footer nudge points at the connect key
+    /// (#1066).
+    #[test]
+    fn hard_gate_refuses_remote_spawn_while_disconnected() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let mut m = m
+            .with_remote_control(ctrl_tx, false)
+            .with_remote_require_connect(true);
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            box_rx.try_recv().is_err(),
+            "the disconnected hard-gate must not forward the spawn"
+        );
+        assert!(m.status.notice.is_some(), "the refusal is surfaced");
+    }
+
+    /// The hard-gate is OFF by default (`require_connect` unset, #1066):
+    /// `r c` while disconnected still lazily brings the box up on demand
+    /// (the spawn reaches the box worker), so remote spawn stays one-key.
+    /// Decoupled from `auto_connect` — startup connect off must not gate
+    /// on-demand spawns.
+    #[test]
+    fn r_spawn_lazily_proceeds_when_require_connect_off() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(8);
+        // auto_connect off (no startup connect), require_connect left off.
+        let mut m = m.with_remote_control(ctrl_tx, false);
+        assert!(!m.remote_connected(), "box starts disconnected");
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            matches!(box_rx.try_recv(), Ok(IpcCommand::Spawn { .. })),
+            "with require_connect off, a disconnected r-spawn lazily reaches the box"
+        );
+    }
+
+    /// Ordering fix (#1066): a disabled repo is refused BEFORE the hard-gate,
+    /// so `r c` there never tells the user to "connect first" (which would
+    /// wake the billed box only to then refuse as disabled).
+    #[test]
+    fn disabled_repo_refuses_before_the_hard_gate() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let mut disabled = std::collections::BTreeSet::new();
+        disabled.insert("owner/repo".to_string());
+        // Hard-gate ON and disconnected: the wrong order would surface the
+        // connect nudge; the fix surfaces the disabled nudge instead.
+        let mut m = m
+            .with_remote_control(ctrl_tx, false)
+            .with_remote_require_connect(true)
+            .with_remote_repo_overrides(disabled);
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(box_rx.try_recv().is_err(), "nothing reaches the box");
+        let msg = m.status.notice.as_ref().expect("a nudge is surfaced");
+        assert!(
+            msg.message.contains("disabled for this project"),
+            "must name the opt-out, not the connect gate: {:?}",
+            msg.message
+        );
+    }
+
+    /// Per-project opt-out (#1066): a repo that set `sandbox: false` resolves
+    /// to no box, while every other repo (and the repo-less path) inherits
+    /// the global one. Matching is case-insensitive — a casing mismatch must
+    /// not silently leave a disabled repo enabled (fail *open*).
+    #[test]
+    fn remote_for_repo_honors_the_per_project_opt_out() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        // Boot lowercases the disabled set (Config::sandbox_disabled_repos).
+        let mut disabled = std::collections::BTreeSet::new();
+        disabled.insert("owner/repo".to_string());
+        let m = m.with_remote_repo_overrides(disabled);
+        assert_eq!(m.remote_for_repo(Some("owner/other")), Some("box"));
+        assert_eq!(m.remote_for_repo(Some("owner/repo")), None, "opted out");
+        assert_eq!(
+            m.remote_for_repo(Some("Owner/Repo")),
+            None,
+            "a casing mismatch must still resolve to the opt-out"
+        );
+        assert_eq!(
+            m.remote_for_repo(None),
+            Some("box"),
+            "a repo-less workspace can't be opted out"
+        );
+    }
+
+    /// An `r`-spawn on a workspace whose repo disabled the box is refused
+    /// (nothing reaches the box) and surfaces a nudge — even though the box
+    /// is configured for other projects (#1066).
+    #[test]
+    fn r_spawn_refused_on_a_disabled_repo() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let mut disabled = std::collections::BTreeSet::new();
+        disabled.insert("owner/repo".to_string());
+        let mut m = m.with_remote_repo_overrides(disabled);
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            box_rx.try_recv().is_err(),
+            "a disabled repo's spawn never reaches the box"
+        );
+        assert!(m.status.notice.is_some(), "the refusal is surfaced");
+    }
+
+    /// With the hard-gate on but the box connected, a remote spawn goes
+    /// straight through — connection is the gate, not a per-spawn effect.
+    #[test]
+    fn hard_gate_allows_remote_spawn_once_connected() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let mut m = m
+            .with_remote_control(ctrl_tx, false)
+            .with_remote_require_connect(true);
+        m.status
+            .note_remote_state(RemoteConnState::Connected { name: "box".into() });
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            matches!(box_rx.try_recv(), Ok(IpcCommand::Spawn { .. })),
+            "a connected box accepts the spawn"
+        );
     }
 }

@@ -449,6 +449,18 @@ impl<T: TerminalAdapter> Model<T> {
             .collect()
     }
 
+    /// Whether any workspace in the current r-spawn target set actually has
+    /// a box (its repo didn't opt out, #1066). Drives the bulk hard-gate: an
+    /// all-disabled selection must not force a needless connect just to skip
+    /// every target.
+    fn selection_has_remote_target(&self) -> bool {
+        self.resolve_targets().iter().any(|key| {
+            self.sidebar
+                .workspace_by_key(key)
+                .is_some_and(|ws| self.remote_for_repo(ws.repo_slug().as_deref()).is_some())
+        })
+    }
+
     /// The target *set* a destructive action fires against: every
     /// `v`-marked row when a multi-selection is active **and the action
     /// is bulk-appropriate** ([`is_bulk_destructive`]), else the single
@@ -999,20 +1011,58 @@ impl<T: TerminalAdapter> Model<T> {
             // client here rather than returned in `cmds` — those flush to
             // the LOCAL daemon.
             Action::SpawnAgentRemote(agent_id) => {
-                let Some(remote) = self.default_remote().map(str::to_string) else {
+                let Some(default_remote) = self.default_remote().map(str::to_string) else {
                     self.flash_error(
                         "no remote box configured — add a `sandbox:` block to spawn on a box",
                     );
                     return cmds;
                 };
                 // Under a live multi-select the r-spawn fans out like every
-                // other bulk-appropriate spawn (#932) — same plan, same
-                // heavy-spawn confirm, each target routed to the box.
+                // other bulk-appropriate spawn (#932) — same plan, each target
+                // routed to (or skipped by) its repo's box per the per-project
+                // opt-out. The hard-gate applies only if at least one selected
+                // target actually has a box: an all-disabled selection must
+                // not induce a needless (billed) connect just to skip
+                // everything.
                 if self.bulk_active() {
+                    if self.remote_require_connect
+                        && !self.remote_connected()
+                        && self.selection_has_remote_target()
+                    {
+                        self.flash_error(
+                            "box not connected — press Shift-C to connect first (require_connect is on)",
+                        );
+                        return cmds;
+                    }
                     return self.dispatch_bulk_agent(
-                        BulkOp::SpawnAgentRemote(agent_id.clone(), remote),
+                        BulkOp::SpawnAgentRemote(agent_id.clone(), default_remote),
                         None,
                     );
+                }
+                // Per-project sandbox opt-out (#1066) is resolved FIRST — a
+                // repo that set `sandbox: false` has no box, so it's refused
+                // here without ever inducing a connect. Ordering matters: the
+                // hard-gate below would otherwise tell a disabled repo to
+                // "connect first", waking the billed box only to then refuse.
+                let repo = self
+                    .sidebar
+                    .selected_workspace()
+                    .and_then(|w| w.repo_slug());
+                let Some(remote) = self.remote_for_repo(repo.as_deref()).map(str::to_string) else {
+                    self.flash_error(
+                        "sandbox is disabled for this project (repos.<repo>.sandbox: false)",
+                    );
+                    return cmds;
+                };
+                // Then the hard-gate (`sandbox.require_connect: true`, #1066):
+                // refuse rather than silently trigger a multi-minute bring-up
+                // from a spawn; the persistent indicator does the waiting.
+                // Off by default — a spawn while disconnected lazily brings up.
+                if self.remote_require_connect && !self.remote_connected() {
+                    self.flash_error(
+                        "box not connected — press Shift-C to connect first (require_connect is on)",
+                    );
+                    return cmds;
                 }
                 if let Some(sk) = session_key {
                     let spawn = IpcCommand::Spawn {
@@ -1594,6 +1644,24 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::ToggleFocusMode => {
                 self.toggle_focus_mode();
+            }
+            Action::ConnectBox => {
+                // Explicit connect/disconnect toggle (#1066). Connection is
+                // first-class session state: this brings the box up (or
+                // tears the link down) on demand, with the persistent
+                // footer indicator showing progress. A no-op flash when no
+                // `sandbox:` box is configured.
+                if self.remote_control.is_none() {
+                    self.flash_error(
+                        "no remote box configured — add a `sandbox:` block to connect",
+                    );
+                } else if self.status.remote_conn.is_connected()
+                    || self.status.remote_conn.is_busy()
+                {
+                    self.disconnect_remote();
+                } else {
+                    self.connect_remote();
+                }
             }
             Action::StartAgent => {
                 // Global "just start working" entry point. Unlike `n`
@@ -2195,6 +2263,18 @@ impl<T: TerminalAdapter> Model<T> {
                 if !spawnable {
                     return ApplyOutcome::Skip(name);
                 }
+                // Per-project sandbox opt-out (#1066): a remote fan-out
+                // resolves each target against its repo's box and skips
+                // (naming it) any workspace whose repo set `sandbox: false`,
+                // so a disabled project is never spawned on the box.
+                let remote_target = if let BulkOp::SpawnAgentRemote(..) = op {
+                    match self.remote_for_repo(ws.repo_slug().as_deref()) {
+                        Some(remote) => Some(remote.to_string()),
+                        None => return ApplyOutcome::Skip(name),
+                    }
+                } else {
+                    None
+                };
                 let kind = match op {
                     BulkOp::SpawnShell => lazybox_ipc::TerminalKind::Shell,
                     BulkOp::SpawnAgent(agent) | BulkOp::SpawnAgentRemote(agent, _) => {
@@ -2203,13 +2283,13 @@ impl<T: TerminalAdapter> Model<T> {
                     _ => unreachable!(),
                 };
                 let cmd = bulk_spawn_command(key.clone(), kind, None, model_alias);
-                let step = match op {
-                    BulkOp::SpawnAgentRemote(_, remote) => super::BulkAgentStep::SpawnRemote {
-                        remote: remote.clone(),
+                let step = match remote_target {
+                    Some(remote) => super::BulkAgentStep::SpawnRemote {
+                        remote,
                         key: key.clone(),
                         cmd,
                     },
-                    _ => super::BulkAgentStep::Spawn(cmd),
+                    None => super::BulkAgentStep::Spawn(cmd),
                 };
                 ApplyOutcome::Spawn {
                     step,

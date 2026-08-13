@@ -2401,6 +2401,7 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToLimited => Action::JumpToLimited,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,
         ActionKind::StartAgent => Action::StartAgent,
+        ActionKind::ConnectBox => Action::ConnectBox,
         ActionKind::ToggleActivityPane => Action::ToggleActivityPane,
         ActionKind::ToggleFocusMode => Action::ToggleFocusMode,
         _ => return None,

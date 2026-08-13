@@ -9,6 +9,7 @@ use crate::realm::model::Msg;
 use chrono::{DateTime, Utc};
 use lazybox_core::SessionKey;
 use lazybox_ipc::TerminalKind;
+use lazybox_tui_core::remote::RemoteConnState;
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -430,6 +431,16 @@ pub(crate) struct StatusCtx {
     /// stops firing — which fails *open* (the banner re-shows), never
     /// silently muting a live error.
     dismissed_action_errors: HashMap<String, String>,
+    /// Durable state of the connection to the remote box (#1066). Unlike
+    /// the transient `notice`, this persists so the user can consult "am I
+    /// connected to my box right now?" at any time. `NotConfigured` (the
+    /// default) hides the indicator entirely — the local-only path is
+    /// unchanged. Fed by the r-spawn worker's `State` notices.
+    pub remote_conn: RemoteConnState,
+    /// Animation frame for the box-connection indicator while a bring-up
+    /// is in flight (creating/waking/connecting). Advanced on the polling
+    /// heartbeat so the glyph turns like the other spinners.
+    remote_spinner_idx: usize,
 }
 
 impl StatusCtx {
@@ -445,7 +456,37 @@ impl StatusCtx {
             sync: SyncLog::default(),
             messages: MessageLog::default(),
             dismissed_action_errors: HashMap::new(),
+            remote_conn: RemoteConnState::NotConfigured,
+            remote_spinner_idx: 0,
         }
+    }
+
+    /// Record a durable box-connection-state transition (#1066).
+    pub fn note_remote_state(&mut self, state: RemoteConnState) {
+        self.remote_conn = state;
+    }
+
+    /// The persistent box indicator's `(glyph, label)` while a bring-up is
+    /// in flight — an animated spinner frame plus `creating…`/`waking…`/
+    /// `connecting…`. `None` when the box is idle or unconfigured, so the
+    /// caller can rank it above the ambient background-poll spinner.
+    pub fn remote_status_busy(&self) -> Option<(&'static str, String)> {
+        self.remote_conn.is_busy().then(|| {
+            (
+                BG_SPINNER_FRAMES[self.remote_spinner_idx % BG_SPINNER_FRAMES.len()],
+                self.remote_conn.label(),
+            )
+        })
+    }
+
+    /// The persistent box indicator's `(glyph, label)` in a steady state —
+    /// connected / disconnected / asleep / error. `None` when a bring-up is
+    /// in flight (that's `remote_status_busy`) or no box is configured.
+    /// This is the footer's lowest-priority fallback, so the box state is
+    /// visible whenever nothing more urgent occupies the status slot.
+    pub fn remote_status_steady(&self) -> Option<(&'static str, String)> {
+        (self.remote_conn.is_configured() && !self.remote_conn.is_busy())
+            .then(|| (self.remote_conn.glyph(), self.remote_conn.label()))
     }
 
     /// Remember the currently-displayed action-error toast as dismissed,
@@ -718,6 +759,13 @@ impl StatusCtx {
         // wait, defeating the "something is happening" reassurance.
         if let Some(sp) = self.spawning.as_mut() {
             sp.spinner_idx = sp.spinner_idx.wrapping_add(1);
+            advanced = true;
+        }
+        // Box-connection indicator: animate only while a bring-up is in
+        // flight; a steady state (connected/disconnected) uses a static
+        // glyph and needs no per-tick redraw.
+        if self.remote_conn.is_busy() {
+            self.remote_spinner_idx = self.remote_spinner_idx.wrapping_add(1);
             advanced = true;
         }
         if self.tick_github_rate_limit_wait(Utc::now()) {
@@ -1150,6 +1198,56 @@ mod tests {
         assert!(matches!(latest[0].outcome, SyncOutcome::Err { .. }));
         assert_eq!(latest[1].source, "linear");
         assert!(latest[1].is_ok());
+    }
+
+    #[test]
+    fn remote_status_is_hidden_until_a_box_is_configured() {
+        // Default (NotConfigured) shows nothing — the local-only path is
+        // unchanged (#1066).
+        let s = StatusCtx::new();
+        assert!(s.remote_status_busy().is_none());
+        assert!(s.remote_status_steady().is_none());
+    }
+
+    #[test]
+    fn remote_steady_state_shows_a_static_indicator() {
+        let mut s = StatusCtx::new();
+        s.note_remote_state(RemoteConnState::Connected {
+            name: "obin".into(),
+        });
+        // A connected box is steady, not busy.
+        assert!(s.remote_status_busy().is_none());
+        let (glyph, label) = s.remote_status_steady().expect("connected shows");
+        assert_eq!(glyph, "⇅");
+        assert_eq!(label, "connected: obin");
+    }
+
+    #[test]
+    fn remote_busy_state_animates_and_outranks_steady() {
+        let mut s = StatusCtx::new();
+        s.note_remote_state(RemoteConnState::Connecting);
+        // Busy is surfaced by remote_status_busy (spinner); steady is None.
+        assert!(s.remote_status_steady().is_none());
+        let (_, label) = s.remote_status_busy().expect("connecting shows");
+        assert_eq!(label, "connecting…");
+
+        // The heartbeat advances the busy spinner and requests a redraw.
+        s.polling_last_tick = Instant::now() - Duration::from_millis(200);
+        let before = s.remote_spinner_idx;
+        let (_, advanced) = s.polling_tick();
+        assert_eq!(s.remote_spinner_idx, before + 1, "busy glyph advances");
+        assert!(advanced);
+    }
+
+    #[test]
+    fn remote_steady_state_does_not_animate() {
+        let mut s = StatusCtx::new();
+        s.note_remote_state(RemoteConnState::Disconnected);
+        s.polling_last_tick = Instant::now() - Duration::from_millis(200);
+        let before = s.remote_spinner_idx;
+        let (_, advanced) = s.polling_tick();
+        assert_eq!(s.remote_spinner_idx, before, "steady glyph is static");
+        assert!(!advanced, "a static indicator needs no redraw");
     }
 
     #[test]

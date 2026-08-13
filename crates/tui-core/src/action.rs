@@ -362,6 +362,13 @@ pub enum Action {
     /// point for "I just want to start working" — no need to first
     /// navigate the sidebar to a project header.
     StartAgent,
+    /// Connect to (or disconnect from) the remote box on demand
+    /// (`Shift-C`, #1066). A toggle: when disconnected/errored it brings
+    /// the box up (create → wake → connect); when connected/connecting it
+    /// tears the link down. Only meaningful when a `sandbox:` box is
+    /// configured — connection is first-class session state with a
+    /// persistent indicator, not a side-effect of the first `r`-spawn.
+    ConnectBox,
     /// Show or hide the Activity (right) pane for the focused
     /// workspace. The pane auto-hides when the workspace has no
     /// activity worth showing; this reveals it on demand (and
@@ -512,6 +519,7 @@ pub enum ActionKind {
     ResumeRateLimited,
     ToggleFocusMode,
     StartAgent,
+    ConnectBox,
     ToggleActivityPane,
     Quit,
     ResizeSplitter,
@@ -553,6 +561,7 @@ impl ActionKind {
         Self::JumpToLimited,
         Self::ToggleFocusMode,
         Self::StartAgent,
+        Self::ConnectBox,
         Self::ResumeRateLimited,
         Self::ToggleActivityPane,
         Self::ToggleMouseCapture,
@@ -755,6 +764,7 @@ impl Action {
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
             Action::StartAgent => ActionKind::StartAgent,
+            Action::ConnectBox => ActionKind::ConnectBox,
             Action::ToggleActivityPane => ActionKind::ToggleActivityPane,
             Action::Quit => ActionKind::Quit,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
@@ -944,6 +954,13 @@ impl ActionDef {
                 default_keys: "Shift-W",
                 label: "start work",
                 describe: "Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane.",
+                section: Section::Global,
+            },
+            ActionKind::ConnectBox => &Self {
+                kind: ActionKind::ConnectBox,
+                default_keys: "Shift-C",
+                label: "connect box",
+                describe: "Connect to (or disconnect from) the remote box on demand. A toggle: when disconnected it brings the box up (create → wake → connect); when connected it drops the link (the box keeps running, so reconnecting is cheap). The persistent footer indicator shows the box state at all times. The box does NOT connect on its own by default; opt into startup auto-connect with `sandbox.auto_connect: true`. Only meaningful with a `sandbox:` block.",
                 section: Section::Global,
             },
             ActionKind::ToggleActivityPane => &Self {
@@ -1944,6 +1961,7 @@ impl ActionKind {
             ActionKind::ResumeRateLimited => "resume_rate_limited",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
             ActionKind::StartAgent => "start_agent",
+            ActionKind::ConnectBox => "connect_box",
             ActionKind::ToggleActivityPane => "toggle_activity_pane",
             ActionKind::Quit => "quit",
             ActionKind::ResizeSplitter => "resize_splitter",
@@ -2781,6 +2799,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToFailingCi
         | ActionKind::JumpToLimited
         | ActionKind::ResumeRateLimited
+        | ActionKind::ConnectBox
         | ActionKind::ToggleActivityPane
         | ActionKind::ToggleFocusMode
         | ActionKind::Quit

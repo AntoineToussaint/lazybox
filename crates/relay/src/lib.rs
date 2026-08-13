@@ -16,6 +16,8 @@ pub mod client;
 pub mod protocol;
 pub mod server;
 
-pub use client::{OnClient, connect_through_relay, serve_box};
+pub use client::{
+    OnClient, RelayClientError, SUBSCRIPTION_REQUIRED_MESSAGE, connect_through_relay, serve_box,
+};
 pub use protocol::{Ack, Hello, ToBox};
 pub use server::Relay;

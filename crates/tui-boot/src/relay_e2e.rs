@@ -104,7 +104,9 @@ pub fn relay_redial(relay_addr: String, box_id: String, box_key: PublicKey) -> R
         let box_id = box_id.clone();
         Box::pin(async move {
             let dial = async {
-                let tcp = lazybox_relay::connect_through_relay(&relay_addr, &box_id).await?;
+                let tcp = lazybox_relay::connect_through_relay(&relay_addr, &box_id)
+                    .await
+                    .map_err(relay_io)?;
                 // A device identity the box learns during the handshake.
                 // Step 1 does not yet bind it to a per-device credential
                 // (that is the pairing work), so a fresh ephemeral key per
@@ -129,6 +131,15 @@ pub fn relay_redial(relay_addr: String, box_id: String, box_key: PublicKey) -> R
 
 fn channel_io(e: ChannelError) -> io::Error {
     io::Error::other(e.to_string())
+}
+
+fn relay_io(error: lazybox_relay::RelayClientError) -> io::Error {
+    let kind = match &error {
+        lazybox_relay::RelayClientError::Io(error) => error.kind(),
+        lazybox_relay::RelayClientError::Unavailable { .. } => io::ErrorKind::NotFound,
+        lazybox_relay::RelayClientError::SubscriptionRequired => io::ErrorKind::PermissionDenied,
+    };
+    io::Error::new(kind, error)
 }
 
 /// Read a persisted channel identity, or `None` if the file is absent.
@@ -273,5 +284,15 @@ mod tests {
     fn parse_box_key_rejects_garbage() {
         assert!(parse_box_key("not-hex").is_err());
         assert!(parse_box_key("dead").is_err(), "wrong length is rejected");
+    }
+
+    #[test]
+    fn subscription_denial_keeps_its_typed_kind_and_message() {
+        let error = relay_io(lazybox_relay::RelayClientError::SubscriptionRequired);
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            error.to_string(),
+            lazybox_relay::SUBSCRIPTION_REQUIRED_MESSAGE
+        );
     }
 }

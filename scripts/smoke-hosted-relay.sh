@@ -45,7 +45,7 @@ if [ -z "$relay_addr" ]; then
   done
 fi
 
-box_home="$work/box"
+box_home="${LAZYBOX_SMOKE_BOX_HOME:-$work/box}"
 client_home="$work/client"
 mkdir -p "$box_home" "$client_home"
 box_id="relay-smoke-$$"

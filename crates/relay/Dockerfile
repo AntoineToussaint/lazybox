@@ -4,6 +4,7 @@ RUN apk add --no-cache ca-certificates musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY prompts ./prompts
 RUN cargo build --locked --release -p lazybox-relay
 
 FROM scratch

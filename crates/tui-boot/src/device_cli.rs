@@ -10,7 +10,8 @@ use anyhow::Context;
 use lazybox_identity::{BoxIdentity, DeviceRecord, DeviceRegistry};
 
 const USAGE: &str = "usage:\n  \
-    lazybox device box                  show this box's pairing identity\n  \
+    lazybox device box [--format base64]\n  \
+                                        show this box's pairing identity\n  \
     lazybox device mint --name <name>   mint a credential for a new device\n  \
     lazybox device list                 list paired devices\n  \
     lazybox device revoke <id>          revoke one device\n  \
@@ -18,7 +19,7 @@ const USAGE: &str = "usage:\n  \
 
 pub async fn device_subcommand(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
-        Some("box") => box_identity(),
+        Some("box") => box_identity(&args[1..]),
         Some("mint") => mint(&open_registry(), &args[1..]),
         Some("list") => list(&open_registry()),
         Some("revoke") => revoke(&open_registry(), args.get(1).map(String::as_str)),
@@ -38,11 +39,19 @@ fn open_registry() -> DeviceRegistry {
     DeviceRegistry::open(dir, keystore)
 }
 
-fn box_identity() -> anyhow::Result<()> {
+fn box_identity(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let format = crate::take_value(&mut args, "--format");
     let identity = BoxIdentity::load_or_generate(lazybox_core::paths::identity_dir())
         .context("load or generate box identity")?;
-    println!("box id:     {}", identity.box_id());
-    println!("public key: {}", identity.public_key_hex());
+    match format.as_deref() {
+        None => {
+            println!("box id:     {}", identity.box_id());
+            println!("public key: {}", identity.public_key_hex());
+        }
+        Some("base64") => println!("{}", identity.public_key_base64()),
+        Some(format) => anyhow::bail!("unknown box identity format {format:?}; expected `base64`"),
+    }
     Ok(())
 }
 

@@ -58,12 +58,24 @@ relay without creating a local container, pass its `host:port`:
 scripts/smoke-hosted-relay.sh relay.lazybox.ai:9443
 ```
 
-With #1080 deployed, set `LAZYBOX_PLATFORM_URL` and
-`LAZYBOX_PLATFORM_API_KEY` before the no-argument local smoke. The script
-forwards both variables into the container. The box's persistent Ed25519 public
-key identifies the subscription; ensure the test key is active in the platform,
-then repeat with an inactive test key and require the smoke to fail before
-considering the gate verified.
+With #1080 deployed, create a persistent smoke identity and enroll its Ed25519
+public key before testing the gate:
+
+```sh
+SMOKE_BOX_HOME="$(mktemp -d)"
+LAZYBOX_HOME="$SMOKE_BOX_HOME" target/release/lazybox device box --format base64
+# Enroll the printed key as an active box in lazybox-platform.
+
+LAZYBOX_PLATFORM_URL=https://platform.lazybox.ai \
+LAZYBOX_PLATFORM_API_KEY='replace-with-test-secret' \
+LAZYBOX_SMOKE_BOX_HOME="$SMOKE_BOX_HOME" \
+  scripts/smoke-hosted-relay.sh
+```
+
+The script forwards both platform variables into the container and reuses the
+provided box home without deleting it. Deactivate that same test key in the
+platform, wait for the gate's active-decision cache to expire, and require the
+smoke to fail before considering the gate verified.
 
 ## Fly Machine
 

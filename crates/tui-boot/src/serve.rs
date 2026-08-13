@@ -34,14 +34,13 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 /// the relay's own `handshake_timeout` enforces on its protocol frame.
 const E2E_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// `lazybox serve --relay <host:port> [--account <id>] [--box-id <id>]
+/// `lazybox serve --relay <host:port> [--box-id <id>]
 /// [--socket <path>] [--insecure-no-auth]`.
 ///
-/// `--relay` (or `LAZYBOX_RELAY`) is required; `--account` (or
-/// `LAZYBOX_ACCOUNT`) defaults to `self-hosted` — the relay checks it
-/// against the entitlement gate before brokering. The channel is
-/// encrypted by default; `--insecure-no-auth` is a loopback-testing
-/// escape hatch that forwards plaintext.
+/// `--relay` (or `LAZYBOX_RELAY`) is required. The box's persistent
+/// Ed25519 public key identifies its subscription to a hosted relay. The
+/// channel is encrypted by default; `--insecure-no-auth` is a
+/// loopback-testing escape hatch that forwards plaintext.
 pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
     let insecure_no_auth = take_flag(&mut args, "--insecure-no-auth");
@@ -52,11 +51,6 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
     let Some(relay_addr) = relay_addr else {
         anyhow::bail!("lazybox serve needs a relay: pass --relay <host:port> or set LAZYBOX_RELAY",);
     };
-    let account = take_value(&mut args, "--account")
-        .or_else(|| std::env::var("LAZYBOX_ACCOUNT").ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "self-hosted".to_string());
     let socket_path = take_value(&mut args, "--socket")
         .map(PathBuf::from)
         .unwrap_or_else(lifecycle::socket_path);
@@ -64,6 +58,9 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
         Some(id) => id.trim().to_string(),
         None => load_or_create_box_id(&box_id_file())?,
     };
+    let box_public_key =
+        lazybox_identity::BoxIdentity::load_or_generate(lazybox_core::paths::identity_dir())?
+            .public_key_base64();
 
     // Secure by default: load (or generate on first run) the box's
     // persistent X25519 channel identity and terminate the Noise channel
@@ -97,7 +94,7 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
              the relay with box-id {box_id} can drive your daemon (loopback testing only)"
         ),
     }
-    println!("dialing relay {relay_addr} (account {account})");
+    println!("dialing relay {relay_addr}");
 
     let bridge_socket = socket_path.clone();
     let on_client: lazybox_relay::OnClient = Arc::new(move |relay_stream| {
@@ -112,7 +109,7 @@ pub async fn serve_subcommand(args: &[String]) -> anyhow::Result<()> {
         match lazybox_relay::serve_box(
             relay_addr.clone(),
             box_id.clone(),
-            account.clone(),
+            box_public_key.clone(),
             Arc::clone(&on_client),
         )
         .await

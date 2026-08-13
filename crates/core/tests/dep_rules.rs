@@ -71,7 +71,11 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         // `e2e-channel` are leaves (deps set(&[])), so neither adds a cycle.
         (
             "lazybox-relay",
-            set(&["lazybox-e2e-channel", "lazybox-entitlement"]),
+            set(&[
+                "lazybox-config",
+                "lazybox-e2e-channel",
+                "lazybox-entitlement",
+            ]),
         ),
         // The remote-box lifecycle crate (#931): it persists a `BoxHandle`
         // through the store's kv table, so it depends on store (store →
@@ -132,6 +136,9 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 // and `--connect-relay` runs the initiator, so the boot
                 // crate holds the channel identity + handshake directly.
                 "lazybox-e2e-channel",
+                // The hosted-relay integration test installs an entitlement
+                // gate so the real smoke script must reuse its enrolled key.
+                "lazybox-entitlement",
                 "lazybox-gh",
                 "lazybox-git-ops",
                 "lazybox-identity",

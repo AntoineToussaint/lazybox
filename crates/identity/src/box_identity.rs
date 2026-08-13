@@ -9,6 +9,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
@@ -118,6 +120,12 @@ impl BoxIdentity {
         hex::encode(self.signing_key.verifying_key().to_bytes())
     }
 
+    /// The box's Ed25519 public key in the standard base64 form expected by
+    /// the hosted relay entitlement API.
+    pub fn public_key_base64(&self) -> String {
+        STANDARD.encode(self.signing_key.verifying_key().to_bytes())
+    }
+
     /// A short, stable fingerprint of the public key (32 hex chars =
     /// 128 bits) — a human-presentable box id.
     pub fn box_id(&self) -> String {
@@ -176,11 +184,17 @@ mod tests {
         let first = BoxIdentity::load_or_generate(dir.path()).unwrap();
         let id = first.box_id();
         let pubkey = first.public_key_hex();
+        let pubkey_base64 = first.public_key_base64();
 
         // A second load reuses the persisted key, not a fresh one.
         let second = BoxIdentity::load_or_generate(dir.path()).unwrap();
         assert_eq!(second.box_id(), id);
         assert_eq!(second.public_key_hex(), pubkey);
+        assert_eq!(second.public_key_base64(), pubkey_base64);
+        assert_eq!(
+            STANDARD.decode(pubkey_base64).unwrap(),
+            second.verifying_key().to_bytes()
+        );
         assert_eq!(pubkey.len(), 64);
         assert_eq!(id.len(), 32);
     }

@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use lazybox_entitlement::{AccountId, AllowAll, EntitlementGate};
+use lazybox_entitlement::{AccountId, AllowAll, Entitlement, EntitlementGate};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use uuid::Uuid;
@@ -35,6 +35,7 @@ const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 struct BoxHandle {
     /// Announces new clients down the box's held control connection.
     to_box: mpsc::Sender<ToBox>,
+    account: AccountId,
 }
 
 /// Shared relay state. Cheap to clone (`Arc`-wrapped internally by
@@ -45,8 +46,8 @@ pub struct Relay {
     /// relay-assigned session id.
     pending: Mutex<HashMap<Uuid, oneshot::Sender<TcpStream>>>,
     /// The subscription check run before a box is allowed to register —
-    /// the relay's payment-enforcement point. [`AllowAll`] by default so
-    /// behaviour is unchanged until real licensing backs it.
+    /// the relay's payment-enforcement point. [`AllowAll`] by default for
+    /// self-hosted relays; the hosted binary injects its platform gate.
     gate: Box<dyn EntitlementGate>,
     broker_timeout: Duration,
     handshake_timeout: Duration,
@@ -67,8 +68,7 @@ impl Relay {
     }
 
     /// A relay whose brokering is gated by `gate`. `new()` wires
-    /// [`AllowAll`]; a deployment swaps in the real subscription check
-    /// here without touching the broker.
+    /// [`AllowAll`]; hosted deployments pass their subscription check.
     pub fn with_gate(gate: Box<dyn EntitlementGate>) -> Self {
         Self {
             boxes: Mutex::default(),
@@ -105,9 +105,10 @@ impl Relay {
                 std::io::Error::new(std::io::ErrorKind::TimedOut, "handshake timed out")
             })??;
         match hello {
-            Hello::RegisterBox { box_id, account } => {
-                self.register_box(stream, box_id, account).await
-            }
+            Hello::RegisterBox {
+                box_id,
+                box_public_key,
+            } => self.register_box(stream, box_id, box_public_key).await,
             Hello::ConnectClient { box_id } => self.broker_client(stream, box_id).await,
             Hello::BoxData { session_id } => {
                 self.deliver_box_data(stream, session_id).await;
@@ -122,22 +123,12 @@ impl Relay {
         self: Arc<Self>,
         mut stream: TcpStream,
         box_id: String,
-        account: String,
+        box_public_key: String,
     ) -> std::io::Result<()> {
-        // The entitlement gate is the relay's payment-enforcement point:
-        // refuse to register (and therefore to broker for) an account
-        // without an active subscription. Fail closed — a lookup error is
-        // treated as "not entitled", never as an open door.
-        let entitled = match self.gate.check(&AccountId::new(account.clone())).await {
-            Ok(decision) => decision.is_active(),
-            Err(error) => {
-                tracing::warn!(%box_id, %account, %error, "entitlement lookup failed; refusing");
-                false
-            }
-        };
-        if !entitled {
-            tracing::info!(%box_id, %account, "box registration refused: not entitled");
-            write_msg(&mut stream, &Ack::Unavailable).await?;
+        let account = AccountId::new(box_public_key);
+        if !self.is_entitled(&box_id, &account).await {
+            tracing::info!(%box_id, "box registration refused: not entitled");
+            write_msg(&mut stream, &Ack::SubscriptionRequired).await?;
             return Ok(());
         }
 
@@ -152,10 +143,11 @@ impl Relay {
                 box_id.clone(),
                 BoxHandle {
                     to_box: to_box.clone(),
+                    account: account.clone(),
                 },
             );
         }
-        tracing::info!(%box_id, %account, "box registered");
+        tracing::info!(%box_id, "box registered");
 
         let (mut rd, mut wr) = stream.into_split();
         let mut drain = [0u8; 256];
@@ -200,14 +192,20 @@ impl Relay {
         mut client: TcpStream,
         box_id: String,
     ) -> std::io::Result<()> {
-        let to_box = {
+        let target = {
             let boxes = self.boxes.lock().await;
-            boxes.get(&box_id).map(|h| h.to_box.clone())
+            boxes
+                .get(&box_id)
+                .map(|handle| (handle.to_box.clone(), handle.account.clone()))
         };
-        let Some(to_box) = to_box else {
+        let Some((to_box, account)) = target else {
             write_msg(&mut client, &Ack::Unavailable).await?;
             return Ok(());
         };
+        if !self.is_entitled(&box_id, &account).await {
+            write_msg(&mut client, &Ack::SubscriptionRequired).await?;
+            return Ok(());
+        }
         write_msg(&mut client, &Ack::Ok).await?;
 
         let session_id = Uuid::new_v4();
@@ -248,6 +246,20 @@ impl Relay {
             // If the client already gave up, `send` hands the stream back
             // and it is simply dropped.
             let _ = tx.send(stream);
+        }
+    }
+
+    async fn is_entitled(&self, box_id: &str, account: &AccountId) -> bool {
+        match self.gate.check(account).await {
+            Ok(Entitlement::Active) => true,
+            Ok(Entitlement::Inactive { reason }) => {
+                tracing::info!(%box_id, %reason, "entitlement inactive; refusing");
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%box_id, %error, "entitlement lookup failed; refusing");
+                false
+            }
         }
     }
 }

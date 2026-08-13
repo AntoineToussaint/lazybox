@@ -8,19 +8,28 @@
 //! [`EntitlementGate`] and refuses on an [`Entitlement::Inactive`]
 //! decision.
 //!
-//! Real subscription checks (via codefly / saas-starter) arrive with
-//! the licensing work; until then, wire [`AllowAll`] so the relay path
-//! is exercisable end to end without gating. Swapping in a real gate is
-//! a one-line change at the relay: it holds the trait, not a concrete
-//! implementation.
+//! Hosted relays wire [`PlatformEntitlementGate`] to lazybox-platform.
+//! Self-hosted relays retain [`AllowAll`] when no platform configuration
+//! is present.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
+use tokio::time::Instant;
+
+const PLATFORM_TIMEOUT: Duration = Duration::from_secs(2);
+const ACTIVE_TTL: Duration = Duration::from_secs(60);
+const INACTIVE_TTL: Duration = Duration::from_secs(15);
+const CHECK_PATH: &str = "/v1/relay/entitlements/check";
 
 /// The account an incoming relay connection claims to act on behalf of.
 ///
-/// Opaque to this crate — the relay derives it from the connecting
-/// device's credential; the gate maps it to a subscription.
+/// Opaque to this crate. The hosted relay passes the box's base64 Ed25519
+/// public key, which is also the platform cache and subscription key.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AccountId(pub String);
 
@@ -67,11 +76,10 @@ pub enum EntitlementError {
 
 /// Resolves whether an account is entitled to the relay's brokering.
 ///
-/// Implement this over the real subscription service when licensing
-/// lands. The relay holds a gate as a trait object (`Box<dyn
-/// EntitlementGate>`) so the stub and the real check are interchangeable
-/// without touching the broker — hence the boxed-future return, which
-/// keeps the trait dyn-compatible.
+/// The relay holds a gate as a trait object (`Box<dyn EntitlementGate>`)
+/// so self-hosted and platform-backed checks are interchangeable without
+/// touching the broker — hence the boxed-future return, which keeps the
+/// trait dyn-compatible.
 pub trait EntitlementGate: Send + Sync {
     fn check<'a>(
         &'a self,
@@ -81,8 +89,7 @@ pub trait EntitlementGate: Send + Sync {
 
 /// Stub gate that treats every account as entitled.
 ///
-/// The gate to wire until real licensing lands, per the "stub /
-/// allow-all first" plan. It never errors and never denies.
+/// Self-hosted relays use this gate. It never errors and never denies.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AllowAll;
 
@@ -92,6 +99,118 @@ impl EntitlementGate for AllowAll {
         _account: &'a AccountId,
     ) -> Pin<Box<dyn Future<Output = Result<Entitlement, EntitlementError>> + Send + 'a>> {
         Box::pin(async { Ok(Entitlement::Active) })
+    }
+}
+
+#[derive(Debug)]
+struct CacheEntry {
+    entitlement: Entitlement,
+    expires_at: Instant,
+}
+
+/// An entitlement gate backed by lazybox-platform's relay subscription API.
+pub struct PlatformEntitlementGate {
+    http: reqwest::Client,
+    endpoint: String,
+    api_key: String,
+    cache: Mutex<HashMap<AccountId, CacheEntry>>,
+}
+
+#[derive(Serialize)]
+struct CheckRequest<'a> {
+    box_public_key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_public_key: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct CheckResponse {
+    active: bool,
+    #[serde(rename = "plan")]
+    _plan: String,
+    reason: String,
+    #[serde(rename = "checked_at")]
+    _checked_at: String,
+}
+
+impl PlatformEntitlementGate {
+    pub fn new(platform_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        let platform_url = platform_url.into();
+        Self {
+            http: reqwest::Client::new(),
+            endpoint: format!("{}{CHECK_PATH}", platform_url.trim_end_matches('/')),
+            api_key: api_key.into(),
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn check_cached(&self, account: &AccountId) -> Result<Entitlement, EntitlementError> {
+        let now = Instant::now();
+        {
+            let mut cache = self.cache.lock().await;
+            cache.retain(|_, entry| entry.expires_at > now);
+            if let Some(entry) = cache.get(account) {
+                return Ok(entry.entitlement.clone());
+            }
+        }
+
+        let entitlement = self.fetch(account).await?;
+        let ttl = match entitlement {
+            Entitlement::Active => ACTIVE_TTL,
+            Entitlement::Inactive { .. } => INACTIVE_TTL,
+        };
+        self.cache.lock().await.insert(
+            account.clone(),
+            CacheEntry {
+                entitlement: entitlement.clone(),
+                expires_at: Instant::now() + ttl,
+            },
+        );
+        Ok(entitlement)
+    }
+
+    async fn fetch(&self, account: &AccountId) -> Result<Entitlement, EntitlementError> {
+        let request = async {
+            let response = self
+                .http
+                .post(&self.endpoint)
+                .bearer_auth(&self.api_key)
+                .json(&CheckRequest {
+                    box_public_key: account.as_str(),
+                    device_public_key: None,
+                })
+                .send()
+                .await
+                .map_err(|error| error.to_string())?;
+            if response.status() != reqwest::StatusCode::OK {
+                return Err(format!("platform returned HTTP {}", response.status()));
+            }
+            response
+                .json::<CheckResponse>()
+                .await
+                .map_err(|error| error.to_string())
+        };
+
+        let response = tokio::time::timeout(PLATFORM_TIMEOUT, request)
+            .await
+            .map_err(|_| EntitlementError::Lookup("platform request timed out".into()))?
+            .map_err(EntitlementError::Lookup)?;
+        if response.active {
+            Ok(Entitlement::Active)
+        } else {
+            Ok(Entitlement::Inactive {
+                reason: response.reason,
+            })
+        }
+    }
+}
+
+impl EntitlementGate for PlatformEntitlementGate {
+    fn check<'a>(
+        &'a self,
+        account: &'a AccountId,
+    ) -> Pin<Box<dyn Future<Output = Result<Entitlement, EntitlementError>> + Send + 'a>> {
+        Box::pin(self.check_cached(account))
     }
 }
 

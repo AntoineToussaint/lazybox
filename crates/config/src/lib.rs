@@ -52,6 +52,10 @@ pub struct Config {
     /// [`RemoteConfig`].
     #[serde(default, skip_serializing_if = "RemoteConfig::is_empty")]
     pub remote: RemoteConfig,
+    /// Hosted relay service configuration. Empty for self-hosted relays,
+    /// which do not enforce lazybox-platform subscriptions.
+    #[serde(default, skip_serializing_if = "RelayConfig::is_empty")]
+    pub relay: RelayConfig,
     /// Remote dev-box lifecycle (#931): the GCP project/placement, the
     /// Terraform module + deployment overlay, and the socket the connect
     /// forward carries. Read by `lazybox sandbox …`. Empty by default. See
@@ -208,6 +212,36 @@ pub struct RemoteConfig {
     /// replacing the operator-run `autossh` of the BYO-remote runbook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tunnel: Option<TunnelConfig>,
+}
+
+/// `relay:` service configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RelayConfig {
+    #[serde(default, skip_serializing_if = "RelayEntitlementConfig::is_empty")]
+    pub entitlement: RelayEntitlementConfig,
+}
+
+impl RelayConfig {
+    pub fn is_empty(&self) -> bool {
+        self.entitlement.is_empty()
+    }
+}
+
+/// `relay.entitlement:` connection to lazybox-platform.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct RelayEntitlementConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+impl RelayEntitlementConfig {
+    pub fn is_empty(&self) -> bool {
+        self.platform_url.is_none() && self.api_key.is_none()
+    }
 }
 
 impl RemoteConfig {
@@ -2445,6 +2479,26 @@ mod duration_human_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_entitlement_config_is_optional_and_round_trips() {
+        let default_yaml = serde_yaml::to_string(&Config::default()).unwrap();
+        assert!(!default_yaml.contains("relay:"));
+
+        let config = Config::parse(
+            "relay:\n  entitlement:\n    platform_url: https://platform.example\n    api_key: secret\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.relay.entitlement.platform_url.as_deref(),
+            Some("https://platform.example")
+        );
+        assert_eq!(config.relay.entitlement.api_key.as_deref(), Some("secret"));
+
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.relay, config.relay);
+    }
 
     /// The default merge-on-green config keeps own-PRs-only; a
     /// configured allowlist opts specific authors in, parsed from YAML.

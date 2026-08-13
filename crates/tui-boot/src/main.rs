@@ -300,7 +300,7 @@ Remote & services:
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox serve --relay <a>   dial out to a rendezvous relay so clients can
                               reach this box's daemon (behind NAT, no ports;
-                              --account <id>, LAZYBOX_RELAY env). End-to-end
+                              LAZYBOX_RELAY env). End-to-end
                               encrypted by default; it prints the box channel
                               key clients pin (--insecure-no-auth forwards
                               plaintext, for loopback testing only)
@@ -1147,11 +1147,16 @@ async fn require_snapshot(
     client
         .send(lazybox_ipc::Command::Subscribe)
         .map_err(|_| anyhow::anyhow!("relay smoke could not send the subscribe request"))?;
-    match tokio::time::timeout(timeout, client.recv()).await {
-        Ok(Some(lazybox_ipc::Event::Snapshot { .. })) => Ok(()),
-        Ok(Some(_)) => anyhow::bail!("relay smoke expected a daemon snapshot"),
-        Ok(None) => anyhow::bail!("relay smoke connection closed before the daemon replied"),
-        Err(_) => anyhow::bail!("relay smoke timed out waiting for the daemon snapshot"),
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::Snapshot { .. })) => return Ok(()),
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                anyhow::bail!("relay smoke connection closed before the daemon replied")
+            }
+            Err(_) => anyhow::bail!("relay smoke timed out waiting for the daemon snapshot"),
+        }
     }
 }
 
@@ -2102,21 +2107,36 @@ mod argv_tests {
     }
 
     #[tokio::test]
-    async fn relay_smoke_rejects_a_non_snapshot_reply() {
-        let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();
+    async fn relay_smoke_ignores_events_before_the_snapshot() {
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
         let client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
-        event_tx
-            .send(lazybox_ipc::Event::ProjectRemoved(
-                lazybox_core::ProjectKey::new("unexpected"),
-            ))
+        tokio::spawn(async move {
+            assert!(matches!(
+                command_rx.recv().await,
+                Some(lazybox_ipc::Command::Subscribe)
+            ));
+            event_tx
+                .send(lazybox_ipc::Event::ProjectRemoved(
+                    lazybox_core::ProjectKey::new("updated"),
+                ))
+                .await
+                .unwrap();
+            event_tx
+                .send(lazybox_ipc::Event::Snapshot {
+                    workspaces: Vec::new(),
+                    terminals: Vec::new(),
+                    projects: Vec::new(),
+                    recent_snippets: Vec::new(),
+                    dismissed_updates: Vec::new(),
+                })
+                .await
+                .unwrap();
+        });
+
+        require_snapshot(client, Duration::from_secs(1))
             .await
             .unwrap();
-
-        let error = require_snapshot(client, Duration::from_secs(1))
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("expected a daemon snapshot"));
     }
 
     #[test]

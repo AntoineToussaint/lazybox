@@ -70,6 +70,7 @@ uuid               = { version = "1", features = ["v4"] }
 hex                = "0.4"
 
 [dev-dependencies]
+lazybox-entitlement = { workspace = true }
 tempfile = "3"
 
 [lints]

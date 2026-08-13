@@ -332,6 +332,26 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Kick off the reviewer picker for the focused workspace's PR.
+    /// Two-step like the label picker (`g l`): ask the daemon for the
+    /// repo's requestable reviewers, then mount the picker when
+    /// `Event::RequestableReviewers` arrives (see
+    /// [`Model::mount_request_reviewers`]). Returns the fetch command
+    /// to enqueue, or `None` when the focused workspace has no PR.
+    /// Shared by the `g r` action and the clickable header "Reviewers:"
+    /// line.
+    pub(crate) fn begin_request_reviewers(&mut self) -> Option<IpcCommand> {
+        let ws = self.sidebar.selected_workspace()?;
+        // Only PRs have reviewers — bail when the focused workspace has no PR.
+        ws.pr.as_ref()?;
+        let ws_key = ws.key.clone();
+        self.awaiting_requestable_reviewers = Some(ws_key.clone());
+        self.flash_hint("loading reviewers…");
+        Some(IpcCommand::FetchRequestableReviewers {
+            workspace_key: ws_key,
+        })
+    }
+
     /// Single fan-out from a catalog `Action` to its effect (IPC
     /// command, modal mount, focus shift, …). Surfaces (keyboard,
     /// right-click menu, future remap UI) all call this so behavior
@@ -1696,11 +1716,8 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::RequestReviewers => {
-                if let Some(ws) = self.sidebar.selected_workspace()
-                    && ws.pr.is_some()
-                {
-                    let ws_key = ws.key.clone();
-                    self.mount_request_reviewers(ws_key);
+                if let Some(cmd) = self.begin_request_reviewers() {
+                    cmds.push(cmd);
                 }
             }
             Action::AddAssignees => {

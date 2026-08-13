@@ -19580,6 +19580,120 @@ mod async_modal_preempt_tests {
 }
 
 #[cfg(test)]
+mod requestable_reviewers_async_mount_tests {
+    //! The reviewer picker (`g r`) is now a two-step async flow like the
+    //! label picker: ask the daemon for the repo's requestable
+    //! reviewers, then mount from the reply. Same don't-preempt contract
+    //! (#1092).
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Empty stack — the reply mounts the picker with the fetched
+    /// requestable reviewers.
+    #[test]
+    fn requestable_reviewers_reply_mounts_on_an_empty_stack() {
+        let mut m = build_model();
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: wk,
+            logins: vec!["octocat".into(), "hubot".into()],
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::RequestReviewers));
+        // The stash is consumed once served so a stray later reply can't
+        // re-mount on a stale target.
+        assert!(m.awaiting_requestable_reviewers.is_none());
+    }
+
+    /// A slow reply must not steal focus from a modal the user opened
+    /// while the fetch was in flight.
+    #[test]
+    fn slow_requestable_reviewers_reply_does_not_preempt_reply_textarea() {
+        let mut m = build_model();
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        m.mount_reply(SessionKey::from("github:owner/repo#1"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: wk,
+            logins: vec!["octocat".into()],
+        });
+
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::Reply),
+            "the reviewer picker must not steal focus from the composer"
+        );
+        assert!(!m.modal_stack.contains(&Id::RequestReviewers));
+        assert!(m.awaiting_requestable_reviewers.is_none());
+    }
+
+    /// A reply whose key no longer matches the pending request (the
+    /// user pressed `g r` on a different workspace, or already
+    /// dismissed) is ignored — no picker mounts.
+    #[test]
+    fn stale_requestable_reviewers_reply_is_ignored() {
+        let mut m = build_model();
+        m.awaiting_requestable_reviewers =
+            Some(lazybox_core::WorkspaceKey::new("github:owner/repo#1"));
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:owner/repo#2"),
+            logins: vec!["octocat".into()],
+        });
+        assert!(m.modal_stack.is_empty());
+        assert!(m.awaiting_requestable_reviewers.is_some());
+    }
+
+    /// On a fetch *failure* with no interaction-derived fallback
+    /// candidates, the flash must be the error — never the misleading
+    /// "showing PR participants only" when there are no participants.
+    #[test]
+    fn failed_fetch_with_no_participants_flashes_error_not_participants_hint() {
+        let mut m = build_model();
+        // ProviderError is only processed once the initial polling modal
+        // is gone.
+        m.status.polling = None;
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        // No workspace seeded → gather_candidate_logins yields nobody.
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "requestable-reviewers".into(),
+            message: "boom".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        // The empty-state picker still mounts and the stash is consumed…
+        assert_eq!(m.modal_stack.last(), Some(&Id::RequestReviewers));
+        assert!(m.awaiting_requestable_reviewers.is_none());
+        // …but the flash is the error, not the participants hint.
+        let logged: Vec<String> = m
+            .status
+            .messages
+            .recent()
+            .map(|e| e.message.clone())
+            .collect();
+        assert!(
+            logged
+                .iter()
+                .any(|msg| msg.contains("couldn't load requestable reviewers")),
+            "expected the error flash, got {logged:?}",
+        );
+        assert!(
+            !logged.iter().any(|msg| msg.contains("participants only")),
+            "must not claim participants when there are none: {logged:?}",
+        );
+    }
+}
+
+#[cfg(test)]
 mod focus_mode_terminal_exit_tests {
     //! Focus mode must not survive an EMPTY stack — the user would be
     //! stranded on a near-fullscreen blank pane. A crashed AGENT is not

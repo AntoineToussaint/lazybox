@@ -553,19 +553,66 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::NewWorkspaceRepo, modal);
     }
 
-    /// Mount the "request reviewers" multi-select picker for the
-    /// given workspace's PR. Candidates are gathered from the
-    /// workspace's known people; Space toggles, Enter submits →
+    /// Mount the "request reviewers" multi-select picker once the
+    /// daemon has answered our `FetchRequestableReviewers` request
+    /// (`fetched` = the repo's requestable reviewers: GitHub's
+    /// suggestions for this PR plus the assignable-user pool). Merges
+    /// those with the interaction-derived candidates (people already on
+    /// the PR) so nobody the user might reasonably pick is dropped,
+    /// then excludes the viewer and reviewers already requested (this
+    /// stays an add-only picker). Space toggles, Enter submits →
     /// `Msg::ChoicePicked` — each row carrying its login as a
     /// [`ChoicePayload::Text`] — → `handle_choice_picked` collects the
     /// chosen logins and dispatches `Command::RequestReviewers`.
-    pub(crate) fn mount_request_reviewers(&mut self, workspace_key: lazybox_core::WorkspaceKey) {
+    ///
+    /// Async mount, same contract as [`Self::mount_manage_labels`]: the
+    /// reply can arrive seconds after `g r`, so any modal already up
+    /// wins and the fetch result is dropped (press `g r` again). On a
+    /// fetch failure the caller passes an empty `fetched`, degrading to
+    /// the interaction-derived candidates alone.
+    pub(crate) fn mount_request_reviewers(
+        &mut self,
+        workspace_key: lazybox_core::WorkspaceKey,
+        fetched: Vec<String>,
+    ) {
         use crate::realm::components::choice::Choice;
 
-        if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
+        if let Some(top) = self.modal_stack.last() {
+            self.awaiting_requestable_reviewers = None;
+            if !matches!(top, Id::RequestReviewers) {
+                self.flash_hint("reviewers loaded, but another dialog was open — press g r again");
+            }
             return;
         }
-        let candidates = self.gather_candidate_logins(&workspace_key, true);
+        self.awaiting_requestable_reviewers = None;
+        // Exclude the viewer (no self-review), the PR author (GitHub
+        // rejects requesting a review from the author), and reviewers
+        // already requested — this is an add-only picker.
+        let mut excluded: std::collections::HashSet<String> =
+            self.viewer_logins.values().cloned().collect();
+        if let Some(pr) = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .and_then(|(_, w)| w.pr.as_ref())
+        {
+            if !pr.author.is_empty() {
+                excluded.insert(pr.author.clone());
+            }
+            for r in &pr.reviewers {
+                excluded.insert(r.clone());
+            }
+        }
+        // Fetched (suggestions first) then interaction-derived, deduped.
+        // `gather_candidate_logins(true)` already drops the viewer and
+        // existing reviewers; apply the same exclusion to `fetched`.
+        let interaction = self.gather_candidate_logins(&workspace_key, true);
+        let mut candidates: Vec<String> = Vec::new();
+        for login in fetched.into_iter().chain(interaction) {
+            if !login.is_empty() && !excluded.contains(&login) && !candidates.contains(&login) {
+                candidates.push(login);
+            }
+        }
         // With no candidates, mount the picker with an explanatory
         // empty state rather than only flashing — a bare footer flash
         // is easy to miss, and the framed notice reads clearly over
@@ -573,7 +620,7 @@ impl<T: TerminalAdapter> Model<T> {
         // empty so this never renders as a blank rectangle (#35).
         let modal = if candidates.is_empty() {
             Choice::<String>::multi(
-                "No candidate reviewers yet.\n\nInteract with the PR — comment, review, or assign\nsomeone — and they'll show up here to pick from.",
+                "No requestable reviewers found.\n\nThis repo exposes no assignable users, or every\nrequestable reviewer is already on the PR.",
                 Vec::new(),
             )
             .title("Add reviewers")

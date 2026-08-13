@@ -196,6 +196,11 @@ pub struct RightPane {
     /// drains it after dispatching the click and hands it to the
     /// browser launcher (#567).
     pending_open_url: Option<String>,
+    /// Set when a click lands on the header `Reviewers:` line. The
+    /// orchestrator drains it and kicks off the reviewer picker — the
+    /// same `g r` flow — since the pane can't reach `Model` itself
+    /// (#1092).
+    pending_request_reviewers: bool,
     /// Set when the user asks to read the full description (a second
     /// `d`, or a click on the `+N more lines` trailer). The orchestrator
     /// drains it after dispatching the key/click and mounts the reader
@@ -251,6 +256,10 @@ struct ClickHits {
     /// with that issue's URL. `None` unless the workspace is a PR with
     /// a tracked originating issue (#567).
     header_issue: Option<(u16, String)>,
+    /// Row of the header's `Reviewers:` line. Clicking it opens the
+    /// reviewer picker — the same `g r` flow (#1092). `None` unless the
+    /// workspace is a PR (only PRs have reviewers).
+    header_reviewers: Option<u16>,
     /// Row containing the `▶ Description` / `▼ Description` header,
     /// or `None` when the section isn't being rendered (no body).
     body_header_row: Option<u16>,
@@ -436,6 +445,7 @@ impl RightPane {
             click_hits: ClickHits::default(),
             pending_selection_notice: None,
             pending_open_url: None,
+            pending_request_reviewers: false,
             pending_open_description: false,
             body_overflows: false,
             activity_buffer: None,
@@ -975,6 +985,12 @@ impl RightPane {
             self.pending_open_url = Some(url.clone());
             return true;
         }
+        if Some(row) == self.click_hits.header_reviewers {
+            // Click the Reviewers line to open the reviewer picker —
+            // same effect as pressing `g r` (#1092).
+            self.pending_request_reviewers = true;
+            return true;
+        }
         if Some(row) == self.click_hits.body_header_row {
             // Click the description header to toggle the teaser — same
             // effect as pressing `d`.
@@ -1038,6 +1054,13 @@ impl RightPane {
     /// browser (#567).
     pub fn take_open_url(&mut self) -> Option<String> {
         self.pending_open_url.take()
+    }
+
+    /// Drain the "open the reviewer picker" request queued by a click
+    /// on the header `Reviewers:` line (#1092). The orchestrator runs
+    /// the `g r` flow when this returns `true`.
+    pub fn take_request_reviewers(&mut self) -> bool {
+        std::mem::take(&mut self.pending_request_reviewers)
     }
 
     /// Double-click on an activity card → toggle its expanded state.
@@ -1240,6 +1263,7 @@ impl RightPane {
     ) {
         self.click_hits.header_title = None;
         self.click_hits.header_issue = None;
+        self.click_hits.header_reviewers = None;
         let theme = crate::theme::current();
         let Some(workspace) = &self.workspace else {
             let line = Line::from(Span::styled(" (no session selected) ", theme.hint()));
@@ -1537,8 +1561,16 @@ impl RightPane {
                     spans.push(Span::styled(" (bot)", Style::default().fg(theme.text_dim)));
                 }
             }
+            let reviewers_row = area.y + lines.len() as u16;
+            if reviewers_row < area.bottom() {
+                self.click_hits.header_reviewers = Some(reviewers_row);
+            }
             lines.push(Line::from(spans));
         } else if is_pr {
+            let reviewers_row = area.y + lines.len() as u16;
+            if reviewers_row < area.bottom() {
+                self.click_hits.header_reviewers = Some(reviewers_row);
+            }
             lines.push(Line::from(vec![
                 Span::styled("Reviewers: ", Style::default().fg(theme.text_dim)),
                 Span::styled(

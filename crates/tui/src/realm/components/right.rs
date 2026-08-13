@@ -180,6 +180,12 @@ impl Right {
         self.inner.take_open_url()
     }
 
+    /// Drain a click on the header `Reviewers:` line (#1092). The
+    /// orchestrator runs the `g r` reviewer-picker flow when true.
+    pub fn take_request_reviewers(&mut self) -> bool {
+        self.inner.take_request_reviewers()
+    }
+
     /// The focused task's raw markdown body, for the reader modal.
     pub fn task_body(&self) -> Option<String> {
         self.inner.task_body()

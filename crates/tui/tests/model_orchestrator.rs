@@ -1800,15 +1800,21 @@ fn render_to_string(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> S
     out
 }
 
-/// Regression for #35: `g r` on a PR with no candidate reviewers must
+/// Regression for #35: `g r` on a PR with no requestable reviewers must
 /// surface a framed empty-state over the still-visible panes — NOT a
 /// blank/black screen. Previously the empty case only fired a footer
 /// flash, and an empty `Choice` (when it was mounted) rendered as a
 /// full-height blank rectangle.
+///
+/// `g r` now fetches the repo's requestable reviewers first (#1092), so
+/// the picker mounts on the daemon's `RequestableReviewers` reply rather
+/// than synchronously — a reply carrying no logins (and no
+/// interaction-derived candidates) still lands on the framed empty-state.
 #[test]
 fn gr_with_no_candidate_reviewers_shows_framed_empty_state() {
     let mut m = build_model();
     let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let ws_key = ws.key.clone();
     m.handle_daemon_event(IpcEvent::Snapshot {
         workspaces: vec![ws],
         terminals: vec![],
@@ -1819,6 +1825,11 @@ fn gr_with_no_candidate_reviewers_shows_framed_empty_state() {
 
     m.dispatch_key(key(Key::Char('g')));
     m.dispatch_key(key(Key::Char('r')));
+    // The daemon answers the fetch with no requestable reviewers.
+    m.handle_daemon_event(IpcEvent::RequestableReviewers {
+        workspace_key: ws_key,
+        logins: Vec::new(),
+    });
 
     // A framed picker is mounted (not a bare flash).
     assert_eq!(
@@ -1830,7 +1841,7 @@ fn gr_with_no_candidate_reviewers_shows_framed_empty_state() {
     let screen = render_to_string(&mut m);
     // The empty-state explains itself inside its bordered box…
     assert!(
-        screen.contains("No candidate reviewers yet"),
+        screen.contains("No requestable reviewers found"),
         "empty state must explain why there's nothing to pick:\n{screen}",
     );
     assert!(

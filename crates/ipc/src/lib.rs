@@ -1102,6 +1102,16 @@ pub enum Command {
     FetchRepoLabels {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Ask the daemon for the accounts requestable as reviewers on the
+    /// workspace's PR — the repo's assignable users plus GitHub's
+    /// suggestions for this PR — and broadcast them back via
+    /// `Event::RequestableReviewers`. Used by the reviewer picker on
+    /// mount so the user can request a review from anyone requestable,
+    /// not only people who already touched the PR. Keyed by
+    /// `workspace_key`; no-op for a workspace with no PR.
+    FetchRequestableReviewers {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Admin command: walk every persisted workspace, drop sessions
     /// whose terminals aren't currently live, and remove the
     /// corresponding worktrees from disk. Used to reclaim disk
@@ -1775,6 +1785,15 @@ pub enum Event {
     RepoLabels {
         workspace_key: lazybox_core::WorkspaceKey,
         labels: Vec<lazybox_core::Label>,
+    },
+    /// Response to `Command::FetchRequestableReviewers`. Carries the
+    /// GitHub logins requestable as reviewers on the workspace's PR
+    /// (suggestions first, then assignable users). Keyed by
+    /// `workspace_key` so the reviewer picker knows which mount to
+    /// fill — same request/response-by-key shape as `RepoLabels`.
+    RequestableReviewers {
+        workspace_key: lazybox_core::WorkspaceKey,
+        logins: Vec<String>,
     },
     /// A new session (= folder worktree) was provisioned inside its
     /// workspace. Sent in response to `Command::CreateSession` and

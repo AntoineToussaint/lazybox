@@ -149,3 +149,59 @@ fn startup_script_installs_the_daemon_behind_the_install_flag() {
         "the pinned SHA is referenced only inside the guard"
     );
 }
+
+#[test]
+fn e2b_template_bakes_the_remote_toolchain_and_memory_safe_startup() {
+    let e2b = sandbox_dir().join("e2b");
+    let dockerfile =
+        std::fs::read_to_string(e2b.join("e2b.Dockerfile")).expect("read E2B Dockerfile");
+    let start = std::fs::read_to_string(e2b.join("start.sh")).expect("read E2B start script");
+
+    for tool in ["tmux", "git", "@anthropic-ai/claude-code", "lazybox"] {
+        assert!(dockerfile.contains(tool), "E2B template must bake {tool}");
+    }
+    assert!(
+        dockerfile.contains("lazybox-build.sh") && dockerfile.contains("build-sha"),
+        "E2B template must carry the same build-stamp helper and stamp as GCP"
+    );
+    assert!(
+        start.contains("lazybox server start"),
+        "E2B startup must launch the daemon"
+    );
+    assert!(
+        start.contains("ws-l:0.0.0.0:8081") && start.contains("tcp:127.0.0.1:22"),
+        "E2B startup must expose SSH through its WebSocket proxy"
+    );
+
+    let ignore = std::fs::read_to_string(workspace_root().join(".dockerignore"))
+        .expect("read template context exclusions");
+    for excluded in [".git", ".env", "target", ".lazybox"] {
+        assert!(
+            ignore.lines().any(|line| line == excluded),
+            "E2B build context must exclude {excluded}"
+        );
+    }
+
+    let docs = std::fs::read_to_string(workspace_root().join("docs/e2b-provider-spike.md"))
+        .expect("read E2B spike docs");
+    assert!(
+        docs.contains("127.0.0.1:8081"),
+        "template readiness must include the SSH-over-WebSocket transport"
+    );
+}
+
+#[test]
+fn e2b_probe_checks_the_full_five_minute_process_boundary() {
+    let probe = std::fs::read_to_string(workspace_root().join("scripts/e2b-pause-resume-spike.sh"))
+        .expect("read E2B persistence probe");
+
+    assert!(probe.contains("WAIT_SECONDS:-300"));
+    assert!(probe.contains("tmux capture-pane"));
+    assert!(probe.contains("grep -Fqx '$MARKER-1'"));
+    assert!(probe.contains("tmux display-message") && probe.contains("pane_pid"));
+    assert!(probe.contains("daemon.sock"));
+    assert!(probe.contains("perceived_resume_ms"));
+    assert!(probe.contains("resume_ms\" -ge 5000"));
+    assert!(probe.contains("resume_deadline"));
+    assert!(!probe.contains("until remote true"));
+}

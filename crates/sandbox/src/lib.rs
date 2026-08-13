@@ -2,7 +2,7 @@
 //!
 //! A **generic remote dev-box abstraction**: start / stop / connect a box
 //! that hosts a lazybox daemon and a project's workload, provider-agnostic,
-//! with **GCP as the first implementation**.
+//! with GCP and E2B implementations.
 //!
 //! Two axes are kept deliberately separate (see epic #885, issue #931):
 //!
@@ -18,10 +18,9 @@
 //!    `stack.local.yaml` overlay uses. obin's override is the box we
 //!    already built (its repo + `dev up <profile>` + SA/IAM/NAT).
 //!
-//! Provisioning (`ensure`/`destroy`) drives a **Terraform module per
-//! provider** (`terraform/sandbox/gcp` first). The fast lifecycle ops
-//! (`start`/`stop`/`status`/`connect`) use the native SDK/CLI — never
-//! Terraform — so waking a box is a `gcloud instances start`, not a plan.
+//! Provisioning (`ensure`/`destroy`) uses each provider's create/delete
+//! boundary. The fast lifecycle ops (`start`/`stop`/`status`/`connect`) use
+//! the native API/CLI, so waking a box never requires a Terraform plan.
 
 mod connect;
 mod deployment;
@@ -34,8 +33,14 @@ pub mod persist;
 #[cfg(feature = "gcp")]
 pub mod gcp;
 
+#[cfg(feature = "e2b")]
+pub mod e2b;
+
 pub use connect::connect_box;
 pub use deployment::{Deployment, DeploymentConfig, merge_yaml};
 pub use handle::{BoxHandle, BoxStatus, PowerState};
-pub use provider::{SandboxError, SandboxProvider, Tunnel};
+pub use provider::{
+    CommandFuture, CommandRunner, SandboxError, SandboxProvider, SystemRunner, Tunnel,
+    validate_handle_provider,
+};
 pub use spec::SandboxSpec;

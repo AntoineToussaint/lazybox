@@ -1,6 +1,6 @@
 [package]
 name = "lazybox-sandbox"
-description = "Provider-agnostic remote dev-box lifecycle (start/stop/connect) for lazybox; GCP first."
+description = "Provider-agnostic remote dev-box lifecycle (start/stop/connect) for lazybox."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,6 +11,7 @@ publish.workspace = true
 # standalone and later providers (azure) land as their own gate.
 default = ["gcp"]
 gcp = []
+e2b = ["dep:fs2", "dep:reqwest"]
 
 [dependencies]
 lazybox-store = { workspace = true }
@@ -20,6 +21,8 @@ serde_yaml = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"], optional = true }
+fs2 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

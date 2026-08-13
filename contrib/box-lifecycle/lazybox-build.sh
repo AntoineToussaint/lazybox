@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Build (or rebuild) the lazybox daemon on a sandbox box at a pinned commit
-# and (re)start it under systemd — the on-box half of build-parity (#977).
+# and (re)start it — the on-box half of build-parity (#977).
 #
 # So a client and the box's daemon share a commit and the wire-fingerprint
 # handshake passes by construction. Reused by two callers:
@@ -11,8 +11,9 @@
 #     SHA as $1, recovering from a fingerprint mismatch WITHOUT a reboot
 #     (changing GCE metadata does not re-run the startup script on a live box).
 #
-# Must run as root: it installs to /usr/local/bin + /etc/systemd/system and
-# drives systemctl. The compile itself runs unprivileged as $LAZYBOX_USER.
+# Must run as root: it installs to /usr/local/bin and, in the default service
+# mode, /etc/systemd/system. The compile itself runs unprivileged as
+# $LAZYBOX_USER.
 #
 # Idempotent: re-running rebuilds the same (or a new) commit and restarts the
 # daemon; apt/rustup/`make setup` all skip work already done.
@@ -27,6 +28,7 @@ REPO_URL="${LAZYBOX_REPO_URL:-https://github.com/AntoineToussaint/lazybox}"
 TARGET_SHA="${1:-${LAZYBOX_TARGET_SHA:-}}"
 BIN_DEST="${LAZYBOX_BIN_DEST:-/usr/local/bin/lazybox}"
 SHA_FILE="${LAZYBOX_SHA_FILE:-/etc/lazybox/build-sha}"
+SERVICE_MODE="${LAZYBOX_SERVICE_MODE:-systemd}"
 
 log() { echo "lazybox-build: $*" >&2; }
 
@@ -77,15 +79,22 @@ install -d -m0755 "$(dirname "$SHA_FILE")"
 as_build "cd '$SRC_DIR' && git rev-parse HEAD" >"$SHA_FILE"
 log "installed $BIN_DEST at $(cat "$SHA_FILE")"
 
-# 5. Install the systemd units from the checkout and (re)start the daemon +
-# idle-stop timer. `enable` wires them to boot; `restart` picks up the new
-# binary on the rebuild path (and starts a not-yet-running unit on the first).
-install -m0644 "$SRC_DIR/contrib/systemd/lazybox-daemon@.service" /etc/systemd/system/
-install -m0644 "$SRC_DIR/contrib/box-lifecycle/lazybox-idle-stop.service" /etc/systemd/system/
-install -m0644 "$SRC_DIR/contrib/box-lifecycle/lazybox-idle-stop.timer" /etc/systemd/system/
-install -m0755 "$SRC_DIR/contrib/box-lifecycle/lazybox-idle-stop.sh" /usr/local/bin/lazybox-idle-stop.sh
-systemctl daemon-reload
-systemctl enable "lazybox-daemon@$LAZYBOX_USER.service"
-systemctl restart "lazybox-daemon@$LAZYBOX_USER.service"
-systemctl enable --now lazybox-idle-stop.timer
-log "daemon + idle-stop timer active"
+# 5. Restart the daemon. GCP uses systemd plus its idle-stop timer. E2B's
+# template init is not systemd, so its provider selects direct mode and owns
+# pause timing through the E2B lifecycle API.
+if [ "$SERVICE_MODE" = "direct" ]; then
+  sudo -u "$LAZYBOX_USER" -H env \
+    LAZYBOX_BIN_DEST="$BIN_DEST" \
+    "$SRC_DIR/contrib/box-lifecycle/lazybox-direct-service.sh"
+  log "daemon active (direct mode)"
+else
+  install -m0644 "$SRC_DIR/contrib/systemd/lazybox-daemon@.service" /etc/systemd/system/
+  install -m0644 "$SRC_DIR/contrib/box-lifecycle/lazybox-idle-stop.service" /etc/systemd/system/
+  install -m0644 "$SRC_DIR/contrib/box-lifecycle/lazybox-idle-stop.timer" /etc/systemd/system/
+  install -m0755 "$SRC_DIR/contrib/box-lifecycle/lazybox-idle-stop.sh" /usr/local/bin/lazybox-idle-stop.sh
+  systemctl daemon-reload
+  systemctl enable "lazybox-daemon@$LAZYBOX_USER.service"
+  systemctl restart "lazybox-daemon@$LAZYBOX_USER.service"
+  systemctl enable --now lazybox-idle-stop.timer
+  log "daemon + idle-stop timer active"
+fi

@@ -1,6 +1,25 @@
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::process::Stdio;
+
+use tokio::process::Command;
 
 use crate::{BoxHandle, BoxStatus, SandboxSpec};
+
+/// Reject a handle before it crosses into a different provider's API.
+pub fn validate_handle_provider(
+    expected_provider: &str,
+    handle: &BoxHandle,
+) -> Result<(), SandboxError> {
+    if handle.provider == expected_provider {
+        return Ok(());
+    }
+    Err(SandboxError::Config(format!(
+        "box {} belongs to sandbox provider {:?}, but provider {:?} is selected; select the handle's provider before managing or replacing it",
+        handle.id, handle.provider, expected_provider
+    )))
+}
 
 /// A ready-to-spawn port-forward for a connected box.
 ///
@@ -57,6 +76,77 @@ pub enum SandboxError {
     Serialize(String),
     #[error("{0}")]
     Config(String),
+    #[error("{provider} API {operation}: {detail}")]
+    ApiTransport {
+        provider: &'static str,
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("{provider} API {operation} returned HTTP {status}: {detail}")]
+    Api {
+        provider: &'static str,
+        operation: &'static str,
+        status: u16,
+        detail: String,
+    },
+    #[error("{operation}: {source}")]
+    Io {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{operation}: background task failed: {detail}")]
+    Task {
+        operation: &'static str,
+        detail: String,
+    },
+}
+
+/// Boxed async result returned by [`CommandRunner`].
+pub type CommandFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SandboxError>> + Send + 'a>>;
+
+/// Runs a provider CLI command to completion.
+pub trait CommandRunner: Send + Sync + std::fmt::Debug {
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+        env: &'a [(String, String)],
+    ) -> CommandFuture<'a, String>;
+}
+
+/// The production command runner.
+#[derive(Debug, Clone)]
+pub struct SystemRunner;
+
+impl CommandRunner for SystemRunner {
+    fn run<'a>(
+        &'a self,
+        program: &'a str,
+        args: &'a [String],
+        env: &'a [(String, String)],
+    ) -> CommandFuture<'a, String> {
+        Box::pin(async move {
+            let output = Command::new(program)
+                .args(args)
+                .envs(env.iter().map(|(k, v)| (k, v)))
+                .stdin(Stdio::null())
+                .output()
+                .await
+                .map_err(|source| SandboxError::Spawn {
+                    program: program.to_string(),
+                    source,
+                })?;
+            if !output.status.success() {
+                return Err(SandboxError::Command {
+                    program: program.to_string(),
+                    status: output.status.to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                });
+            }
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        })
+    }
 }
 
 /// Provider-agnostic box lifecycle.
@@ -64,7 +154,7 @@ pub enum SandboxError {
 /// Split by cost: `ensure`/`destroy` drive a Terraform module (create /
 /// tear down infrastructure); `start`/`stop`/`status`/`connect` use the
 /// native CLI so waking a box is fast and cheap. Implementations are
-/// selected at compile time behind a Cargo feature (`gcp` first), so the
+/// selected at compile time behind Cargo features, so the
 /// trait needs no object safety — the async methods stay ergonomic.
 #[allow(async_fn_in_trait)]
 pub trait SandboxProvider {

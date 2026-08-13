@@ -41,7 +41,7 @@ lazybox-tui      = { path = "../tui" }
 lazybox-tui-core = { workspace = true }
 lazybox-core     = { workspace = true }
 lazybox-config   = { workspace = true }
-lazybox-sandbox  = { workspace = true, features = ["gcp"] }
+lazybox-sandbox  = { workspace = true, features = ["e2b", "gcp"] }
 lazybox-git-ops  = { workspace = true }
 lazybox-store    = { workspace = true }
 lazybox-gh       = { workspace = true }

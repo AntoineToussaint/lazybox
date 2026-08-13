@@ -1,8 +1,9 @@
 //! `lazybox sandbox <ensure|wake|sleep|status|connect|rebuild|destroy>` —
 //! the client surface for the remote dev-box lifecycle (#931).
 //!
-//! `ensure`/`destroy` drive the Terraform module; `wake`/`sleep`/`status`/
-//! `connect`/`rebuild` use the native `gcloud`/IAP path. `ensure` provisions
+//! `ensure`/`destroy` drive the provider's create/delete API; `wake`/`sleep`/
+//! `status`/`connect`/`rebuild` use its fast lifecycle and SSH path. `ensure`
+//! provisions
 //! a box that builds + runs a wire-compatible lazybox daemon on boot (#977),
 //! and `rebuild` re-syncs that daemon to the client's commit without a reboot.
 //!
@@ -21,9 +22,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lazybox_config::{Config, SandboxConfig};
-use lazybox_sandbox::gcp::{GcpAuth, GcpProvider, SystemRunner};
+use lazybox_sandbox::e2b::E2bProvider;
+use lazybox_sandbox::gcp::{GcpAuth, GcpProvider};
 use lazybox_sandbox::{
-    BoxHandle, Deployment, PowerState, SandboxProvider, SandboxSpec, connect_box, persist,
+    BoxHandle, BoxStatus, Deployment, PowerState, SandboxError, SandboxProvider, SandboxSpec,
+    SystemRunner, Tunnel, connect_box, persist,
 };
 use lazybox_store::Store;
 use tokio::process::Command;
@@ -33,6 +36,133 @@ use crate::take_value;
 /// Local socket the connect forward binds when nothing else is configured
 /// — the same default `contrib/box-lifecycle/connect.sh` uses.
 const DEFAULT_LOCAL_SOCKET: &str = "/tmp/lazybox.sock";
+const DEFAULT_E2B_TEMPLATE: &str = "lazybox-e2b";
+const DEFAULT_E2B_TIMEOUT_SECONDS: u32 = 3600;
+const DEFAULT_E2B_USER: &str = "user";
+
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedProvider {
+    Gcp(GcpProvider),
+    E2b(E2bProvider),
+}
+
+impl ResolvedProvider {
+    pub(crate) fn state_file(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Gcp(provider) => Some(&provider.state_file),
+            Self::E2b(_) => None,
+        }
+    }
+
+    pub(crate) fn local_socket(&self) -> &std::path::Path {
+        match self {
+            Self::Gcp(provider) => &provider.local_socket,
+            Self::E2b(provider) => &provider.local_socket,
+        }
+    }
+
+    pub(crate) fn set_local_socket(&mut self, socket: PathBuf) {
+        match self {
+            Self::Gcp(provider) => provider.local_socket = socket,
+            Self::E2b(provider) => provider.local_socket = socket,
+        }
+    }
+
+    pub(crate) fn remote_socket(&self) -> &str {
+        match self {
+            Self::Gcp(provider) => &provider.remote_socket,
+            Self::E2b(provider) => &provider.remote_socket,
+        }
+    }
+
+    fn command_env(&self) -> Vec<(String, String)> {
+        match self {
+            Self::Gcp(provider) => provider.auth.command_env(),
+            Self::E2b(_) => Vec::new(),
+        }
+    }
+
+    fn rebuild_command(&self, handle: &BoxHandle, sha: &str) -> (String, Vec<String>) {
+        match self {
+            Self::Gcp(provider) => provider.rebuild_command(handle, sha),
+            Self::E2b(provider) => provider.rebuild_command(handle, sha),
+        }
+    }
+
+    #[cfg(test)]
+    fn gcp(&self) -> &GcpProvider {
+        match self {
+            Self::Gcp(provider) => provider,
+            Self::E2b(_) => panic!("expected gcp provider"),
+        }
+    }
+
+    #[cfg(test)]
+    fn e2b(&self) -> &E2bProvider {
+        match self {
+            Self::E2b(provider) => provider,
+            Self::Gcp(_) => panic!("expected e2b provider"),
+        }
+    }
+}
+
+impl SandboxProvider for ResolvedProvider {
+    fn id(&self) -> &str {
+        match self {
+            Self::Gcp(provider) => provider.id(),
+            Self::E2b(provider) => provider.id(),
+        }
+    }
+
+    async fn check_auth(&self) -> Result<(), SandboxError> {
+        match self {
+            Self::Gcp(provider) => provider.check_auth().await,
+            Self::E2b(provider) => provider.check_auth().await,
+        }
+    }
+
+    async fn ensure(&self, spec: &SandboxSpec) -> Result<BoxHandle, SandboxError> {
+        match self {
+            Self::Gcp(provider) => provider.ensure(spec).await,
+            Self::E2b(provider) => provider.ensure(spec).await,
+        }
+    }
+
+    async fn start(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        match self {
+            Self::Gcp(provider) => provider.start(handle).await,
+            Self::E2b(provider) => provider.start(handle).await,
+        }
+    }
+
+    async fn stop(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        match self {
+            Self::Gcp(provider) => provider.stop(handle).await,
+            Self::E2b(provider) => provider.stop(handle).await,
+        }
+    }
+
+    async fn status(&self, handle: &BoxHandle) -> Result<BoxStatus, SandboxError> {
+        match self {
+            Self::Gcp(provider) => provider.status(handle).await,
+            Self::E2b(provider) => provider.status(handle).await,
+        }
+    }
+
+    async fn connect(&self, handle: &BoxHandle, ports: &[u16]) -> Result<Tunnel, SandboxError> {
+        match self {
+            Self::Gcp(provider) => provider.connect(handle, ports).await,
+            Self::E2b(provider) => provider.connect(handle, ports).await,
+        }
+    }
+
+    async fn destroy(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        match self {
+            Self::Gcp(provider) => provider.destroy(handle).await,
+            Self::E2b(provider) => provider.destroy(handle).await,
+        }
+    }
+}
 
 /// The single shared box's stable identity — the store/tfstate key both
 /// this CLI **and** the TUI's `r`-spawn worker (`remote_box`) resolve by
@@ -260,49 +390,64 @@ fn resolve_ports(raw: Option<String>, cfg: &[u16]) -> anyhow::Result<Vec<u16>> {
         .collect()
 }
 
-/// Build the provider from config + flags, with this worktree's isolated
-/// Terraform state. Only `gcp` is implemented.
+/// Build the provider from config + flags.
 pub(crate) fn resolve_provider(
     sc: &SandboxConfig,
     args: &mut Vec<String>,
     worktree: &str,
-) -> anyhow::Result<GcpProvider> {
+) -> anyhow::Result<ResolvedProvider> {
     let provider = take_value(args, "--provider")
         .or_else(|| sc.provider.clone())
         .unwrap_or_else(|| "gcp".to_string());
-    if provider != "gcp" {
-        anyhow::bail!("sandbox provider {provider:?} is not implemented (only `gcp` today)");
-    }
-    let terraform_dir = take_value(args, "--terraform-dir")
-        .map(PathBuf::from)
-        .or_else(|| sc.terraform_dir.clone())
-        .unwrap_or_else(|| PathBuf::from("terraform/sandbox/gcp"));
-    // Default the SSH login to the dedicated `lazybox` user provisioning
-    // creates when it installs the daemon (#977): its socket lives under
-    // that user's home, so `connect`/`r`-spawn must SSH in as it to reach
-    // the conventional daemon socket. An explicit `--user`/`sandbox.user`
-    // wins; a bring-your-own-stack box (install_lazybox=false) keeps
-    // gcloud's default user.
-    let user = take_value(args, "--user")
-        .or_else(|| sc.user.clone())
-        .or_else(|| install_lazybox_enabled(sc).then(|| BOX_LAZYBOX_USER.to_string()));
+    let user = take_value(args, "--user").or_else(|| sc.user.clone());
     let remote_socket = take_value(args, "--remote-socket").or_else(|| sc.remote_socket.clone());
     let local_socket = take_value(args, "--local-socket")
         .map(PathBuf::from)
         .or_else(|| sc.local_socket.clone())
         .unwrap_or_else(|| PathBuf::from(DEFAULT_LOCAL_SOCKET));
-    Ok(GcpProvider {
-        terraform_dir,
-        state_file: state_file_for(worktree),
-        user,
-        // Unset → the conventional home-relative box daemon socket, the
-        // same one the box's systemd/tmux daemon binds — so `connect`
-        // works with zero socket config, exactly like the `r`-spawn.
-        remote_socket: remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string()),
-        local_socket,
-        runner: Arc::new(SystemRunner),
-        auth: resolve_auth(sc, args),
-    })
+    let remote_socket = remote_socket.unwrap_or_else(|| BOX_DAEMON_SOCKET.to_string());
+    match provider.as_str() {
+        "gcp" => {
+            let terraform_dir = take_value(args, "--terraform-dir")
+                .map(PathBuf::from)
+                .or_else(|| sc.terraform_dir.clone())
+                .unwrap_or_else(|| PathBuf::from("terraform/sandbox/gcp"));
+            Ok(ResolvedProvider::Gcp(GcpProvider {
+                terraform_dir,
+                state_file: state_file_for(worktree),
+                user: user
+                    .or_else(|| install_lazybox_enabled(sc).then(|| BOX_LAZYBOX_USER.to_string())),
+                remote_socket,
+                local_socket,
+                runner: Arc::new(SystemRunner),
+                auth: resolve_auth(sc, args),
+            }))
+        }
+        "e2b" => {
+            let template = take_value(args, "--template")
+                .or_else(|| sc.template.clone())
+                .unwrap_or_else(|| DEFAULT_E2B_TEMPLATE.to_string());
+            let timeout_seconds = take_value(args, "--timeout-seconds")
+                .map(|raw| {
+                    raw.parse::<u32>()
+                        .map_err(|_| anyhow::anyhow!("invalid --timeout-seconds {raw:?}"))
+                })
+                .transpose()?
+                .or(sc.timeout_seconds)
+                .unwrap_or(DEFAULT_E2B_TIMEOUT_SECONDS);
+            Ok(ResolvedProvider::E2b(E2bProvider::from_env(
+                template,
+                timeout_seconds,
+                user.unwrap_or_else(|| DEFAULT_E2B_USER.to_string()),
+                remote_socket,
+                local_socket,
+                Arc::new(SystemRunner),
+            )))
+        }
+        _ => anyhow::bail!(
+            "sandbox provider {provider:?} is not implemented (choose `gcp` or `e2b`)"
+        ),
+    }
 }
 
 /// The lazybox-owned `CLOUDSDK_CONFIG` dir credentials activate into, so
@@ -346,9 +491,10 @@ pub(crate) fn resolve_spec(
     sc: &SandboxConfig,
     args: &mut Vec<String>,
     worktree: &str,
+    provider: &ResolvedProvider,
 ) -> anyhow::Result<SandboxSpec> {
     let deployment = resolve_deployment(sc, args)?;
-    resolve_spec_with_deployment(sc, args, worktree, deployment)
+    resolve_spec_with_deployment(sc, args, worktree, deployment, provider.id())
 }
 
 /// Resolve the deployment recipe (`--deployment` flag → config overlay →
@@ -378,19 +524,28 @@ fn resolve_spec_with_deployment(
     args: &mut Vec<String>,
     worktree: &str,
     deployment: Deployment,
+    provider: &str,
 ) -> anyhow::Result<SandboxSpec> {
-    let project = take_value(args, "--project")
-        .or_else(|| sc.project.clone())
-        .ok_or_else(|| anyhow::anyhow!("no project: set sandbox.project or pass --project"))?;
-    let region = take_value(args, "--region")
-        .or_else(|| sc.region.clone())
-        .unwrap_or_else(|| "us-central1".to_string());
-    let zone = take_value(args, "--zone")
-        .or_else(|| sc.zone.clone())
-        .unwrap_or_else(|| "us-central1-a".to_string());
+    let (project, region, zone) = if provider == "gcp" {
+        (
+            take_value(args, "--project")
+                .or_else(|| sc.project.clone())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no project: set sandbox.project or pass --project")
+                })?,
+            take_value(args, "--region")
+                .or_else(|| sc.region.clone())
+                .unwrap_or_else(|| "us-central1".to_string()),
+            take_value(args, "--zone")
+                .or_else(|| sc.zone.clone())
+                .unwrap_or_else(|| "us-central1-a".to_string()),
+        )
+    } else {
+        (String::new(), "global".to_string(), String::new())
+    };
     let name = instance_name(take_value(args, "--name"), &name_salt(worktree));
     Ok(SandboxSpec {
-        provider: "gcp".to_string(),
+        provider: provider.to_string(),
         name,
         project,
         region,
@@ -420,8 +575,12 @@ fn open_store() -> anyhow::Result<std::sync::Arc<dyn Store>> {
     lazybox_server::open_store().map_err(|e| anyhow::anyhow!("open store: {e}"))
 }
 
-fn load_handle_or_bail(store: &dyn Store, worktree: &str) -> anyhow::Result<BoxHandle> {
-    match persist::load_handle(store, worktree)? {
+fn load_handle_or_bail(
+    store: &dyn Store,
+    worktree: &str,
+    provider: &str,
+) -> anyhow::Result<BoxHandle> {
+    match persist::load_handle_for_provider(store, worktree, provider)? {
         Some(handle) => Ok(handle),
         None => anyhow::bail!(missing_handle_message(store, worktree)),
     }
@@ -463,14 +622,15 @@ async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
-    let spec = resolve_spec(&config.sandbox, args, &worktree)?;
+    let spec = resolve_spec(&config.sandbox, args, &worktree, &provider)?;
     let store = open_store()?;
+    persist::load_handle_for_provider(store.as_ref(), &worktree, provider.id())?;
     // Preflight the provider's credentials so a missing/expired credential
     // fails here with a fix hint, not minutes into a terraform apply (#1047).
     provider.check_auth().await?;
 
     // Terraform's `-state=<path>` writes the file but not its parent dir.
-    if let Some(parent) = provider.state_file.parent() {
+    if let Some(parent) = provider.state_file().and_then(std::path::Path::parent) {
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("create sandbox state dir {}: {e}", parent.display()))?;
     }
@@ -482,7 +642,7 @@ async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
     {
         println!("{w}");
     }
-    println!("Provisioning box {} (terraform apply)…", spec.name);
+    println!("Provisioning {} box {}…", provider.id(), spec.name);
     let handle = provider.ensure(&spec).await?;
     persist::save_handle(store.as_ref(), &worktree, &handle)?;
     println!(
@@ -497,7 +657,7 @@ async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     println!("Waking {}…", handle.id);
@@ -513,7 +673,7 @@ async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     println!("Sleeping {}…", handle.id);
@@ -529,7 +689,7 @@ async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     let status = provider.status(&handle).await?;
@@ -584,7 +744,7 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
         }
     };
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
-    if provider.remote_socket.is_empty() {
+    if provider.remote_socket().is_empty() {
         anyhow::bail!(
             "no remote socket: set sandbox.remote_socket or pass --remote-socket \
              (the absolute daemon-socket path on the box)"
@@ -593,7 +753,7 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     provider.check_auth().await?;
     let store = open_store()?;
 
-    let existing = persist::load_handle(store.as_ref(), &worktree)?;
+    let existing = persist::load_handle_for_provider(store.as_ref(), &worktree, provider.id())?;
     let (mut handle, tunnel) = match existing {
         // Stamped box: wake-if-stopped + tunnel. No spec needed, so a
         // config that dropped `project` after `ensure` still connects.
@@ -604,13 +764,19 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
         None if provision => {
             // The same ensure → connect sequence the TUI's `r`-spawn
             // runs — one engine, two callers (#965).
-            let spec = resolve_spec_with_deployment(&config.sandbox, args, &worktree, deployment?)?;
-            if let Some(parent) = provider.state_file.parent() {
+            let spec = resolve_spec_with_deployment(
+                &config.sandbox,
+                args,
+                &worktree,
+                deployment?,
+                provider.id(),
+            )?;
+            if let Some(parent) = provider.state_file().and_then(std::path::Path::parent) {
                 std::fs::create_dir_all(parent).map_err(|e| {
                     anyhow::anyhow!("create sandbox state dir {}: {e}", parent.display())
                 })?;
             }
-            println!("Provisioning {} (terraform apply)…", spec.name);
+            println!("Provisioning {} box {}…", provider.id(), spec.name);
             connect_box(&provider, &spec, None, &ports).await?
         }
         None => anyhow::bail!(
@@ -719,7 +885,7 @@ async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
     let sha = explicit_sha.unwrap_or_else(client_build_sha);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     // The rebuild runs over SSH, so the box must be awake AND accepting SSH.
@@ -750,7 +916,7 @@ async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
     // injected credentials too (#1047).
     let status = Command::new(&program)
         .args(&cmd_args)
-        .envs(provider.auth.command_env().iter().map(|(k, v)| (k, v)))
+        .envs(provider.command_env().iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null())
         .status()
         .await
@@ -769,15 +935,15 @@ async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
     // opt-in rather than run on a bare `destroy`.
     if !crate::take_flag(args, "--yes") {
         anyhow::bail!(
-            "refusing to destroy without --yes (this tears the box down via `terraform destroy`)"
+            "refusing to destroy without --yes (this permanently deletes the provider box)"
         );
     }
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
-    println!("Destroying {} (terraform destroy)…", handle.id);
+    println!("Destroying {} via {}…", handle.id, provider.id());
     provider.destroy(&handle).await?;
     persist::delete_handle(store.as_ref(), &worktree)?;
     println!("{} destroyed.", handle.id);
@@ -894,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_provider_rejects_non_gcp() {
+    fn resolve_provider_rejects_an_unknown_provider() {
         let sc = SandboxConfig {
             provider: Some("azure".into()),
             ..SandboxConfig::default()
@@ -917,17 +1083,46 @@ mod tests {
             "dev".into(),
         ];
         let p = resolve_provider(&sc, &mut args, "/home/me/wt").unwrap();
-        assert_eq!(p.terraform_dir, PathBuf::from("/flag/tf"));
-        assert_eq!(p.user.as_deref(), Some("dev"));
+        assert_eq!(p.gcp().terraform_dir, PathBuf::from("/flag/tf"));
+        assert_eq!(p.gcp().user.as_deref(), Some("dev"));
         // Config fills what the flags did not.
-        assert_eq!(p.remote_socket, "/cfg.sock");
+        assert_eq!(p.remote_socket(), "/cfg.sock");
         // State is isolated per worktree, under the lazybox state root.
         assert!(
-            p.state_file.ends_with("terraform.tfstate"),
+            p.state_file().unwrap().ends_with("terraform.tfstate"),
             "{:?}",
-            p.state_file
+            p.state_file()
         );
-        assert!(p.state_file.starts_with(lazybox_core::paths::state_root()));
+        assert!(
+            p.state_file()
+                .unwrap()
+                .starts_with(lazybox_core::paths::state_root())
+        );
+    }
+
+    #[test]
+    fn resolve_provider_builds_e2b_from_flags_and_config() {
+        let sc = SandboxConfig {
+            provider: Some("gcp".into()),
+            template: Some("configured-template".into()),
+            timeout_seconds: Some(1800),
+            ..SandboxConfig::default()
+        };
+        let mut args = vec![
+            "--provider".into(),
+            "e2b".into(),
+            "--template".into(),
+            "flag-template".into(),
+            "--timeout-seconds".into(),
+            "7200".into(),
+        ];
+        let provider = resolve_provider(&sc, &mut args, "/wt").unwrap();
+
+        assert_eq!(provider.id(), "e2b");
+        assert_eq!(provider.e2b().template, "flag-template");
+        assert_eq!(provider.e2b().timeout_seconds, 7200);
+        assert_eq!(provider.e2b().user, DEFAULT_E2B_USER);
+        assert!(provider.state_file().is_none());
     }
 
     #[test]
@@ -1025,7 +1220,7 @@ mod tests {
             ..SandboxConfig::default()
         };
         let p = resolve_provider(&sc, &mut vec![], "/wt").unwrap();
-        assert!(p.remote_socket.is_empty());
+        assert!(p.remote_socket().is_empty());
     }
 
     #[test]
@@ -1082,7 +1277,7 @@ mod tests {
         // the home-relative daemon socket resolves.
         let sc = SandboxConfig::default();
         let p = resolve_provider(&sc, &mut vec![], "/wt").unwrap();
-        assert_eq!(p.user.as_deref(), Some(BOX_LAZYBOX_USER));
+        assert_eq!(p.gcp().user.as_deref(), Some(BOX_LAZYBOX_USER));
 
         // A bring-your-own-stack box keeps gcloud's default user…
         let opt_out = SandboxConfig {
@@ -1090,7 +1285,10 @@ mod tests {
             ..SandboxConfig::default()
         };
         assert_eq!(
-            resolve_provider(&opt_out, &mut vec![], "/wt").unwrap().user,
+            resolve_provider(&opt_out, &mut vec![], "/wt")
+                .unwrap()
+                .gcp()
+                .user,
             None
         );
 
@@ -1102,6 +1300,7 @@ mod tests {
         assert_eq!(
             resolve_provider(&explicit, &mut vec![], "/wt")
                 .unwrap()
+                .gcp()
                 .user
                 .as_deref(),
             Some("alice")
@@ -1114,7 +1313,8 @@ mod tests {
             project: Some("proj".into()),
             ..SandboxConfig::default()
         };
-        let spec = resolve_spec(&sc, &mut vec![], "/home/me/wt").unwrap();
+        let provider = resolve_provider(&sc, &mut vec![], "/home/me/wt").unwrap();
+        let spec = resolve_spec(&sc, &mut vec![], "/home/me/wt", &provider).unwrap();
         assert!(spec.install_lazybox, "default installs the daemon");
         // The spec's SHA is exactly the normalized client build SHA.
         assert_eq!(spec.lazybox_git_sha, client_build_sha());
@@ -1124,7 +1324,8 @@ mod tests {
             install_lazybox: Some(false),
             ..SandboxConfig::default()
         };
-        let spec = resolve_spec(&opt_out, &mut vec![], "/home/me/wt").unwrap();
+        let provider = resolve_provider(&opt_out, &mut vec![], "/home/me/wt").unwrap();
+        let spec = resolve_spec(&opt_out, &mut vec![], "/home/me/wt", &provider).unwrap();
         assert!(!spec.install_lazybox);
     }
 
@@ -1132,7 +1333,22 @@ mod tests {
     fn resolve_spec_requires_a_project() {
         let sc = SandboxConfig::default();
         let mut args = vec![];
-        assert!(resolve_spec(&sc, &mut args, "/wt").is_err());
+        let provider = resolve_provider(&sc, &mut vec![], "/wt").unwrap();
+        assert!(resolve_spec(&sc, &mut args, "/wt", &provider).is_err());
+    }
+
+    #[test]
+    fn resolve_spec_for_e2b_does_not_require_a_gcp_project() {
+        let sc = SandboxConfig {
+            provider: Some("e2b".into()),
+            ..SandboxConfig::default()
+        };
+        let provider = resolve_provider(&sc, &mut vec![], "/wt").unwrap();
+        let spec = resolve_spec(&sc, &mut vec![], "/wt", &provider).unwrap();
+
+        assert_eq!(spec.provider, "e2b");
+        assert_eq!(spec.project, "");
+        assert_eq!(spec.region, "global");
     }
 
     #[test]
@@ -1142,7 +1358,8 @@ mod tests {
             ..SandboxConfig::default()
         };
         let mut args = vec![];
-        let spec = resolve_spec(&sc, &mut args, "/home/me/wt").unwrap();
+        let provider = resolve_provider(&sc, &mut vec![], "/home/me/wt").unwrap();
+        let spec = resolve_spec(&sc, &mut args, "/home/me/wt", &provider).unwrap();
         assert_eq!(spec.project, "proj");
         assert_eq!(spec.region, "us-central1");
         assert_eq!(spec.zone, "us-central1-a");

@@ -1,7 +1,11 @@
 .git
 .github
 .claude
+.lazybox
+.env
+.env.*
 target
+**/target
 tmp
 apps/desktop/node_modules
 apps/desktop/src-tauri/target

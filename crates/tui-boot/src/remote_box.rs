@@ -4,15 +4,15 @@
 //! [`Client`] (from [`lazybox_ipc::channel::pair`]) whose far end is **this worker**,
 //! not a live daemon. So a `sandbox:` box being configured is enough to
 //! light up the `r <agent>` chords (the pair exists), while a normal launch
-//! never touches GCP: the box stays asleep until the first `r`-spawn.
+//! never touches the provider: the box stays asleep until the first `r`-spawn.
 //!
 //! When the first command arrives the worker runs the existing sandbox
 //! engine — [`connect_box`] does ensure (create if missing) → connect
-//! (wake + build the IAP forward) — supervises the forward in-process, dials
+//! (wake + build the SSH forward) — supervises the forward in-process, dials
 //! the box's daemon over the **internally derived** socket, and forwards
 //! that command (and every one after) to it. No socket or tunnel is ever
-//! configured or shown — the whole transport is derived from
-//! `{project, deployment}`.
+//! configured or shown — the whole transport is derived from the provider
+//! configuration and deployment.
 //!
 //! This is the **command path**: an `r`-spawn reaches the box and the box
 //! runs the session. Rendering the box's *own* terminal/session state back
@@ -30,13 +30,12 @@ use std::time::Duration;
 use lazybox_config::SandboxConfig;
 use lazybox_core::SessionKey;
 use lazybox_ipc::{Client, Command, socket};
-use lazybox_sandbox::gcp::GcpProvider;
 use lazybox_sandbox::{SandboxProvider, SandboxSpec, connect_box, persist};
 use lazybox_store::Store;
 use lazybox_tui_core::remote::RemoteBoxNotice;
 use tokio::sync::mpsc;
 
-use crate::sandbox::{SHARED_BOX_KEY, resolve_provider, resolve_spec};
+use crate::sandbox::{ResolvedProvider, SHARED_BOX_KEY, resolve_provider, resolve_spec};
 
 /// Bound on the in-process command channel bridging the `Model` to this
 /// worker — the same order as the IPC transport's own channels.
@@ -86,28 +85,30 @@ fn local_socket() -> PathBuf {
         .join(format!("sandbox-{}.sock", std::process::id()))
 }
 
-/// Build the GCP provider for the shared box, deriving the transport
+/// Build the configured provider for the shared box, deriving the transport
 /// internally: a dedicated local socket, and the conventional box daemon
 /// socket when `sandbox.remote_socket` is unset (the product path leaves it
 /// unset).
-fn build_provider(sandbox: &SandboxConfig) -> anyhow::Result<GcpProvider> {
+fn build_provider(sandbox: &SandboxConfig) -> anyhow::Result<ResolvedProvider> {
     // `resolve_provider` already defaults `remote_socket` to the
     // conventional home-relative box daemon socket; only the local socket
     // is overridden to the dedicated per-box path.
     let mut provider = resolve_provider(sandbox, &mut Vec::new(), SHARED_BOX_KEY)?;
-    provider.local_socket = local_socket();
+    provider.set_local_socket(local_socket());
     Ok(provider)
 }
 
 fn build_spec(sandbox: &SandboxConfig) -> anyhow::Result<SandboxSpec> {
-    resolve_spec(sandbox, &mut Vec::new(), SHARED_BOX_KEY)
+    let provider = resolve_provider(sandbox, &mut Vec::new(), SHARED_BOX_KEY)?;
+    resolve_spec(sandbox, &mut Vec::new(), SHARED_BOX_KEY, &provider)
 }
 
 /// Wire the lazy worker when a `sandbox:` box is configured, returning the
 /// `Model`-facing client + glyph name. `None` — the `r` chords stay hidden
 /// and no worker spawns — when the box can't be resolved (no `sandbox:`
-/// block, or one missing a project). Cheap: it resolves config and spawns a
-/// task, but never touches GCP (that waits for the first `r`-spawn).
+/// block, or a GCP block missing a project). Cheap: it resolves config and
+/// spawns a task, but never touches the provider (that waits for the first
+/// `r`-spawn).
 pub fn setup(sandbox: &SandboxConfig, store: Arc<dyn Store>) -> Option<RemoteBox> {
     let provider = build_provider(sandbox)
         .map_err(|e| tracing::info!("no r-spawn box: {e:#}"))
@@ -170,7 +171,7 @@ fn notify(tx: &mpsc::Sender<RemoteBoxNotice>, notice: RemoteBoxNotice) {
 /// forward, wait for the socket, and dial the box daemon. Returns the box
 /// client plus the forward supervisor to hold for the session.
 async fn bring_up(
-    provider: &GcpProvider,
+    provider: &ResolvedProvider,
     spec: &SandboxSpec,
     store: &dyn Store,
     ports: &[u16],
@@ -178,13 +179,13 @@ async fn bring_up(
     // Preflight the provider's own credentials so a missing/expired one drops
     // as an actionable UI notice, not a raw terraform/gcloud failure (#1047).
     provider.check_auth().await?;
-    if let Some(parent) = provider.state_file.parent() {
+    if let Some(parent) = provider.state_file().and_then(std::path::Path::parent) {
         std::fs::create_dir_all(parent)?;
     }
-    if let Some(parent) = provider.local_socket.parent() {
+    if let Some(parent) = provider.local_socket().parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let existing = persist::load_handle(store, SHARED_BOX_KEY)?;
+    let existing = persist::load_handle_for_provider(store, SHARED_BOX_KEY, provider.id())?;
     if existing.is_none() {
         tracing::info!("provisioning r-spawn box (terraform apply)…");
     }
@@ -281,7 +282,7 @@ enum Step {
 /// box link's events are drained to keep it from backing up, then discarded
 /// (rendering them is a follow-up — see the module doc).
 async fn run(
-    provider: GcpProvider,
+    provider: ResolvedProvider,
     spec: SandboxSpec,
     store: Arc<dyn Store>,
     ports: Vec<u16>,
@@ -367,7 +368,8 @@ async fn run(
                     format!("⇅ {name}: waking box…")
                 } else {
                     format!(
-                        "⇅ {name}: provisioning box (terraform apply — first use can take minutes)…"
+                        "⇅ {name}: provisioning {} box (first use can take minutes)…",
+                        provider.id()
                     )
                 }),
             );
@@ -453,7 +455,7 @@ async fn run(
     // socket file so the per-pid directory doesn't accumulate one dead
     // path per run. Best-effort — a crashed run skips this and leaves an
     // inert file.
-    let _ = std::fs::remove_file(&provider.local_socket);
+    let _ = std::fs::remove_file(provider.local_socket());
 }
 
 #[cfg(test)]
@@ -470,27 +472,31 @@ mod tests {
             ..SandboxConfig::default()
         };
         let p = build_provider(&sc).unwrap();
-        assert_eq!(p.local_socket, local_socket());
+        assert_eq!(p.local_socket(), local_socket());
         assert!(
-            p.local_socket
+            p.local_socket()
                 .starts_with(lazybox_core::paths::state_root())
         );
         // Per-process: two concurrent lazybox instances must not fight
         // over one socket path (the second can't bind; the first's exit
         // unlinks it under the second).
         assert!(
-            p.local_socket
+            p.local_socket()
                 .file_name()
                 .unwrap()
                 .to_string_lossy()
                 .contains(&std::process::id().to_string()),
             "{:?} must be pid-scoped",
-            p.local_socket
+            p.local_socket()
         );
-        assert_eq!(p.remote_socket, crate::sandbox::BOX_DAEMON_SOCKET);
+        assert_eq!(p.remote_socket(), crate::sandbox::BOX_DAEMON_SOCKET);
         // Isolated state, keyed by the shared-box key, under the state root.
-        assert!(p.state_file.starts_with(lazybox_core::paths::state_root()));
-        assert!(p.state_file.ends_with("terraform.tfstate"));
+        assert!(
+            p.state_file()
+                .unwrap()
+                .starts_with(lazybox_core::paths::state_root())
+        );
+        assert!(p.state_file().unwrap().ends_with("terraform.tfstate"));
     }
 
     #[test]
@@ -500,7 +506,7 @@ mod tests {
             ..SandboxConfig::default()
         };
         assert_eq!(
-            build_provider(&sc).unwrap().remote_socket,
+            build_provider(&sc).unwrap().remote_socket(),
             "/custom/daemon.sock"
         );
     }
@@ -564,6 +570,17 @@ mod tests {
         };
         let store = Arc::new(lazybox_store::MemoryStore::new());
         let rb = setup(&sc, store).expect("a configured box yields a RemoteBox");
+        assert_eq!(rb.name, "default");
+    }
+
+    #[tokio::test]
+    async fn setup_accepts_e2b_without_a_gcp_project() {
+        let sc = SandboxConfig {
+            provider: Some("e2b".into()),
+            ..SandboxConfig::default()
+        };
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let rb = setup(&sc, store).expect("an E2B provider does not require a GCP project");
         assert_eq!(rb.name, "default");
     }
 

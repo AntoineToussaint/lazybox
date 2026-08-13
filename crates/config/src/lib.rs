@@ -254,8 +254,8 @@ impl RemoteConfig {
 
 /// `sandbox:` block — remote dev-box lifecycle wiring for
 /// `lazybox sandbox <ensure|wake|sleep|status|connect|destroy>` (#931).
-/// Names the GCP project/placement, the Terraform module + deployment
-/// overlay, and the socket the connect forward carries. Every field is
+/// Names the provider placement/template, deployment overlay, and the socket
+/// the connect forward carries. Every field is
 /// optional so the block round-trips out of a written config when unset,
 /// and each command's flags override what is set here.
 ///
@@ -270,10 +270,20 @@ impl RemoteConfig {
 ///   remote_socket: /home/me/.lazybox/run/daemon.sock
 ///   ports: [3000, 8082, 8787]
 /// ```
+///
+/// E2B uses `template` and `timeout_seconds` instead of the GCP placement
+/// fields:
+///
+/// ```yaml
+/// sandbox:
+///   provider: e2b
+///   template: lazybox-e2b
+///   timeout_seconds: 3600
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(default)]
 pub struct SandboxConfig {
-    /// Provider id; only `gcp` is implemented today.
+    /// Provider id (`gcp` or `e2b`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -282,6 +292,12 @@ pub struct SandboxConfig {
     pub region: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zone: Option<String>,
+    /// E2B template id or alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    /// E2B running timeout. On expiry E2B performs a full-memory auto-pause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u32>,
     /// Path to the Terraform module `ensure`/`destroy` run against
     /// (`terraform/sandbox/gcp`); a project override points at its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3525,6 +3541,19 @@ repos:
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
         assert_eq!(reparsed.sandbox.auth, cfg.sandbox.auth);
+    }
+
+    #[test]
+    fn sandbox_e2b_fields_round_trip() {
+        let yaml = "sandbox:\n  provider: e2b\n  template: lazybox-e2b\n  timeout_seconds: 3600\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.sandbox.provider.as_deref(), Some("e2b"));
+        assert_eq!(cfg.sandbox.template.as_deref(), Some("lazybox-e2b"));
+        assert_eq!(cfg.sandbox.timeout_seconds, Some(3600));
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.sandbox, cfg.sandbox);
     }
 
     #[test]

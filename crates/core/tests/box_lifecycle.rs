@@ -97,7 +97,12 @@ fn service_runs_the_installed_script() {
 fn scripts_are_hardened_and_parse() {
     // Every helper must use strict mode; a partial run of a box-stop, a
     // tunnel, or a daemon build on an unset variable is worse than a clean abort.
-    for name in ["lazybox-idle-stop.sh", "connect.sh", "lazybox-build.sh"] {
+    for name in [
+        "lazybox-idle-stop.sh",
+        "connect.sh",
+        "lazybox-build.sh",
+        "lazybox-direct-service.sh",
+    ] {
         let body = read(name);
         assert!(
             body.starts_with("#!/usr/bin/env bash"),
@@ -153,6 +158,15 @@ fn scripts_are_hardened_and_parse() {
         build.contains("lazybox-idle-stop.timer"),
         "build helper must arm the idle-stop timer so an ensured box still sleeps"
     );
+    let direct = read("lazybox-direct-service.sh");
+    assert!(
+        build.contains("LAZYBOX_SERVICE_MODE")
+            && build.contains("lazybox-direct-service.sh")
+            && direct.contains("server stop")
+            && direct.contains("server start")
+            && direct.contains("server status"),
+        "build helper direct mode must restart the daemon and verify readiness without systemd"
+    );
     // A client built from an unpushed commit passes a SHA the box can't fetch;
     // the checkout must fall back to the default branch so the box still runs a
     // daemon, not abort with none (the exact failure #977 removes). Assert the
@@ -175,7 +189,12 @@ fn scripts_are_hardened_and_parse() {
 
     // Catch shell syntax errors where bash is available (any dev/CI host).
     if let Ok(bash) = which_bash() {
-        for name in ["lazybox-idle-stop.sh", "connect.sh", "lazybox-build.sh"] {
+        for name in [
+            "lazybox-idle-stop.sh",
+            "connect.sh",
+            "lazybox-build.sh",
+            "lazybox-direct-service.sh",
+        ] {
             let path = lifecycle_dir().join(name);
             let out = Command::new(&bash)
                 .arg("-n")
@@ -579,6 +598,40 @@ mod behavior {
         assert!(
             did_shutdown.exists(),
             "a rejected `gcloud … stop` must fall back to a guest shutdown, not leave the box running"
+        );
+    }
+
+    #[test]
+    fn direct_service_restart_fails_when_the_daemon_never_starts() {
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("direct_service_start_failure");
+        let state = dir.join("state");
+        let fake = dir.join("lazybox");
+        write_exec(
+            &fake,
+            &format!(
+                "#!/usr/bin/env bash\ncase \"$2\" in\n  stop) printf stopped > {state};;\n  status) cat {state};;\n  start) exit 7;;\nesac\n",
+                state = state.display()
+            ),
+        );
+
+        let output = Command::new(&bash)
+            .arg(lifecycle_dir().join("lazybox-direct-service.sh"))
+            .env("HOME", &dir)
+            .env("LAZYBOX_BIN_DEST", &fake)
+            .env("LAZYBOX_DIRECT_SERVICE_ATTEMPTS", "5")
+            .env("LAZYBOX_DIRECT_SERVICE_LOG", dir.join("daemon.log"))
+            .output()
+            .expect("run direct service helper");
+
+        assert!(
+            !output.status.success(),
+            "a failed background daemon start must propagate to provisioning"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("exited before becoming ready"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 }

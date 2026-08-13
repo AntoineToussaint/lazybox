@@ -56,15 +56,18 @@ fn status_pill_doc(tag: StatusTag) -> Option<MarkerDoc> {
             when,
         })
     };
-    // The `label` is the on-screen glyph (#1046) — several states share
-    // one (`✓` = CI ok / approved / ready / merged, distinguished by color
-    // and column), so each `meaning` leads with the state name to keep the
-    // generated Ask-Lazybox docs unambiguous. The glyph set is pinned to
-    // the renderer by `documented_status_pills_match_the_renderer` in `tui`.
+    // The `label` is the on-screen glyph (#1046) — several of the
+    // actionable states share one (`✓` = CI ok / approved / ready,
+    // distinguished by color and column), so each `meaning` leads with the
+    // state name to keep the generated Ask-Lazybox docs unambiguous. Merged
+    // is deliberately NOT one of them: it carries its own terminal `⋈` join
+    // glyph so a done-and-gone PR can't be mistaken for a ready-to-act one
+    // (#1079). The glyph set is pinned to the renderer by
+    // `documented_status_pills_match_the_renderer` in `tui`.
     match tag {
         StatusTag::Merged => doc(
-            "✓",
-            "Merged — the pull request has been merged.",
+            "⋈",
+            "Merged — the pull request has been merged; a terminal, past-tense state.",
             "Shows on a PR whose branch was merged into its base.",
         ),
         StatusTag::Closed => doc(

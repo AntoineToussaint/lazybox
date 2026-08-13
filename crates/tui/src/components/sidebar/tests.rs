@@ -289,7 +289,43 @@ mod status_pill_tests {
         let mut t = base_task();
         t.state = TaskState::Merged;
         t.ci = CiStatus::Failure;
-        assert_eq!(status_pill(&t).unwrap().label, " ✓");
+        assert_eq!(status_pill(&t).unwrap().label, " ⋈");
+    }
+
+    #[test]
+    fn merged_glyph_is_distinct_from_actionable_ok_states() {
+        // #1079: a merged PR (terminal, done-and-gone) must not share the
+        // `✓` used for the actionable ready / approved / CI-green trio, and
+        // it must read as a dimmed/terminal state rather than an active
+        // signal. Color alone was too weak a distinction.
+        let theme = crate::theme::current();
+
+        let mut merged = base_task();
+        merged.state = TaskState::Merged;
+        let merged_pill = status_pill(&merged).expect("merged renders a pill");
+
+        let mut ready = base_task();
+        ready.review = ReviewStatus::Approved;
+        ready.ci = CiStatus::Success;
+        let ready_pill = status_pill(&ready).expect("ready renders a pill");
+
+        let mut approved = base_task();
+        approved.review = ReviewStatus::Approved;
+        approved.ci = CiStatus::Running;
+        let approved_pill = status_pill(&approved).expect("approved renders a pill");
+
+        // Distinct glyph, not the shared `✓`.
+        assert_eq!(merged_pill.label, " ⋈");
+        assert_ne!(merged_pill.label, ready_pill.label);
+        assert_ne!(merged_pill.label, approved_pill.label);
+        assert_eq!(ready_pill.label, " ✓");
+        assert_eq!(approved_pill.label, " ✓");
+
+        // Terminal / past-tense styling: dimmed, unlike the bright
+        // actionable `✓`s.
+        assert_eq!(merged_pill.style.fg, Some(theme.text_dim));
+        assert_ne!(merged_pill.style.fg, ready_pill.style.fg);
+        assert_ne!(merged_pill.style.fg, approved_pill.style.fg);
     }
 
     #[test]

@@ -18,13 +18,18 @@ use lazybox_e2e_channel::{Identity, initiator_handshake, responder_handshake};
 use lazybox_entitlement::{
     AccountId, Entitlement, EntitlementError, EntitlementGate, PlatformEntitlementGate,
 };
+use lazybox_identity::BoxIdentity;
 use lazybox_relay::{
-    Relay, RelayClientError, SUBSCRIPTION_REQUIRED_MESSAGE, connect_through_relay, serve_box,
+    Ack, Hello, RegistrationChallenge, RegistrationProof, Relay, RelayClientError,
+    SUBSCRIPTION_REQUIRED_MESSAGE, connect_through_relay, serve_box,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
 
-const BOX_PUBLIC_KEY: &str = "Ym94LXB1YmxpYy1rZXk=";
+fn registration_identity() -> Arc<BoxIdentity> {
+    let dir = tempfile::tempdir().unwrap();
+    Arc::new(BoxIdentity::load_or_generate(dir.path()).unwrap())
+}
 
 /// Start a relay on an ephemeral loopback port and return its address.
 async fn start_relay() -> String {
@@ -39,11 +44,12 @@ async fn start_relay() -> String {
 fn spawn_echo_box(relay_addr: &str, box_id: &str) {
     let relay_addr = relay_addr.to_string();
     let box_id = box_id.to_string();
+    let identity = registration_identity();
     tokio::spawn(async move {
         let _ = serve_box(
             relay_addr,
             box_id,
-            BOX_PUBLIC_KEY.into(),
+            identity,
             Arc::new(|mut stream| {
                 Box::pin(async move {
                     stream.write_all(b"hello from box").await.unwrap();
@@ -119,11 +125,12 @@ async fn forwards_arbitrary_bytes_untouched() {
     // nothing like its own protocol and require them back verbatim.
     let addr = start_relay().await;
     let relay_addr = addr.clone();
+    let identity = registration_identity();
     tokio::spawn(async move {
         let _ = serve_box(
             relay_addr,
             "box-raw".into(),
-            BOX_PUBLIC_KEY.into(),
+            identity,
             Arc::new(|mut stream| {
                 Box::pin(async move {
                     let mut buf = vec![0u8; 256];
@@ -153,7 +160,7 @@ async fn forwards_arbitrary_bytes_untouched() {
 
 #[tokio::test]
 async fn serve_box_returns_ok_on_clean_control_close() {
-    use lazybox_relay::protocol::{Ack, Hello, read_msg, write_msg};
+    use lazybox_relay::protocol::{read_msg, registration_payload, write_msg};
 
     // A fake relay that accepts the registration, acks it, then closes the
     // control connection cleanly — the box should treat that as a normal
@@ -162,7 +169,25 @@ async fn serve_box_returns_ok_on_clean_control_close() {
     let addr = listener.local_addr().unwrap().to_string();
     tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
-        let _register: Hello = read_msg(&mut sock).await.unwrap();
+        let register: Hello = read_msg(&mut sock).await.unwrap();
+        let Hello::RegisterBox {
+            box_id,
+            box_public_key,
+        } = register
+        else {
+            panic!("expected box registration");
+        };
+        let challenge = RegistrationChallenge {
+            nonce: uuid::Uuid::new_v4(),
+        };
+        write_msg(&mut sock, &challenge).await.unwrap();
+        let proof: RegistrationProof = read_msg(&mut sock).await.unwrap();
+        let identity_payload = registration_payload(&challenge, &box_id, &box_public_key);
+        assert!(lazybox_identity::verify_base64(
+            &box_public_key,
+            &identity_payload,
+            &proof.signature,
+        ));
         write_msg(&mut sock, &Ack::Ok).await.unwrap();
         // Drop `sock` → clean EOF on the box's control read.
     });
@@ -170,7 +195,7 @@ async fn serve_box_returns_ok_on_clean_control_close() {
     let result = serve_box(
         addr,
         "box-clean".into(),
-        BOX_PUBLIC_KEY.into(),
+        registration_identity(),
         Arc::new(|_stream| Box::pin(async {})),
     )
     .await;
@@ -189,11 +214,12 @@ const PLAINTEXT_MARKER: &[u8] = b"LAZYBOX-PLAINTEXT-MARKER-must-not-leak";
 fn spawn_encrypted_echo_box(relay_addr: &str, box_id: &str, identity: Arc<Identity>) {
     let relay_addr = relay_addr.to_string();
     let box_id = box_id.to_string();
+    let registration_identity = registration_identity();
     tokio::spawn(async move {
         let _ = serve_box(
             relay_addr,
             box_id,
-            BOX_PUBLIC_KEY.into(),
+            registration_identity,
             Arc::new(move |stream| {
                 let identity = Arc::clone(&identity);
                 Box::pin(async move {
@@ -324,7 +350,7 @@ async fn unentitled_box_is_refused() {
         serve_box(
             relay_addr,
             "box-denied".into(),
-            BOX_PUBLIC_KEY.into(),
+            registration_identity(),
             Arc::new(|_stream| Box::pin(async {})),
         )
         .await
@@ -389,6 +415,94 @@ async fn newly_brokered_session_gets_typed_subscription_denial() {
         .unwrap_err();
     assert!(matches!(error, RelayClientError::SubscriptionRequired));
     assert_eq!(error.to_string(), SUBSCRIPTION_REQUIRED_MESSAGE);
+}
+
+#[tokio::test]
+async fn copied_public_key_without_its_private_key_cannot_register() {
+    use lazybox_relay::protocol::{read_msg, registration_payload, write_msg};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let relay = Arc::new(Relay::new());
+    tokio::spawn(Arc::clone(&relay).serve(listener));
+
+    let claimed = registration_identity();
+    let impostor = registration_identity();
+    let box_id = "copied-entitlement";
+    let box_public_key = claimed.public_key_base64();
+    let mut stream = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    write_msg(
+        &mut stream,
+        &Hello::RegisterBox {
+            box_id: box_id.into(),
+            box_public_key: box_public_key.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    let challenge: RegistrationChallenge = read_msg(&mut stream).await.unwrap();
+    let signature = impostor
+        .sign(&registration_payload(&challenge, box_id, &box_public_key))
+        .to_bytes()
+        .to_vec();
+    write_msg(&mut stream, &RegistrationProof { signature })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        read_msg::<_, Ack>(&mut stream).await.unwrap(),
+        Ack::AuthenticationFailed
+    );
+    assert_eq!(relay.registered_boxes().await, 0);
+}
+
+#[tokio::test]
+async fn registration_proof_cannot_be_replayed_for_a_new_challenge() {
+    use lazybox_relay::protocol::{read_msg, registration_payload, write_msg};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let relay = Arc::new(Relay::new());
+    tokio::spawn(Arc::clone(&relay).serve(listener));
+
+    let identity = registration_identity();
+    let box_id = "replay-attempt";
+    let box_public_key = identity.public_key_base64();
+    let mut first = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let hello = Hello::RegisterBox {
+        box_id: box_id.into(),
+        box_public_key: box_public_key.clone(),
+    };
+    write_msg(&mut first, &hello).await.unwrap();
+    let first_challenge: RegistrationChallenge = read_msg(&mut first).await.unwrap();
+    let old_signature = identity
+        .sign(&registration_payload(
+            &first_challenge,
+            box_id,
+            &box_public_key,
+        ))
+        .to_bytes()
+        .to_vec();
+    drop(first);
+
+    let mut replay = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    write_msg(&mut replay, &hello).await.unwrap();
+    let second_challenge: RegistrationChallenge = read_msg(&mut replay).await.unwrap();
+    assert_ne!(first_challenge, second_challenge);
+    write_msg(
+        &mut replay,
+        &RegistrationProof {
+            signature: old_signature,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        read_msg::<_, Ack>(&mut replay).await.unwrap(),
+        Ack::AuthenticationFailed
+    );
+    assert_eq!(relay.registered_boxes().await, 0);
 }
 
 #[tokio::test]

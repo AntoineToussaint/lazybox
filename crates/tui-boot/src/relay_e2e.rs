@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lazybox_e2e_channel::{ChannelError, Identity, PublicKey, initiator_handshake};
-use lazybox_ipc::socket::Redial;
+use lazybox_ipc::socket::{Redial, RedialError};
 use lazybox_ipc::transport::{BoxRead, BoxWrite};
 
 /// `<identity>/box_channel_key` — the box's persistent X25519 channel
@@ -106,24 +106,27 @@ pub fn relay_redial(relay_addr: String, box_id: String, box_key: PublicKey) -> R
             let dial = async {
                 let tcp = lazybox_relay::connect_through_relay(&relay_addr, &box_id)
                     .await
-                    .map_err(relay_io)?;
+                    .map_err(relay_redial_error)?;
                 // A device identity the box learns during the handshake.
                 // Step 1 does not yet bind it to a per-device credential
                 // (that is the pairing work), so a fresh ephemeral key per
                 // dial is correct.
-                let device = Identity::generate().map_err(channel_io)?;
+                let device = Identity::generate()
+                    .map_err(channel_io)
+                    .map_err(RedialError::retryable)?;
                 let encrypted = initiator_handshake(tcp, &device, &box_key)
                     .await
-                    .map_err(channel_io)?;
+                    .map_err(channel_io)
+                    .map_err(RedialError::retryable)?;
                 let (rd, wr) = tokio::io::split(encrypted);
                 Ok((Box::new(rd) as BoxRead, Box::new(wr) as BoxWrite))
             };
             match tokio::time::timeout(RELAY_DIAL_TIMEOUT, dial).await {
                 Ok(result) => result,
-                Err(_) => Err(io::Error::new(
+                Err(_) => Err(RedialError::retryable(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "relay dial + E2E handshake timed out",
-                )),
+                ))),
             }
         })
     })
@@ -133,13 +136,21 @@ fn channel_io(e: ChannelError) -> io::Error {
     io::Error::other(e.to_string())
 }
 
-fn relay_io(error: lazybox_relay::RelayClientError) -> io::Error {
-    let kind = match &error {
-        lazybox_relay::RelayClientError::Io(error) => error.kind(),
-        lazybox_relay::RelayClientError::Unavailable { .. } => io::ErrorKind::NotFound,
-        lazybox_relay::RelayClientError::SubscriptionRequired => io::ErrorKind::PermissionDenied,
-    };
-    io::Error::new(kind, error)
+fn relay_redial_error(error: lazybox_relay::RelayClientError) -> RedialError {
+    match error {
+        error @ lazybox_relay::RelayClientError::SubscriptionRequired => {
+            RedialError::terminal(io::Error::new(io::ErrorKind::PermissionDenied, error))
+        }
+        error @ lazybox_relay::RelayClientError::AuthenticationFailed => {
+            RedialError::terminal(io::Error::new(io::ErrorKind::PermissionDenied, error))
+        }
+        lazybox_relay::RelayClientError::Io(error) => {
+            RedialError::retryable(io::Error::new(error.kind(), error))
+        }
+        error @ lazybox_relay::RelayClientError::Unavailable { .. } => {
+            RedialError::retryable(io::Error::new(io::ErrorKind::NotFound, error))
+        }
+    }
 }
 
 /// Read a persisted channel identity, or `None` if the file is absent.
@@ -288,7 +299,10 @@ mod tests {
 
     #[test]
     fn subscription_denial_keeps_its_typed_kind_and_message() {
-        let error = relay_io(lazybox_relay::RelayClientError::SubscriptionRequired);
+        let error = relay_redial_error(lazybox_relay::RelayClientError::SubscriptionRequired);
+        let RedialError::Terminal(error) = error else {
+            panic!("subscription denial must stop reconnecting");
+        };
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert_eq!(
             error.to_string(),

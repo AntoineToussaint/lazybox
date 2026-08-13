@@ -20,6 +20,7 @@ path = "src/bin/lazybox-relay.rs"
 [dependencies]
 lazybox-config      = { workspace = true }
 lazybox-entitlement = { workspace = true }
+lazybox-identity    = { workspace = true }
 serde              = { workspace = true }
 bincode            = { workspace = true }
 thiserror          = { workspace = true }

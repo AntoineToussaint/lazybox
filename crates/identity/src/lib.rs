@@ -19,7 +19,7 @@ mod box_identity;
 mod device;
 mod keystore;
 
-pub use box_identity::{BoxIdentity, BoxIdentityError, verify};
+pub use box_identity::{BoxIdentity, BoxIdentityError, verify, verify_base64};
 pub use device::{
     DeviceRecord, DeviceRegistry, DeviceRegistryError, MintedDevice, device_principal_id,
 };

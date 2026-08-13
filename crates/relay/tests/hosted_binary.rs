@@ -10,6 +10,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use lazybox_identity::BoxIdentity;
 use lazybox_relay::{RelayClientError, serve_box};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -101,7 +102,7 @@ async fn environment_only_platform_config_enforces_entitlements() {
     let error = serve_box(
         relay_addr,
         "box-inactive".into(),
-        "Ym94LXB1YmxpYy1rZXk=".into(),
+        Arc::new(BoxIdentity::load_or_generate(home.path()).unwrap()),
         Arc::new(|_| Box::pin(async {})),
     )
     .await

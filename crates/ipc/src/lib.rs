@@ -3121,12 +3121,13 @@ pub struct Client {
 /// Whether the client currently has a live link to the daemon. A
 /// self-healing transport flips to [`Reconnecting`](Self::Reconnecting)
 /// while it re-dials so the UI can say so instead of freezing silently;
-/// giving up entirely closes the event stream instead (surfaced as the
-/// usual disconnect banner), so there is no terminal variant here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// a non-retryable dial failure becomes [`Failed`](Self::Failed) with the
+/// actionable reason the UI should render.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
     Connected,
     Reconnecting,
+    Failed { message: String },
 }
 
 /// A snapshot of the transport's link to the daemon, published on every
@@ -3180,7 +3181,7 @@ impl Client {
     pub fn connection_status(&self) -> ConnectionStatus {
         self.connection
             .as_ref()
-            .map(|rx| rx.borrow().status)
+            .map(|rx| rx.borrow().status.clone())
             .unwrap_or(ConnectionStatus::Connected)
     }
 

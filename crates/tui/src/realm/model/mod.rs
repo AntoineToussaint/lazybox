@@ -3530,6 +3530,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// outlive everything else. Esc still dismisses it (severity only
     /// drives auto-fade + displacement, never dismissability).
     pub(crate) fn note_daemon_disconnected(&mut self) {
+        if let lazybox_ipc::ConnectionStatus::Failed { message } = self.client.connection_status() {
+            self.note_daemon_connection_failed(message);
+            return;
+        }
         if self.daemon_disconnect_notified {
             return;
         }
@@ -3567,7 +3571,18 @@ impl<T: TerminalAdapter> Model<T> {
         match self.client.connection_status() {
             lazybox_ipc::ConnectionStatus::Reconnecting => self.note_daemon_reconnecting(),
             lazybox_ipc::ConnectionStatus::Connected => self.note_daemon_reconnected(),
+            lazybox_ipc::ConnectionStatus::Failed { message } => {
+                self.note_daemon_connection_failed(message)
+            }
         }
+    }
+
+    fn note_daemon_connection_failed(&mut self, message: String) {
+        if self.daemon_disconnect_notified {
+            return;
+        }
+        self.daemon_disconnect_notified = true;
+        self.flash_error(message);
     }
 
     /// Raise the one-shot "reconnecting…" banner while the transport

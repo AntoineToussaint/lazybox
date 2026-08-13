@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -114,6 +115,7 @@ pub struct PlatformEntitlementGate {
     endpoint: String,
     api_key: String,
     cache: Mutex<HashMap<AccountId, CacheEntry>>,
+    refreshes: Mutex<HashMap<AccountId, Arc<Mutex<()>>>>,
 }
 
 #[derive(Serialize)]
@@ -141,19 +143,42 @@ impl PlatformEntitlementGate {
             endpoint: format!("{}{CHECK_PATH}", platform_url.trim_end_matches('/')),
             api_key: api_key.into(),
             cache: Mutex::new(HashMap::new()),
+            refreshes: Mutex::new(HashMap::new()),
         }
     }
 
     async fn check_cached(&self, account: &AccountId) -> Result<Entitlement, EntitlementError> {
-        let now = Instant::now();
-        {
-            let mut cache = self.cache.lock().await;
-            cache.retain(|_, entry| entry.expires_at > now);
-            if let Some(entry) = cache.get(account) {
-                return Ok(entry.entitlement.clone());
-            }
+        if let Some(entitlement) = self.cached_entitlement(account).await {
+            return Ok(entitlement);
         }
 
+        let refresh = {
+            let mut refreshes = self.refreshes.lock().await;
+            Arc::clone(
+                refreshes
+                    .entry(account.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let result = {
+            let _refresh_guard = refresh.lock().await;
+            match self.cached_entitlement(account).await {
+                Some(entitlement) => Ok(entitlement),
+                None => self.refresh(account).await,
+            }
+        };
+        self.release_refresh(account, &refresh).await;
+        result
+    }
+
+    async fn cached_entitlement(&self, account: &AccountId) -> Option<Entitlement> {
+        let now = Instant::now();
+        let mut cache = self.cache.lock().await;
+        cache.retain(|_, entry| entry.expires_at > now);
+        cache.get(account).map(|entry| entry.entitlement.clone())
+    }
+
+    async fn refresh(&self, account: &AccountId) -> Result<Entitlement, EntitlementError> {
         let entitlement = self.fetch(account).await?;
         let ttl = match entitlement {
             Entitlement::Active => ACTIVE_TTL,
@@ -167,6 +192,17 @@ impl PlatformEntitlementGate {
             },
         );
         Ok(entitlement)
+    }
+
+    async fn release_refresh(&self, account: &AccountId, refresh: &Arc<Mutex<()>>) {
+        let mut refreshes = self.refreshes.lock().await;
+        if Arc::strong_count(refresh) == 2
+            && refreshes
+                .get(account)
+                .is_some_and(|current| Arc::ptr_eq(current, refresh))
+        {
+            refreshes.remove(account);
+        }
     }
 
     async fn fetch(&self, account: &AccountId) -> Result<Entitlement, EntitlementError> {

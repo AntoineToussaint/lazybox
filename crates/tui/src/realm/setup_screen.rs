@@ -145,7 +145,8 @@ pub fn render(screen: Screen) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<
                 Choice::multi(
                     format!(
                         "Pick the {parent_label} repos to subscribe to.\n\n\
-                         Space toggles a repo. Enter confirms.\n\
+                         Space toggles a repo · Enter confirms (none is fine — \
+                         subscribes to no repos from this org).\n\
                          Backspace goes back without changing the existing \
                          subscription.",
                     ),
@@ -154,6 +155,7 @@ pub fn render(screen: Screen) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<
                 .title(format!("Setup · {parent_label} repos"))
                 .label(repo_pick_row_label)
                 .selected_mask(selected)
+                .allow_empty(true)
                 .with_back(true),
             ),
             None,
@@ -352,6 +354,27 @@ mod tests {
     #[test]
     fn public_repo_row_is_plain() {
         assert_eq!(repo_pick_row_label(&repo("acme/web", false)), "acme/web");
+    }
+
+    #[test]
+    fn repo_pick_confirms_with_zero_repos_selected() {
+        // #1098: choosing no repos from an org is a legitimate answer —
+        // an org whose only repo you don't want must not trap the flow.
+        // Enter on an empty selection must confirm (empty pick), not
+        // latch the "pick at least one" hint.
+        use tuirealm::event::{Event, Key, KeyEvent};
+
+        let (mut modal, _) = render(Screen::RepoPick {
+            provider_id: "github".into(),
+            parent_label: "acme".into(),
+            scopes: vec![repo("acme/web", false)],
+            selected: vec![false],
+        });
+        let out = modal.on(&Event::Keyboard(KeyEvent::from(Key::Enter)));
+        assert!(
+            matches!(out, Some(Msg::ChoicePicked(ref v)) if v.is_empty()),
+            "Enter with no repos selected must confirm an empty pick, got {out:?}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -553,11 +553,14 @@ pub(crate) enum ActionConfirmTarget {
     Project(lazybox_core::ProjectKey),
 }
 
-/// One step of a bulk `w w` / spawn / shell fan-out (#899), kept inert
-/// until the plan runs. A `Spawn` is a pure `Command`; an `Inject`
-/// carries only the target terminal + body, so the recap-mutating
-/// delivery ([`Model::deliver_prompt`]) happens at run time, not when
-/// the plan is built — cancelling the confirm then records nothing.
+/// One inert step of the unified per-target fan-out (#1077), produced by
+/// [`Model::apply_one`] — the single "do this op to this workspace"
+/// resolver shared by bulk `w w` / spawn / shell (#899) and snippet /
+/// free-text broadcast (#836). Kept inert until the plan runs: a `Spawn`
+/// is a pure `Command`, while `Inject` / `Write` / `DeliverSnippet` carry
+/// only the target terminal + body, so the recap-mutating delivery
+/// ([`Model::deliver_prompt`]) happens at run time, not when the plan is
+/// built — cancelling the confirm then records nothing.
 #[derive(Debug, Clone)]
 pub(crate) enum BulkAgentStep {
     Spawn(lazybox_ipc::Command),
@@ -570,8 +573,25 @@ pub(crate) enum BulkAgentStep {
         key: lazybox_core::SessionKey,
         cmd: lazybox_ipc::Command,
     },
+    /// Deliver a body to a live agent through the settle-gated inject
+    /// (`w w` continue, free-text broadcast to an agent).
     Inject {
         terminal_id: lazybox_ipc::TerminalId,
+        body: String,
+    },
+    /// Direct encoded write to a live shell (free-text broadcast to a
+    /// shell — no paste debounce, so a plain submit commits cleanly).
+    Write {
+        terminal_id: lazybox_ipc::TerminalId,
+        body: String,
+    },
+    /// Deliver a snippet to a live terminal through the daemon's
+    /// confirmed-delivery command (snippet broadcast / sidebar `]]s`
+    /// fan-out). Works for both agent and shell targets.
+    DeliverSnippet {
+        terminal_id: lazybox_ipc::TerminalId,
+        snippet_key: String,
+        category: String,
         body: String,
     },
 }
@@ -811,13 +831,14 @@ pub(crate) enum ModalFlow {
     UpdateTarget { target: String },
     /// Broadcast flow (`Shift-B`): snippet picker → compose textarea.
     Broadcast { draft: BroadcastDraft },
-    /// Broadcast confirm gate (#836): the composed message + resolved
-    /// targets, stashed while the "start N agents?" `Confirm` is up so a
-    /// "yes" can run the same fan-out the immediate path does.
+    /// Broadcast confirm gate (#836): the fan-out plan snapshotted while
+    /// the "start N agents?" `Confirm` is up, so a "yes" runs exactly the
+    /// steps resolved at compose time — a poll under the modal can't
+    /// change who gets started. Shares the unified [`BulkAgentStep`]
+    /// pipeline (#1077) with `w w` bulk start.
     BroadcastConfirm {
-        targets: Vec<lazybox_core::SessionKey>,
-        snippet_key: Option<String>,
-        body: String,
+        steps: Vec<BulkAgentStep>,
+        summary: String,
     },
     /// Agent-to-agent handoff (`x s`, #431): target picker → compose.
     Handoff { draft: HandoffDraft },

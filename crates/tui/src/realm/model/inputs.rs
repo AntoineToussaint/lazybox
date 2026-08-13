@@ -228,12 +228,12 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Compose-submit for the broadcast flow. Session-less workspaces that
-    /// still belong to a repo/project scope get the default agent spun up
-    /// and the message seeded as its initial prompt (#836) — spawning is
-    /// heavy, so when the send would newly start any agents we first raise
-    /// a confirm gate; a selection that hits only live sessions runs
-    /// straight through. The actual fan-out lives in [`Self::run_broadcast`].
+    /// Compose-submit for the broadcast flow. Delegates to the unified
+    /// per-target pipeline ([`Self::dispatch_broadcast_op`], #1077): a
+    /// broadcast is just a `Snippet` / `Prompt` op fanned over the targets
+    /// stashed when the flow mounted. Session-less scoped workspaces get
+    /// the default agent spun up seeded with the message (#836) behind a
+    /// confirm gate; a selection that hits only live sessions runs through.
     fn dispatch_broadcast(&mut self, body: &str) -> Vec<IpcCommand> {
         let Some(ModalFlow::Broadcast { draft }) = self.modal_flow.take() else {
             return Vec::new();
@@ -245,34 +245,7 @@ impl<T: TerminalAdapter> Model<T> {
         if body.is_empty() {
             return Vec::new();
         }
-        let spawn_count = draft
-            .targets
-            .iter()
-            .filter(|key| {
-                self.sidebar.broadcast_terminal(key).is_none() && self.broadcast_can_spawn(key)
-            })
-            .count();
-        if spawn_count == 0 {
-            return self.run_broadcast(&draft.targets, draft.snippet_key.as_deref(), body);
-        }
-        let agent = self.sidebar.default_agent().to_string();
-        let prompt = if spawn_count == 1 {
-            format!(
-                "1 selected workspace has no agent — start the default agent ({agent}) there and broadcast?"
-            )
-        } else {
-            format!(
-                "{spawn_count} selected workspaces have no agent — start the default agent ({agent}) in each and broadcast?"
-            )
-        };
-        self.set_modal_flow(ModalFlow::BroadcastConfirm {
-            targets: draft.targets,
-            snippet_key: draft.snippet_key,
-            body: body.to_string(),
-        });
-        let modal = crate::realm::components::confirm::Confirm::new(&prompt).default_yes();
-        self.mount_modal(Id::BroadcastConfirm, modal);
-        Vec::new()
+        self.dispatch_broadcast_op(&draft.targets, draft.snippet_key.as_deref(), body)
     }
 
     /// Whether a session-less broadcast target can host an auto-started
@@ -283,102 +256,6 @@ impl<T: TerminalAdapter> Model<T> {
         self.sidebar
             .workspace_by_key(key)
             .is_some_and(|w| w.worktree_scope().is_some())
-    }
-
-    /// Fan the composed broadcast body out to every target. A live session
-    /// gets the message now — snippet-seeded bodies via `DeliverSnippet`
-    /// (leaving history/MRU behind daemon confirmation), free text via the
-    /// agent/shell `deliver_prompt` split. A session-less workspace with a
-    /// repo scope gets the default agent spawned, the body seeded as its
-    /// initial prompt (the daemon injects it once the agent settles).
-    /// Repo-less, project-less workspaces are skipped and named in the
-    /// summary notice.
-    fn run_broadcast(
-        &mut self,
-        targets: &[lazybox_core::SessionKey],
-        snippet_key: Option<&str>,
-        body: &str,
-    ) -> Vec<IpcCommand> {
-        let snippet_category = snippet_key
-            .and_then(|key| self.snippets.get(key))
-            .map(|snippet| snippet.category.clone())
-            .unwrap_or_default();
-        let mut cmds = Vec::new();
-        let mut sent = 0usize;
-        let mut started = 0usize;
-        let mut skipped: Vec<String> = Vec::new();
-        for key in targets {
-            match self.sidebar.broadcast_terminal(key) {
-                Some((terminal_id, is_agent)) => {
-                    if let Some(snippet_key) = snippet_key {
-                        cmds.push(IpcCommand::DeliverSnippet {
-                            terminal_id,
-                            snippet_key: snippet_key.to_string(),
-                            category: snippet_category.clone(),
-                            body: body.to_string(),
-                            submit: true,
-                        });
-                    } else {
-                        self.deliver_prompt(
-                            terminal_id,
-                            is_agent,
-                            body,
-                            lazybox_ipc::PromptSource::Typed,
-                            &mut cmds,
-                        );
-                    }
-                    sent += 1;
-                }
-                None if self.broadcast_can_spawn(key) => {
-                    cmds.push(IpcCommand::Spawn {
-                        session_key: key.clone(),
-                        session_id: None,
-                        client_request_id: None,
-                        kind: lazybox_ipc::TerminalKind::Agent(
-                            self.sidebar.default_agent().to_string(),
-                        ),
-                        cwd: None,
-                        initial_prompt: Some(body.to_string()),
-                        on_main: false,
-                        model_alias: None,
-                        access: lazybox_ipc::AgentRunAccess::Default,
-                    });
-                    started += 1;
-                }
-                None => skipped.push(
-                    self.sidebar
-                        .workspace_by_key(key)
-                        .map(|w| w.name.clone())
-                        .unwrap_or_else(|| key.to_string()),
-                ),
-            }
-        }
-        if sent > 0 || started > 0 {
-            self.sidebar.clear_broadcast_selection();
-        }
-        let plural = |n: usize| if n == 1 { "" } else { "s" };
-        let mut parts: Vec<String> = Vec::new();
-        if sent > 0 {
-            parts.push(format!("queued for {sent} workspace{}", plural(sent)));
-        }
-        if started > 0 {
-            parts.push(format!("started {started} agent{}", plural(started)));
-        }
-        if !skipped.is_empty() {
-            parts.push(format!(
-                "{} skipped (no repo): {}",
-                skipped.len(),
-                skipped.join(", "),
-            ));
-        }
-        let summary = if parts.is_empty() {
-            "broadcast reached nobody".to_string()
-        } else {
-            parts.join(" · ")
-        };
-        self.flash_info(summary);
-        self.redraw = true;
-        cmds
     }
 
     /// Resume every workspace currently blocked on a provider usage /
@@ -1286,15 +1163,15 @@ showing keybinding search only",
             }
             Some(Id::BroadcastConfirm) => {
                 // The broadcast would start new agents (#836); yes runs the
-                // same fan-out the no-spawn path takes, no drops the stash.
-                if let Some(ModalFlow::BroadcastConfirm {
-                    targets,
-                    snippet_key,
-                    body,
-                }) = self.modal_flow.take()
+                // plan snapshotted at compose time (#1077), no drops the
+                // stash and keeps the multi-select for a retry.
+                if let Some(ModalFlow::BroadcastConfirm { steps, summary }) = self.modal_flow.take()
                 {
                     if yes {
-                        cmds.extend(self.run_broadcast(&targets, snippet_key.as_deref(), &body));
+                        self.sidebar.clear_broadcast_selection();
+                        self.flash_info(summary);
+                        self.redraw = true;
+                        cmds.extend(self.run_bulk_agent_steps(steps));
                     } else {
                         self.flash_info("broadcast cancelled");
                     }

@@ -612,19 +612,28 @@ fn title_spans(
 }
 
 /// Byte range of the first case-insensitive occurrence of `needle` in
-/// `hay`, or `None`. Bails when case-folding shifts byte lengths (rare,
-/// non-ASCII) rather than risk slicing a title mid-codepoint.
+/// `hay`, expressed in `hay`'s ORIGINAL byte offsets, or `None`.
+///
+/// The match is found in lowercased space, but `to_lowercase()` can shift
+/// byte offsets (non-ASCII case-folds grow or shrink, and per-char shifts
+/// can even cancel to an equal total length while skewing interior
+/// boundaries). So the lowercased offsets are validated against the
+/// original before use: they must land on real char boundaries AND the
+/// original slice must itself case-fold back to the needle. When they
+/// don't, we skip the highlight rather than slice mid-codepoint — which
+/// would panic in this render path on an attacker-chosen title.
 fn ci_match_range(hay: &str, needle: &str) -> Option<std::ops::Range<usize>> {
     if needle.is_empty() {
         return None;
     }
-    let hay_lower = hay.to_lowercase();
-    if hay_lower.len() != hay.len() {
-        return None;
-    }
     let needle_lower = needle.to_lowercase();
+    let hay_lower = hay.to_lowercase();
     let start = hay_lower.find(&needle_lower)?;
-    Some(start..(start + needle_lower.len()).min(hay.len()))
+    let end = start + needle_lower.len();
+    (hay.is_char_boundary(start)
+        && hay.is_char_boundary(end)
+        && hay[start..end].to_lowercase() == needle_lower)
+        .then_some(start..end)
 }
 
 /// Hard cap on a single chip's text (before the `…`). A verbose
@@ -3581,11 +3590,17 @@ mod tests {
     }
 
     #[test]
-    fn ci_match_range_bails_on_length_shifting_case_fold() {
-        // A pre-composed uppercase whose lowercase is longer (İ → i̇) would
-        // shift byte offsets; rather than risk slicing mid-codepoint the
-        // helper declines to highlight.
+    fn ci_match_range_stays_correct_and_panic_free_under_case_fold_skew() {
+        // A grow-on-fold (İ → i̇, +1 byte) skews later offsets: naively
+        // mapping the lowercased match back would highlight "tanb", so the
+        // helper must decline instead.
         assert_eq!(ci_match_range("İstanbul", "stan"), None);
+        // A net-zero fold (ẞ→ß shrinks −1, İ→i̇ grows +1) leaves total length
+        // equal but skews an interior boundary — the lowercased offset lands
+        // mid-codepoint in the original. Must return None, never panic.
+        assert_eq!(ci_match_range("ẞxİy", "x"), None);
+        // A length-preserving non-ASCII fold still highlights the right span.
+        assert_eq!(ci_match_range("Café", "café"), Some(0..5));
     }
 
     #[test]

@@ -6180,6 +6180,8 @@ mod stale_input_tests {
                 | Id::NewWorkspaceRepo
                 | Id::LinearTeamRepo
                 | Id::Editor
+                | Id::EditorsPanel
+                | Id::EditorForm
                 | Id::Setup
                 | Id::AdoptTarget
                 | Id::StartAgentProject
@@ -6224,6 +6226,8 @@ mod stale_input_tests {
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
             Id::Editor,
+            Id::EditorsPanel,
+            Id::EditorForm,
             Id::Setup,
             Id::RemoveOutOfScope,
             Id::MergeConfirm,

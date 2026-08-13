@@ -297,6 +297,42 @@ pub fn discover_at_startup(user: Vec<UserEditorEntry>) -> Vec<EditorTemplate> {
     detect_available(&merged)
 }
 
+/// Whether a configured editor's `command` resolves right now: an
+/// absolute path that exists and is executable, or a bare name found on
+/// PATH. Drives the "not found" badge in the Settings editors panel so
+/// a typo or an uninstalled tool is visible without launching it.
+pub fn command_available(command: &str) -> bool {
+    which::which(command).is_ok()
+}
+
+/// Split a user-typed launch command line into `(program, args)`,
+/// guaranteeing a `{path}` placeholder so the worktree directory is
+/// always handed to the editor. Shell-style tokenization (via
+/// `shell_words`) so a quoted path with spaces stays one token —
+/// `"/Applications/Sublime Text.app/.../subl" {path}` parses as the
+/// program plus `{path}`, and round-trips through [`join_launch_command`]
+/// without corruption. A line without `{path}` gets one appended,
+/// matching the common "open this folder" default.
+///
+/// Returns `None` for a blank line or unbalanced quoting (nothing to
+/// save, or a parse the user needs to fix).
+pub fn parse_launch_command(line: &str) -> Option<(String, Vec<String>)> {
+    let mut tokens = shell_words::split(line).ok()?.into_iter();
+    let command = tokens.next()?;
+    let mut args: Vec<String> = tokens.collect();
+    if !args.iter().any(|arg| arg.contains("{path}")) {
+        args.push("{path}".to_string());
+    }
+    Some((command, args))
+}
+
+/// Render a stored `(command, args)` back into one editable line for the
+/// edit prompt, shell-quoting any token that contains whitespace so it
+/// round-trips through [`parse_launch_command`] unchanged.
+pub fn join_launch_command(command: &str, args: &[String]) -> String {
+    shell_words::join(std::iter::once(command).chain(args.iter().map(String::as_str)))
+}
+
 /// Build the launcher argv for opening `url`, honoring an optional
 /// `browser` override. Split out from [`open_url`] so the
 /// platform-specific command shape is unit-testable without spawning.
@@ -1173,5 +1209,95 @@ mod tests {
         let t = tpl("myedit", &["--flag"]);
         let (launch, _) = open_file_launch(&t, "/a/b.rs", None, None);
         assert_eq!(launch.args, vec!["--flag", "/a/b.rs"]);
+    }
+
+    #[test]
+    fn parse_launch_command_splits_program_and_args() {
+        assert_eq!(
+            parse_launch_command("code --new-window {path}"),
+            Some((
+                "code".to_string(),
+                vec!["--new-window".to_string(), "{path}".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_launch_command_appends_path_when_absent() {
+        // Bare command: the worktree still needs to be passed, so a
+        // `{path}` token is synthesized.
+        assert_eq!(
+            parse_launch_command("code"),
+            Some(("code".to_string(), vec!["{path}".to_string()]))
+        );
+        // Args present but none carry the placeholder → append it.
+        assert_eq!(
+            parse_launch_command("edit --workspace"),
+            Some((
+                "edit".to_string(),
+                vec!["--workspace".to_string(), "{path}".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_launch_command_keeps_a_provided_placeholder_in_place() {
+        assert_eq!(
+            parse_launch_command("edit --file {path} --wait"),
+            Some((
+                "edit".to_string(),
+                vec![
+                    "--file".to_string(),
+                    "{path}".to_string(),
+                    "--wait".to_string()
+                ]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_launch_command_rejects_a_blank_line() {
+        assert_eq!(parse_launch_command("   "), None);
+        assert_eq!(parse_launch_command(""), None);
+    }
+
+    #[test]
+    fn parse_launch_command_keeps_a_quoted_path_with_spaces_intact() {
+        assert_eq!(
+            parse_launch_command("\"/Applications/Sublime Text.app/bin/subl\" {path}"),
+            Some((
+                "/Applications/Sublime Text.app/bin/subl".to_string(),
+                vec!["{path}".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_launch_command_rejects_unbalanced_quoting() {
+        assert_eq!(parse_launch_command("edit \"unclosed {path}"), None);
+    }
+
+    #[test]
+    fn launch_command_round_trips_through_join_and_parse() {
+        // The edit prompt joins a stored entry back to a line; re-parsing
+        // it must reproduce the same (command, args) — including a path
+        // with spaces, which naive whitespace-splitting would corrupt.
+        let command = "/Applications/Sublime Text.app/bin/subl";
+        let args = vec!["--wait".to_string(), "{path}".to_string()];
+        let line = join_launch_command(command, &args);
+        assert_eq!(
+            parse_launch_command(&line),
+            Some((command.to_string(), args))
+        );
+    }
+
+    #[test]
+    fn command_available_finds_a_command_on_path() {
+        // `sh` exists on every unix CI runner; a random name never does.
+        #[cfg(unix)]
+        assert!(command_available("sh"));
+        assert!(!command_available(
+            "lazybox-definitely-not-a-real-editor-xyz"
+        ));
     }
 }

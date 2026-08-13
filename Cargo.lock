@@ -2128,6 +2128,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "shell-words",
  "tempfile",
  "tokio",
  "tracing",

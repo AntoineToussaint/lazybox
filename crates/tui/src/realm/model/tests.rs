@@ -5596,6 +5596,110 @@ mod wake_tests {
 }
 
 #[cfg(test)]
+mod wake_burst_liveness_tests {
+    //! Issue #1045: the whole-app freeze after sleep/wake was a wake
+    //! catch-up burst flooding the single UI thread WHILE a `Loading`
+    //! modal awaited a result that never landed (dropped on the
+    //! overflowed event channel). Either half alone is survivable; the
+    //! incident was the combination. This binds both guarantees at once:
+    //!
+    //! - the burst can't monopolise the thread — a drain is bounded and
+    //!   returns control to the input read with events still queued, so
+    //!   `Esc` is serviced within frame budget rather than after the
+    //!   whole burst; and
+    //! - the modal can't wait forever — even with its producer's sender
+    //!   still ALIVE (the "value produced but lost on the overflowed
+    //!   channel" case, distinct from a dropped sender), it times out
+    //!   and asks to be dismissed.
+    //!
+    //! Together: wake burst + never-arriving modal → app stays
+    //! responsive AND the modal clears itself.
+    use super::super::Model;
+    use super::super::helpers::{MAX_EVENTS_PER_TICK, drain_daemon_events};
+    use crate::realm::Msg;
+    use crate::realm::components::loading::Loading;
+    use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event, TerminalId};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
+    use tuirealm::component::AppComponent;
+    use tuirealm::event::Event as RealmEvent;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model_with_event_sender() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::Sender<Event>,
+        mpsc::UnboundedReceiver<lazybox_ipc::Command>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let model = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        (model, evt_tx, cmd_rx)
+    }
+
+    /// Fill the inbound channel with a wake catch-up burst: more
+    /// `TerminalOutput` chunks than one drain can collect, the shape of
+    /// a machine resuming from sleep. Kept under the channel capacity so
+    /// the test exercises the per-tick collection cap, not the daemon
+    /// forwarder's overflow path (covered by its own tests).
+    fn wake_burst(tx: &mpsc::Sender<Event>) -> usize {
+        let n = (MAX_EVENTS_PER_TICK * 4).min(EVENT_CHANNEL_CAPACITY - 1);
+        for seq in 0..n {
+            tx.try_send(Event::TerminalOutput {
+                terminal_id: TerminalId(1),
+                bytes: b"wake catch-up chunk\n".to_vec(),
+                first_seq: seq as u64,
+                seq: seq as u64,
+            })
+            .expect("bounded channel must have room for the burst");
+        }
+        n
+    }
+
+    #[test]
+    fn wake_burst_stays_responsive_while_a_stuck_modal_self_dismisses() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+
+        let queued = wake_burst(&evt_tx);
+        assert!(
+            queued > MAX_EVENTS_PER_TICK,
+            "the burst must exceed one drain's collection cap"
+        );
+
+        // A `Loading` modal is up, awaiting a value that will never
+        // land. Holding the producer keeps its sender ALIVE — the #1045
+        // signature (result dropped on the overflowed channel), NOT a
+        // producer that dropped its sender.
+        let (loading, _never_sends) = Loading::pending("waking…");
+        let mut loading = loading.timeout(Duration::ZERO);
+
+        // Responsiveness: one drain is bounded — it cannot swallow the
+        // whole burst, so the loop falls through to the input read with
+        // events still queued instead of spinning on output.
+        let backlog = drain_daemon_events(&mut m, &mut Vec::new(), || false);
+        assert!(
+            backlog,
+            "a bounded drain over a wake burst must report more still queued"
+        );
+        assert!(
+            m.client.rx.try_recv().is_ok(),
+            "the burst must NOT drain in one tick — the keyboard read would be starved"
+        );
+
+        // Liveness: the modal times out and asks to be dismissed even
+        // though its producer never sent and never dropped its sender.
+        assert!(
+            matches!(loading.on(&RealmEvent::Tick), Some(Msg::LoadingTimedOut)),
+            "a modal awaiting a lost wake result must self-dismiss, not spin forever"
+        );
+    }
+}
+
+#[cfg(test)]
 mod coalesce_tests {
     //! `coalesce_adjacent_output` collapses a streaming burst into one
     //! dispatch per terminal — this is what keeps memory bounded under

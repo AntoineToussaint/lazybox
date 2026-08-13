@@ -32,6 +32,7 @@ mod inputs;
 mod keys;
 mod modals;
 mod optimistic;
+mod render_writer;
 mod terminal_leader;
 #[cfg(test)]
 mod tests;
@@ -70,7 +71,9 @@ use tuirealm::application::Application;
 use tuirealm::event::Event as RealmEvent;
 use tuirealm::listener::{EventListenerCfg, Poll, PortError, PortResult};
 use tuirealm::ratatui::layout::Rect;
-use tuirealm::terminal::{CrosstermTerminalAdapter, TerminalAdapter};
+use tuirealm::terminal::TerminalAdapter;
+
+use render_writer::AsyncCrosstermAdapter;
 
 const SIDEBAR_PID: PaneId = PaneId::new(1);
 const RIGHT_PID: PaneId = PaneId::new(2);
@@ -1343,6 +1346,22 @@ pub struct Model<T: TerminalAdapter> {
     /// it opens `?` so the hidden hints are reachable instead of the
     /// count being a dead end (#805).
     footer_overflow_rect: Option<Rect>,
+    /// Last frame's widget-build cost (walking the tree into the back
+    /// buffer — CPU), split out from the flush by `view()` so the
+    /// watchdog can tell an expensive render from a blocked terminal
+    /// write (#1090 / audit R-0).
+    last_render_build: std::time::Duration,
+    /// Last frame's flush cost (diff + stdout write inside `terminal.draw`
+    /// — I/O that blocks on the host terminal). A slow frame that is
+    /// nearly all flush is the terminal write freezing the UI thread, not
+    /// costly rendering.
+    last_render_flush: std::time::Duration,
+    /// Bytes handed to the off-thread render writer but not yet drained to
+    /// the terminal, when async rendering is on (`LAZYBOX_ASYNC_RENDER`).
+    /// The run loop skips rendering a new frame while this is over its cap,
+    /// so a slow terminal write can't back up the input thread (#1090).
+    /// `None` in the default (synchronous) mode — the loop never skips.
+    render_pending: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// True if the user has typed at least one non-Tab key since
     /// focus entered the terminal pane. While `false`, Tab in the
     /// terminal pane cycles focus like everywhere else; once the
@@ -2044,6 +2063,9 @@ impl<T: TerminalAdapter> Model<T> {
             leader_target: None,
             last_click: None,
             footer_overflow_rect: None,
+            last_render_build: std::time::Duration::ZERO,
+            last_render_flush: std::time::Duration::ZERO,
+            render_pending: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
             sync_error_source: None,
@@ -2178,10 +2200,16 @@ fn install_panic_hook() {
     });
 }
 
-impl Model<CrosstermTerminalAdapter> {
+impl Model<AsyncCrosstermAdapter> {
     pub fn new(client: Client, snippets: lazybox_config::Snippets) -> anyhow::Result<Self> {
         install_panic_hook();
-        let terminal = CrosstermTerminalAdapter::new()?;
+        // The production adapter renders straight to stdout by default;
+        // `LAZYBOX_ASYNC_RENDER=1` opts into the off-thread writer so a slow
+        // terminal write can't freeze the input thread (#1090 / #1045). Kept
+        // opt-in until the terminal-owner architecture makes the writer
+        // crash-safe by default (would otherwise regress #211).
+        let terminal = AsyncCrosstermAdapter::new()?;
+        let render_pending = terminal.pending_handle();
         // Enable raw mode, the alt screen, mouse capture, bracketed
         // paste, focus reporting and the Kitty keyboard protocol. The
         // guard owns the whole set: dropping it (clean exit, error, or
@@ -2198,6 +2226,7 @@ impl Model<CrosstermTerminalAdapter> {
         );
         model.apply_snippets(snippets);
         model.term_guard = Some(term_guard);
+        model.render_pending = render_pending;
         // Subscribe up-front for both first-run and returning users.
         // First-run gets an empty snapshot before the wizard finishes
         // (no polling has run yet) so nothing flickers in behind the
@@ -5063,6 +5092,16 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let mut captured_area = Rect::default();
         let mut footer_overflow: Option<Rect> = None;
+        // Split the `terminal.draw` cost into *build* (walking the widget
+        // tree into the back buffer — CPU) vs *flush* (diffing + writing
+        // the frame to stdout — I/O that blocks on the host terminal).
+        // The run-loop watchdog brackets `view()` as one "render" number,
+        // but a multi-second "render" is never CPU (a full grid walk is
+        // ~1-2ms) — it's the flush blocking on a slow/suspended terminal
+        // (issue #1090 / audit R-0). `build_end` is stamped at the end of
+        // the draw closure; everything after it inside `draw` is flush.
+        let draw_start = std::time::Instant::now();
+        let build_end: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
         let _ = self.terminal.draw(|f| {
             let area = f.area();
             captured_area = area;
@@ -5175,7 +5214,22 @@ impl<T: TerminalAdapter> Model<T> {
             if let Some(top) = self.modal_stack.last() {
                 self.app.view(top, f, area);
             }
+            // End of widget build; the diff + stdout flush happens after
+            // this closure returns, inside `draw`.
+            build_end.set(Some(std::time::Instant::now()));
         });
+        // Attribute the frame's wall-clock to build vs flush. A slow frame
+        // whose time is nearly all `flush` is the terminal write blocking
+        // the UI thread, not expensive rendering — the distinction the
+        // watchdog needs so it stops crying "render" at an I/O stall.
+        let render_total = draw_start.elapsed();
+        let render_build = build_end
+            .get()
+            .map(|end| end.saturating_duration_since(draw_start))
+            .unwrap_or(render_total);
+        let render_flush = render_total.saturating_sub(render_build);
+        self.last_render_build = render_build;
+        self.last_render_flush = render_flush;
         self.layout.last_area = captured_area;
         self.footer_overflow_rect = footer_overflow;
         // Resize commands are queued by the terminal stack's render

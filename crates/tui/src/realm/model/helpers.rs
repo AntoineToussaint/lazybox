@@ -561,7 +561,16 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(
             resyncs += 1;
         }
         model.dispatch_daemon_event(evt);
-        if input_pending() {
+        // Bound event *handling*, not just receiving (audit D-0): the
+        // collection loop above stops pulling at `DRAIN_BUDGET`, but the
+        // real cost is dispatch — a poll that upserts N workspaces, or a
+        // single fat `Snapshot`, could otherwise run the whole batch past
+        // the budget on the UI thread. Stop once the drain has spent its
+        // budget and carry the remainder to the next iteration. The check
+        // is after dispatch, so at least one event always makes progress
+        // (a lone oversized event can't be starved forever). Input still
+        // pre-empts immediately, ahead of the clock.
+        if input_pending() || start.elapsed() >= DRAIN_BUDGET {
             break;
         }
     }
@@ -854,8 +863,17 @@ pub(super) struct PhaseTimings {
     pub(super) ticks: Duration,
     /// The tuirealm message pump plus the updates it produces.
     pub(super) messages: Duration,
-    /// Rendering the frame.
+    /// Rendering the frame (build + flush; == `render_build + render_flush`).
     pub(super) render: Duration,
+    /// The CPU half of `render`: walking the widget tree into the back
+    /// buffer. A full grid walk is ~1-2ms, so this stays small even under
+    /// a chatty agent (#1090).
+    pub(super) render_build: Duration,
+    /// The I/O half of `render`: diffing + writing the frame to stdout,
+    /// which blocks on the host terminal. When a slow "render" is almost
+    /// entirely this, the terminal write is freezing the UI thread — not
+    /// expensive rendering (audit R-0).
+    pub(super) render_flush: Duration,
 }
 
 impl PhaseTimings {
@@ -882,6 +900,15 @@ impl PhaseTimings {
 /// always a bug. The watchdog turns those from "the UI felt frozen"
 /// field reports into warn lines in `/tmp/lazybox.log`.
 pub(super) const FRAME_BUDGET: Duration = Duration::from_millis(50);
+
+/// Backpressure cap for the off-thread render writer (#1090): while more
+/// than this many bytes are queued but not yet drained to the terminal, the
+/// run loop skips generating a new frame (coalescing at the frame boundary)
+/// rather than piling diffs onto a writer the slow terminal is starving.
+/// ~512 KiB is several full-screen frames of headroom — enough to ride out
+/// a brief write stall without skipping, but bounded so a wedged terminal
+/// can't grow the queue without limit. Only consulted in async mode.
+const RENDER_BACKPRESSURE_CAP: usize = 512 * 1024;
 
 /// Minimum spacing between watchdog warn lines. A pathological case
 /// (every iteration slow) logs a summary once a second instead of
@@ -933,6 +960,8 @@ impl LoopWatchdog {
             ticks_ms = timings.ticks.as_millis() as u64,
             messages_ms = timings.messages.as_millis() as u64,
             render_ms = timings.render.as_millis() as u64,
+            render_build_ms = timings.render_build.as_millis() as u64,
+            render_flush_ms = timings.render_flush.as_millis() as u64,
             suppressed = self.suppressed,
             worst_suppressed_ms = self.worst_suppressed.as_millis() as u64,
             "run-loop iteration exceeded the frame budget — something \
@@ -1034,6 +1063,8 @@ impl PerfMonitor {
             ticks_ms = timings.ticks.as_micros() as f64 / 1000.0,
             messages_ms = timings.messages.as_micros() as f64 / 1000.0,
             render_ms = timings.render.as_micros() as f64 / 1000.0,
+            render_build_ms = timings.render_build.as_micros() as f64 / 1000.0,
+            render_flush_ms = timings.render_flush.as_micros() as f64 / 1000.0,
             chan_depth = depth,
             resyncs_total = resyncs,
             backlog_hwm,
@@ -1334,9 +1365,27 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // discrete input (keystrokes, clicks) bypasses the cap and paints
         // at once. A frame the throttle defers keeps `model.redraw` set,
         // so it paints on the next eligible iteration (≤ one refresh away).
+        // Whether a pending redraw was skipped this iteration *only* because
+        // the async writer was backed up. When so, we must NOT consume
+        // `redraw_is_input` below — the keystroke that armed the immediate
+        // paint hasn't been painted yet, and dropping its input-priority
+        // would route the deferred repaint through the background throttle,
+        // adding a visible ~refresh of lag after the key (#1090 finding #6).
+        let mut skipped_for_backpressure = false;
         if model.redraw {
+            // Async-render backpressure (#1090): while the off-thread
+            // writer is behind — a slow terminal accepting the previous
+            // frames — skip generating a new frame instead of piling more
+            // diffs onto it. `redraw` stays set, so we paint the moment it
+            // drains; coalescing happens at the frame boundary, so ratatui's
+            // previous-frame state stays exactly the last frame we sent and
+            // no diff is ever split or lost. `None` (sync mode) never skips.
+            let writer_behind = model.render_pending.as_ref().is_some_and(|pending| {
+                pending.load(std::sync::atomic::Ordering::Acquire) > RENDER_BACKPRESSURE_CAP
+            });
+            skipped_for_backpressure = writer_behind;
             let now = std::time::Instant::now();
-            if render_throttle.should_render(now, redraw_is_input) {
+            if !writer_behind && render_throttle.should_render(now, redraw_is_input) {
                 // Per-frame timing log behind the `lazybox=debug`
                 // filter. Lets us see in `/tmp/lazybox.log` whether a
                 // slow scroll is the render itself (would show large
@@ -1345,21 +1394,35 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
                 // `tracing::debug!` is a no-op when the level isn't on.
                 model.view();
                 timings.render = now.elapsed();
+                // Split render into build (CPU) vs flush (terminal-write
+                // I/O), stamped by `view()` — so an over-budget "render"
+                // reveals whether the UI was expensive to build or the
+                // terminal write blocked the thread (#1090 / audit R-0).
+                timings.render_build = model.last_render_build;
+                timings.render_flush = model.last_render_flush;
                 let elapsed_ms = timings.render.as_micros() as f32 / 1000.0;
                 tracing::debug!(frame_ms = elapsed_ms, "render");
                 model.redraw = false;
                 render_throttle.record(now);
             }
         }
-        redraw_is_input = false;
+        // Consume the one-shot input flag — unless the frame was held back
+        // purely by writer backpressure, in which case it must survive to
+        // the next iteration so the deferred paint stays immediate (#6).
+        if !skipped_for_backpressure {
+            redraw_is_input = false;
+        }
 
-        // Emit any OSC desktop notifications queued during this
-        // iteration's drain. Here — after the frame flush, on the
-        // render thread — is the one point where the escape bytes
-        // can't interleave with a half-written ratatui frame, which
-        // would paint the payload as literal text and lose the
-        // banner (#296).
-        crate::notify::flush_pending_osc();
+        // Emit any OSC desktop notifications queued during this iteration's
+        // drain. Routed through the render writer (not stdout directly) so
+        // the escape bytes are serialized behind this iteration's frame on
+        // the one channel and can't interleave with a half-written frame —
+        // which would paint the payload as literal text and lose the banner
+        // (#296). In sync mode `enqueue_raw` writes stdout directly, still
+        // after the frame flush above, preserving the same ordering.
+        for seq in crate::notify::take_pending_osc() {
+            super::render_writer::enqueue_raw(seq.as_bytes());
+        }
 
         // 5. Block on the unified wait. One input event per
         // iteration, render between events — the "drain all then

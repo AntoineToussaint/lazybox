@@ -6197,6 +6197,7 @@ mod watchdog_tests {
             ticks: Duration::from_millis(2),
             messages: Duration::from_millis(3),
             render: Duration::from_millis(40),
+            ..Default::default()
         };
         let (name, dur) = timings.worst();
         assert_eq!(name, "drain");

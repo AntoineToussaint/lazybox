@@ -20,6 +20,11 @@ poll loop and its own writer against the same `state.db`, so running both
 doubles the provider polling and risks SQLite write contention. Run
 `lazybox-api@` alone only if you don't also need the socket daemon.
 
+`lazybox-relay.service` is a separate system-level unit for the public hosted
+relay. It runs as a dynamic user, reads `/etc/lazybox/relay.env`, and is
+installed through [`docs/hosted-relay-runbook.md`][hosted-relay]; it does not
+share state with either per-user box unit.
+
 ## Install (golden image)
 
 Bake the units and an env dir into the image (see epic #885 / #886):
@@ -77,3 +82,4 @@ systemctl restart lazybox-daemon@alice
 
 [scoping]: ../../docs/remote-daemon-scoping.md
 [runbook]: ../../docs/byo-remote-runbook.md
+[hosted-relay]: ../../docs/hosted-relay-runbook.md

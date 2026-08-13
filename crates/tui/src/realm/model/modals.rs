@@ -2580,8 +2580,13 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         if !self.mount_linear_team_repo_picker(&team) {
+            // Genuinely nothing to propose: the user tracks no GitHub repo,
+            // so there's no repo to map the team *to* either. Point at the
+            // fix (add a repo) rather than at a config key that can't yet be
+            // filled in (#1041, review).
             self.flash_info(format!(
-                "no GitHub repos tracked yet — set providers.linear.teams.{team} by hand"
+                "no GitHub repos in scope yet — add one to lazybox, then `w w` \
+                 offers it for Linear team {team}"
             ));
         }
     }

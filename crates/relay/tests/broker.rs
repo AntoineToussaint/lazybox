@@ -3,14 +3,28 @@
 //! through the relay — which only ever splices opaque bytes.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
+use bytes::Bytes;
+use http_body_util::Full;
+use hyper::Response;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use lazybox_e2e_channel::{Identity, initiator_handshake, responder_handshake};
-use lazybox_entitlement::{AccountId, Entitlement, EntitlementError, EntitlementGate};
-use lazybox_relay::{Relay, connect_through_relay, serve_box};
+use lazybox_entitlement::{
+    AccountId, Entitlement, EntitlementError, EntitlementGate, PlatformEntitlementGate,
+};
+use lazybox_relay::{
+    Relay, RelayClientError, SUBSCRIPTION_REQUIRED_MESSAGE, connect_through_relay, serve_box,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
+
+const BOX_PUBLIC_KEY: &str = "Ym94LXB1YmxpYy1rZXk=";
 
 /// Start a relay on an ephemeral loopback port and return its address.
 async fn start_relay() -> String {
@@ -29,7 +43,7 @@ fn spawn_echo_box(relay_addr: &str, box_id: &str) {
         let _ = serve_box(
             relay_addr,
             box_id,
-            "test-account".into(),
+            BOX_PUBLIC_KEY.into(),
             Arc::new(|mut stream| {
                 Box::pin(async move {
                     stream.write_all(b"hello from box").await.unwrap();
@@ -93,7 +107,10 @@ async fn unknown_box_is_rejected() {
     let err = connect_through_relay(&addr, "nobody-home")
         .await
         .unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    assert!(matches!(
+        err,
+        RelayClientError::Unavailable { box_id } if box_id == "nobody-home"
+    ));
 }
 
 #[tokio::test]
@@ -106,7 +123,7 @@ async fn forwards_arbitrary_bytes_untouched() {
         let _ = serve_box(
             relay_addr,
             "box-raw".into(),
-            "acct".into(),
+            BOX_PUBLIC_KEY.into(),
             Arc::new(|mut stream| {
                 Box::pin(async move {
                     let mut buf = vec![0u8; 256];
@@ -153,7 +170,7 @@ async fn serve_box_returns_ok_on_clean_control_close() {
     let result = serve_box(
         addr,
         "box-clean".into(),
-        "acct".into(),
+        BOX_PUBLIC_KEY.into(),
         Arc::new(|_stream| Box::pin(async {})),
     )
     .await;
@@ -176,7 +193,7 @@ fn spawn_encrypted_echo_box(relay_addr: &str, box_id: &str, identity: Arc<Identi
         let _ = serve_box(
             relay_addr,
             box_id,
-            "test-account".into(),
+            BOX_PUBLIC_KEY.into(),
             Arc::new(move |stream| {
                 let identity = Arc::clone(&identity);
                 Box::pin(async move {
@@ -307,15 +324,17 @@ async fn unentitled_box_is_refused() {
         serve_box(
             relay_addr,
             "box-denied".into(),
-            "lapsed-account".into(),
+            BOX_PUBLIC_KEY.into(),
             Arc::new(|_stream| Box::pin(async {})),
         )
         .await
     });
-    assert!(
-        registered.await.unwrap().is_err(),
-        "a denied registration surfaces as an error to the box",
-    );
+    let error = registered
+        .await
+        .unwrap()
+        .expect_err("a denied registration surfaces as an error to the box");
+    assert!(matches!(error, RelayClientError::SubscriptionRequired));
+    assert_eq!(error.to_string(), SUBSCRIPTION_REQUIRED_MESSAGE);
     assert_eq!(
         relay.registered_boxes().await,
         0,
@@ -326,7 +345,111 @@ async fn unentitled_box_is_refused() {
     let err = connect_through_relay(&addr, "box-denied")
         .await
         .unwrap_err();
-    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    assert!(matches!(err, RelayClientError::Unavailable { .. }));
+}
+
+struct ToggleGate {
+    active: Arc<AtomicBool>,
+}
+
+impl EntitlementGate for ToggleGate {
+    fn check<'a>(
+        &'a self,
+        _account: &'a AccountId,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Entitlement, EntitlementError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            if self.active.load(Ordering::SeqCst) {
+                Ok(Entitlement::Active)
+            } else {
+                Ok(Entitlement::Inactive {
+                    reason: "no active subscription".into(),
+                })
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn newly_brokered_session_gets_typed_subscription_denial() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let active = Arc::new(AtomicBool::new(true));
+    let relay = Arc::new(Relay::with_gate(Box::new(ToggleGate {
+        active: Arc::clone(&active),
+    })));
+    tokio::spawn(Arc::clone(&relay).serve(listener));
+
+    spawn_echo_box(&addr, "box-expired");
+    await_registration(&relay).await;
+    active.store(false, Ordering::SeqCst);
+
+    let error = connect_through_relay(&addr, "box-expired")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, RelayClientError::SubscriptionRequired));
+    assert_eq!(error.to_string(), SUBSCRIPTION_REQUIRED_MESSAGE);
+}
+
+#[tokio::test]
+async fn cached_active_box_survives_platform_outage_until_ttl() {
+    let platform_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let platform_url = format!("http://{}", platform_listener.local_addr().unwrap());
+    let (platform_shutdown, mut platform_shutdown_rx) = tokio::sync::oneshot::channel();
+    let platform = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut platform_shutdown_rx => return,
+                accepted = platform_listener.accept() => {
+                    let Ok((stream, _)) = accepted else { continue };
+                    tokio::spawn(async move {
+                        let service = service_fn(|_| async {
+                            Ok::<_, std::convert::Infallible>(
+                                Response::builder()
+                                    .header(hyper::header::CONTENT_TYPE, "application/json")
+                                    .header(hyper::header::CONNECTION, "close")
+                                    .body(Full::new(Bytes::from_static(
+                                        br#"{"active":true,"plan":"pro","reason":"active","checked_at":"2026-08-12T12:00:00Z"}"#,
+                                    )))
+                                    .unwrap(),
+                            )
+                        });
+                        let _ = http1::Builder::new()
+                            .serve_connection(TokioIo::new(stream), service)
+                            .await;
+                    });
+                }
+            }
+        }
+    });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let relay = Arc::new(Relay::with_gate(Box::new(PlatformEntitlementGate::new(
+        platform_url,
+        "platform-secret",
+    ))));
+    tokio::spawn(Arc::clone(&relay).serve(listener));
+    spawn_echo_box(&addr, "box-cached");
+    await_registration(&relay).await;
+
+    let _ = platform_shutdown.send(());
+    platform.await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(59)).await;
+    tokio::time::resume();
+    connect_through_relay(&addr, "box-cached")
+        .await
+        .expect("the cached active decision admits a new session within its TTL");
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::resume();
+    let error = connect_through_relay(&addr, "box-cached")
+        .await
+        .expect_err("an expired decision must be rechecked and fail closed");
+    assert!(matches!(error, RelayClientError::SubscriptionRequired));
 }
 
 /// Wraps a stream and records every byte handed to the reader — the

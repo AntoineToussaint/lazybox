@@ -300,7 +300,7 @@ Remote & services:
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox serve --relay <a>   dial out to a rendezvous relay so clients can
                               reach this box's daemon (behind NAT, no ports;
-                              --account <id>, LAZYBOX_RELAY env). End-to-end
+                              LAZYBOX_RELAY env). End-to-end
                               encrypted by default; it prints the box channel
                               key clients pin (--insecure-no-auth forwards
                               plaintext, for loopback testing only)

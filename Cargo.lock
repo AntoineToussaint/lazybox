@@ -1840,6 +1840,13 @@ dependencies = [
 name = "lazybox-entitlement"
 version = "0.1.10"
 dependencies = [
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "reqwest",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -1879,6 +1886,7 @@ dependencies = [
 name = "lazybox-identity"
 version = "0.1.10"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "ed25519-dalek",
  "hex",
@@ -1936,9 +1944,15 @@ name = "lazybox-relay"
 version = "0.1.10"
 dependencies = [
  "bincode",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "lazybox-config",
  "lazybox-e2e-channel",
  "lazybox-entitlement",
  "serde",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "tracing-subscriber",

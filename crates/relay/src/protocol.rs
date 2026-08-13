@@ -13,10 +13,10 @@ use serde::de::DeserializeOwned;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use uuid::Uuid;
 
-/// Ceiling on a single handshake frame. A handshake carries a box-id +
-/// account string or a UUID — well under a kilobyte in practice; this
-/// only bounds the allocation a hostile peer can request before it has
-/// proven anything.
+/// Ceiling on a single handshake frame. A handshake carries a box id and
+/// public key or a UUID — well under a kilobyte in practice; this only
+/// bounds the allocation a hostile peer can request before it has proven
+/// anything.
 pub const MAX_HANDSHAKE_BYTES: u32 = 64 * 1024;
 
 /// The first frame every connection sends, declaring its role.
@@ -24,7 +24,10 @@ pub const MAX_HANDSHAKE_BYTES: u32 = 64 * 1024;
 pub enum Hello {
     /// A box dialing **out** to register under `box_id` and hold the
     /// control connection open. Works behind NAT — no inbound ports.
-    RegisterBox { box_id: String, account: String },
+    RegisterBox {
+        box_id: String,
+        box_public_key: String,
+    },
     /// A client asking to be brokered to the box registered as `box_id`.
     ConnectClient { box_id: String },
     /// A box opening a fresh data connection in response to a
@@ -43,6 +46,8 @@ pub enum Ack {
     Ok,
     /// No box is registered under the requested id.
     Unavailable,
+    /// The box does not have an active hosted-relay subscription.
+    SubscriptionRequired,
 }
 
 /// A control message pushed from the relay down a box's held control
@@ -105,11 +110,19 @@ mod tests {
         let (mut a, mut b) = tokio::io::duplex(1024);
         let sent = Hello::RegisterBox {
             box_id: "box-123".into(),
-            account: "acct".into(),
+            box_public_key: "Ym94LWtleQ==".into(),
         };
         write_msg(&mut a, &sent).await.unwrap();
         let got: Hello = read_msg(&mut b).await.unwrap();
         assert_eq!(sent, got);
+    }
+
+    #[tokio::test]
+    async fn subscription_required_ack_round_trips() {
+        let (mut a, mut b) = tokio::io::duplex(1024);
+        write_msg(&mut a, &Ack::SubscriptionRequired).await.unwrap();
+        let got: Ack = read_msg(&mut b).await.unwrap();
+        assert_eq!(got, Ack::SubscriptionRequired);
     }
 
     #[tokio::test]

@@ -71,7 +71,11 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         // `e2e-channel` are leaves (deps set(&[])), so neither adds a cycle.
         (
             "lazybox-relay",
-            set(&["lazybox-e2e-channel", "lazybox-entitlement"]),
+            set(&[
+                "lazybox-config",
+                "lazybox-e2e-channel",
+                "lazybox-entitlement",
+            ]),
         ),
         // The remote-box lifecycle crate (#931): it persists a `BoxHandle`
         // through the store's kv table, so it depends on store (store →

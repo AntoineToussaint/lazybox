@@ -17,6 +17,19 @@ use uuid::Uuid;
 
 use crate::protocol::{Ack, Hello, ToBox, read_msg, write_msg};
 
+pub const SUBSCRIPTION_REQUIRED_MESSAGE: &str =
+    "subscription required — https://lazybox.ai/pricing";
+
+#[derive(Debug, thiserror::Error)]
+pub enum RelayClientError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("no box registered as {box_id}")]
+    Unavailable { box_id: String },
+    #[error("subscription required — https://lazybox.ai/pricing")]
+    SubscriptionRequired,
+}
+
 /// Called with a fresh, already-brokered data stream for each client the
 /// relay announces. The box bridges it to its local service.
 pub type OnClient =
@@ -30,7 +43,7 @@ pub type OnClient =
 pub async fn connect_through_relay<A: ToSocketAddrs>(
     relay_addr: A,
     box_id: &str,
-) -> io::Result<TcpStream> {
+) -> Result<TcpStream, RelayClientError> {
     let mut stream = TcpStream::connect(relay_addr).await?;
     write_msg(
         &mut stream,
@@ -41,30 +54,39 @@ pub async fn connect_through_relay<A: ToSocketAddrs>(
     .await?;
     match read_msg::<_, Ack>(&mut stream).await? {
         Ack::Ok => Ok(stream),
-        Ack::Unavailable => Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no box registered as {box_id}"),
-        )),
+        Ack::Unavailable => Err(RelayClientError::Unavailable {
+            box_id: box_id.to_string(),
+        }),
+        Ack::SubscriptionRequired => Err(RelayClientError::SubscriptionRequired),
     }
 }
 
-/// Dial out to the relay, register `box_id` under `account`, and hold the
-/// control connection open. For every client the relay brokers, dial a
-/// fresh data connection and invoke `on_client` with the spliced stream.
+/// Dial out to the relay, register `box_id` under `box_public_key`, and
+/// hold the control connection open. For every client the relay brokers,
+/// dial a fresh data connection and invoke `on_client` with the spliced
+/// stream.
 ///
 /// Returns when the control connection drops (relay restart, network
 /// blip); callers reconnect with backoff.
 pub async fn serve_box(
     relay_addr: String,
     box_id: String,
-    account: String,
+    box_public_key: String,
     on_client: OnClient,
-) -> io::Result<()> {
+) -> Result<(), RelayClientError> {
     let mut control = TcpStream::connect(&relay_addr).await?;
-    write_msg(&mut control, &Hello::RegisterBox { box_id, account }).await?;
+    write_msg(
+        &mut control,
+        &Hello::RegisterBox {
+            box_id,
+            box_public_key,
+        },
+    )
+    .await?;
     match read_msg::<_, Ack>(&mut control).await? {
         Ack::Ok => {}
-        Ack::Unavailable => return Err(io::Error::other("relay refused box registration")),
+        Ack::Unavailable => return Err(io::Error::other("relay refused box registration").into()),
+        Ack::SubscriptionRequired => return Err(RelayClientError::SubscriptionRequired),
     }
 
     loop {
@@ -73,7 +95,7 @@ pub async fn serve_box(
             // A clean control-connection close is the normal reconnect
             // trigger (relay restart, network blip), not a failure.
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         };
         let relay_addr = relay_addr.clone();
         let on_client = Arc::clone(&on_client);

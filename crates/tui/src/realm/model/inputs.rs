@@ -1162,16 +1162,23 @@ showing keybinding search only",
                 }
             }
             Some(Id::BroadcastConfirm) => {
-                // The broadcast would start new agents (#836); yes runs the
-                // plan snapshotted at compose time (#1077), no drops the
-                // stash and keeps the multi-select for a retry.
-                if let Some(ModalFlow::BroadcastConfirm { steps, summary }) = self.modal_flow.take()
+                // The broadcast would start new agents (#836); yes re-resolves
+                // the fixed target set against current session state and runs
+                // the fan-out (#1077 — so a target whose agent died under the
+                // modal recovers rather than delivering to a dead terminal),
+                // no drops the stash and keeps the multi-select for a retry.
+                if let Some(ModalFlow::BroadcastConfirm {
+                    targets,
+                    snippet_key,
+                    body,
+                }) = self.modal_flow.take()
                 {
                     if yes {
-                        self.sidebar.clear_broadcast_selection();
-                        self.flash_info(summary);
-                        self.redraw = true;
-                        cmds.extend(self.run_bulk_agent_steps(steps));
+                        cmds.extend(self.run_broadcast_confirmed(
+                            &targets,
+                            snippet_key.as_deref(),
+                            &body,
+                        ));
                     } else {
                         self.flash_info("broadcast cancelled");
                     }

@@ -3136,6 +3136,62 @@ snippets:
         );
     }
 
+    /// #1077 review regression: if a live-agent target's terminal dies
+    /// while the "start N agents?" confirm is up, "yes" must re-resolve it
+    /// — spawning a fresh seeded agent — not fire a delivery at the dead
+    /// terminal (which the daemon silently drops while the summary lies
+    /// "queued"). Snapshotting the resolved steps at compose time would
+    /// have replayed an `InjectPrompt` at the gone terminal; re-resolving
+    /// at confirm-yes recovers.
+    #[test]
+    fn broadcast_confirm_re_resolves_a_target_whose_agent_died_under_the_modal() {
+        // A: live agent (terminal 1); B: session-less spawnable → forces
+        // the confirm gate. Both carry a repo scope, so a session-less A
+        // is spawnable too.
+        let (mut m, keys) = model_with_scoped_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+        ]);
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys.clone(),
+                snippet_key: None,
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let _ = m.handle_textarea_submitted("ship it".into());
+        assert_eq!(m.top_modal(), Some(&Id::BroadcastConfirm));
+
+        // A's agent exits while the confirm is up.
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalExited {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            exit_code: None,
+            last_output: None,
+        });
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, .. } if terminal_id.0 == 1
+            )),
+            "no delivery fires at the terminal that died under the modal: {cmds:?}",
+        );
+        let seeded_spawns = cmds
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    IpcCommand::Spawn { initial_prompt: Some(p), .. } if p == "ship it"
+                )
+            })
+            .count();
+        assert_eq!(
+            seeded_spawns, 2,
+            "the dead-agent target re-resolves to a fresh seeded spawn alongside the session-less one: {cmds:?}",
+        );
+    }
+
     /// #836: declining the gate spawns nothing and keeps the sidebar
     /// multi-select intact so the user can retry or change the pick.
     #[test]
@@ -9164,14 +9220,30 @@ mod merge_focus_follow_tests {
         let start = src
             .find("fn apply_one(")
             .expect("apply_one is the single per-target executor");
-        let rest = &src[start..];
-        // The next method definition at method indentation bounds the body.
-        let end = rest[1..]
-            .find("\n    fn ")
-            .or_else(|| rest[1..].find("\n    pub"))
-            .map(|i| i + 1)
-            .unwrap_or(rest.len());
-        let body = &rest[..end];
+        // Bound the body by brace-matching from its opening `{`, so the
+        // guard survives method reordering / new helpers (apply_one has no
+        // brace-bearing string or char literals, so a raw scan is exact).
+        let open = start + src[start..].find('{').expect("apply_one has a body");
+        let mut depth = 0usize;
+        let mut end = open;
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &src[open..=end];
+        assert!(
+            depth == 0 && end > open,
+            "apply_one body braces did not balance — guard bound is wrong",
+        );
         assert!(
             !body.contains("selected_workspace"),
             "apply_one must resolve its target from `key`, not selected_workspace()",

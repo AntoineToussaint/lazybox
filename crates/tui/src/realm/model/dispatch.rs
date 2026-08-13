@@ -1958,21 +1958,11 @@ impl<T: TerminalAdapter> Model<T> {
         Vec::new()
     }
 
-    /// Fan a snippet / free-text broadcast over an explicit target set
-    /// (#836, #1077) through the same [`Self::apply_one`] pipeline `w w`
-    /// bulk start uses — a broadcast is just a `Snippet` / `Prompt` op.
-    /// A live session is delivered to now; a session-less scoped row spawns
-    /// the default agent seeded with the body, and because spawning is
-    /// heavy the send gates behind a confirm first, snapshotting the plan
-    /// so a poll under the modal can't change who starts. `targets` is the
-    /// set stashed when the flow mounted, never re-read here.
-    pub(super) fn dispatch_broadcast_op(
-        &mut self,
-        targets: &[lazybox_core::SessionKey],
-        snippet_key: Option<&str>,
-        body: &str,
-    ) -> Vec<IpcCommand> {
-        let op = match snippet_key {
+    /// Resolve a broadcast's (snippet / free-text) payload into a
+    /// [`BulkOp`] once. The snippet category is looked up here so the op
+    /// carries everything `apply_one` needs per target.
+    fn broadcast_op(&self, snippet_key: Option<&str>, body: &str) -> BulkOp {
+        match snippet_key {
             Some(key) => BulkOp::Snippet {
                 key: key.to_string(),
                 category: self
@@ -1985,18 +1975,30 @@ impl<T: TerminalAdapter> Model<T> {
             None => BulkOp::Prompt {
                 body: body.to_string(),
             },
-        };
+        }
+    }
+
+    /// Fan a snippet / free-text broadcast over an explicit target set
+    /// (#836, #1077) through the same [`Self::apply_one`] pipeline `w w`
+    /// bulk start uses — a broadcast is just a `Snippet` / `Prompt` op.
+    /// A live session is delivered to now; a session-less scoped row spawns
+    /// the default agent seeded with the body, and because spawning is
+    /// heavy the send gates behind a confirm first. `targets` is the set
+    /// stashed when the flow mounted; the confirm stashes the op *inputs*
+    /// (not the resolved steps) so a "yes" re-resolves each target's live
+    /// session state — a target whose agent died under the modal recovers
+    /// by re-spawning seeded, rather than firing at a now-dead terminal.
+    pub(super) fn dispatch_broadcast_op(
+        &mut self,
+        targets: &[lazybox_core::SessionKey],
+        snippet_key: Option<&str>,
+        body: &str,
+    ) -> Vec<IpcCommand> {
+        let op = self.broadcast_op(snippet_key, body);
         let plan = self.build_bulk_agent_plan(&op, targets, None);
-        let summary = broadcast_summary(&plan);
         if plan.spawned == 0 {
-            // No heavy spawns — deliver now. Broadcast never follows focus
-            // (fire-and-stay), so `spawn_follow_to` is left untouched.
-            if plan.injected > 0 {
-                self.sidebar.clear_broadcast_selection();
-            }
-            self.flash_info(summary);
-            self.redraw = true;
-            return self.run_bulk_agent_steps(plan.steps);
+            // No heavy spawns — deliver now.
+            return self.run_broadcast_plan(plan);
         }
         let agent = self.sidebar.default_agent().to_string();
         let prompt = if plan.spawned == 1 {
@@ -2010,12 +2012,45 @@ impl<T: TerminalAdapter> Model<T> {
             )
         };
         self.set_modal_flow(super::ModalFlow::BroadcastConfirm {
-            steps: plan.steps,
-            summary,
+            targets: targets.to_vec(),
+            snippet_key: snippet_key.map(str::to_string),
+            body: body.to_string(),
         });
         let modal = crate::realm::components::confirm::Confirm::new(&prompt).default_yes();
         self.mount_modal(super::Id::BroadcastConfirm, modal);
         Vec::new()
+    }
+
+    /// Run a confirmed broadcast (`Id::BroadcastConfirm` "yes"). Re-resolves
+    /// the op against each target's *current* session state — the fixed
+    /// target set can't change, but a target that lost (or gained) a live
+    /// agent while the confirm was up is served correctly now, so a delivery
+    /// never fires at a terminal that died under the modal (#1077 review).
+    pub(super) fn run_broadcast_confirmed(
+        &mut self,
+        targets: &[lazybox_core::SessionKey],
+        snippet_key: Option<&str>,
+        body: &str,
+    ) -> Vec<IpcCommand> {
+        let op = self.broadcast_op(snippet_key, body);
+        let plan = self.build_bulk_agent_plan(&op, targets, None);
+        self.run_broadcast_plan(plan)
+    }
+
+    /// Materialize a broadcast plan: clear the multi-select when anything
+    /// was delivered or started (but not when every target was skipped, so
+    /// a retry keeps the marks), flash the outcome summary, and run the
+    /// steps. Broadcast never follows focus (fire-and-stay), so
+    /// `spawn_follow_to` is left untouched. Shared by the immediate and
+    /// post-confirm paths so both materialize identically.
+    fn run_broadcast_plan(&mut self, plan: BulkAgentPlan) -> Vec<IpcCommand> {
+        let summary = broadcast_summary(&plan);
+        if plan.injected > 0 || plan.spawned > 0 {
+            self.sidebar.clear_broadcast_selection();
+        }
+        self.flash_info(summary);
+        self.redraw = true;
+        self.run_bulk_agent_steps(plan.steps)
     }
 
     /// Run a snapshotted bulk agent plan: emit each spawn and deliver

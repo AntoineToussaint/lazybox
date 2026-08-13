@@ -831,14 +831,16 @@ pub(crate) enum ModalFlow {
     UpdateTarget { target: String },
     /// Broadcast flow (`Shift-B`): snippet picker → compose textarea.
     Broadcast { draft: BroadcastDraft },
-    /// Broadcast confirm gate (#836): the fan-out plan snapshotted while
-    /// the "start N agents?" `Confirm` is up, so a "yes" runs exactly the
-    /// steps resolved at compose time — a poll under the modal can't
-    /// change who gets started. Shares the unified [`BulkAgentStep`]
-    /// pipeline (#1077) with `w w` bulk start.
+    /// Broadcast confirm gate (#836): the composed message + resolved
+    /// target set, stashed while the "start N agents?" `Confirm` is up. A
+    /// "yes" re-runs the unified [`Model::apply_one`] pipeline (#1077)
+    /// over these fixed targets, re-resolving each one's live session
+    /// state so a target whose agent died under the modal recovers by
+    /// re-spawning instead of a delivery firing at a dead terminal.
     BroadcastConfirm {
-        steps: Vec<BulkAgentStep>,
-        summary: String,
+        targets: Vec<lazybox_core::SessionKey>,
+        snippet_key: Option<String>,
+        body: String,
     },
     /// Agent-to-agent handoff (`x s`, #431): target picker → compose.
     Handoff { draft: HandoffDraft },

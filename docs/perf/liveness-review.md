@@ -13,8 +13,11 @@ value that never arrived, on a UI thread that was also behind, so it read as
 a total freeze.
 
 This doc states the invariant, audits every place it can be violated with
-`file:line` evidence, and records which violations this PR closes versus
-which remain design work (with the follow-up that owns each).
+`file:line` evidence, and records where each violation was closed. It was
+seeded with the modal-timeout work (#1051) and completed once the run loop's
+per-event input pre-emption landed (#1055); the "Status" table names the PR
+that owns each property. Below, "(#1051)" marks the modal-timeout changes and
+"(#1055)" the input-pre-emption changes.
 
 ## The invariant
 
@@ -48,7 +51,7 @@ Every spinner/awaiting modal was checked for a timeout backstop.
 
 | Modal | File | Awaits | Timeout before | Timeout now |
 |-------|------|--------|----------------|-------------|
-| `Loading` | `crates/tui/src/realm/components/loading.rs` | setup effect result via `sync_channel` | **none — could spin forever** | **60 s (this PR)** |
+| `Loading` | `crates/tui/src/realm/components/loading.rs` | setup effect result via `sync_channel` | **none — could spin forever** | **60 s (#1051)** |
 | `Polling` | `crates/tui/src/realm/components/polling.rs:29,165` | first `WorkspaceUpserted` | 15 s | 15 s |
 | `WorktreeProgress` | `crates/tui/src/realm/components/worktree_progress.rs` | provision step events | terminal step → Esc-dismissable retry (`:163`) | unchanged |
 | `PrChat` / `HelpAsk` | `crates/tui/src/realm/components/{pr_chat,help_ask}.rs` | streamed agent answer | `Esc`/`Ctrl-c` dismiss (`pr_chat.rs:74`) | unchanged |
@@ -64,7 +67,7 @@ channel, or the task stalled on a daemon/network response. The channel stays
 `Empty`, `Cancelled` never fires, and with the run loop behind, `Esc` isn't
 serviced either → forever spinner.
 
-**Fix (this PR) — two layers, by responsibility:**
+**Fix (#1051) — two layers, by responsibility:**
 
 - **Effect-level timeout (the graceful path).** The setup executor
   (`setup_screen.rs`, `run_effect`) now wraps each effect in a 30 s
@@ -127,17 +130,34 @@ input guard **discards** buffered key/mouse events older than 500 ms
 fire a backlog — meaning a stall long enough to age a keystroke past 500 ms
 drops it (28 real dropped-input episodes measured, #1031 §6).
 
-This is the shared root with #1030/#1031 and is **partially addressed there
-already**: the sidebar-recompute coalescing (#1030, merged c8eb2591) and the
-two hottest render memoizations (#1031, merged) cut the phase durations that
-starve input. The remaining structural cure — **servicing pending input
-between sub-steps of an expensive drain/render** so a keystroke pre-empts a
-burst's tail — is called out in #1031 §6 as the one true fix while VT parse
-stays on-thread. It is a run-loop change of real risk and is **not** taken
-here; it belongs with the #1031 backlog item, not bundled into this modal-
-liveness PR. This PR's L2 timeout is the safety net for exactly the window
-where L-input is degraded: even if `Esc` is dropped, the modal still
-self-dismisses.
+This is the shared root with #1030/#1031, and it is now **closed by
+construction**. Three landed changes together bound how long a keystroke can
+wait:
+
+- The sidebar-recompute coalescing (#1030, merged c8eb2591) and the two
+  hottest render memoizations (#1031, merged) cut the per-phase durations.
+- The structural cure #1031 §6 called for — **servicing pending input between
+  events of an expensive drain** so a keystroke pre-empts a burst's tail —
+  has since shipped (#1055, merged 0300f60c): `drain_daemon_events` now yields
+  the instant host input is pending (`if input_pending() { break; }`,
+  `helpers.rs`), carrying the un-dispatched tail into the next drain rather
+  than finishing the burst first. The run loop drives it with
+  `|| !input_rx.is_empty()`, and when a drain hits its collection cap it skips
+  the idle wait entirely and services a pending key non-blocking before
+  looping (`helpers.rs`, the `had_backlog` fast path). So one iteration
+  handles at most one event before input can win — input can no longer wait
+  out an arbitrarily long burst. Tests:
+  `pending_input_preempts_the_dispatch_loop_and_carries_the_rest`,
+  `constant_input_still_drains_every_event_one_at_a_time`,
+  `flood_does_not_drain_everything_in_one_tick` (`model/tests.rs`).
+
+The stale-input guard still discards buffered key/mouse events older than
+`STALE_INPUT_MAX_AGE` (500 ms, `helpers.rs`) so a recovered UI never
+burst-fires a backlog — but a modal that owns input keeps its keys across the
+stall (`Id::retains_stale_keys`, #1055), and the pre-emption above keeps a
+single work phase short enough that a keystroke rarely ages that far in the
+first place. L2's modal timeout remains the belt-and-braces backstop for the
+residual window: even if a key is dropped, the modal still self-dismisses.
 
 ### L3 — no UI-thread block on daemon/network
 
@@ -183,7 +203,7 @@ The wake path was audited against the incident's three log signatures:
    #1030/#1031 drain-cost surface (D-0 "budget bounds receiving, not
    handling", #1031 §3) — tracked there, not re-fixed here.
 3. **Orphaned modal on a pre-sleep request.** This is the one net-new
-   liveness hole and is what this PR closes: a modal awaiting a result
+   liveness hole and is what #1051 closed: a modal awaiting a result
    issued before the sleep, whose reply is lost across the wake. The
    effect-level timeout resolves the common "provider stalled" case into a
    retryable error that continues the wizard; the modal backstop covers the
@@ -194,22 +214,35 @@ No modal is tied to a terminal resync, so signatures 1–2 cannot orphan a
 modal directly; only the generic `Loading`-await case (signature 3) could,
 and it is now bounded.
 
+The exact incident — a wake catch-up burst flooding the UI thread *while* a
+`Loading` modal awaits a result that never lands — is pinned by
+`wake_burst_preempts_input_while_a_mounted_loading_modal_self_dismisses`
+(`model/tests.rs`): on one real model with the modal mounted under `Id::Setup`
+and its producer held silent, a drain of a non-coalescing burst yields after a
+single event to a pending keystroke (responsiveness, the #1055 pre-emption
+path), and `Msg::LoadingTimedOut` must pop the mounted modal through the model
+even with the burst tail still queued (liveness). It binds the two halves that
+made the freeze — neither alone reproduces it.
+
 ## Status
 
 | Property | State | Owner |
 |----------|-------|-------|
 | L1 — every modal `Esc`-dismissable from local state | **holds** (audited) | — |
-| L2 — every awaiting modal has a timeout | **closed** — setup effects get a retryable 30 s timeout that continues the wizard, plus a `Loading` modal backstop with a user notice (this PR); other modals already had one | this PR |
+| L2 — every awaiting modal has a timeout | **closed** — setup effects get a retryable 30 s timeout that continues the wizard, plus a `Loading` modal backstop with a user notice (#1051); other modals already had one | #1051 |
 | L3 — no UI-thread block on daemon/network | **holds** (audited) | — |
 | Sleep/wake — resync-not-found handled without an error storm | **holds** (audited) | — |
-| Sleep/wake — orphaned pre-sleep modal | **closed** by L2 (this PR) | this PR |
-| L-input — input serviced within frame budget under a burst | **partial** — phase costs cut by #1030/#1031; mid-phase input pre-emption remains | #1031 §6 backlog |
-| Bounded drain — burst coalesced within budget | **partial** — coalescing landed (#1030); drain-handling budget (D-0) open | #1031 §3 backlog |
+| Sleep/wake — orphaned pre-sleep modal | **closed** by L2 | #1051 |
+| L-input — input serviced within frame budget under a burst | **closed** — phase costs cut (#1030/#1031) and per-event input pre-emption landed (#1055) | #1055 |
+| Bounded drain — burst coalesced within budget | **holds** — collection cap + drain budget bound receiving; per-event input pre-emption bounds handling | #1055 |
 
-This PR closes the liveness holes that are cleanly, locally fixable and
-testable (L2, and the orphaned-modal wake case it subsumes) and documents
-L1/L3 as holding. The two `partial` rows are latency-under-load work that
-shares #1030/#1031's run-loop surface; folding them in here would rebuild the
-run loop's input scheduling in a modal-liveness PR. They stay with the
-#1031 backlog that owns that surface, so each change lands where it can be
-profiled and reviewed against the telemetry it targets.
+Every row now holds or is closed: the invariant is enforced by construction,
+not by any single guard. L2 (setup-effect + `Loading` backstop timeouts,
+#1051) removes the infinite wait; L-input's per-event pre-emption (#1055)
+keeps the keyboard live under a burst; L1/L3 hold as audited. The one
+remaining latency concern is not a liveness hole — the drain's *handling*
+budget (D-0, #1031 §3): with no input pending, a full collected batch is
+dispatched without a mid-batch time check, so a burst with no user watching
+can still exceed one frame's budget. That degrades to a slow frame (the
+watchdog logs it, `helpers.rs`), never a hang — input pre-empts the moment a
+key arrives — so it stays a #1031 latency item, not a liveness one.

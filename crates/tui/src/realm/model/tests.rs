@@ -5685,6 +5685,124 @@ mod wake_tests {
 }
 
 #[cfg(test)]
+mod wake_burst_liveness_tests {
+    //! Issue #1045: the whole-app freeze after sleep/wake was a wake
+    //! catch-up burst flooding the single UI thread WHILE a `Loading`
+    //! modal awaited a result that never landed. Neither half alone
+    //! reproduces it — the freeze was the two together — so this drives
+    //! the REAL model through both at once on a single instance:
+    //!
+    //! - the burst can't monopolise the thread — with host input
+    //!   pending, one drain dispatches a single event and carries the
+    //!   rest (`if input_pending() { break; }`, #1055), so `Esc` and the
+    //!   modal's own tick still get a turn instead of waiting out the
+    //!   whole burst; and
+    //! - the mounted modal can't wait forever — its timeout resolves to
+    //!   `Msg::LoadingTimedOut` (the component side of that is proven in
+    //!   `loading.rs`), and here the MODEL must actually pop the modal on
+    //!   that message — the wiring the component test can't see — even
+    //!   while the burst tail is still queued.
+    //!
+    //! The modal is held silent with its producer ALIVE (the #1045
+    //! "produced-but-lost / task stalled" shape, distinct from a dropped
+    //! sender, which `TakeOutcome::Cancelled` already covers).
+    use super::super::helpers::drain_daemon_events;
+    use super::super::{Id, Model};
+    use crate::realm::Msg;
+    use crate::realm::components::loading::Loading;
+    use lazybox_core::{Workspace, WorkspaceKey};
+    use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event};
+    use tokio::sync::mpsc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model_with_event_sender() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::Sender<Event>,
+        mpsc::UnboundedReceiver<lazybox_ipc::Command>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let model = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        (model, evt_tx, cmd_rx)
+    }
+
+    /// A wake catch-up burst of DISTINCT workspace upserts. Distinct
+    /// matters: same-terminal `TerminalOutput` coalesces into one event
+    /// (`coalesce_adjacent_output`), so it can't exercise per-event
+    /// pre-emption — the drain would dispatch the single merged event and
+    /// never re-check input. Upserts never coalesce, so the dispatch loop
+    /// has `n` real iterations a pending keystroke can break out of.
+    fn wake_burst_of_upserts(tx: &mpsc::Sender<Event>, n: usize) {
+        use chrono::Utc;
+        for i in 0..n {
+            let ws = Workspace::empty(
+                WorkspaceKey::new(format!("github:o/r#{i}")),
+                "main",
+                Utc::now(),
+            );
+            tx.try_send(Event::WorkspaceUpserted(Box::new(ws)))
+                .expect("bounded channel must have room for the burst");
+        }
+    }
+
+    #[test]
+    fn wake_burst_preempts_input_while_a_mounted_loading_modal_self_dismisses() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+
+        // A `Loading` modal is up on the model, mounted under its real
+        // `Id::Setup` (the id the setup flow mounts it under), awaiting a
+        // value that will never land — producer held alive but silent.
+        let (loading, _never_sends) = Loading::pending("waking…");
+        m.mount_modal(Id::Setup, loading);
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Setup),
+            "the loading modal is mounted before the burst",
+        );
+
+        // The wake burst floods the UI thread's inbound channel.
+        let n = 128;
+        wake_burst_of_upserts(&evt_tx, n);
+
+        // Responsiveness: with a keystroke pending the whole time, ONE
+        // drain dispatches exactly one event and carries the rest — the
+        // burst cannot hold the thread (and thus `Esc` / the modal's
+        // tick) hostage for its full length.
+        let mut carried = Vec::new();
+        let backlog = drain_daemon_events(&mut m, &mut carried, || true);
+        assert!(backlog, "an un-dispatched tail is a backlog");
+        assert_eq!(
+            carried.len(),
+            n - 1,
+            "input pre-empts after one event: the rest is carried, not drained in one shot",
+        );
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            1,
+            "exactly one burst event applied before yielding to the waiting keystroke",
+        );
+
+        // Liveness: `Msg::LoadingTimedOut` must dismiss the mounted modal
+        // through the model — not merely flash a notice and leave it up —
+        // even with the burst tail still queued.
+        m.update(Msg::LoadingTimedOut);
+        assert!(
+            m.top_modal().is_none(),
+            "a timed-out loading modal must be dismissed by the model, not left orphaned",
+        );
+        assert!(
+            !carried.is_empty(),
+            "the modal cleared while the burst tail was still pending — mid-burst, not after it drained",
+        );
+    }
+}
+
+#[cfg(test)]
 mod coalesce_tests {
     //! `coalesce_adjacent_output` collapses a streaming burst into one
     //! dispatch per terminal — this is what keeps memory bounded under

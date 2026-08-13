@@ -2525,13 +2525,23 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(workspace_key) = self.awaiting_requestable_reviewers.take() else {
             return;
         };
-        // Re-arm so the async-mount stash check inside
-        // `mount_request_reviewers` still recognizes this as our request.
-        self.awaiting_requestable_reviewers = Some(workspace_key.clone());
+        // Whether the interaction-derived fallback has anyone to offer —
+        // computed before the mount so the flash matches what the picker
+        // actually shows. `mount_request_reviewers` clears the stash and
+        // reads `modal_flow`, not the stash, so there's nothing to
+        // re-arm before calling it.
+        let has_participants = !self
+            .gather_candidate_logins(&workspace_key, true)
+            .is_empty();
         self.mount_request_reviewers(workspace_key, Vec::new());
-        if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
+        let mounted = matches!(self.modal_stack.last(), Some(Id::RequestReviewers));
+        if mounted && has_participants {
             self.flash_hint("requestable reviewers unavailable — showing PR participants only");
         } else {
+            // Either the mount was deferred (another modal owns the
+            // stack) or the fallback picker is empty — there are no
+            // participants to fall back to, so surface the error rather
+            // than claim we're "showing participants".
             self.flash_error(format!("✗ couldn't load requestable reviewers — {message}"));
         }
         self.redraw = true;

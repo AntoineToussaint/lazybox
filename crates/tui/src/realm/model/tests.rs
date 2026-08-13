@@ -19651,6 +19651,46 @@ mod requestable_reviewers_async_mount_tests {
         assert!(m.modal_stack.is_empty());
         assert!(m.awaiting_requestable_reviewers.is_some());
     }
+
+    /// On a fetch *failure* with no interaction-derived fallback
+    /// candidates, the flash must be the error — never the misleading
+    /// "showing PR participants only" when there are no participants.
+    #[test]
+    fn failed_fetch_with_no_participants_flashes_error_not_participants_hint() {
+        let mut m = build_model();
+        // ProviderError is only processed once the initial polling modal
+        // is gone.
+        m.status.polling = None;
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        // No workspace seeded → gather_candidate_logins yields nobody.
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "requestable-reviewers".into(),
+            message: "boom".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        // The empty-state picker still mounts and the stash is consumed…
+        assert_eq!(m.modal_stack.last(), Some(&Id::RequestReviewers));
+        assert!(m.awaiting_requestable_reviewers.is_none());
+        // …but the flash is the error, not the participants hint.
+        let logged: Vec<String> = m
+            .status
+            .messages
+            .recent()
+            .map(|e| e.message.clone())
+            .collect();
+        assert!(
+            logged
+                .iter()
+                .any(|msg| msg.contains("couldn't load requestable reviewers")),
+            "expected the error flash, got {logged:?}",
+        );
+        assert!(
+            !logged.iter().any(|msg| msg.contains("participants only")),
+            "must not claim participants when there are none: {logged:?}",
+        );
+    }
 }
 
 #[cfg(test)]

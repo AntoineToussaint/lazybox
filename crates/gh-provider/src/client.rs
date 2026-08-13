@@ -4036,6 +4036,13 @@ impl GhClient {
     /// GitHub's own reviewer dropdown draws from — far wider than the
     /// people already interacting with the PR.
     ///
+    /// Paginates `assignableUsers` (100/page) so a repo with more than
+    /// 100 collaborators doesn't silently drop the overflow — the exact
+    /// "missing reviewers" bug this feature exists to fix. Bounded at
+    /// `MAX_PAGES` as a runaway backstop (a repo that large is well past
+    /// where a scroll-list picker is usable anyway); a repo that hits
+    /// the cap is logged, not silently truncated.
+    ///
     /// Named with the `_for_pr` suffix so this inherent method doesn't
     /// shadow the trait-side `TaskProvider::list_requestable_reviewers`
     /// (which takes a `&Workspace` and delegates here).
@@ -4045,22 +4052,59 @@ impl GhClient {
         name: &str,
         number: u64,
     ) -> Result<Vec<String>, GhError> {
-        self.acquire_or_block("requestable reviewers query")?;
-        let body = graphql::requestable_reviewers_body(owner, name, number);
-        let response: graphql::GqlRequestableReviewersResponse = self
-            .post_graphql_with_retry("requestable reviewers query", &body)
-            .await?;
-        if let Some(errors) = response.errors {
-            return Err(mutation_error_response(
-                "requestable reviewers query",
-                &errors,
-            ));
+        const MAX_PAGES: usize = 10;
+        let mut out: Vec<String> = Vec::new();
+        let mut after: Option<String> = None;
+        // Suggestions are fetched only on the first page (they aren't
+        // paginated); `@skip` drops them on later rounds.
+        let mut skip_suggested = false;
+        for page in 0..MAX_PAGES {
+            self.acquire_or_block("requestable reviewers query")?;
+            let body = graphql::requestable_reviewers_body(
+                owner,
+                name,
+                number,
+                after.as_deref(),
+                skip_suggested,
+            );
+            let response: graphql::GqlRequestableReviewersResponse = self
+                .post_graphql_with_retry("requestable reviewers query", &body)
+                .await?;
+            if let Some(errors) = response.errors {
+                return Err(mutation_error_response(
+                    "requestable reviewers query",
+                    &errors,
+                ));
+            }
+            let repo = response
+                .data
+                .and_then(|d| d.repository)
+                .ok_or_else(|| GhError::Graphql("list_requestable_reviewers: no data".into()))?;
+            // Read the pagination cursor before `logins()` consumes `repo`.
+            let has_next = repo.assignable_users.page_info.has_next_page;
+            let end_cursor = repo.assignable_users.page_info.end_cursor.clone();
+            for login in repo.logins() {
+                if !out.contains(&login) {
+                    out.push(login);
+                }
+            }
+            match end_cursor {
+                Some(cursor) if has_next => {
+                    after = Some(cursor);
+                    skip_suggested = true;
+                }
+                // No further pages, or `hasNextPage` with no cursor
+                // (defensive — never spin without an advancing cursor).
+                _ => return Ok(out),
+            }
+            if page + 1 == MAX_PAGES {
+                tracing::warn!(
+                    "list_requestable_reviewers {owner}/{name}#{number}: hit {MAX_PAGES}-page cap ({} users); more assignable users exist but were omitted",
+                    out.len(),
+                );
+            }
         }
-        let repo = response
-            .data
-            .and_then(|d| d.repository)
-            .ok_or_else(|| GhError::Graphql("list_requestable_reviewers: no data".into()))?;
-        Ok(repo.logins())
+        Ok(out)
     }
 
     /// Add labels (by GraphQL node id) to any `Labelable` (PR or

@@ -1213,22 +1213,30 @@ pub struct GqlRepoLabelNode {
 }
 
 /// Fetch the accounts that can be *requested* as reviewers on a PR:
-/// GitHub's own suggestions for this PR (`suggestedReviewers`) plus
-/// the repo's full assignable-user set (up to 100 — enough for any
-/// real repo). Feeds the reviewer picker so a review can be requested
-/// from anyone requestable, not only people who already touched the
-/// PR. `assignableUsers` is the API-correct candidate set — the same
-/// pool GitHub's own "request reviewers" dropdown draws from.
+/// GitHub's own suggestions for this PR (`suggestedReviewers`) plus the
+/// repo's assignable-user set. Feeds the reviewer picker so a review
+/// can be requested from anyone requestable, not only people who
+/// already touched the PR. `assignableUsers` is the API-correct
+/// candidate set — the same pool GitHub's own "request reviewers"
+/// dropdown draws from.
+///
+/// One page holds up to 100 assignable users; the caller paginates via
+/// `$after`/`pageInfo` so a repo with more than 100 collaborators
+/// doesn't silently drop everyone past the first page (the exact
+/// "missing reviewers" symptom this feature fixes). `suggestedReviewers`
+/// is `@skip`ped past the first page (`$skipSuggested`) since it isn't
+/// paginated and would just re-fetch the same short list every round.
 const REQUESTABLE_REVIEWERS_QUERY: &str = r#"
-query($owner: String!, $name: String!, $number: Int!) {
+query($owner: String!, $name: String!, $number: Int!, $after: String, $skipSuggested: Boolean!) {
   repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
+    pullRequest(number: $number) @skip(if: $skipSuggested) {
       suggestedReviewers {
         reviewer { login }
       }
     }
-    assignableUsers(first: 100) {
+    assignableUsers(first: 100, after: $after) {
       nodes { login }
+      pageInfo { hasNextPage endCursor }
     }
   }
   rateLimit {
@@ -1241,10 +1249,22 @@ query($owner: String!, $name: String!, $number: Int!) {
 }
 "#;
 
-pub fn requestable_reviewers_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
+pub fn requestable_reviewers_body(
+    owner: &str,
+    name: &str,
+    number: u64,
+    after: Option<&str>,
+    skip_suggested: bool,
+) -> serde_json::Value {
     serde_json::json!({
         "query": REQUESTABLE_REVIEWERS_QUERY,
-        "variables": { "owner": owner, "name": name, "number": number },
+        "variables": {
+            "owner": owner,
+            "name": name,
+            "number": number,
+            "after": after,
+            "skipSuggested": skip_suggested,
+        },
     })
 }
 
@@ -1317,6 +1337,9 @@ pub struct GqlReviewerLogin {
 pub struct GqlAssignableUsersConn {
     #[serde(default)]
     pub nodes: Vec<GqlReviewerLogin>,
+    // Reuses the crate-wide `GqlPageInfo` (hasNextPage / endCursor).
+    #[serde(default, rename = "pageInfo")]
+    pub page_info: GqlPageInfo,
 }
 
 /// Per-PR "give me everything heavy" query. Pulls every field the
@@ -5726,13 +5749,49 @@ mod tests {
 
     #[test]
     fn requestable_reviewers_body_carries_owner_name_number() {
-        let body = requestable_reviewers_body("acme", "widget", 42);
+        // First page: no cursor, suggestions included.
+        let body = requestable_reviewers_body("acme", "widget", 42, None, false);
         assert_eq!(body["variables"]["owner"], "acme");
         assert_eq!(body["variables"]["name"], "widget");
         assert_eq!(body["variables"]["number"], 42);
+        assert!(body["variables"]["after"].is_null());
+        assert_eq!(body["variables"]["skipSuggested"], false);
         let query = body["query"].as_str().unwrap();
         assert!(query.contains("suggestedReviewers"));
         assert!(query.contains("assignableUsers"));
+        assert!(query.contains("pageInfo"));
+    }
+
+    #[test]
+    fn requestable_reviewers_body_second_page_carries_cursor_and_skips_suggestions() {
+        let body = requestable_reviewers_body("acme", "widget", 42, Some("CUR2"), true);
+        assert_eq!(body["variables"]["after"], "CUR2");
+        assert_eq!(body["variables"]["skipSuggested"], true);
+    }
+
+    #[test]
+    fn requestable_reviewers_response_parses_page_info_for_pagination() {
+        // A first page that reports more to come — the client keys its
+        // loop off exactly these two fields.
+        let json = r#"{
+          "data": {
+            "repository": {
+              "pullRequest": { "suggestedReviewers": [] },
+              "assignableUsers": {
+                "nodes": [ { "login": "u1" } ],
+                "pageInfo": { "hasNextPage": true, "endCursor": "CUR1" }
+              }
+            }
+          }
+        }"#;
+        let resp: GqlRequestableReviewersResponse = serde_json::from_str(json).unwrap();
+        let repo = resp.data.unwrap().repository.unwrap();
+        assert!(repo.assignable_users.page_info.has_next_page);
+        assert_eq!(
+            repo.assignable_users.page_info.end_cursor.as_deref(),
+            Some("CUR1")
+        );
+        assert_eq!(repo.logins(), vec!["u1".to_string()]);
     }
 
     #[test]

@@ -542,20 +542,21 @@ impl<T: Clone + 'static + Send> Choice<T> {
         let prev_cursor = self.cursor;
         self.cursor = idx;
         self.show_empty_hint = false;
-        let result = match self.mode {
-            Mode::Single => match self.confirm_picks() {
-                ConfirmResult::Picked(picks) => Some(Msg::ChoicePicked(picks)),
-                _ => None,
-            },
-            Mode::Multi => {
-                self.selected[idx] = !self.selected[idx];
-                None
-            }
-        };
+        // A row click never confirms a single-select. Confirm is a
+        // separate, deliberate act (Enter, or a click on the help
+        // footer) so a stray click can't fire a consequential
+        // single-select action — arming a policy (`g p`), injecting into
+        // an agent (WorkAgentPicker), snoozing — where the pre-mouse
+        // flow required Enter. A single-select click only positions the
+        // cursor (and fires the live preview below); a multi-select
+        // click toggles the row.
+        if self.mode == Mode::Multi {
+            self.selected[idx] = !self.selected[idx];
+        }
         if self.cursor != prev_cursor {
             self.fire_highlight();
         }
-        result
+        None
     }
 }
 
@@ -991,17 +992,27 @@ mod tests {
     }
 
     #[test]
-    fn single_click_on_row_picks_it() {
+    fn single_click_on_row_highlights_without_confirming() {
+        // A single-select click must NOT confirm — it only positions the
+        // cursor, so a stray click can't fire a consequential action.
+        // Confirmation comes from a second, deliberate act (help-row
+        // click or Enter).
         let mut c = Choice::single("p", vec![Item("a"), Item("b"), Item("c")])
             .payload_for(|i: &Item| ChoicePayload::Text(i.0.to_string()));
         render(&mut c);
         let row = item_row(&c, 2);
         let col = c.body_area.x + 1;
-        match c.on(&left_click(col, row)) {
+        assert_eq!(c.on(&left_click(col, row)), None, "click must not confirm");
+        assert_eq!(c.cursor, 2, "click positions the cursor on the clicked row");
+        // A help-row click then confirms the highlighted row.
+        render(&mut c);
+        let help_row = c.help_area.y;
+        let help_col = c.help_area.x + 1;
+        match c.on(&left_click(help_col, help_row)) {
             Some(Msg::ChoicePicked(picks)) => {
                 assert_eq!(picks, vec![ChoicePayload::Text("c".to_string())]);
             }
-            other => panic!("expected ChoicePicked, got {other:?}"),
+            other => panic!("expected ChoicePicked after help-row click, got {other:?}"),
         }
     }
 

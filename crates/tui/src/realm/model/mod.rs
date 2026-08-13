@@ -1692,6 +1692,16 @@ pub struct Model<T: TerminalAdapter> {
     /// #557) — provisioning failures persist no session, so a re-send
     /// retries the full provision cleanly.
     last_spawn: Option<IpcCommand>,
+    /// The spawn to re-issue after mapping an unmapped Linear team (#1041),
+    /// captured at the moment the repo picker opens. The pick re-provisions
+    /// *this* spawn rather than the live [`Self::last_spawn`], which is not
+    /// guaranteed to still be the failed spawn: a second concurrent `w w`
+    /// overwrites `last_spawn`, and an autonomous failure's spawn was never
+    /// client-issued so it isn't in `last_spawn` at all. `None` means
+    /// persist-only — the mapping is saved but there's no client spawn to
+    /// re-run (an autonomous Linear failure), so the next attempt resolves
+    /// through the freshly-persisted mapping.
+    linear_map_spawn: Option<IpcCommand>,
     /// Terminal the next `sync_panes` should promote to the active tab.
     /// Set alongside [`Self::spawn_follow_to`] so `w` lands on the
     /// freshly-spawned agent rather than whatever tab the followed
@@ -2108,6 +2118,7 @@ impl<T: TerminalAdapter> Model<T> {
             merge_follow_from: None,
             spawn_follow_to: None,
             last_spawn: None,
+            linear_map_spawn: None,
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),

@@ -787,17 +787,15 @@ impl SetupRunner {
                 // un-ticking one would leave its stale entry behind.
                 let prefix = format!("{parent_id}/");
                 entry.retain(|id| *id != parent_id && !id.starts_with(&prefix));
-                if picked.is_empty() {
-                    // Un-ticking every repo is a real submission, not
-                    // a no-op: fall back to the org-level subscription
-                    // (the same entry the org picker would have left
-                    // when no narrowing exists). Ignoring it silently
-                    // kept the previous narrowing as-if-unchanged.
-                    entry.insert(parent_id);
-                } else {
-                    for s in picked {
-                        entry.insert(s.id);
-                    }
+                // Confirming with nothing ticked is a real submission
+                // meaning "no repos from this org" (#1098): the `retain`
+                // above already dropped the whole-org entry and every
+                // narrowed repo, so leaving `picked` empty leaves the org
+                // unsubscribed. Re-inserting `parent_id` here would
+                // resubscribe the whole org — the very repos the user
+                // just deselected — the opposite of what they asked for.
+                for s in picked {
+                    entry.insert(s.id);
                 }
                 self.next_repo_step()
             }
@@ -1940,12 +1938,14 @@ mod tests {
         );
     }
 
-    /// Regression: confirming the repo picker with EVERY repo
-    /// un-ticked used to be silently ignored, keeping the previous
-    /// narrowing as if nothing happened. An empty pick is a real
-    /// submission — fall back to the org-level subscription.
+    /// Regression (#1098): confirming the repo picker with EVERY repo
+    /// un-ticked is a real submission meaning "no repos from this org."
+    /// It must drop the whole org — the org-level entry AND every
+    /// previously-narrowed repo — not fall back to a whole-org
+    /// subscription (which would resubscribe the very repos the user
+    /// just deselected).
     #[tokio::test(flavor = "current_thread")]
-    async fn un_ticking_all_repos_falls_back_to_org_level() {
+    async fn un_ticking_all_repos_drops_the_org() {
         let mut prior: BTreeSet<String> = BTreeSet::new();
         prior.insert("github:acme/keep".into());
         prior.insert("github:acme/drop".into());
@@ -1990,11 +1990,17 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         assert!(
-            after.contains("github:acme"),
-            "empty pick must mean org-level subscription: {after:?}"
+            !after.contains("github:acme"),
+            "empty pick must not resubscribe the whole org: {after:?}"
         );
-        assert!(!after.contains("github:acme/keep"));
-        assert!(!after.contains("github:acme/drop"));
+        assert!(
+            !after.contains("github:acme/keep"),
+            "narrowed repos dropped"
+        );
+        assert!(
+            !after.contains("github:acme/drop"),
+            "narrowed repos dropped"
+        );
     }
 
     /// A malformed config.yaml (hand-edit typo) + a completed wizard

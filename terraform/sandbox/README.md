@@ -1,15 +1,19 @@
-# lazybox sandbox — Terraform modules + deployments
+# lazybox sandbox — provider templates + deployments
 
 A **generic remote dev-box** lazybox can start / stop / connect, split on
 two axes (see epic #885, issue #931):
 
-- **`gcp/`** — the provider module (**GCP first**). One IAP-only GCE
+- **`gcp/`** — the GCP provider module. One IAP-only GCE
   instance + dedicated service account + optional Cloud NAT + a startup
   script. `terraform apply`/`destroy` are the create/tear-down half; the
   fast lifecycle (`start`/`stop`/`status`/`connect`) uses `gcloud`/IAP
   directly, never Terraform. Driven by `GcpProvider` in the
-  `lazybox-sandbox` crate. A later `azure/` module lands as its own
-  provider.
+  `lazybox-sandbox` crate.
+
+- **`e2b/`** — the E2B Dockerfile template. It bakes lazybox, tmux, git,
+  Claude Code, and SSH-over-WebSocket transport. `E2bProvider` drives the E2B
+  REST lifecycle directly; see [`docs/e2b-provider-spike.md`](../../docs/e2b-provider-spike.md)
+  for build, probe, and lifecycle details.
 
 - **`deployments/`** — **what is on the box**, pluggable. `default.yaml`
   is the generic recipe (base toolchain, blank workspace) that lazybox

@@ -1966,6 +1966,7 @@ version = "0.1.10"
 dependencies = [
  "chrono",
  "lazybox-store",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3150,6 +3151,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

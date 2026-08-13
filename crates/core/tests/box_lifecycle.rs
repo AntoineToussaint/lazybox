@@ -153,6 +153,12 @@ fn scripts_are_hardened_and_parse() {
         build.contains("lazybox-idle-stop.timer"),
         "build helper must arm the idle-stop timer so an ensured box still sleeps"
     );
+    assert!(
+        build.contains("LAZYBOX_SERVICE_MODE")
+            && build.contains("server stop")
+            && build.contains("server start"),
+        "build helper direct mode must restart the daemon without systemd"
+    );
     // A client built from an unpushed commit passes a SHA the box can't fetch;
     // the checkout must fall back to the default branch so the box still runs a
     // daemon, not abort with none (the exact failure #977 removes). Assert the

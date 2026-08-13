@@ -13,72 +13,13 @@
 //! unit-tested without a real GCP project (the same stance `tui-boot`'s
 //! tunnel supervisor takes).
 
-use std::future::Future;
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::process::Stdio;
 use std::sync::Arc;
 
 use chrono::Utc;
-use tokio::process::Command;
 
-use crate::provider::{SandboxError, SandboxProvider, Tunnel};
+use crate::provider::{CommandRunner, SandboxError, SandboxProvider, Tunnel};
 use crate::{BoxHandle, BoxStatus, PowerState, SandboxSpec};
-
-/// Boxed async result returned by [`CommandRunner`].
-pub type CommandFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SandboxError>> + Send + 'a>>;
-
-/// Runs one external command (`terraform`/`gcloud`) to completion.
-/// Injectable so `GcpProvider`'s lifecycle sequencing — ensure's
-/// init→apply→output, connect's wake-then-forward — is unit-tested against
-/// scripted output without a real GCP project (see this module's tests).
-pub trait CommandRunner: Send + Sync + std::fmt::Debug {
-    /// Run `program` with `args` and the extra `env` overlaid on the
-    /// inherited environment, resolving to captured stdout on a zero exit or
-    /// a [`SandboxError`] carrying the program name and stderr otherwise.
-    /// `env` is the provider's explicitly-injected credentials (#1047), never
-    /// ambient state. Spawn failures surface as [`SandboxError::Spawn`].
-    fn run<'a>(
-        &'a self,
-        program: &'a str,
-        args: &'a [String],
-        env: &'a [(String, String)],
-    ) -> CommandFuture<'a, String>;
-}
-
-/// The production runner: shells out with stdin closed and captures output.
-#[derive(Debug, Clone)]
-pub struct SystemRunner;
-
-impl CommandRunner for SystemRunner {
-    fn run<'a>(
-        &'a self,
-        program: &'a str,
-        args: &'a [String],
-        env: &'a [(String, String)],
-    ) -> CommandFuture<'a, String> {
-        Box::pin(async move {
-            let output = Command::new(program)
-                .args(args)
-                .envs(env.iter().map(|(k, v)| (k, v)))
-                .stdin(Stdio::null())
-                .output()
-                .await
-                .map_err(|source| SandboxError::Spawn {
-                    program: program.to_string(),
-                    source,
-                })?;
-            if !output.status.success() {
-                return Err(SandboxError::Command {
-                    program: program.to_string(),
-                    status: output.status.to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-                });
-            }
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        })
-    }
-}
 
 /// How the GCP provider authenticates, threaded explicitly into every
 /// `gcloud`/`terraform` call so the box lifecycle never depends on ambient
@@ -611,6 +552,7 @@ impl SandboxProvider for GcpProvider {
 mod tests {
     use super::*;
     use crate::Deployment;
+    use crate::{CommandFuture, SystemRunner};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 

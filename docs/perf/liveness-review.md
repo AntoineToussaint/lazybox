@@ -216,11 +216,13 @@ and it is now bounded.
 
 The exact incident — a wake catch-up burst flooding the UI thread *while* a
 `Loading` modal awaits a result that never lands — is pinned by
-`wake_burst_stays_responsive_while_a_stuck_modal_self_dismisses`
-(`model/tests.rs`): a burst larger than one drain's collection cap must leave
-the loop able to return to the input read (responsiveness), and the modal,
-with its producer's sender still alive, must still time out (liveness). It
-binds the two halves that made the freeze — neither alone reproduces it.
+`wake_burst_preempts_input_while_a_mounted_loading_modal_self_dismisses`
+(`model/tests.rs`): on one real model with the modal mounted under `Id::Setup`
+and its producer held silent, a drain of a non-coalescing burst yields after a
+single event to a pending keystroke (responsiveness, the #1055 pre-emption
+path), and `Msg::LoadingTimedOut` must pop the mounted modal through the model
+even with the burst tail still queued (liveness). It binds the two halves that
+made the freeze — neither alone reproduces it.
 
 ## Status
 

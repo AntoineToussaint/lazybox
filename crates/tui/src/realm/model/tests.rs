@@ -5599,30 +5599,31 @@ mod wake_tests {
 mod wake_burst_liveness_tests {
     //! Issue #1045: the whole-app freeze after sleep/wake was a wake
     //! catch-up burst flooding the single UI thread WHILE a `Loading`
-    //! modal awaited a result that never landed (dropped on the
-    //! overflowed event channel). Either half alone is survivable; the
-    //! incident was the combination. This binds both guarantees at once:
+    //! modal awaited a result that never landed. Neither half alone
+    //! reproduces it — the freeze was the two together — so this drives
+    //! the REAL model through both at once on a single instance:
     //!
-    //! - the burst can't monopolise the thread — a drain is bounded and
-    //!   returns control to the input read with events still queued, so
-    //!   `Esc` is serviced within frame budget rather than after the
+    //! - the burst can't monopolise the thread — with host input
+    //!   pending, one drain dispatches a single event and carries the
+    //!   rest (`if input_pending() { break; }`, #1055), so `Esc` and the
+    //!   modal's own tick still get a turn instead of waiting out the
     //!   whole burst; and
-    //! - the modal can't wait forever — even with its producer's sender
-    //!   still ALIVE (the "value produced but lost on the overflowed
-    //!   channel" case, distinct from a dropped sender), it times out
-    //!   and asks to be dismissed.
+    //! - the mounted modal can't wait forever — its timeout resolves to
+    //!   `Msg::LoadingTimedOut` (the component side of that is proven in
+    //!   `loading.rs`), and here the MODEL must actually pop the modal on
+    //!   that message — the wiring the component test can't see — even
+    //!   while the burst tail is still queued.
     //!
-    //! Together: wake burst + never-arriving modal → app stays
-    //! responsive AND the modal clears itself.
-    use super::super::Model;
-    use super::super::helpers::{MAX_EVENTS_PER_TICK, drain_daemon_events};
+    //! The modal is held silent with its producer ALIVE (the #1045
+    //! "produced-but-lost / task stalled" shape, distinct from a dropped
+    //! sender, which `TakeOutcome::Cancelled` already covers).
+    use super::super::helpers::drain_daemon_events;
+    use super::super::{Id, Model};
     use crate::realm::Msg;
     use crate::realm::components::loading::Loading;
-    use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event, TerminalId};
-    use std::time::Duration;
+    use lazybox_core::{Workspace, WorkspaceKey};
+    use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event};
     use tokio::sync::mpsc;
-    use tuirealm::component::AppComponent;
-    use tuirealm::event::Event as RealmEvent;
     use tuirealm::ratatui::layout::Size;
 
     fn model_with_event_sender() -> (
@@ -5641,60 +5642,73 @@ mod wake_burst_liveness_tests {
         (model, evt_tx, cmd_rx)
     }
 
-    /// Fill the inbound channel with a wake catch-up burst: more
-    /// `TerminalOutput` chunks than one drain can collect, the shape of
-    /// a machine resuming from sleep. Kept under the channel capacity so
-    /// the test exercises the per-tick collection cap, not the daemon
-    /// forwarder's overflow path (covered by its own tests).
-    fn wake_burst(tx: &mpsc::Sender<Event>) -> usize {
-        let n = (MAX_EVENTS_PER_TICK * 4).min(EVENT_CHANNEL_CAPACITY - 1);
-        for seq in 0..n {
-            tx.try_send(Event::TerminalOutput {
-                terminal_id: TerminalId(1),
-                bytes: b"wake catch-up chunk\n".to_vec(),
-                first_seq: seq as u64,
-                seq: seq as u64,
-            })
-            .expect("bounded channel must have room for the burst");
+    /// A wake catch-up burst of DISTINCT workspace upserts. Distinct
+    /// matters: same-terminal `TerminalOutput` coalesces into one event
+    /// (`coalesce_adjacent_output`), so it can't exercise per-event
+    /// pre-emption — the drain would dispatch the single merged event and
+    /// never re-check input. Upserts never coalesce, so the dispatch loop
+    /// has `n` real iterations a pending keystroke can break out of.
+    fn wake_burst_of_upserts(tx: &mpsc::Sender<Event>, n: usize) {
+        use chrono::Utc;
+        for i in 0..n {
+            let ws = Workspace::empty(
+                WorkspaceKey::new(format!("github:o/r#{i}")),
+                "main",
+                Utc::now(),
+            );
+            tx.try_send(Event::WorkspaceUpserted(Box::new(ws)))
+                .expect("bounded channel must have room for the burst");
         }
-        n
     }
 
     #[test]
-    fn wake_burst_stays_responsive_while_a_stuck_modal_self_dismisses() {
+    fn wake_burst_preempts_input_while_a_mounted_loading_modal_self_dismisses() {
         let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
 
-        let queued = wake_burst(&evt_tx);
-        assert!(
-            queued > MAX_EVENTS_PER_TICK,
-            "the burst must exceed one drain's collection cap"
-        );
-
-        // A `Loading` modal is up, awaiting a value that will never
-        // land. Holding the producer keeps its sender ALIVE — the #1045
-        // signature (result dropped on the overflowed channel), NOT a
-        // producer that dropped its sender.
+        // A `Loading` modal is up on the model, mounted under its real
+        // `Id::Setup` (the id the setup flow mounts it under), awaiting a
+        // value that will never land — producer held alive but silent.
         let (loading, _never_sends) = Loading::pending("waking…");
-        let mut loading = loading.timeout(Duration::ZERO);
-
-        // Responsiveness: one drain is bounded — it cannot swallow the
-        // whole burst, so the loop falls through to the input read with
-        // events still queued instead of spinning on output.
-        let backlog = drain_daemon_events(&mut m, &mut Vec::new(), || false);
-        assert!(
-            backlog,
-            "a bounded drain over a wake burst must report more still queued"
-        );
-        assert!(
-            m.client.rx.try_recv().is_ok(),
-            "the burst must NOT drain in one tick — the keyboard read would be starved"
+        m.mount_modal(Id::Setup, loading);
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Setup),
+            "the loading modal is mounted before the burst",
         );
 
-        // Liveness: the modal times out and asks to be dismissed even
-        // though its producer never sent and never dropped its sender.
+        // The wake burst floods the UI thread's inbound channel.
+        let n = 128;
+        wake_burst_of_upserts(&evt_tx, n);
+
+        // Responsiveness: with a keystroke pending the whole time, ONE
+        // drain dispatches exactly one event and carries the rest — the
+        // burst cannot hold the thread (and thus `Esc` / the modal's
+        // tick) hostage for its full length.
+        let mut carried = Vec::new();
+        let backlog = drain_daemon_events(&mut m, &mut carried, || true);
+        assert!(backlog, "an un-dispatched tail is a backlog");
+        assert_eq!(
+            carried.len(),
+            n - 1,
+            "input pre-empts after one event: the rest is carried, not drained in one shot",
+        );
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            1,
+            "exactly one burst event applied before yielding to the waiting keystroke",
+        );
+
+        // Liveness: `Msg::LoadingTimedOut` must dismiss the mounted modal
+        // through the model — not merely flash a notice and leave it up —
+        // even with the burst tail still queued.
+        m.update(Msg::LoadingTimedOut);
         assert!(
-            matches!(loading.on(&RealmEvent::Tick), Some(Msg::LoadingTimedOut)),
-            "a modal awaiting a lost wake result must self-dismiss, not spin forever"
+            m.top_modal().is_none(),
+            "a timed-out loading modal must be dismissed by the model, not left orphaned",
+        );
+        assert!(
+            !carried.is_empty(),
+            "the modal cleared while the burst tail was still pending — mid-burst, not after it drained",
         );
     }
 }

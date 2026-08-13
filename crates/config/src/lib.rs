@@ -324,6 +324,23 @@ pub struct SandboxConfig {
     /// bring-your-own-stack deployment sets it `false` to manage its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_lazybox: Option<bool>,
+    /// Whether to auto-connect to the box on startup (#1066). Unset →
+    /// `false` (opt-in): nothing touches the billed box at launch — it stays
+    /// disconnected until you connect (explicitly with `Shift-C`, or lazily
+    /// on the first `r`-spawn). Set `true` to connect in the background at
+    /// launch so the box is live by the time you spawn. This governs *only*
+    /// startup; it does NOT gate on-demand spawns — see [`Self::require_connect`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_connect: Option<bool>,
+    /// Whether a remote (`r`-)spawn is hard-gated on an already-live
+    /// connection (#1066). Unset → `false`: an `r`-spawn while disconnected
+    /// lazily brings the box up on demand (one-key remote spawn). Set `true`
+    /// for the hard-gate — a spawn while disconnected is refused and points at
+    /// `Shift-C`, so a bring-up is never a side-effect of a spawn. Decoupled
+    /// from [`Self::auto_connect`] so "don't connect at launch, but let `r c`
+    /// connect on demand" is expressible (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_connect: Option<bool>,
     /// How the provider authenticates to the cloud (#1047). The provider
     /// injects these credentials explicitly into every `gcloud`/`terraform`
     /// call, so no ambient `gcloud auth login`/ADC is a hidden prerequisite.
@@ -1296,6 +1313,23 @@ pub struct RepoConfig {
     /// ```
     #[serde(default)]
     pub approval: ApprovalConfig,
+    /// Whether this repo's workspaces use the global `sandbox:` box for
+    /// remote (`r`-)spawn (#1066). `None` (the default) inherits — the box
+    /// applies to every project. `Some(false)` opts this repo out: its
+    /// workspaces get no box, so the `r`-spawn is refused there with a nudge.
+    ///
+    /// `Some(true)` only re-asserts the inherit default — it does NOT create
+    /// or enable a box for this repo when no global `sandbox:` block is set.
+    /// There is no per-repo *own* box today; this flag is a per-project
+    /// on/off switch over the single global box.
+    ///
+    /// ```yaml
+    /// repos:
+    ///   AntoineToussaint/personal-notes:
+    ///     sandbox: false   # never run this repo's work on the box
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<bool>,
 }
 
 /// Per-repo approval policy (`repos.<owner/name>.approval`). Maps to the
@@ -1720,6 +1754,23 @@ impl Default for TerminalSection {
 }
 
 impl Config {
+    /// Repos that opt out of the global `sandbox:` box (`repos.<key>.sandbox:
+    /// false`, #1066). Their workspaces get no remote box, so the `r`-spawn
+    /// is refused there even while the box is configured for other projects.
+    /// Empty when no repo overrides — the box applies to every project.
+    ///
+    /// Keys are lowercased: GitHub `owner/repo` slugs are case-insensitive,
+    /// and a cost/safety opt-out must not silently fail *open* on a casing
+    /// mismatch between the config key and the task's canonical slug. The
+    /// caller compares against a lowercased slug too.
+    pub fn sandbox_disabled_repos(&self) -> std::collections::BTreeSet<String> {
+        self.repos
+            .iter()
+            .filter(|(_, r)| r.sandbox == Some(false))
+            .map(|(k, _)| k.to_ascii_lowercase())
+            .collect()
+    }
+
     /// Parse config YAML, including migrations from older serialized defaults.
     pub fn parse(contents: &str) -> Result<Self, ConfigError> {
         let mut config: Self = serde_yaml::from_str(contents)?;
@@ -2514,6 +2565,60 @@ mod tests {
         let serialized = serde_yaml::to_string(&config).unwrap();
         let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.relay, config.relay);
+    }
+
+    /// Auto-connect and the spawn hard-gate are both opt-in and independent
+    /// (#1066): unset means the box does not touch GCP at launch, and an
+    /// on-demand `r`-spawn is not gated. Boot reads each as `unwrap_or(false)`.
+    #[test]
+    fn sandbox_auto_connect_and_require_connect_default_off_and_independent() {
+        assert_eq!(SandboxConfig::default().auto_connect, None);
+        assert_eq!(SandboxConfig::default().require_connect, None);
+        let cfg: Config = Config::parse("sandbox:\n  project: p\n").expect("parse");
+        assert_eq!(
+            cfg.sandbox.auto_connect, None,
+            "no startup connect by default"
+        );
+        assert_eq!(
+            cfg.sandbox.require_connect, None,
+            "no spawn hard-gate by default"
+        );
+        // Independently settable: don't connect at launch, but hard-gate spawns.
+        let opted: Config = Config::parse(
+            "sandbox:\n  project: p\n  auto_connect: false\n  require_connect: true\n",
+        )
+        .expect("parse");
+        assert_eq!(opted.sandbox.auto_connect, Some(false));
+        assert_eq!(opted.sandbox.require_connect, Some(true));
+    }
+
+    /// A repo can opt out of the global box (#1066); every other repo still
+    /// inherits it. The opt-out is case-insensitive — a casing mismatch must
+    /// not silently leave the box enabled (fail *open*).
+    #[test]
+    fn per_repo_sandbox_opt_out_is_collected_case_insensitively() {
+        // No overrides → the box applies to every project.
+        let none: Config = Config::parse("sandbox:\n  project: p\n").expect("parse");
+        assert!(none.sandbox_disabled_repos().is_empty());
+
+        let cfg: Config = Config::parse(
+            "sandbox:\n  project: p\nrepos:\n  \
+             Owner/Off:\n    sandbox: false\n  \
+             owner/on:\n    sandbox: true\n  \
+             owner/inherit:\n    approval: human\n",
+        )
+        .expect("parse");
+        let disabled = cfg.sandbox_disabled_repos();
+        assert!(
+            disabled.contains("owner/off"),
+            "explicit false opts out, matched lowercased: {disabled:?}"
+        );
+        assert!(!disabled.contains("owner/on"), "explicit true inherits");
+        assert!(
+            !disabled.contains("owner/inherit"),
+            "unset inherits the global box"
+        );
+        assert_eq!(disabled.len(), 1);
     }
 
     /// The default merge-on-green config keeps own-PRs-only; a

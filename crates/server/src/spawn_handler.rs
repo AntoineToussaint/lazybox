@@ -10420,6 +10420,7 @@ mod tests {
                 branch_prefix: None,
                 bringup: None,
                 approval: Default::default(),
+                sandbox: None,
             },
         );
 
@@ -13615,6 +13616,7 @@ mod tests {
                 branch_prefix: None,
                 bringup: None,
                 approval: Default::default(),
+                sandbox: None,
             },
         );
         // Different case should miss.

@@ -1343,13 +1343,22 @@ async fn run_embedded_realm(
     // stays asleep (no GCP, no Terraform) until the first `r`-spawn. `None`
     // when no `sandbox:` box is configured — the `r` chords stay hidden.
     // Must run here, in the async context: `setup` spawns a tokio task.
-    let remote_box = remote_box::setup(
-        &lazybox_config::Config::load()
-            .map_err(|e| tracing::warn!("config load for the r-spawn box failed: {e:#}"))
-            .unwrap_or_default()
-            .sandbox,
-        config.store.clone(),
-    );
+    let box_config = lazybox_config::Config::load()
+        .map_err(|e| tracing::warn!("config load for the r-spawn box failed: {e:#}"))
+        .unwrap_or_default();
+    // Repos that opted out of the global box (`repos.<key>.sandbox: false`,
+    // #1066) — the per-project override the model enforces on `r`-spawn.
+    let remote_disabled_repos = box_config.sandbox_disabled_repos();
+    let sandbox_config = box_config.sandbox;
+    // Both default OFF and independent (#1066). `auto_connect` governs only
+    // startup: off means nothing touches the billed box at launch.
+    // `require_connect` governs on-demand spawns: off (the default) means an
+    // `r`-spawn while disconnected lazily brings the box up; on hard-gates it
+    // behind an explicit connect. Default: no startup connect, but `r c`
+    // still works one-key.
+    let remote_auto_connect = sandbox_config.auto_connect.unwrap_or(false);
+    let remote_require_connect = sandbox_config.require_connect.unwrap_or(false);
+    let remote_box = remote_box::setup(&sandbox_config, config.store.clone());
     let store_for_save = config.store.clone();
     let realm_result = tokio::task::spawn_blocking(move || {
         let snippets =
@@ -1365,7 +1374,10 @@ async fn run_embedded_realm(
             clients.insert(rb.name.clone(), rb.client);
             model = model
                 .with_remote_clients(clients, Some(rb.name))
-                .with_remote_notices(rb.notices);
+                .with_remote_notices(rb.notices)
+                .with_remote_control(rb.control, remote_auto_connect)
+                .with_remote_require_connect(remote_require_connect)
+                .with_remote_repo_overrides(remote_disabled_repos);
         }
         // Returning user with persisted setup → mount the polling
         // modal up front so the first poll cycle has UI feedback.

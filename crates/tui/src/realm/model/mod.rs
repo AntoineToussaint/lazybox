@@ -1287,6 +1287,11 @@ pub struct Model<T: TerminalAdapter> {
     /// The remote an unqualified `r`-spawn targets — today the single
     /// `sandbox:` box. `None` when no box is configured.
     default_remote: Option<String>,
+    /// Repos that opted out of the global box (`repos.<key>.sandbox: false`,
+    /// #1066). An `r`-spawn on a workspace in one of these is refused even
+    /// while the box is configured for other projects — the per-project
+    /// override the boot crate resolves from config and hands here.
+    remote_disabled_repos: std::collections::BTreeSet<String>,
     /// The r-spawn worker's notice stream (bring-up progress, dropped
     /// commands), drained once per run-loop iteration into footer
     /// flashes. `None` when no box is configured. Deliberately not the
@@ -1302,6 +1307,17 @@ pub struct Model<T: TerminalAdapter> {
     /// the next poll instead of flickering off within seconds. Rolled back
     /// when the worker reports the spawn dropped.
     remote_marks: std::collections::HashMap<lazybox_core::SessionKey, String>,
+    /// UI→worker control channel for the remote box: explicit
+    /// connect/disconnect (the `Shift-C` action) and the startup
+    /// auto-connect (#1066). `None` when no `sandbox:` box is configured.
+    remote_control: Option<tokio::sync::mpsc::Sender<lazybox_tui_core::remote::RemoteControl>>,
+    /// Whether a remote spawn is hard-gated on a live connection
+    /// (`sandbox.require_connect`, default off, #1066). When true, an
+    /// `r`-spawn while disconnected is refused (pointing at `Shift-C`) rather
+    /// than lazily bringing the box up. Decoupled from startup auto-connect
+    /// (`sandbox.auto_connect`) so "no startup connect, but `r c` still
+    /// connects on demand" is the default.
+    remote_require_connect: bool,
     /// True when this client is attached to a standalone daemon over a
     /// socket (`--connect`) rather than the in-process embedded daemon.
     /// The `Client` transport is deliberately opaque, so the entrypoint
@@ -2049,8 +2065,11 @@ impl<T: TerminalAdapter> Model<T> {
             client,
             remote_clients: std::collections::BTreeMap::new(),
             default_remote: None,
+            remote_disabled_repos: std::collections::BTreeSet::new(),
             remote_notice_rx: None,
             remote_marks: std::collections::HashMap::new(),
+            remote_control: None,
+            remote_require_connect: false,
             event_backlog: helpers::BacklogMonitor::default(),
             remote: false,
             redraw: true,
@@ -2285,6 +2304,12 @@ impl<T: TerminalAdapter> Model<T> {
     ) -> Self {
         self.default_remote = default.or_else(|| clients.keys().next().cloned());
         self.remote_clients = clients;
+        // A configured box starts out disconnected (not `NotConfigured`),
+        // so the persistent indicator is visible from launch (#1066).
+        if self.default_remote.is_some() {
+            self.status
+                .note_remote_state(lazybox_tui_core::remote::RemoteConnState::Disconnected);
+        }
         self.rebuild_catalog();
         self
     }
@@ -2298,10 +2323,100 @@ impl<T: TerminalAdapter> Model<T> {
         self
     }
 
+    /// Attach the r-spawn worker's control channel and apply the startup
+    /// auto-connect policy (#1066). When auto-connect is on, fire the
+    /// background connect now so the box is live before the first spawn;
+    /// the indicator shows `connecting…` immediately. Startup only — the
+    /// per-spawn hard-gate is [`Self::with_remote_require_connect`].
+    pub fn with_remote_control(
+        mut self,
+        control: tokio::sync::mpsc::Sender<lazybox_tui_core::remote::RemoteControl>,
+        auto_connect: bool,
+    ) -> Self {
+        self.remote_control = Some(control);
+        if auto_connect {
+            self.connect_remote();
+        }
+        self
+    }
+
+    /// Whether the remote box link is currently live.
+    pub(crate) fn remote_connected(&self) -> bool {
+        self.status.remote_conn.is_connected()
+    }
+
+    /// Ask the worker to bring the box up (create → wake → connect) and
+    /// paint the indicator `connecting…` optimistically. No-op without a
+    /// configured box.
+    pub(crate) fn connect_remote(&mut self) {
+        let Some(control) = self.remote_control.as_ref() else {
+            return;
+        };
+        if control
+            .try_send(lazybox_tui_core::remote::RemoteControl::Connect)
+            .is_ok()
+        {
+            self.status
+                .note_remote_state(lazybox_tui_core::remote::RemoteConnState::Connecting);
+            self.redraw = true;
+        }
+    }
+
+    /// Ask the worker to drop the box link (the box keeps running). Paints
+    /// the indicator `disconnected` optimistically.
+    pub(crate) fn disconnect_remote(&mut self) {
+        let Some(control) = self.remote_control.as_ref() else {
+            return;
+        };
+        if control
+            .try_send(lazybox_tui_core::remote::RemoteControl::Disconnect)
+            .is_ok()
+        {
+            self.status
+                .note_remote_state(lazybox_tui_core::remote::RemoteConnState::Disconnected);
+            self.redraw = true;
+        }
+    }
+
     /// The remote name an `r`-spawn targets when the chord doesn't name
     /// one — the configured default, else the first connected remote.
     pub(crate) fn default_remote(&self) -> Option<&str> {
         self.default_remote.as_deref()
+    }
+
+    /// Record the per-project sandbox overrides — the repos that opted out
+    /// of the global box (`repos.<key>.sandbox: false`, #1066). The boot
+    /// crate resolves these from config (already lowercased).
+    pub fn with_remote_repo_overrides(
+        mut self,
+        disabled_repos: std::collections::BTreeSet<String>,
+    ) -> Self {
+        self.remote_disabled_repos = disabled_repos;
+        self
+    }
+
+    /// Record whether a remote spawn is hard-gated on a live connection
+    /// (`sandbox.require_connect`, #1066).
+    pub fn with_remote_require_connect(mut self, require_connect: bool) -> Self {
+        self.remote_require_connect = require_connect;
+        self
+    }
+
+    /// The remote box an `r`-spawn targets for a workspace in `repo`,
+    /// honoring the per-project opt-out (#1066): `None` when that repo
+    /// disabled the box, else the default remote. A `None` repo (repo-less
+    /// workspace) can't be opted out, so it uses the default. Matched
+    /// case-insensitively — a casing mismatch must not leave a repo the user
+    /// disabled silently enabled (the disabled set is already lowercased).
+    pub(crate) fn remote_for_repo(&self, repo: Option<&str>) -> Option<&str> {
+        if let Some(repo) = repo
+            && self
+                .remote_disabled_repos
+                .contains(&repo.to_ascii_lowercase())
+        {
+            return None;
+        }
+        self.default_remote()
     }
 
     /// Tag a workspace as running on a remote box: paint the sidebar row
@@ -2348,12 +2463,24 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if worker_dead {
             self.remote_notice_rx = None;
+            // The link is gone: reflect it in the persistent indicator too,
+            // not just a one-shot flash.
+            self.status
+                .note_remote_state(lazybox_tui_core::remote::RemoteConnState::Error {
+                    reason: "worker terminated — restart lazybox".into(),
+                });
             self.flash_error(
                 "⇅ remote-box worker terminated — r-spawns are unavailable until restart",
             );
         }
         for notice in drained {
             match notice {
+                // A durable connection-state transition drives the
+                // persistent indicator only — no transient flash (#1066).
+                lazybox_tui_core::remote::RemoteBoxNotice::State(state) => {
+                    self.status.note_remote_state(state);
+                    self.redraw = true;
+                }
                 lazybox_tui_core::remote::RemoteBoxNotice::Info(msg) => self.flash_info(msg),
                 lazybox_tui_core::remote::RemoteBoxNotice::Dropped {
                     session_keys,
@@ -4902,6 +5029,12 @@ impl<T: TerminalAdapter> Model<T> {
         // just-pressed `w`/`a c`/`s`) beats the ambient background-poll
         // indicator, since it's direct feedback for an action they're
         // waiting on. Background poll is the steady-state fallback.
+        // A box bring-up in flight (creating/waking/connecting) is a
+        // direct, multi-minute action the user is waiting on, so it
+        // out-ranks the ambient background-poll spinner; a steady box
+        // state (connected/disconnected/error) is the lowest-priority
+        // fallback so the persistent indicator (#1066) is visible whenever
+        // nothing more urgent holds the status slot.
         let polling_status: Option<(&'static str, String)> =
             if let Some(p) = self.status.polling.as_ref() {
                 Some((p.spinner_glyph(), p.status_label()))
@@ -4909,11 +5042,12 @@ impl<T: TerminalAdapter> Model<T> {
                 Some((sp.spinner_glyph(), sp.label()))
             } else if let Some(wait) = self.status.github_rate_limit_wait.as_ref() {
                 Some(("◷", wait.label()))
+            } else if let Some(box_status) = self.status.remote_status_busy() {
+                Some(box_status)
+            } else if let Some(bg) = self.status.bg_poll.as_ref() {
+                Some((bg.spinner_glyph(), bg.label()))
             } else {
-                self.status
-                    .bg_poll
-                    .as_ref()
-                    .map(|bg| (bg.spinner_glyph(), bg.label()))
+                self.status.remote_status_steady()
             };
         // Resolve the focused pane's CONTEXTUAL bindings for the
         // footer hint bar. Contextual = state-aware short list

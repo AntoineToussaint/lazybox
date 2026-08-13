@@ -543,6 +543,14 @@ impl<T: TerminalAdapter> Model<T> {
                         pr.assignees = logins.clone();
                     } else if let Some(issue) = workspace.gh_issues.first_mut() {
                         issue.assignees = logins.clone();
+                    } else if let Some(issue) = workspace.linear_issues.first_mut() {
+                        // Linear issues hold a single assignee; the
+                        // provider keeps the LAST login (see
+                        // LinearClient::set_assignees). Mirror that so the
+                        // optimistic chips don't briefly show an
+                        // impossible two-assignee state before the poll
+                        // reconciles.
+                        issue.assignees = logins.last().cloned().into_iter().collect();
                     }
                 });
                 cmds.push(IpcCommand::SetAssignees {
@@ -591,5 +599,131 @@ impl<T: TerminalAdapter> Model<T> {
             PickOutcome::Runner(_) => unreachable!("runner outcomes return before modal pop"),
         }
         cmds
+    }
+}
+
+#[cfg(test)]
+mod optimistic_assignee_tests {
+    use crate::realm::Model;
+    use chrono::Utc;
+    use lazybox_core::{
+        CiStatus, Mergeable, ReviewStatus, SessionKey, Task, TaskId, TaskKind, TaskRole, TaskState,
+        Workspace, WorkspaceKey,
+    };
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use lazybox_tui_core::choice::PickOutcome;
+    use tuirealm::ratatui::layout::Size;
+
+    fn issue_task(source: &str, url: &str, assignees: Vec<String>) -> Task {
+        Task {
+            author: String::new(),
+            id: TaskId {
+                source: source.into(),
+                key: "ENG-1".into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Assignee,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: url.into(),
+            repo: Some("o/r".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees,
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Unknown,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: Some("node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: Some(TaskKind::Issue),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    fn model_with(task: Task) -> (Model<tuirealm::terminal::TestTerminalAdapter>, WorkspaceKey) {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+        let ws = Workspace::from_task(task, Utc::now());
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        (m, key)
+    }
+
+    /// Linear issues hold a single assignee. When the picker submits the
+    /// existing assignee (listed first) plus a newly-ticked one, the
+    /// optimistic chips must show the last-wins single assignee — not an
+    /// impossible two-assignee state that only self-corrects on the next
+    /// poll.
+    #[test]
+    fn linear_assignee_optimistic_edit_reflects_single_last_login() {
+        let (mut m, key) = model_with(issue_task(
+            "linear",
+            "https://linear.app/acme/issue/ENG-1",
+            vec!["Alice".into()],
+        ));
+
+        let _ = m.apply_pick_outcome(PickOutcome::Assignees {
+            workspace_key: key.clone(),
+            logins: vec!["Alice".into(), "Bob".into()],
+        });
+
+        let session_key: SessionKey = (&key).into();
+        let ws = m.sidebar.workspace_by_key(&session_key).expect("workspace");
+        assert_eq!(
+            ws.linear_issues[0].assignees,
+            vec!["Bob".to_string()],
+            "single-assignee Linear issue reflects last-wins, not a 2-assignee state",
+        );
+    }
+
+    /// GitHub issues are multi-assignee; splitting the Linear branch out
+    /// must not regress that — the full selected set is reflected.
+    #[test]
+    fn github_issue_assignee_optimistic_edit_keeps_all_logins() {
+        let (mut m, key) = model_with(issue_task(
+            "github",
+            "https://github.com/o/r/issues/1",
+            vec![],
+        ));
+
+        let _ = m.apply_pick_outcome(PickOutcome::Assignees {
+            workspace_key: key.clone(),
+            logins: vec!["Alice".into(), "Bob".into()],
+        });
+
+        let session_key: SessionKey = (&key).into();
+        let ws = m.sidebar.workspace_by_key(&session_key).expect("workspace");
+        assert_eq!(
+            ws.gh_issues[0].assignees,
+            vec!["Alice".to_string(), "Bob".to_string()],
+            "GitHub issue keeps the full multi-assignee set",
+        );
     }
 }

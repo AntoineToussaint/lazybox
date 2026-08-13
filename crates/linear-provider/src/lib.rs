@@ -315,6 +315,24 @@ impl LinearClient {
     }
 }
 
+/// Join a GraphQL response body's `errors` array into one message, or
+/// `None` when the mutation carried no errors. GraphQL surfaces
+/// mutation failures in the response body (HTTP 200), not the status,
+/// so every mutation checks this before declaring success.
+fn gql_errors(resp: &serde_json::Value) -> Option<String> {
+    let errors = resp.get("errors").and_then(|v| v.as_array())?;
+    if errors.is_empty() {
+        return None;
+    }
+    Some(
+        errors
+            .iter()
+            .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
 impl LinearClient {
     /// Post a comment on a Linear issue. `issue_id` is the issue's
     /// UUID node id (stored in `task.node_id` after a poll). Wraps
@@ -328,17 +346,161 @@ impl LinearClient {
         // The response shape is `{ data: { commentCreate: { success } } }`
         // — we only need to confirm we got a 2xx + no GraphQL errors.
         let resp: serde_json::Value = self.graphql(&req).await?;
-        if let Some(errors) = resp.get("errors").and_then(|v| v.as_array())
-            && !errors.is_empty()
-        {
-            let joined = errors
-                .iter()
-                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(LinearError::Graphql(joined));
+        if let Some(msg) = gql_errors(&resp) {
+            return Err(LinearError::Graphql(msg));
         }
         Ok(())
+    }
+
+    /// Resolve a Linear user's display name or email to their UUID.
+    /// The assignee picker's candidate strings are Linear display
+    /// names (Linear has no GitHub-style login), so a mutation must
+    /// map the picked name back to the id `issueUpdate` expects.
+    /// Matches `name`, `displayName`, or `email` case-insensitively.
+    ///
+    /// `Ok(None)` when nobody matches. Display names are NOT unique in
+    /// Linear, so when more than one distinct user matches we refuse
+    /// rather than assign an arbitrary one — silently picking the first
+    /// would assign the wrong person. `Err` names the ambiguity so the
+    /// caller can retype a unique identifier (e.g. the email).
+    pub async fn resolve_user_id(&self, name: &str) -> Result<Option<String>, LinearError> {
+        // Filter server-side on an exact (case-insensitive) match of
+        // any identifier. A blind `users(first: N)` fetch would miss a
+        // match sorted past the page — a member of a >N-user workspace
+        // would falsely resolve to "not found".
+        let target = name.trim();
+        let req = serde_json::json!({
+            "query": "query($q: String!) { users(first: 50, filter: { or: [ { name: { eqIgnoreCase: $q } }, { displayName: { eqIgnoreCase: $q } }, { email: { eqIgnoreCase: $q } } ] }) { nodes { id name displayName email } } }",
+            "variables": { "q": target },
+        });
+        let resp: serde_json::Value = self.graphql(&req).await?;
+        if let Some(msg) = gql_errors(&resp) {
+            return Err(LinearError::Graphql(msg));
+        }
+        let target = target.to_lowercase();
+        let Some(nodes) = resp
+            .get("data")
+            .and_then(|d| d.get("users"))
+            .and_then(|u| u.get("nodes"))
+            .and_then(|n| n.as_array())
+        else {
+            return Ok(None);
+        };
+        let matched: Vec<&str> = nodes
+            .iter()
+            .filter(|node| {
+                ["name", "displayName", "email"].iter().any(|field| {
+                    node.get(*field)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|v| v.to_lowercase() == target)
+                })
+            })
+            .filter_map(|node| node.get("id").and_then(|v| v.as_str()))
+            .collect();
+        match matched.as_slice() {
+            [] => Ok(None),
+            [id] => Ok(Some((*id).to_string())),
+            _ => Err(LinearError::Graphql(format!(
+                "`{name}` matches {} Linear users; use a unique email to disambiguate",
+                matched.len()
+            ))),
+        }
+    }
+
+    /// Set (or clear, with `None`) the single assignee on a Linear
+    /// issue via `issueUpdate`. Linear issues hold at most one
+    /// assignee, so this replaces rather than appends.
+    pub async fn set_assignee(
+        &self,
+        issue_id: &str,
+        assignee_id: Option<&str>,
+    ) -> Result<(), LinearError> {
+        let req = serde_json::json!({
+            "query": "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+            "variables": { "id": issue_id, "input": { "assigneeId": assignee_id } },
+        });
+        let resp: serde_json::Value = self.graphql(&req).await?;
+        if let Some(msg) = gql_errors(&resp) {
+            return Err(LinearError::Graphql(msg));
+        }
+        Ok(())
+    }
+
+    /// Move a Linear issue to a workflow-state id via `issueUpdate`.
+    /// State ids are per-team, so callers resolve one from the issue's
+    /// own team (see [`Self::close_issue_by_id`]).
+    pub async fn move_issue_to_state(
+        &self,
+        issue_id: &str,
+        state_id: &str,
+    ) -> Result<(), LinearError> {
+        let req = serde_json::json!({
+            "query": "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+            "variables": { "id": issue_id, "input": { "stateId": state_id } },
+        });
+        let resp: serde_json::Value = self.graphql(&req).await?;
+        if let Some(msg) = gql_errors(&resp) {
+            return Err(LinearError::Graphql(msg));
+        }
+        Ok(())
+    }
+
+    /// Close a Linear issue by moving it to a `canceled`-type workflow
+    /// state — the analog of GitHub's "close as not planned" that the
+    /// `x c` action triggers. Resolves a canceled state from the
+    /// issue's own team (state ids are per-team), so nothing team-
+    /// specific needs threading in. Idempotent: an issue already in a
+    /// completed or canceled state is a no-op.
+    pub async fn close_issue_by_id(&self, issue_id: &str) -> Result<(), LinearError> {
+        let req = serde_json::json!({
+            "query": "query($id: String!) { issue(id: $id) { state { type } team { states { nodes { id type } } } } }",
+            "variables": { "id": issue_id },
+        });
+        let resp: serde_json::Value = self.graphql(&req).await?;
+        if let Some(msg) = gql_errors(&resp) {
+            return Err(LinearError::Graphql(msg));
+        }
+        let issue = resp
+            .get("data")
+            .and_then(|d| d.get("issue"))
+            .filter(|i| !i.is_null())
+            .ok_or_else(|| LinearError::Graphql(format!("issue {issue_id} not found")))?;
+        let current_type = issue
+            .get("state")
+            .and_then(|s| s.get("type"))
+            .and_then(|t| t.as_str())
+            .unwrap_or_default();
+        if matches!(current_type, "completed" | "canceled") {
+            return Ok(());
+        }
+        let state_id = issue
+            .get("team")
+            .and_then(|t| t.get("states"))
+            .and_then(|s| s.get("nodes"))
+            .and_then(|n| n.as_array())
+            .into_iter()
+            .flatten()
+            .find(|s| s.get("type").and_then(|t| t.as_str()) == Some("canceled"))
+            .and_then(|s| s.get("id").and_then(|v| v.as_str()))
+            .ok_or_else(|| {
+                LinearError::Graphql("issue team has no canceled workflow state".into())
+            })?;
+        self.move_issue_to_state(issue_id, state_id).await
+    }
+
+    /// The Linear issue UUID backing a workspace's primary task.
+    /// `permanent` error when the workspace has no polled task or its
+    /// task carries no `node_id` (pre-poll state).
+    fn issue_id_for(&self, workspace: &lazybox_core::Workspace) -> Result<String, ProviderError> {
+        let task = workspace.primary_task().ok_or_else(|| {
+            ProviderError::permanent(
+                "linear",
+                format!("workspace {} has no primary task", workspace.key),
+            )
+        })?;
+        task.node_id
+            .clone()
+            .ok_or_else(|| ProviderError::permanent("linear", "task has no node_id (poll first)"))
     }
 }
 
@@ -364,16 +526,58 @@ impl TaskProvider for LinearClient {
         workspace: &lazybox_core::Workspace,
         body: &str,
     ) -> Result<(), ProviderError> {
-        let task = workspace.primary_task().ok_or_else(|| {
-            ProviderError::permanent(
-                "linear",
-                format!("workspace {} has no primary task", workspace.key),
-            )
-        })?;
-        let issue_id = task.node_id.as_deref().ok_or_else(|| {
-            ProviderError::permanent("linear", "task has no node_id (poll first)")
-        })?;
-        self.post_comment(issue_id, body)
+        let issue_id = self.issue_id_for(workspace)?;
+        self.post_comment(&issue_id, body)
+            .await
+            .map_err(|e| ProviderError::permanent("linear", e.to_string()))
+    }
+
+    /// Close the workspace's Linear issue by moving it to a canceled
+    /// workflow state — the `x c` close-issue analog (see
+    /// [`Self::close_issue_by_id`]).
+    async fn close_issue(&self, workspace: &lazybox_core::Workspace) -> Result<(), ProviderError> {
+        let issue_id = self.issue_id_for(workspace)?;
+        self.close_issue_by_id(&issue_id)
+            .await
+            .map_err(|e| ProviderError::permanent("linear", e.to_string()))
+    }
+
+    /// Assign the Linear issue. Linear issues hold a single assignee,
+    /// so "add" replaces with the named user — [`Self::set_assignees`]
+    /// carries the actual logic.
+    async fn add_assignees(
+        &self,
+        workspace: &lazybox_core::Workspace,
+        logins: &[String],
+    ) -> Result<(), ProviderError> {
+        self.set_assignees(workspace, logins).await
+    }
+
+    /// Replace the Linear issue's assignee. `logins` are Linear
+    /// display names (what the picker offers). Linear issues hold a
+    /// single assignee, so the LAST login wins — the picker lists the
+    /// existing assignee first, so a user who *adds* a name (leaving
+    /// the current one checked) still reassigns to the one they picked
+    /// rather than silently keeping the old one. An empty set clears
+    /// the assignee.
+    async fn set_assignees(
+        &self,
+        workspace: &lazybox_core::Workspace,
+        logins: &[String],
+    ) -> Result<(), ProviderError> {
+        let issue_id = self.issue_id_for(workspace)?;
+        let assignee_id = match logins.last() {
+            Some(login) => Some(
+                self.resolve_user_id(login)
+                    .await
+                    .map_err(|e| ProviderError::permanent("linear", e.to_string()))?
+                    .ok_or_else(|| {
+                        ProviderError::permanent("linear", format!("user `{login}` not found"))
+                    })?,
+            ),
+            None => None,
+        };
+        self.set_assignee(&issue_id, assignee_id.as_deref())
             .await
             .map_err(|e| ProviderError::permanent("linear", e.to_string()))
     }

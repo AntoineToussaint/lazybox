@@ -962,7 +962,7 @@ impl<T: TerminalAdapter> Model<T> {
                 push(r, &mut out);
             }
         }
-        for issue in &ws.gh_issues {
+        for issue in ws.gh_issues.iter().chain(ws.linear_issues.iter()) {
             for a in &issue.assignees {
                 push(a, &mut out);
             }
@@ -1013,7 +1013,7 @@ impl<T: TerminalAdapter> Model<T> {
                 push(r, &mut out);
             }
         }
-        for issue in &ws.gh_issues {
+        for issue in ws.gh_issues.iter().chain(ws.linear_issues.iter()) {
             for a in &issue.assignees {
                 push(a, &mut out);
             }

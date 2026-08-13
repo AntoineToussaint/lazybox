@@ -2090,6 +2090,52 @@ mod tests {
         assert_eq!(cell.spans[0].content.as_ref(), " ✗");
     }
 
+    /// #1079: a merged PR must render a glyph distinct from the
+    /// actionable `✓` shared by ready / approved / CI-green, in a dimmed
+    /// terminal-state style — so "done and gone" can't be mistaken for
+    /// "act on me now" at the real rendered-cell level (not just in the
+    /// `status_pill` map). Renders all three rows through `cell_status`
+    /// and pins glyph + color for each.
+    #[test]
+    fn merged_row_renders_a_distinct_dim_glyph_from_ready_and_approved() {
+        let theme = theme();
+        let rendered = |task: &Task| {
+            let ws = Workspace::from_task(task.clone(), fixed_time());
+            let ctx = ctx_for(&ws, task, &theme);
+            let cell = cell_status(&ctx);
+            let span = &cell.spans[0];
+            (span.content.as_ref().to_string(), span.style.fg)
+        };
+
+        let mut merged = make_task("owner/repo#1", "x");
+        merged.state = TaskState::Merged;
+
+        let mut ready = make_task("owner/repo#2", "x");
+        ready.review = ReviewStatus::Approved;
+        ready.ci = CiStatus::Success;
+
+        let mut approved = make_task("owner/repo#3", "x");
+        approved.review = ReviewStatus::Approved;
+        approved.ci = CiStatus::Running;
+
+        let (merged_glyph, merged_fg) = rendered(&merged);
+        let (ready_glyph, ready_fg) = rendered(&ready);
+        let (approved_glyph, approved_fg) = rendered(&approved);
+
+        // Distinct glyph, not the shared `✓`.
+        assert_eq!(merged_glyph, " ⋈");
+        assert_eq!(ready_glyph, " ✓");
+        assert_eq!(approved_glyph, " ✓");
+        assert_ne!(merged_glyph, ready_glyph);
+        assert_ne!(merged_glyph, approved_glyph);
+
+        // Terminal / past-tense styling: dimmed, so the distinction holds
+        // even without color, and unlike the bright actionable `✓`s.
+        assert_eq!(merged_fg, Some(theme.text_dim));
+        assert_ne!(merged_fg, ready_fg);
+        assert_ne!(merged_fg, approved_fg);
+    }
+
     /// An armed workspace surfaces its `⚡` merge-on-green marker in its
     /// own slot even when the PR has no CI / review pill yet — so a
     /// freshly-armed row is visibly distinct before CI even starts (#524).

@@ -19,6 +19,9 @@
 //!   lazybox sandbox ensure          provision a remote dev box (terraform);
 //!                                  wake/sleep/status/connect/destroy manage
 //!                                  its lifecycle (GCP; per-worktree handle)
+//!   lazybox auth login github       native GitHub OAuth device-flow login
+//!                                  (no `gh` CLI needed); `status` / `logout`
+//!                                  inspect and clear the stored token
 //!   lazybox slack init              interactive Slack token setup wizard
 //!   lazybox slack doctor            read-only validation of an existing setup
 //!   lazybox slack prune             archive stale per-(session, agent) channels
@@ -33,6 +36,7 @@
 // Boot-side modules quarantined off the thin UI library (#548): the
 // build-guard fetch (octocrab), provider detection, setup persistence,
 // the Slack CLI flows, and the test harness.
+mod auth_cli;
 mod build_guard;
 mod device_cli;
 mod relay_e2e;
@@ -308,6 +312,8 @@ Remote & services:
                               attach a TUI to a box through the relay, over an
                               end-to-end encrypted tunnel (LAZYBOX_RELAY env;
                               add --smoke for a one-shot daemon round trip)
+  lazybox auth login github   log in to GitHub via OAuth device flow (no `gh`
+                              CLI needed); `auth status` / `auth logout` too
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
   lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots;
@@ -322,7 +328,8 @@ Remote & services:
 Advanced:
   lazybox --fresh             wipe ~/.lazybox/v2/state.db and re-run setup (destructive)
 
-Credentials come from `gh auth token` by default; set LINEAR_API_KEY for Linear.
+Credentials come from `gh auth token` or `lazybox auth login github` (native
+OAuth, no `gh` needed); set LINEAR_API_KEY for Linear.
 Logs go to /tmp/lazybox.log (RUST_LOG=lazybox=debug for verbose). State lives in
 ~/.lazybox/v2/state.db. Docs: https://lazybox.ai/docs/";
 
@@ -404,6 +411,7 @@ async fn main() -> anyhow::Result<()> {
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
         Some("device") => device_cli::device_subcommand(&args[1..]).await,
+        Some("auth") => auth_cli::auth_subcommand(&args[1..]).await,
         Some("sandbox") => sandbox::sandbox_subcommand(&args[1..]).await,
         Some("--connect") => {
             let socket_path = args

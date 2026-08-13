@@ -1943,6 +1943,11 @@ impl<T: TerminalAdapter> Model<T> {
                         if let Some(url) = self.right.take_open_url() {
                             self.open_external_url(&url);
                         }
+                        if self.right.take_request_reviewers()
+                            && let Some(cmd) = self.begin_request_reviewers()
+                        {
+                            self.dispatch_cmds(vec![cmd]);
+                        }
                         if let Some(msg) = self.right.drain_selection_notice() {
                             self.flash_hint(msg);
                         }

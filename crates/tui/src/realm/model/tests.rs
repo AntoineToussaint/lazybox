@@ -19580,6 +19580,80 @@ mod async_modal_preempt_tests {
 }
 
 #[cfg(test)]
+mod requestable_reviewers_async_mount_tests {
+    //! The reviewer picker (`g r`) is now a two-step async flow like the
+    //! label picker: ask the daemon for the repo's requestable
+    //! reviewers, then mount from the reply. Same don't-preempt contract
+    //! (#1092).
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Empty stack — the reply mounts the picker with the fetched
+    /// requestable reviewers.
+    #[test]
+    fn requestable_reviewers_reply_mounts_on_an_empty_stack() {
+        let mut m = build_model();
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: wk,
+            logins: vec!["octocat".into(), "hubot".into()],
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::RequestReviewers));
+        // The stash is consumed once served so a stray later reply can't
+        // re-mount on a stale target.
+        assert!(m.awaiting_requestable_reviewers.is_none());
+    }
+
+    /// A slow reply must not steal focus from a modal the user opened
+    /// while the fetch was in flight.
+    #[test]
+    fn slow_requestable_reviewers_reply_does_not_preempt_reply_textarea() {
+        let mut m = build_model();
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        m.mount_reply(SessionKey::from("github:owner/repo#1"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: wk,
+            logins: vec!["octocat".into()],
+        });
+
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::Reply),
+            "the reviewer picker must not steal focus from the composer"
+        );
+        assert!(!m.modal_stack.contains(&Id::RequestReviewers));
+        assert!(m.awaiting_requestable_reviewers.is_none());
+    }
+
+    /// A reply whose key no longer matches the pending request (the
+    /// user pressed `g r` on a different workspace, or already
+    /// dismissed) is ignored — no picker mounts.
+    #[test]
+    fn stale_requestable_reviewers_reply_is_ignored() {
+        let mut m = build_model();
+        m.awaiting_requestable_reviewers =
+            Some(lazybox_core::WorkspaceKey::new("github:owner/repo#1"));
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:owner/repo#2"),
+            logins: vec!["octocat".into()],
+        });
+        assert!(m.modal_stack.is_empty());
+        assert!(m.awaiting_requestable_reviewers.is_some());
+    }
+}
+
+#[cfg(test)]
 mod focus_mode_terminal_exit_tests {
     //! Focus mode must not survive an EMPTY stack — the user would be
     //! stranded on a near-fullscreen blank pane. A crashed AGENT is not

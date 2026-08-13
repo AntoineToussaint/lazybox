@@ -965,6 +965,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::MergedPrRemovable { .. }
                 | IpcEvent::RemovalCancelled { .. }
                 | IpcEvent::RepoLabels { .. }
+                | IpcEvent::RequestableReviewers { .. }
                 | IpcEvent::SessionCreated(_)
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
@@ -1581,6 +1582,21 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Response to a `FetchRequestableReviewers` command — mount the
+        // reviewer picker once the daemon has the repo's requestable
+        // set. Same out-of-band tolerance as `RepoLabels`: only mount
+        // when the workspace key still matches the pending request.
+        if let IpcEvent::RequestableReviewers {
+            workspace_key,
+            logins,
+        } = &event
+        {
+            if self.awaiting_requestable_reviewers.as_ref() == Some(workspace_key) {
+                self.mount_request_reviewers(workspace_key.clone(), logins.clone());
+                self.redraw = true;
+            }
+            return;
+        }
         // Durable Error Inbox snapshot (#831) — repaint the open inbox.
         // A snapshot that lands while the inbox is closed is dropped by
         // `update_error_inbox`.
@@ -1788,6 +1804,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::MergedPrRemovable { .. }
             | IpcEvent::RemovalCancelled { .. }
             | IpcEvent::RepoLabels { .. }
+            | IpcEvent::RequestableReviewers { .. }
             | IpcEvent::SessionCreated(_)
             | IpcEvent::WorktreeProgress { .. }
             | IpcEvent::SessionEnded { .. }
@@ -1948,6 +1965,8 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                     } else if source == "repo-labels" {
                         self.handle_repo_labels_failed(message);
+                    } else if source == "requestable-reviewers" {
+                        self.handle_requestable_reviewers_failed(message);
                     } else if let Some(action) = mutation_failure_label(source) {
                         // A user-initiated GitHub mutation was rejected
                         // (or never reached the provider). Pre-fix the
@@ -2053,6 +2072,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::MergedPrRemovable { .. }
                 | IpcEvent::RemovalCancelled { .. }
                 | IpcEvent::RepoLabels { .. }
+                | IpcEvent::RequestableReviewers { .. }
                 | IpcEvent::SessionCreated(_)
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
@@ -2490,6 +2510,29 @@ impl<T: TerminalAdapter> Model<T> {
             if matches!(self.modal_stack.last(), Some(Id::ManageLabels)) {
                 self.flash_hint("repo labels unavailable — showing this task's labels only");
             }
+        }
+        self.redraw = true;
+    }
+
+    /// The daemon couldn't fetch the requestable-reviewer set for a
+    /// pending `g r` request (`ProviderError { source:
+    /// "requestable-reviewers" }`). Consume the stash and fall back to
+    /// the interaction-derived picker (people already on the PR) —
+    /// exactly today's pre-fix behavior — so the action never dead-ends
+    /// on a fetch error. `mount_request_reviewers` with an empty
+    /// `fetched` degrades to that candidate list on its own.
+    fn handle_requestable_reviewers_failed(&mut self, message: &str) {
+        let Some(workspace_key) = self.awaiting_requestable_reviewers.take() else {
+            return;
+        };
+        // Re-arm so the async-mount stash check inside
+        // `mount_request_reviewers` still recognizes this as our request.
+        self.awaiting_requestable_reviewers = Some(workspace_key.clone());
+        self.mount_request_reviewers(workspace_key, Vec::new());
+        if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
+            self.flash_hint("requestable reviewers unavailable — showing PR participants only");
+        } else {
+            self.flash_error(format!("✗ couldn't load requestable reviewers — {message}"));
         }
         self.redraw = true;
     }

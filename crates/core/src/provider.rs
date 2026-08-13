@@ -514,6 +514,24 @@ pub trait TaskProvider: Send + Sync {
         Err(ProviderError::unsupported(self.name(), "delete_issue"))
     }
 
+    /// List the accounts that can be *requested* as reviewers on the
+    /// workspace's PR — the repo's assignable users plus the
+    /// provider's own suggestions for this PR. Used to populate the
+    /// reviewer picker with the full requestable set rather than only
+    /// people who already touched the PR. Returns provider-native
+    /// logins; the caller merges them with interaction-derived
+    /// candidates and pre-excludes existing reviewers.
+    async fn list_requestable_reviewers(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<Vec<String>, ProviderError> {
+        let _ = workspace;
+        Err(ProviderError::unsupported(
+            self.name(),
+            "list_requestable_reviewers",
+        ))
+    }
+
     /// Request reviewer(s) on the workspace's task. `logins` are
     /// provider-native account identifiers (github logins, linear
     /// user ids, …).

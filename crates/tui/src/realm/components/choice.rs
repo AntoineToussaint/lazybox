@@ -24,7 +24,7 @@ use crate::realm::Msg;
 use crate::realm::UserEvent;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
-use tuirealm::event::{Event, Key, KeyModifiers};
+use tuirealm::event::{Event, Key, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use tuirealm::props::{AttrValue, Attribute, QueryResult};
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
@@ -81,6 +81,24 @@ pub struct Choice<T: Clone + 'static + Send> {
     /// jump a full screen at a time. Set during `view`; defaults
     /// to a reasonable fallback before the first render.
     body_height: u16,
+    /// Screen rect of the modal box (border included), stashed in
+    /// `view` so `on()` can hit-test a click — the layout is invisible
+    /// to `on()` otherwise. A click outside it dismisses the picker,
+    /// mirroring the description reader (#1092).
+    modal_rect: Rect,
+    /// Screen rect of the scrolling item body (inside the border,
+    /// above the help line). Click-to-toggle maps `(row - body.y +
+    /// scroll)` through `line_items`.
+    body_area: Rect,
+    /// Screen rect of the one-row help footer. A click here confirms
+    /// the current selection — the mouse counterpart to Enter — so a
+    /// multi-select can be completed without the keyboard (#1092).
+    help_area: Rect,
+    /// Per rendered body line, the item index it displays (`None` for
+    /// prompt / section-header / hint lines). Rebuilt every `view`;
+    /// click hit-testing reads it to resolve a clicked row back to its
+    /// item.
+    line_items: Vec<Option<usize>>,
 }
 
 impl<T: Clone + 'static + Send> Choice<T> {
@@ -105,6 +123,10 @@ impl<T: Clone + 'static + Send> Choice<T> {
             on_highlight: None,
             scroll: 0,
             body_height: 10,
+            modal_rect: Rect::default(),
+            body_area: Rect::default(),
+            help_area: Rect::default(),
+            line_items: Vec::new(),
         }
     }
 
@@ -129,6 +151,10 @@ impl<T: Clone + 'static + Send> Choice<T> {
             on_highlight: None,
             scroll: 0,
             body_height: 10,
+            modal_rect: Rect::default(),
+            body_area: Rect::default(),
+            help_area: Rect::default(),
+            line_items: Vec::new(),
         }
     }
 
@@ -357,13 +383,19 @@ impl<T: Clone + 'static + Send> Choice<T> {
         ConfirmResult::Picked(payloads)
     }
 
-    /// Returns the laid-out lines plus the line index of the cursor
-    /// row (so `view` can compute a scroll offset that keeps it on
-    /// screen). Header lines (prompt + section labels) shift the
-    /// item-index → line-index relationship, so we track it here.
-    fn build_lines(&mut self, width: u16) -> (Vec<Line<'static>>, u16) {
+    /// Returns the laid-out lines, the line index of the cursor row
+    /// (so `view` can compute a scroll offset that keeps it on screen),
+    /// and a per-line item map (`line_items[l] == Some(i)` when body
+    /// line `l` renders item `i`, `None` for prompt / section / hint
+    /// lines). Header lines shift the item-index → line-index
+    /// relationship, so both the cursor line and the click map are
+    /// tracked here.
+    fn build_lines(&mut self, width: u16) -> (Vec<Line<'static>>, u16, Vec<Option<usize>>) {
         let theme = crate::theme::current();
         let mut lines: Vec<Line> = Vec::with_capacity(self.items.len() + 4);
+        // Parallel to `lines`: which item (if any) each rendered line
+        // shows. Load-bearing for click hit-testing (#1092).
+        let mut line_items: Vec<Option<usize>> = Vec::with_capacity(self.items.len() + 4);
         let mut cursor_line: u16 = 0;
         // Prompt — split on '\n' so each prompt line is its own `Line`.
         // Without this, ratatui's wrap reflows the embedded newlines
@@ -374,8 +406,10 @@ impl<T: Clone + 'static + Send> Choice<T> {
         let prompt_style = Style::default().fg(theme.text_dim);
         for segment in self.prompt.split('\n') {
             lines.push(Line::from(Span::styled(segment.to_string(), prompt_style)));
+            line_items.push(None);
         }
         lines.push(Line::raw(""));
+        line_items.push(None);
 
         // Section grouping — if a `section_for` exists, walk the
         // items printing the section header before the first item of
@@ -387,6 +421,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
                 if !section.is_empty() && Some(section) != last_section {
                     if last_section.is_some() {
                         lines.push(Line::raw(""));
+                        line_items.push(None);
                     }
                     // Truncate the same way item rows are — wrap is
                     // off, so an overlong section label would print
@@ -402,6 +437,7 @@ impl<T: Clone + 'static + Send> Choice<T> {
                         section_truncated,
                         Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
                     )));
+                    line_items.push(None);
                     last_section = Some(section);
                 }
             }
@@ -442,16 +478,84 @@ impl<T: Clone + 'static + Send> Choice<T> {
                 cursor_line = lines.len() as u16;
             }
             lines.push(Line::from(Span::styled(truncated, style)));
+            line_items.push(Some(i));
         }
         // Empty hint
         if self.show_empty_hint {
             lines.push(Line::raw(""));
+            line_items.push(None);
             lines.push(Line::from(Span::styled(
                 "  pick at least one (Space to toggle)",
                 Style::default().fg(theme.error),
             )));
+            line_items.push(None);
         }
-        (lines, cursor_line)
+        (lines, cursor_line, line_items)
+    }
+
+    /// Resolve a click at screen `(col, row)` to the item index it
+    /// landed on, or `None` when the click is outside the body or on a
+    /// non-item line (prompt / section / hint). Reads the `body_area`,
+    /// `scroll`, and `line_items` stashed by the last `view`.
+    fn item_at_click(&self, col: u16, row: u16) -> Option<usize> {
+        let b = self.body_area;
+        if row < b.y || row >= b.y + b.height || col < b.x || col >= b.x + b.width {
+            return None;
+        }
+        let line = (row - b.y) as usize + self.scroll as usize;
+        self.line_items.get(line).copied().flatten()
+    }
+
+    /// Whether `(col, row)` lands inside `rect` (half-open on the far
+    /// edges, matching how the rects are laid out).
+    fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
+        col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
+    }
+
+    /// Mouse handling (#1092). Left-click is the only driver — the
+    /// router forwards button-downs to this modal (it isn't in
+    /// `dismissable_by_outside_click`, so an outside click reaches
+    /// here rather than dismissing at the router):
+    /// - outside the modal box → dismiss (click-away to cancel);
+    /// - on the help footer → confirm (the mouse counterpart to Enter,
+    ///   so a multi-select finishes without the keyboard);
+    /// - on an item row → single-select picks it outright, multi-select
+    ///   toggles it (Enter / a help-row click then confirms).
+    fn on_mouse(&mut self, m: &MouseEvent) -> Option<Msg> {
+        if !matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return None;
+        }
+        if !Self::rect_contains(self.modal_rect, m.column, m.row) {
+            return Some(Msg::ModalDismissed);
+        }
+        if Self::rect_contains(self.help_area, m.column, m.row) {
+            return match self.confirm_picks() {
+                ConfirmResult::Stay => None,
+                ConfirmResult::Cancel => Some(Msg::ModalDismissed),
+                ConfirmResult::Picked(picks) => Some(Msg::ChoicePicked(picks)),
+            };
+        }
+        let idx = self.item_at_click(m.column, m.row)?;
+        if !self.is_selectable(idx) {
+            return None;
+        }
+        let prev_cursor = self.cursor;
+        self.cursor = idx;
+        self.show_empty_hint = false;
+        let result = match self.mode {
+            Mode::Single => match self.confirm_picks() {
+                ConfirmResult::Picked(picks) => Some(Msg::ChoicePicked(picks)),
+                _ => None,
+            },
+            Mode::Multi => {
+                self.selected[idx] = !self.selected[idx];
+                None
+            }
+        };
+        if self.cursor != prev_cursor {
+            self.fire_highlight();
+        }
+        result
     }
 }
 
@@ -493,7 +597,8 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
 
-        let (lines, cursor_line) = self.build_lines(inner.width);
+        let (lines, cursor_line, line_items) = self.build_lines(inner.width);
+        self.line_items = line_items;
         // Help footer — an empty list can only be dismissed, so drop
         // the navigate/toggle/confirm hints that don't apply.
         let help_spans = if self.items.is_empty() {
@@ -576,6 +681,10 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
         // load-bearing for the scroll math above.
         frame.render_widget(Paragraph::new(lines).scroll((self.scroll, 0)), body_area);
         frame.render_widget(Paragraph::new(Line::from(help_spans)), help_area);
+        // Stash the rects for `on()`'s mouse hit-testing (#1092).
+        self.modal_rect = modal;
+        self.body_area = body_area;
+        self.help_area = help_area;
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -592,6 +701,9 @@ impl<T: Clone + 'static + Send> Component for Choice<T> {
 
 impl<T: Clone + 'static + Send> AppComponent<Msg, UserEvent> for Choice<T> {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
+        if let Event::Mouse(m) = ev {
+            return self.on_mouse(m);
+        }
         let Event::Keyboard(key) = ev else {
             return None;
         };
@@ -832,5 +944,104 @@ mod tests {
             "empty box should be compact, spanned {bordered_rows} rows",
         );
         assert!(bordered_rows >= 4, "box must still be a visible frame");
+    }
+
+    // --- mouse hit-testing (#1092) ---------------------------------
+
+    /// Render `c` to a fixed backend so `view` stashes `body_area`,
+    /// `help_area`, `modal_rect`, and `line_items` for hit-testing.
+    fn render(c: &mut Choice<Item>) {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| c.view(f, f.area())).unwrap();
+    }
+
+    fn left_click(col: u16, row: u16) -> Event<UserEvent> {
+        Event::Mouse(tuirealm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            modifiers: KeyModifiers::NONE,
+            column: col,
+            row,
+        })
+    }
+
+    /// Screen row of item `i` (scroll assumed 0 for these short lists).
+    fn item_row(c: &Choice<Item>, i: usize) -> u16 {
+        let line = c
+            .line_items
+            .iter()
+            .position(|x| *x == Some(i))
+            .expect("item rendered");
+        c.body_area.y + line as u16 - c.scroll
+    }
+
+    #[test]
+    fn multi_click_on_row_toggles_it() {
+        let mut c = Choice::multi("p", vec![Item("a"), Item("b"), Item("c")]);
+        render(&mut c);
+        let row = item_row(&c, 1);
+        let col = c.body_area.x + 1;
+        assert_eq!(c.on(&left_click(col, row)), None);
+        assert_eq!(c.selected, vec![false, true, false], "click toggled row 1");
+        // Clicking again untoggles.
+        render(&mut c);
+        assert_eq!(c.on(&left_click(col, row)), None);
+        assert_eq!(c.selected, vec![false, false, false]);
+    }
+
+    #[test]
+    fn single_click_on_row_picks_it() {
+        let mut c = Choice::single("p", vec![Item("a"), Item("b"), Item("c")])
+            .payload_for(|i: &Item| ChoicePayload::Text(i.0.to_string()));
+        render(&mut c);
+        let row = item_row(&c, 2);
+        let col = c.body_area.x + 1;
+        match c.on(&left_click(col, row)) {
+            Some(Msg::ChoicePicked(picks)) => {
+                assert_eq!(picks, vec![ChoicePayload::Text("c".to_string())]);
+            }
+            other => panic!("expected ChoicePicked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn click_outside_modal_dismisses() {
+        let mut c = Choice::multi("p", vec![Item("a"), Item("b")]);
+        render(&mut c);
+        // (0,0) is well outside the centered modal box.
+        assert_eq!(c.on(&left_click(0, 0)), Some(Msg::ModalDismissed));
+    }
+
+    #[test]
+    fn click_help_row_confirms_multi_selection() {
+        let mut c = Choice::multi("p", vec![Item("a"), Item("b")])
+            .payload_for(|i: &Item| ChoicePayload::Text(i.0.to_string()));
+        render(&mut c);
+        // Toggle row 0 by clicking it, then click the help footer to
+        // confirm — the mouse-only path a multi-select needs.
+        let col = c.body_area.x + 1;
+        let row0 = item_row(&c, 0);
+        c.on(&left_click(col, row0));
+        render(&mut c);
+        let help_row = c.help_area.y;
+        let help_col = c.help_area.x + 1;
+        match c.on(&left_click(help_col, help_row)) {
+            Some(Msg::ChoicePicked(picks)) => {
+                assert_eq!(picks, vec![ChoicePayload::Text("a".to_string())]);
+            }
+            other => panic!("expected ChoicePicked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn click_on_prompt_line_is_noop() {
+        // The prompt occupies the first body line; a click there maps to
+        // no item and must neither toggle nor dismiss.
+        let mut c = Choice::multi("prompt", vec![Item("a"), Item("b")]);
+        render(&mut c);
+        let col = c.body_area.x + 1;
+        assert_eq!(c.on(&left_click(col, c.body_area.y)), None);
+        assert_eq!(c.selected, vec![false, false]);
     }
 }

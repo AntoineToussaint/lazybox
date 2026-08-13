@@ -1212,6 +1212,113 @@ pub struct GqlRepoLabelNode {
     pub description: Option<String>,
 }
 
+/// Fetch the accounts that can be *requested* as reviewers on a PR:
+/// GitHub's own suggestions for this PR (`suggestedReviewers`) plus
+/// the repo's full assignable-user set (up to 100 — enough for any
+/// real repo). Feeds the reviewer picker so a review can be requested
+/// from anyone requestable, not only people who already touched the
+/// PR. `assignableUsers` is the API-correct candidate set — the same
+/// pool GitHub's own "request reviewers" dropdown draws from.
+const REQUESTABLE_REVIEWERS_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      suggestedReviewers {
+        reviewer { login }
+      }
+    }
+    assignableUsers(first: 100) {
+      nodes { login }
+    }
+  }
+  rateLimit {
+    cost
+    limit
+    remaining
+    resetAt
+    used
+  }
+}
+"#;
+
+pub fn requestable_reviewers_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
+    serde_json::json!({
+        "query": REQUESTABLE_REVIEWERS_QUERY,
+        "variables": { "owner": owner, "name": name, "number": number },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRequestableReviewersResponse {
+    pub data: Option<GqlRequestableReviewersData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRequestableReviewersData {
+    pub repository: Option<GqlRequestableReviewersRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlRequestableReviewersRepo {
+    #[serde(default, rename = "pullRequest")]
+    pub pull_request: Option<GqlSuggestedReviewersPr>,
+    #[serde(default, rename = "assignableUsers")]
+    pub assignable_users: GqlAssignableUsersConn,
+}
+
+impl GqlRequestableReviewersRepo {
+    /// Flatten to the requestable logins: GitHub's suggestions for the
+    /// PR first (most relevant), then the assignable-user pool. Deduped,
+    /// order-preserving. Suggestions that resolved to a team or a
+    /// since-deleted account (a `null` reviewer) are dropped.
+    pub fn logins(self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |login: String| {
+            if !login.is_empty() && !out.contains(&login) {
+                out.push(login);
+            }
+        };
+        if let Some(pr) = self.pull_request {
+            for s in pr.suggested_reviewers {
+                if let Some(r) = s.reviewer {
+                    push(r.login);
+                }
+            }
+        }
+        for u in self.assignable_users.nodes {
+            push(u.login);
+        }
+        out
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct GqlSuggestedReviewersPr {
+    #[serde(default, rename = "suggestedReviewers")]
+    pub suggested_reviewers: Vec<GqlSuggestedReviewer>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlSuggestedReviewer {
+    /// `null` for suggestions that resolve to a team or a since-deleted
+    /// account — dropped when flattening to logins.
+    #[serde(default)]
+    pub reviewer: Option<GqlReviewerLogin>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlReviewerLogin {
+    pub login: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct GqlAssignableUsersConn {
+    #[serde(default)]
+    pub nodes: Vec<GqlReviewerLogin>,
+}
+
 /// Per-PR "give me everything heavy" query. Pulls every field the
 /// inbox-scan `SEARCH_QUERY` dropped: full review-thread data, the
 /// full reviews list, top-level comment bodies, status-check
@@ -5615,5 +5722,67 @@ mod tests {
         assert_eq!(act1.node_id.as_deref(), Some("PRR_eager1"));
         assert_eq!(act1.created_at, fixed_time());
         assert_eq!(act1.created_at, act2.created_at);
+    }
+
+    #[test]
+    fn requestable_reviewers_body_carries_owner_name_number() {
+        let body = requestable_reviewers_body("acme", "widget", 42);
+        assert_eq!(body["variables"]["owner"], "acme");
+        assert_eq!(body["variables"]["name"], "widget");
+        assert_eq!(body["variables"]["number"], 42);
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("suggestedReviewers"));
+        assert!(query.contains("assignableUsers"));
+    }
+
+    #[test]
+    fn requestable_reviewers_response_flattens_suggestions_first_deduped() {
+        // Suggestions and the assignable pool overlap; `logins()` must
+        // keep suggestions first and drop duplicates + null reviewers.
+        let json = r#"{
+          "data": {
+            "repository": {
+              "pullRequest": {
+                "suggestedReviewers": [
+                  { "reviewer": { "login": "suggested-1" } },
+                  { "reviewer": null },
+                  { "reviewer": { "login": "shared" } }
+                ]
+              },
+              "assignableUsers": {
+                "nodes": [
+                  { "login": "shared" },
+                  { "login": "assignable-1" }
+                ]
+              }
+            }
+          }
+        }"#;
+        let resp: GqlRequestableReviewersResponse = serde_json::from_str(json).unwrap();
+        let repo = resp.data.unwrap().repository.unwrap();
+        assert_eq!(
+            repo.logins(),
+            vec![
+                "suggested-1".to_string(),
+                "shared".to_string(),
+                "assignable-1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn requestable_reviewers_response_without_pr_uses_assignable_only() {
+        // A repo with no `pullRequest` block (e.g. suggestedReviewers
+        // omitted) still yields the assignable pool.
+        let json = r#"{
+          "data": {
+            "repository": {
+              "assignableUsers": { "nodes": [ { "login": "solo" } ] }
+            }
+          }
+        }"#;
+        let resp: GqlRequestableReviewersResponse = serde_json::from_str(json).unwrap();
+        let repo = resp.data.unwrap().repository.unwrap();
+        assert_eq!(repo.logins(), vec!["solo".to_string()]);
     }
 }

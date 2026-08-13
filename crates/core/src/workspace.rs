@@ -514,6 +514,7 @@ impl Workspace {
     /// Activity from `task.recent_activity` is merged into the
     /// workspace's feed and de-duplicated.
     pub fn attach_task(&mut self, task: Task) {
+        let was_empty = self.activity.is_empty();
         match classify(&task) {
             TaskSlot::Pr => {
                 let merged = match self.pr.take() {
@@ -527,6 +528,38 @@ impl Workspace {
             TaskSlot::Unknown => return,
         }
         self.merge_activity(&task.recent_activity);
+        if was_empty {
+            self.baseline_first_activity_as_seen();
+        }
+    }
+
+    /// On a workspace's FIRST activity population, treat comments created
+    /// at or before the user's last visit as already seen. A provider
+    /// that only recently began fetching comment threads (Linear, #1060)
+    /// would otherwise flood the inbox on the next poll with the entire
+    /// back-history of every already-open ticket — comments the user had
+    /// the chance to read before. Items created *after* the last visit
+    /// are genuinely new and stay unread; a never-viewed workspace
+    /// (`last_viewed_at == None`) baselines nothing, so a freshly
+    /// discovered task still surfaces all its comments as unread (matching
+    /// every other provider's first-discovery behavior).
+    ///
+    /// Scoped to `attach_task` (the poll path) on purpose: the collapse
+    /// carrier [`Self::absorb_activity_from`] transfers read/seen state
+    /// explicitly and must not be second-guessed by a timestamp baseline.
+    fn baseline_first_activity_as_seen(&mut self) {
+        let Some(viewed) = self.last_viewed_at else {
+            return;
+        };
+        // The feed is sorted newest-first, so the at-or-before-last-visit
+        // items form the oldest suffix — exactly the shape `seen_count`
+        // (the seen tail length) expects.
+        self.seen_count = self
+            .activity
+            .iter()
+            .filter(|a| a.created_at <= viewed)
+            .count();
+        self.read_indices.clear();
     }
 
     /// Detach by id — works on any slot. Silently no-op if missing.
@@ -1842,6 +1875,88 @@ mod tests {
             diff_hunk: None,
             thread_id: None,
         }
+    }
+
+    /// A never-before-fetched issue whose comment history is pulled for
+    /// the first time (Linear, #1060) must NOT flood the inbox: comments
+    /// created before the user's last visit were available to read then,
+    /// so they baseline as seen. Only the post-visit comment is unread.
+    #[test]
+    fn first_activity_before_last_visit_baselines_as_seen() {
+        let mut ws = Workspace::from_task(issue("linear", "ENG-1"), now());
+        assert!(ws.activity.is_empty(), "issue task carries no activity yet");
+        ws.last_viewed_at = Some(now());
+
+        let mut task = issue("linear", "ENG-1");
+        task.recent_activity = vec![
+            activity_at(-120, "old 1"), // before last visit → seen
+            activity_at(-60, "old 2"),  // before last visit → seen
+            activity_at(60, "fresh"),   // after last visit  → unread
+        ];
+        ws.attach_task(task);
+
+        assert_eq!(ws.activity.len(), 3);
+        assert_eq!(
+            ws.unread_count(),
+            1,
+            "only the comment created after the last visit is unread",
+        );
+    }
+
+    /// Every comment is newer than the last visit → all unread (nothing
+    /// to baseline away).
+    #[test]
+    fn first_activity_all_after_last_visit_stays_unread() {
+        let mut ws = Workspace::from_task(issue("linear", "ENG-1"), now());
+        ws.last_viewed_at = Some(now() - chrono::Duration::seconds(300));
+
+        let mut task = issue("linear", "ENG-1");
+        task.recent_activity = vec![activity_at(-60, "a"), activity_at(-30, "b")];
+        ws.attach_task(task);
+
+        assert_eq!(ws.unread_count(), 2, "post-visit comments all unread");
+    }
+
+    /// A never-viewed workspace baselines nothing, so a freshly
+    /// discovered task surfaces all its comments as unread — matching
+    /// every other provider's first-discovery behavior.
+    #[test]
+    fn first_activity_never_viewed_surfaces_all_unread() {
+        let mut ws = Workspace::from_task(issue("linear", "ENG-1"), now());
+        assert_eq!(ws.last_viewed_at, None);
+
+        let mut task = issue("linear", "ENG-1");
+        task.recent_activity = vec![activity_at(-120, "a"), activity_at(-60, "b")];
+        ws.attach_task(task);
+
+        assert_eq!(ws.unread_count(), 2, "never-viewed → all unread");
+    }
+
+    /// The baseline is a one-shot for the FIRST population. Once the feed
+    /// exists, a later poll must use the normal read/seen remap — a brand
+    /// new comment is unread, and it is not re-baselined against the last
+    /// visit.
+    #[test]
+    fn baseline_not_reapplied_on_later_polls() {
+        let mut ws = Workspace::from_task(issue("linear", "ENG-1"), now());
+        ws.last_viewed_at = Some(now());
+
+        let mut first = issue("linear", "ENG-1");
+        first.recent_activity = vec![activity_at(-60, "old")];
+        ws.attach_task(first);
+        assert_eq!(ws.unread_count(), 0, "the pre-visit comment baselined seen");
+
+        // A later poll returns the old comment plus a brand-new one whose
+        // timestamp is *before* last_viewed — if the baseline re-ran it
+        // would wrongly mark it seen. It must be unread.
+        let mut later = issue("linear", "ENG-1");
+        later.recent_activity = vec![activity_at(-60, "old"), activity_at(-30, "new")];
+        ws.attach_task(later);
+        assert_eq!(
+            ws.unread_count(),
+            1,
+            "the new comment is unread; the baseline does not re-run",
+        );
     }
 
     #[test]

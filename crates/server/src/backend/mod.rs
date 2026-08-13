@@ -71,6 +71,25 @@ pub struct ReplaySnapshot {
     pub complete: bool,
 }
 
+/// A delta of a terminal's output since a byte watermark — the read
+/// primitive session transfer splices, unified so a puller treats local
+/// and remote sources alike (`docs/session-transfer-adr.md`, #1089).
+///
+/// Offsets count live output bytes emitted since the session spawned
+/// (the raw-PTY ring's `total_written`); they are NOT chunk `seq`s.
+/// `bytes` is exactly `[from_offset, to_offset)`. `covers_offset ==
+/// false` means the bounded ring had already evicted bytes at/after the
+/// requested watermark, so `from_offset` was pulled forward to the
+/// oldest retained byte and the consumer must treat `bytes` as a reset,
+/// not a gap-free continuation — older history is lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputDelta {
+    pub from_offset: u64,
+    pub to_offset: u64,
+    pub bytes: Vec<u8>,
+    pub covers_offset: bool,
+}
+
 /// Capacity of a `Subscription`'s live channel. Bounded so a stalled
 /// consumer puts a hard ceiling on daemon-side buffering: producers
 /// `try_send` and drop chunks on overflow (the `seq` gap + resync
@@ -236,6 +255,22 @@ pub trait SessionBackend: Send + Sync + 'static {
                 "snapshot unimplemented for {key}"
             )))
         })
+    }
+
+    /// Output bytes emitted since byte watermark `since` (see
+    /// [`OutputDelta`]) — the delta pull session transfer reads (#1089).
+    /// Default `Ok(None)`: a backend that cannot slice its history by
+    /// byte offset (tmux keeps only its own `capture-pane` history) opts
+    /// out, and the caller falls back to a full [`Self::snapshot`]. The
+    /// raw-PTY backend, whose ring counts bytes exactly, returns a real
+    /// delta.
+    fn read_since<'a>(
+        &'a self,
+        key: &'a str,
+        since: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<OutputDelta>, BackendError>> + Send + 'a>> {
+        let _ = (key, since);
+        Box::pin(async { Ok(None) })
     }
 
     /// Deep scrollback for a LIVE session, rebuilt from the backend's

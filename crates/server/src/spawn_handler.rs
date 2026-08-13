@@ -9205,6 +9205,49 @@ pub async fn handle_terminal_resync_request(
     }
 }
 
+/// Serve a `RequestTerminalDelta` (#1089): the terminal's output bytes
+/// since a byte watermark, for a transferring puller that already holds
+/// everything up to `since_offset`. Replies `TerminalDelta` when the
+/// backend can slice by byte offset (raw-PTY ring), else
+/// `TerminalDeltaUnavailable` (tmux, unknown terminal, or a read error)
+/// so the caller falls back to the full-snapshot path.
+pub async fn handle_terminal_delta_request(
+    config: &ServerConfig,
+    tx: &lazybox_ipc::EventSender,
+    terminal_id: TerminalId,
+    since_offset: u64,
+) {
+    let key = config
+        .terminal
+        .terminals
+        .lock()
+        .await
+        .get(&terminal_id)
+        .cloned();
+    let Some(key) = key else {
+        let _ = tx.send(Event::TerminalDeltaUnavailable { terminal_id });
+        return;
+    };
+    match config.backend.read_since(&key, since_offset).await {
+        Ok(Some(delta)) => {
+            let _ = tx.send(Event::TerminalDelta {
+                terminal_id,
+                from_offset: delta.from_offset,
+                to_offset: delta.to_offset,
+                bytes: delta.bytes,
+                covers_offset: delta.covers_offset,
+            });
+        }
+        Ok(None) => {
+            let _ = tx.send(Event::TerminalDeltaUnavailable { terminal_id });
+        }
+        Err(error) => {
+            tracing::warn!(?terminal_id, since_offset, %error, "terminal delta request failed");
+            let _ = tx.send(Event::TerminalDeltaUnavailable { terminal_id });
+        }
+    }
+}
+
 /// Walk every persisted workspace's `sessions` and spawn any whose
 /// runner isn't already alive. Called once at startup after
 /// `recover_sessions` (which reattaches surviving tmux sessions).
@@ -12356,6 +12399,62 @@ mod tests {
         assert!(matches!(
             rx.try_recv(),
             Ok(Event::TerminalResyncUnavailable { terminal_id }) if terminal_id == id
+        ));
+    }
+
+    /// A delta request returns exactly the bytes past the watermark, so a
+    /// transferring puller fetches only what it doesn't already have (#1089).
+    #[tokio::test]
+    async fn handle_terminal_delta_request_serves_bytes_since_watermark() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"hello ").await;
+        mock.emit(&key, b"world").await;
+        let id = TerminalId(1);
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = lazybox_ipc::EventSender::from_unbounded(tx);
+        handle_terminal_delta_request(&config, &sender, id, 6).await;
+
+        match rx.try_recv() {
+            Ok(Event::TerminalDelta {
+                terminal_id,
+                from_offset,
+                to_offset,
+                bytes,
+                covers_offset,
+            }) => {
+                assert_eq!(terminal_id, id);
+                assert_eq!(from_offset, 6);
+                assert_eq!(to_offset, 11);
+                assert_eq!(bytes, b"world");
+                assert!(covers_offset);
+            }
+            other => panic!("expected a delta, got {other:?}"),
+        }
+    }
+
+    /// An unknown terminal can't be sliced — the caller must fall back to the
+    /// full-snapshot path, so the daemon says so rather than going silent.
+    #[tokio::test]
+    async fn handle_terminal_delta_request_unknown_terminal_is_unavailable() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = lazybox_ipc::EventSender::from_unbounded(tx);
+        handle_terminal_delta_request(&config, &sender, TerminalId(99), 0).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::TerminalDeltaUnavailable { terminal_id }) if terminal_id == TerminalId(99)
         ));
     }
 

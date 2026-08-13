@@ -143,6 +143,10 @@ fn all_commands() -> Vec<Command> {
             terminal_id: TerminalId(7),
             required_seq: 42,
         },
+        Command::RequestTerminalDelta {
+            terminal_id: TerminalId(7),
+            since_offset: 4096,
+        },
         Command::Close {
             terminal_id: TerminalId(7),
             client_request_id: Some("close-1".into()),
@@ -662,6 +666,16 @@ fn all_events() -> Vec<Event> {
         Event::TerminalResyncUnavailable {
             terminal_id: TerminalId(2),
         },
+        Event::TerminalDelta {
+            terminal_id: TerminalId(2),
+            from_offset: 4096,
+            to_offset: 4107,
+            bytes: b"delta bytes".to_vec(),
+            covers_offset: true,
+        },
+        Event::TerminalDeltaUnavailable {
+            terminal_id: TerminalId(2),
+        },
         Event::TerminalExited {
             terminal_id: TerminalId(2),
             exit_code: Some(0),
@@ -1036,6 +1050,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::RecordComposingBuffer { .. } => "RecordComposingBuffer",
         Command::Resize { .. } => "Resize",
         Command::RequestTerminalResync { .. } => "RequestTerminalResync",
+        Command::RequestTerminalDelta { .. } => "RequestTerminalDelta",
         Command::Close { .. } => "Close",
         Command::IngestHook { .. } => "IngestHook",
         Command::Kill { .. } => "Kill",
@@ -1144,6 +1159,8 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentAuthReplay { .. } => "AgentAuthReplay",
         Event::TerminalResync { .. } => "TerminalResync",
         Event::TerminalResyncUnavailable { .. } => "TerminalResyncUnavailable",
+        Event::TerminalDelta { .. } => "TerminalDelta",
+        Event::TerminalDeltaUnavailable { .. } => "TerminalDeltaUnavailable",
         Event::TerminalExited { .. } => "TerminalExited",
         Event::TerminalFocusRequested { .. } => "TerminalFocusRequested",
         Event::WorkspaceFocusRequested { .. } => "WorkspaceFocusRequested",
@@ -1204,12 +1221,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        76,
+        77,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        82,
+        84,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

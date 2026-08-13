@@ -335,6 +335,28 @@ impl SessionBackend for RawPtyBackend {
         })
     }
 
+    fn read_since<'a>(
+        &'a self,
+        key: &'a str,
+        since: u64,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<Option<crate::backend::OutputDelta>, BackendError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .map(|s| s.pty.clone())
+                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+            };
+            Ok(Some(pty.read_since(since).await))
+        })
+    }
+
     fn subscribe<'a>(
         &'a self,
         key: &'a str,

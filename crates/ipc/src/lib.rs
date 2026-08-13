@@ -791,6 +791,18 @@ pub enum Command {
         terminal_id: TerminalId,
         required_seq: u64,
     },
+    /// Delta pull for session transfer (#1089): the terminal's output
+    /// bytes since byte watermark `since_offset`, so a puller fetches
+    /// only what it doesn't already have — symmetric across a local and
+    /// a remote (box) source. The daemon replies `TerminalDelta` when
+    /// the backend can serve a byte-offset delta (the raw-PTY ring),
+    /// else `TerminalDeltaUnavailable` (tmux keeps no byte offsets, so
+    /// the caller falls back to the full-snapshot path). `since_offset`
+    /// counts live output bytes since spawn, NOT chunk seqs.
+    RequestTerminalDelta {
+        terminal_id: TerminalId,
+        since_offset: u64,
+    },
     Close {
         terminal_id: TerminalId,
         /// Client-generated correlation id used to report a backend kill
@@ -1883,6 +1895,26 @@ pub enum Event {
     /// grid, discard live output, and retry later—never clear the parser
     /// or treat this as sequence coverage.
     TerminalResyncUnavailable {
+        terminal_id: TerminalId,
+    },
+    /// Reply to `RequestTerminalDelta` (#1089): output bytes in
+    /// `[from_offset, to_offset)`. `covers_offset == false` means the
+    /// ring had evicted bytes at/after the requested watermark, so
+    /// `from_offset` is the oldest byte still retained and the consumer
+    /// must reset its parser rather than append — older history is lost.
+    /// Pass `to_offset` back as the next `since_offset` for an
+    /// incremental pull.
+    TerminalDelta {
+        terminal_id: TerminalId,
+        from_offset: u64,
+        to_offset: u64,
+        bytes: Vec<u8>,
+        covers_offset: bool,
+    },
+    /// The backend cannot serve a byte-offset delta for this terminal
+    /// (no byte ring — e.g. tmux). The caller falls back to the full
+    /// snapshot / scrollback path.
+    TerminalDeltaUnavailable {
         terminal_id: TerminalId,
     },
     TerminalExited {

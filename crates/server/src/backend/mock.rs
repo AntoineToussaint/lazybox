@@ -15,7 +15,7 @@
 //! Coverage: this fake honors the same `SessionBackend` contract the
 //! real backends do. Tests using it exercise the daemon end-to-end.
 
-use crate::backend::{BackendError, OutputChunk, SessionBackend, Subscription};
+use crate::backend::{BackendError, OutputChunk, OutputDelta, SessionBackend, Subscription};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
@@ -613,6 +613,29 @@ impl SessionBackend for MockBackend {
                 last_seq: session.last_seq,
                 complete: !incomplete,
             })
+        })
+    }
+
+    fn read_since<'a>(
+        &'a self,
+        key: &'a str,
+        since: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<OutputDelta>, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let map = self.inner.sessions.lock().await;
+            let session = map
+                .get(key)
+                .ok_or_else(|| BackendError::NotFound(key.into()))?;
+            // The mock's replay buffer never evicts, so every watermark
+            // is covered; the returned bytes are the exact suffix.
+            let to_offset = session.replay.len() as u64;
+            let from_offset = since.min(to_offset);
+            Ok(Some(OutputDelta {
+                from_offset,
+                to_offset,
+                bytes: session.replay[from_offset as usize..].to_vec(),
+                covers_offset: true,
+            }))
         })
     }
 

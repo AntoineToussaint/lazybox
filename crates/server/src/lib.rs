@@ -851,6 +851,9 @@ impl Server {
                         lazybox_ipc::Command::RequestTerminalResync { .. } => {
                             "RequestTerminalResync"
                         }
+                        lazybox_ipc::Command::RequestTerminalDelta { .. } => {
+                            "RequestTerminalDelta"
+                        }
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
@@ -1494,6 +1497,13 @@ pub async fn dispatch_command(
             required_seq,
         } => {
             spawn_handler::handle_terminal_resync_request(config, tx, terminal_id, required_seq)
+                .await;
+        }
+        lazybox_ipc::Command::RequestTerminalDelta {
+            terminal_id,
+            since_offset,
+        } => {
+            spawn_handler::handle_terminal_delta_request(config, tx, terminal_id, since_offset)
                 .await;
         }
         lazybox_ipc::Command::Resize {

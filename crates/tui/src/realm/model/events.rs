@@ -1605,6 +1605,10 @@ impl<T: TerminalAdapter> Model<T> {
         } = &event
         {
             self.route_worktree_progress(session_key.clone(), *step, status.clone(), *origin);
+            // The sidebar folds the same progress into its per-row
+            // "spawning" arc (#1069) — the modal/footer isn't the only
+            // surface anymore, so the row shows the spawn is coming.
+            self.sidebar.on_daemon_event(&event);
             self.redraw = true;
             return;
         }

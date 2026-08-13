@@ -3464,6 +3464,344 @@ mod working_spinner_tests {
     }
 }
 
+/// #1069: the pre-terminal "spawning" arc. A spawn's `WorktreeProgress`
+/// stream marks its workspace spawning so the row shows the agent is
+/// *coming* during clone → worktree → launch, before any terminal
+/// reports an `AgentState`; the first live state, the `TerminalSpawned`,
+/// or a `Failed` step clears it.
+#[cfg(test)]
+mod spawning_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::Workspace;
+    use lazybox_ipc::{
+        AgentState, Event, SpawnOrigin, TerminalId, TerminalKind, WorktreeStep, WorktreeStepStatus,
+    };
+
+    fn progress(key: &SessionKey, step: WorktreeStep, status: WorktreeStepStatus) -> Event {
+        Event::WorktreeProgress {
+            session_key: key.clone(),
+            step,
+            status,
+            origin: SpawnOrigin::Interactive,
+        }
+    }
+
+    fn one_workspace() -> (Sidebar, SessionKey) {
+        let mut t = base_task();
+        t.title = "Ship it".into();
+        let mut w = Workspace::from_task(t, chrono::Utc::now());
+        w.name = "Ship it".into();
+        let key = SessionKey::from(&w.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(key.clone(), w);
+        sb.recompute_visible();
+        (sb, key)
+    }
+
+    #[test]
+    fn worktree_progress_started_marks_spawning() {
+        let (mut sb, key) = one_workspace();
+        assert!(!sb.is_spawning(&key));
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+    }
+
+    /// A single step finishing (or reporting live progress) doesn't clear
+    /// the arc — more steps, and finally the agent, are still coming.
+    #[test]
+    fn a_step_completing_keeps_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Done,
+        ));
+        assert!(sb.is_spawning(&key), "more steps still to come");
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Progress("42%".into()),
+        ));
+        assert!(sb.is_spawning(&key));
+    }
+
+    #[test]
+    fn first_agent_state_clears_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        });
+        assert!(!sb.is_spawning(&key), "the live agent owns the slot now");
+    }
+
+    /// #1069 redraw gate: while spawning, the row shows the arc, not the
+    /// agent glyph — so the orchestrator's `changed` check (which reads
+    /// `displays_agent_state`) must repaint when the first `AgentState`
+    /// arrives, *even for `Idle`*. Without this, an `Idle`-first agent
+    /// whose `TerminalSpawned` was dropped on the lossy bus would clear
+    /// the spawning set with no repaint, stranding the arc on screen.
+    #[test]
+    fn displays_agent_state_forces_repaint_out_of_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        // Absent entry and `Idle` both map to "no glyph", but the row
+        // currently shows the arc — so folding `Idle` in *does* change it.
+        assert!(
+            !sb.displays_agent_state(&key, AgentState::Idle),
+            "spawning row must repaint when the first (Idle) state lands"
+        );
+        // Once the state is folded and spawning cleared, the normal
+        // no-op dedup applies again so repeated pings don't churn redraws.
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Idle,
+        });
+        assert!(!sb.is_spawning(&key));
+        assert!(sb.displays_agent_state(&key, AgentState::Idle));
+    }
+
+    #[test]
+    fn terminal_spawned_clears_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        assert!(!sb.is_spawning(&key));
+    }
+
+    #[test]
+    fn spawn_failure_clears_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Failed("boom".into()),
+        ));
+        assert!(
+            !sb.is_spawning(&key),
+            "a failed spawn must not spin forever"
+        );
+    }
+
+    fn spawn_error(source: &str) -> Event {
+        Event::ProviderError {
+            source: source.into(),
+            message: "agent binary not found".into(),
+            detail: String::new(),
+            kind: String::new(),
+        }
+    }
+
+    /// A post-provisioning agent-*launch* failure emits only a keyless
+    /// `ProviderError` (source `"spawn"`) — never a `WorktreeStepStatus::
+    /// Failed` — so the arc, set while the worktree provisioned, would
+    /// otherwise spin forever. The spawn error must clear it (#1069).
+    #[test]
+    fn spawn_provider_error_clears_the_arc() {
+        let (mut sb, key) = one_workspace();
+        // Provisioning ran (arc set); the daemon then failed to launch the
+        // agent — no `Failed` step, only the keyless spawn `ProviderError`.
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        sb.on_event(&spawn_error("spawn"));
+        assert!(
+            !sb.is_spawning(&key),
+            "a keyless launch-failure spawn error must clear the arc"
+        );
+    }
+
+    /// An unrelated provider (sync) error must NOT touch the arc — only
+    /// `spawn*`-sourced failures mean a spawn ended.
+    #[test]
+    fn non_spawn_provider_error_leaves_the_arc() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&spawn_error("github"));
+        assert!(
+            sb.is_spawning(&key),
+            "a sync-provider error is unrelated to the spawn arc"
+        );
+    }
+
+    /// Finding 2: a workspace with a *live* `Working` agent and a second
+    /// session cold-provisioning shows the working spinner (working >
+    /// spawning), so the live agent's repeated pings must still dedup —
+    /// `displays_agent_state` must not force a repaint just because the
+    /// key is in the spawning set (#1069).
+    #[test]
+    fn live_sibling_pings_dedup_during_a_concurrent_spawn() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        });
+        // A second session for the same workspace starts provisioning.
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key), "the second session is provisioning");
+        // The row shows the live working spinner, so a repeated Working
+        // ping is a no-op that must NOT force a redraw.
+        assert!(
+            sb.displays_agent_state(&key, AgentState::Working),
+            "a live sibling's repeated ping must still dedup during a spawn"
+        );
+    }
+
+    /// Removing a workspace mid-spawn drops its spawning entry so a
+    /// cancelled/closed workspace can't leak a stuck spinner.
+    #[test]
+    fn removing_a_workspace_clears_spawning() {
+        let (mut sb, key) = one_workspace();
+        let ws_key = sb.workspaces.get(&key).unwrap().key.clone();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&Event::WorkspaceRemoved(ws_key));
+        assert!(!sb.is_spawning(&key));
+    }
+
+    /// The shared spinner counter advances while a row is merely
+    /// spawning, even with no agent yet `Working`.
+    #[test]
+    fn spinner_animates_while_only_spawning() {
+        use std::time::{Duration, Instant};
+        let (mut sb, key) = one_workspace();
+        assert!(
+            !sb.tick_working(),
+            "nothing spawning or working → no animation"
+        );
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.spinner_epoch = Instant::now() - Duration::from_millis(600);
+        assert!(
+            sb.tick_working(),
+            "a spawning row animates the shared spinner"
+        );
+        assert_eq!(sb.working_spinner_frame, 5);
+    }
+
+    /// Acceptance render: the row shows the distinct spawning arc during
+    /// provisioning, then yields to the working braille spinner once the
+    /// agent goes live.
+    #[test]
+    fn row_shows_spawning_arc_then_working_spinner() {
+        use crate::components::workspace_row::{spawning_glyph, working_glyph};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+
+        fn screen(sb: &mut Sidebar) -> String {
+            let backend = TestBackend::new(60, 12);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(frame.area(), frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_string())
+                })
+                .collect()
+        }
+
+        let spawning = screen(&mut sb);
+        assert!(
+            spawning.contains(spawning_glyph(0)),
+            "spawning arc must be on the row: {spawning:?}"
+        );
+        assert!(
+            !spawning.contains(working_glyph(0)),
+            "not the working spinner yet: {spawning:?}"
+        );
+
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        });
+        assert!(!sb.is_spawning(&key));
+        let working = screen(&mut sb);
+        assert!(
+            working.contains(working_glyph(0)),
+            "working spinner must replace the arc: {working:?}"
+        );
+        assert!(
+            !working.contains(spawning_glyph(0)),
+            "spawning arc cleared once live: {working:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod done_alert_tests {
     use super::super::*;

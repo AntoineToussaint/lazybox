@@ -70,6 +70,21 @@ pub struct WorkspaceRowCtx<'a> {
     /// the animation costs one glyph lookup per working row, no
     /// per-tick row rebuild.
     pub working_glyph: &'static str,
+    /// This workspace is provisioning its first spawn (cloning, worktree,
+    /// setup, launching the agent) and no terminal has reported an
+    /// `AgentState` yet (#1069). Renders the animated "spawning" arc in
+    /// the shared state slot so the row reads as *coming up* rather than
+    /// blank until the agent is live. Yields to every live agent signal
+    /// (`working` / `done` / `asking` / `limit_reached`) — a second
+    /// session running beside the spawn keeps its glyph — and outranks
+    /// only the terminal `exited` marker: re-spawning a crashed agent,
+    /// whose sticky `Exited` (#356) lingers with no live terminal, shows
+    /// the arc rather than a stale ✗. See `cell_state`.
+    pub spawning: bool,
+    /// Current glyph for the `spawning` slot — a rotating arc, sharing
+    /// the same frame counter as `working_glyph` but a distinct frame set
+    /// so a starting-up row reads differently from a running one.
+    pub spawning_glyph: &'static str,
     /// `Sidebar::runner_badges(key)` — `[('C', n), ('S', m)]` etc.
     pub badges: Vec<(char, usize)>,
     /// `Sidebar::agent_models(key)` — the model + effort label to show
@@ -461,15 +476,27 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     agent finished its turn and is waiting to be looked at (#80).
 ///   - `LimitReached`→ ` ⏳ ` (warn, bold) — a static glyph: the agent
 ///     hit its provider usage limit and is waiting to be resumed (#847).
+///   - `Spawning`    → ` <arc> ` (dim) — an animated glyph: the workspace
+///     is provisioning (clone / worktree / launch) and the agent is
+///     *coming*, before any terminal reports state (#1069). A distinct
+///     spinner from `Working` so "starting up" doesn't read as "running".
 ///   - `Exited`      → ` ✗ ` (dim) — a static glyph: the agent process
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
 /// Reserved width either way so the kind/title to the right don't
 /// jitter as a row moves between states. Precedence limit-reached >
-/// asking > working > done > exited, applied defensively though the
-/// states are disjoint upstream (a live signal always wins over the
-/// terminal exit marker).
+/// asking > working > done > spawning > exited. `spawning` yields to
+/// every *live* signal and outranks only the terminal `exited` marker.
+/// That split is exact, not defensive: a terminal's `Working` / `Done` /
+/// `InputNeeded` / `LimitReached` entry is dropped when it exits (only
+/// `Exited` is retained — the sidebar's `TerminalExited` handler), so any
+/// of those present while `spawning` is set belongs to a genuinely live
+/// *sibling* terminal (a second session running alongside this spawn) and
+/// rightly wins. `Exited` is the lone exception: retained as the #356
+/// restart affordance, it lingers with no live terminal after a crash, so
+/// on a cold re-provision `spawning > exited` shows the "coming up" arc
+/// instead of stranding a stale ✗ over an agent that is restarting.
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let (glyph, fg) = if ctx.limit_reached {
         ("⏳", ctx.theme.warn)
@@ -479,6 +506,8 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         (ctx.working_glyph, ctx.theme.accent)
     } else if ctx.done {
         ("✓", ctx.theme.success)
+    } else if ctx.spawning {
+        (ctx.spawning_glyph, ctx.theme.text_dim)
     } else if ctx.exited {
         ("✗", ctx.theme.text_dim)
     } else {
@@ -511,6 +540,18 @@ pub(crate) const WORKING_SPINNER_FRAMES: &[&str] =
 /// caller's counter can grow unbounded.
 pub(crate) fn working_glyph(frame: usize) -> &'static str {
     WORKING_SPINNER_FRAMES[frame % WORKING_SPINNER_FRAMES.len()]
+}
+
+/// Spinner frames for the "spawning" state slot (#1069) — a rotating
+/// arc, deliberately distinct from the `Working` braille cycle so a row
+/// that is *coming up* (cloning / worktree / launching the agent) reads
+/// differently from one actively running.
+pub(crate) const SPAWNING_SPINNER_FRAMES: &[&str] = &["◜", "◠", "◝", "◞", "◡", "◟"];
+
+/// Resolve the spawning arc glyph for a given frame index. Wraps, so the
+/// shared frame counter can grow unbounded.
+pub(crate) fn spawning_glyph(frame: usize) -> &'static str {
+    SPAWNING_SPINNER_FRAMES[frame % SPAWNING_SPINNER_FRAMES.len()]
 }
 
 fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -1243,6 +1284,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -1509,6 +1552,59 @@ mod tests {
         assert_eq!(cell_text(&cell), format!(" {} ", working_glyph(2)));
     }
 
+    /// #1069: re-spawning a crashed agent. The prior session's sticky
+    /// `Exited` (#356 keeps it across the reap) lingers in the state map
+    /// while the new cold provision runs — so `spawning` and `exited` are
+    /// both set. The arc must win, or the row shows a stale ✗ over an
+    /// agent that is actively restarting.
+    #[test]
+    fn cell_state_spawning_wins_over_exited() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.spawning = true;
+        ctx.spawning_glyph = spawning_glyph(1);
+        ctx.exited = true;
+        let cell = cell_state(&ctx);
+        assert_eq!(cell_text(&cell), format!(" {} ", spawning_glyph(1)));
+    }
+
+    /// A *live* `done` wins over the arc: a second session that finished
+    /// (terminal still alive, → alert #80) beside a sibling session's
+    /// cold spawn shows `✓`, not the arc. A stale `done` never reaches
+    /// this arm — `Done` is dropped when its terminal exits (only `Exited`
+    /// is retained), so a `done` seen while spawning is a live sibling.
+    #[test]
+    fn cell_state_done_wins_over_spawning() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.done = true;
+        ctx.spawning = true;
+        ctx.spawning_glyph = spawning_glyph(2);
+        let cell = cell_state(&ctx);
+        assert_eq!(cell_text(&cell), " ✓ ");
+    }
+
+    /// But a genuinely live signal still wins: a second session
+    /// provisioning behind an already-`working` agent shows the working
+    /// spinner, not the arc — the workspace really is working.
+    #[test]
+    fn cell_state_working_wins_over_spawning() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.working = true;
+        ctx.working_glyph = working_glyph(4);
+        ctx.spawning = true;
+        ctx.spawning_glyph = spawning_glyph(1);
+        let cell = cell_state(&ctx);
+        assert_eq!(cell_text(&cell), format!(" {} ", working_glyph(4)));
+    }
+
     /// The spinner frame index wraps so an unbounded counter is safe.
     #[test]
     fn working_glyph_wraps_frame_index() {
@@ -1600,6 +1696,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -2040,6 +2138,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -3236,6 +3336,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,

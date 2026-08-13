@@ -264,6 +264,17 @@ pub struct Sidebar {
     /// (which gets clobbered every poll cycle when the daemon
     /// re-broadcasts `WorkspaceUpserted`).
     agents: std::collections::HashMap<SessionKey, lazybox_ipc::AgentState>,
+    /// Workspaces mid-spawn: provisioning a first session — cloning,
+    /// creating the worktree, running setup, launching the agent —
+    /// before any terminal exists to report an `AgentState` (#1069).
+    /// Driven by `Event::WorktreeProgress`: a step `Started` / `Progress`
+    /// marks the workspace spawning; the first live `AgentState`, the
+    /// matching `TerminalSpawned`, or a `Failed` step clears it. Renders
+    /// the animated "spawning" arc in the row's shared state slot so a
+    /// spawn reads as *coming up* instead of a blank row until the agent
+    /// is live. Independent of `agents` above, which only gains an entry
+    /// once a terminal reports state.
+    spawning: std::collections::HashSet<SessionKey>,
     /// Current frame of the shared "working" spinner, mirrored from
     /// the free-running wall clock by [`Sidebar::tick_working`] so the
     /// render path stays a cheap field read and every working row shows
@@ -389,6 +400,7 @@ impl Sidebar {
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents: std::collections::HashMap::new(),
+            spawning: std::collections::HashSet::new(),
             agent_terminal_states: std::collections::HashMap::new(),
             working_spinner_frame: 0,
             spinner_epoch: std::time::Instant::now(),
@@ -560,6 +572,12 @@ impl Sidebar {
             .values()
             .any(|s| matches!(s, lazybox_ipc::AgentState::Working))
     }
+    /// True while `session_key`'s workspace is provisioning its first
+    /// spawn and no terminal has reported an `AgentState` yet — drives
+    /// the row's "spawning" arc (#1069). Reads the private `spawning` set.
+    pub fn is_spawning(&self, session_key: &SessionKey) -> bool {
+        self.spawning.contains(session_key)
+    }
     /// Sync the "working" spinner to the wall clock. Returns `true`
     /// when the displayed frame changed, so the caller knows a
     /// re-render is warranted.
@@ -579,7 +597,10 @@ impl Sidebar {
     /// rest of the time, so it never forces a faster redraw and a single
     /// shared frame index means no per-row work on each tick.
     pub fn tick_working(&mut self) -> bool {
-        if !self.any_agent_working() {
+        // The one shared frame counter drives both the `Working` braille
+        // spinner and the `Spawning` arc (#1069), so advance it while
+        // either is on screen.
+        if !self.any_agent_working() && self.spawning.is_empty() {
             return false;
         }
         let frame =
@@ -610,6 +631,28 @@ impl Sidebar {
         session_key: &SessionKey,
         state: lazybox_ipc::AgentState,
     ) -> bool {
+        // While a spawn is in flight and the arc is what's actually on
+        // screen, folding in the agent's first reading *does* change the
+        // display: it clears the arc. This holds even for `Idle`, which the
+        // absent-entry default below also maps to, so without this the
+        // orchestrator's `changed` gate (which reads this) would skip the
+        // repaint and strand the arc when the `TerminalSpawned` event was
+        // dropped on the lossy bus and the first `AgentState` is `Idle`
+        // (#1069). Gate it on the arc *actually being displayed* — matching
+        // `cell_state`'s precedence, the arc shows only when no higher live
+        // signal does, i.e. the stored state is absent / `Idle` / `Exited`.
+        // A live sibling session (`Working`/`Done`/`InputNeeded`/
+        // `LimitReached`) owns the slot instead, so its repeated pings must
+        // still dedup here rather than force a needless repaint every tick.
+        if self.spawning.contains(session_key)
+            && matches!(
+                self.agents.get(session_key),
+                None | Some(lazybox_ipc::AgentState::Idle)
+                    | Some(lazybox_ipc::AgentState::Exited { .. })
+            )
+        {
+            return false;
+        }
         // "Already displays it" = the stored state already equals this
         // reading, so folding it in would be a no-op. An absent entry
         // renders as `Idle`, so treat it as such.

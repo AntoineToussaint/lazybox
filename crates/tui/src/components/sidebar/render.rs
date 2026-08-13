@@ -1213,6 +1213,10 @@ impl Sidebar {
                 working_glyph: crate::components::workspace_row::working_glyph(
                     self.working_spinner_frame,
                 ),
+                spawning: self.is_spawning(key),
+                spawning_glyph: crate::components::workspace_row::spawning_glyph(
+                    self.working_spinner_frame,
+                ),
                 badges: badges_by_key.get(key).cloned().unwrap_or_default(),
                 agent_models: models_by_key.get(key).cloned().unwrap_or_default(),
                 agent_number: agent_numbers.get(key).copied(),

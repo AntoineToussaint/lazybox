@@ -138,6 +138,10 @@ pub enum Id {
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
+    /// Config-driven "Open with…" picker (`x o`, issue #1100). Single-
+    /// pick `Choice` over the `open_with:` apps; each row is an index
+    /// into `setup.open_with`. Submit → `editors::launch_open_with`.
+    OpenWith,
     /// Active setup-wizard step. Each transition unmounts the
     /// previous component at this id and mounts the next; only one
     /// setup step is ever live.
@@ -2598,6 +2602,12 @@ impl<T: TerminalAdapter> Model<T> {
         self.setup.editors = editors;
     }
 
+    /// Hand in the config-driven "Open with…" apps (issue #1100). The
+    /// `x o` picker reads from this list; an empty list = footer notice.
+    pub fn cache_open_with(&mut self, apps: Vec<crate::editors::OpenWithApp>) {
+        self.setup.open_with = apps;
+    }
+
     /// Apply `~/.lazybox/config.yaml::attention` +
     /// `ui.collapsed_repos` to the sidebar at startup. Must be called
     /// before the first daemon Subscribe so the saved collapse state
@@ -4433,6 +4443,88 @@ impl<T: TerminalAdapter> Model<T> {
             .title("Open editor")
             .label(|s: &String| s.clone());
         self.mount_modal(Id::Editor, modal);
+    }
+
+    /// `x o` — the config-driven "Open with…" picker (issue #1100).
+    /// Surfaces the `open_with:` apps (Obsidian / Finder / browser / …)
+    /// on the focused workspace, decoupled from the single `e` code
+    /// editor. One app → launch directly; 2+ → a Choice picker; none →
+    /// a footer notice pointing at the config file. Local-only, like the
+    /// editor (#742): a remote worktree path can't be opened here.
+    pub fn open_with_picker(&mut self) {
+        if self.editor_unavailable_remote() {
+            return;
+        }
+        if self.sidebar.selected_workspace_key().is_none() {
+            return;
+        }
+        if self.setup.open_with.is_empty() {
+            let path = lazybox_core::paths::config_yaml();
+            self.flash_info(format!(
+                "no `open_with:` apps configured — add some under `open_with:` in {}",
+                path.display(),
+            ));
+            return;
+        }
+        let Some(ctx) = self.open_with_context() else {
+            return;
+        };
+        match self.setup.open_with.len() {
+            1 => {
+                let app = self.setup.open_with[0].clone();
+                self.launch_open_with(&app, &ctx);
+            }
+            _ => self.mount_open_with_picker(),
+        }
+    }
+
+    fn mount_open_with_picker(&mut self) {
+        use crate::realm::components::choice::Choice;
+        let labels: Vec<String> = self
+            .setup
+            .open_with
+            .iter()
+            .map(|app| app.name.clone())
+            .collect();
+        let modal = Choice::single("Open with…", labels)
+            .title("Open with")
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::OpenWith, modal);
+    }
+
+    /// Assemble the token context for an "Open with…" launch from the
+    /// focused workspace: `{path}` (first session's worktree), `{url}`
+    /// (primary task URL), `{branch}`, and `{repo}`. Each is optional —
+    /// a workspace with no worktree/PR simply leaves that token unset,
+    /// and an app referencing it fails at launch with a named error.
+    pub(super) fn open_with_context(&self) -> Option<crate::editors::OpenWithContext> {
+        let workspace = self.sidebar.selected_workspace()?;
+        Some(crate::editors::OpenWithContext {
+            path: workspace
+                .sessions
+                .first()
+                .map(|session| session.worktree_path.to_string_lossy().into_owned()),
+            url: workspace.primary_task().map(|task| task.url.clone()),
+            branch: (!workspace.branch.is_empty()).then(|| workspace.branch.clone()),
+            repo: workspace.primary_task().and_then(|task| task.repo.clone()),
+        })
+    }
+
+    fn launch_open_with(
+        &mut self,
+        app: &crate::editors::OpenWithApp,
+        ctx: &crate::editors::OpenWithContext,
+    ) {
+        match crate::editors::launch_open_with(app, ctx) {
+            Ok(()) => {
+                tracing::info!(app = %app.name, "launched open-with app");
+                self.flash_info(format!("opening in {}…", app.name));
+            }
+            Err(e) => {
+                tracing::warn!(app = %app.name, "open-with launch failed: {e}");
+                self.flash_error(format!("failed to open {}: {e}", app.name));
+            }
+        }
     }
 
     /// Route a [`crate::components::terminal_stack::ClickTarget`] produced by a right-click in the agent

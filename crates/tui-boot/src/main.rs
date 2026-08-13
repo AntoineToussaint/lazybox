@@ -1424,6 +1424,12 @@ async fn run_embedded_realm(
         let editors = lazybox_tui::editors::discover_at_startup(load_user_editors());
         tracing::info!("detected {} editor(s)", editors.len());
         model.cache_editors(editors);
+        // Config-driven "Open with…" apps (issue #1100) — arbitrary
+        // launchers behind the `x o` picker, separate from the `e`
+        // code-editor slot.
+        let open_with = load_user_open_with();
+        tracing::info!("configured {} open-with app(s)", open_with.len());
+        model.cache_open_with(open_with);
         // Apply ~/.lazybox/config.yaml::{attention, ui, setup} → sidebar
         // + Model. Single load; subsequent reads happen on-demand via
         // Config::save_with for the writable parts.
@@ -1618,6 +1624,26 @@ fn load_user_editors() -> Vec<lazybox_tui::editors::UserEditorEntry> {
             display: e.display,
             command: e.command,
             args: e.args,
+        })
+        .collect()
+}
+
+/// Load the config-driven "Open with…" apps (issue #1100), mapping the
+/// config crate's `OpenWithEntry` into the UI library's launch template.
+fn load_user_open_with() -> Vec<lazybox_tui::editors::OpenWithApp> {
+    let cfg = match lazybox_config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("config.yaml load failed: {e}");
+            return Vec::new();
+        }
+    };
+    cfg.open_with
+        .into_iter()
+        .map(|entry| lazybox_tui::editors::OpenWithApp {
+            name: entry.name,
+            command: entry.command,
+            args: entry.args,
         })
         .collect()
 }

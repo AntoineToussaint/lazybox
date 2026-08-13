@@ -1203,6 +1203,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // picker; none → footer notice).
                 self.open_editor();
             }
+            Action::OpenWith => {
+                // Config-driven "Open with…" (issue #1100): surface the
+                // `open_with:` apps on the focused workspace. Single app
+                // → launch directly; multiple → picker; none → notice.
+                self.open_with_picker();
+            }
             Action::ViewDiff => {
                 if let Some((workspace_key, target)) =
                     self.sidebar.selected_workspace().and_then(|workspace| {

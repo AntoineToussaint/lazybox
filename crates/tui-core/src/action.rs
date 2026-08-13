@@ -90,6 +90,10 @@ pub enum Action {
     SpawnShellOnMain,
     /// Open the workspace's worktree in the user's editor.
     OpenEditor,
+    /// Open the focused workspace in a configured `open_with:` app
+    /// (Obsidian / Finder / browser / …) — the config-driven
+    /// "Open with…" picker, decoupled from the single code-editor slot.
+    OpenWith,
     /// Review the workspace's combined staged/unstaged worktree diff.
     ViewDiff,
     /// Create a brand-new pre-PR workspace (asks for a name).
@@ -446,6 +450,7 @@ pub enum ActionKind {
     SpawnAgentOnMain,
     SpawnShellOnMain,
     OpenEditor,
+    OpenWith,
     ViewDiff,
     NewWorkspace,
     RenameWorkspace,
@@ -589,6 +594,7 @@ impl ActionKind {
         Self::NewProject,
         Self::ImportCheckout,
         Self::AddScanRoot,
+        Self::OpenWith,
         Self::AdoptSessions,
         Self::SendToSession,
         Self::ConvertSession,
@@ -695,6 +701,7 @@ impl Action {
             Action::SpawnAgentOnMain(_) => ActionKind::SpawnAgentOnMain,
             Action::SpawnShellOnMain => ActionKind::SpawnShellOnMain,
             Action::OpenEditor => ActionKind::OpenEditor,
+            Action::OpenWith => ActionKind::OpenWith,
             Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::RenameWorkspace => ActionKind::RenameWorkspace,
@@ -1064,6 +1071,13 @@ impl ActionDef {
                 default_keys: "e",
                 label: "editor",
                 describe: "Open the worktree in the configured editor.",
+                section: Section::Workspace,
+            },
+            ActionKind::OpenWith => &Self {
+                kind: ActionKind::OpenWith,
+                default_keys: "x o",
+                label: "open with",
+                describe: "Open the focused workspace in a configured `open_with:` app (Obsidian, Finder, browser, …) — separate from the `e` code editor. Tokens {path}/{url}/{branch}/{repo} are substituted at launch.",
                 section: Section::Workspace,
             },
             ActionKind::ViewDiff => &Self {
@@ -1891,6 +1905,7 @@ impl ActionKind {
             ActionKind::SpawnAgentOnMain => "spawn_agent_on_main",
             ActionKind::SpawnShellOnMain => "spawn_shell_on_main",
             ActionKind::OpenEditor => "open_editor",
+            ActionKind::OpenWith => "open_with",
             ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::RenameWorkspace => "rename_workspace",
@@ -2170,6 +2185,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::AdoptSessions
         | ActionKind::SendToSession
         | ActionKind::ConvertSession
+        | ActionKind::OpenWith
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -2722,6 +2738,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
         | ActionKind::OpenInBrowser
+        // "Open with…" targets any workspace under the cursor; the
+        // picker itself surfaces a notice when no `open_with:` apps are
+        // configured (like `e` with no editor). Apps needing a token
+        // the workspace can't supply fail at launch, named.
+        | ActionKind::OpenWith
         // Notes attach to any workspace — even a session-less/empty
         // one — so gate purely on a workspace being under the cursor.
         | ActionKind::EditNotes => has_ws,

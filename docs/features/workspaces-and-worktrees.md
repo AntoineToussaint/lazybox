@@ -244,6 +244,74 @@ Detection runs at startup; `e` resolves the editor command and spawns it with
 ### Known sharp edges
 - Detection is best-effort by binary path; an editor installed in a nonstandard location needs a custom `editors:` entry.
 
+### Stopgap: one alternate app via `editors:`
+Before `open_with:` existed, a single non-editor app (e.g. Obsidian) could be
+added as an `editors:` entry and picked with `e`:
+
+```yaml
+editors:
+  - id: obsidian
+    display: Obsidian
+    command: open
+    args: ["-a", "Obsidian", "{path}"]
+```
+
+This still works, but `editors:` is scoped to *the* code editor (it carries
+go-to-`file:line` semantics). For multiple distinct "open with" targets, use
+`open_with:` below.
+
+---
+
+## Open with… (arbitrary apps)
+
+**Status:** stable
+**Crate(s):** `config` (`OpenWithEntry`), `tui-core` (`editors::OpenWithApp`), `tui`
+**Config / flags:** `open_with:`
+**Key bindings:** `x o`
+
+### What it does
+A config-driven list of arbitrary apps to launch on the focused workspace —
+Obsidian, Finder, a browser, anything — decoupled from the single `e` code
+editor. `x o` opens an "Open with…" picker over the configured apps (one app
+launches directly).
+
+### How to use it
+Add apps under `open_with:`; each is a launch command with optional `args`:
+
+```yaml
+open_with:
+  - name: Obsidian
+    command: open
+    args: ["-a", "Obsidian", "{path}"]
+  - name: Finder
+    command: open
+    args: ["{path}"]
+  - name: Preview PR in browser
+    command: open
+    args: ["{url}"]
+```
+
+Tokens substituted at launch: `{path}` (the worktree dir), `{url}` (the PR /
+issue URL), `{branch}`, and `{repo}` (`owner/repo`). `args` defaults to
+`["{path}"]` when omitted. An app that references a token the workspace can't
+supply (e.g. `{url}` with no PR) fails with a footer notice naming the token,
+rather than launching with a stray placeholder.
+
+### How it works (brief)
+`open_with:` entries load at startup and reuse the editor launch primitive
+(`tui-core` `editors::launch_open_with`): command + args + token substitution,
+detaching a GUI binary and handing `open` off to Launch Services. `editors:` /
+`e` are unchanged — `open_with:` is the general escape hatch.
+
+### Test checklist
+- [ ] `x o` with 2+ apps shows a picker; a single app launches directly.
+- [ ] `{path}` / `{url}` / `{branch}` / `{repo}` are substituted at launch.
+- [ ] An app using `{url}` on a workspace with no PR fails with a named notice.
+- [ ] With no `open_with:` configured, `x o` points at the config file.
+
+### Known sharp edges
+- Local-only, like the editor (#742): a remote (`--connect`) worktree path lives on the box, so `x o` declines on a remote daemon and points at `s` for a server shell.
+
 ---
 
 ## Per-repo overrides

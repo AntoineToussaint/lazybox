@@ -264,7 +264,11 @@ session (agent-to-agent handoff, #431 — capture the focused agent's
 on-screen output, pick a target workspace, edit the brief, and
 inject + submit it into that session's agent; the source is excluded
 so a handoff can't loop back to itself, and a visible `source →
-target` notice records the trail), `x j` join issue
+target` notice records the trail), `x o` open with… (a config-driven
+picker over `open_with:` apps — Obsidian / Finder / browser / … —
+decoupled from the `e` code editor; `{path}`/`{url}`/`{branch}`/`{repo}`
+tokens substituted at launch, local-only per #742; #1100), `x j` join
+issue
 into PR, `x z` long snooze, `x x` archive, `x c` close issue
 (as not-planned, upstream; issue workspaces only, confirmed first) —
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).

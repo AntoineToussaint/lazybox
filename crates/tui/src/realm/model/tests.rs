@@ -6180,6 +6180,9 @@ mod stale_input_tests {
                 | Id::NewWorkspaceRepo
                 | Id::LinearTeamRepo
                 | Id::Editor
+                // Open-with launches an external app — an outward
+                // effect a stale Enter must not trigger.
+                | Id::OpenWith
                 | Id::Setup
                 | Id::AdoptTarget
                 | Id::StartAgentProject
@@ -6224,6 +6227,7 @@ mod stale_input_tests {
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
             Id::Editor,
+            Id::OpenWith,
             Id::Setup,
             Id::RemoveOutOfScope,
             Id::MergeConfirm,

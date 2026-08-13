@@ -2327,6 +2327,7 @@ pub(super) fn action_from_kind(
         ActionKind::MarkAllRead => Action::MarkAllRead,
         ActionKind::Work => Action::Work,
         ActionKind::OpenEditor => Action::OpenEditor,
+        ActionKind::OpenWith => Action::OpenWith,
         ActionKind::ViewDiff => Action::ViewDiff,
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::RenameWorkspace => Action::RenameWorkspace,

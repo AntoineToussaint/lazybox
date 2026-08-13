@@ -181,6 +181,13 @@ impl<T: TerminalAdapter> Model<T> {
                         .map(|session| session.worktree_path.clone())
                 }),
             },
+            Id::OpenWith => match self.open_with_context() {
+                Some(ctx) => PickFlow::OpenWith {
+                    apps: self.setup.open_with.clone(),
+                    ctx,
+                },
+                None => PickFlow::Plain,
+            },
             Id::Setup if self.setup.runner.is_some() => PickFlow::Runner,
             Id::Setup if !self.setup.settings_actions.is_empty() => PickFlow::Settings {
                 action_count: self.setup.settings_actions.len(),
@@ -588,6 +595,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
             PickOutcome::LaunchEditor { editor, worktree } => {
                 self.launch_editor(&editor, &worktree);
+            }
+            PickOutcome::LaunchOpenWith { app, ctx } => {
+                self.launch_open_with(&app, &ctx);
             }
             PickOutcome::DispatchSettings(index) => {
                 let action = self.setup.settings_actions.get(index).cloned();

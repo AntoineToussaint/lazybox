@@ -41,5 +41,6 @@ pub use deployment::{Deployment, DeploymentConfig, merge_yaml};
 pub use handle::{BoxHandle, BoxStatus, PowerState};
 pub use provider::{
     CommandFuture, CommandRunner, SandboxError, SandboxProvider, SystemRunner, Tunnel,
+    validate_handle_provider,
 };
 pub use spec::SandboxSpec;

@@ -575,8 +575,12 @@ fn open_store() -> anyhow::Result<std::sync::Arc<dyn Store>> {
     lazybox_server::open_store().map_err(|e| anyhow::anyhow!("open store: {e}"))
 }
 
-fn load_handle_or_bail(store: &dyn Store, worktree: &str) -> anyhow::Result<BoxHandle> {
-    match persist::load_handle(store, worktree)? {
+fn load_handle_or_bail(
+    store: &dyn Store,
+    worktree: &str,
+    provider: &str,
+) -> anyhow::Result<BoxHandle> {
+    match persist::load_handle_for_provider(store, worktree, provider)? {
         Some(handle) => Ok(handle),
         None => anyhow::bail!(missing_handle_message(store, worktree)),
     }
@@ -620,6 +624,7 @@ async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let spec = resolve_spec(&config.sandbox, args, &worktree, &provider)?;
     let store = open_store()?;
+    persist::load_handle_for_provider(store.as_ref(), &worktree, provider.id())?;
     // Preflight the provider's credentials so a missing/expired credential
     // fails here with a fix hint, not minutes into a terraform apply (#1047).
     provider.check_auth().await?;
@@ -652,7 +657,7 @@ async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     println!("Waking {}…", handle.id);
@@ -668,7 +673,7 @@ async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     println!("Sleeping {}…", handle.id);
@@ -684,7 +689,7 @@ async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     let status = provider.status(&handle).await?;
@@ -748,7 +753,7 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
     provider.check_auth().await?;
     let store = open_store()?;
 
-    let existing = persist::load_handle(store.as_ref(), &worktree)?;
+    let existing = persist::load_handle_for_provider(store.as_ref(), &worktree, provider.id())?;
     let (mut handle, tunnel) = match existing {
         // Stamped box: wake-if-stopped + tunnel. No spec needed, so a
         // config that dropped `project` after `ensure` still connects.
@@ -880,7 +885,7 @@ async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
     let sha = explicit_sha.unwrap_or_else(client_build_sha);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let mut handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let mut handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     // The rebuild runs over SSH, so the box must be awake AND accepting SSH.
@@ -935,7 +940,7 @@ async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
     }
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
-    let handle = load_handle_or_bail(store.as_ref(), &worktree)?;
+    let handle = load_handle_or_bail(store.as_ref(), &worktree, provider.id())?;
     provider.check_auth().await?;
 
     println!("Destroying {} via {}…", handle.id, provider.id());

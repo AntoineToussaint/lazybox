@@ -83,7 +83,9 @@ log "installed $BIN_DEST at $(cat "$SHA_FILE")"
 # template init is not systemd, so its provider selects direct mode and owns
 # pause timing through the E2B lifecycle API.
 if [ "$SERVICE_MODE" = "direct" ]; then
-  as_build "'$BIN_DEST' server stop >/dev/null 2>&1 || true; for _ in \$(seq 1 100); do '$BIN_DEST' server status | grep -q '^stopped$' && break; sleep 0.1; done; '$BIN_DEST' server status | grep -q '^stopped$'; install -d ~/.lazybox; nohup '$BIN_DEST' server start >~/.lazybox/daemon.log 2>&1 </dev/null &"
+  sudo -u "$LAZYBOX_USER" -H env \
+    LAZYBOX_BIN_DEST="$BIN_DEST" \
+    "$SRC_DIR/contrib/box-lifecycle/lazybox-direct-service.sh"
   log "daemon active (direct mode)"
 else
   install -m0644 "$SRC_DIR/contrib/systemd/lazybox-daemon@.service" /etc/systemd/system/

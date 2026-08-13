@@ -7,6 +7,20 @@ use tokio::process::Command;
 
 use crate::{BoxHandle, BoxStatus, SandboxSpec};
 
+/// Reject a handle before it crosses into a different provider's API.
+pub fn validate_handle_provider(
+    expected_provider: &str,
+    handle: &BoxHandle,
+) -> Result<(), SandboxError> {
+    if handle.provider == expected_provider {
+        return Ok(());
+    }
+    Err(SandboxError::Config(format!(
+        "box {} belongs to sandbox provider {:?}, but provider {:?} is selected; select the handle's provider before managing or replacing it",
+        handle.id, handle.provider, expected_provider
+    )))
+}
+
 /// A ready-to-spawn port-forward for a connected box.
 ///
 /// `connect` returns the forward invocation rather than owning the
@@ -73,6 +87,17 @@ pub enum SandboxError {
         provider: &'static str,
         operation: &'static str,
         status: u16,
+        detail: String,
+    },
+    #[error("{operation}: {source}")]
+    Io {
+        operation: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{operation}: background task failed: {detail}")]
+    Task {
+        operation: &'static str,
         detail: String,
     },
 }

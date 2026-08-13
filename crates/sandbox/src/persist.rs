@@ -9,7 +9,7 @@
 
 use lazybox_store::Store;
 
-use crate::{BoxHandle, provider::SandboxError};
+use crate::{BoxHandle, provider::SandboxError, validate_handle_provider};
 
 fn kv_key(worktree: &str) -> String {
     format!("box:{worktree}")
@@ -33,6 +33,19 @@ pub fn load_handle(store: &dyn Store, worktree: &str) -> Result<Option<BoxHandle
     };
     let handle = serde_json::from_str(&json).map_err(|e| SandboxError::Serialize(e.to_string()))?;
     Ok(Some(handle))
+}
+
+/// Load a handle only when it belongs to `provider`.
+pub fn load_handle_for_provider(
+    store: &dyn Store,
+    worktree: &str,
+    provider: &str,
+) -> Result<Option<BoxHandle>, SandboxError> {
+    let handle = load_handle(store, worktree)?;
+    if let Some(handle) = &handle {
+        validate_handle_provider(provider, handle)?;
+    }
+    Ok(handle)
 }
 
 /// Forget the box handle for `worktree`. Idempotent.
@@ -108,5 +121,16 @@ mod tests {
             keys,
             vec!["/repos/foo/wt".to_string(), "sandbox".to_string()]
         );
+    }
+
+    #[test]
+    fn provider_scoped_load_rejects_a_handle_from_another_backend() {
+        let store = MemoryStore::new();
+        save_handle(&store, "sandbox", &handle()).unwrap();
+
+        assert!(load_handle_for_provider(&store, "sandbox", "gcp").is_ok());
+        let error = load_handle_for_provider(&store, "sandbox", "e2b").unwrap_err();
+        assert!(error.to_string().contains("provider \"gcp\""));
+        assert!(error.to_string().contains("provider \"e2b\""));
     }
 }

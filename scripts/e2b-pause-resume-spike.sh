@@ -14,6 +14,10 @@ if [ "$WAIT_SECONDS" -lt 300 ]; then
   echo "WAIT_SECONDS must be at least 300 for the persistence probe" >&2
   exit 2
 fi
+if ! [[ "$CYCLES" =~ ^[1-9][0-9]*$ ]]; then
+  echo "CYCLES must be a positive integer" >&2
+  exit 2
+fi
 
 for command in curl python3 ssh websocat; do
   command -v "$command" >/dev/null || {
@@ -40,12 +44,22 @@ ssh_args=(
   -o StrictHostKeyChecking=no
   -o UserKnownHostsFile=/dev/null
   -o LogLevel=ERROR
+  -o ConnectTimeout=1
   -o "ProxyCommand=websocat --binary -B 65536 - wss://8081-%h.e2b.app"
   "user@$sandbox_id"
 )
 
 remote() {
   ssh "${ssh_args[@]}" "$@"
+}
+
+verify_remote_state() {
+  remote "/usr/local/bin/lazybox server status | grep -q '^running' \
+    && test -S ~/.lazybox/run/daemon.sock \
+    && tmux has-session -t '$SESSION' \
+    && tmux capture-pane -p -t '$SESSION' -S - | grep -Fqx '$MARKER-1' \
+    && pane_pid=\$(tmux display-message -p -t '$SESSION' '#{pane_pid}') \
+    && ps -p \"\$pane_pid\" -o args= | grep -q '[c]laude'"
 }
 
 memory_mb="$({
@@ -57,10 +71,7 @@ remote "tmux kill-session -t '$SESSION' 2>/dev/null || true; \
   tmux new-session -d -s '$SESSION' \
   \"bash -lc 'for i in \\$(seq 1 200); do echo $MARKER-\\$i; done; exec claude'\""
 sleep 5
-remote "/usr/local/bin/lazybox server status | grep -q '^running' \
-  && test -S ~/.lazybox/run/daemon.sock \
-  && tmux has-session -t '$SESSION' \
-  && pgrep -u \"\$(id -u)\" -f '[c]laude' >/dev/null"
+verify_remote_state
 
 for cycle in $(seq 1 "$CYCLES"); do
   pause_started="$(now_ms)"
@@ -71,7 +82,12 @@ for cycle in $(seq 1 "$CYCLES"); do
 
   wake_started="$(now_ms)"
   "$LAZYBOX_BIN" sandbox wake --provider e2b --template "$E2B_TEMPLATE"
-  until remote true 2>/dev/null; do
+  resume_deadline=$((wake_started + 5000))
+  while ! remote true 2>/dev/null; do
+    if [ "$(now_ms)" -ge "$resume_deadline" ]; then
+      echo "sandbox did not become reachable within the 5s acceptance bound" >&2
+      exit 1
+    fi
     sleep 0.1
   done
   wake_finished="$(now_ms)"
@@ -86,11 +102,7 @@ for cycle in $(seq 1 "$CYCLES"); do
     echo "resume exceeded the 5s acceptance bound" >&2
     exit 1
   fi
-  remote "/usr/local/bin/lazybox server status | grep -q '^running' \
-    && test -S ~/.lazybox/run/daemon.sock \
-    && tmux has-session -t '$SESSION' \
-    && tmux capture-pane -p -t '$SESSION' -S - | grep -q '$MARKER-1' \
-    && pgrep -u \"\$(id -u)\" -f '[c]laude' >/dev/null"
+  verify_remote_state
 done
 
 echo "PASS: tmux session, scrollback, and Claude process survived $CYCLES pause/resume cycle(s)"

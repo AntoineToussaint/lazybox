@@ -3,7 +3,9 @@
 //! `lazybox sandbox connect` CLI drive the **same** sequence against the
 //! existing [`SandboxProvider`] engine rather than each re-implementing it.
 
-use crate::{BoxHandle, SandboxError, SandboxProvider, SandboxSpec, Tunnel};
+use crate::{
+    BoxHandle, SandboxError, SandboxProvider, SandboxSpec, Tunnel, validate_handle_provider,
+};
 
 /// Bring a box up and return its live handle plus the forward to
 /// supervise.
@@ -23,6 +25,7 @@ pub async fn connect_box<P: SandboxProvider>(
         Some(handle) => handle,
         None => provider.ensure(spec).await?,
     };
+    validate_handle_provider(provider.id(), &handle)?;
     let tunnel = provider.connect(&handle, ports).await?;
     Ok((handle, tunnel))
 }
@@ -124,5 +127,20 @@ mod tests {
         );
         assert!(p.connected.get(), "connect still wakes + forwards the box");
         assert_eq!(handle.id, "stamped");
+    }
+
+    #[tokio::test]
+    async fn rejects_a_stamped_handle_owned_by_another_provider() {
+        let p = FakeProvider::default();
+        let mut stamped = handle("stamped");
+        stamped.provider = "other".into();
+
+        let error = connect_box(&p, &spec(), Some(stamped), &[])
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("belongs to sandbox provider"));
+        assert!(!p.ensured.get());
+        assert!(!p.connected.get());
     }
 }

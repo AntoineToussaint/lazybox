@@ -185,7 +185,7 @@ async fn bring_up(
     if let Some(parent) = provider.local_socket().parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let existing = persist::load_handle(store, SHARED_BOX_KEY)?;
+    let existing = persist::load_handle_for_provider(store, SHARED_BOX_KEY, provider.id())?;
     if existing.is_none() {
         tracing::info!("provisioning r-spawn box (terraform apply)…");
     }

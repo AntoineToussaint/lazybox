@@ -32,7 +32,7 @@ e2b template create lazybox-e2b \
   --path . \
   --dockerfile terraform/sandbox/e2b/e2b.Dockerfile \
   --cmd /usr/local/bin/lazybox-e2b-start \
-  --ready-cmd 'test -S /home/user/.lazybox/run/daemon.sock' \
+  --ready-cmd 'test -S /home/user/.lazybox/run/daemon.sock && curl --max-time 1 --silent http://127.0.0.1:8081 >/dev/null' \
   --cpu-count 2 \
   --memory-mb 4096
 ```
@@ -42,6 +42,9 @@ baked lazybox daemon. `ensure` then runs the same on-box build helper used by
 GCP, pinned to the invoking client's build SHA, in direct-service mode. This
 last stamp is what guarantees the client and daemon wire fingerprints match;
 the template's baked binary is only the bootstrap.
+
+The repository `.dockerignore` excludes local Git metadata, credentials,
+lazybox state, and Rust build output from the uploaded template context.
 
 Set the API key and ensure the box:
 

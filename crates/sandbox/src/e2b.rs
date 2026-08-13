@@ -1,10 +1,13 @@
 //! E2B sandbox lifecycle driver.
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
+use fs2::FileExt;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -18,6 +21,7 @@ const PROVIDER: &str = "e2b";
 const SERVER_ALIVE_INTERVAL: u64 = 30;
 const SERVER_ALIVE_COUNT_MAX: u64 = 3;
 const PROBE_CONNECT_TIMEOUT: u64 = 8;
+const API_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Driver for E2B sandboxes.
 #[derive(Debug, Clone)]
@@ -31,6 +35,8 @@ pub struct E2bProvider {
     api_key: Option<String>,
     api_base: String,
     client: reqwest::Client,
+    request_timeout: Duration,
+    ensure_lock_dir: PathBuf,
 }
 
 impl E2bProvider {
@@ -56,6 +62,8 @@ impl E2bProvider {
             api_key,
             api_base: API_BASE.to_string(),
             client: reqwest::Client::new(),
+            request_timeout: API_REQUEST_TIMEOUT,
+            ensure_lock_dir: std::env::temp_dir().join("lazybox-e2b-ensure"),
         }
     }
 
@@ -72,6 +80,7 @@ impl E2bProvider {
         Ok(self
             .client
             .request(method, format!("{}{path}", self.api_base))
+            .timeout(self.request_timeout)
             .header("X-API-Key", self.api_key()?))
     }
 
@@ -147,11 +156,10 @@ impl E2bProvider {
     }
 
     async fn list_named(&self, name: &str) -> Result<Vec<ListedSandbox>, SandboxError> {
-        let request = self.request(Method::GET, "/v2/sandboxes")?.query(&[
-            ("state", "running"),
-            ("state", "paused"),
-            ("metadata", &format!("lazybox_name={name}")),
-        ]);
+        let metadata = format!("lazybox_name={name}");
+        let request = self
+            .request(Method::GET, "/v2/sandboxes")?
+            .query(&[("state", "running,paused"), ("metadata", metadata.as_str())]);
         self.json(request, "list sandboxes", &[StatusCode::OK])
             .await
     }
@@ -204,13 +212,14 @@ impl E2bProvider {
         let mut args = self.ssh_options();
         args.push(self.ssh_destination(handle));
         let target = shell_quote(sha);
+        let user = shell_quote(&self.user);
         let current_check = if sha.is_empty() {
             String::new()
         } else {
             format!("test \"$(cat /etc/lazybox/build-sha 2>/dev/null)\" = {target} || ")
         };
         args.push(format!(
-            "{current_check}sudo env LAZYBOX_SERVICE_MODE=direct LAZYBOX_USER=user \
+            "{current_check}sudo env LAZYBOX_SERVICE_MODE=direct LAZYBOX_USER={user} \
              LAZYBOX_SRC_DIR=/opt/lazybox/git \
              /usr/local/bin/lazybox-build.sh {target}"
         ));
@@ -220,6 +229,35 @@ impl E2bProvider {
     async fn stamp_daemon(&self, handle: &BoxHandle, sha: &str) -> Result<(), SandboxError> {
         let (program, args) = self.rebuild_command(handle, sha);
         self.runner.run(&program, &args, &[]).await.map(|_| ())
+    }
+
+    async fn acquire_ensure_lock(&self, name: &str) -> Result<File, SandboxError> {
+        let lock_dir = self.ensure_lock_dir.clone();
+        let file_name = name
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&lock_dir)?;
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(lock_dir.join(file_name))?;
+            file.lock_exclusive()?;
+            Ok::<_, std::io::Error>(file)
+        })
+        .await
+        .map_err(|error| SandboxError::Task {
+            operation: "acquire E2B ensure lock",
+            detail: error.to_string(),
+        })?
+        .map_err(|source| SandboxError::Io {
+            operation: "acquire E2B ensure lock",
+            source,
+        })
     }
 
     fn tunnel(&self, handle: &BoxHandle, ports: &[u16]) -> Tunnel {
@@ -267,6 +305,7 @@ impl SandboxProvider for E2bProvider {
     }
 
     async fn ensure(&self, spec: &SandboxSpec) -> Result<BoxHandle, SandboxError> {
+        let _lock = self.acquire_ensure_lock(&spec.name).await?;
         if let Some(existing) = self.list_named(&spec.name).await?.first() {
             let mut handle = self.handle(existing);
             if !handle.power_state.is_running() {
@@ -284,6 +323,7 @@ impl SandboxProvider for E2bProvider {
             timeout: self.timeout_seconds,
             auto_pause: true,
             auto_pause_memory: true,
+            secure: true,
             metadata: HashMap::from([
                 ("lazybox_name", spec.name.as_str()),
                 ("lazybox_sha", spec.lazybox_git_sha.as_str()),
@@ -340,9 +380,7 @@ impl SandboxProvider for E2bProvider {
     }
 
     async fn connect(&self, handle: &BoxHandle, ports: &[u16]) -> Result<Tunnel, SandboxError> {
-        if !self.detail(&handle.id).await?.state.power().is_running() {
-            self.start(handle).await?;
-        }
+        self.start(handle).await?;
         Ok(self.tunnel(handle, ports))
     }
 
@@ -396,6 +434,7 @@ struct NewSandbox<'a> {
     auto_pause: bool,
     #[serde(rename = "autoPauseMemory")]
     auto_pause_memory: bool,
+    secure: bool,
     metadata: HashMap<&'static str, &'a str>,
 }
 
@@ -517,9 +556,14 @@ mod tests {
     }
 
     fn provider_at(api_base: String, runner: Arc<dyn CommandRunner>) -> E2bProvider {
+        let lock_suffix = api_base
+            .bytes()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         E2bProvider {
             api_base,
             runner,
+            ensure_lock_dir: std::env::temp_dir().join(format!("lazybox-e2b-test-{lock_suffix}")),
             ..provider()
         }
     }
@@ -548,6 +592,8 @@ mod tests {
             api_key: Some("test-key".to_string()),
             api_base: "http://127.0.0.1".to_string(),
             client: reqwest::Client::new(),
+            request_timeout: API_REQUEST_TIMEOUT,
+            ensure_lock_dir: std::env::temp_dir().join("lazybox-e2b-test"),
         }
     }
 
@@ -586,6 +632,7 @@ mod tests {
             timeout: 3600,
             auto_pause: true,
             auto_pause_memory: true,
+            secure: true,
             metadata: HashMap::from([("lazybox_name", "box"), ("lazybox_sha", "abc")]),
         };
         assert_eq!(
@@ -595,6 +642,7 @@ mod tests {
                 "timeout": 3600,
                 "autoPause": true,
                 "autoPauseMemory": true,
+                "secure": true,
                 "metadata": { "lazybox_name": "box", "lazybox_sha": "abc" }
             })
         );
@@ -631,7 +679,19 @@ mod tests {
         let (_, args) = provider().rebuild_command(&handle(PowerState::Running), "abc'123");
         let remote = args.last().expect("remote command");
         assert!(remote.contains("LAZYBOX_SERVICE_MODE=direct"), "{remote}");
+        assert!(remote.contains("LAZYBOX_USER='lazybox'"), "{remote}");
         assert!(remote.contains("'abc'\"'\"'123'"), "{remote}");
+    }
+
+    #[test]
+    fn rebuild_uses_the_configured_remote_user_for_the_daemon() {
+        let mut provider = provider();
+        provider.user = "custom-user".to_string();
+
+        let (_, args) = provider.rebuild_command(&handle(PowerState::Running), "abc123");
+
+        let remote = args.last().expect("remote command");
+        assert!(remote.contains("LAZYBOX_USER='custom-user'"), "{remote}");
     }
 
     #[test]
@@ -664,7 +724,7 @@ mod tests {
         let requests = requests.lock().unwrap();
         assert!(
             requests[0].starts_with(
-                "GET /v2/sandboxes?state=running&state=paused&metadata=lazybox_name%3Dlazybox-sbx-test"
+                "GET /v2/sandboxes?state=running%2Cpaused&metadata=lazybox_name%3Dlazybox-sbx-test"
             ),
             "{}",
             requests[0]
@@ -675,6 +735,7 @@ mod tests {
         let create: serde_json::Value = serde_json::from_str(create_body).unwrap();
         assert_eq!(create["autoPause"], true);
         assert_eq!(create["autoPauseMemory"], true);
+        assert_eq!(create["secure"], true);
         assert_eq!(create["metadata"]["lazybox_sha"], "abc123");
         let calls = runner.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -696,10 +757,6 @@ mod tests {
             MockResponse {
                 status: "200 OK",
                 body: r#"{"state":"running"}"#,
-            },
-            MockResponse {
-                status: "200 OK",
-                body: r#"{"state":"paused"}"#,
             },
             MockResponse {
                 status: "201 Created",
@@ -737,9 +794,32 @@ mod tests {
             Some(r#"{"memory":true}"#)
         );
         assert!(requests[2].starts_with("GET /sandboxes/sbx_123 HTTP/1.1"));
-        assert!(requests[3].starts_with("GET /sandboxes/sbx_123 HTTP/1.1"));
-        assert!(requests[4].starts_with("POST /sandboxes/sbx_123/connect HTTP/1.1"));
-        assert!(requests[5].starts_with("DELETE /sandboxes/sbx_123 HTTP/1.1"));
+        assert!(requests[3].starts_with("POST /sandboxes/sbx_123/connect HTTP/1.1"));
+        assert!(requests[4].starts_with("DELETE /sandboxes/sbx_123 HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn connect_renews_the_timeout_even_when_the_handle_is_running() {
+        let (base, requests, server) = mock_api(vec![MockResponse {
+            status: "200 OK",
+            body: r#"{"sandboxID":"sbx_123"}"#,
+        }])
+        .await;
+        let provider = provider_at(base, Arc::new(OkRunner));
+
+        provider
+            .connect(&handle(PowerState::Running), &[])
+            .await
+            .unwrap();
+        server.await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("POST /sandboxes/sbx_123/connect HTTP/1.1"));
+        assert_eq!(
+            requests[0].split("\r\n\r\n").nth(1),
+            Some(r#"{"timeout":3600}"#)
+        );
     }
 
     #[tokio::test]
@@ -770,5 +850,62 @@ mod tests {
             "no create request for an existing sandbox"
         );
         assert!(requests[1].starts_with("POST /sandboxes/sbx_existing/connect HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_ensure_calls_create_only_one_sandbox() {
+        let (base, requests, server) = mock_api(vec![
+            MockResponse {
+                status: "200 OK",
+                body: "[]",
+            },
+            MockResponse {
+                status: "201 Created",
+                body: r#"{"sandboxID":"sbx_created"}"#,
+            },
+            MockResponse {
+                status: "200 OK",
+                body: r#"[{"sandboxID":"sbx_created","state":"running"}]"#,
+            },
+        ])
+        .await;
+        let provider = provider_at(base, Arc::new(OkRunner));
+        let first_spec = spec();
+        let second_spec = spec();
+
+        let (first, second) =
+            tokio::join!(provider.ensure(&first_spec), provider.ensure(&second_spec));
+        server.await.unwrap();
+
+        assert_eq!(first.unwrap().id, "sbx_created");
+        assert_eq!(second.unwrap().id, "sbx_created");
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /sandboxes HTTP/1.1"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn api_requests_fail_within_the_configured_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let mut provider = provider_at(format!("http://{address}"), Arc::new(OkRunner));
+        provider.request_timeout = Duration::from_millis(20);
+
+        let result = tokio::time::timeout(Duration::from_millis(200), provider.check_auth()).await;
+        server.abort();
+
+        let error = result
+            .expect("the provider request must honor its own deadline")
+            .unwrap_err();
+        assert!(matches!(error, SandboxError::ApiTransport { .. }));
     }
 }

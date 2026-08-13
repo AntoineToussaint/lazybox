@@ -148,6 +148,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// badge letter so two agents sharing a tier label keep distinct
     /// shorts. Sourced from `Sidebar::model_shorts`.
     pub model_shorts: &'a std::collections::HashMap<(char, String), String>,
+    /// Active search term to highlight within this row's title, or `None`
+    /// when no search touches this row. `Some` underlines the matched span
+    /// so the user can see *what* matched — the vim `/pattern` cue (#1099).
+    /// Already `#`-stripped and trimmed by the caller.
+    pub highlight_query: Option<&'a str>,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -574,9 +579,52 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // when the row is too narrow (see `Cell::atomic_tail`).
     let labels = label_spans(ctx);
     let tail = labels.len();
-    let mut spans = vec![Span::styled(ctx.raw_title().to_string(), style)];
+    let mut spans = title_spans(ctx.raw_title(), ctx.highlight_query, style, ctx.theme);
     spans.extend(labels);
     Cell::new(spans).atomic_tail(tail)
+}
+
+/// Split a title into styled spans, underlining the first case-insensitive
+/// occurrence of the active search term so the user can see what matched
+/// (the vim `/pattern` cue, #1099). With no query — or no contiguous match
+/// (a purely fuzzy/metadata hit) — the title is one plain span, unchanged.
+fn title_spans(
+    title: &str,
+    query: Option<&str>,
+    style: Style,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let Some(range) = query.and_then(|q| ci_match_range(title, q)) else {
+        return vec![Span::styled(title.to_string(), style)];
+    };
+    let hl = style
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut spans = Vec::with_capacity(3);
+    if range.start > 0 {
+        spans.push(Span::styled(title[..range.start].to_string(), style));
+    }
+    spans.push(Span::styled(title[range.clone()].to_string(), hl));
+    if range.end < title.len() {
+        spans.push(Span::styled(title[range.end..].to_string(), style));
+    }
+    spans
+}
+
+/// Byte range of the first case-insensitive occurrence of `needle` in
+/// `hay`, or `None`. Bails when case-folding shifts byte lengths (rare,
+/// non-ASCII) rather than risk slicing a title mid-codepoint.
+fn ci_match_range(hay: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let hay_lower = hay.to_lowercase();
+    if hay_lower.len() != hay.len() {
+        return None;
+    }
+    let needle_lower = needle.to_lowercase();
+    let start = hay_lower.find(&needle_lower)?;
+    Some(start..(start + needle_lower.len()).min(hay.len()))
 }
 
 /// Hard cap on a single chip's text (before the `…`). A verbose
@@ -1300,6 +1348,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         }
     }
 
@@ -1712,6 +1761,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -2154,6 +2204,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -3352,6 +3403,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];
@@ -3516,6 +3568,58 @@ mod tests {
             !line_text(&lines[1]).contains(long),
             "occupied snippet column must steal width from the title: {:?}",
             line_text(&lines[1]),
+        );
+    }
+
+    #[test]
+    fn ci_match_range_is_case_insensitive_and_byte_correct() {
+        assert_eq!(ci_match_range("Add Search bar", "search"), Some(4..10));
+        assert_eq!(ci_match_range("Add Search bar", "ADD"), Some(0..3));
+        assert_eq!(ci_match_range("Add Search bar", "bar"), Some(11..14));
+        assert_eq!(ci_match_range("Add Search bar", "xyz"), None);
+        assert_eq!(ci_match_range("anything", ""), None);
+    }
+
+    #[test]
+    fn ci_match_range_bails_on_length_shifting_case_fold() {
+        // A pre-composed uppercase whose lowercase is longer (İ → i̇) would
+        // shift byte offsets; rather than risk slicing mid-codepoint the
+        // helper declines to highlight.
+        assert_eq!(ci_match_range("İstanbul", "stan"), None);
+    }
+
+    #[test]
+    fn title_spans_underlines_only_the_matched_substring() {
+        let theme = theme();
+        let base = Style::default().fg(theme.text_dim);
+        let spans = title_spans("Add Search bar", Some("search"), base, &theme);
+        assert_eq!(spans.len(), 3, "before / match / after: {spans:?}");
+        assert_eq!(spans[0].content, "Add ");
+        assert_eq!(spans[1].content, "Search");
+        assert!(
+            spans[1].style.add_modifier.contains(Modifier::UNDERLINED),
+            "the matched span is underlined",
+        );
+        assert_eq!(spans[1].style.fg, Some(theme.accent));
+        assert_eq!(spans[2].content, " bar");
+        // The unmatched flanks keep the base style untouched.
+        assert_eq!(spans[0].style.fg, base.fg);
+        assert_eq!(spans[2].style.fg, base.fg);
+    }
+
+    #[test]
+    fn title_spans_is_one_plain_span_without_a_match() {
+        let theme = theme();
+        let base = Style::default().fg(theme.text_dim);
+        assert_eq!(
+            title_spans("Add Search bar", None, base, &theme).len(),
+            1,
+            "no query → no split",
+        );
+        assert_eq!(
+            title_spans("Add Search bar", Some("zzz"), base, &theme).len(),
+            1,
+            "a non-matching query → no split",
         );
     }
 }

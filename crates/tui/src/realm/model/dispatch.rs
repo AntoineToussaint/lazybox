@@ -1889,12 +1889,16 @@ impl<T: TerminalAdapter> Model<T> {
                 self.sidebar.open_global_search();
             }
             Action::ToggleRepoGroup => {
-                // `Space` folds whichever tier the cursor rests on: a
-                // Space header collapses the whole Space (#860), any
-                // other row collapses its repo group.
+                // `Space` folds only the tier the cursor rests ON: a Space
+                // header collapses the whole Space (#860), a repo header
+                // collapses its group. On a workspace / session / kind row
+                // it is inert — a bare Space is the most reflexively-pressed
+                // "neutral" key, so it must never fold the group you're
+                // navigating inside (#1099). Collapse a group by moving to
+                // its header or clicking the ▾ triangle.
                 if self.sidebar.cursor_on_space_header() {
                     self.sidebar.toggle_space_at_cursor();
-                } else {
+                } else if self.sidebar.cursor_on_repo_header() {
                     self.sidebar.toggle_repo_at_cursor();
                 }
             }

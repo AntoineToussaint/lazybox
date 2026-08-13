@@ -2306,6 +2306,87 @@ mod search_tests {
         search_bar_row_at(sb, 60)
     }
 
+    /// Render the whole sidebar to a newline-joined string of cell
+    /// symbols, for asserting on content-area panels.
+    fn full_screen(sb: &mut Sidebar, width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// While the bar is capturing keystrokes it reads as an unmistakable
+    /// field: the `🔍` glyph, the vim `/` prefix, the typed query, and a
+    /// solid block cursor (#1099).
+    #[test]
+    fn editing_search_bar_is_a_prominent_field_with_a_block_cursor() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "al");
+        let bar = search_bar_row(&mut sb);
+        assert!(bar.contains('🔍'), "search glyph present: {bar:?}");
+        assert!(bar.contains('█'), "block cursor while editing: {bar:?}");
+        assert!(bar.contains("al"), "shows the typed query: {bar:?}");
+    }
+
+    /// A search that filters every workspace away shows an explicit
+    /// empty-state panel — naming the query and the Esc exit — instead of
+    /// a blank pane that reads as "everything vanished / broke" (#1099).
+    #[test]
+    fn empty_search_result_shows_a_no_matches_panel() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_global_search();
+        type_query(&mut sb, "zzzqqq");
+        assert_eq!(sb.workspace_count(), 0, "the query matches nothing");
+        let screen = full_screen(&mut sb, 46, 16);
+        assert!(
+            screen.contains("No matches"),
+            "explicit empty state: {screen:?}"
+        );
+        assert!(
+            screen.contains("Esc to clear"),
+            "names the exit: {screen:?}"
+        );
+    }
+
+    /// A matching row underlines the searched substring in its title so
+    /// the user can see *what* matched — the vim `/pattern` cue (#1099).
+    #[test]
+    fn matching_rows_underline_the_searched_substring() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut sb = sidebar_with_issues(&[("1", "Add Search bar")]);
+        sb.open_search();
+        type_query(&mut sb, "Search");
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let underlined = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.modifier.contains(ratatui::style::Modifier::UNDERLINED)
+                    && "Search".contains(cell.symbol())
+                    && !cell.symbol().trim().is_empty()
+            })
+        });
+        assert!(underlined, "the matched substring is underlined in the row");
+    }
+
     /// A scoped `/` search names the project it's pinned to and points
     /// at `#` for the wider reach, so its scope is never invisible
     /// (#1033).

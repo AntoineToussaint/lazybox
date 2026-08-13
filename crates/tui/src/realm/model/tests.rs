@@ -3136,6 +3136,62 @@ snippets:
         );
     }
 
+    /// #1077 review regression: if a live-agent target's terminal dies
+    /// while the "start N agents?" confirm is up, "yes" must re-resolve it
+    /// — spawning a fresh seeded agent — not fire a delivery at the dead
+    /// terminal (which the daemon silently drops while the summary lies
+    /// "queued"). Snapshotting the resolved steps at compose time would
+    /// have replayed an `InjectPrompt` at the gone terminal; re-resolving
+    /// at confirm-yes recovers.
+    #[test]
+    fn broadcast_confirm_re_resolves_a_target_whose_agent_died_under_the_modal() {
+        // A: live agent (terminal 1); B: session-less spawnable → forces
+        // the confirm gate. Both carry a repo scope, so a session-less A
+        // is spawnable too.
+        let (mut m, keys) = model_with_scoped_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+        ]);
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys.clone(),
+                snippet_key: None,
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let _ = m.handle_textarea_submitted("ship it".into());
+        assert_eq!(m.top_modal(), Some(&Id::BroadcastConfirm));
+
+        // A's agent exits while the confirm is up.
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalExited {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            exit_code: None,
+            last_output: None,
+        });
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, .. } if terminal_id.0 == 1
+            )),
+            "no delivery fires at the terminal that died under the modal: {cmds:?}",
+        );
+        let seeded_spawns = cmds
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    IpcCommand::Spawn { initial_prompt: Some(p), .. } if p == "ship it"
+                )
+            })
+            .count();
+        assert_eq!(
+            seeded_spawns, 2,
+            "the dead-agent target re-resolves to a fresh seeded spawn alongside the session-less one: {cmds:?}",
+        );
+    }
+
     /// #836: declining the gate spawns nothing and keeps the sidebar
     /// multi-select intact so the user can retry or change the pick.
     #[test]
@@ -4820,6 +4876,39 @@ snippets:
         // The retarget is scoped to that one pick — the next picker falls
         // back to the focused terminal.
         assert_eq!(m.leader_target, None, "leader_target cleared on modal pop");
+    }
+
+    /// #1077 regression: with a `v` multi-select active, `]]s` from the
+    /// sidebar fans the snippet out over the WHOLE selection (via the
+    /// broadcast picker) instead of the single-cursor retarget — which
+    /// hit one row and left the rest to fall into `w w` / a spawn (the
+    /// reported "snippet-on-one, w-w-on-others" bug).
+    #[test]
+    fn sidebar_snippet_send_under_multiselect_fans_out_via_broadcast() {
+        let mut m = model_two_agent_workspaces_sidebar("sidebar-multi");
+        let a_key: SessionKey = SessionKey::from("github:o/r#1");
+        let b_key: SessionKey = SessionKey::from("github:o/r#2");
+        for key in [&a_key, &b_key] {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        let mut cmds = Vec::new();
+        m.run_sidebar_leader_cmd(
+            crate::realm::model::terminal_leader::LeaderCmd::Snippets,
+            &mut cmds,
+        );
+        assert!(cmds.is_empty(), "picking hasn't happened yet");
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::BroadcastSnippet),
+            "a live multi-select fans out through the broadcast picker",
+        );
+        assert_eq!(
+            m.leader_target, None,
+            "no single-cursor retarget when the selection is what we act on",
+        );
     }
 
     /// A terminal-only chord (`]]f` focus mode) is inert from the sidebar:
@@ -9019,6 +9108,148 @@ mod merge_focus_follow_tests {
         );
 
         assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
+    /// #1077 headline acceptance: for N selected workspaces, a snippet
+    /// broadcast fires N snippet deliveries — one per row, never a mix —
+    /// and `w w` fires N injects over the *same* set. Both flow through
+    /// the one `apply_one` pipeline, so snippet and work fan out
+    /// identically: no row falls into a different action.
+    #[test]
+    fn snippet_and_work_fan_out_identically_over_a_selection() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let tmp_dir = std::env::temp_dir().join(format!("lazybox-fanout-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("snippets.yaml");
+        std::fs::write(
+            &tmp,
+            "snippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+        )
+        .unwrap();
+        m.apply_snippets(
+            lazybox_config::Snippets::load_from(&tmp, lazybox_config::SnippetOrigin::Global)
+                .unwrap(),
+        );
+        let mut keys = Vec::new();
+        for (i, tid) in [(1u64, 11u64), (2, 12), (3, 13)] {
+            let ws = workspace(&format!("owner/repo#{i}"), true, Duration::hours(i as i64));
+            let key: SessionKey = (&ws.key).into();
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+            });
+            keys.push(key);
+        }
+        let select_all = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| {
+            for key in &keys {
+                assert!(m.sidebar.focus_workspace_key(key));
+                m.sidebar.toggle_broadcast_select();
+            }
+        };
+
+        // --- snippet fan-out (the reported-bug path) ---
+        select_all(&mut m);
+        assert_eq!(m.sidebar.broadcast_selected_count(), 3);
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys.clone(),
+                snippet_key: Some("rev".into()),
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let snippet_cmds = m.handle_textarea_submitted("review the diff".into());
+        let mut snippet_targets: Vec<u64> = snippet_cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::DeliverSnippet { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        snippet_targets.sort_unstable();
+        assert_eq!(
+            snippet_targets,
+            vec![11, 12, 13],
+            "the snippet reaches every selected agent — no row falls into w-w or a spawn: {snippet_cmds:?}",
+        );
+        assert!(
+            !snippet_cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::Spawn { .. } | IpcCommand::InjectPrompt { .. }
+            )),
+            "snippet delivery never spawns or injects a work prompt: {snippet_cmds:?}",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "selection clears after delivery"
+        );
+
+        // --- `w w` fan-out over the same selection ---
+        select_all(&mut m);
+        let work_cmds = m.dispatch_action(&Action::Work);
+        let mut work_targets: Vec<u64> = work_cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        work_targets.sort_unstable();
+        assert_eq!(
+            work_targets,
+            vec![11, 12, 13],
+            "w w injects into every selected agent — identical fan-out to the snippet: {work_cmds:?}",
+        );
+    }
+
+    /// #1077 guard: `apply_one` — the single per-target executor every
+    /// fan-out shares — must resolve its target from its `key` argument
+    /// alone, never from the sidebar cursor / selection. A dispatchable
+    /// path that reached for `selected_workspace()` here would reintroduce
+    /// the divergence (one row acted on, the rest something else) the
+    /// unified pipeline exists to prevent.
+    #[test]
+    fn apply_one_resolves_targets_only_from_its_argument() {
+        let src = include_str!("dispatch.rs");
+        let start = src
+            .find("fn apply_one(")
+            .expect("apply_one is the single per-target executor");
+        // Bound the body by brace-matching from its opening `{`, so the
+        // guard survives method reordering / new helpers (apply_one has no
+        // brace-bearing string or char literals, so a raw scan is exact).
+        let open = start + src[start..].find('{').expect("apply_one has a body");
+        let mut depth = 0usize;
+        let mut end = open;
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &src[open..=end];
+        assert!(
+            depth == 0 && end > open,
+            "apply_one body braces did not balance — guard bound is wrong",
+        );
+        assert!(
+            !body.contains("selected_workspace"),
+            "apply_one must resolve its target from `key`, not selected_workspace()",
+        );
     }
 
     /// #899 regression: an inherently single-target destructive action

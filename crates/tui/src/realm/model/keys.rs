@@ -917,6 +917,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// agent there (#836); a workspace with nothing to spawn into is named
     /// in a notice.
     fn sidebar_send_snippet(&mut self) {
+        // Under a live multi-select the snippet fans out over the whole
+        // selection, identically to `w w` — the same broadcast pipeline
+        // (#1077) rather than the single-cursor retarget below, which
+        // would have hit one row and left the rest untouched.
+        if self.bulk_active() {
+            self.mount_broadcast_picker();
+            return;
+        }
         let Some(key) = self.sidebar.selected_workspace_key().cloned() else {
             self.flash_info("no workspace selected");
             return;

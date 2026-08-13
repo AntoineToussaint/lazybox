@@ -209,6 +209,14 @@ capability mind ships natively — so scope it into lazybox only if attach/detac
 provably can't serve the use case, and even then treat it as a bounded one-shot
 bridge, not a platform.
 
+> **Update (#1089):** the ephemeral GCP box is that carved-out case — you want to
+> *stop paying for the box*, so attach/detach (which requires it to keep running)
+> can't serve it. [`session-transfer-adr.md`][transfer-adr] designs the bounded
+> one-shot bridge this exception reserved: ring-window output sync, push/bundle
+> code transfer, and a per-agent native-resume-or-log-replay handoff.
+
+[transfer-adr]: ./session-transfer-adr.md
+
 **Anchors:** cheap path — standalone daemon + `run_remote`
 (`crates/tui-boot/src/main.rs:360`), JSON API (`crates/server/src/api_gateway.rs`),
 structured agent runs (ROADMAP §4); intra-daemon transfer (shipped) —

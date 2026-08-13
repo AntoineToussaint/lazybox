@@ -449,6 +449,11 @@ impl Sidebar {
         self.inner.github_repos_for_picker()
     }
 
+    /// See `Sidebar::github_repos_ranked_for_linear_team`.
+    pub fn github_repos_ranked_for_linear_team(&self, team: &str) -> Vec<String> {
+        self.inner.github_repos_ranked_for_linear_team(team)
+    }
+
     /// Apply `~/.lazybox/config.yaml` overrides to the inner pane in
     /// place. Used by `Model::apply_sidebar_config` once at startup.
     #[allow(clippy::too_many_arguments)]

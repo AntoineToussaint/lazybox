@@ -1799,6 +1799,33 @@ impl Sidebar {
             .collect()
     }
 
+    /// Tracked GitHub repos to offer for an unmapped Linear `team`, ranked
+    /// so the likely answer is one keystroke (#1041). Repos that other
+    /// Linear tickets in the *same team* already link a GitHub PR to float
+    /// to the top — the team's real repos, learned from its own tickets —
+    /// followed by the rest in their existing order. A blank picker is never
+    /// what the user wants: even with no signal this still lists every repo.
+    pub fn github_repos_ranked_for_linear_team(&self, team: &str) -> Vec<String> {
+        let mut repos = self.github_repos_for_picker();
+        let linked: std::collections::HashSet<String> = self
+            .workspaces
+            .values()
+            .filter_map(|w| w.primary_task())
+            .filter(|t| {
+                t.id.source == "linear"
+                    && t.repo.as_deref().and_then(|r| r.strip_prefix("linear/")) == Some(team)
+            })
+            .flat_map(|t| {
+                t.linked_tasks
+                    .iter()
+                    .filter(|id| id.source == "github")
+                    .filter_map(|id| id.key.split_once('#').map(|(repo, _)| repo.to_string()))
+            })
+            .collect();
+        repos.sort_by_key(|repo| !linked.contains(repo));
+        repos
+    }
+
     /// The Project the cursor is currently "in" — drives the `n` (new
     /// workspace) flow. Resolution:
     ///

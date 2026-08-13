@@ -174,6 +174,9 @@ async fn detect_github() -> ToolStatus {
     // Token resolved — verify it actually works by hitting the user
     // endpoint. A live username is more reassuring (and more
     // actionable) than just "I have a string."
+    // Capture the source before `cred` is moved: the fix a rejected token
+    // needs depends on where it came from.
+    let cred_source = cred.source.clone();
     match tokio::time::timeout(
         Duration::from_secs(5),
         lazybox_gh::GhClient::from_credential(cred),
@@ -183,14 +186,25 @@ async fn detect_github() -> ToolStatus {
         Ok(Ok(client)) => mk(ToolState::Found {
             detail: format!("@{}", client.authenticated_user()),
         }),
-        // Token present but rejected — distinct from "no token". The
-        // user needs to rotate the credential, not run `gh auth login`
-        // (which might just regenerate the same dead token from the
-        // device flow if their account is in a weird state).
+        // Token present but rejected — distinct from "no token". The fix
+        // depends on the source: a stale stored OAuth token is cleared with
+        // `lazybox auth logout`, whereas a `gh`/env token is rotated. Pointing
+        // an OAuth user at `gh auth refresh` sends them to the wrong tool.
         Ok(Err(_)) | Err(_) => mk(ToolState::Missing {
             kind: MissingKind::TokenInvalid,
-            hint: "rotate token: gh auth refresh".into(),
+            hint: token_invalid_hint(&cred_source).into(),
         }),
+    }
+}
+
+/// Fix advice for a resolved-but-rejected GitHub credential, keyed on its
+/// source label. A stored OAuth token (from `lazybox auth login`) is cleared,
+/// not rotated with `gh`.
+fn token_invalid_hint(source: &str) -> &'static str {
+    if source == lazybox_gh::oauth::CREDENTIAL_SOURCE {
+        "clear stale login: lazybox auth logout github"
+    } else {
+        "rotate token: gh auth refresh"
     }
 }
 
@@ -223,5 +237,28 @@ async fn detect_linear() -> ToolStatus {
             kind: MissingKind::EnvVarMissing,
             hint: "export LINEAR_API_KEY=lin_api_… (or run `linear auth login`)".into(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_token_hint_matches_the_credential_source() {
+        // A rejected OAuth token is cleared, not rotated with `gh`.
+        assert_eq!(
+            token_invalid_hint(lazybox_gh::oauth::CREDENTIAL_SOURCE),
+            "clear stale login: lazybox auth logout github"
+        );
+        // A `gh`/env token still points at the `gh` refresh path.
+        assert_eq!(
+            token_invalid_hint("cmd:gh auth token"),
+            "rotate token: gh auth refresh"
+        );
+        assert_eq!(
+            token_invalid_hint("env:GH_TOKEN"),
+            "rotate token: gh auth refresh"
+        );
     }
 }

@@ -9,14 +9,19 @@ adds a self-contained path using GitHub's [OAuth device flow].
 ## Chain order
 
 ```
-LAZYBOX_GITHUB_TOKEN → GH_TOKEN → GITHUB_TOKEN → OAuth token → gh auth token
+LAZYBOX_GITHUB_TOKEN → GH_TOKEN → GITHUB_TOKEN → gh auth token → OAuth token
 ```
 
 - An explicit env token still wins (unchanged for CI / scripted setups).
-- The OAuth token (stored by `auth login`) is preferred over `gh` once you
-  log in.
-- `gh auth token` remains the final fallback, so nothing regresses for
-  existing users who never run `auth login`.
+- `gh auth token` is used whenever `gh` is installed and authenticated, so
+  nothing changes for existing users.
+- The stored OAuth token is the **last resort** — it activates only when
+  nothing above it resolves (the `gh`-not-installed case it exists for). It
+  sits behind `gh` deliberately: a stored token that GitHub invalidates
+  server-side (password reset, revoked authorization) still looks valid
+  locally, so placing it ahead of `gh` would let a dead token shadow a
+  working `gh` credential. Run `lazybox auth logout github` to clear a stored
+  token that has stopped working.
 
 ## Usage
 

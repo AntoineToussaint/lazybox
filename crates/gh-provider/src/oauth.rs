@@ -8,9 +8,11 @@
 //! back an access token, which it persists under `<state>/oauth/github.json`.
 //!
 //! [`OAuthTokenProvider`] then reads that stored token so polling and
-//! mutations work with no `gh` present. It sits between the env providers
-//! and the `gh` fallback in [`crate::credential_chain`], so an explicit
-//! `GH_TOKEN` still wins and `gh auth token` still backstops.
+//! mutations work with no `gh` present. It is the **last** provider in
+//! [`crate::credential_chain`], after `gh auth token`: a manually-stored
+//! token can be invalidated server-side without `is_expired()` noticing, so
+//! ahead of `gh` it would shadow a working `gh` credential; last, it only
+//! activates when nothing better resolves — the `gh`-absent case it is for.
 //!
 //! The device flow needs a registered GitHub OAuth app's **client id**
 //! (public, not a secret). It is read from the `LAZYBOX_GITHUB_OAUTH_CLIENT_ID`
@@ -43,6 +45,11 @@ pub const DEFAULT_SCOPES: &str = "repo read:org";
 
 /// Environment variable overriding the OAuth app client id.
 pub const CLIENT_ID_ENV: &str = "LAZYBOX_GITHUB_OAUTH_CLIENT_ID";
+
+/// `Credential::source` label for a token resolved from the stored OAuth
+/// login. Callers (e.g. setup detection) match on it to tell an invalid
+/// OAuth token apart from an invalid `gh` token when advising a fix.
+pub const CREDENTIAL_SOURCE: &str = "oauth:github";
 
 /// Baked-in client id for lazybox's registered GitHub OAuth app. Empty
 /// until the app is registered upstream; the env override always wins, so
@@ -146,9 +153,10 @@ pub fn save_token(token: &StoredToken) -> std::io::Result<()> {
 }
 
 /// Load the persisted token, or `None` when the file is absent or malformed.
-/// A corrupt file is treated as "not logged in" so the chain can fall through
-/// to `gh` — but it is logged, because on a `gh`-less box that silent `None`
-/// is the difference between "authenticated" and a baffling auth failure.
+/// A corrupt file is treated as "not logged in" so the chain resolves as if
+/// no OAuth login exists — but it is logged, because on a `gh`-less box that
+/// silent `None` is the difference between "authenticated" and a baffling
+/// auth failure with a token file sitting right there.
 pub fn load_token() -> Option<StoredToken> {
     let bytes = std::fs::read(token_path()).ok()?;
     match serde_json::from_slice(&bytes) {
@@ -174,8 +182,9 @@ pub fn delete_token() -> std::io::Result<()> {
 }
 
 /// Credential provider that reads the token persisted by the device flow.
-/// Declines with [`CredentialError::NotFound`] when no token is stored, so
-/// the chain treats it as mere absence and continues to `gh auth token`.
+/// Declines with [`CredentialError::NotFound`] when no token is stored or the
+/// stored one has expired, so the chain treats it as mere absence rather than
+/// a hard failure. It is the chain's last resort (see [`crate::credential_chain`]).
 pub struct OAuthTokenProvider;
 
 impl CredentialProvider for OAuthTokenProvider {
@@ -194,7 +203,7 @@ impl CredentialProvider for OAuthTokenProvider {
                     "stored GitHub OAuth token expired".into(),
                 ))
             }
-            Some(t) => Ok(Credential::new(t.access_token, "oauth:github")),
+            Some(t) => Ok(Credential::new(t.access_token, CREDENTIAL_SOURCE)),
             None => Err(CredentialError::NotFound(
                 "no stored GitHub OAuth token".into(),
             )),
@@ -327,16 +336,26 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-async fn post_form(url: &str, params: &[(&str, &str)]) -> Result<String, DeviceFlowError> {
+/// Build the HTTP client used for the device flow. Reused across the poll
+/// loop (see [`poll_for_token`]) rather than rebuilt per request, which would
+/// discard the connection pool and re-run TLS setup every ~5s.
+fn build_http_client() -> Result<reqwest::Client, DeviceFlowError> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| DeviceFlowError::Http(e.to_string()))
+}
+
+async fn post_form(
+    client: &reqwest::Client,
+    url: &str,
+    params: &[(&str, &str)],
+) -> Result<String, DeviceFlowError> {
     let body = params
         .iter()
         .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
         .collect::<Vec<_>>()
         .join("&");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| DeviceFlowError::Http(e.to_string()))?;
     let resp = client
         .post(url)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -368,7 +387,9 @@ pub async fn request_device_code(
     client_id: &str,
     scopes: &str,
 ) -> Result<DeviceCodeResponse, DeviceFlowError> {
+    let client = build_http_client()?;
     let body = post_form(
+        &client,
         DEVICE_CODE_URL,
         &[("client_id", client_id), ("scope", scopes)],
     )
@@ -376,9 +397,13 @@ pub async fn request_device_code(
     parse_device_code_response(&body)
 }
 
-/// Poll GitHub once for the access token (device-flow stage 2).
-pub async fn poll_once(client_id: &str, device_code: &str) -> Result<PollOutcome, DeviceFlowError> {
+async fn poll_once_with(
+    client: &reqwest::Client,
+    client_id: &str,
+    device_code: &str,
+) -> Result<PollOutcome, DeviceFlowError> {
     let body = post_form(
+        client,
         ACCESS_TOKEN_URL,
         &[
             ("client_id", client_id),
@@ -388,6 +413,12 @@ pub async fn poll_once(client_id: &str, device_code: &str) -> Result<PollOutcome
     )
     .await?;
     Ok(parse_poll_body(&body))
+}
+
+/// Poll GitHub once for the access token (device-flow stage 2).
+pub async fn poll_once(client_id: &str, device_code: &str) -> Result<PollOutcome, DeviceFlowError> {
+    let client = build_http_client()?;
+    poll_once_with(&client, client_id, device_code).await
 }
 
 /// Whether a poll error is transient — a network blip or a GitHub 5xx that
@@ -428,6 +459,7 @@ pub async fn poll_for_token(
     client_id: &str,
     dc: &DeviceCodeResponse,
 ) -> Result<StoredToken, DeviceFlowError> {
+    let client = build_http_client()?;
     let mut interval = Duration::from_secs(dc.interval.max(1));
     let start = tokio::time::Instant::now();
     let ttl = Duration::from_secs(dc.expires_in);
@@ -436,7 +468,7 @@ pub async fn poll_for_token(
         if start.elapsed() > ttl {
             return Err(DeviceFlowError::Expired);
         }
-        let outcome = match poll_once(client_id, &dc.device_code).await {
+        let outcome = match poll_once_with(&client, client_id, &dc.device_code).await {
             Ok(outcome) => outcome,
             Err(e) if poll_error_is_transient(&e) => {
                 tracing::debug!(error = %e, "transient error polling for token; retrying");
@@ -698,6 +730,13 @@ mod tests {
         let app = authorized_token("t".into(), "bearer".into(), "repo".into(), Some(28800));
         assert!(app.expires_at.is_some(), "GitHub App token: expiry stamped");
         assert!(!app.is_expired(), "a fresh 8h token is not already expired");
+    }
+
+    #[test]
+    fn http_client_builds() {
+        // The poll loop shares one client; a misconfigured builder would
+        // fail every login, so confirm it constructs.
+        assert!(build_http_client().is_ok());
     }
 
     #[test]

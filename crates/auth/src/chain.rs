@@ -109,6 +109,13 @@ impl CredentialChain {
         self.providers.len()
     }
 
+    /// Provider names in resolution order. Lets callers assert the order a
+    /// chain resolves in — e.g. that a last-resort provider stays behind the
+    /// providers meant to take precedence — without running any resolution.
+    pub fn provider_names(&self) -> Vec<&str> {
+        self.providers.iter().map(|p| p.name()).collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }

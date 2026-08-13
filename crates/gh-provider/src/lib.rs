@@ -38,25 +38,31 @@ use std::sync::Arc;
 pub const SOURCE: &str = lazybox_core::GITHUB_SOURCE;
 
 /// Credential chain GitHub uses. Tried in order:
-/// `LAZYBOX_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, a token stored by
-/// the native OAuth device flow (`lazybox auth login github`), then
-/// `gh auth token`. The lazybox-specific variable is a credential
-/// override: spawned agents and interactive `gh` do not automatically
-/// read it, but same-user tokens still share GitHub's per-user API quota.
+/// `LAZYBOX_GITHUB_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `gh auth token`,
+/// then a token stored by the native OAuth device flow
+/// (`lazybox auth login github`). The lazybox-specific variable is a
+/// credential override: spawned agents and interactive `gh` do not
+/// automatically read it, but same-user tokens still share GitHub's
+/// per-user API quota.
 ///
-/// The OAuth provider sits above `gh` so a machine with the `gh` CLI
-/// absent still authenticates once the user has logged in, while an
-/// explicit env token still overrides and `gh auth token` remains the
-/// final fallback for existing users who never log in. The polling
-/// poller, mutation router, setup wizard's scope source, and
+/// The stored OAuth token is the **last** resort, below `gh auth token`.
+/// It is a manually-persisted credential that never self-heals: unlike an
+/// env var or `gh` (which re-read live state each resolve), a stored token
+/// that GitHub has invalidated server-side — a password reset, a revoked
+/// authorization — is not detectable by `is_expired()` and keeps resolving
+/// until the user runs `lazybox auth logout`. Placed ahead of `gh` it would
+/// shadow a perfectly good `gh` credential with that dead token and 401 with
+/// no fallthrough; placed last, it only activates when nothing better
+/// resolves — which is exactly the `gh`-not-installed case it exists for.
+/// The polling poller, mutation router, setup wizard's scope source, and
 /// fetch-PR-details handler all build clients from this chain.
 pub fn credential_chain() -> CredentialChain {
     CredentialChain::new()
         .with(EnvProvider::new("LAZYBOX_GITHUB_TOKEN"))
         .with(EnvProvider::new("GH_TOKEN"))
         .with(EnvProvider::new("GITHUB_TOKEN"))
-        .with(oauth::OAuthTokenProvider)
         .with(CommandProvider::new("gh", &["auth", "token"]))
+        .with(oauth::OAuthTokenProvider)
 }
 
 /// `ScopeSource` adapter over [`GhClient`]. Lets the setup screen
@@ -133,5 +139,33 @@ mod tests {
             .expect("lazybox credential override resolves");
         assert_eq!(credential.token(), "lazybox-test-token");
         assert_eq!(credential.source, "env:LAZYBOX_GITHUB_TOKEN");
+    }
+
+    /// The stored OAuth token is a last resort: it must sit *behind*
+    /// `gh auth token` in the chain. A dead-but-unexpired stored token
+    /// (GitHub-side revoke / password reset — invisible to `is_expired()`)
+    /// placed ahead of `gh` would shadow a working `gh` credential and 401
+    /// forever with no fallthrough. This pins the order that prevents it.
+    #[test]
+    fn stored_oauth_token_is_the_last_resort_behind_gh() {
+        let chain = credential_chain();
+        let names = chain.provider_names();
+        let gh = names
+            .iter()
+            .position(|n| *n == "command")
+            .expect("chain includes the `gh auth token` command provider");
+        let oauth = names
+            .iter()
+            .position(|n| *n == "github-oauth")
+            .expect("chain includes the OAuth provider");
+        assert!(
+            gh < oauth,
+            "OAuth token must be tried after `gh auth token`, got {names:?}"
+        );
+        assert_eq!(
+            names.last().copied(),
+            Some("github-oauth"),
+            "OAuth token must be the final fallback, got {names:?}"
+        );
     }
 }

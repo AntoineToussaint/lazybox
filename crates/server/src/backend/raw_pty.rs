@@ -353,7 +353,10 @@ impl SessionBackend for RawPtyBackend {
                     .map(|s| s.pty.clone())
                     .ok_or_else(|| BackendError::NotFound(key.into()))?
             };
-            Ok(Some(pty.read_since(since).await))
+            // `None` (ring evicted the watermark) propagates as a
+            // no-gap-free-delta signal — the caller falls back to a full
+            // snapshot, same as the tmux opt-out.
+            Ok(pty.read_since(since).await)
         })
     }
 

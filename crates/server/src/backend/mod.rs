@@ -71,23 +71,28 @@ pub struct ReplaySnapshot {
     pub complete: bool,
 }
 
-/// A delta of a terminal's output since a byte watermark — the read
-/// primitive session transfer splices, unified so a puller treats local
-/// and remote sources alike (`docs/session-transfer-adr.md`, #1089).
+/// A gap-free delta of a terminal's output since a byte watermark — the
+/// read primitive session transfer splices, unified so a puller treats
+/// local and remote sources alike (`docs/session-transfer-adr.md`,
+/// #1089).
 ///
 /// Offsets count live output bytes emitted since the session spawned
 /// (the raw-PTY ring's `total_written`); they are NOT chunk `seq`s.
-/// `bytes` is exactly `[from_offset, to_offset)`. `covers_offset ==
-/// false` means the bounded ring had already evicted bytes at/after the
-/// requested watermark, so `from_offset` was pulled forward to the
-/// oldest retained byte and the consumer must treat `bytes` as a reset,
-/// not a gap-free continuation — older history is lost.
+/// `bytes` is exactly `[from_offset, to_offset)` and is always a
+/// gap-free continuation the consumer appends: `from_offset` equals the
+/// requested watermark (clamped down only when the caller was already
+/// past `to_offset`). A backend returns this ONLY when it still retains
+/// the requested watermark; once the bounded ring has evicted that byte
+/// there is no gap-free delta, so [`SessionBackend::read_since`] yields
+/// `None` (the caller falls back to the full snapshot) rather than a
+/// truncated suffix. Never treat any `bytes` here as a reset baseline —
+/// an evicted ring tail can begin mid-UTF-8 / mid-CSI, the corruption
+/// [`ReplaySnapshot`]'s `complete` flag guards against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputDelta {
     pub from_offset: u64,
     pub to_offset: u64,
     pub bytes: Vec<u8>,
-    pub covers_offset: bool,
 }
 
 /// Capacity of a `Subscription`'s live channel. Bounded so a stalled
@@ -257,13 +262,15 @@ pub trait SessionBackend: Send + Sync + 'static {
         })
     }
 
-    /// Output bytes emitted since byte watermark `since` (see
-    /// [`OutputDelta`]) — the delta pull session transfer reads (#1089).
-    /// Default `Ok(None)`: a backend that cannot slice its history by
-    /// byte offset (tmux keeps only its own `capture-pane` history) opts
-    /// out, and the caller falls back to a full [`Self::snapshot`]. The
-    /// raw-PTY backend, whose ring counts bytes exactly, returns a real
-    /// delta.
+    /// A gap-free [`OutputDelta`] of the output bytes emitted since byte
+    /// watermark `since` — the delta pull session transfer reads (#1089).
+    /// `Ok(None)` means no gap-free delta is available and the caller
+    /// must fall back to a full [`Self::snapshot`]: either the backend
+    /// cannot slice its history by byte offset (default impl — tmux keeps
+    /// only its own `capture-pane` history), or it can but has already
+    /// evicted `since` from its bounded ring. The raw-PTY backend, whose
+    /// ring counts bytes exactly, returns a real delta while `since` is
+    /// still retained and `None` once it has scrolled off.
     fn read_since<'a>(
         &'a self,
         key: &'a str,

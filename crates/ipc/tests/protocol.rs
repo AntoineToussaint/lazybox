@@ -671,7 +671,6 @@ fn all_events() -> Vec<Event> {
             from_offset: 4096,
             to_offset: 4107,
             bytes: b"delta bytes".to_vec(),
-            covers_offset: true,
         },
         Event::TerminalDeltaUnavailable {
             terminal_id: TerminalId(2),

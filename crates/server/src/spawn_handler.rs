@@ -9235,7 +9235,6 @@ pub async fn handle_terminal_delta_request(
                 from_offset: delta.from_offset,
                 to_offset: delta.to_offset,
                 bytes: delta.bytes,
-                covers_offset: delta.covers_offset,
             });
         }
         Ok(None) => {
@@ -12432,13 +12431,11 @@ mod tests {
                 from_offset,
                 to_offset,
                 bytes,
-                covers_offset,
             }) => {
                 assert_eq!(terminal_id, id);
                 assert_eq!(from_offset, 6);
                 assert_eq!(to_offset, 11);
                 assert_eq!(bytes, b"world");
-                assert!(covers_offset);
             }
             other => panic!("expected a delta, got {other:?}"),
         }
@@ -12456,6 +12453,44 @@ mod tests {
             rx.try_recv(),
             Ok(Event::TerminalDeltaUnavailable { terminal_id }) if terminal_id == TerminalId(99)
         ));
+    }
+
+    /// Once the ring has evicted the requested watermark there is no
+    /// gap-free delta, so the daemon replies `TerminalDeltaUnavailable`
+    /// (driving the caller to the full-snapshot path) rather than handing
+    /// back an untrimmed suffix as a reset baseline (#1089). Regression
+    /// guard for the removed `covers_offset` footgun: the mock reports the
+    /// watermark as evicted, and the handler must NOT emit a delta.
+    #[tokio::test]
+    async fn handle_terminal_delta_request_evicted_watermark_is_unavailable() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"hello world").await;
+        // Simulate the bounded ring having scrolled the first 4 bytes off.
+        mock.evict_before(&key, 4).await;
+        let id = TerminalId(1);
+        config
+            .terminal
+            .terminals
+            .lock()
+            .await
+            .insert(id, key.clone());
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = lazybox_ipc::EventSender::from_unbounded(tx);
+        // Watermark 0 predates the oldest retained byte (4) — not coverable.
+        handle_terminal_delta_request(&config, &sender, id, 0).await;
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(Event::TerminalDeltaUnavailable { terminal_id }) if terminal_id == id
+            ),
+            "an evicted watermark must fall back to a full snapshot, not a truncated delta",
+        );
     }
 
     /// The pump's gap recovery must serve a wrapped ring, not drop the torn

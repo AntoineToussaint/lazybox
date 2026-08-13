@@ -300,13 +300,14 @@ Remote & services:
   lazybox --connect <socket>  attach a TUI to a running daemon
   lazybox serve --relay <a>   dial out to a rendezvous relay so clients can
                               reach this box's daemon (behind NAT, no ports;
-                              --account <id>, LAZYBOX_RELAY env). End-to-end
+                              LAZYBOX_RELAY env). End-to-end
                               encrypted by default; it prints the box channel
                               key clients pin (--insecure-no-auth forwards
                               plaintext, for loopback testing only)
   lazybox --connect-relay <box-id> --relay <a> --box-key <hex>
                               attach a TUI to a box through the relay, over an
-                              end-to-end encrypted tunnel (LAZYBOX_RELAY env)
+                              end-to-end encrypted tunnel (LAZYBOX_RELAY env;
+                              add --smoke for a one-shot daemon round trip)
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
   lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots;
@@ -1094,6 +1095,7 @@ async fn run_connect_relay(
     preselect: Option<lazybox_tui::realm::model::Preselect>,
 ) -> anyhow::Result<()> {
     let mut rest = args.to_vec();
+    let smoke = take_flag(&mut rest, "--smoke");
     let relay_addr = take_value(&mut rest, "--relay")
         .or_else(|| std::env::var("LAZYBOX_RELAY").ok())
         .map(|s| s.trim().to_string())
@@ -1116,7 +1118,46 @@ async fn run_connect_relay(
         .ok_or_else(|| {
             anyhow::anyhow!("--connect-relay needs a box-id: lazybox --connect-relay <box-id>")
         })?;
-    run_remote_relay(relay_addr, box_id, box_key, preselect).await
+    if smoke {
+        run_remote_relay_smoke(relay_addr, box_id, box_key).await
+    } else {
+        run_remote_relay(relay_addr, box_id, box_key, preselect).await
+    }
+}
+
+async fn run_remote_relay_smoke(
+    relay_addr: String,
+    box_id: String,
+    box_key_hex: String,
+) -> anyhow::Result<()> {
+    let box_key = relay_e2e::parse_box_key(&box_key_hex)?;
+    let redial = relay_e2e::relay_redial(relay_addr.clone(), box_id.clone(), box_key);
+    let (client, _) = lazybox_ipc::socket::connect_reconnecting_with(redial)
+        .await
+        .map_err(|error| anyhow::anyhow!("connect relay {relay_addr} (box {box_id}): {error}"))?;
+    require_snapshot(client, Duration::from_secs(10)).await?;
+    println!("relay smoke passed: encrypted daemon round trip completed");
+    Ok(())
+}
+
+async fn require_snapshot(
+    mut client: lazybox_ipc::Client,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    client
+        .send(lazybox_ipc::Command::Subscribe)
+        .map_err(|_| anyhow::anyhow!("relay smoke could not send the subscribe request"))?;
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::Snapshot { .. })) => return Ok(()),
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                anyhow::bail!("relay smoke connection closed before the daemon replied")
+            }
+            Err(_) => anyhow::bail!("relay smoke timed out waiting for the daemon snapshot"),
+        }
+    }
 }
 
 async fn run_remote_relay(
@@ -2036,6 +2077,66 @@ mod argv_tests {
         let mut a = args(&["--workspace", "foo"]);
         assert!(!take_flag(&mut a, "--fresh"));
         assert_eq!(a, args(&["--workspace", "foo"]));
+    }
+
+    #[tokio::test]
+    async fn relay_smoke_requires_a_snapshot_round_trip() {
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        let client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        tokio::spawn(async move {
+            assert!(matches!(
+                command_rx.recv().await,
+                Some(lazybox_ipc::Command::Subscribe)
+            ));
+            event_tx
+                .send(lazybox_ipc::Event::Snapshot {
+                    workspaces: Vec::new(),
+                    terminals: Vec::new(),
+                    projects: Vec::new(),
+                    recent_snippets: Vec::new(),
+                    dismissed_updates: Vec::new(),
+                })
+                .await
+                .unwrap();
+        });
+
+        require_snapshot(client, Duration::from_secs(1))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_smoke_ignores_events_before_the_snapshot() {
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        let client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        tokio::spawn(async move {
+            assert!(matches!(
+                command_rx.recv().await,
+                Some(lazybox_ipc::Command::Subscribe)
+            ));
+            event_tx
+                .send(lazybox_ipc::Event::ProjectRemoved(
+                    lazybox_core::ProjectKey::new("updated"),
+                ))
+                .await
+                .unwrap();
+            event_tx
+                .send(lazybox_ipc::Event::Snapshot {
+                    workspaces: Vec::new(),
+                    terminals: Vec::new(),
+                    projects: Vec::new(),
+                    recent_snippets: Vec::new(),
+                    dismissed_updates: Vec::new(),
+                })
+                .await
+                .unwrap();
+        });
+
+        require_snapshot(client, Duration::from_secs(1))
+            .await
+            .unwrap();
     }
 
     #[test]

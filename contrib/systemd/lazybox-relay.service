@@ -1,0 +1,24 @@
+[Unit]
+Description=lazybox hosted relay
+Documentation=https://github.com/AntoineToussaint/lazybox/blob/main/docs/hosted-relay-runbook.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+DynamicUser=true
+EnvironmentFile=/etc/lazybox/relay.env
+ExecStart=/usr/local/bin/lazybox-relay
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

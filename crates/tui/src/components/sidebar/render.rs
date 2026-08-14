@@ -1261,7 +1261,7 @@ impl Sidebar {
             // precomputed into `searched_keys` at recompute time (#1099) —
             // here it's an O(1) lookup, and it can't diverge from the filter.
             let highlight_query: Option<&str> = self.search.as_ref().and_then(|s| {
-                let q = s.query.trim().trim_start_matches('#');
+                let q = crate::components::visible_rows::normalized_query(&s.query);
                 (!q.is_empty() && self.searched_keys.contains(key)).then_some(q)
             });
             let ctx = WorkspaceRowCtx {

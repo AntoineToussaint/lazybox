@@ -518,7 +518,7 @@ pub fn pr_number(task: &Task) -> Option<u64> {
 /// empty query (after trimming) matches everything — callers guard
 /// against that, but it keeps the function total.
 pub fn search_matches(query: &str, w: &Workspace) -> bool {
-    let q = query.trim().trim_start_matches('#').to_lowercase();
+    let q = normalized_query(query).to_lowercase();
     if q.is_empty() {
         return true;
     }
@@ -567,12 +567,26 @@ pub fn search_scope_covers(
     workspaces: &HashMap<SessionKey, Workspace>,
 ) -> bool {
     match search {
-        Some(s) if !s.query.is_empty() => match &s.scope {
+        // Emptiness is judged on the *normalized* query — the same reduction
+        // `search_matches` and the highlight use — so "covers", "matches",
+        // and "highlights" all agree on when a query is blank (a whitespace-
+        // or `#`-only query covers nothing, exactly as it highlights nothing).
+        Some(s) if !normalized_query(&s.query).is_empty() => match &s.scope {
             None => true,
             Some(scope) => group_label(w, projects, workspaces) == *scope,
         },
         _ => false,
     }
+}
+
+/// The query reduced to its meaningful core: surrounding whitespace
+/// trimmed and a leading `#` dropped (so `100` and `#100` are the same
+/// search, and a blank or `#`-only query is empty). The single
+/// normalization shared by the search filter ([`search_matches`]), the
+/// scope test ([`search_scope_covers`]), and the sidebar's match
+/// highlight, so all three agree on when a query is "empty" (#1099).
+pub fn normalized_query(query: &str) -> &str {
+    query.trim().trim_start_matches('#')
 }
 
 /// True when every char of `needle` appears in `haystack` in order
@@ -1504,6 +1518,21 @@ mod tests {
             &projects,
             &ws
         ));
+
+        // Emptiness is judged on the normalized query, so a query that
+        // reduces to nothing — whitespace, or a lone `#` — covers nothing,
+        // matching what the highlight shows (which normalizes the same way).
+        // This keeps "covered" and "highlighted" in lockstep (#1099).
+        let whitespace = global_search("   ");
+        assert!(
+            !search_scope_covers(Some(&whitespace), &in_scope, &projects, &ws),
+            "a whitespace-only query covers nothing",
+        );
+        let hash_only = global_search("#");
+        assert!(
+            !search_scope_covers(Some(&hash_only), &in_scope, &projects, &ws),
+            "a `#`-only query covers nothing",
+        );
     }
 
     /// A global search (`scope: None`) filters EVERY project at once —

@@ -1977,6 +1977,10 @@ mod search_tests {
     fn issue_ws_in_repo(repo: &str, num: &str, title: &str) -> Workspace {
         let mut t = base_task();
         t.id.key = format!("{repo}#{num}");
+        // `group_label` keys on `task.repo`, so set it too — otherwise every
+        // workspace inherits base_task's fixed repo and collapses into one
+        // group regardless of the `repo` argument.
+        t.repo = Some(repo.to_string());
         t.title = title.into();
         t.url = format!("https://github.com/{repo}/issues/{num}");
         let mut w = Workspace::from_task(t, chrono::Utc::now());
@@ -2368,22 +2372,10 @@ mod search_tests {
     /// drifting apart (#1099) — both read `search_scope_covers`.
     #[test]
     fn scoped_highlight_set_tracks_filter_scope_not_title_text() {
-        // Distinct repo groups: `group_label` keys on `task.repo`, so the
-        // fixture must set it (the shared `issue_ws_in_repo` helper leaves
-        // base_task's repo in place, which would collapse both into one
-        // group and defeat the scope distinction this test exercises).
-        let in_repo = |repo: &str, num: &str, title: &str| {
-            let mut t = base_task();
-            t.id.key = format!("{repo}#{num}");
-            t.repo = Some(repo.to_string());
-            t.title = title.into();
-            t.url = format!("https://github.com/{repo}/issues/{num}");
-            let mut w = Workspace::from_task(t, chrono::Utc::now());
-            w.name = title.into();
-            w
-        };
-        let a = in_repo("o/a", "1", "Add search bar");
-        let b = in_repo("o/b", "2", "search everywhere");
+        // Distinct repo groups (`o/a`, `o/b`) so the scoped search pins to
+        // one and the other stays out of scope.
+        let a = issue_ws_in_repo("o/a", "1", "Add search bar");
+        let b = issue_ws_in_repo("o/b", "2", "search everywhere");
         let a_key = SessionKey::from(&a.key);
         let b_key = SessionKey::from(&b.key);
         let mut sb = Sidebar::new(PaneId::new(1));

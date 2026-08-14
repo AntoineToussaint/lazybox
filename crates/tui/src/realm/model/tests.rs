@@ -11413,11 +11413,20 @@ mod terminal_url_mouse_tests {
         });
 
         let drag = model.terminal_drag.expect("left-press claims a drag");
+        // The drag binds to the tile it STARTED in (left / terminal 1), not
+        // the tile that was focused when it began (right / terminal 2).
+        assert_eq!(
+            drag.terminal,
+            TerminalId(1),
+            "the drag anchors to the start tile, not the focused one",
+        );
 
         // The copy holds only the start tile's text. The middle row is
         // fully spanned regardless of the anchor/focus columns, so it must
         // be the start tile's row — and only that.
-        let copied = model.terminals.extract_selection(drag.anchor, drag.focus);
+        let copied = model
+            .terminals
+            .extract_selection(drag.terminal, drag.anchor, drag.focus);
         assert!(
             copied.contains("AAA1"),
             "the start tile's rows are copied: {copied:?}",
@@ -11433,11 +11442,27 @@ mod terminal_url_mouse_tests {
         // grid would project the focus into the right tile (>= rx).
         let (hstart, hend) = model
             .terminals
-            .selection_screen_span(pane, drag.anchor, drag.focus)
+            .selection_screen_span(drag.terminal, pane, drag.anchor, drag.focus)
             .expect("a visible selection span");
         assert!(
             hstart.0 < rx && hend.0 < rx,
             "the highlight never crosses into the right tile (rx={rx}): {hstart:?} {hend:?}",
+        );
+
+        // Focus divergence mid-gesture must not redirect the copy: if an
+        // event refocuses the other tile before release, extraction still
+        // reads the tile the drag started in (`drag.terminal`), not live
+        // focus — the guarantee that makes scoping correct-by-construction
+        // rather than a side effect of focus following the click.
+        let mut cmds = Vec::new();
+        model.terminals.focus_tile(TerminalId(2), &mut cmds);
+        let after_refocus =
+            model
+                .terminals
+                .extract_selection(drag.terminal, drag.anchor, drag.focus);
+        assert!(
+            after_refocus.contains("AAA1") && !after_refocus.contains("BBB"),
+            "copy stays pinned to the start tile after focus moves: {after_refocus:?}",
         );
     }
 

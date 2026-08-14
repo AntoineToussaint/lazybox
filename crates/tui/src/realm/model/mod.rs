@@ -1205,6 +1205,13 @@ impl PaneFocus {
 /// extracted from libghostty on release.
 #[derive(Debug, Clone, Copy)]
 struct TerminalDrag {
+    /// The terminal the drag STARTED in — the tile under the mouse-down,
+    /// resolved once and fixed for the drag's lifetime. Every selection
+    /// mapping (anchor, focus, extraction, highlight) is composed against
+    /// THIS terminal's grid, so a drag that strays into a neighbouring tile
+    /// stays scoped to the tile it began in regardless of what is focused
+    /// at release (#1101).
+    terminal: lazybox_ipc::TerminalId,
     /// Crossterm cell of the initial mouse-down. A press-release with no
     /// intervening cell change is a plain click, forwarded to a
     /// mouse-tracking inner program from this position.
@@ -5282,10 +5289,10 @@ impl<T: TerminalAdapter> Model<T> {
             // selection (compare to the host terminal's native
             // selection, which crosses panes).
             if let Some(drag) = self.terminal_drag.as_ref() {
-                let (anchor, focus) = (drag.anchor, drag.focus);
+                let (terminal, anchor, focus) = (drag.terminal, drag.anchor, drag.focus);
                 if let Some((start, end)) =
                     self.terminals
-                        .selection_screen_span(right_bottom, anchor, focus)
+                        .selection_screen_span(terminal, right_bottom, anchor, focus)
                 {
                     paint_selection(f.buffer_mut(), right_bottom, start, end);
                 }

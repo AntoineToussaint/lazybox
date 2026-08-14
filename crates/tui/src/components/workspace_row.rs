@@ -94,11 +94,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// when no model is known, or when a badge collapses two agents.
     pub agent_models: Vec<(char, String)>,
     /// This workspace's 1-based jump number — its slot in the
-    /// sidebar-order agent roster (`Sidebar::agent_workspace_keys`).
-    /// `Some` only for workspaces with a coding agent; rendered as a
-    /// small badge ahead of the agent pill so the user can see which
-    /// `]]<digit>` lands here. `None` for non-agent rows (and for
-    /// agents past the 9th, which have no single-digit jump).
+    /// sidebar-order focused roster (`Sidebar::numbered_workspace_keys`).
+    /// `Some` only for focused (starred) workspaces; rendered as a small
+    /// badge ahead of the agent pill so the user can see which
+    /// `]]<digit>` lands here. `None` for unfocused rows (and for the
+    /// 10th focused workspace onward, which has no single-digit jump).
     pub agent_number: Option<usize>,
     /// Render the type indicator as plain ASCII (`p`/`i`/`l`) instead
     /// of the default unicode glyphs (`⇄`/`○`/`◆`). Wired from

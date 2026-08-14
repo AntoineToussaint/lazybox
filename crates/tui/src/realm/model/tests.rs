@@ -13742,11 +13742,11 @@ mod focus_mode_tests {
         );
     }
 
-    /// `]]<digit>` moves the displayed terminal to the Nth agent
-    /// workspace in sidebar order and keeps focus mode on, so the user
-    /// hops to a specific agent heads-down.
+    /// `]]<digit>` moves the displayed terminal to the Nth **focused**
+    /// (starred) workspace in sidebar order and keeps focus mode on, so
+    /// the user hops to a curated workspace heads-down.
     #[test]
-    fn bracket_digit_jumps_to_agent_workspace_in_focus_mode() {
+    fn bracket_digit_jumps_to_focused_workspace_in_focus_mode() {
         let mut m = build_model();
         let ws1 = workspace_with_agent("owner/repo#1");
         let ws2 = workspace_with_agent("owner/repo#2");
@@ -13755,10 +13755,17 @@ mod focus_mode_tests {
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
 
+        // Only focused workspaces are numbered now — star both so they
+        // enter the roster.
+        assert!(m.sidebar.focus_workspace_key(&key1));
+        m.sidebar.toggle_focus_at_cursor();
+        assert!(m.sidebar.focus_workspace_key(&key2));
+        m.sidebar.toggle_focus_at_cursor();
+
         // The jump number is the slot in this roster (sidebar order),
         // which the badge mirrors — read it rather than assume an order.
-        let roster = m.sidebar.agent_workspace_keys();
-        assert_eq!(roster.len(), 2, "both agents in the roster");
+        let roster = m.sidebar.numbered_workspace_keys();
+        assert_eq!(roster.len(), 2, "both focused workspaces in the roster");
         assert!(roster.contains(&key1) && roster.contains(&key2));
 
         // Start parked on slot 2 so `]]1` is a real move to slot 1.
@@ -13775,8 +13782,31 @@ mod focus_mode_tests {
         assert_eq!(
             m.sidebar.selected_workspace_key(),
             Some(&slot1),
-            "`]]1` jumps to the first agent workspace in the roster",
+            "`]]1` jumps to the first focused workspace in the roster",
         );
+    }
+
+    /// An unfocused workspace gets no jump number, and `]]<digit>`
+    /// past the focused count flashes instead of moving.
+    #[test]
+    fn unfocused_workspaces_are_not_numbered() {
+        let mut m = build_model();
+        let ws1 = workspace_with_agent("owner/repo#1");
+        let ws2 = workspace_with_agent("owner/repo#2");
+        let key1 = SessionKey::from(&ws1.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
+
+        // Nothing starred → nothing numbered.
+        assert!(
+            m.sidebar.numbered_workspace_keys().is_empty(),
+            "no focused workspace, so no jump numbers"
+        );
+
+        // Star just one → exactly one slot, in first position.
+        assert!(m.sidebar.focus_workspace_key(&key1));
+        m.sidebar.toggle_focus_at_cursor();
+        assert_eq!(m.sidebar.numbered_workspace_keys(), vec![key1.clone()]);
     }
 
     /// The attention summary the header reads counts unread / asking /

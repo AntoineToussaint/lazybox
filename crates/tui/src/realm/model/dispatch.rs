@@ -2607,21 +2607,20 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Switch the displayed terminal to the Nth agent workspace,
-    /// counting in sidebar (top-down) order — the deterministic
-    /// `]]<digit>` jump that replaced the old `F3` cycle. `n` is
-    /// 1-based, matching the number badge on the sidebar row and the
-    /// roster in the `]]` leader popup. Keeps focus on the terminal so
-    /// it works seamlessly inside focus mode; flashes when there's no
-    /// agent at that slot. Mirrors the `!` / `Shift-F` jumps but lands
-    /// the cursor on a specific agent rather than asking / failing-CI.
-    pub(super) fn jump_to_agent_workspace(&mut self, n: usize) {
-        if self.sidebar.focus_nth_agent_workspace(n) {
+    /// Switch the displayed terminal to the Nth numbered (focused)
+    /// workspace, counting in sidebar (top-down) order — the
+    /// deterministic `]]<digit>` jump. `n` is 1-based, matching the
+    /// number badge on the sidebar row and the roster in the `]]` leader
+    /// popup. Keeps focus on the terminal so it works seamlessly inside
+    /// focus mode; flashes when no focused workspace holds that slot
+    /// (nothing starred, or fewer than `n`).
+    pub(super) fn jump_to_numbered_workspace(&mut self, n: usize) {
+        if self.sidebar.focus_nth_numbered_workspace(n) {
             self.set_focus(PaneFocus::Terminals);
             self.sync_panes();
             self.redraw = true;
         } else {
-            self.flash_hint(format!("no agent #{n}"));
+            self.flash_hint(format!("no focused workspace #{n} — star one with focus"));
         }
     }
 

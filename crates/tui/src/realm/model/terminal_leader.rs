@@ -16,8 +16,9 @@ use tuirealm::event::{Key, KeyModifiers};
 /// cancel back into the terminal" (the tmux-prefix convention).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LeaderCmd {
-    /// `]]<1..9>` — jump to the Nth agent workspace (sidebar order).
-    JumpAgent(usize),
+    /// `]]<1..9>` — jump to the Nth numbered (focused) workspace in
+    /// sidebar order.
+    JumpNumbered(usize),
     /// `]]s` — open the snippet picker.
     Snippets,
     /// `]]l` — open the skills picker: the focused agent's available
@@ -192,7 +193,7 @@ impl LeaderCmd {
                 return None;
             }
             if let '1'..='9' = c {
-                return Some(Self::JumpAgent(c.to_digit(10)? as usize));
+                return Some(Self::JumpNumbered(c.to_digit(10)? as usize));
             }
             // `\\` is the easy-to-type alias for `|` on layouts where
             // the shifted symbol is awkward; both resolve through the

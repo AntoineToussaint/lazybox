@@ -1509,14 +1509,33 @@ impl Sidebar {
             .collect()
     }
 
-    /// Move the cursor onto the `n`th (1-based) agent workspace in
-    /// sidebar order. Returns true when that slot exists and the
-    /// cursor moved. Backs the `]]<digit>` focus-mode jump — the
-    /// deterministic replacement for the old `F3` cycle.
-    pub fn focus_nth_agent_workspace(&mut self, n: usize) -> bool {
+    /// The workspaces that carry a jump number, in sidebar (top-down)
+    /// order: the **focused** (starred) workspaces, deduped so one that
+    /// the `★ Focused` pin lifts to the top isn't also counted in its
+    /// repo group. The 1-based index here is the badge number and the
+    /// `]]<digit>` target, so numbering only what the user curated keeps
+    /// the sidebar quiet and the digits stable.
+    pub fn numbered_workspace_keys(&self) -> Vec<SessionKey> {
+        let mut seen = std::collections::HashSet::new();
+        self.visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k),
+                _ => None,
+            })
+            .filter(|k| self.is_focused(k))
+            .filter(|k| seen.insert((*k).clone()))
+            .cloned()
+            .collect()
+    }
+
+    /// Move the cursor onto the `n`th (1-based) numbered (focused)
+    /// workspace in sidebar order. Returns true when that slot exists and
+    /// the cursor moved. Backs the `]]<digit>` focus-mode jump.
+    pub fn focus_nth_numbered_workspace(&mut self, n: usize) -> bool {
         let Some(target) = n
             .checked_sub(1)
-            .and_then(|i| self.agent_workspace_keys().into_iter().nth(i))
+            .and_then(|i| self.numbered_workspace_keys().into_iter().nth(i))
         else {
             return false;
         };

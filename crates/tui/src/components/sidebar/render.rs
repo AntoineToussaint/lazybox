@@ -1027,12 +1027,12 @@ impl Sidebar {
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
     ) -> Vec<Option<Line<'static>>> {
-        // 1-based jump numbers for the first nine agent workspaces, in
+        // 1-based jump numbers for the first nine focused workspaces, in
         // sidebar order — the badge that pairs with the `]]<digit>`
         // jump. Past the ninth there's no single-digit key, so it gets
         // no badge.
         let agent_numbers: std::collections::HashMap<SessionKey, usize> = self
-            .agent_workspace_keys()
+            .numbered_workspace_keys()
             .into_iter()
             .take(9)
             .enumerate()

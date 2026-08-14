@@ -5218,11 +5218,12 @@ impl<T: TerminalAdapter> Model<T> {
                 .or_else(|| self.sidebar.selected_workspace())
                 .map(|w| w.name.clone())
                 .unwrap_or_else(|| "no workspace".to_string());
-            // Prefix the title with this agent's jump number (its
-            // 1-based slot in the sidebar-order agent roster) so the
-            // user knows which `]]<digit>` lands back here.
-            let agents = self.sidebar.agent_workspace_keys();
-            let number = active.and_then(|k| agents.iter().position(|a| a == k));
+            // Prefix the title with this workspace's jump number (its
+            // 1-based slot in the sidebar-order focused roster) so the
+            // user knows which `]]<digit>` lands back here. Unnumbered
+            // (unfocused) workspaces show no prefix.
+            let numbered = self.sidebar.numbered_workspace_keys();
+            let number = active.and_then(|k| numbered.iter().position(|a| a == k));
             let title = match number {
                 Some(i) => format!("{} · {name}", i + 1),
                 None => name,

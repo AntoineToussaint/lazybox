@@ -270,6 +270,12 @@ impl Sidebar {
         self.inner.finish_agent_run(run_id);
     }
 
+    /// Observe proxy-metered usage attributed straight to an agent
+    /// (`AgentSessionUsage`).
+    pub fn add_agent_session_usage(&mut self, agent_id: &str, usage: &lazybox_ipc::AgentUsage) {
+        self.inner.add_agent_session_usage(agent_id, usage);
+    }
+
     /// Attribute a usage-limit reset hint to a terminal's agent
     /// (`AgentUsageLimit`).
     pub fn note_usage_limit_reset(&mut self, terminal_id: lazybox_ipc::TerminalId, hint: String) {

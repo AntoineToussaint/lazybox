@@ -45,6 +45,11 @@ bytes            = "1"
 hyper            = { version = "1", features = ["server", "http1"] }
 hyper-util       = { version = "0.1", features = ["server", "tokio"] }
 http-body-util   = { version = "0.1", features = ["channel"] }
+# Outbound leg of the metering proxy (#1062): forwards agent traffic to
+# the real Anthropic/OpenAI upstream and streams the response back. TLS
+# backend + version mirror the other provider crates so it shares the
+# rustls stack; `stream` powers the chunk-by-chunk `bytes_stream()` tee.
+reqwest          = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 
 [dev-dependencies]
 tokio          = { workspace = true, features = ["full", "test-util"] }

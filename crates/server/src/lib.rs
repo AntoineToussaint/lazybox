@@ -44,6 +44,7 @@ pub mod keep_awake;
 pub mod lifecycle;
 pub mod metrics;
 pub mod polling;
+pub mod proxy;
 pub mod pty;
 pub mod registries;
 mod resource_limits;

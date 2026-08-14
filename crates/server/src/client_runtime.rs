@@ -44,6 +44,9 @@ impl ClientRuntime {
         }
         tasks.push(crate::auto_wait::spawn(&config));
         tasks.push(crate::agent_updates::spawn_scheduled(config.clone()));
+        if let Some(task) = crate::proxy::spawn(&config).await {
+            tasks.push(task);
+        }
         if let Some(slack) = options.slack
             && let Some(task) = crate::slack::spawn(config, slack)
         {

@@ -104,6 +104,20 @@ impl UsageTracker {
         }
     }
 
+    /// Observe usage the metering proxy attributed straight to an agent
+    /// (no structured run). Unlike [`Self::observe_usage`], each report is
+    /// one distinct upstream response, so they *sum* rather than collapsing
+    /// to a turn high-water mark: the proxy sees every request the agent
+    /// makes — interactive terminal turns included — and none is a repeat
+    /// of another. A zero-token report contributes nothing (and so never
+    /// promotes the agent into [`Self::agents_with_usage`]).
+    pub fn observe_session_usage(&mut self, agent_id: &str, usage: &AgentUsage) {
+        let tokens = event_tokens(usage);
+        if tokens > 0 {
+            *self.tokens.entry(agent_id.to_string()).or_default() += tokens;
+        }
+    }
+
     /// Tokens committed for `agent_id` this window (`0` when none).
     pub fn tokens_for(&self, agent_id: &str) -> u64 {
         self.tokens.get(agent_id).copied().unwrap_or(0)
@@ -356,6 +370,27 @@ mod tests {
         tracker.commit_turn(&AgentRunId(2));
         let agents: Vec<&str> = tracker.agents_with_usage().collect();
         assert_eq!(agents, vec!["claude"]);
+    }
+
+    #[test]
+    fn proxy_session_usage_sums_per_agent_across_responses() {
+        // Proxy-observed usage has no structured run: every report is a
+        // distinct upstream response, so they accumulate rather than
+        // collapsing to a turn high-water mark.
+        let mut tracker = UsageTracker::default();
+        tracker.observe_session_usage("codex", &usage(1_000, 200));
+        tracker.observe_session_usage("codex", &usage(500, 100));
+        assert_eq!(tracker.tokens_for("codex"), 1_800);
+        let agents: Vec<&str> = tracker.agents_with_usage().collect();
+        assert_eq!(agents, vec!["codex"]);
+    }
+
+    #[test]
+    fn proxy_zero_token_report_is_ignored() {
+        let mut tracker = UsageTracker::default();
+        tracker.observe_session_usage("claude", &usage(0, 0));
+        assert_eq!(tracker.tokens_for("claude"), 0);
+        assert_eq!(tracker.agents_with_usage().count(), 0);
     }
 
     #[test]

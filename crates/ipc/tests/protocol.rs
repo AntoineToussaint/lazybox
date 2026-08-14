@@ -791,6 +791,16 @@ fn all_events() -> Vec<Event> {
                 cost_usd_micros: Some(1234),
             },
         },
+        Event::AgentSessionUsage {
+            agent_id: "codex".into(),
+            usage: AgentUsage {
+                input_tokens: Some(1000),
+                output_tokens: Some(200),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: Some(50),
+                cost_usd_micros: Some(4321),
+            },
+        },
         Event::AgentTurnFinished {
             run_id: AgentRunId(9),
             result: Some("turn complete".into()),
@@ -1186,6 +1196,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentPermissionRequest { .. } => "AgentPermissionRequest",
         Event::AgentUserQuestion { .. } => "AgentUserQuestion",
         Event::AgentUsage { .. } => "AgentUsage",
+        Event::AgentSessionUsage { .. } => "AgentSessionUsage",
         Event::AgentTurnFinished { .. } => "AgentTurnFinished",
         Event::AgentRunFinished { .. } => "AgentRunFinished",
         Event::ProviderCredentialUpdated { .. } => "ProviderCredentialUpdated",
@@ -1225,7 +1236,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        84,
+        85,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

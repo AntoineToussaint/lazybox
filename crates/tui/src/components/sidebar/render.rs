@@ -894,6 +894,14 @@ impl Sidebar {
         // with zero GitHub data (issue #100).
         if self.is_getting_started() {
             self.render_getting_started(inner, frame, theme);
+        } else if let Some(query) = self.search.as_ref().and_then(|s| {
+            let q = s.query.trim();
+            (!q.is_empty() && self.workspace_count() == 0).then(|| q.to_string())
+        }) {
+            // A live search that filtered every workspace away. A blank
+            // pane reads as "everything vanished / broke"; this names the
+            // query and the way out instead (#1099).
+            self.render_no_matches(inner, frame, theme, &query);
         }
 
         // Scroll-position indicator in the right padding strip —
@@ -922,13 +930,41 @@ impl Sidebar {
             let bar = Rect::new(area.x + l_pad, area.y + area.height - 1, inner_width, 1);
             self.search_bar_rect = Some(bar);
             let global = s.scope.is_none();
-            let prefix = if global { "⌕ " } else { "/ " };
+            // While the bar is capturing keystrokes, fill it with a solid
+            // block so it reads unmistakably as a search field — not just
+            // another list row you can keep typing "into" (#1099). The
+            // `🔍` glyph + `/` prefix give it the vim `/pattern` shape.
+            let field = s.editing;
+            let with_field_bg = |st: Style| if field { st.bg(theme.fill) } else { st };
+            if field {
+                frame.render_widget(Block::default().style(Style::default().bg(theme.fill)), bar);
+            }
+            let prefix = if global { "🔍 ⌕ " } else { "🔍 /" };
             let mut spans = vec![
-                Span::styled(prefix, Style::default().fg(theme.accent)),
-                Span::styled(s.query.clone(), Style::default().fg(theme.text_strong)),
+                Span::styled(
+                    prefix,
+                    with_field_bg(
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ),
+                Span::styled(
+                    s.query.clone(),
+                    with_field_bg(
+                        Style::default()
+                            .fg(theme.text_strong)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ),
             ];
-            if s.editing {
-                spans.push(Span::styled("▏", Style::default().fg(theme.accent)));
+            if field {
+                // A solid block cursor — a visible caret so it's obvious
+                // where typed characters land (#1099).
+                spans.push(Span::styled(
+                    "█",
+                    with_field_bg(Style::default().fg(theme.accent)),
+                ));
             }
             // Trailing guidance for a scoped `/` search. The actionable
             // cues lead so they survive a narrow-pane clip: the `#`
@@ -949,7 +985,10 @@ impl Sidebar {
                 (Some(scope), false) => format!("  # all repos · esc clear · {scope}"),
                 (None, _) => "  all repos · esc clear".to_string(),
             };
-            spans.push(Span::styled(hint, Style::default().fg(theme.text_dim)));
+            spans.push(Span::styled(
+                hint,
+                with_field_bg(Style::default().fg(theme.text_dim)),
+            ));
             frame.render_widget(Paragraph::new(Line::from(spans)), bar);
         }
     }
@@ -1003,6 +1042,33 @@ impl Sidebar {
         frame.render_widget(Paragraph::new(lines), inner);
     }
 
+    /// Paint the empty-search panel: a live query filtered every row away,
+    /// so instead of a blank pane (which reads as "everything vanished")
+    /// name the query and the way out (#1099).
+    fn render_no_matches(
+        &self,
+        inner: Rect,
+        frame: &mut Frame,
+        theme: &crate::theme::Theme,
+        query: &str,
+    ) {
+        if inner.height < 2 {
+            return;
+        }
+        let heading = Style::default().fg(theme.warn).add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(theme.text_dim);
+        // Clip a pathological query so the message can't itself overflow.
+        let shown = truncate_ellipsis(query, inner.width.saturating_sub(20).max(8) as usize);
+        let lines: Vec<Line<'static>> = vec![
+            Line::raw(""),
+            Line::from(Span::styled(format!(" No matches for “{shown}”"), heading)),
+            Line::raw(""),
+            Line::from(Span::styled(" Esc to clear the search", dim)),
+            Line::from(Span::styled(" # searches all repos", dim)),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
     /// Build & lay out every visible workspace row and scatter the
     /// resulting Lines back to the visible-list indices they belong to.
     ///
@@ -1027,12 +1093,12 @@ impl Sidebar {
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
     ) -> Vec<Option<Line<'static>>> {
-        // 1-based jump numbers for the first nine agent workspaces, in
+        // 1-based jump numbers for the first nine focused workspaces, in
         // sidebar order — the badge that pairs with the `]]<digit>`
         // jump. Past the ninth there's no single-digit key, so it gets
         // no badge.
         let agent_numbers: std::collections::HashMap<SessionKey, usize> = self
-            .agent_workspace_keys()
+            .numbered_workspace_keys()
             .into_iter()
             .take(9)
             .enumerate()
@@ -1190,6 +1256,14 @@ impl Sidebar {
                 continue;
             };
             let workspace = self.workspaces.get(key);
+            // The search term to underline in this row's title. `render` is
+            // per-frame, so the "does the search touch this row?" decision is
+            // precomputed into `searched_keys` at recompute time (#1099) —
+            // here it's an O(1) lookup, and it can't diverge from the filter.
+            let highlight_query: Option<&str> = self.search.as_ref().and_then(|s| {
+                let q = crate::components::visible_rows::normalized_query(&s.query);
+                (!q.is_empty() && self.searched_keys.contains(key)).then_some(q)
+            });
             let ctx = WorkspaceRowCtx {
                 workspace,
                 task: workspace.and_then(|w| w.primary_task()),
@@ -1211,6 +1285,10 @@ impl Sidebar {
                 exited: workspace
                     .is_some_and(|w| crate::agent_attention::workspace_is_exited(w, &self.agents)),
                 working_glyph: crate::components::workspace_row::working_glyph(
+                    self.working_spinner_frame,
+                ),
+                spawning: self.is_spawning(key),
+                spawning_glyph: crate::components::workspace_row::spawning_glyph(
                     self.working_spinner_frame,
                 ),
                 badges: badges_by_key.get(key).cloned().unwrap_or_default(),
@@ -1235,6 +1313,7 @@ impl Sidebar {
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.len()),
                 stack: self.stacks.get(key),
                 model_shorts: &self.model_shorts,
+                highlight_query,
             };
             row_indices.push(i);
             rows.push(build_workspace_row(&ctx));

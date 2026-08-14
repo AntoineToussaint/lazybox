@@ -191,6 +191,15 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::list_repo_labels(c, ws).await,
         }
     }
+    pub async fn list_requestable_reviewers(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<Vec<String>, lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::list_requestable_reviewers(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::list_requestable_reviewers(c, ws).await,
+        }
+    }
     pub async fn set_labels(
         &self,
         ws: &lazybox_core::Workspace,
@@ -1285,6 +1294,57 @@ pub async fn handle_fetch_repo_labels(config: &ServerConfig, workspace_key: Work
         Err(e) => {
             tracing::warn!("fetch_repo_labels {workspace_key}: {e:?}");
             emit_err(&format!("label fetch failed: {e}"));
+        }
+    }
+}
+
+/// Handle `Command::FetchRequestableReviewers`: pull the accounts
+/// requestable as reviewers on the workspace's PR and broadcast
+/// `Event::RequestableReviewers` so the TUI can populate the reviewer
+/// picker. On failure, broadcast a `ProviderError` with source
+/// `"requestable-reviewers"` — the client is waiting on this reply to
+/// mount the picker, and staying silent left its pending request armed
+/// forever. On that failure event the client falls back to a picker
+/// built from the PR's interaction-derived candidates.
+pub async fn handle_fetch_requestable_reviewers(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+) {
+    let emit_err = |msg: &str| {
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "requestable-reviewers",
+            msg,
+        ));
+    };
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        tracing::debug!("fetch_requestable_reviewers: workspace {workspace_key} not found");
+        emit_err(&format!(
+            "fetch requestable reviewers: workspace {workspace_key} not found"
+        ));
+        return;
+    };
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("fetch_requestable_reviewers: {e}");
+            emit_err(&e);
+            return;
+        }
+    };
+    match provider.list_requestable_reviewers(&ws).await {
+        Ok(logins) => {
+            tracing::info!(
+                "fetch_requestable_reviewers {workspace_key}: {} candidates",
+                logins.len()
+            );
+            let _ = config.bus.send(Event::RequestableReviewers {
+                workspace_key,
+                logins,
+            });
+        }
+        Err(e) => {
+            tracing::warn!("fetch_requestable_reviewers {workspace_key}: {e:?}");
+            emit_err(&format!("requestable reviewers fetch failed: {e}"));
         }
     }
 }

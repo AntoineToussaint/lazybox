@@ -50,13 +50,26 @@ convention-less:
 4. Otherwise: a **hard error** naming the missing config key.
 
 Step 4 used to dead-end `w w` for a fresh user or a new team: the only
-way forward was hand-editing `config.yaml`. It no longer does. The error
-is classified `WorktreeRecovery::LinearUnmapped` (`crates/ipc`), and the
-worktree-progress modal offers **`r` pick repo** instead of a bare retry.
-The pick lists the tracked GitHub repos, persists the choice as
-`providers.linear.teams.<team>` via `Config::save_with`, and re-provisions
-— the daemon reloads `config.yaml` on the next provision, so the retry
-resolves through step 2. The mapping is asked **once** per team.
+way forward was hand-editing `config.yaml`. It no longer does — and it
+never surfaces as a failure to the user either. The daemon still errors
+loudly (classified `WorktreeRecovery::LinearUnmapped`, `crates/ipc`), but
+the client treats that class as a *missing choice*, not a breakage: `w w`
+on an unmapped team opens the **repo picker directly** — no "× spawn
+aborted / retry once fixed" modal, no manual `r`. Both surfaces of the
+failure (the `WorktreeProgress::Failed` step and the `spawn:worktree`
+provider error) route to the same idempotent
+`open_linear_team_repo_picker` (`crates/tui`), tearing down the in-flight
+spinner in favor of the picker. The pick persists the choice as
+`providers.linear.teams.<team>` via `Config::save_with` and immediately
+re-issues the spawn; because the daemon reloads `config.yaml` on the next
+provision, the re-spawn resolves through step 2 with no manual retry. The
+mapping is asked **once** per team. The classified failure modal (with its
+`r` pick affordance) survives only as the genuine last resort — reached
+when there is no tracked GitHub repo to propose at all.
+
+The picker's repo list is **ranked**, not blank: repos that other tickets
+in the *same* team already link a GitHub PR to (learned from their
+`linked_tasks`) float to the top, so the common case is one keystroke.
 
 ### Inference: what auto-resolves today, and what doesn't (#1041 investigation)
 
@@ -71,17 +84,19 @@ attach), and lazybox learns nothing about a team's repos from *other*
 tickets. Neither of the doc's speculative sources is implemented:
 
 - **Learning from sibling tickets** — scanning the same team's other
-  tickets for their linked PRs to derive the team's repo set — is *not*
-  wired. Each ticket is resolved in isolation.
+  tickets for their linked PRs to derive the team's repo set — does *not*
+  auto-resolve the clone target. Each ticket is still resolved in isolation
+  in `linear_repo_for_task`. It *does* now feed the picker's ranking
+  (`Sidebar::github_repos_ranked_for_linear_team`): a repo a sibling ticket
+  links floats to the top of the choice, so the likely answer is one
+  keystroke — a *proposal*, not a silent auto-route.
 - **Org-repo inference** — deriving the repo from the org's repo list plus
-  the ticket identifier/branch — is *not* wired either.
+  the ticket identifier/branch — is *not* wired.
 
-Both would need a repo-candidate index the spawn path doesn't build today,
-and both are heuristic (a team legitimately spans several repos). The
-persisted picker sidesteps this: one deterministic choice teaches the
-mapping for good, which is strictly better than a guess that can be wrong.
-Auto-inference from sibling tickets remains a possible future refinement
-(it could *pre-select* the picker's most-likely repo), tracked as deferred.
+Auto-routing from either source is deliberately not done: both are
+heuristic (a team legitimately spans several repos), and a wrong silent
+guess is worse than one deterministic pick. The persisted picker teaches
+the mapping for good; sibling-ticket signal only *ranks* the proposal.
 
 ## What obin actually does (the convention to honor)
 

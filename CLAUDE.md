@@ -227,9 +227,10 @@ failing CI) → hidden → full, remembered per workspace with a
 has no activity), `.`
 toggle focus mode (near-fullscreen agent terminal behind a slim event
 header; from inside a terminal use `]]f`, and `]]q` exits),
-`]]<digit>` jump the focused terminal straight to the Nth agent
-workspace (sidebar order; the number rides a badge on each agent row
-and the `]]` leader popup), `Shift-arrows` resize splitters
+`]]<digit>` jump the focused terminal straight to the Nth **focused**
+(starred) workspace (sidebar order; the number rides a badge on each
+focused row and the `]]` leader popup — only focused workspaces are
+numbered), `Shift-arrows` resize splitters
 (`Shift-←/→` everywhere; `Shift-↑/↓` too, except in the sidebar where
 they extend the multi-select instead — #932), `F8` /
 `Alt-s` / `Ctrl-Alt-s` toggle mouse capture (host-native text
@@ -243,13 +244,21 @@ menu (a multi-select over state / role / kind predicates — with-agent,
 CI-failing, conflict, unread, asking, review-requested, auto-merge,
 author/reviewer/assignee/mentioned, PR/issue — combined AND-across /
 OR-within-axis, shown with match counts and as removable header chips),
-`o` cycle sort, `Space` collapse/expand repo group, `p`
+`o` cycle sort, `Space` collapse/expand the repo group **only when the
+cursor sits directly on its header row** — on a workspace row a bare
+Space is inert so it can't fold the group you're navigating (#1099;
+move to the header or click the ▾ triangle to collapse), `p`
 pin/unpin the cursor's repo group to the top of the sidebar (pinned
 repos render first in pin order, the rest keep the algorithmic order;
 the pin set persists — #760), `Shift-S`
 cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
 the active filters; matches title, number, repo, labels, reviewers /
-assignees). `x` is a
+assignees). While editing, the bottom bar is a filled, accented field
+with a `🔍 /<query>` prefix + block cursor so it's unmistakable you're
+typing into search, matched substrings are underlined in the visible
+rows, and a query that filters everything away shows an explicit "No
+matches for … · Esc to clear" panel rather than a blank pane (#1099).
+`x` is a
 leader for the **workspace** group (which-key popup): `x n` new
 workspace, `x R` rename (change the focused workspace's display name
 in place — key/worktree stay put; #744), `x m` move the cursor's
@@ -412,7 +421,7 @@ report; Cmd isn't encoded and most emulators eat it, so don't rely on
 it); both need capture on, while `]]u` works even with capture off.
 `]]f`
 toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
-the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
+the Nth focused (starred) workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that

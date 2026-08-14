@@ -791,6 +791,20 @@ pub enum Command {
         terminal_id: TerminalId,
         required_seq: u64,
     },
+    /// Delta pull for session transfer (#1089): the terminal's output
+    /// bytes since byte watermark `since_offset`, so a puller fetches
+    /// only what it doesn't already have — symmetric across a local and
+    /// a remote (box) source. The daemon replies `TerminalDelta` with a
+    /// gap-free continuation when the backend can serve a byte-offset
+    /// delta AND still retains `since_offset` (the raw-PTY ring), else
+    /// `TerminalDeltaUnavailable` (tmux keeps no byte offsets, or the
+    /// ring already evicted the watermark) and the caller falls back to
+    /// the full-snapshot path. `since_offset` counts live output bytes
+    /// since spawn, NOT chunk seqs.
+    RequestTerminalDelta {
+        terminal_id: TerminalId,
+        since_offset: u64,
+    },
     Close {
         terminal_id: TerminalId,
         /// Client-generated correlation id used to report a backend kill
@@ -1100,6 +1114,16 @@ pub enum Command {
     /// the user can pick from every label the repo defines (not
     /// just the ones currently applied).
     FetchRepoLabels {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Ask the daemon for the accounts requestable as reviewers on the
+    /// workspace's PR — the repo's assignable users plus GitHub's
+    /// suggestions for this PR — and broadcast them back via
+    /// `Event::RequestableReviewers`. Used by the reviewer picker on
+    /// mount so the user can request a review from anyone requestable,
+    /// not only people who already touched the PR. Keyed by
+    /// `workspace_key`; no-op for a workspace with no PR.
+    FetchRequestableReviewers {
         workspace_key: lazybox_core::WorkspaceKey,
     },
     /// Admin command: walk every persisted workspace, drop sessions
@@ -1776,6 +1800,15 @@ pub enum Event {
         workspace_key: lazybox_core::WorkspaceKey,
         labels: Vec<lazybox_core::Label>,
     },
+    /// Response to `Command::FetchRequestableReviewers`. Carries the
+    /// GitHub logins requestable as reviewers on the workspace's PR
+    /// (suggestions first, then assignable users). Keyed by
+    /// `workspace_key` so the reviewer picker knows which mount to
+    /// fill — same request/response-by-key shape as `RepoLabels`.
+    RequestableReviewers {
+        workspace_key: lazybox_core::WorkspaceKey,
+        logins: Vec<String>,
+    },
     /// A new session (= folder worktree) was provisioned inside its
     /// workspace. Sent in response to `Command::CreateSession` and
     /// also when the daemon auto-creates a session for a workspace-
@@ -1864,6 +1897,30 @@ pub enum Event {
     /// grid, discard live output, and retry later—never clear the parser
     /// or treat this as sequence coverage.
     TerminalResyncUnavailable {
+        terminal_id: TerminalId,
+    },
+    /// Reply to `RequestTerminalDelta` (#1089): the gap-free output bytes
+    /// in `[from_offset, to_offset)`. Always a clean continuation the
+    /// consumer appends — `from_offset` equals the requested
+    /// `since_offset` (clamped down only if the caller was already past
+    /// the high-water). Pass `to_offset` back as the next `since_offset`
+    /// for an incremental pull. When the ring has evicted the requested
+    /// watermark no gap-free delta exists, so the daemon replies
+    /// `TerminalDeltaUnavailable` instead — it never hands back an
+    /// untrimmed ring tail as a reset baseline (that can begin mid-UTF-8 /
+    /// mid-CSI; see `Event::Snapshot`'s completeness contract).
+    TerminalDelta {
+        terminal_id: TerminalId,
+        from_offset: u64,
+        to_offset: u64,
+        bytes: Vec<u8>,
+    },
+    /// No gap-free byte-offset delta is available for this terminal: the
+    /// backend keeps no byte ring (e.g. tmux), or the ring already evicted
+    /// the requested watermark. Either way the caller falls back to the
+    /// full snapshot / scrollback path (which rebuilds a clean VT
+    /// baseline). Mirrors `TerminalResyncUnavailable`.
+    TerminalDeltaUnavailable {
         terminal_id: TerminalId,
     },
     TerminalExited {

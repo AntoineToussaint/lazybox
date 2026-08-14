@@ -41,7 +41,8 @@ pub(crate) struct StatusPill {
 // `documented_status_pills_match_the_renderer` drift test.
 // Each carries a leading-space separator so two adjacent slots read as
 // ` ✓ ✗`; trimmed, the glyph is what the marker docs pin to.
-const G_OK: &str = " ✓"; // CI green / approved / ready / merged
+const G_OK: &str = " ✓"; // CI green / approved / ready
+const G_MERGED: &str = " ⋈"; // merged — a terminal join, distinct from the actionable `✓`
 const G_FAIL: &str = " ✗"; // CI failed / changes requested
 const G_MIXED: &str = " ±"; // CI partly green, partly failing
 const G_RUNNING: &str = " ◔"; // CI queued or in progress — a partial-circle,
@@ -122,7 +123,7 @@ pub(crate) fn status_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
 /// hides one of the two. A PR with review-pending + CI-failing (`◌ ✗`)
 /// is something the user needs to see BOTH of.
 ///
-/// **Terminal / blocker** states (merged `✓`, closed `⊘`, draft `◇`,
+/// **Terminal / blocker** states (merged `⋈`, closed `⊘`, draft `◇`,
 /// conflict `⚠`, ready `✓`, queued `⧖`) are single-purpose — they
 /// override both signals — so they return as the first slot with the CI
 /// slot empty. GitHub-native auto-merge is *not* one of them: it's a
@@ -197,7 +198,7 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     // full override — it composites with its blockers in `status_pills`
     // (#1058) so a conflicting or CI-failing draft still surfaces them.
     match task.state {
-        TaskState::Merged => return Some(glyph_pill(G_OK, theme.hover)),
+        TaskState::Merged => return Some(glyph_pill(G_MERGED, theme.text_dim)),
         TaskState::Closed => return Some(glyph_pill(G_CLOSED, theme.text_dim)),
         _ => {}
     }
@@ -280,7 +281,7 @@ pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
     use lazybox_core::StatusTag::*;
     let theme = crate::theme::current();
     match tag {
-        Merged => Some(glyph_pill(G_OK, theme.hover)),
+        Merged => Some(glyph_pill(G_MERGED, theme.text_dim)),
         Closed => Some(glyph_pill(G_CLOSED, theme.text_dim)),
         Conflict => Some(glyph_pill(G_CONFLICT, theme.error)),
         CiFailed => Some(glyph_pill(G_FAIL, theme.error)),
@@ -340,7 +341,7 @@ pub(crate) fn status_legend() -> Vec<LegendRow> {
         row(G_CONFLICT.trim(), theme.error, "merge conflict"),
         row(G_QUEUED.trim(), theme.success, "in the merge queue"),
         row(G_DRAFT.trim(), theme.text_dim, "draft"),
-        row(G_OK.trim(), theme.hover, "merged"),
+        row(G_MERGED.trim(), theme.text_dim, "merged"),
         row(G_CLOSED.trim(), theme.text_dim, "closed"),
         row(
             ARM_GLYPH,

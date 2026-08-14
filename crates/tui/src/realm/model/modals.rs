@@ -14,6 +14,17 @@
 use super::{ChoicePayload, ConversionDraft, HandoffDraft, Id, ModalFlow, Model};
 use tuirealm::terminal::TerminalAdapter;
 
+/// Fallback display name for an editor entry with no explicit `display:`
+/// — the id with its first letter capitalized, matching what the launch
+/// path derives (`From<UserEditorEntry>`).
+fn titlecase_id(id: &str) -> String {
+    let mut s = id.to_string();
+    if let Some(first) = s.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    s
+}
+
 /// Choice-modal item wrapper for the worktree inspector. Picker
 /// returns indices; we store one of these per row so the
 /// `ChoicePicked` handler knows whether the user hit the bulk
@@ -553,19 +564,66 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::NewWorkspaceRepo, modal);
     }
 
-    /// Mount the "request reviewers" multi-select picker for the
-    /// given workspace's PR. Candidates are gathered from the
-    /// workspace's known people; Space toggles, Enter submits →
+    /// Mount the "request reviewers" multi-select picker once the
+    /// daemon has answered our `FetchRequestableReviewers` request
+    /// (`fetched` = the repo's requestable reviewers: GitHub's
+    /// suggestions for this PR plus the assignable-user pool). Merges
+    /// those with the interaction-derived candidates (people already on
+    /// the PR) so nobody the user might reasonably pick is dropped,
+    /// then excludes the viewer and reviewers already requested (this
+    /// stays an add-only picker). Space toggles, Enter submits →
     /// `Msg::ChoicePicked` — each row carrying its login as a
     /// [`ChoicePayload::Text`] — → `handle_choice_picked` collects the
     /// chosen logins and dispatches `Command::RequestReviewers`.
-    pub(crate) fn mount_request_reviewers(&mut self, workspace_key: lazybox_core::WorkspaceKey) {
+    ///
+    /// Async mount, same contract as [`Self::mount_manage_labels`]: the
+    /// reply can arrive seconds after `g r`, so any modal already up
+    /// wins and the fetch result is dropped (press `g r` again). On a
+    /// fetch failure the caller passes an empty `fetched`, degrading to
+    /// the interaction-derived candidates alone.
+    pub(crate) fn mount_request_reviewers(
+        &mut self,
+        workspace_key: lazybox_core::WorkspaceKey,
+        fetched: Vec<String>,
+    ) {
         use crate::realm::components::choice::Choice;
 
-        if matches!(self.modal_stack.last(), Some(Id::RequestReviewers)) {
+        if let Some(top) = self.modal_stack.last() {
+            self.awaiting_requestable_reviewers = None;
+            if !matches!(top, Id::RequestReviewers) {
+                self.flash_hint("reviewers loaded, but another dialog was open — press g r again");
+            }
             return;
         }
-        let candidates = self.gather_candidate_logins(&workspace_key, true);
+        self.awaiting_requestable_reviewers = None;
+        // Exclude the viewer (no self-review), the PR author (GitHub
+        // rejects requesting a review from the author), and reviewers
+        // already requested — this is an add-only picker.
+        let mut excluded: std::collections::HashSet<String> =
+            self.viewer_logins.values().cloned().collect();
+        if let Some(pr) = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .and_then(|(_, w)| w.pr.as_ref())
+        {
+            if !pr.author.is_empty() {
+                excluded.insert(pr.author.clone());
+            }
+            for r in &pr.reviewers {
+                excluded.insert(r.clone());
+            }
+        }
+        // Fetched (suggestions first) then interaction-derived, deduped.
+        // `gather_candidate_logins(true)` already drops the viewer and
+        // existing reviewers; apply the same exclusion to `fetched`.
+        let interaction = self.gather_candidate_logins(&workspace_key, true);
+        let mut candidates: Vec<String> = Vec::new();
+        for login in fetched.into_iter().chain(interaction) {
+            if !login.is_empty() && !excluded.contains(&login) && !candidates.contains(&login) {
+                candidates.push(login);
+            }
+        }
         // With no candidates, mount the picker with an explanatory
         // empty state rather than only flashing — a bare footer flash
         // is easy to miss, and the framed notice reads clearly over
@@ -573,7 +631,7 @@ impl<T: TerminalAdapter> Model<T> {
         // empty so this never renders as a blank rectangle (#35).
         let modal = if candidates.is_empty() {
             Choice::<String>::multi(
-                "No candidate reviewers yet.\n\nInteract with the PR — comment, review, or assign\nsomeone — and they'll show up here to pick from.",
+                "No requestable reviewers found.\n\nThis repo exposes no assignable users, or every\nrequestable reviewer is already on the PR.",
                 Vec::new(),
             )
             .title("Add reviewers")
@@ -919,6 +977,177 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::LlmGatewayUrl, modal);
     }
 
+    /// Mount / refresh the Settings editors panel (#1102) from a fresh
+    /// config load. Re-mounting under the same id replaces the component,
+    /// so this doubles as the panel's own reopen path. The post-write
+    /// paths call [`Self::mount_editors_panel_from`] directly to reuse the
+    /// config they already loaded.
+    pub(crate) fn mount_editors_panel(&mut self) {
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        self.mount_editors_panel_from(&cfg);
+    }
+
+    /// Build the panel rows from an already-loaded config and mount it.
+    /// Lists the custom `editors:` entries (the editable ones) with a live
+    /// on-PATH badge, plus the display names of any built-in editors
+    /// detected on this machine so a user with no custom entries still
+    /// sees what `e` will offer.
+    pub(crate) fn mount_editors_panel_from(&mut self, cfg: &lazybox_config::Config) {
+        use crate::realm::components::editors_panel::{EditorRow, EditorsPanel};
+        let rows = cfg
+            .editors
+            .iter()
+            .map(|e| EditorRow {
+                display: e.display.clone().unwrap_or_else(|| titlecase_id(&e.id)),
+                id: e.id.clone(),
+                command: e.command.clone(),
+                available: crate::editors::command_available(&e.command),
+            })
+            .collect();
+        // Detected built-ins, minus any id a custom entry overrides — the
+        // reference set shown so the panel is never blank on a machine
+        // that only relies on auto-detection.
+        let overridden: std::collections::HashSet<&str> =
+            cfg.editors.iter().map(|e| e.id.as_str()).collect();
+        let detected_builtins = crate::editors::discover_at_startup(Vec::new())
+            .into_iter()
+            .filter(|b| !overridden.contains(b.id.as_str()))
+            .map(|b| b.display)
+            .collect();
+        let path = lazybox_config::Config::default_path().display().to_string();
+        self.mount_modal(
+            Id::EditorsPanel,
+            EditorsPanel::new(rows, detected_builtins, path),
+        );
+    }
+
+    /// `a` in the editors panel: start the two-step add flow, prompting
+    /// for the stable id first.
+    pub(crate) fn start_editor_add(&mut self) {
+        use crate::realm::components::input::Input;
+        self.set_modal_flow(ModalFlow::EditorForm {
+            stage: crate::realm::model::EditorFormStage::AwaitId,
+        });
+        let modal = Input::new("Editor id")
+            .title("Add editor")
+            .placeholder("e.g. fleet, my-editor");
+        self.mount_modal(Id::EditorForm, modal);
+    }
+
+    /// `e`/Enter in the editors panel: edit an existing entry's launch
+    /// command. The id + any custom display are fixed and preserved; only
+    /// the command line is re-collected, prefilled with the current one.
+    pub(crate) fn start_editor_edit(&mut self, id: &str) {
+        use crate::realm::components::input::Input;
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let Some(entry) = cfg.editors.iter().find(|e| e.id == id) else {
+            self.flash_error(format!("no configured editor with id {id}"));
+            return;
+        };
+        // Reconstruct the line from the effective args (the launch path
+        // defaults an unset `args` to `["{path}"]`), quoting so a command
+        // / arg with a space round-trips instead of re-splitting.
+        let args = entry
+            .args
+            .clone()
+            .unwrap_or_else(|| vec!["{path}".to_string()]);
+        let line = crate::editors::join_launch_command(&entry.command, &args);
+        self.set_modal_flow(ModalFlow::EditorForm {
+            stage: crate::realm::model::EditorFormStage::AwaitCommand {
+                id: id.to_string(),
+                display: entry.display.clone(),
+            },
+        });
+        let modal = Input::new("Launch command")
+            .title(format!("Edit {id}"))
+            .placeholder("e.g. code {path}")
+            .with_input(line);
+        self.mount_modal(Id::EditorForm, modal);
+    }
+
+    /// `d`/`x` in the editors panel: confirm before dropping the entry.
+    /// Removal is recoverable (re-add), but it's a config write on a
+    /// single keystroke, so it goes through a yes/no like the other
+    /// mutating panel actions rather than firing on a stray key.
+    pub(crate) fn prompt_remove_editor(&mut self, id: String) {
+        use crate::realm::components::confirm::Confirm;
+        let modal = Confirm::new(format!("Remove editor {id}?"));
+        self.set_modal_flow(ModalFlow::EditorRemoveConfirm { id });
+        self.mount_modal(Id::EditorRemoveConfirm, modal);
+    }
+
+    /// Confirmed removal: drop the entry from `editors:`, hot-reload, and
+    /// refresh the panel. Reached from `handle_confirmed` after
+    /// [`Self::prompt_remove_editor`].
+    pub(crate) fn remove_editor(&mut self, id: &str) {
+        let id_owned = id.to_string();
+        let mut removed = false;
+        let saved = lazybox_config::Config::save_with(|c| {
+            let before = c.editors.len();
+            c.editors.retain(|e| e.id != id_owned);
+            removed = c.editors.len() != before;
+        });
+        match saved {
+            Ok(()) if removed => {
+                self.flash_info(format!("removed editor {id}"));
+                self.refresh_editors_after_write();
+            }
+            Ok(()) => self.flash_info(format!("no configured editor with id {id}")),
+            Err(e) => self.flash_error(format!("couldn't save config: {e}")),
+        }
+    }
+
+    /// Persist an add/edit from the editors form: parse the launch line,
+    /// upsert the `editors:` entry (matching id replaces, new id appends),
+    /// hot-reload, and refresh the panel. A command that isn't on PATH is
+    /// saved anyway but flagged, matching the panel's badge.
+    pub(crate) fn save_editor_entry(&mut self, id: &str, display: Option<String>, line: &str) {
+        let Some((command, args)) = crate::editors::parse_launch_command(line) else {
+            self.flash_error("launch command can't be empty");
+            return;
+        };
+        let mut entry = lazybox_config::EditorEntry {
+            id: id.to_string(),
+            display,
+            command: command.clone(),
+            args: Some(args),
+        };
+        let saved = lazybox_config::Config::save_with(move |c| {
+            if let Some(slot) = c.editors.iter_mut().find(|e| e.id == entry.id) {
+                // Keep an existing custom display when this write doesn't
+                // set one (the add flow always passes `None`), so re-adding
+                // an id doesn't silently wipe its label.
+                if entry.display.is_none() {
+                    entry.display = slot.display.clone();
+                }
+                *slot = entry;
+            } else {
+                c.editors.push(entry);
+            }
+        });
+        match saved {
+            Ok(()) => {
+                let note = if crate::editors::command_available(&command) {
+                    ""
+                } else {
+                    " — command not found on PATH"
+                };
+                self.flash_info(format!("saved editor {id}{note}"));
+                self.refresh_editors_after_write();
+            }
+            Err(e) => self.flash_error(format!("couldn't save config: {e}")),
+        }
+    }
+
+    /// After a successful `editors:` write, refresh both the cached editor
+    /// list (so the next `e` sees it) and the open panel — from a single
+    /// config load rather than one per concern.
+    fn refresh_editors_after_write(&mut self) {
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        self.reload_editors_from(&cfg);
+        self.mount_editors_panel_from(&cfg);
+    }
+
     /// Build the candidate-logins list for the picker. Source set
     /// is the workspace's known people: existing reviewers,
     /// assignees, activity authors. Excludes the local user
@@ -962,7 +1191,7 @@ impl<T: TerminalAdapter> Model<T> {
                 push(r, &mut out);
             }
         }
-        for issue in &ws.gh_issues {
+        for issue in ws.gh_issues.iter().chain(ws.linear_issues.iter()) {
             for a in &issue.assignees {
                 push(a, &mut out);
             }
@@ -1013,7 +1242,7 @@ impl<T: TerminalAdapter> Model<T> {
                 push(r, &mut out);
             }
         }
-        for issue in &ws.gh_issues {
+        for issue in ws.gh_issues.iter().chain(ws.linear_issues.iter()) {
             for a in &issue.assignees {
                 push(a, &mut out);
             }
@@ -2216,6 +2445,35 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.worktree_progress_dismissed = None;
+        // #1041: an unmapped Linear team surfaces as a Failed provision
+        // step, but it's a missing *choice*, not a breakage. Open the repo
+        // picker directly — the primary path — instead of the "× spawn
+        // aborted / retry once fixed" checklist. `open_…` tears down the
+        // in-flight spinner itself; it returns false (falling through to the
+        // normal failed modal) only when there's genuinely no repo to
+        // propose — the true last resort.
+        //
+        // Gate on the failed spawn being *this* client's `last_spawn` for
+        // *this* session, and hand that exact spawn to the picker: an
+        // autonomous failure (daemon-issued, so not in `last_spawn`) or a
+        // stale interactive `last_spawn` from another session must NOT open
+        // a picker that would then re-provision the wrong spawn — it falls
+        // through to the failure modal instead.
+        if let lazybox_ipc::WorktreeStepStatus::Failed(message) = &status
+            && lazybox_ipc::WorktreeRecovery::classify(message)
+                == lazybox_ipc::WorktreeRecovery::LinearUnmapped
+            && let Some(spawn) = self.last_spawn.clone().filter(|cmd| {
+                matches!(
+                    cmd,
+                    lazybox_ipc::Command::Spawn { session_key: sk, .. } if *sk == session_key,
+                )
+            })
+        {
+            let message = message.clone();
+            if self.open_linear_team_repo_picker(&message, spawn) {
+                return;
+            }
+        }
         // A new spawn supersedes any stale checklist (e.g. the previous
         // one errored and the user re-pressed `w`).
         let state = match self.worktree_progress.as_mut() {
@@ -2372,9 +2630,13 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::realm::components::worktree_progress::{
             WorktreeProgress, WorktreeProgressState,
         };
-        let Some(lazybox_ipc::Command::Spawn { session_key, .. }) = self.last_spawn.clone() else {
+        let Some(spawn) = self.last_spawn.clone() else {
             return false;
         };
+        let lazybox_ipc::Command::Spawn { session_key, .. } = &spawn else {
+            return false;
+        };
+        let session_key = session_key.clone();
         // This failure belongs to `session_key`; a live checklist for
         // another session must keep advancing rather than be replaced.
         if self
@@ -2383,6 +2645,20 @@ impl<T: TerminalAdapter> Model<T> {
             .is_some_and(|s| !s.failed() && s.session_key != session_key)
         {
             return false;
+        }
+        // #1041: an unmapped Linear team is not a failure to *show* — it's a
+        // missing choice to *make*. Open the repo picker directly as the
+        // primary path (persist + re-provision on pick), never the "× spawn
+        // aborted / retry once fixed" dead-end. This path fires only when the
+        // failure arrives as a bare provider error with no live checklist
+        // (#594), so `last_spawn` is the spawn that just failed — hand it to
+        // the picker to re-provision. Only when there's genuinely no repo to
+        // propose does it fall through to the failure modal below.
+        if lazybox_ipc::WorktreeRecovery::classify(message)
+            == lazybox_ipc::WorktreeRecovery::LinearUnmapped
+            && self.open_linear_team_repo_picker(message, spawn)
+        {
+            return true;
         }
         let step = lazybox_ipc::WorktreeRecovery::classify(message).failed_step();
         let mut state = WorktreeProgressState::new(session_key);
@@ -2422,6 +2698,25 @@ impl<T: TerminalAdapter> Model<T> {
         self.force_dismiss_worktree_progress();
         // A superseded checklist would otherwise be treated as
         // Esc-dismissed; clear the marker so the retry's events mount.
+        self.worktree_progress_dismissed = None;
+        self.flush_dispatched_cmds(vec![spawn]);
+    }
+
+    /// Re-issue the spawn that opened the repo picker after mapping an
+    /// unmapped Linear team (#1041). Unlike `retry_worktree_provision`, this
+    /// is not gated on a failed checklist: the picker now opens *before* any
+    /// failure modal, so there is usually no failed state to observe. It
+    /// re-provisions [`Self::linear_map_spawn`] — the spawn captured when the
+    /// picker opened — *not* the live `last_spawn`, which a later concurrent
+    /// `w w` may have overwritten. `None` is persist-only: an autonomous
+    /// Linear failure has no client-issued spawn to re-run, and the saved
+    /// mapping already lets the next attempt resolve directly.
+    pub(super) fn reprovision_after_linear_map(&mut self) {
+        let Some(spawn) = self.linear_map_spawn.take() else {
+            self.flash_hint("mapping saved — retry to start on this ticket");
+            return;
+        };
+        self.force_dismiss_worktree_progress();
         self.worktree_progress_dismissed = None;
         self.flush_dispatched_cmds(vec![spawn]);
     }
@@ -2521,31 +2816,94 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// `r` on a `LinearUnmapped` `WorktreeProgress` modal (#1041): open a
-    /// picker of tracked GitHub repos for the ticket's team. The pick
-    /// persists `providers.linear.teams.<team>` and re-provisions the
-    /// stuck spawn, so the mapping is asked once instead of demanding a
-    /// hand-edit of `config.yaml`. With no team parseable from the error,
-    /// or no GitHub repos to offer, it falls back to the manual hint.
+    /// picker of tracked GitHub repos for the ticket's team. Reached only as
+    /// the last-resort recovery — the picker normally opens *directly* from
+    /// `route_spawn_failure_to_recovery` before any failure modal, so `w w`
+    /// never dead-ends. With no team parseable from the error, or no GitHub
+    /// repos to offer, it falls back to the manual hint.
     pub(super) fn pick_repo_for_linear_team(&mut self) {
-        use crate::realm::components::choice::Choice;
-
-        let Some(team) = self
-            .worktree_progress
-            .as_ref()
-            .and_then(|state| state.error())
-            .and_then(lazybox_ipc::WorktreeRecovery::linear_team)
-        else {
+        let Some((team, failed_key)) = self.worktree_progress.as_ref().and_then(|state| {
+            let team = state
+                .error()
+                .and_then(lazybox_ipc::WorktreeRecovery::linear_team)?;
+            Some((team, state.session_key.clone()))
+        }) else {
             self.flash_hint("couldn't read the team — set providers.linear.teams by hand");
             return;
         };
-        let repos = self.sidebar.github_repos_for_picker();
-        if repos.is_empty() {
+        // Capture the failed spawn to re-provision only when it's this
+        // client's own spawn for the checklist's session; an autonomous
+        // failure's `last_spawn` belongs to an unrelated interactive spawn
+        // and must not be re-issued (#1041, review) — the map is persist-only.
+        let spawn = self.last_spawn.clone().filter(|cmd| {
+            matches!(
+                cmd,
+                lazybox_ipc::Command::Spawn { session_key, .. } if *session_key == failed_key,
+            )
+        });
+        if !self.mount_linear_team_repo_picker(&team, spawn) {
+            // Genuinely nothing to propose: the user tracks no GitHub repo,
+            // so there's no repo to map the team *to* either. Point at the
+            // fix (add a repo) rather than at a config key that can't yet be
+            // filled in (#1041, review).
             self.flash_info(format!(
-                "no GitHub repos tracked yet — set providers.linear.teams.{team} by hand"
+                "no GitHub repos in scope yet — add one to lazybox, then `w w` \
+                 offers it for Linear team {team}"
             ));
-            return;
         }
-        self.set_modal_flow(ModalFlow::LinearTeamRepo { team: team.clone() });
+    }
+
+    /// An unmapped Linear team spawn failure (#1041): open the repo picker
+    /// **directly** as the primary path, in place of the "× spawn aborted"
+    /// failure modal, capturing `spawn` (the spawn that failed) so the pick
+    /// re-provisions exactly it. Returns `true` when the picker mounted (team
+    /// parseable and at least one tracked repo to propose); `false` lets the
+    /// caller fall back to the failure modal — the genuine last resort when
+    /// there is no repo to offer at all.
+    pub(super) fn open_linear_team_repo_picker(
+        &mut self,
+        message: &str,
+        spawn: lazybox_ipc::Command,
+    ) -> bool {
+        // One failed provision surfaces twice — a `WorktreeProgress::Failed`
+        // step *and* a `spawn:worktree` provider error — and both route
+        // here. The first opens the picker (and captures its spawn); the
+        // second must be a no-op — neither a second stacked picker nor an
+        // overwrite of the captured spawn with a later, racing one.
+        if self.modal_stack.contains(&Id::LinearTeamRepo) {
+            return true;
+        }
+        let Some(team) = lazybox_ipc::WorktreeRecovery::linear_team(message) else {
+            return false;
+        };
+        // Never fabricated failure state: a spinner from an earlier progress
+        // step is torn down so the picker — not a stuck checklist — is what
+        // the user sees.
+        self.force_dismiss_worktree_progress();
+        self.worktree_progress_dismissed = None;
+        self.mount_linear_team_repo_picker(&team, Some(spawn))
+    }
+
+    /// Mount the team→repo `Choice` picker for `team`, ranking repos the
+    /// team's other tickets already link to first (#1041), and stash `spawn`
+    /// as the spawn the pick will re-provision. Returns `false` without
+    /// mounting (or capturing) when no GitHub repo is tracked yet — a blank
+    /// picker helps no one.
+    fn mount_linear_team_repo_picker(
+        &mut self,
+        team: &str,
+        spawn: Option<lazybox_ipc::Command>,
+    ) -> bool {
+        use crate::realm::components::choice::Choice;
+
+        let repos = self.sidebar.github_repos_ranked_for_linear_team(team);
+        if repos.is_empty() {
+            return false;
+        }
+        self.linear_map_spawn = spawn;
+        self.set_modal_flow(ModalFlow::LinearTeamRepo {
+            team: team.to_string(),
+        });
         let modal = Choice::single(
             format!("Which repo should Linear team {team} use? (saved for its future tickets)"),
             repos,
@@ -2554,6 +2912,7 @@ impl<T: TerminalAdapter> Model<T> {
         .label(|repo: &String| repo.clone())
         .payload_for(|repo: &String| ChoicePayload::Text(repo.clone()));
         self.mount_modal(Id::LinearTeamRepo, modal);
+        true
     }
 
     /// Push a modal.

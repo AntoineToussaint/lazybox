@@ -20,9 +20,14 @@ fn task_number_suffix(task_key: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Which contextual/agent operation a bulk `v`-selection fan-out runs
-/// (#899). Tiers ride alongside as a separate `model_alias`.
-enum BulkAgentOp {
+/// A resolved workspace operation the unified fan-out applies uniformly
+/// to every target (#1077): the action + its payload, decided ONCE, then
+/// handed to [`Model::apply_one`] per target. Bulk `v`-selection work
+/// (#899) and snippet / free-text broadcast (#836) are all just variants
+/// here — the same pipeline resolves targets once, resolves the op once,
+/// and applies that same op to each. Tiers ride alongside as a separate
+/// `model_alias`.
+enum BulkOp {
     /// `w w`: continue the contextual agent per workspace, else spawn it.
     Work,
     /// `w c` / `w x` / `w u`: same, but force a specific agent id.
@@ -35,6 +40,36 @@ enum BulkAgentOp {
     SpawnAgentRemote(String, String),
     /// `s`: always spawn a shell.
     SpawnShell,
+    /// Deliver a snippet to each target (snippet broadcast / sidebar `]]s`
+    /// fan-out, #1077). Category + body are resolved once at op-build
+    /// time. A live session gets the confirmed-delivery command; a
+    /// session-less but spawnable workspace spawns the default agent
+    /// seeded with the body (#836); a repo-less row is skipped.
+    Snippet {
+        key: String,
+        category: String,
+        body: String,
+    },
+    /// Deliver a free-text prompt to each target (free-text broadcast,
+    /// #836). Same target handling as [`Self::Snippet`], but a live agent
+    /// gets the settle-gated inject and a live shell the encoded write.
+    Prompt { body: String },
+}
+
+/// What applying a [`BulkOp`] to one target yields (#1077) — the return
+/// of [`Model::apply_one`]. The fan-out loop folds these into a
+/// [`BulkAgentPlan`]: a `Spawn` counts as a heavy new session (and pins
+/// the focus-follow), a `Live` delivery injects/writes into a running
+/// session, a `Skip` is named in the summary, and `Gone` is dropped
+/// silently (the row vanished between mark and fire).
+enum ApplyOutcome {
+    Spawn {
+        step: super::BulkAgentStep,
+        follow: lazybox_core::SessionKey,
+    },
+    Live(super::BulkAgentStep),
+    Skip(String),
+    Gone,
 }
 
 /// The pre-computed result of a bulk agent fan-out: the ordered,
@@ -95,6 +130,41 @@ fn bulk_agent_summary(plan: &BulkAgentPlan) -> String {
     }
     if parts.is_empty() {
         "nothing to work on".to_string()
+    } else {
+        parts.join(" · ")
+    }
+}
+
+/// "queued for N · started M · K skipped (no repo): …" — the outcome
+/// notice a snippet / free-text broadcast (#836) flashes. Distinct copy
+/// from [`bulk_agent_summary`] (a broadcast "queues" deliveries and
+/// "starts" seeded agents), but the same [`BulkAgentPlan`] tallies.
+fn broadcast_summary(plan: &BulkAgentPlan) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let mut parts: Vec<String> = Vec::new();
+    if plan.injected > 0 {
+        parts.push(format!(
+            "queued for {} workspace{}",
+            plan.injected,
+            plural(plan.injected)
+        ));
+    }
+    if plan.spawned > 0 {
+        parts.push(format!(
+            "started {} agent{}",
+            plan.spawned,
+            plural(plan.spawned)
+        ));
+    }
+    if !plan.skipped.is_empty() {
+        parts.push(format!(
+            "{} skipped (no repo): {}",
+            plan.skipped.len(),
+            plan.skipped.join(", "),
+        ));
+    }
+    if parts.is_empty() {
+        "broadcast reached nobody".to_string()
     } else {
         parts.join(" · ")
     }
@@ -262,6 +332,26 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Kick off the reviewer picker for the focused workspace's PR.
+    /// Two-step like the label picker (`g l`): ask the daemon for the
+    /// repo's requestable reviewers, then mount the picker when
+    /// `Event::RequestableReviewers` arrives (see
+    /// [`Model::mount_request_reviewers`]). Returns the fetch command
+    /// to enqueue, or `None` when the focused workspace has no PR.
+    /// Shared by the `g r` action and the clickable header "Reviewers:"
+    /// line.
+    pub(crate) fn begin_request_reviewers(&mut self) -> Option<IpcCommand> {
+        let ws = self.sidebar.selected_workspace()?;
+        // Only PRs have reviewers — bail when the focused workspace has no PR.
+        ws.pr.as_ref()?;
+        let ws_key = ws.key.clone();
+        self.awaiting_requestable_reviewers = Some(ws_key.clone());
+        self.flash_hint("loading reviewers…");
+        Some(IpcCommand::FetchRequestableReviewers {
+            workspace_key: ws_key,
+        })
+    }
+
     /// Single fan-out from a catalog `Action` to its effect (IPC
     /// command, modal mount, focus shift, …). Surfaces (keyboard,
     /// right-click menu, future remap UI) all call this so behavior
@@ -377,6 +467,18 @@ impl<T: TerminalAdapter> Model<T> {
             .cloned()
             .into_iter()
             .collect()
+    }
+
+    /// Whether any workspace in the current r-spawn target set actually has
+    /// a box (its repo didn't opt out, #1066). Drives the bulk hard-gate: an
+    /// all-disabled selection must not force a needless connect just to skip
+    /// every target.
+    fn selection_has_remote_target(&self) -> bool {
+        self.resolve_targets().iter().any(|key| {
+            self.sidebar
+                .workspace_by_key(key)
+                .is_some_and(|ws| self.remote_for_repo(ws.repo_slug().as_deref()).is_some())
+        })
     }
 
     /// The target *set* a destructive action fires against: every
@@ -534,7 +636,9 @@ impl<T: TerminalAdapter> Model<T> {
                                 "closing issue{}…",
                                 task_number_suffix(
                                     ws.gh_issues
-                                        .first()
+                                        .iter()
+                                        .chain(ws.linear_issues.iter())
+                                        .next()
                                         .map(|i| i.id.key.as_str())
                                         .unwrap_or("")
                                 )
@@ -886,7 +990,7 @@ impl<T: TerminalAdapter> Model<T> {
         match action {
             Action::SpawnShell => {
                 if self.bulk_active() {
-                    return self.dispatch_bulk_agent(BulkAgentOp::SpawnShell, None);
+                    return self.dispatch_bulk_agent(BulkOp::SpawnShell, None);
                 }
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
@@ -904,8 +1008,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::SpawnAgent(agent_id) => {
                 if self.bulk_active() {
-                    return self
-                        .dispatch_bulk_agent(BulkAgentOp::SpawnAgent(agent_id.clone()), None);
+                    return self.dispatch_bulk_agent(BulkOp::SpawnAgent(agent_id.clone()), None);
                 }
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
@@ -930,20 +1033,58 @@ impl<T: TerminalAdapter> Model<T> {
             // client here rather than returned in `cmds` — those flush to
             // the LOCAL daemon.
             Action::SpawnAgentRemote(agent_id) => {
-                let Some(remote) = self.default_remote().map(str::to_string) else {
+                let Some(default_remote) = self.default_remote().map(str::to_string) else {
                     self.flash_error(
                         "no remote box configured — add a `sandbox:` block to spawn on a box",
                     );
                     return cmds;
                 };
                 // Under a live multi-select the r-spawn fans out like every
-                // other bulk-appropriate spawn (#932) — same plan, same
-                // heavy-spawn confirm, each target routed to the box.
+                // other bulk-appropriate spawn (#932) — same plan, each target
+                // routed to (or skipped by) its repo's box per the per-project
+                // opt-out. The hard-gate applies only if at least one selected
+                // target actually has a box: an all-disabled selection must
+                // not induce a needless (billed) connect just to skip
+                // everything.
                 if self.bulk_active() {
+                    if self.remote_require_connect
+                        && !self.remote_connected()
+                        && self.selection_has_remote_target()
+                    {
+                        self.flash_error(
+                            "box not connected — press Shift-C to connect first (require_connect is on)",
+                        );
+                        return cmds;
+                    }
                     return self.dispatch_bulk_agent(
-                        BulkAgentOp::SpawnAgentRemote(agent_id.clone(), remote),
+                        BulkOp::SpawnAgentRemote(agent_id.clone(), default_remote),
                         None,
                     );
+                }
+                // Per-project sandbox opt-out (#1066) is resolved FIRST — a
+                // repo that set `sandbox: false` has no box, so it's refused
+                // here without ever inducing a connect. Ordering matters: the
+                // hard-gate below would otherwise tell a disabled repo to
+                // "connect first", waking the billed box only to then refuse.
+                let repo = self
+                    .sidebar
+                    .selected_workspace()
+                    .and_then(|w| w.repo_slug());
+                let Some(remote) = self.remote_for_repo(repo.as_deref()).map(str::to_string) else {
+                    self.flash_error(
+                        "sandbox is disabled for this project (repos.<repo>.sandbox: false)",
+                    );
+                    return cmds;
+                };
+                // Then the hard-gate (`sandbox.require_connect: true`, #1066):
+                // refuse rather than silently trigger a multi-minute bring-up
+                // from a spawn; the persistent indicator does the waiting.
+                // Off by default — a spawn while disconnected lazily brings up.
+                if self.remote_require_connect && !self.remote_connected() {
+                    self.flash_error(
+                        "box not connected — press Shift-C to connect first (require_connect is on)",
+                    );
+                    return cmds;
                 }
                 if let Some(sk) = session_key {
                     let spawn = IpcCommand::Spawn {
@@ -1011,19 +1152,19 @@ impl<T: TerminalAdapter> Model<T> {
                 // The scoped `w c` / `w x` chords (Action::WorkWith) force
                 // a specific agent.
                 if self.bulk_active() {
-                    return self.dispatch_bulk_agent(BulkAgentOp::Work, None);
+                    return self.dispatch_bulk_agent(BulkOp::Work, None);
                 }
                 self.dispatch_work(session_id, None, &mut cmds);
             }
             Action::WorkWith(agent_id) => {
                 if self.bulk_active() {
-                    return self.dispatch_bulk_agent(BulkAgentOp::WorkWith(agent_id.clone()), None);
+                    return self.dispatch_bulk_agent(BulkOp::WorkWith(agent_id.clone()), None);
                 }
                 self.dispatch_work_with(agent_id, session_id, None, &mut cmds);
             }
             Action::WorkTier(alias) => {
                 if self.bulk_active() {
-                    return self.dispatch_bulk_agent(BulkAgentOp::Work, Some(alias.clone()));
+                    return self.dispatch_bulk_agent(BulkOp::Work, Some(alias.clone()));
                 }
                 // Flat `w S`: work on the same contextual target agent as
                 // `w w`, but launch it at the picked model tier. The
@@ -1037,7 +1178,7 @@ impl<T: TerminalAdapter> Model<T> {
                 if self.bulk_active() {
                     let agent = self.sidebar.default_agent().to_string();
                     return self
-                        .dispatch_bulk_agent(BulkAgentOp::SpawnAgent(agent), Some(alias.clone()));
+                        .dispatch_bulk_agent(BulkOp::SpawnAgent(agent), Some(alias.clone()));
                 }
                 if let Some(sk) = session_key {
                     cmds.push(IpcCommand::Spawn {
@@ -1526,6 +1667,24 @@ impl<T: TerminalAdapter> Model<T> {
             Action::ToggleFocusMode => {
                 self.toggle_focus_mode();
             }
+            Action::ConnectBox => {
+                // Explicit connect/disconnect toggle (#1066). Connection is
+                // first-class session state: this brings the box up (or
+                // tears the link down) on demand, with the persistent
+                // footer indicator showing progress. A no-op flash when no
+                // `sandbox:` box is configured.
+                if self.remote_control.is_none() {
+                    self.flash_error(
+                        "no remote box configured — add a `sandbox:` block to connect",
+                    );
+                } else if self.status.remote_conn.is_connected()
+                    || self.status.remote_conn.is_busy()
+                {
+                    self.disconnect_remote();
+                } else {
+                    self.connect_remote();
+                }
+            }
             Action::StartAgent => {
                 // Global "just start working" entry point. Unlike `n`
                 // (which needs the sidebar cursor on a project), this
@@ -1557,22 +1716,21 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::RequestReviewers => {
-                if let Some(ws) = self.sidebar.selected_workspace()
-                    && ws.pr.is_some()
-                {
-                    let ws_key = ws.key.clone();
-                    self.mount_request_reviewers(ws_key);
+                if let Some(cmd) = self.begin_request_reviewers() {
+                    cmds.push(cmd);
                 }
             }
             Action::AddAssignees => {
                 if let Some(ws) = self.sidebar.selected_workspace() {
-                    // Assignment requires a GraphQL Assignable id —
-                    // PR or gh issue with a node_id. Empty pre-PR
-                    // workspaces don't qualify.
+                    // Assignment requires a provider assignable id — a
+                    // PR, gh issue, or Linear issue with a node_id.
+                    // Empty pre-PR workspaces don't qualify.
                     let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
                         || ws
                             .gh_issues
-                            .first()
+                            .iter()
+                            .chain(ws.linear_issues.iter())
+                            .next()
                             .map(|i| i.node_id.is_some())
                             .unwrap_or(false);
                     if has_target {
@@ -1731,12 +1889,16 @@ impl<T: TerminalAdapter> Model<T> {
                 self.sidebar.open_global_search();
             }
             Action::ToggleRepoGroup => {
-                // `Space` folds whichever tier the cursor rests on: a
-                // Space header collapses the whole Space (#860), any
-                // other row collapses its repo group.
+                // `Space` folds only the tier the cursor rests ON: a Space
+                // header collapses the whole Space (#860), a repo header
+                // collapses its group. On a workspace / session / kind row
+                // it is inert — a bare Space is the most reflexively-pressed
+                // "neutral" key, so it must never fold the group you're
+                // navigating inside (#1099). Collapse a group by moving to
+                // its header or clicking the ▾ triangle.
                 if self.sidebar.cursor_on_space_header() {
                     self.sidebar.toggle_space_at_cursor();
-                } else {
+                } else if self.sidebar.cursor_on_repo_header() {
                     self.sidebar.toggle_repo_at_cursor();
                 }
             }
@@ -1858,12 +2020,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// immediately, otherwise it gates behind a `Confirm` that names the
     /// count — spawning N agents is heavy (#836) — snapshotting the plan
     /// so a poll under the modal can't change who starts.
-    fn dispatch_bulk_agent(
-        &mut self,
-        op: BulkAgentOp,
-        model_alias: Option<String>,
-    ) -> Vec<IpcCommand> {
-        let plan = self.build_bulk_agent_plan(&op, model_alias);
+    fn dispatch_bulk_agent(&mut self, op: BulkOp, model_alias: Option<String>) -> Vec<IpcCommand> {
+        let targets = self.resolve_targets();
+        let plan = self.build_bulk_agent_plan(&op, &targets, model_alias);
         let summary = bulk_agent_summary(&plan);
         if plan.spawned == 0 {
             // No heavy spawns — run the plan (injects, or nothing) now.
@@ -1878,7 +2037,7 @@ impl<T: TerminalAdapter> Model<T> {
             return self.run_bulk_agent_steps(plan.steps);
         }
         let remote = match &op {
-            BulkAgentOp::SpawnAgentRemote(_, remote) => Some(remote.as_str()),
+            BulkOp::SpawnAgentRemote(_, remote) => Some(remote.as_str()),
             _ => None,
         };
         let prompt = bulk_agent_confirm_prompt(&plan, remote);
@@ -1890,6 +2049,101 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = crate::realm::components::confirm::Confirm::new(&prompt).default_yes();
         self.mount_modal(super::Id::BulkSpawnConfirm, modal);
         Vec::new()
+    }
+
+    /// Resolve a broadcast's (snippet / free-text) payload into a
+    /// [`BulkOp`] once. The snippet category is looked up here so the op
+    /// carries everything `apply_one` needs per target.
+    fn broadcast_op(&self, snippet_key: Option<&str>, body: &str) -> BulkOp {
+        match snippet_key {
+            Some(key) => BulkOp::Snippet {
+                key: key.to_string(),
+                category: self
+                    .snippets
+                    .get(key)
+                    .map(|snippet| snippet.category.clone())
+                    .unwrap_or_default(),
+                body: body.to_string(),
+            },
+            None => BulkOp::Prompt {
+                body: body.to_string(),
+            },
+        }
+    }
+
+    /// Fan a snippet / free-text broadcast over an explicit target set
+    /// (#836, #1077) through the same [`Self::apply_one`] pipeline `w w`
+    /// bulk start uses — a broadcast is just a `Snippet` / `Prompt` op.
+    /// A live session is delivered to now; a session-less scoped row spawns
+    /// the default agent seeded with the body, and because spawning is
+    /// heavy the send gates behind a confirm first. `targets` is the set
+    /// stashed when the flow mounted; the confirm stashes the op *inputs*
+    /// (not the resolved steps) so a "yes" re-resolves each target's live
+    /// session state — a target whose agent died under the modal recovers
+    /// by re-spawning seeded, rather than firing at a now-dead terminal.
+    pub(super) fn dispatch_broadcast_op(
+        &mut self,
+        targets: &[lazybox_core::SessionKey],
+        snippet_key: Option<&str>,
+        body: &str,
+    ) -> Vec<IpcCommand> {
+        let op = self.broadcast_op(snippet_key, body);
+        let plan = self.build_bulk_agent_plan(&op, targets, None);
+        if plan.spawned == 0 {
+            // No heavy spawns — deliver now.
+            return self.run_broadcast_plan(plan);
+        }
+        let agent = self.sidebar.default_agent().to_string();
+        let prompt = if plan.spawned == 1 {
+            format!(
+                "1 selected workspace has no agent — start the default agent ({agent}) there and broadcast?"
+            )
+        } else {
+            format!(
+                "{} selected workspaces have no agent — start the default agent ({agent}) in each and broadcast?",
+                plan.spawned
+            )
+        };
+        self.set_modal_flow(super::ModalFlow::BroadcastConfirm {
+            targets: targets.to_vec(),
+            snippet_key: snippet_key.map(str::to_string),
+            body: body.to_string(),
+        });
+        let modal = crate::realm::components::confirm::Confirm::new(&prompt).default_yes();
+        self.mount_modal(super::Id::BroadcastConfirm, modal);
+        Vec::new()
+    }
+
+    /// Run a confirmed broadcast (`Id::BroadcastConfirm` "yes"). Re-resolves
+    /// the op against each target's *current* session state — the fixed
+    /// target set can't change, but a target that lost (or gained) a live
+    /// agent while the confirm was up is served correctly now, so a delivery
+    /// never fires at a terminal that died under the modal (#1077 review).
+    pub(super) fn run_broadcast_confirmed(
+        &mut self,
+        targets: &[lazybox_core::SessionKey],
+        snippet_key: Option<&str>,
+        body: &str,
+    ) -> Vec<IpcCommand> {
+        let op = self.broadcast_op(snippet_key, body);
+        let plan = self.build_bulk_agent_plan(&op, targets, None);
+        self.run_broadcast_plan(plan)
+    }
+
+    /// Materialize a broadcast plan: clear the multi-select when anything
+    /// was delivered or started (but not when every target was skipped, so
+    /// a retry keeps the marks), flash the outcome summary, and run the
+    /// steps. Broadcast never follows focus (fire-and-stay), so
+    /// `spawn_follow_to` is left untouched. Shared by the immediate and
+    /// post-confirm paths so both materialize identically.
+    fn run_broadcast_plan(&mut self, plan: BulkAgentPlan) -> Vec<IpcCommand> {
+        let summary = broadcast_summary(&plan);
+        if plan.injected > 0 || plan.spawned > 0 {
+            self.sidebar.clear_broadcast_selection();
+        }
+        self.flash_info(summary);
+        self.redraw = true;
+        self.run_bulk_agent_steps(plan.steps)
     }
 
     /// Run a snapshotted bulk agent plan: emit each spawn and deliver
@@ -1921,137 +2175,239 @@ impl<T: TerminalAdapter> Model<T> {
                         &mut cmds,
                     );
                 }
+                // A live shell has no paste debounce, so the encoded direct
+                // write submits cleanly (free-text broadcast to a shell).
+                super::BulkAgentStep::Write { terminal_id, body } => {
+                    self.deliver_prompt(
+                        terminal_id,
+                        false,
+                        &body,
+                        lazybox_ipc::PromptSource::Typed,
+                        &mut cmds,
+                    );
+                }
+                // Snippet delivery rides the daemon's confirmed-delivery
+                // command (agent + shell), leaving history / MRU behind the
+                // daemon's ack.
+                super::BulkAgentStep::DeliverSnippet {
+                    terminal_id,
+                    snippet_key,
+                    category,
+                    body,
+                } => {
+                    cmds.push(IpcCommand::DeliverSnippet {
+                        terminal_id,
+                        snippet_key,
+                        category,
+                        body,
+                        submit: true,
+                    });
+                }
             }
         }
         cmds
     }
 
-    /// Build the spawn/inject step plan for a bulk agent op over the
-    /// current multi-select, in sidebar order. Each target either injects
-    /// the contextual work prompt into its live agent, spawns a fresh
-    /// session, or is skipped (session-less scratch row, or a
-    /// merged/finished workspace that steers to cleanup instead). Takes
-    /// `&self` and produces only inert steps — nothing is delivered or
-    /// recorded here, so a plan the user later cancels leaves no trace.
+    /// Build the fan-out plan for a resolved [`BulkOp`] over an explicit
+    /// target set, in the given order, by running [`Self::apply_one`] on
+    /// each. The unified pipeline (#1077): callers resolve the target set
+    /// once ([`Self::resolve_targets`] for the `v` multi-select, the
+    /// stashed draft for a broadcast) and the op once, then this applies
+    /// that same op to every target. Takes `&self` and produces only
+    /// inert steps — nothing is delivered or recorded here, so a plan the
+    /// user later cancels leaves no trace.
+    fn build_bulk_agent_plan(
+        &self,
+        op: &BulkOp,
+        targets: &[lazybox_core::SessionKey],
+        model_alias: Option<String>,
+    ) -> BulkAgentPlan {
+        let mut plan = BulkAgentPlan::default();
+        for key in targets {
+            match self.apply_one(op, key, model_alias.as_deref()) {
+                ApplyOutcome::Spawn { step, follow } => {
+                    plan.steps.push(step);
+                    plan.spawned += 1;
+                    plan.follow.get_or_insert(follow);
+                }
+                ApplyOutcome::Live(step) => {
+                    plan.steps.push(step);
+                    plan.injected += 1;
+                }
+                ApplyOutcome::Skip(name) => plan.skipped.push(name),
+                ApplyOutcome::Gone => {}
+            }
+        }
+        plan
+    }
+
+    /// The single source of truth for "apply this op to this one
+    /// workspace" (#1077) — the `apply_one` every fan-out shares. Given a
+    /// resolved [`BulkOp`] and one target key, it produces the inert step
+    /// to run (spawn / inject / write / snippet), a named skip, or `Gone`
+    /// when the row vanished between mark and fire. Never touches the
+    /// sidebar selection or the focused row: the target is the `key`
+    /// argument alone, so no dispatchable action re-derives its target
+    /// from `selected_workspace()`.
     ///
     /// A workspace running *several* agents (`WorkTarget::Choose`, #418)
     /// can't raise its per-row chooser mid-fan-out, so bulk work targets
     /// its first live agent — the deliberate "resolve per target, don't
     /// prompt N times" bulk trade-off.
-    fn build_bulk_agent_plan(
+    fn apply_one(
         &self,
-        op: &BulkAgentOp,
-        model_alias: Option<String>,
-    ) -> BulkAgentPlan {
+        op: &BulkOp,
+        key: &lazybox_core::SessionKey,
+        model_alias: Option<&str>,
+    ) -> ApplyOutcome {
         use crate::components::sidebar::WorkTarget;
-        let keys = self.resolve_targets();
+        let Some(ws) = self.sidebar.workspace_by_key(key) else {
+            return ApplyOutcome::Gone;
+        };
+        let name = crate::util::notice_slug(&ws.name).into_owned();
+        let spawnable = ws.worktree_scope().is_some();
         let default_agent = self.sidebar.default_agent().to_string();
-        let mut plan = BulkAgentPlan::default();
-        for key in &keys {
-            let Some(ws) = self.sidebar.workspace_by_key(key) else {
-                continue;
-            };
-            let name = crate::util::notice_slug(&ws.name).into_owned();
-            let spawnable = ws.worktree_scope().is_some();
-            match op {
-                // Plain spawns always start a fresh session — a repo-less,
-                // project-less row (a Slack DM, scratch) has nothing to
-                // spawn into (#836), so it's skipped and named.
-                BulkAgentOp::SpawnShell
-                | BulkAgentOp::SpawnAgent(_)
-                | BulkAgentOp::SpawnAgentRemote(..) => {
-                    if !spawnable {
-                        plan.skipped.push(name);
-                        continue;
-                    }
-                    let kind = match op {
-                        BulkAgentOp::SpawnShell => lazybox_ipc::TerminalKind::Shell,
-                        BulkAgentOp::SpawnAgent(agent)
-                        | BulkAgentOp::SpawnAgentRemote(agent, _) => {
-                            lazybox_ipc::TerminalKind::Agent(agent.clone())
-                        }
-                        _ => unreachable!(),
-                    };
-                    let cmd = bulk_spawn_command(key.clone(), kind, None, model_alias.clone());
-                    let step = match op {
-                        BulkAgentOp::SpawnAgentRemote(_, remote) => {
-                            super::BulkAgentStep::SpawnRemote {
-                                remote: remote.clone(),
-                                key: key.clone(),
-                                cmd,
-                            }
-                        }
-                        _ => super::BulkAgentStep::Spawn(cmd),
-                    };
-                    plan.steps.push(step);
-                    plan.spawned += 1;
-                    plan.follow.get_or_insert_with(|| key.clone());
+        let model_alias = model_alias.map(str::to_string);
+        // A session-less but spawnable target seeds the default agent with
+        // the delivered body (#836) — shared by the snippet and free-text
+        // ops so both auto-start identically.
+        let seed_spawn = |body: &str| ApplyOutcome::Spawn {
+            step: super::BulkAgentStep::Spawn(bulk_spawn_command(
+                key.clone(),
+                lazybox_ipc::TerminalKind::Agent(default_agent.clone()),
+                Some(body.to_string()),
+                None,
+            )),
+            follow: key.clone(),
+        };
+        match op {
+            // Plain spawns always start a fresh session — a repo-less,
+            // project-less row (a Slack DM, scratch) has nothing to
+            // spawn into (#836), so it's skipped and named.
+            BulkOp::SpawnShell | BulkOp::SpawnAgent(_) | BulkOp::SpawnAgentRemote(..) => {
+                if !spawnable {
+                    return ApplyOutcome::Skip(name);
                 }
-                // Contextual work: continue a live agent, else start one.
-                BulkAgentOp::Work | BulkAgentOp::WorkWith(_) => {
-                    let target = match op {
-                        BulkAgentOp::WorkWith(agent) => {
-                            self.sidebar.work_target_for_agent(key, agent)
-                        }
-                        _ => self.sidebar.work_target(key, &default_agent),
-                    };
-                    let agent_id = match &target {
-                        WorkTarget::Spawn(agent) => agent.clone(),
-                        WorkTarget::Running(running) => running.agent_id.clone(),
-                        WorkTarget::Choose(targets) => targets
-                            .first()
-                            .map(|t| t.agent_id.clone())
-                            .unwrap_or_else(|| default_agent.clone()),
-                    };
-                    let running_terminal = match &target {
-                        WorkTarget::Running(running) => Some(running.terminal_id),
-                        WorkTarget::Choose(targets) => targets.first().map(|t| t.terminal_id),
-                        WorkTarget::Spawn(_) => None,
-                    };
-                    let intent = crate::intent::resolve_work(
-                        Some(ws),
-                        &[],
-                        &agent_id,
-                        self.sidebar.conventions(),
-                    );
-                    match intent {
-                        crate::intent::Intent::SpawnAgent {
-                            workspace_key,
-                            agent_id,
-                            prompt,
-                        } => match (running_terminal, prompt) {
-                            // A live agent + fresh instructions → inject.
-                            // Recorded as an inert step: the recap-mutating
-                            // delivery runs only when the plan does, so
-                            // cancelling the spawn confirm records nothing.
-                            (Some(terminal_id), Some(body)) => {
-                                plan.steps
-                                    .push(super::BulkAgentStep::Inject { terminal_id, body });
-                                plan.injected += 1;
-                            }
-                            // A live agent but nothing new to say (a scratch
-                            // row already being worked) → leave it be.
-                            (Some(_), None) => plan.skipped.push(name),
-                            // No live agent → spawn one with the prompt.
-                            (None, body) => {
-                                plan.steps
-                                    .push(super::BulkAgentStep::Spawn(bulk_spawn_command(
-                                        (&workspace_key).into(),
-                                        lazybox_ipc::TerminalKind::Agent(agent_id),
-                                        body,
-                                        model_alias.clone(),
-                                    )));
-                                plan.spawned += 1;
-                                plan.follow.get_or_insert_with(|| (&workspace_key).into());
-                            }
-                        },
-                        // Merged / closed workspace steers to cleanup.
-                        _ => plan.skipped.push(name),
+                // Per-project sandbox opt-out (#1066): a remote fan-out
+                // resolves each target against its repo's box and skips
+                // (naming it) any workspace whose repo set `sandbox: false`,
+                // so a disabled project is never spawned on the box.
+                let remote_target = if let BulkOp::SpawnAgentRemote(..) = op {
+                    match self.remote_for_repo(ws.repo_slug().as_deref()) {
+                        Some(remote) => Some(remote.to_string()),
+                        None => return ApplyOutcome::Skip(name),
                     }
+                } else {
+                    None
+                };
+                let kind = match op {
+                    BulkOp::SpawnShell => lazybox_ipc::TerminalKind::Shell,
+                    BulkOp::SpawnAgent(agent) | BulkOp::SpawnAgentRemote(agent, _) => {
+                        lazybox_ipc::TerminalKind::Agent(agent.clone())
+                    }
+                    _ => unreachable!(),
+                };
+                let cmd = bulk_spawn_command(key.clone(), kind, None, model_alias);
+                let step = match remote_target {
+                    Some(remote) => super::BulkAgentStep::SpawnRemote {
+                        remote,
+                        key: key.clone(),
+                        cmd,
+                    },
+                    None => super::BulkAgentStep::Spawn(cmd),
+                };
+                ApplyOutcome::Spawn {
+                    step,
+                    follow: key.clone(),
                 }
             }
+            // Contextual work: continue a live agent, else start one.
+            BulkOp::Work | BulkOp::WorkWith(_) => {
+                let target = match op {
+                    BulkOp::WorkWith(agent) => self.sidebar.work_target_for_agent(key, agent),
+                    _ => self.sidebar.work_target(key, &default_agent),
+                };
+                let agent_id = match &target {
+                    WorkTarget::Spawn(agent) => agent.clone(),
+                    WorkTarget::Running(running) => running.agent_id.clone(),
+                    WorkTarget::Choose(targets) => targets
+                        .first()
+                        .map(|t| t.agent_id.clone())
+                        .unwrap_or_else(|| default_agent.clone()),
+                };
+                let running_terminal = match &target {
+                    WorkTarget::Running(running) => Some(running.terminal_id),
+                    WorkTarget::Choose(targets) => targets.first().map(|t| t.terminal_id),
+                    WorkTarget::Spawn(_) => None,
+                };
+                let intent = crate::intent::resolve_work(
+                    Some(ws),
+                    &[],
+                    &agent_id,
+                    self.sidebar.conventions(),
+                );
+                match intent {
+                    crate::intent::Intent::SpawnAgent {
+                        workspace_key,
+                        agent_id,
+                        prompt,
+                    } => match (running_terminal, prompt) {
+                        // A live agent + fresh instructions → inject.
+                        (Some(terminal_id), Some(body)) => {
+                            ApplyOutcome::Live(super::BulkAgentStep::Inject { terminal_id, body })
+                        }
+                        // A live agent but nothing new to say (a scratch row
+                        // already being worked) → leave it be.
+                        (Some(_), None) => ApplyOutcome::Skip(name),
+                        // No live agent → spawn one with the prompt.
+                        (None, body) => ApplyOutcome::Spawn {
+                            step: super::BulkAgentStep::Spawn(bulk_spawn_command(
+                                (&workspace_key).into(),
+                                lazybox_ipc::TerminalKind::Agent(agent_id),
+                                body,
+                                model_alias,
+                            )),
+                            follow: (&workspace_key).into(),
+                        },
+                    },
+                    // Merged / closed workspace steers to cleanup.
+                    _ => ApplyOutcome::Skip(name),
+                }
+            }
+            // Snippet delivery: a live session gets the confirmed-delivery
+            // command; a session-less scoped row auto-starts seeded (#836);
+            // a repo-less row is skipped.
+            BulkOp::Snippet {
+                key: snippet_key,
+                category,
+                body,
+            } => match self.sidebar.broadcast_terminal(key) {
+                Some((terminal_id, _)) => {
+                    ApplyOutcome::Live(super::BulkAgentStep::DeliverSnippet {
+                        terminal_id,
+                        snippet_key: snippet_key.clone(),
+                        category: category.clone(),
+                        body: body.clone(),
+                    })
+                }
+                None if spawnable => seed_spawn(body),
+                None => ApplyOutcome::Skip(name),
+            },
+            // Free-text delivery: a live agent gets the settle-gated inject,
+            // a live shell the encoded write; same auto-start / skip tail.
+            BulkOp::Prompt { body } => match self.sidebar.broadcast_terminal(key) {
+                Some((terminal_id, true)) => ApplyOutcome::Live(super::BulkAgentStep::Inject {
+                    terminal_id,
+                    body: body.clone(),
+                }),
+                Some((terminal_id, false)) => ApplyOutcome::Live(super::BulkAgentStep::Write {
+                    terminal_id,
+                    body: body.clone(),
+                }),
+                None if spawnable => seed_spawn(body),
+                None => ApplyOutcome::Skip(name),
+            },
         }
-        plan
     }
 
     /// Resolve and fire `w w` (or a `w S` tier chord) on the selected
@@ -2255,21 +2611,20 @@ impl<T: TerminalAdapter> Model<T> {
         self.redraw = true;
     }
 
-    /// Switch the displayed terminal to the Nth agent workspace,
-    /// counting in sidebar (top-down) order — the deterministic
-    /// `]]<digit>` jump that replaced the old `F3` cycle. `n` is
-    /// 1-based, matching the number badge on the sidebar row and the
-    /// roster in the `]]` leader popup. Keeps focus on the terminal so
-    /// it works seamlessly inside focus mode; flashes when there's no
-    /// agent at that slot. Mirrors the `!` / `Shift-F` jumps but lands
-    /// the cursor on a specific agent rather than asking / failing-CI.
-    pub(super) fn jump_to_agent_workspace(&mut self, n: usize) {
-        if self.sidebar.focus_nth_agent_workspace(n) {
+    /// Switch the displayed terminal to the Nth numbered (focused)
+    /// workspace, counting in sidebar (top-down) order — the
+    /// deterministic `]]<digit>` jump. `n` is 1-based, matching the
+    /// number badge on the sidebar row and the roster in the `]]` leader
+    /// popup. Keeps focus on the terminal so it works seamlessly inside
+    /// focus mode; flashes when no focused workspace holds that slot
+    /// (nothing starred, or fewer than `n`).
+    pub(super) fn jump_to_numbered_workspace(&mut self, n: usize) {
+        if self.sidebar.focus_nth_numbered_workspace(n) {
             self.set_focus(PaneFocus::Terminals);
             self.sync_panes();
             self.redraw = true;
         } else {
-            self.flash_hint(format!("no agent #{n}"));
+            self.flash_hint(format!("no focused workspace #{n} — star one with focus"));
         }
     }
 

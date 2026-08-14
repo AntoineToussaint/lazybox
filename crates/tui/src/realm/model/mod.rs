@@ -141,6 +141,18 @@ pub enum Id {
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
+    /// Settings "Editors" panel (#1102): lists the custom `editors:`
+    /// entries with an on-PATH badge; `a`/`e`/`d` add / edit / remove.
+    /// Mounted from the Settings palette; each write hot-reloads the
+    /// editor cache so the `e` picker updates without a restart.
+    EditorsPanel,
+    /// Single-line input driving the editors-panel add/edit flow. Add is
+    /// two stages (id → launch command); edit is one (launch command,
+    /// prefilled). The stage + target id live in `ModalFlow::EditorForm`.
+    EditorForm,
+    /// Confirm before removing a custom editor from the panel (#1102).
+    /// The target id lives in `ModalFlow::EditorRemoveConfirm`.
+    EditorRemoveConfirm,
     /// Active setup-wizard step. Each transition unmounts the
     /// previous component at this id and mounts the next; only one
     /// setup step is ever live.
@@ -556,11 +568,14 @@ pub(crate) enum ActionConfirmTarget {
     Project(lazybox_core::ProjectKey),
 }
 
-/// One step of a bulk `w w` / spawn / shell fan-out (#899), kept inert
-/// until the plan runs. A `Spawn` is a pure `Command`; an `Inject`
-/// carries only the target terminal + body, so the recap-mutating
-/// delivery ([`Model::deliver_prompt`]) happens at run time, not when
-/// the plan is built — cancelling the confirm then records nothing.
+/// One inert step of the unified per-target fan-out (#1077), produced by
+/// [`Model::apply_one`] — the single "do this op to this workspace"
+/// resolver shared by bulk `w w` / spawn / shell (#899) and snippet /
+/// free-text broadcast (#836). Kept inert until the plan runs: a `Spawn`
+/// is a pure `Command`, while `Inject` / `Write` / `DeliverSnippet` carry
+/// only the target terminal + body, so the recap-mutating delivery
+/// ([`Model::deliver_prompt`]) happens at run time, not when the plan is
+/// built — cancelling the confirm then records nothing.
 #[derive(Debug, Clone)]
 pub(crate) enum BulkAgentStep {
     Spawn(lazybox_ipc::Command),
@@ -573,8 +588,25 @@ pub(crate) enum BulkAgentStep {
         key: lazybox_core::SessionKey,
         cmd: lazybox_ipc::Command,
     },
+    /// Deliver a body to a live agent through the settle-gated inject
+    /// (`w w` continue, free-text broadcast to an agent).
     Inject {
         terminal_id: lazybox_ipc::TerminalId,
+        body: String,
+    },
+    /// Direct encoded write to a live shell (free-text broadcast to a
+    /// shell — no paste debounce, so a plain submit commits cleanly).
+    Write {
+        terminal_id: lazybox_ipc::TerminalId,
+        body: String,
+    },
+    /// Deliver a snippet to a live terminal through the daemon's
+    /// confirmed-delivery command (snippet broadcast / sidebar `]]s`
+    /// fan-out). Works for both agent and shell targets.
+    DeliverSnippet {
+        terminal_id: lazybox_ipc::TerminalId,
+        snippet_key: String,
+        category: String,
         body: String,
     },
 }
@@ -815,8 +847,11 @@ pub(crate) enum ModalFlow {
     /// Broadcast flow (`Shift-B`): snippet picker → compose textarea.
     Broadcast { draft: BroadcastDraft },
     /// Broadcast confirm gate (#836): the composed message + resolved
-    /// targets, stashed while the "start N agents?" `Confirm` is up so a
-    /// "yes" can run the same fan-out the immediate path does.
+    /// target set, stashed while the "start N agents?" `Confirm` is up. A
+    /// "yes" re-runs the unified [`Model::apply_one`] pipeline (#1077)
+    /// over these fixed targets, re-resolving each one's live session
+    /// state so a target whose agent died under the modal recovers by
+    /// re-spawning instead of a delivery firing at a dead terminal.
     BroadcastConfirm {
         targets: Vec<lazybox_core::SessionKey>,
         snippet_key: Option<String>,
@@ -829,6 +864,12 @@ pub(crate) enum ModalFlow {
     ConvertSession { draft: ConversionDraft },
     /// Prompt-history picker (#523) → resend into this terminal.
     PromptHistory { terminal: lazybox_ipc::TerminalId },
+    /// Editors-panel add/edit form (#1102). Carries the current stage so
+    /// the shared `Id::EditorForm` input knows whether a submit collects
+    /// the id (add, stage 1) or the launch command (add stage 2 / edit).
+    EditorForm { stage: EditorFormStage },
+    /// Editors-panel remove confirm (#1102): the id awaiting a yes/no.
+    EditorRemoveConfirm { id: String },
     /// The tour handed control to the real snippet picker. A confirmed
     /// delivery resumes at `success_step`; cancelling or rejecting the
     /// delivery returns to `return_step`.
@@ -837,6 +878,30 @@ pub(crate) enum ModalFlow {
         return_step: usize,
         success_step: usize,
     },
+}
+
+/// Convert a config `EditorEntry` into the `editors` module's owned
+/// user-entry shape for re-discovery after a Settings write (#1102).
+pub(crate) fn editor_entry_to_user(
+    e: lazybox_config::EditorEntry,
+) -> crate::editors::UserEditorEntry {
+    crate::editors::UserEditorEntry {
+        id: e.id,
+        display: e.display,
+        command: e.command,
+        args: e.args,
+    }
+}
+
+/// Which field the editors-panel form is currently collecting.
+#[derive(Debug, Clone)]
+pub(crate) enum EditorFormStage {
+    /// Add flow, step 1: the stable `id` (also seeds the display name).
+    AwaitId,
+    /// The launch command line. Reached after the id on add, or directly
+    /// on edit (where `id` is fixed and `display` preserves any custom
+    /// name the entry already had).
+    AwaitCommand { id: String, display: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -922,6 +987,15 @@ pub enum Msg {
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
+    /// `a` in the Settings editors panel (#1102) — start the add-editor
+    /// input flow (id → launch command).
+    EditorAdd,
+    /// `e`/Enter in the editors panel — edit the launch command of the
+    /// editor with this id (prefilled with its current command).
+    EditorEdit(String),
+    /// `d`/`x` in the editors panel — remove the editor with this id
+    /// from `editors:` and hot-reload.
+    EditorRemove(String),
     LoadingResolved(PayloadCarrier),
     /// The `Loading` modal's liveness backstop fired — its awaited result
     /// never landed (produced but dropped on an overflowed event channel,
@@ -1185,6 +1259,13 @@ impl PaneFocus {
 /// extracted from libghostty on release.
 #[derive(Debug, Clone, Copy)]
 struct TerminalDrag {
+    /// The terminal the drag STARTED in — the tile under the mouse-down,
+    /// resolved once and fixed for the drag's lifetime. Every selection
+    /// mapping (anchor, focus, extraction, highlight) is composed against
+    /// THIS terminal's grid, so a drag that strays into a neighbouring tile
+    /// stays scoped to the tile it began in regardless of what is focused
+    /// at release (#1101).
+    terminal: lazybox_ipc::TerminalId,
     /// Crossterm cell of the initial mouse-down. A press-release with no
     /// intervening cell change is a plain click, forwarded to a
     /// mouse-tracking inner program from this position.
@@ -1267,6 +1348,11 @@ pub struct Model<T: TerminalAdapter> {
     /// The remote an unqualified `r`-spawn targets — today the single
     /// `sandbox:` box. `None` when no box is configured.
     default_remote: Option<String>,
+    /// Repos that opted out of the global box (`repos.<key>.sandbox: false`,
+    /// #1066). An `r`-spawn on a workspace in one of these is refused even
+    /// while the box is configured for other projects — the per-project
+    /// override the boot crate resolves from config and hands here.
+    remote_disabled_repos: std::collections::BTreeSet<String>,
     /// The r-spawn worker's notice stream (bring-up progress, dropped
     /// commands), drained once per run-loop iteration into footer
     /// flashes. `None` when no box is configured. Deliberately not the
@@ -1282,6 +1368,17 @@ pub struct Model<T: TerminalAdapter> {
     /// the next poll instead of flickering off within seconds. Rolled back
     /// when the worker reports the spawn dropped.
     remote_marks: std::collections::HashMap<lazybox_core::SessionKey, String>,
+    /// UI→worker control channel for the remote box: explicit
+    /// connect/disconnect (the `Shift-C` action) and the startup
+    /// auto-connect (#1066). `None` when no `sandbox:` box is configured.
+    remote_control: Option<tokio::sync::mpsc::Sender<lazybox_tui_core::remote::RemoteControl>>,
+    /// Whether a remote spawn is hard-gated on a live connection
+    /// (`sandbox.require_connect`, default off, #1066). When true, an
+    /// `r`-spawn while disconnected is refused (pointing at `Shift-C`) rather
+    /// than lazily bringing the box up. Decoupled from startup auto-connect
+    /// (`sandbox.auto_connect`) so "no startup connect, but `r c` still
+    /// connects on demand" is the default.
+    remote_require_connect: bool,
     /// True when this client is attached to a standalone daemon over a
     /// socket (`--connect`) rather than the in-process embedded daemon.
     /// The `Client` transport is deliberately opaque, so the entrypoint
@@ -1511,6 +1608,12 @@ pub struct Model<T: TerminalAdapter> {
     /// (the reply then disarms it), so it stays out of [`ModalFlow`].
     /// Cleared on mount / submit / dismiss / fetch-failure.
     awaiting_repo_labels: Option<lazybox_core::WorkspaceKey>,
+    /// Workspace whose requestable-reviewer set we've asked the daemon
+    /// for (`g r` → `Command::FetchRequestableReviewers`), waiting on
+    /// the async `Event::RequestableReviewers` reply to mount the
+    /// picker. Same async-mount contract as [`Self::awaiting_repo_labels`]:
+    /// armed before any modal, disarmed by the reply / fetch-failure.
+    awaiting_requestable_reviewers: Option<lazybox_core::WorkspaceKey>,
     /// Exact checkout whose diff response this client is waiting for.
     pending_diff_session: Option<(lazybox_core::WorkspaceKey, lazybox_ipc::WorkspaceDiffTarget)>,
     /// Optimistic mutations applied locally and awaiting the daemon's
@@ -1711,6 +1814,16 @@ pub struct Model<T: TerminalAdapter> {
     /// #557) — provisioning failures persist no session, so a re-send
     /// retries the full provision cleanly.
     last_spawn: Option<IpcCommand>,
+    /// The spawn to re-issue after mapping an unmapped Linear team (#1041),
+    /// captured at the moment the repo picker opens. The pick re-provisions
+    /// *this* spawn rather than the live [`Self::last_spawn`], which is not
+    /// guaranteed to still be the failed spawn: a second concurrent `w w`
+    /// overwrites `last_spawn`, and an autonomous failure's spawn was never
+    /// client-issued so it isn't in `last_spawn` at all. `None` means
+    /// persist-only — the mapping is saved but there's no client spawn to
+    /// re-run (an autonomous Linear failure), so the next attempt resolves
+    /// through the freshly-persisted mapping.
+    linear_map_spawn: Option<IpcCommand>,
     /// Terminal the next `sync_panes` should promote to the active tab.
     /// Set alongside [`Self::spawn_follow_to`] so `w` lands on the
     /// freshly-spawned agent rather than whatever tab the followed
@@ -2045,8 +2158,11 @@ impl<T: TerminalAdapter> Model<T> {
             client,
             remote_clients: std::collections::BTreeMap::new(),
             default_remote: None,
+            remote_disabled_repos: std::collections::BTreeSet::new(),
             remote_notice_rx: None,
             remote_marks: std::collections::HashMap::new(),
+            remote_control: None,
+            remote_require_connect: false,
             event_backlog: helpers::BacklogMonitor::default(),
             remote: false,
             redraw: true,
@@ -2087,6 +2203,7 @@ impl<T: TerminalAdapter> Model<T> {
             conversion: None,
             last_reply_body: None,
             awaiting_repo_labels: None,
+            awaiting_requestable_reviewers: None,
             pending_diff_session: None,
             pending_mutations: Vec::new(),
             removal_prompt_queue: std::collections::VecDeque::new(),
@@ -2130,6 +2247,7 @@ impl<T: TerminalAdapter> Model<T> {
             merge_follow_from: None,
             spawn_follow_to: None,
             last_spawn: None,
+            linear_map_spawn: None,
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
@@ -2291,6 +2409,12 @@ impl<T: TerminalAdapter> Model<T> {
     ) -> Self {
         self.default_remote = default.or_else(|| clients.keys().next().cloned());
         self.remote_clients = clients;
+        // A configured box starts out disconnected (not `NotConfigured`),
+        // so the persistent indicator is visible from launch (#1066).
+        if self.default_remote.is_some() {
+            self.status
+                .note_remote_state(lazybox_tui_core::remote::RemoteConnState::Disconnected);
+        }
         self.rebuild_catalog();
         self
     }
@@ -2304,10 +2428,100 @@ impl<T: TerminalAdapter> Model<T> {
         self
     }
 
+    /// Attach the r-spawn worker's control channel and apply the startup
+    /// auto-connect policy (#1066). When auto-connect is on, fire the
+    /// background connect now so the box is live before the first spawn;
+    /// the indicator shows `connecting…` immediately. Startup only — the
+    /// per-spawn hard-gate is [`Self::with_remote_require_connect`].
+    pub fn with_remote_control(
+        mut self,
+        control: tokio::sync::mpsc::Sender<lazybox_tui_core::remote::RemoteControl>,
+        auto_connect: bool,
+    ) -> Self {
+        self.remote_control = Some(control);
+        if auto_connect {
+            self.connect_remote();
+        }
+        self
+    }
+
+    /// Whether the remote box link is currently live.
+    pub(crate) fn remote_connected(&self) -> bool {
+        self.status.remote_conn.is_connected()
+    }
+
+    /// Ask the worker to bring the box up (create → wake → connect) and
+    /// paint the indicator `connecting…` optimistically. No-op without a
+    /// configured box.
+    pub(crate) fn connect_remote(&mut self) {
+        let Some(control) = self.remote_control.as_ref() else {
+            return;
+        };
+        if control
+            .try_send(lazybox_tui_core::remote::RemoteControl::Connect)
+            .is_ok()
+        {
+            self.status
+                .note_remote_state(lazybox_tui_core::remote::RemoteConnState::Connecting);
+            self.redraw = true;
+        }
+    }
+
+    /// Ask the worker to drop the box link (the box keeps running). Paints
+    /// the indicator `disconnected` optimistically.
+    pub(crate) fn disconnect_remote(&mut self) {
+        let Some(control) = self.remote_control.as_ref() else {
+            return;
+        };
+        if control
+            .try_send(lazybox_tui_core::remote::RemoteControl::Disconnect)
+            .is_ok()
+        {
+            self.status
+                .note_remote_state(lazybox_tui_core::remote::RemoteConnState::Disconnected);
+            self.redraw = true;
+        }
+    }
+
     /// The remote name an `r`-spawn targets when the chord doesn't name
     /// one — the configured default, else the first connected remote.
     pub(crate) fn default_remote(&self) -> Option<&str> {
         self.default_remote.as_deref()
+    }
+
+    /// Record the per-project sandbox overrides — the repos that opted out
+    /// of the global box (`repos.<key>.sandbox: false`, #1066). The boot
+    /// crate resolves these from config (already lowercased).
+    pub fn with_remote_repo_overrides(
+        mut self,
+        disabled_repos: std::collections::BTreeSet<String>,
+    ) -> Self {
+        self.remote_disabled_repos = disabled_repos;
+        self
+    }
+
+    /// Record whether a remote spawn is hard-gated on a live connection
+    /// (`sandbox.require_connect`, #1066).
+    pub fn with_remote_require_connect(mut self, require_connect: bool) -> Self {
+        self.remote_require_connect = require_connect;
+        self
+    }
+
+    /// The remote box an `r`-spawn targets for a workspace in `repo`,
+    /// honoring the per-project opt-out (#1066): `None` when that repo
+    /// disabled the box, else the default remote. A `None` repo (repo-less
+    /// workspace) can't be opted out, so it uses the default. Matched
+    /// case-insensitively — a casing mismatch must not leave a repo the user
+    /// disabled silently enabled (the disabled set is already lowercased).
+    pub(crate) fn remote_for_repo(&self, repo: Option<&str>) -> Option<&str> {
+        if let Some(repo) = repo
+            && self
+                .remote_disabled_repos
+                .contains(&repo.to_ascii_lowercase())
+        {
+            return None;
+        }
+        self.default_remote()
     }
 
     /// Tag a workspace as running on a remote box: paint the sidebar row
@@ -2354,12 +2568,24 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if worker_dead {
             self.remote_notice_rx = None;
+            // The link is gone: reflect it in the persistent indicator too,
+            // not just a one-shot flash.
+            self.status
+                .note_remote_state(lazybox_tui_core::remote::RemoteConnState::Error {
+                    reason: "worker terminated — restart lazybox".into(),
+                });
             self.flash_error(
                 "⇅ remote-box worker terminated — r-spawns are unavailable until restart",
             );
         }
         for notice in drained {
             match notice {
+                // A durable connection-state transition drives the
+                // persistent indicator only — no transient flash (#1066).
+                lazybox_tui_core::remote::RemoteBoxNotice::State(state) => {
+                    self.status.note_remote_state(state);
+                    self.redraw = true;
+                }
                 lazybox_tui_core::remote::RemoteBoxNotice::Info(msg) => self.flash_info(msg),
                 lazybox_tui_core::remote::RemoteBoxNotice::Dropped {
                     session_keys,
@@ -2457,6 +2683,24 @@ impl<T: TerminalAdapter> Model<T> {
     /// reads from this list; empty list = footer notice on `E`.
     pub fn cache_editors(&mut self, editors: Vec<crate::editors::EditorTemplate>) {
         self.setup.editors = editors;
+    }
+
+    /// Re-merge `editors:` with the builtins and re-detect what's
+    /// installed from an already-loaded config — so an add/edit/remove
+    /// from the Settings editors panel (#1102) takes effect on the next
+    /// `e` without a restart. Mirrors the boot-time discovery and the
+    /// snippet hot-reload handoff (`apply_snippets`); the write already
+    /// persisted the change, so this only refreshes the cached list.
+    /// Takes the config by reference so the post-write path can reuse one
+    /// load for both this and the panel rebuild.
+    pub(crate) fn reload_editors_from(&mut self, cfg: &lazybox_config::Config) {
+        let user = cfg
+            .editors
+            .iter()
+            .cloned()
+            .map(editor_entry_to_user)
+            .collect();
+        self.setup.editors = crate::editors::discover_at_startup(user);
     }
 
     /// Apply `~/.lazybox/config.yaml::attention` +
@@ -4647,6 +4891,9 @@ impl<T: TerminalAdapter> Model<T> {
             enabled: cfg.agent.skip_permissions,
         });
         actions.push(SettingsAction::EditSnippets);
+        actions.push(SettingsAction::EditEditors {
+            count: cfg.editors.len(),
+        });
         actions.push(SettingsAction::EditTheme {
             current: crate::theme::current().name.to_string(),
         });
@@ -4696,6 +4943,12 @@ impl<T: TerminalAdapter> Model<T> {
         // Theme picker is its own live-preview modal — not a wizard step.
         if matches!(action, SettingsAction::EditTheme { .. }) {
             self.mount_theme_picker();
+            return;
+        }
+        // Editors panel is its own list modal that writes straight to
+        // YAML and hot-reloads — no wizard runner, no cached inputs.
+        if matches!(action, SettingsAction::EditEditors { .. }) {
+            self.mount_editors_panel();
             return;
         }
         // LLM gateway editor is a single URL input that writes straight
@@ -4773,6 +5026,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::CheckAgentUpdates | SettingsAction::UpdateAgentClis => return,
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme { .. } => return,
+            SettingsAction::EditEditors { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,
             SettingsAction::ShellCommand { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
@@ -4908,6 +5162,12 @@ impl<T: TerminalAdapter> Model<T> {
         // just-pressed `w`/`a c`/`s`) beats the ambient background-poll
         // indicator, since it's direct feedback for an action they're
         // waiting on. Background poll is the steady-state fallback.
+        // A box bring-up in flight (creating/waking/connecting) is a
+        // direct, multi-minute action the user is waiting on, so it
+        // out-ranks the ambient background-poll spinner; a steady box
+        // state (connected/disconnected/error) is the lowest-priority
+        // fallback so the persistent indicator (#1066) is visible whenever
+        // nothing more urgent holds the status slot.
         let polling_status: Option<(&'static str, String)> =
             if let Some(p) = self.status.polling.as_ref() {
                 Some((p.spinner_glyph(), p.status_label()))
@@ -4915,11 +5175,12 @@ impl<T: TerminalAdapter> Model<T> {
                 Some((sp.spinner_glyph(), sp.label()))
             } else if let Some(wait) = self.status.github_rate_limit_wait.as_ref() {
                 Some(("◷", wait.label()))
+            } else if let Some(box_status) = self.status.remote_status_busy() {
+                Some(box_status)
+            } else if let Some(bg) = self.status.bg_poll.as_ref() {
+                Some((bg.spinner_glyph(), bg.label()))
             } else {
-                self.status
-                    .bg_poll
-                    .as_ref()
-                    .map(|bg| (bg.spinner_glyph(), bg.label()))
+                self.status.remote_status_steady()
             };
         // Resolve the focused pane's CONTEXTUAL bindings for the
         // footer hint bar. Contextual = state-aware short list
@@ -5072,11 +5333,12 @@ impl<T: TerminalAdapter> Model<T> {
                 .or_else(|| self.sidebar.selected_workspace())
                 .map(|w| w.name.clone())
                 .unwrap_or_else(|| "no workspace".to_string());
-            // Prefix the title with this agent's jump number (its
-            // 1-based slot in the sidebar-order agent roster) so the
-            // user knows which `]]<digit>` lands back here.
-            let agents = self.sidebar.agent_workspace_keys();
-            let number = active.and_then(|k| agents.iter().position(|a| a == k));
+            // Prefix the title with this workspace's jump number (its
+            // 1-based slot in the sidebar-order focused roster) so the
+            // user knows which `]]<digit>` lands back here. Unnumbered
+            // (unfocused) workspaces show no prefix.
+            let numbered = self.sidebar.numbered_workspace_keys();
+            let number = active.and_then(|k| numbered.iter().position(|a| a == k));
             let title = match number {
                 Some(i) => format!("{} · {name}", i + 1),
                 None => name,
@@ -5146,10 +5408,10 @@ impl<T: TerminalAdapter> Model<T> {
             // selection (compare to the host terminal's native
             // selection, which crosses panes).
             if let Some(drag) = self.terminal_drag.as_ref() {
-                let (anchor, focus) = (drag.anchor, drag.focus);
+                let (terminal, anchor, focus) = (drag.terminal, drag.anchor, drag.focus);
                 if let Some((start, end)) =
                     self.terminals
-                        .selection_screen_span(right_bottom, anchor, focus)
+                        .selection_screen_span(terminal, right_bottom, anchor, focus)
                 {
                     paint_selection(f.buffer_mut(), right_bottom, start, end);
                 }
@@ -5413,6 +5675,9 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.open_snippets_file();
             }
+            Msg::EditorAdd => self.start_editor_add(),
+            Msg::EditorEdit(id) => self.start_editor_edit(&id),
+            Msg::EditorRemove(id) => self.prompt_remove_editor(id),
             // The component's `on(Tick)` already advanced the spinner;
             // here we walk the displayed checklist toward the daemon's
             // truth (gated by the min-dwell) and tear the modal down once

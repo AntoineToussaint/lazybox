@@ -70,6 +70,21 @@ pub struct WorkspaceRowCtx<'a> {
     /// the animation costs one glyph lookup per working row, no
     /// per-tick row rebuild.
     pub working_glyph: &'static str,
+    /// This workspace is provisioning its first spawn (cloning, worktree,
+    /// setup, launching the agent) and no terminal has reported an
+    /// `AgentState` yet (#1069). Renders the animated "spawning" arc in
+    /// the shared state slot so the row reads as *coming up* rather than
+    /// blank until the agent is live. Yields to every live agent signal
+    /// (`working` / `done` / `asking` / `limit_reached`) — a second
+    /// session running beside the spawn keeps its glyph — and outranks
+    /// only the terminal `exited` marker: re-spawning a crashed agent,
+    /// whose sticky `Exited` (#356) lingers with no live terminal, shows
+    /// the arc rather than a stale ✗. See `cell_state`.
+    pub spawning: bool,
+    /// Current glyph for the `spawning` slot — a rotating arc, sharing
+    /// the same frame counter as `working_glyph` but a distinct frame set
+    /// so a starting-up row reads differently from a running one.
+    pub spawning_glyph: &'static str,
     /// `Sidebar::runner_badges(key)` — `[('C', n), ('S', m)]` etc.
     pub badges: Vec<(char, usize)>,
     /// `Sidebar::agent_models(key)` — the model + effort label to show
@@ -79,11 +94,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// when no model is known, or when a badge collapses two agents.
     pub agent_models: Vec<(char, String)>,
     /// This workspace's 1-based jump number — its slot in the
-    /// sidebar-order agent roster (`Sidebar::agent_workspace_keys`).
-    /// `Some` only for workspaces with a coding agent; rendered as a
-    /// small badge ahead of the agent pill so the user can see which
-    /// `]]<digit>` lands here. `None` for non-agent rows (and for
-    /// agents past the 9th, which have no single-digit jump).
+    /// sidebar-order focused roster (`Sidebar::numbered_workspace_keys`).
+    /// `Some` only for focused (starred) workspaces; rendered as a small
+    /// badge ahead of the agent pill so the user can see which
+    /// `]]<digit>` lands here. `None` for unfocused rows (and for the
+    /// 10th focused workspace onward, which has no single-digit jump).
     pub agent_number: Option<usize>,
     /// Render the type indicator as plain ASCII (`p`/`i`/`l`) instead
     /// of the default unicode glyphs (`⇄`/`○`/`◆`). Wired from
@@ -133,6 +148,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// badge letter so two agents sharing a tier label keep distinct
     /// shorts. Sourced from `Sidebar::model_shorts`.
     pub model_shorts: &'a std::collections::HashMap<(char, String), String>,
+    /// Active search term to highlight within this row's title, or `None`
+    /// when no search touches this row. `Some` underlines the matched span
+    /// so the user can see *what* matched — the vim `/pattern` cue (#1099).
+    /// Already `#`-stripped and trimmed by the caller.
+    pub highlight_query: Option<&'a str>,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -461,15 +481,27 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     agent finished its turn and is waiting to be looked at (#80).
 ///   - `LimitReached`→ ` ⏳ ` (warn, bold) — a static glyph: the agent
 ///     hit its provider usage limit and is waiting to be resumed (#847).
+///   - `Spawning`    → ` <arc> ` (dim) — an animated glyph: the workspace
+///     is provisioning (clone / worktree / launch) and the agent is
+///     *coming*, before any terminal reports state (#1069). A distinct
+///     spinner from `Working` so "starting up" doesn't read as "running".
 ///   - `Exited`      → ` ✗ ` (dim) — a static glyph: the agent process
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
 /// Reserved width either way so the kind/title to the right don't
 /// jitter as a row moves between states. Precedence limit-reached >
-/// asking > working > done > exited, applied defensively though the
-/// states are disjoint upstream (a live signal always wins over the
-/// terminal exit marker).
+/// asking > working > done > spawning > exited. `spawning` yields to
+/// every *live* signal and outranks only the terminal `exited` marker.
+/// That split is exact, not defensive: a terminal's `Working` / `Done` /
+/// `InputNeeded` / `LimitReached` entry is dropped when it exits (only
+/// `Exited` is retained — the sidebar's `TerminalExited` handler), so any
+/// of those present while `spawning` is set belongs to a genuinely live
+/// *sibling* terminal (a second session running alongside this spawn) and
+/// rightly wins. `Exited` is the lone exception: retained as the #356
+/// restart affordance, it lingers with no live terminal after a crash, so
+/// on a cold re-provision `spawning > exited` shows the "coming up" arc
+/// instead of stranding a stale ✗ over an agent that is restarting.
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let (glyph, fg) = if ctx.limit_reached {
         ("⏳", ctx.theme.warn)
@@ -479,6 +511,8 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         (ctx.working_glyph, ctx.theme.accent)
     } else if ctx.done {
         ("✓", ctx.theme.success)
+    } else if ctx.spawning {
+        (ctx.spawning_glyph, ctx.theme.text_dim)
     } else if ctx.exited {
         ("✗", ctx.theme.text_dim)
     } else {
@@ -513,6 +547,18 @@ pub(crate) fn working_glyph(frame: usize) -> &'static str {
     WORKING_SPINNER_FRAMES[frame % WORKING_SPINNER_FRAMES.len()]
 }
 
+/// Spinner frames for the "spawning" state slot (#1069) — a rotating
+/// arc, deliberately distinct from the `Working` braille cycle so a row
+/// that is *coming up* (cloning / worktree / launching the agent) reads
+/// differently from one actively running.
+pub(crate) const SPAWNING_SPINNER_FRAMES: &[&str] = &["◜", "◠", "◝", "◞", "◡", "◟"];
+
+/// Resolve the spawning arc glyph for a given frame index. Wraps, so the
+/// shared frame counter can grow unbounded.
+pub(crate) fn spawning_glyph(frame: usize) -> &'static str {
+    SPAWNING_SPINNER_FRAMES[frame % SPAWNING_SPINNER_FRAMES.len()]
+}
+
 fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // The full title, tags and all. Bracketed tags like `[CI]` stay
     // where they originated instead of being hoisted into a reserved
@@ -533,9 +579,61 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // when the row is too narrow (see `Cell::atomic_tail`).
     let labels = label_spans(ctx);
     let tail = labels.len();
-    let mut spans = vec![Span::styled(ctx.raw_title().to_string(), style)];
+    let mut spans = title_spans(ctx.raw_title(), ctx.highlight_query, style, ctx.theme);
     spans.extend(labels);
     Cell::new(spans).atomic_tail(tail)
+}
+
+/// Split a title into styled spans, underlining the first case-insensitive
+/// occurrence of the active search term so the user can see what matched
+/// (the vim `/pattern` cue, #1099). With no query — or no contiguous match
+/// (a purely fuzzy/metadata hit) — the title is one plain span, unchanged.
+fn title_spans(
+    title: &str,
+    query: Option<&str>,
+    style: Style,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let Some(range) = query.and_then(|q| ci_match_range(title, q)) else {
+        return vec![Span::styled(title.to_string(), style)];
+    };
+    let hl = style
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut spans = Vec::with_capacity(3);
+    if range.start > 0 {
+        spans.push(Span::styled(title[..range.start].to_string(), style));
+    }
+    spans.push(Span::styled(title[range.clone()].to_string(), hl));
+    if range.end < title.len() {
+        spans.push(Span::styled(title[range.end..].to_string(), style));
+    }
+    spans
+}
+
+/// Byte range of the first case-insensitive occurrence of `needle` in
+/// `hay`, expressed in `hay`'s ORIGINAL byte offsets, or `None`.
+///
+/// The match is found in lowercased space, but `to_lowercase()` can shift
+/// byte offsets (non-ASCII case-folds grow or shrink, and per-char shifts
+/// can even cancel to an equal total length while skewing interior
+/// boundaries). So the lowercased offsets are validated against the
+/// original before use: they must land on real char boundaries AND the
+/// original slice must itself case-fold back to the needle. When they
+/// don't, we skip the highlight rather than slice mid-codepoint — which
+/// would panic in this render path on an attacker-chosen title.
+fn ci_match_range(hay: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let needle_lower = needle.to_lowercase();
+    let hay_lower = hay.to_lowercase();
+    let start = hay_lower.find(&needle_lower)?;
+    let end = start + needle_lower.len();
+    (hay.is_char_boundary(start)
+        && hay.is_char_boundary(end)
+        && hay[start..end].to_lowercase() == needle_lower)
+        .then_some(start..end)
 }
 
 /// Hard cap on a single chip's text (before the `…`). A verbose
@@ -1243,6 +1341,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -1257,6 +1357,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         }
     }
 
@@ -1509,6 +1610,59 @@ mod tests {
         assert_eq!(cell_text(&cell), format!(" {} ", working_glyph(2)));
     }
 
+    /// #1069: re-spawning a crashed agent. The prior session's sticky
+    /// `Exited` (#356 keeps it across the reap) lingers in the state map
+    /// while the new cold provision runs — so `spawning` and `exited` are
+    /// both set. The arc must win, or the row shows a stale ✗ over an
+    /// agent that is actively restarting.
+    #[test]
+    fn cell_state_spawning_wins_over_exited() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.spawning = true;
+        ctx.spawning_glyph = spawning_glyph(1);
+        ctx.exited = true;
+        let cell = cell_state(&ctx);
+        assert_eq!(cell_text(&cell), format!(" {} ", spawning_glyph(1)));
+    }
+
+    /// A *live* `done` wins over the arc: a second session that finished
+    /// (terminal still alive, → alert #80) beside a sibling session's
+    /// cold spawn shows `✓`, not the arc. A stale `done` never reaches
+    /// this arm — `Done` is dropped when its terminal exits (only `Exited`
+    /// is retained), so a `done` seen while spawning is a live sibling.
+    #[test]
+    fn cell_state_done_wins_over_spawning() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.done = true;
+        ctx.spawning = true;
+        ctx.spawning_glyph = spawning_glyph(2);
+        let cell = cell_state(&ctx);
+        assert_eq!(cell_text(&cell), " ✓ ");
+    }
+
+    /// But a genuinely live signal still wins: a second session
+    /// provisioning behind an already-`working` agent shows the working
+    /// spinner, not the arc — the workspace really is working.
+    #[test]
+    fn cell_state_working_wins_over_spawning() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.working = true;
+        ctx.working_glyph = working_glyph(4);
+        ctx.spawning = true;
+        ctx.spawning_glyph = spawning_glyph(1);
+        let cell = cell_state(&ctx);
+        assert_eq!(cell_text(&cell), format!(" {} ", working_glyph(4)));
+    }
+
     /// The spinner frame index wraps so an unbounded counter is safe.
     #[test]
     fn working_glyph_wraps_frame_index() {
@@ -1600,6 +1754,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -1614,6 +1770,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -2040,6 +2197,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -2054,6 +2213,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -2088,6 +2248,52 @@ mod tests {
         assert_eq!(cell.width(), 2);
         assert_eq!(cell.spans.len(), 1);
         assert_eq!(cell.spans[0].content.as_ref(), " ✗");
+    }
+
+    /// #1079: a merged PR must render a glyph distinct from the
+    /// actionable `✓` shared by ready / approved / CI-green, in a dimmed
+    /// terminal-state style — so "done and gone" can't be mistaken for
+    /// "act on me now" at the real rendered-cell level (not just in the
+    /// `status_pill` map). Renders all three rows through `cell_status`
+    /// and pins glyph + color for each.
+    #[test]
+    fn merged_row_renders_a_distinct_dim_glyph_from_ready_and_approved() {
+        let theme = theme();
+        let rendered = |task: &Task| {
+            let ws = Workspace::from_task(task.clone(), fixed_time());
+            let ctx = ctx_for(&ws, task, &theme);
+            let cell = cell_status(&ctx);
+            let span = &cell.spans[0];
+            (span.content.as_ref().to_string(), span.style.fg)
+        };
+
+        let mut merged = make_task("owner/repo#1", "x");
+        merged.state = TaskState::Merged;
+
+        let mut ready = make_task("owner/repo#2", "x");
+        ready.review = ReviewStatus::Approved;
+        ready.ci = CiStatus::Success;
+
+        let mut approved = make_task("owner/repo#3", "x");
+        approved.review = ReviewStatus::Approved;
+        approved.ci = CiStatus::Running;
+
+        let (merged_glyph, merged_fg) = rendered(&merged);
+        let (ready_glyph, ready_fg) = rendered(&ready);
+        let (approved_glyph, approved_fg) = rendered(&approved);
+
+        // Distinct glyph, not the shared `✓`.
+        assert_eq!(merged_glyph, " ⋈");
+        assert_eq!(ready_glyph, " ✓");
+        assert_eq!(approved_glyph, " ✓");
+        assert_ne!(merged_glyph, ready_glyph);
+        assert_ne!(merged_glyph, approved_glyph);
+
+        // Terminal / past-tense styling: dimmed, so the distinction holds
+        // even without color, and unlike the bright actionable `✓`s.
+        assert_eq!(merged_fg, Some(theme.text_dim));
+        assert_ne!(merged_fg, ready_fg);
+        assert_ne!(merged_fg, approved_fg);
     }
 
     /// An armed workspace surfaces its `⚡` merge-on-green marker in its
@@ -3190,6 +3396,8 @@ mod tests {
             done: false,
             exited: false,
             working_glyph: working_glyph(0),
+            spawning: false,
+            spawning_glyph: spawning_glyph(0),
             badges: vec![],
             agent_models: vec![],
             agent_number: None,
@@ -3204,6 +3412,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];
@@ -3368,6 +3577,115 @@ mod tests {
             !line_text(&lines[1]).contains(long),
             "occupied snippet column must steal width from the title: {:?}",
             line_text(&lines[1]),
+        );
+    }
+
+    #[test]
+    fn ci_match_range_is_case_insensitive_and_byte_correct() {
+        assert_eq!(ci_match_range("Add Search bar", "search"), Some(4..10));
+        assert_eq!(ci_match_range("Add Search bar", "ADD"), Some(0..3));
+        assert_eq!(ci_match_range("Add Search bar", "bar"), Some(11..14));
+        assert_eq!(ci_match_range("Add Search bar", "xyz"), None);
+        assert_eq!(ci_match_range("anything", ""), None);
+    }
+
+    #[test]
+    fn ci_match_range_stays_correct_and_panic_free_under_case_fold_skew() {
+        // A grow-on-fold (İ → i̇, +1 byte) skews later offsets: naively
+        // mapping the lowercased match back would highlight "tanb", so the
+        // helper must decline instead.
+        assert_eq!(ci_match_range("İstanbul", "stan"), None);
+        // A net-zero fold (ẞ→ß shrinks −1, İ→i̇ grows +1) leaves total length
+        // equal but skews an interior boundary — the lowercased offset lands
+        // mid-codepoint in the original. Must return None, never panic.
+        assert_eq!(ci_match_range("ẞxİy", "x"), None);
+        // A length-preserving non-ASCII fold still highlights the right span.
+        assert_eq!(ci_match_range("Café", "café"), Some(0..5));
+    }
+
+    #[test]
+    fn title_spans_underlines_only_the_matched_substring() {
+        let theme = theme();
+        let base = Style::default().fg(theme.text_dim);
+        let spans = title_spans("Add Search bar", Some("search"), base, &theme);
+        assert_eq!(spans.len(), 3, "before / match / after: {spans:?}");
+        assert_eq!(spans[0].content, "Add ");
+        assert_eq!(spans[1].content, "Search");
+        assert!(
+            spans[1].style.add_modifier.contains(Modifier::UNDERLINED),
+            "the matched span is underlined",
+        );
+        assert_eq!(spans[1].style.fg, Some(theme.accent));
+        assert_eq!(spans[2].content, " bar");
+        // The unmatched flanks keep the base style untouched.
+        assert_eq!(spans[0].style.fg, base.fg);
+        assert_eq!(spans[2].style.fg, base.fg);
+    }
+
+    #[test]
+    fn title_spans_is_one_plain_span_without_a_match() {
+        let theme = theme();
+        let base = Style::default().fg(theme.text_dim);
+        assert_eq!(
+            title_spans("Add Search bar", None, base, &theme).len(),
+            1,
+            "no query → no split",
+        );
+        assert_eq!(
+            title_spans("Add Search bar", Some("zzz"), base, &theme).len(),
+            1,
+            "a non-matching query → no split",
+        );
+    }
+
+    /// A highlighted (multi-span) title must survive the table's column
+    /// truncation: at a wide budget the whole match is underlined, and at a
+    /// narrow budget the row elides with `…` and stays within budget —
+    /// never panics or overflows (#1099).
+    #[test]
+    fn highlighted_title_truncates_within_budget() {
+        let theme = theme();
+        let title = "Refactor the search indexer and cache eviction policy";
+        let task = make_task("owner/repo#1", title);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.highlight_query = Some("search");
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx)];
+
+        let underlined = |line: &ratatui::text::Line<'_>| -> String {
+            line.spans
+                .iter()
+                .filter(|s| s.style.add_modifier.contains(Modifier::UNDERLINED))
+                .map(|s| s.content.to_string())
+                .collect()
+        };
+
+        // Wide: the whole match is underlined and the title is intact.
+        let wide = crate::components::table::render_table(&rows, &columns, 100);
+        assert!(
+            line_text(&wide[0]).contains(title),
+            "full title at width 100"
+        );
+        assert_eq!(underlined(&wide[0]), "search", "the match is underlined");
+
+        // Narrow: the title elides, the row stays within budget, and the
+        // underlined fragment (if any) is still a prefix of the match — the
+        // multi-span head truncated cleanly rather than panicking.
+        let narrow = crate::components::table::render_table(&rows, &columns, 22);
+        let text = line_text(&narrow[0]);
+        assert!(
+            text.contains('…'),
+            "narrow budget elides the title: {text:?}"
+        );
+        assert!(
+            crate::util::visual_width(&text) <= 22,
+            "row must not exceed budget: {text:?}",
+        );
+        let frag = underlined(&narrow[0]);
+        assert!(
+            "search".starts_with(frag.as_str()),
+            "the underlined fragment is a clean prefix of the match: {frag:?}",
         );
     }
 }

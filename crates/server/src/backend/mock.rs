@@ -15,7 +15,7 @@
 //! Coverage: this fake honors the same `SessionBackend` contract the
 //! real backends do. Tests using it exercise the daemon end-to-end.
 
-use crate::backend::{BackendError, OutputChunk, SessionBackend, Subscription};
+use crate::backend::{BackendError, OutputChunk, OutputDelta, SessionBackend, Subscription};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
@@ -86,6 +86,13 @@ struct MockSession {
     /// Replay buffer — everything emitted so far. New subscribers get
     /// this in their `Subscription.replay`.
     replay: Vec<u8>,
+    /// Simulated ring-eviction watermark: the oldest byte offset still
+    /// retained. A `read_since(since)` with `since < evicted_before` has
+    /// no gap-free delta (the real raw-PTY ring would have scrolled it
+    /// off), so the mock returns `None` — mirroring the raw backend so
+    /// handler/integration tests can exercise the fall-back path. `0`
+    /// (the default) means nothing has been evicted.
+    evicted_before: u64,
     /// Monotonic chunk counter — matches real backend semantics.
     last_seq: u64,
     /// Fan-out to live subscribers. Each `subscribe()` registers one
@@ -142,6 +149,19 @@ impl MockBackend {
                 Err(mpsc::error::TrySendError::Closed(_))
             )
         });
+    }
+
+    /// Simulate the bounded output ring having scrolled bytes below
+    /// `offset` off, so `read_since(since)` with `since < offset` reports
+    /// no gap-free delta (returns `None`) — the way the raw-PTY ring
+    /// behaves once a watermark is evicted. Lets tests exercise the
+    /// delta-unavailable fall-back without a real overflowing PTY. No-op
+    /// for an unknown key.
+    pub async fn evict_before(&self, key: &str, offset: u64) {
+        let mut map = self.inner.sessions.lock().await;
+        if let Some(session) = map.get_mut(key) {
+            session.evicted_before = offset;
+        }
     }
 
     /// Inject synthetic output while waiting for every live subscriber to
@@ -405,6 +425,7 @@ impl SessionBackend for MockBackend {
                 writes: Vec::new(),
                 resizes: Vec::new(),
                 replay: Vec::new(),
+                evicted_before: 0,
                 last_seq: 0,
                 subscribers: Vec::new(),
                 exit_code: None,
@@ -613,6 +634,33 @@ impl SessionBackend for MockBackend {
                 last_seq: session.last_seq,
                 complete: !incomplete,
             })
+        })
+    }
+
+    fn read_since<'a>(
+        &'a self,
+        key: &'a str,
+        since: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<OutputDelta>, BackendError>> + Send + 'a>> {
+        Box::pin(async move {
+            let map = self.inner.sessions.lock().await;
+            let session = map
+                .get(key)
+                .ok_or_else(|| BackendError::NotFound(key.into()))?;
+            // A watermark below the simulated eviction point has no
+            // gap-free delta (the real ring would have scrolled it off),
+            // so return `None` and let the caller fall back to a full
+            // snapshot — same contract as the raw-PTY backend.
+            if since < session.evicted_before {
+                return Ok(None);
+            }
+            let to_offset = session.replay.len() as u64;
+            let from_offset = since.min(to_offset);
+            Ok(Some(OutputDelta {
+                from_offset,
+                to_offset,
+                bytes: session.replay[from_offset as usize..].to_vec(),
+            }))
         })
     }
 

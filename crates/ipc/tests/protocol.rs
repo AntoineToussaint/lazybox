@@ -143,6 +143,10 @@ fn all_commands() -> Vec<Command> {
             terminal_id: TerminalId(7),
             required_seq: 42,
         },
+        Command::RequestTerminalDelta {
+            terminal_id: TerminalId(7),
+            since_offset: 4096,
+        },
         Command::Close {
             terminal_id: TerminalId(7),
             client_request_id: Some("close-1".into()),
@@ -371,6 +375,9 @@ fn all_commands() -> Vec<Command> {
         Command::FetchRepoLabels {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
+        Command::FetchRequestableReviewers {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
         Command::Refresh,
         Command::CleanWorktrees,
         Command::InspectWorktrees,
@@ -586,6 +593,10 @@ fn all_events() -> Vec<Event> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             labels: vec![lazybox_core::Label::with_color("bug", "d73a4a")],
         },
+        Event::RequestableReviewers {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            logins: vec!["octocat".into()],
+        },
         {
             let mut session = lazybox_core::WorkspaceSession::new(
                 lazybox_core::WorkspaceKey::new(key.as_str()),
@@ -653,6 +664,15 @@ fn all_events() -> Vec<Event> {
             seq: 9,
         },
         Event::TerminalResyncUnavailable {
+            terminal_id: TerminalId(2),
+        },
+        Event::TerminalDelta {
+            terminal_id: TerminalId(2),
+            from_offset: 4096,
+            to_offset: 4107,
+            bytes: b"delta bytes".to_vec(),
+        },
+        Event::TerminalDeltaUnavailable {
             terminal_id: TerminalId(2),
         },
         Event::TerminalExited {
@@ -1029,6 +1049,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::RecordComposingBuffer { .. } => "RecordComposingBuffer",
         Command::Resize { .. } => "Resize",
         Command::RequestTerminalResync { .. } => "RequestTerminalResync",
+        Command::RequestTerminalDelta { .. } => "RequestTerminalDelta",
         Command::Close { .. } => "Close",
         Command::IngestHook { .. } => "IngestHook",
         Command::Kill { .. } => "Kill",
@@ -1062,6 +1083,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetAssignees { .. } => "SetAssignees",
         Command::SetLabels { .. } => "SetLabels",
         Command::FetchRepoLabels { .. } => "FetchRepoLabels",
+        Command::FetchRequestableReviewers { .. } => "FetchRequestableReviewers",
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
         Command::InspectWorkspaceDiff { .. } => "InspectWorkspaceDiff",
@@ -1125,6 +1147,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::MergedPrRemovable { .. } => "MergedPrRemovable",
         Event::RemovalCancelled { .. } => "RemovalCancelled",
         Event::RepoLabels { .. } => "RepoLabels",
+        Event::RequestableReviewers { .. } => "RequestableReviewers",
         Event::SessionCreated(_) => "SessionCreated",
         Event::WorktreeProgress { .. } => "WorktreeProgress",
         Event::SessionEnded { .. } => "SessionEnded",
@@ -1135,6 +1158,8 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentAuthReplay { .. } => "AgentAuthReplay",
         Event::TerminalResync { .. } => "TerminalResync",
         Event::TerminalResyncUnavailable { .. } => "TerminalResyncUnavailable",
+        Event::TerminalDelta { .. } => "TerminalDelta",
+        Event::TerminalDeltaUnavailable { .. } => "TerminalDeltaUnavailable",
         Event::TerminalExited { .. } => "TerminalExited",
         Event::TerminalFocusRequested { .. } => "TerminalFocusRequested",
         Event::WorkspaceFocusRequested { .. } => "WorkspaceFocusRequested",
@@ -1195,12 +1220,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        75,
+        77,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        81,
+        84,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

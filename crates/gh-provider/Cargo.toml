@@ -23,8 +23,13 @@ serde = { workspace = true }
 # directly so the notifications heartbeat can answer 304. Pin matches
 # what octocrab 0.54 already depends on so there's no duplicate.
 http = "1.4"
+# The device-flow OAuth login (`oauth.rs`) POSTs form bodies to
+# github.com's login endpoints, which live outside octocrab's api.github.com
+# base. Feature set mirrors linear-provider so the TLS backend is shared.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 
 [dev-dependencies]
+tempfile = "3"
 # `test-util` powers `#[tokio::test(start_paused = true)]`, which the
 # request-permit deadline test uses to elapse a 30s virtual timeout
 # instantly.

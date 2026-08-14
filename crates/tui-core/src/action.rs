@@ -225,10 +225,12 @@ pub enum Action {
     /// repo group at once, especially for jumping to a PR/issue by
     /// number without knowing its repo.
     OpenGlobalSearch,
-    /// Collapse or expand the repo group the cursor sits in (or on).
+    /// Collapse or expand the repo (or Space) group the cursor sits ON.
     /// Folds a project's workspaces into a single header row — the
-    /// "group the sessions" shortcut. Acts on the list, not a single
-    /// workspace, so it lives in the Sidebar section.
+    /// "group the sessions" shortcut. Gated to header rows so a bare
+    /// `Space` on a workspace row can't fold the group mid-navigation
+    /// (#1099). Acts on the list, not a single workspace, so it lives in
+    /// the Sidebar section.
     ToggleRepoGroup,
     /// Pin or unpin the cursor's repo group to the top of the sidebar.
     /// Pinned groups render first, in pin order; the rest keep the
@@ -362,6 +364,13 @@ pub enum Action {
     /// point for "I just want to start working" — no need to first
     /// navigate the sidebar to a project header.
     StartAgent,
+    /// Connect to (or disconnect from) the remote box on demand
+    /// (`Shift-C`, #1066). A toggle: when disconnected/errored it brings
+    /// the box up (create → wake → connect); when connected/connecting it
+    /// tears the link down. Only meaningful when a `sandbox:` box is
+    /// configured — connection is first-class session state with a
+    /// persistent indicator, not a side-effect of the first `r`-spawn.
+    ConnectBox,
     /// Show or hide the Activity (right) pane for the focused
     /// workspace. The pane auto-hides when the workspace has no
     /// activity worth showing; this reveals it on demand (and
@@ -512,6 +521,7 @@ pub enum ActionKind {
     ResumeRateLimited,
     ToggleFocusMode,
     StartAgent,
+    ConnectBox,
     ToggleActivityPane,
     Quit,
     ResizeSplitter,
@@ -553,6 +563,7 @@ impl ActionKind {
         Self::JumpToLimited,
         Self::ToggleFocusMode,
         Self::StartAgent,
+        Self::ConnectBox,
         Self::ResumeRateLimited,
         Self::ToggleActivityPane,
         Self::ToggleMouseCapture,
@@ -755,6 +766,7 @@ impl Action {
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
             Action::StartAgent => ActionKind::StartAgent,
+            Action::ConnectBox => ActionKind::ConnectBox,
             Action::ToggleActivityPane => ActionKind::ToggleActivityPane,
             Action::Quit => ActionKind::Quit,
             Action::ResizeSplitter(_) => ActionKind::ResizeSplitter,
@@ -944,6 +956,13 @@ impl ActionDef {
                 default_keys: "Shift-W",
                 label: "start work",
                 describe: "Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane.",
+                section: Section::Global,
+            },
+            ActionKind::ConnectBox => &Self {
+                kind: ActionKind::ConnectBox,
+                default_keys: "Shift-C",
+                label: "connect box",
+                describe: "Connect to (or disconnect from) the remote box on demand. A toggle: when disconnected it brings the box up (create → wake → connect); when connected it drops the link (the box keeps running, so reconnecting is cheap). The persistent footer indicator shows the box state at all times. The box does NOT connect on its own by default; opt into startup auto-connect with `sandbox.auto_connect: true`. Only meaningful with a `sandbox:` block.",
                 section: Section::Global,
             },
             ActionKind::ToggleActivityPane => &Self {
@@ -1288,7 +1307,7 @@ impl ActionDef {
                 kind: ActionKind::ToggleRepoGroup,
                 default_keys: "Space",
                 label: "collapse group",
-                describe: "Collapse or expand the repo group the cursor is in — fold a project's workspaces into a single header row, and unfold it again. The collapsed set persists across restarts.",
+                describe: "Collapse or expand the repo (or Space) group the cursor sits ON — fold a project's workspaces into a single header row, and unfold it again. Only acts on a header row: on a workspace row a bare Space is inert so it can't fold the group you're navigating. The collapsed set persists across restarts.",
                 section: Section::Sidebar,
             },
             ActionKind::ToggleRepoPin => &Self {
@@ -1944,6 +1963,7 @@ impl ActionKind {
             ActionKind::ResumeRateLimited => "resume_rate_limited",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
             ActionKind::StartAgent => "start_agent",
+            ActionKind::ConnectBox => "connect_box",
             ActionKind::ToggleActivityPane => "toggle_activity_pane",
             ActionKind::Quit => "quit",
             ActionKind::ResizeSplitter => "resize_splitter",
@@ -2638,16 +2658,17 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             intent::resolve_kill(workspace),
             intent::Intent::KillWorkspace { .. },
         ),
-        // Only on GitHub issue-only workspaces whose issue is still
-        // open — a workspace with a PR acts on the PR, an
-        // already-closed issue has nothing to close, and Linear closes
-        // aren't wired through the provider yet, so gate on a still-open
-        // github issue.
+        // Only on issue-only workspaces whose issue is still open — a
+        // workspace with a PR acts on the PR, and an already-closed
+        // issue has nothing to close. Both GitHub and Linear issues
+        // route through the provider's `close_issue` now (#1060).
         ActionKind::CloseIssue => workspace
             .map(|w| {
                 w.pr.is_none()
                     && w.gh_issues
-                        .first()
+                        .iter()
+                        .chain(w.linear_issues.iter())
+                        .next()
                         .is_some_and(|i| i.state != lazybox_core::TaskState::Closed)
             })
             .unwrap_or(false),
@@ -2781,6 +2802,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToFailingCi
         | ActionKind::JumpToLimited
         | ActionKind::ResumeRateLimited
+        | ActionKind::ConnectBox
         | ActionKind::ToggleActivityPane
         | ActionKind::ToggleFocusMode
         | ActionKind::Quit

@@ -289,7 +289,43 @@ mod status_pill_tests {
         let mut t = base_task();
         t.state = TaskState::Merged;
         t.ci = CiStatus::Failure;
-        assert_eq!(status_pill(&t).unwrap().label, " ✓");
+        assert_eq!(status_pill(&t).unwrap().label, " ⋈");
+    }
+
+    #[test]
+    fn merged_glyph_is_distinct_from_actionable_ok_states() {
+        // #1079: a merged PR (terminal, done-and-gone) must not share the
+        // `✓` used for the actionable ready / approved / CI-green trio, and
+        // it must read as a dimmed/terminal state rather than an active
+        // signal. Color alone was too weak a distinction.
+        let theme = crate::theme::current();
+
+        let mut merged = base_task();
+        merged.state = TaskState::Merged;
+        let merged_pill = status_pill(&merged).expect("merged renders a pill");
+
+        let mut ready = base_task();
+        ready.review = ReviewStatus::Approved;
+        ready.ci = CiStatus::Success;
+        let ready_pill = status_pill(&ready).expect("ready renders a pill");
+
+        let mut approved = base_task();
+        approved.review = ReviewStatus::Approved;
+        approved.ci = CiStatus::Running;
+        let approved_pill = status_pill(&approved).expect("approved renders a pill");
+
+        // Distinct glyph, not the shared `✓`.
+        assert_eq!(merged_pill.label, " ⋈");
+        assert_ne!(merged_pill.label, ready_pill.label);
+        assert_ne!(merged_pill.label, approved_pill.label);
+        assert_eq!(ready_pill.label, " ✓");
+        assert_eq!(approved_pill.label, " ✓");
+
+        // Terminal / past-tense styling: dimmed, unlike the bright
+        // actionable `✓`s.
+        assert_eq!(merged_pill.style.fg, Some(theme.text_dim));
+        assert_ne!(merged_pill.style.fg, ready_pill.style.fg);
+        assert_ne!(merged_pill.style.fg, approved_pill.style.fg);
     }
 
     #[test]
@@ -1941,6 +1977,10 @@ mod search_tests {
     fn issue_ws_in_repo(repo: &str, num: &str, title: &str) -> Workspace {
         let mut t = base_task();
         t.id.key = format!("{repo}#{num}");
+        // `group_label` keys on `task.repo`, so set it too — otherwise every
+        // workspace inherits base_task's fixed repo and collapses into one
+        // group regardless of the `repo` argument.
+        t.repo = Some(repo.to_string());
         t.title = title.into();
         t.url = format!("https://github.com/{repo}/issues/{num}");
         let mut w = Workspace::from_task(t, chrono::Utc::now());
@@ -2337,6 +2377,123 @@ mod search_tests {
 
     fn search_bar_row(sb: &mut Sidebar) -> String {
         search_bar_row_at(sb, 60)
+    }
+
+    /// Render the whole sidebar to a newline-joined string of cell
+    /// symbols, for asserting on content-area panels.
+    fn full_screen(sb: &mut Sidebar, width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// While the bar is capturing keystrokes it reads as an unmistakable
+    /// field: the `🔍` glyph, the vim `/` prefix, the typed query, and a
+    /// solid block cursor (#1099).
+    #[test]
+    fn editing_search_bar_is_a_prominent_field_with_a_block_cursor() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "al");
+        let bar = search_bar_row(&mut sb);
+        assert!(bar.contains('🔍'), "search glyph present: {bar:?}");
+        assert!(bar.contains('█'), "block cursor while editing: {bar:?}");
+        assert!(bar.contains("al"), "shows the typed query: {bar:?}");
+    }
+
+    /// A search that filters every workspace away shows an explicit
+    /// empty-state panel — naming the query and the Esc exit — instead of
+    /// a blank pane that reads as "everything vanished / broke" (#1099).
+    #[test]
+    fn empty_search_result_shows_a_no_matches_panel() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_global_search();
+        type_query(&mut sb, "zzzqqq");
+        assert_eq!(sb.workspace_count(), 0, "the query matches nothing");
+        let screen = full_screen(&mut sb, 46, 16);
+        assert!(
+            screen.contains("No matches"),
+            "explicit empty state: {screen:?}"
+        );
+        assert!(
+            screen.contains("Esc to clear"),
+            "names the exit: {screen:?}"
+        );
+    }
+
+    /// The highlight set tracks the search's *scope*, not raw title text:
+    /// under a scoped `/` search, an out-of-scope row whose title happens
+    /// to contain the query is left visible but NOT highlighted, exactly as
+    /// the filter leaves it untouched. Guards the filter/highlight from
+    /// drifting apart (#1099) — both read `search_scope_covers`.
+    #[test]
+    fn scoped_highlight_set_tracks_filter_scope_not_title_text() {
+        // Distinct repo groups (`o/a`, `o/b`) so the scoped search pins to
+        // one and the other stays out of scope.
+        let a = issue_ws_in_repo("o/a", "1", "Add search bar");
+        let b = issue_ws_in_repo("o/b", "2", "search everywhere");
+        let a_key = SessionKey::from(&a.key);
+        let b_key = SessionKey::from(&b.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(b_key.clone(), b);
+        sb.recompute_visible();
+        // Cursor lands on the first (alphabetically `o/a`) workspace, so the
+        // scoped `/` search pins to `o/a`.
+        sb.open_search();
+        type_query(&mut sb, "search");
+        assert!(
+            sb.searched_keys.contains(&a_key),
+            "the in-scope match is highlighted",
+        );
+        assert!(
+            !sb.searched_keys.contains(&b_key),
+            "an out-of-scope row is not highlighted even though its title contains the term",
+        );
+        assert_eq!(
+            sb.workspace_count(),
+            2,
+            "the out-of-scope row stays visible (scoped search leaves other repos untouched)",
+        );
+    }
+
+    /// A matching row underlines the searched substring in its title so
+    /// the user can see *what* matched — the vim `/pattern` cue (#1099).
+    #[test]
+    fn matching_rows_underline_the_searched_substring() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut sb = sidebar_with_issues(&[("1", "Add Search bar")]);
+        sb.open_search();
+        type_query(&mut sb, "Search");
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let underlined = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.modifier.contains(ratatui::style::Modifier::UNDERLINED)
+                    && "Search".contains(cell.symbol())
+                    && !cell.symbol().trim().is_empty()
+            })
+        });
+        assert!(underlined, "the matched substring is underlined in the row");
     }
 
     /// A scoped `/` search names the project it's pinned to and points
@@ -3497,6 +3654,344 @@ mod working_spinner_tests {
     }
 }
 
+/// #1069: the pre-terminal "spawning" arc. A spawn's `WorktreeProgress`
+/// stream marks its workspace spawning so the row shows the agent is
+/// *coming* during clone → worktree → launch, before any terminal
+/// reports an `AgentState`; the first live state, the `TerminalSpawned`,
+/// or a `Failed` step clears it.
+#[cfg(test)]
+mod spawning_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::Workspace;
+    use lazybox_ipc::{
+        AgentState, Event, SpawnOrigin, TerminalId, TerminalKind, WorktreeStep, WorktreeStepStatus,
+    };
+
+    fn progress(key: &SessionKey, step: WorktreeStep, status: WorktreeStepStatus) -> Event {
+        Event::WorktreeProgress {
+            session_key: key.clone(),
+            step,
+            status,
+            origin: SpawnOrigin::Interactive,
+        }
+    }
+
+    fn one_workspace() -> (Sidebar, SessionKey) {
+        let mut t = base_task();
+        t.title = "Ship it".into();
+        let mut w = Workspace::from_task(t, chrono::Utc::now());
+        w.name = "Ship it".into();
+        let key = SessionKey::from(&w.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(key.clone(), w);
+        sb.recompute_visible();
+        (sb, key)
+    }
+
+    #[test]
+    fn worktree_progress_started_marks_spawning() {
+        let (mut sb, key) = one_workspace();
+        assert!(!sb.is_spawning(&key));
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+    }
+
+    /// A single step finishing (or reporting live progress) doesn't clear
+    /// the arc — more steps, and finally the agent, are still coming.
+    #[test]
+    fn a_step_completing_keeps_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Done,
+        ));
+        assert!(sb.is_spawning(&key), "more steps still to come");
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Progress("42%".into()),
+        ));
+        assert!(sb.is_spawning(&key));
+    }
+
+    #[test]
+    fn first_agent_state_clears_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        });
+        assert!(!sb.is_spawning(&key), "the live agent owns the slot now");
+    }
+
+    /// #1069 redraw gate: while spawning, the row shows the arc, not the
+    /// agent glyph — so the orchestrator's `changed` check (which reads
+    /// `displays_agent_state`) must repaint when the first `AgentState`
+    /// arrives, *even for `Idle`*. Without this, an `Idle`-first agent
+    /// whose `TerminalSpawned` was dropped on the lossy bus would clear
+    /// the spawning set with no repaint, stranding the arc on screen.
+    #[test]
+    fn displays_agent_state_forces_repaint_out_of_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        // Absent entry and `Idle` both map to "no glyph", but the row
+        // currently shows the arc — so folding `Idle` in *does* change it.
+        assert!(
+            !sb.displays_agent_state(&key, AgentState::Idle),
+            "spawning row must repaint when the first (Idle) state lands"
+        );
+        // Once the state is folded and spawning cleared, the normal
+        // no-op dedup applies again so repeated pings don't churn redraws.
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Idle,
+        });
+        assert!(!sb.is_spawning(&key));
+        assert!(sb.displays_agent_state(&key, AgentState::Idle));
+    }
+
+    #[test]
+    fn terminal_spawned_clears_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        assert!(!sb.is_spawning(&key));
+    }
+
+    #[test]
+    fn spawn_failure_clears_spawning() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Failed("boom".into()),
+        ));
+        assert!(
+            !sb.is_spawning(&key),
+            "a failed spawn must not spin forever"
+        );
+    }
+
+    fn spawn_error(source: &str) -> Event {
+        Event::ProviderError {
+            source: source.into(),
+            message: "agent binary not found".into(),
+            detail: String::new(),
+            kind: String::new(),
+        }
+    }
+
+    /// A post-provisioning agent-*launch* failure emits only a keyless
+    /// `ProviderError` (source `"spawn"`) — never a `WorktreeStepStatus::
+    /// Failed` — so the arc, set while the worktree provisioned, would
+    /// otherwise spin forever. The spawn error must clear it (#1069).
+    #[test]
+    fn spawn_provider_error_clears_the_arc() {
+        let (mut sb, key) = one_workspace();
+        // Provisioning ran (arc set); the daemon then failed to launch the
+        // agent — no `Failed` step, only the keyless spawn `ProviderError`.
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Setup,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        sb.on_event(&spawn_error("spawn"));
+        assert!(
+            !sb.is_spawning(&key),
+            "a keyless launch-failure spawn error must clear the arc"
+        );
+    }
+
+    /// An unrelated provider (sync) error must NOT touch the arc — only
+    /// `spawn*`-sourced failures mean a spawn ended.
+    #[test]
+    fn non_spawn_provider_error_leaves_the_arc() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&spawn_error("github"));
+        assert!(
+            sb.is_spawning(&key),
+            "a sync-provider error is unrelated to the spawn arc"
+        );
+    }
+
+    /// Finding 2: a workspace with a *live* `Working` agent and a second
+    /// session cold-provisioning shows the working spinner (working >
+    /// spawning), so the live agent's repeated pings must still dedup —
+    /// `displays_agent_state` must not force a repaint just because the
+    /// key is in the spawning set (#1069).
+    #[test]
+    fn live_sibling_pings_dedup_during_a_concurrent_spawn() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        });
+        // A second session for the same workspace starts provisioning.
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key), "the second session is provisioning");
+        // The row shows the live working spinner, so a repeated Working
+        // ping is a no-op that must NOT force a redraw.
+        assert!(
+            sb.displays_agent_state(&key, AgentState::Working),
+            "a live sibling's repeated ping must still dedup during a spawn"
+        );
+    }
+
+    /// Removing a workspace mid-spawn drops its spawning entry so a
+    /// cancelled/closed workspace can't leak a stuck spinner.
+    #[test]
+    fn removing_a_workspace_clears_spawning() {
+        let (mut sb, key) = one_workspace();
+        let ws_key = sb.workspaces.get(&key).unwrap().key.clone();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.on_event(&Event::WorkspaceRemoved(ws_key));
+        assert!(!sb.is_spawning(&key));
+    }
+
+    /// The shared spinner counter advances while a row is merely
+    /// spawning, even with no agent yet `Working`.
+    #[test]
+    fn spinner_animates_while_only_spawning() {
+        use std::time::{Duration, Instant};
+        let (mut sb, key) = one_workspace();
+        assert!(
+            !sb.tick_working(),
+            "nothing spawning or working → no animation"
+        );
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        sb.spinner_epoch = Instant::now() - Duration::from_millis(600);
+        assert!(
+            sb.tick_working(),
+            "a spawning row animates the shared spinner"
+        );
+        assert_eq!(sb.working_spinner_frame, 5);
+    }
+
+    /// Acceptance render: the row shows the distinct spawning arc during
+    /// provisioning, then yields to the working braille spinner once the
+    /// agent goes live.
+    #[test]
+    fn row_shows_spawning_arc_then_working_spinner() {
+        use crate::components::workspace_row::{spawning_glyph, working_glyph};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+
+        fn screen(sb: &mut Sidebar) -> String {
+            let backend = TestBackend::new(60, 12);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(frame.area(), frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_string())
+                })
+                .collect()
+        }
+
+        let spawning = screen(&mut sb);
+        assert!(
+            spawning.contains(spawning_glyph(0)),
+            "spawning arc must be on the row: {spawning:?}"
+        );
+        assert!(
+            !spawning.contains(working_glyph(0)),
+            "not the working spinner yet: {spawning:?}"
+        );
+
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Working,
+        });
+        assert!(!sb.is_spawning(&key));
+        let working = screen(&mut sb);
+        assert!(
+            working.contains(working_glyph(0)),
+            "working spinner must replace the arc: {working:?}"
+        );
+        assert!(
+            !working.contains(spawning_glyph(0)),
+            "spawning arc cleared once live: {working:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod done_alert_tests {
     use super::super::*;
@@ -4019,6 +4514,10 @@ mod rebadge_attention_tests {
             chrono::Utc::now(),
         ));
         sb.on_event(&Event::WorkspaceUpserted(Box::new(workspace)));
+
+        // Jump numbers now ride only focused (starred) workspaces, so star
+        // the PR row to make its `]]1` badge render alongside the agents.
+        sb.focused_workspaces.push(pr.clone());
 
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).expect("terminal");
@@ -4563,5 +5062,93 @@ mod stack_tests {
         sb.workspaces.insert(key.clone(), ws);
         sb.recompute_visible();
         assert!(sb.stack_info(&key).is_none());
+    }
+}
+
+#[cfg(test)]
+mod linear_team_repo_picker_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::{Project, TaskId, Workspace};
+
+    fn sidebar_tracking(repos: &[&str]) -> Sidebar {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let now = chrono::Utc::now();
+        let mut projects = std::collections::BTreeMap::new();
+        for repo in repos {
+            let (owner, name) = repo.split_once('/').expect("owner/repo");
+            let p = Project::github(owner, name, now);
+            projects.insert(p.key.clone(), p);
+        }
+        sb.apply_projects(projects);
+        sb
+    }
+
+    fn linear_ticket_linking(team: &str, id: &str, linked_repo: Option<&str>) -> Workspace {
+        let mut t = base_task();
+        t.id = TaskId {
+            source: "linear".into(),
+            key: id.into(),
+        };
+        t.repo = Some(format!("linear/{team}"));
+        t.branch = None;
+        t.linked_tasks = linked_repo
+            .into_iter()
+            .map(|repo| TaskId {
+                source: "github".into(),
+                key: format!("{repo}#42"),
+            })
+            .collect();
+        Workspace::from_task(t, chrono::Utc::now())
+    }
+
+    /// #1041 (reopened) smart proposals: a repo that another ticket in the
+    /// *same* Linear team already links a GitHub PR to floats to the top of
+    /// the picker — the team's real repo, learned from its own tickets —
+    /// while every tracked repo is still offered.
+    #[test]
+    fn ranks_repos_linked_by_sibling_team_tickets_first() {
+        let mut sb = sidebar_tracking(&["obin-ai/obin-platform", "obin-ai/obin-infra"]);
+        let ws = linear_ticket_linking("OBI", "OBI-1000", Some("obin-ai/obin-infra"));
+        sb.workspaces.insert(SessionKey::from(&ws.key), ws);
+
+        let ranked = sb.github_repos_ranked_for_linear_team("OBI");
+        assert_eq!(
+            ranked.first().map(String::as_str),
+            Some("obin-ai/obin-infra"),
+            "the repo a sibling ticket links floats first: {ranked:?}",
+        );
+        assert!(
+            ranked.iter().any(|r| r == "obin-ai/obin-platform"),
+            "the rest are still offered: {ranked:?}",
+        );
+    }
+
+    /// A different team's linked repo must not reorder this team's picker —
+    /// the signal is scoped to the team being mapped.
+    #[test]
+    fn ranking_ignores_other_teams_links() {
+        let mut sb = sidebar_tracking(&["obin-ai/obin-platform", "obin-ai/obin-infra"]);
+        let other = linear_ticket_linking("NYL", "NYL-1", Some("obin-ai/obin-infra"));
+        sb.workspaces.insert(SessionKey::from(&other.key), other);
+
+        // No OBI ticket links anything, so ordering stays the tracked order.
+        let ranked = sb.github_repos_ranked_for_linear_team("OBI");
+        assert_eq!(
+            ranked,
+            sb.github_repos_for_picker(),
+            "another team's link must not reorder OBI's picker: {ranked:?}",
+        );
+    }
+
+    /// With no signal at all the picker still lists every tracked repo —
+    /// never a blank picker.
+    #[test]
+    fn ranks_all_repos_even_without_a_signal() {
+        let sb = sidebar_tracking(&["obin-ai/obin-platform"]);
+        assert_eq!(
+            sb.github_repos_ranked_for_linear_team("OBI"),
+            vec!["obin-ai/obin-platform".to_string()],
+        );
     }
 }

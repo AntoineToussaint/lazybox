@@ -851,6 +851,9 @@ impl Server {
                         lazybox_ipc::Command::RequestTerminalResync { .. } => {
                             "RequestTerminalResync"
                         }
+                        lazybox_ipc::Command::RequestTerminalDelta { .. } => {
+                            "RequestTerminalDelta"
+                        }
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
@@ -884,6 +887,9 @@ impl Server {
                         lazybox_ipc::Command::SetAssignees { .. } => "SetAssignees",
                         lazybox_ipc::Command::SetLabels { .. } => "SetLabels",
                         lazybox_ipc::Command::FetchRepoLabels { .. } => "FetchRepoLabels",
+                        lazybox_ipc::Command::FetchRequestableReviewers { .. } => {
+                            "FetchRequestableReviewers"
+                        }
                         lazybox_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
                         lazybox_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
                         lazybox_ipc::Command::SendAgentInput { .. } => "SendAgentInput",
@@ -1493,6 +1499,13 @@ pub async fn dispatch_command(
             spawn_handler::handle_terminal_resync_request(config, tx, terminal_id, required_seq)
                 .await;
         }
+        lazybox_ipc::Command::RequestTerminalDelta {
+            terminal_id,
+            since_offset,
+        } => {
+            spawn_handler::handle_terminal_delta_request(config, tx, terminal_id, since_offset)
+                .await;
+        }
         lazybox_ipc::Command::Resize {
             terminal_id,
             cols,
@@ -1837,6 +1850,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchRepoLabels { workspace_key } => {
             polling::handle_fetch_repo_labels(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::FetchRequestableReviewers { workspace_key } => {
+            polling::handle_fetch_requestable_reviewers(config, workspace_key).await;
         }
         lazybox_ipc::Command::CleanWorktrees => {
             polling::handle_clean_worktrees(config).await;

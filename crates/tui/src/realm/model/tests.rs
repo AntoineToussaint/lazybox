@@ -2789,6 +2789,49 @@ snippets:
         (m, keys)
     }
 
+    /// `Space` collapses a repo group ONLY when the cursor sits on its
+    /// header row — on a workspace row it is inert, so a reflexive Space
+    /// mid-navigation can't fold the group you're inside (#1099). Drives
+    /// the real key routing so the dispatch guard, not just the catalog
+    /// resolution, is under test.
+    #[test]
+    fn space_collapse_is_gated_to_the_header_row() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+        let space = || RealmKey::new(Key::Char(' '), RealmMods::NONE);
+        let up = || RealmKey::new(Key::Char('k'), RealmMods::NONE);
+
+        let (mut m, _keys) = model_with_broadcast_targets(&[None, None]);
+        assert_eq!(m.sidebar.visible_workspace_count(), 2, "both rows visible");
+        // Cursor starts on a workspace row: Space must leave the group open
+        // (a collapse would drop the workspace rows from the visible list).
+        assert!(!m.sidebar.cursor_on_repo_header());
+        m.dispatch_key(space());
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            2,
+            "a bare Space on a workspace row must not collapse the group",
+        );
+
+        // Walk up onto the repo header (j/k stop on headers), where Space
+        // is the intended collapse toggle.
+        for _ in 0..6 {
+            if m.sidebar.cursor_on_repo_header() {
+                break;
+            }
+            m.dispatch_key(up());
+        }
+        assert!(
+            m.sidebar.cursor_on_repo_header(),
+            "k navigation reaches the repo header row",
+        );
+        m.dispatch_key(space());
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "Space on the header row collapses the group",
+        );
+    }
+
     /// Like [`model_with_broadcast_targets`], but every seeded workspace
     /// carries a GitHub project scope, so a session-less target is
     /// spawnable (`worktree_scope().is_some()`) rather than skipped —
@@ -3133,6 +3176,62 @@ snippets:
             notice.message.contains("started 1 agent"),
             "summary reports the auto-start: {}",
             notice.message,
+        );
+    }
+
+    /// #1077 review regression: if a live-agent target's terminal dies
+    /// while the "start N agents?" confirm is up, "yes" must re-resolve it
+    /// — spawning a fresh seeded agent — not fire a delivery at the dead
+    /// terminal (which the daemon silently drops while the summary lies
+    /// "queued"). Snapshotting the resolved steps at compose time would
+    /// have replayed an `InjectPrompt` at the gone terminal; re-resolving
+    /// at confirm-yes recovers.
+    #[test]
+    fn broadcast_confirm_re_resolves_a_target_whose_agent_died_under_the_modal() {
+        // A: live agent (terminal 1); B: session-less spawnable → forces
+        // the confirm gate. Both carry a repo scope, so a session-less A
+        // is spawnable too.
+        let (mut m, keys) = model_with_scoped_broadcast_targets(&[
+            Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
+            None,
+        ]);
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys.clone(),
+                snippet_key: None,
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let _ = m.handle_textarea_submitted("ship it".into());
+        assert_eq!(m.top_modal(), Some(&Id::BroadcastConfirm));
+
+        // A's agent exits while the confirm is up.
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalExited {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            exit_code: None,
+            last_output: None,
+        });
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::InjectPrompt { terminal_id, .. } if terminal_id.0 == 1
+            )),
+            "no delivery fires at the terminal that died under the modal: {cmds:?}",
+        );
+        let seeded_spawns = cmds
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    IpcCommand::Spawn { initial_prompt: Some(p), .. } if p == "ship it"
+                )
+            })
+            .count();
+        assert_eq!(
+            seeded_spawns, 2,
+            "the dead-agent target re-resolves to a fresh seeded spawn alongside the session-less one: {cmds:?}",
         );
     }
 
@@ -4822,6 +4921,39 @@ snippets:
         assert_eq!(m.leader_target, None, "leader_target cleared on modal pop");
     }
 
+    /// #1077 regression: with a `v` multi-select active, `]]s` from the
+    /// sidebar fans the snippet out over the WHOLE selection (via the
+    /// broadcast picker) instead of the single-cursor retarget — which
+    /// hit one row and left the rest to fall into `w w` / a spawn (the
+    /// reported "snippet-on-one, w-w-on-others" bug).
+    #[test]
+    fn sidebar_snippet_send_under_multiselect_fans_out_via_broadcast() {
+        let mut m = model_two_agent_workspaces_sidebar("sidebar-multi");
+        let a_key: SessionKey = SessionKey::from("github:o/r#1");
+        let b_key: SessionKey = SessionKey::from("github:o/r#2");
+        for key in [&a_key, &b_key] {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        let mut cmds = Vec::new();
+        m.run_sidebar_leader_cmd(
+            crate::realm::model::terminal_leader::LeaderCmd::Snippets,
+            &mut cmds,
+        );
+        assert!(cmds.is_empty(), "picking hasn't happened yet");
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::BroadcastSnippet),
+            "a live multi-select fans out through the broadcast picker",
+        );
+        assert_eq!(
+            m.leader_target, None,
+            "no single-cursor retarget when the selection is what we act on",
+        );
+    }
+
     /// A terminal-only chord (`]]f` focus mode) is inert from the sidebar:
     /// it isn't offered and resolves to nothing rather than toggling.
     #[test]
@@ -5596,6 +5728,124 @@ mod wake_tests {
 }
 
 #[cfg(test)]
+mod wake_burst_liveness_tests {
+    //! Issue #1045: the whole-app freeze after sleep/wake was a wake
+    //! catch-up burst flooding the single UI thread WHILE a `Loading`
+    //! modal awaited a result that never landed. Neither half alone
+    //! reproduces it — the freeze was the two together — so this drives
+    //! the REAL model through both at once on a single instance:
+    //!
+    //! - the burst can't monopolise the thread — with host input
+    //!   pending, one drain dispatches a single event and carries the
+    //!   rest (`if input_pending() { break; }`, #1055), so `Esc` and the
+    //!   modal's own tick still get a turn instead of waiting out the
+    //!   whole burst; and
+    //! - the mounted modal can't wait forever — its timeout resolves to
+    //!   `Msg::LoadingTimedOut` (the component side of that is proven in
+    //!   `loading.rs`), and here the MODEL must actually pop the modal on
+    //!   that message — the wiring the component test can't see — even
+    //!   while the burst tail is still queued.
+    //!
+    //! The modal is held silent with its producer ALIVE (the #1045
+    //! "produced-but-lost / task stalled" shape, distinct from a dropped
+    //! sender, which `TakeOutcome::Cancelled` already covers).
+    use super::super::helpers::drain_daemon_events;
+    use super::super::{Id, Model};
+    use crate::realm::Msg;
+    use crate::realm::components::loading::Loading;
+    use lazybox_core::{Workspace, WorkspaceKey};
+    use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event};
+    use tokio::sync::mpsc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model_with_event_sender() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::Sender<Event>,
+        mpsc::UnboundedReceiver<lazybox_ipc::Command>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let model = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        (model, evt_tx, cmd_rx)
+    }
+
+    /// A wake catch-up burst of DISTINCT workspace upserts. Distinct
+    /// matters: same-terminal `TerminalOutput` coalesces into one event
+    /// (`coalesce_adjacent_output`), so it can't exercise per-event
+    /// pre-emption — the drain would dispatch the single merged event and
+    /// never re-check input. Upserts never coalesce, so the dispatch loop
+    /// has `n` real iterations a pending keystroke can break out of.
+    fn wake_burst_of_upserts(tx: &mpsc::Sender<Event>, n: usize) {
+        use chrono::Utc;
+        for i in 0..n {
+            let ws = Workspace::empty(
+                WorkspaceKey::new(format!("github:o/r#{i}")),
+                "main",
+                Utc::now(),
+            );
+            tx.try_send(Event::WorkspaceUpserted(Box::new(ws)))
+                .expect("bounded channel must have room for the burst");
+        }
+    }
+
+    #[test]
+    fn wake_burst_preempts_input_while_a_mounted_loading_modal_self_dismisses() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+
+        // A `Loading` modal is up on the model, mounted under its real
+        // `Id::Setup` (the id the setup flow mounts it under), awaiting a
+        // value that will never land — producer held alive but silent.
+        let (loading, _never_sends) = Loading::pending("waking…");
+        m.mount_modal(Id::Setup, loading);
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Setup),
+            "the loading modal is mounted before the burst",
+        );
+
+        // The wake burst floods the UI thread's inbound channel.
+        let n = 128;
+        wake_burst_of_upserts(&evt_tx, n);
+
+        // Responsiveness: with a keystroke pending the whole time, ONE
+        // drain dispatches exactly one event and carries the rest — the
+        // burst cannot hold the thread (and thus `Esc` / the modal's
+        // tick) hostage for its full length.
+        let mut carried = Vec::new();
+        let backlog = drain_daemon_events(&mut m, &mut carried, || true);
+        assert!(backlog, "an un-dispatched tail is a backlog");
+        assert_eq!(
+            carried.len(),
+            n - 1,
+            "input pre-empts after one event: the rest is carried, not drained in one shot",
+        );
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            1,
+            "exactly one burst event applied before yielding to the waiting keystroke",
+        );
+
+        // Liveness: `Msg::LoadingTimedOut` must dismiss the mounted modal
+        // through the model — not merely flash a notice and leave it up —
+        // even with the burst tail still queued.
+        m.update(Msg::LoadingTimedOut);
+        assert!(
+            m.top_modal().is_none(),
+            "a timed-out loading modal must be dismissed by the model, not left orphaned",
+        );
+        assert!(
+            !carried.is_empty(),
+            "the modal cleared while the burst tail was still pending — mid-burst, not after it drained",
+        );
+    }
+}
+
+#[cfg(test)]
 mod coalesce_tests {
     //! `coalesce_adjacent_output` collapses a streaming burst into one
     //! dispatch per terminal — this is what keeps memory bounded under
@@ -5953,6 +6203,7 @@ mod stale_input_tests {
                 | Id::ErrorInboxClearConfirm
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
+                | Id::EditorRemoveConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
                 Id::SidebarContext | Id::InspectList | Id::ImportCheckoutList => false,
@@ -5973,6 +6224,8 @@ mod stale_input_tests {
                 | Id::NewWorkspaceRepo
                 | Id::LinearTeamRepo
                 | Id::Editor
+                | Id::EditorsPanel
+                | Id::EditorForm
                 | Id::Setup
                 | Id::AdoptTarget
                 | Id::StartAgentProject
@@ -6017,6 +6270,9 @@ mod stale_input_tests {
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
             Id::Editor,
+            Id::EditorsPanel,
+            Id::EditorForm,
+            Id::EditorRemoveConfirm,
             Id::Setup,
             Id::RemoveOutOfScope,
             Id::MergeConfirm,
@@ -9022,6 +9278,148 @@ mod merge_focus_follow_tests {
         assert_eq!(m.sidebar.broadcast_selected_count(), 0);
     }
 
+    /// #1077 headline acceptance: for N selected workspaces, a snippet
+    /// broadcast fires N snippet deliveries — one per row, never a mix —
+    /// and `w w` fires N injects over the *same* set. Both flow through
+    /// the one `apply_one` pipeline, so snippet and work fan out
+    /// identically: no row falls into a different action.
+    #[test]
+    fn snippet_and_work_fan_out_identically_over_a_selection() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let tmp_dir = std::env::temp_dir().join(format!("lazybox-fanout-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let tmp = tmp_dir.join("snippets.yaml");
+        std::fs::write(
+            &tmp,
+            "snippets:\n  rev:\n    description: Review\n    body: review the diff\n",
+        )
+        .unwrap();
+        m.apply_snippets(
+            lazybox_config::Snippets::load_from(&tmp, lazybox_config::SnippetOrigin::Global)
+                .unwrap(),
+        );
+        let mut keys = Vec::new();
+        for (i, tid) in [(1u64, 11u64), (2, 12), (3, 13)] {
+            let ws = workspace(&format!("owner/repo#{i}"), true, Duration::hours(i as i64));
+            let key: SessionKey = (&ws.key).into();
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+            });
+            keys.push(key);
+        }
+        let select_all = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| {
+            for key in &keys {
+                assert!(m.sidebar.focus_workspace_key(key));
+                m.sidebar.toggle_broadcast_select();
+            }
+        };
+
+        // --- snippet fan-out (the reported-bug path) ---
+        select_all(&mut m);
+        assert_eq!(m.sidebar.broadcast_selected_count(), 3);
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys.clone(),
+                snippet_key: Some("rev".into()),
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let snippet_cmds = m.handle_textarea_submitted("review the diff".into());
+        let mut snippet_targets: Vec<u64> = snippet_cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::DeliverSnippet { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        snippet_targets.sort_unstable();
+        assert_eq!(
+            snippet_targets,
+            vec![11, 12, 13],
+            "the snippet reaches every selected agent — no row falls into w-w or a spawn: {snippet_cmds:?}",
+        );
+        assert!(
+            !snippet_cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::Spawn { .. } | IpcCommand::InjectPrompt { .. }
+            )),
+            "snippet delivery never spawns or injects a work prompt: {snippet_cmds:?}",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "selection clears after delivery"
+        );
+
+        // --- `w w` fan-out over the same selection ---
+        select_all(&mut m);
+        let work_cmds = m.dispatch_action(&Action::Work);
+        let mut work_targets: Vec<u64> = work_cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        work_targets.sort_unstable();
+        assert_eq!(
+            work_targets,
+            vec![11, 12, 13],
+            "w w injects into every selected agent — identical fan-out to the snippet: {work_cmds:?}",
+        );
+    }
+
+    /// #1077 guard: `apply_one` — the single per-target executor every
+    /// fan-out shares — must resolve its target from its `key` argument
+    /// alone, never from the sidebar cursor / selection. A dispatchable
+    /// path that reached for `selected_workspace()` here would reintroduce
+    /// the divergence (one row acted on, the rest something else) the
+    /// unified pipeline exists to prevent.
+    #[test]
+    fn apply_one_resolves_targets_only_from_its_argument() {
+        let src = include_str!("dispatch.rs");
+        let start = src
+            .find("fn apply_one(")
+            .expect("apply_one is the single per-target executor");
+        // Bound the body by brace-matching from its opening `{`, so the
+        // guard survives method reordering / new helpers (apply_one has no
+        // brace-bearing string or char literals, so a raw scan is exact).
+        let open = start + src[start..].find('{').expect("apply_one has a body");
+        let mut depth = 0usize;
+        let mut end = open;
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body = &src[open..=end];
+        assert!(
+            depth == 0 && end > open,
+            "apply_one body braces did not balance — guard bound is wrong",
+        );
+        assert!(
+            !body.contains("selected_workspace"),
+            "apply_one must resolve its target from `key`, not selected_workspace()",
+        );
+    }
+
     /// #899 regression: an inherently single-target destructive action
     /// (`x c` close-issue) must stay focused-only even under a `v`
     /// selection — before the fix it swept the whole set behind the
@@ -11010,6 +11408,112 @@ mod terminal_url_mouse_tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A drag selection across two side-by-side split tiles stays scoped
+    /// to the tile the drag STARTED in: the copy holds only that terminal's
+    /// rows, never the neighbour's, and the on-screen highlight never
+    /// crosses the tile boundary (#1101). The drag begins in the
+    /// *non-focused* left tile, so this pins the mouse-down's
+    /// focus-the-clicked-tile step — drop it and the anchor would land in
+    /// the previously-focused right tile and copy its text instead. The
+    /// highlight-span check covers the reverse-video overlay path
+    /// (`selection_screen_span`) that the copy never exercises, and pins the
+    /// column clamp directly: selection maps screen coords through the start
+    /// tile's recorded grid (#1021), so a column past the tile boundary
+    /// clamps to the tile's edge instead of projecting into the adjacent
+    /// grid's cells.
+    #[test]
+    fn drag_selection_scoped_to_the_start_tile() {
+        let (mut model, _server, _opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Splits {
+                tree: lazybox_core::TileTree::HSplit {
+                    left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                    right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                    ratio: 50,
+                },
+                // Focus the RIGHT tile; the drag below starts in the left one.
+                focused: vec![1],
+            });
+        feed(&mut model, 1, b"AAA0\r\nAAA1\r\nAAA2\r\n".to_vec());
+        feed(&mut model, 2, b"BBB0\r\nBBB1\r\nBBB2\r\n".to_vec());
+        let pane = render(&mut model);
+        let (lx, ly) = body_origin(&model, pane, 1);
+        let (rx, _) = body_origin(&model, pane, 2);
+        // Press in the interior of the left tile — its horizontal midpoint,
+        // maximally clear of the sidebar/right splitter seam that hugs the
+        // tile's left edge and would otherwise steal the click as a resize.
+        let press_col = (lx + rx) / 2;
+
+        // Press in the left tile's first row, then drag across the tile
+        // boundary into the right tile two rows lower.
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: press_col,
+            row: ly,
+            modifiers: KeyModifiers::empty(),
+        });
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: rx + 3,
+            row: ly + 2,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        let drag = model.terminal_drag.expect("left-press claims a drag");
+        // The drag binds to the tile it STARTED in (left / terminal 1), not
+        // the tile that was focused when it began (right / terminal 2).
+        assert_eq!(
+            drag.terminal,
+            TerminalId(1),
+            "the drag anchors to the start tile, not the focused one",
+        );
+
+        // The copy holds only the start tile's text. The middle row is
+        // fully spanned regardless of the anchor/focus columns, so it must
+        // be the start tile's row — and only that.
+        let copied = model
+            .terminals
+            .extract_selection(drag.terminal, drag.anchor, drag.focus);
+        assert!(
+            copied.contains("AAA1"),
+            "the start tile's rows are copied: {copied:?}",
+        );
+        assert!(
+            !copied.contains("BBB"),
+            "the adjacent tile never bleeds into the copy: {copied:?}",
+        );
+
+        // The highlight span is clamped to the start tile: both projected
+        // endpoints stay left of the right tile's first column. A regression
+        // that mapped the drag through the whole pane instead of the tile's
+        // grid would project the focus into the right tile (>= rx).
+        let (hstart, hend) = model
+            .terminals
+            .selection_screen_span(drag.terminal, pane, drag.anchor, drag.focus)
+            .expect("a visible selection span");
+        assert!(
+            hstart.0 < rx && hend.0 < rx,
+            "the highlight never crosses into the right tile (rx={rx}): {hstart:?} {hend:?}",
+        );
+
+        // Focus divergence mid-gesture must not redirect the copy: if an
+        // event refocuses the other tile before release, extraction still
+        // reads the tile the drag started in (`drag.terminal`), not live
+        // focus — the guarantee that makes scoping correct-by-construction
+        // rather than a side effect of focus following the click.
+        let mut cmds = Vec::new();
+        model.terminals.focus_tile(TerminalId(2), &mut cmds);
+        let after_refocus =
+            model
+                .terminals
+                .extract_selection(drag.terminal, drag.anchor, drag.focus);
+        assert!(
+            after_refocus.contains("AAA1") && !after_refocus.contains("BBB"),
+            "copy stays pinned to the start tile after focus moves: {after_refocus:?}",
+        );
     }
 
     #[test]
@@ -13394,11 +13898,11 @@ mod focus_mode_tests {
         );
     }
 
-    /// `]]<digit>` moves the displayed terminal to the Nth agent
-    /// workspace in sidebar order and keeps focus mode on, so the user
-    /// hops to a specific agent heads-down.
+    /// `]]<digit>` moves the displayed terminal to the Nth **focused**
+    /// (starred) workspace in sidebar order and keeps focus mode on, so
+    /// the user hops to a curated workspace heads-down.
     #[test]
-    fn bracket_digit_jumps_to_agent_workspace_in_focus_mode() {
+    fn bracket_digit_jumps_to_focused_workspace_in_focus_mode() {
         let mut m = build_model();
         let ws1 = workspace_with_agent("owner/repo#1");
         let ws2 = workspace_with_agent("owner/repo#2");
@@ -13407,10 +13911,17 @@ mod focus_mode_tests {
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
 
+        // Only focused workspaces are numbered now — star both so they
+        // enter the roster.
+        assert!(m.sidebar.focus_workspace_key(&key1));
+        m.sidebar.toggle_focus_at_cursor();
+        assert!(m.sidebar.focus_workspace_key(&key2));
+        m.sidebar.toggle_focus_at_cursor();
+
         // The jump number is the slot in this roster (sidebar order),
         // which the badge mirrors — read it rather than assume an order.
-        let roster = m.sidebar.agent_workspace_keys();
-        assert_eq!(roster.len(), 2, "both agents in the roster");
+        let roster = m.sidebar.numbered_workspace_keys();
+        assert_eq!(roster.len(), 2, "both focused workspaces in the roster");
         assert!(roster.contains(&key1) && roster.contains(&key2));
 
         // Start parked on slot 2 so `]]1` is a real move to slot 1.
@@ -13427,8 +13938,31 @@ mod focus_mode_tests {
         assert_eq!(
             m.sidebar.selected_workspace_key(),
             Some(&slot1),
-            "`]]1` jumps to the first agent workspace in the roster",
+            "`]]1` jumps to the first focused workspace in the roster",
         );
+    }
+
+    /// An unfocused workspace gets no jump number, and `]]<digit>`
+    /// past the focused count flashes instead of moving.
+    #[test]
+    fn unfocused_workspaces_are_not_numbered() {
+        let mut m = build_model();
+        let ws1 = workspace_with_agent("owner/repo#1");
+        let ws2 = workspace_with_agent("owner/repo#2");
+        let key1 = SessionKey::from(&ws1.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
+
+        // Nothing starred → nothing numbered.
+        assert!(
+            m.sidebar.numbered_workspace_keys().is_empty(),
+            "no focused workspace, so no jump numbers"
+        );
+
+        // Star just one → exactly one slot, in first position.
+        assert!(m.sidebar.focus_workspace_key(&key1));
+        m.sidebar.toggle_focus_at_cursor();
+        assert_eq!(m.sidebar.numbered_workspace_keys(), vec![key1.clone()]);
     }
 
     /// The attention summary the header reads counts unread / asking /
@@ -14514,11 +15048,11 @@ mod worktree_progress_recovery_tests {
         }
     }
 
-    /// Issue #1041: an unmapped Linear team no longer dead-ends `w w`. The
-    /// daemon's "has no repo mapping" failure classifies `LinearUnmapped`
-    /// (offering `r pick repo`, not a bare retry), and opening the picker
-    /// stashes the team so the pick can persist `providers.linear.teams.OBI`
-    /// against the tracked GitHub repos.
+    /// Issue #1041 (reopened): an unmapped Linear team must never dead-end
+    /// `w w` with a "× spawn aborted" failure modal. The daemon's "has no
+    /// repo mapping" failure now opens the repo picker **directly** — no
+    /// failed checklist, no manual `r` — stashing the team so the pick can
+    /// persist `providers.linear.teams.OBI` against the tracked GitHub repos.
     #[test]
     fn unmapped_linear_team_opens_a_repo_picker_stashing_the_team() {
         let mut m = build_model();
@@ -14544,16 +15078,13 @@ mod worktree_progress_recovery_tests {
             "workspace: Linear team `OBI` has no repo mapping and the ticket has no \
              linked GitHub PR — set providers.linear.teams.OBI in ~/.lazybox/config.yaml",
         ));
-        assert_eq!(
-            m.worktree_progress.as_ref().and_then(|s| s.recovery()),
-            Some(lazybox_ipc::WorktreeRecovery::LinearUnmapped),
-            "the modal carries the unmapped-team recovery so it offers a repo pick",
-        );
-
-        m.pick_repo_for_linear_team();
         assert!(
             m.modal_stack.contains(&Id::LinearTeamRepo),
-            "pressing r mounts the repo picker",
+            "the picker opens directly as the primary path",
+        );
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress) && m.worktree_progress.is_none(),
+            "no '× spawn aborted' failure modal is shown before the picker",
         );
         assert!(
             matches!(
@@ -14593,9 +15124,222 @@ mod worktree_progress_recovery_tests {
         );
     }
 
-    /// With no GitHub repo tracked, the picker has nothing to offer, so the
-    /// unmapped-team recovery falls back to the manual hint instead of
-    /// mounting an empty picker (#1041).
+    /// The real primary path (#1041 reopened): the daemon surfaces the
+    /// unmapped-team failure as a `WorktreeProgress::Failed` step. That step
+    /// must open the picker directly, tearing down the in-flight spinner —
+    /// never freezing on a "× spawn aborted" checklist the user has to `r`
+    /// past.
+    #[test]
+    fn unmapped_linear_team_failed_step_opens_the_picker_over_the_spinner() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![],
+            terminals: vec![],
+            projects: vec![lazybox_core::Project::github(
+                "obin-ai",
+                "obin-platform",
+                Utc::now(),
+            )],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        let key = WorkspaceKey::new("linear:OBI-1749");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(remembered_spawn(session_key.clone()));
+
+        // Provisioning starts — the spinner mounts.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: session_key.clone(),
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Started,
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        assert!(m.modal_stack.contains(&Id::WorktreeProgress));
+
+        // …then the repo resolution fails: the picker replaces the spinner.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Failed(
+                "workspace: Linear team `OBI` has no repo mapping and the ticket has no \
+                 linked GitHub PR — set providers.linear.teams.OBI in ~/.lazybox/config.yaml"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        assert!(
+            m.modal_stack.contains(&Id::LinearTeamRepo),
+            "the failed step opens the picker directly",
+        );
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress) && m.worktree_progress.is_none(),
+            "the in-flight spinner is torn down, not left frozen on a failure",
+        );
+    }
+
+    /// The unmapped-team wire error the daemon emits for team `OBI`.
+    const OBI_UNMAPPED: &str = "workspace: Linear team `OBI` has no repo mapping and \
+         the ticket has no linked GitHub PR — set providers.linear.teams.OBI in \
+         ~/.lazybox/config.yaml";
+
+    fn snapshot_with_obin_platform() -> IpcEvent {
+        IpcEvent::Snapshot {
+            workspaces: vec![],
+            terminals: vec![],
+            projects: vec![lazybox_core::Project::github(
+                "obin-ai",
+                "obin-platform",
+                Utc::now(),
+            )],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        }
+    }
+
+    fn failed_linear_step(
+        session_key: lazybox_core::SessionKey,
+        origin: lazybox_ipc::SpawnOrigin,
+    ) -> IpcEvent {
+        IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::Fetch,
+            status: WorktreeStepStatus::Failed(OBI_UNMAPPED.into()),
+            origin,
+        }
+    }
+
+    /// Mapping the team re-issues the spawn that opened the picker straight
+    /// away — no manual retry — so the pick "continues the spawn into the
+    /// chosen repo" (#1041 reopened). The spawn is the one captured when the
+    /// picker opened, so this drives it through the real Failed-step path.
+    #[test]
+    fn mapping_a_linear_team_reprovisions_the_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.handle_daemon_event(snapshot_with_obin_platform());
+        let session_key: lazybox_core::SessionKey = (&WorkspaceKey::new("linear:OBI-1749")).into();
+        m.last_spawn = Some(remembered_spawn(session_key.clone()));
+
+        // The failure opens the picker and captures this spawn.
+        m.handle_daemon_event(failed_linear_step(
+            session_key,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        ));
+        assert!(m.modal_stack.contains(&Id::LinearTeamRepo));
+        while server.rx.try_recv().is_ok() {} // drain init + spawn traffic
+
+        m.reprovision_after_linear_map();
+
+        let mut saw_spawn = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, lazybox_ipc::Command::Spawn { .. }) {
+                saw_spawn = true;
+            }
+        }
+        assert!(
+            saw_spawn,
+            "the pick must re-issue the spawn so it lands in the freshly-mapped repo",
+        );
+    }
+
+    /// Review finding 2: two unmapped-team `w w` in flight must not cross
+    /// wires. Ticket A's failure opens the picker (capturing A's spawn); a
+    /// second `w w` on B overwrites `last_spawn` and its failure is
+    /// suppressed by the already-open picker. Mapping in A's picker must
+    /// re-provision **A's** spawn — the one that owns the picker — not
+    /// whatever `last_spawn` drifted to (B). Regresses the single-slot
+    /// `last_spawn` reprovision that would have fired B.
+    #[test]
+    fn concurrent_unmapped_spawns_reprovision_the_picker_owner_not_the_latest() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.handle_daemon_event(snapshot_with_obin_platform());
+        let key_a: lazybox_core::SessionKey = (&WorkspaceKey::new("linear:OBI-1")).into();
+        let key_b: lazybox_core::SessionKey = (&WorkspaceKey::new("linear:OBI-2")).into();
+
+        // A fails first → picker opens and captures A.
+        m.last_spawn = Some(remembered_spawn(key_a.clone()));
+        m.handle_daemon_event(failed_linear_step(
+            key_a.clone(),
+            lazybox_ipc::SpawnOrigin::Interactive,
+        ));
+        assert!(m.modal_stack.contains(&Id::LinearTeamRepo));
+
+        // B races in: last_spawn becomes B, but B's failure is suppressed by
+        // the picker already up for A.
+        m.last_spawn = Some(remembered_spawn(key_b.clone()));
+        m.handle_daemon_event(failed_linear_step(
+            key_b,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        ));
+        while server.rx.try_recv().is_ok() {} // drain
+
+        m.reprovision_after_linear_map();
+
+        let mut spawned_key = None;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let lazybox_ipc::Command::Spawn { session_key, .. } = cmd {
+                spawned_key = Some(session_key);
+            }
+        }
+        assert_eq!(
+            spawned_key.as_ref(),
+            Some(&key_a),
+            "the pick re-provisions the picker's own spawn (A), not the later race (B)",
+        );
+    }
+
+    /// Review finding 1: an autonomous unmapped-Linear failure has no
+    /// client-issued spawn — `last_spawn` holds an unrelated *interactive*
+    /// spawn from another session. It must NOT auto-open a picker that would
+    /// then re-provision that stale spawn; it falls to the failure modal, and
+    /// a subsequent map is persist-only (no stray spawn fired).
+    #[test]
+    fn autonomous_unmapped_failure_does_not_reprovision_a_stale_interactive_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.handle_daemon_event(snapshot_with_obin_platform());
+        // A stale interactive spawn on an unrelated GitHub workspace.
+        let stale: lazybox_core::SessionKey = (&WorkspaceKey::new("github:acme/widget#7")).into();
+        m.last_spawn = Some(remembered_spawn(stale));
+
+        // An autonomous unmapped-Linear failure on a *different* session.
+        let linear_key: lazybox_core::SessionKey = (&WorkspaceKey::new("linear:OBI-9")).into();
+        m.handle_daemon_event(failed_linear_step(
+            linear_key,
+            lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::AutoFix),
+        ));
+
+        assert!(
+            !m.modal_stack.contains(&Id::LinearTeamRepo),
+            "an autonomous failure must not hijack a stale interactive spawn into a picker",
+        );
+        assert_eq!(
+            m.worktree_progress.as_ref().and_then(|s| s.recovery()),
+            Some(lazybox_ipc::WorktreeRecovery::LinearUnmapped),
+            "it shows the recovery modal instead",
+        );
+
+        // Even a subsequent map must not re-issue the stale interactive spawn.
+        while server.rx.try_recv().is_ok() {} // drain
+        m.reprovision_after_linear_map();
+        let mut saw_spawn = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if matches!(cmd, lazybox_ipc::Command::Spawn { .. }) {
+                saw_spawn = true;
+            }
+        }
+        assert!(
+            !saw_spawn,
+            "no stale interactive spawn is re-issued for an autonomous Linear failure",
+        );
+    }
+
+    /// With no GitHub repo tracked, there's genuinely nothing to propose, so
+    /// the unmapped-team failure falls through to the classified recovery
+    /// modal (the true last resort) instead of mounting an empty picker —
+    /// and its `r` still flashes the manual hint rather than an empty list
+    /// (#1041).
     #[test]
     fn unmapped_linear_team_without_repos_does_not_mount_an_empty_picker() {
         let mut m = build_model();
@@ -14607,11 +15351,20 @@ mod worktree_progress_recovery_tests {
             "workspace: Linear team `OBI` has no repo mapping and the ticket has no \
              linked GitHub PR — set providers.linear.teams.OBI in ~/.lazybox/config.yaml",
         ));
+        assert!(
+            !m.modal_stack.contains(&Id::LinearTeamRepo),
+            "no tracked repos means no picker to mount",
+        );
+        assert_eq!(
+            m.worktree_progress.as_ref().and_then(|s| s.recovery()),
+            Some(lazybox_ipc::WorktreeRecovery::LinearUnmapped),
+            "it falls back to the classified recovery modal as the last resort",
+        );
 
         m.pick_repo_for_linear_team();
         assert!(
             !m.modal_stack.contains(&Id::LinearTeamRepo),
-            "no tracked repos means no picker to mount",
+            "and `r` there still can't mount an empty picker",
         );
     }
 
@@ -19013,6 +19766,120 @@ mod async_modal_preempt_tests {
 }
 
 #[cfg(test)]
+mod requestable_reviewers_async_mount_tests {
+    //! The reviewer picker (`g r`) is now a two-step async flow like the
+    //! label picker: ask the daemon for the repo's requestable
+    //! reviewers, then mount from the reply. Same don't-preempt contract
+    //! (#1092).
+    use super::super::*;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Event as IpcEvent, channel};
+    use tuirealm::ratatui::layout::Size;
+
+    fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        let (client, _server) = channel::pair();
+        Model::new_for_test(client, Size::new(120, 40)).expect("model init")
+    }
+
+    /// Empty stack — the reply mounts the picker with the fetched
+    /// requestable reviewers.
+    #[test]
+    fn requestable_reviewers_reply_mounts_on_an_empty_stack() {
+        let mut m = build_model();
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: wk,
+            logins: vec!["octocat".into(), "hubot".into()],
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::RequestReviewers));
+        // The stash is consumed once served so a stray later reply can't
+        // re-mount on a stale target.
+        assert!(m.awaiting_requestable_reviewers.is_none());
+    }
+
+    /// A slow reply must not steal focus from a modal the user opened
+    /// while the fetch was in flight.
+    #[test]
+    fn slow_requestable_reviewers_reply_does_not_preempt_reply_textarea() {
+        let mut m = build_model();
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        m.mount_reply(SessionKey::from("github:owner/repo#1"));
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: wk,
+            logins: vec!["octocat".into()],
+        });
+
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::Reply),
+            "the reviewer picker must not steal focus from the composer"
+        );
+        assert!(!m.modal_stack.contains(&Id::RequestReviewers));
+        assert!(m.awaiting_requestable_reviewers.is_none());
+    }
+
+    /// A reply whose key no longer matches the pending request (the
+    /// user pressed `g r` on a different workspace, or already
+    /// dismissed) is ignored — no picker mounts.
+    #[test]
+    fn stale_requestable_reviewers_reply_is_ignored() {
+        let mut m = build_model();
+        m.awaiting_requestable_reviewers =
+            Some(lazybox_core::WorkspaceKey::new("github:owner/repo#1"));
+        m.handle_daemon_event(IpcEvent::RequestableReviewers {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:owner/repo#2"),
+            logins: vec!["octocat".into()],
+        });
+        assert!(m.modal_stack.is_empty());
+        assert!(m.awaiting_requestable_reviewers.is_some());
+    }
+
+    /// On a fetch *failure* with no interaction-derived fallback
+    /// candidates, the flash must be the error — never the misleading
+    /// "showing PR participants only" when there are no participants.
+    #[test]
+    fn failed_fetch_with_no_participants_flashes_error_not_participants_hint() {
+        let mut m = build_model();
+        // ProviderError is only processed once the initial polling modal
+        // is gone.
+        m.status.polling = None;
+        let wk = lazybox_core::WorkspaceKey::new("github:owner/repo#1");
+        m.awaiting_requestable_reviewers = Some(wk.clone());
+        // No workspace seeded → gather_candidate_logins yields nobody.
+        m.handle_daemon_event(IpcEvent::ProviderError {
+            source: "requestable-reviewers".into(),
+            message: "boom".into(),
+            detail: String::new(),
+            kind: "retryable".into(),
+        });
+        // The empty-state picker still mounts and the stash is consumed…
+        assert_eq!(m.modal_stack.last(), Some(&Id::RequestReviewers));
+        assert!(m.awaiting_requestable_reviewers.is_none());
+        // …but the flash is the error, not the participants hint.
+        let logged: Vec<String> = m
+            .status
+            .messages
+            .recent()
+            .map(|e| e.message.clone())
+            .collect();
+        assert!(
+            logged
+                .iter()
+                .any(|msg| msg.contains("couldn't load requestable reviewers")),
+            "expected the error flash, got {logged:?}",
+        );
+        assert!(
+            !logged.iter().any(|msg| msg.contains("participants only")),
+            "must not claim participants when there are none: {logged:?}",
+        );
+    }
+}
+
+#[cfg(test)]
 mod focus_mode_terminal_exit_tests {
     //! Focus mode must not survive an EMPTY stack — the user would be
     //! stranded on a near-fullscreen blank pane. A crashed AGENT is not
@@ -20700,7 +21567,7 @@ mod remote_spawn_tests {
     use lazybox_core::{SessionKey, Task, TaskId, Workspace};
     use lazybox_ipc::{Command as IpcCommand, Event as IpcEvent, channel};
     use lazybox_tui_core::action::Action;
-    use lazybox_tui_core::remote::RemoteBoxNotice;
+    use lazybox_tui_core::remote::{RemoteBoxNotice, RemoteConnState, RemoteControl};
     use tuirealm::ratatui::layout::Size;
 
     fn task(key: &str, age: Duration) -> Task {
@@ -20947,5 +21814,235 @@ mod remote_spawn_tests {
             );
         }
         assert!(m.remote_marks.is_empty(), "the latch is released too");
+    }
+
+    /// A configured box shows a persistent `disconnected` indicator from
+    /// launch — not the hidden `NotConfigured` state (#1066).
+    #[test]
+    fn a_configured_box_starts_disconnected_and_visible() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        assert_eq!(m.status.remote_conn, RemoteConnState::Disconnected);
+    }
+
+    /// Auto-connect (the default) fires a background `Connect` on startup
+    /// and paints the indicator `connecting…` immediately (#1066).
+    #[test]
+    fn auto_connect_requests_connect_on_startup() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let m = m.with_remote_control(ctrl_tx, true);
+        assert_eq!(
+            ctrl_rx.try_recv().expect("a Connect was queued"),
+            RemoteControl::Connect
+        );
+        assert_eq!(m.status.remote_conn, RemoteConnState::Connecting);
+    }
+
+    /// With auto-connect off (the hard-gate opt-out), startup does NOT
+    /// connect — the box waits for an explicit action (#1066).
+    #[test]
+    fn auto_connect_off_does_not_connect_on_startup() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let m = m.with_remote_control(ctrl_tx, false);
+        assert!(
+            ctrl_rx.try_recv().is_err(),
+            "no Connect should be sent when auto_connect is off"
+        );
+        assert_eq!(m.status.remote_conn, RemoteConnState::Disconnected);
+    }
+
+    /// The `ConnectBox` action toggles: a `Connect` when disconnected,
+    /// then a `Disconnect` when connected (#1066).
+    #[test]
+    fn connect_box_action_toggles_connect_and_disconnect() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (ctrl_tx, mut ctrl_rx) = tokio::sync::mpsc::channel(8);
+        // auto_connect off so startup doesn't pre-send a Connect.
+        let mut m = m.with_remote_control(ctrl_tx, false);
+
+        m.dispatch_action(&Action::ConnectBox);
+        assert_eq!(ctrl_rx.try_recv().unwrap(), RemoteControl::Connect);
+        assert_eq!(m.status.remote_conn, RemoteConnState::Connecting);
+
+        // Simulate the worker reporting the link came up.
+        m.status
+            .note_remote_state(RemoteConnState::Connected { name: "box".into() });
+        m.dispatch_action(&Action::ConnectBox);
+        assert_eq!(ctrl_rx.try_recv().unwrap(), RemoteControl::Disconnect);
+        assert_eq!(m.status.remote_conn, RemoteConnState::Disconnected);
+    }
+
+    /// `ConnectBox` with no `sandbox:` box flashes an error rather than
+    /// silently doing nothing.
+    #[test]
+    fn connect_box_without_a_box_flashes_an_error() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.dispatch_action(&Action::ConnectBox);
+        assert!(
+            m.status.notice.is_some(),
+            "a missing box surfaces a footer notice"
+        );
+    }
+
+    /// A worker `State` notice drives the persistent indicator only — no
+    /// transient flash steals the footer (#1066).
+    #[test]
+    fn state_notice_updates_the_persistent_indicator() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        let (notice_tx, notice_rx) = tokio::sync::mpsc::channel(8);
+        let mut m = m.with_remote_notices(notice_rx);
+
+        notice_tx
+            .try_send(RemoteBoxNotice::State(RemoteConnState::Connected {
+                name: "obin".into(),
+            }))
+            .expect("test channel");
+        m.tick_remote_notices();
+
+        assert_eq!(
+            m.status.remote_conn,
+            RemoteConnState::Connected {
+                name: "obin".into()
+            }
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "a state transition is durable, not a transient flash"
+        );
+    }
+
+    /// With the hard-gate on (`require_connect: true`), a remote spawn while
+    /// disconnected is refused instead of lazily triggering a bring-up:
+    /// nothing reaches the box and a footer nudge points at the connect key
+    /// (#1066).
+    #[test]
+    fn hard_gate_refuses_remote_spawn_while_disconnected() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let mut m = m
+            .with_remote_control(ctrl_tx, false)
+            .with_remote_require_connect(true);
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            box_rx.try_recv().is_err(),
+            "the disconnected hard-gate must not forward the spawn"
+        );
+        assert!(m.status.notice.is_some(), "the refusal is surfaced");
+    }
+
+    /// The hard-gate is OFF by default (`require_connect` unset, #1066):
+    /// `r c` while disconnected still lazily brings the box up on demand
+    /// (the spawn reaches the box worker), so remote spawn stays one-key.
+    /// Decoupled from `auto_connect` — startup connect off must not gate
+    /// on-demand spawns.
+    #[test]
+    fn r_spawn_lazily_proceeds_when_require_connect_off() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(8);
+        // auto_connect off (no startup connect), require_connect left off.
+        let mut m = m.with_remote_control(ctrl_tx, false);
+        assert!(!m.remote_connected(), "box starts disconnected");
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            matches!(box_rx.try_recv(), Ok(IpcCommand::Spawn { .. })),
+            "with require_connect off, a disconnected r-spawn lazily reaches the box"
+        );
+    }
+
+    /// Ordering fix (#1066): a disabled repo is refused BEFORE the hard-gate,
+    /// so `r c` there never tells the user to "connect first" (which would
+    /// wake the billed box only to then refuse as disabled).
+    #[test]
+    fn disabled_repo_refuses_before_the_hard_gate() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let mut disabled = std::collections::BTreeSet::new();
+        disabled.insert("owner/repo".to_string());
+        // Hard-gate ON and disconnected: the wrong order would surface the
+        // connect nudge; the fix surfaces the disabled nudge instead.
+        let mut m = m
+            .with_remote_control(ctrl_tx, false)
+            .with_remote_require_connect(true)
+            .with_remote_repo_overrides(disabled);
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(box_rx.try_recv().is_err(), "nothing reaches the box");
+        let msg = m.status.notice.as_ref().expect("a nudge is surfaced");
+        assert!(
+            msg.message.contains("disabled for this project"),
+            "must name the opt-out, not the connect gate: {:?}",
+            msg.message
+        );
+    }
+
+    /// Per-project opt-out (#1066): a repo that set `sandbox: false` resolves
+    /// to no box, while every other repo (and the repo-less path) inherits
+    /// the global one. Matching is case-insensitive — a casing mismatch must
+    /// not silently leave a disabled repo enabled (fail *open*).
+    #[test]
+    fn remote_for_repo_honors_the_per_project_opt_out() {
+        let (m, _conn, _box_rx) = build_model_with_box();
+        // Boot lowercases the disabled set (Config::sandbox_disabled_repos).
+        let mut disabled = std::collections::BTreeSet::new();
+        disabled.insert("owner/repo".to_string());
+        let m = m.with_remote_repo_overrides(disabled);
+        assert_eq!(m.remote_for_repo(Some("owner/other")), Some("box"));
+        assert_eq!(m.remote_for_repo(Some("owner/repo")), None, "opted out");
+        assert_eq!(
+            m.remote_for_repo(Some("Owner/Repo")),
+            None,
+            "a casing mismatch must still resolve to the opt-out"
+        );
+        assert_eq!(
+            m.remote_for_repo(None),
+            Some("box"),
+            "a repo-less workspace can't be opted out"
+        );
+    }
+
+    /// An `r`-spawn on a workspace whose repo disabled the box is refused
+    /// (nothing reaches the box) and surfaces a nudge — even though the box
+    /// is configured for other projects (#1066).
+    #[test]
+    fn r_spawn_refused_on_a_disabled_repo() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let mut disabled = std::collections::BTreeSet::new();
+        disabled.insert("owner/repo".to_string());
+        let mut m = m.with_remote_repo_overrides(disabled);
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            box_rx.try_recv().is_err(),
+            "a disabled repo's spawn never reaches the box"
+        );
+        assert!(m.status.notice.is_some(), "the refusal is surfaced");
+    }
+
+    /// With the hard-gate on but the box connected, a remote spawn goes
+    /// straight through — connection is the gate, not a per-spawn effect.
+    #[test]
+    fn hard_gate_allows_remote_spawn_once_connected() {
+        let (m, _conn, mut box_rx) = build_model_with_box();
+        let (ctrl_tx, _ctrl_rx) = tokio::sync::mpsc::channel(8);
+        let mut m = m
+            .with_remote_control(ctrl_tx, false)
+            .with_remote_require_connect(true);
+        m.status
+            .note_remote_state(RemoteConnState::Connected { name: "box".into() });
+        let _sk = seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+
+        m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(
+            matches!(box_rx.try_recv(), Ok(IpcCommand::Spawn { .. })),
+            "a connected box accepts the spawn"
+        );
     }
 }

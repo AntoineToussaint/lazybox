@@ -799,7 +799,7 @@ impl<T: TerminalAdapter> Model<T> {
         );
         rows.extend(
             self.sidebar
-                .agent_workspace_keys()
+                .numbered_workspace_keys()
                 .into_iter()
                 .take(9)
                 .enumerate()
@@ -856,7 +856,7 @@ impl<T: TerminalAdapter> Model<T> {
         // a previous `]]s`-from-the-sidebar target (#871).
         self.leader_target = None;
         match cmd {
-            LeaderCmd::JumpAgent(n) => self.jump_to_agent_workspace(n),
+            LeaderCmd::JumpNumbered(n) => self.jump_to_numbered_workspace(n),
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
@@ -917,6 +917,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// agent there (#836); a workspace with nothing to spawn into is named
     /// in a notice.
     fn sidebar_send_snippet(&mut self) {
+        // Under a live multi-select the snippet fans out over the whole
+        // selection, identically to `w w` — the same broadcast pipeline
+        // (#1077) rather than the single-cursor retarget below, which
+        // would have hit one row and left the rest untouched.
+        if self.bulk_active() {
+            self.mount_broadcast_picker();
+            return;
+        }
         let Some(key) = self.sidebar.selected_workspace_key().cloned() else {
             self.flash_info("no workspace selected");
             return;
@@ -1891,14 +1899,26 @@ impl<T: TerminalAdapter> Model<T> {
                     // viewport auto-scrolling under an edge drag; a
                     // press-release with no cell change (`dragged` never
                     // set) is treated as a plain click in the Up handler.
+                    // The drag binds to the tile under the press (falling
+                    // back to the focused tile at a seam/chrome miss), and
+                    // every later mapping composes against that terminal —
+                    // so the selection can't spill into a neighbour (#1101).
                     if focus == PaneFocus::Terminals
                         && matches!(button, crossterm::event::MouseButton::Left)
                         && claim_for_selection
-                        && let Some(anchor) =
-                            self.terminals
-                                .selection_point(right_bottom_rect, m.column, m.row)
+                        && let Some(terminal) = self
+                            .terminals
+                            .tile_at(m.column, m.row)
+                            .or_else(|| self.terminals.focused_terminal_id())
+                        && let Some(anchor) = self.terminals.selection_point(
+                            terminal,
+                            right_bottom_rect,
+                            m.column,
+                            m.row,
+                        )
                     {
                         self.terminal_drag = Some(TerminalDrag {
+                            terminal,
                             down: (m.column, m.row),
                             anchor,
                             focus: anchor,
@@ -1935,6 +1955,11 @@ impl<T: TerminalAdapter> Model<T> {
                         if let Some(url) = self.right.take_open_url() {
                             self.open_external_url(&url);
                         }
+                        if self.right.take_request_reviewers()
+                            && let Some(cmd) = self.begin_request_reviewers()
+                        {
+                            self.dispatch_cmds(vec![cmd]);
+                        }
                         if let Some(msg) = self.right.drain_selection_notice() {
                             self.flash_hint(msg);
                         }
@@ -1960,7 +1985,11 @@ impl<T: TerminalAdapter> Model<T> {
                 let mut click_no_drag_at: Option<(u16, u16)> = None;
                 if let Some(drag) = self.terminal_drag.take() {
                     if drag.dragged {
-                        let text = self.terminals.extract_selection(drag.anchor, drag.focus);
+                        let text = self.terminals.extract_selection(
+                            drag.terminal,
+                            drag.anchor,
+                            drag.focus,
+                        );
                         if !text.trim().is_empty() {
                             emit_clipboard_copy(&text);
                             let lines = text.lines().count();
@@ -2118,13 +2147,15 @@ impl<T: TerminalAdapter> Model<T> {
     /// auto-scroll (`tick_terminal_drag`) so a pointer held still at the
     /// edge keeps scrolling (#432).
     pub(super) fn drive_terminal_drag(&mut self, col: u16, row: u16) {
-        let (rect, down) = match &self.terminal_drag {
-            Some(drag) => (drag.rect, drag.down),
+        let (terminal, rect, down) = match &self.terminal_drag {
+            Some(drag) => (drag.terminal, drag.rect, drag.down),
             None => return,
         };
         let delta = edge_scroll_delta(rect, row);
         if delta != 0 {
-            let _ = self.terminals.scroll_active(delta);
+            // Scroll the tile the drag started in — not whatever is focused
+            // — so an edge drag extends the selection within its own tile.
+            let _ = self.terminals.scroll_terminal(terminal, delta);
             // Reaching for scrollback above the local grid arms the same
             // deep-scrollback fetch the wheel/keyboard scroll paths do, so
             // an edge drag can select as deep as the daemon retained (#393).
@@ -2132,7 +2163,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.send_cmd(IpcCommand::FetchScrollback { terminal_id });
             }
         }
-        let focus = self.terminals.selection_point(rect, col, row);
+        let focus = self.terminals.selection_point(terminal, rect, col, row);
         if let Some(drag) = self.terminal_drag.as_mut() {
             drag.pointer = (col, row);
             if (col, row) != down {
@@ -2393,6 +2424,7 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToLimited => Action::JumpToLimited,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,
         ActionKind::StartAgent => Action::StartAgent,
+        ActionKind::ConnectBox => Action::ConnectBox,
         ActionKind::ToggleActivityPane => Action::ToggleActivityPane,
         ActionKind::ToggleFocusMode => Action::ToggleFocusMode,
         _ => return None,

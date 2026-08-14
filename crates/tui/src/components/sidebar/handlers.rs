@@ -214,6 +214,7 @@ impl Sidebar {
                     self.workspaces.insert(key, w.clone());
                 }
                 self.agents.clear();
+                self.spawning.clear();
                 self.agent_terminal_states.clear();
                 self.running_terminals.clear();
                 self.terminal_models.clear();
@@ -245,6 +246,10 @@ impl Sidebar {
                 if let Some(model) = model_label {
                     self.terminal_models.insert(*terminal_id, model.clone());
                 }
+                // The terminal now exists, so provisioning is done — drop
+                // the "spawning" arc; the agent's own `AgentState` takes
+                // over the row's state slot from here (#1069).
+                self.spawning.remove(session_key);
             }
             Event::TerminalModelChanged {
                 terminal_id,
@@ -314,6 +319,7 @@ impl Sidebar {
                 self.workspaces.remove(&session_key);
                 self.broadcast_selected.remove(&session_key);
                 self.agents.remove(&session_key);
+                self.spawning.remove(&session_key);
                 self.agent_terminal_states
                     .retain(|_, (key, _)| key != &session_key);
                 // A starred workspace that's archived / deleted must drop
@@ -375,6 +381,10 @@ impl Sidebar {
                 // `osascript` / `notify-send`).
                 self.agent_terminal_states
                     .insert(*terminal_id, (session_key.clone(), *state));
+                // The agent is live now — its real state owns the row's
+                // state slot, so the provisional "spawning" arc clears
+                // (#1069). A no-op unless this workspace was mid-spawn.
+                self.spawning.remove(session_key);
                 // Clear a stale reset hint once this agent leaves the limit
                 // block, so a later limit episode whose banner carries no
                 // parseable countdown can't resurface a prior episode's time
@@ -470,6 +480,52 @@ impl Sidebar {
                 if change.asking_changed || change.limit_changed {
                     self.recompute_visible();
                 }
+            }
+            Event::WorktreeProgress {
+                session_key,
+                status,
+                ..
+            } => {
+                // First-time provisioning progress for a spawn the user
+                // (or the daemon) just kicked off. The terminal doesn't
+                // exist yet, so the row would otherwise show nothing
+                // agent-y for the whole clone → worktree → launch window.
+                // Reflect it as a "spawning" arc in the row's state slot
+                // until the agent reports its first state (#1069).
+                match status {
+                    lazybox_ipc::WorktreeStepStatus::Started
+                    | lazybox_ipc::WorktreeStepStatus::Progress(_) => {
+                        self.spawning.insert(session_key.clone());
+                    }
+                    // Setup failed (or was cancelled — a `Failed` carrying
+                    // `SPAWN_CANCELLED_NOTE`): stop spinning. The failure
+                    // surfaces through the progress modal / footer notice;
+                    // the row must not spin forever with no agent coming.
+                    lazybox_ipc::WorktreeStepStatus::Failed(_) => {
+                        self.spawning.remove(session_key);
+                    }
+                    // A single step finishing (`Done`) or completing in a
+                    // degraded way (`Warned`) just advances the checklist —
+                    // more steps, and finally the agent, are still coming,
+                    // so keep spinning until a live signal clears it.
+                    lazybox_ipc::WorktreeStepStatus::Done
+                    | lazybox_ipc::WorktreeStepStatus::Warned(_) => {}
+                }
+            }
+            Event::ProviderError { source, .. } if source.starts_with("spawn") => {
+                // A spawn failed. Worktree-*provisioning* failures also emit
+                // a `WorktreeStepStatus::Failed` that clears the specific
+                // workspace's arc above — but a post-provisioning
+                // agent-*launch* failure (`execute_spawn_plan` erroring after
+                // the worktree is ready) emits only this `ProviderError`,
+                // which carries a `source` string and no session key. Without
+                // a target the arc would spin forever, so drop every in-flight
+                // arc: a genuinely systemic launch failure (missing agent
+                // binary, PTY exhaustion) fails all concurrent spawns anyway,
+                // and any healthy concurrent provision re-shows its glyph on
+                // its own `TerminalSpawned`. Fixes the "not stuck spinning
+                // forever" acceptance for #1069.
+                self.spawning.clear();
             }
             Event::TerminalsRebadged { from, to } => {
                 // The daemon moved every terminal owned by `from` onto

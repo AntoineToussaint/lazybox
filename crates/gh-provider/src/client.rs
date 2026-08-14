@@ -4030,6 +4030,83 @@ impl GhClient {
         Ok(nodes)
     }
 
+    /// Fetch the accounts requestable as reviewers on a PR: GitHub's
+    /// suggestions for this PR first (most relevant), then the repo's
+    /// assignable users. Deduped, suggestions-first. This is the pool
+    /// GitHub's own reviewer dropdown draws from — far wider than the
+    /// people already interacting with the PR.
+    ///
+    /// Paginates `assignableUsers` (100/page) so a repo with more than
+    /// 100 collaborators doesn't silently drop the overflow — the exact
+    /// "missing reviewers" bug this feature exists to fix. Bounded at
+    /// `MAX_PAGES` as a runaway backstop (a repo that large is well past
+    /// where a scroll-list picker is usable anyway); a repo that hits
+    /// the cap is logged, not silently truncated.
+    ///
+    /// Named with the `_for_pr` suffix so this inherent method doesn't
+    /// shadow the trait-side `TaskProvider::list_requestable_reviewers`
+    /// (which takes a `&Workspace` and delegates here).
+    pub async fn list_requestable_reviewers_for_pr(
+        &self,
+        owner: &str,
+        name: &str,
+        number: u64,
+    ) -> Result<Vec<String>, GhError> {
+        const MAX_PAGES: usize = 10;
+        let mut out: Vec<String> = Vec::new();
+        let mut after: Option<String> = None;
+        // Suggestions are fetched only on the first page (they aren't
+        // paginated); `@skip` drops them on later rounds.
+        let mut skip_suggested = false;
+        for page in 0..MAX_PAGES {
+            self.acquire_or_block("requestable reviewers query")?;
+            let body = graphql::requestable_reviewers_body(
+                owner,
+                name,
+                number,
+                after.as_deref(),
+                skip_suggested,
+            );
+            let response: graphql::GqlRequestableReviewersResponse = self
+                .post_graphql_with_retry("requestable reviewers query", &body)
+                .await?;
+            if let Some(errors) = response.errors {
+                return Err(mutation_error_response(
+                    "requestable reviewers query",
+                    &errors,
+                ));
+            }
+            let repo = response
+                .data
+                .and_then(|d| d.repository)
+                .ok_or_else(|| GhError::Graphql("list_requestable_reviewers: no data".into()))?;
+            // Read the pagination cursor before `logins()` consumes `repo`.
+            let has_next = repo.assignable_users.page_info.has_next_page;
+            let end_cursor = repo.assignable_users.page_info.end_cursor.clone();
+            for login in repo.logins() {
+                if !out.contains(&login) {
+                    out.push(login);
+                }
+            }
+            match end_cursor {
+                Some(cursor) if has_next => {
+                    after = Some(cursor);
+                    skip_suggested = true;
+                }
+                // No further pages, or `hasNextPage` with no cursor
+                // (defensive — never spin without an advancing cursor).
+                _ => return Ok(out),
+            }
+            if page + 1 == MAX_PAGES {
+                tracing::warn!(
+                    "list_requestable_reviewers {owner}/{name}#{number}: hit {MAX_PAGES}-page cap ({} users); more assignable users exist but were omitted",
+                    out.len(),
+                );
+            }
+        }
+        Ok(out)
+    }
+
     /// Add labels (by GraphQL node id) to any `Labelable` (PR or
     /// Issue). Empty `label_ids` returns Ok immediately.
     pub async fn add_labels(
@@ -4359,6 +4436,47 @@ impl lazybox_core::TaskProvider for GhClient {
         self.close_pr_node(node_id)
             .await
             .map_err(mutation_provider_error)
+    }
+
+    /// List the accounts requestable as reviewers on the workspace's
+    /// PR — the repo's assignable users plus GitHub's suggestions for
+    /// this PR. Resolves `(owner, name, number)` from the PR task.
+    async fn list_requestable_reviewers(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<Vec<String>, lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(repo) = pr.repo.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR task has no repo",
+            ));
+        };
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("can't parse owner/name from `{repo}`"),
+            ));
+        };
+        let Some(number) = pr.id.number() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("can't parse PR number from `{}`", pr.id.key),
+            ));
+        };
+        // A read that feeds the reviewer picker (not a mutation): the
+        // client falls back to interaction-derived candidates the
+        // instant this fails, so a rate limit here must surface at once
+        // — never a `Retryable` whose "retrying" message the picker
+        // path never honors.
+        self.list_requestable_reviewers_for_pr(owner, name, number)
+            .await
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }
 
     /// Hard-delete the workspace's GitHub issue. Only repo admins may

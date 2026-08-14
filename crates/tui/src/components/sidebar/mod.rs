@@ -264,6 +264,17 @@ pub struct Sidebar {
     /// (which gets clobbered every poll cycle when the daemon
     /// re-broadcasts `WorkspaceUpserted`).
     agents: std::collections::HashMap<SessionKey, lazybox_ipc::AgentState>,
+    /// Workspaces mid-spawn: provisioning a first session — cloning,
+    /// creating the worktree, running setup, launching the agent —
+    /// before any terminal exists to report an `AgentState` (#1069).
+    /// Driven by `Event::WorktreeProgress`: a step `Started` / `Progress`
+    /// marks the workspace spawning; the first live `AgentState`, the
+    /// matching `TerminalSpawned`, or a `Failed` step clears it. Renders
+    /// the animated "spawning" arc in the row's shared state slot so a
+    /// spawn reads as *coming up* instead of a blank row until the agent
+    /// is live. Independent of `agents` above, which only gains an entry
+    /// once a terminal reports state.
+    spawning: std::collections::HashSet<SessionKey>,
     /// Current frame of the shared "working" spinner, mirrored from
     /// the free-running wall clock by [`Sidebar::tick_working`] so the
     /// render path stays a cheap field read and every working row shows
@@ -306,6 +317,14 @@ pub struct Sidebar {
     /// search is in flight; `Some` while the `/` input bar is open or
     /// a query stays applied after `Enter`. See [`SearchState`].
     search: Option<SearchState>,
+    /// Workspace keys the active search's scope covers — the rows whose
+    /// titles get the match highlight (#1099). Precomputed once per
+    /// [`Self::recompute_visible`] from the same `search_scope_covers`
+    /// predicate the visible-row filter uses, so a highlighted row is
+    /// exactly a row the search kept (no drift) and `render` needs only an
+    /// O(1) lookup instead of re-deriving each row's group label per frame.
+    /// Empty when no search is active.
+    searched_keys: std::collections::HashSet<SessionKey>,
     /// Workspace rows the user multi-selected with `v` (or swept with
     /// Shift-↑/↓). While non-empty, every bulk-appropriate workspace
     /// action targets this whole set instead of the cursor row (#932) —
@@ -389,6 +408,7 @@ impl Sidebar {
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents: std::collections::HashMap::new(),
+            spawning: std::collections::HashSet::new(),
             agent_terminal_states: std::collections::HashMap::new(),
             working_spinner_frame: 0,
             spinner_epoch: std::time::Instant::now(),
@@ -398,6 +418,7 @@ impl Sidebar {
             search_bar_rect: None,
             now_override: None,
             search: None,
+            searched_keys: std::collections::HashSet::new(),
             broadcast_selected: std::collections::HashSet::new(),
             keep_awake: false,
             show_agent_model: true,
@@ -560,6 +581,12 @@ impl Sidebar {
             .values()
             .any(|s| matches!(s, lazybox_ipc::AgentState::Working))
     }
+    /// True while `session_key`'s workspace is provisioning its first
+    /// spawn and no terminal has reported an `AgentState` yet — drives
+    /// the row's "spawning" arc (#1069). Reads the private `spawning` set.
+    pub fn is_spawning(&self, session_key: &SessionKey) -> bool {
+        self.spawning.contains(session_key)
+    }
     /// Sync the "working" spinner to the wall clock. Returns `true`
     /// when the displayed frame changed, so the caller knows a
     /// re-render is warranted.
@@ -579,7 +606,10 @@ impl Sidebar {
     /// rest of the time, so it never forces a faster redraw and a single
     /// shared frame index means no per-row work on each tick.
     pub fn tick_working(&mut self) -> bool {
-        if !self.any_agent_working() {
+        // The one shared frame counter drives both the `Working` braille
+        // spinner and the `Spawning` arc (#1069), so advance it while
+        // either is on screen.
+        if !self.any_agent_working() && self.spawning.is_empty() {
             return false;
         }
         let frame =
@@ -610,6 +640,28 @@ impl Sidebar {
         session_key: &SessionKey,
         state: lazybox_ipc::AgentState,
     ) -> bool {
+        // While a spawn is in flight and the arc is what's actually on
+        // screen, folding in the agent's first reading *does* change the
+        // display: it clears the arc. This holds even for `Idle`, which the
+        // absent-entry default below also maps to, so without this the
+        // orchestrator's `changed` gate (which reads this) would skip the
+        // repaint and strand the arc when the `TerminalSpawned` event was
+        // dropped on the lossy bus and the first `AgentState` is `Idle`
+        // (#1069). Gate it on the arc *actually being displayed* — matching
+        // `cell_state`'s precedence, the arc shows only when no higher live
+        // signal does, i.e. the stored state is absent / `Idle` / `Exited`.
+        // A live sibling session (`Working`/`Done`/`InputNeeded`/
+        // `LimitReached`) owns the slot instead, so its repeated pings must
+        // still dedup here rather than force a needless repaint every tick.
+        if self.spawning.contains(session_key)
+            && matches!(
+                self.agents.get(session_key),
+                None | Some(lazybox_ipc::AgentState::Idle)
+                    | Some(lazybox_ipc::AgentState::Exited { .. })
+            )
+        {
+            return false;
+        }
         // "Already displays it" = the stored state already equals this
         // reading, so folding it in would be a no-op. An absent entry
         // renders as `Idle`, so treat it as such.
@@ -1466,14 +1518,33 @@ impl Sidebar {
             .collect()
     }
 
-    /// Move the cursor onto the `n`th (1-based) agent workspace in
-    /// sidebar order. Returns true when that slot exists and the
-    /// cursor moved. Backs the `]]<digit>` focus-mode jump — the
-    /// deterministic replacement for the old `F3` cycle.
-    pub fn focus_nth_agent_workspace(&mut self, n: usize) -> bool {
+    /// The workspaces that carry a jump number, in sidebar (top-down)
+    /// order: the **focused** (starred) workspaces, deduped so one that
+    /// the `★ Focused` pin lifts to the top isn't also counted in its
+    /// repo group. The 1-based index here is the badge number and the
+    /// `]]<digit>` target, so numbering only what the user curated keeps
+    /// the sidebar quiet and the digits stable.
+    pub fn numbered_workspace_keys(&self) -> Vec<SessionKey> {
+        let mut seen = std::collections::HashSet::new();
+        self.visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k),
+                _ => None,
+            })
+            .filter(|k| self.is_focused(k))
+            .filter(|k| seen.insert((*k).clone()))
+            .cloned()
+            .collect()
+    }
+
+    /// Move the cursor onto the `n`th (1-based) numbered (focused)
+    /// workspace in sidebar order. Returns true when that slot exists and
+    /// the cursor moved. Backs the `]]<digit>` focus-mode jump.
+    pub fn focus_nth_numbered_workspace(&mut self, n: usize) -> bool {
         let Some(target) = n
             .checked_sub(1)
-            .and_then(|i| self.agent_workspace_keys().into_iter().nth(i))
+            .and_then(|i| self.numbered_workspace_keys().into_iter().nth(i))
         else {
             return false;
         };
@@ -1754,6 +1825,33 @@ impl Sidebar {
             .values()
             .filter_map(|p| p.github_repo().map(str::to_string))
             .collect()
+    }
+
+    /// Tracked GitHub repos to offer for an unmapped Linear `team`, ranked
+    /// so the likely answer is one keystroke (#1041). Repos that other
+    /// Linear tickets in the *same team* already link a GitHub PR to float
+    /// to the top — the team's real repos, learned from its own tickets —
+    /// followed by the rest in their existing order. A blank picker is never
+    /// what the user wants: even with no signal this still lists every repo.
+    pub fn github_repos_ranked_for_linear_team(&self, team: &str) -> Vec<String> {
+        let mut repos = self.github_repos_for_picker();
+        let linked: std::collections::HashSet<String> = self
+            .workspaces
+            .values()
+            .filter_map(|w| w.primary_task())
+            .filter(|t| {
+                t.id.source == "linear"
+                    && t.repo.as_deref().and_then(|r| r.strip_prefix("linear/")) == Some(team)
+            })
+            .flat_map(|t| {
+                t.linked_tasks
+                    .iter()
+                    .filter(|id| id.source == "github")
+                    .filter_map(|id| id.key.split_once('#').map(|(repo, _)| repo.to_string()))
+            })
+            .collect();
+        repos.sort_by_key(|repo| !linked.contains(repo));
+        repos
     }
 
     /// The Project the cursor is currently "in" — drives the `n` (new
@@ -2722,6 +2820,7 @@ impl Sidebar {
         self.visible = outcome.visible;
         self.repo_summaries = outcome.summaries;
         self.recompute_stacks();
+        self.recompute_searched_keys();
 
         // Preserve cursor on a repo header across reorderings — j/k
         // can land on headers (collapse target), and snapshots
@@ -2771,6 +2870,34 @@ impl Sidebar {
             .iter()
             .position(|r| matches!(r, VisibleRow::Workspace(_) | VisibleRow::Session { .. }))
             .unwrap_or(0);
+    }
+
+    /// Rebuild [`Self::searched_keys`] from the freshly-computed visible
+    /// list — the workspace keys the active search's scope covers, which
+    /// `render` highlights. Uses the shared `search_scope_covers`
+    /// predicate (the same one the visible-row filter uses) so a
+    /// highlighted row can never diverge from what the filter kept, and
+    /// keeps the per-row `group_label` work here (once per recompute)
+    /// rather than in the per-frame render path (#1099).
+    fn recompute_searched_keys(&mut self) {
+        let keys: std::collections::HashSet<SessionKey> = self
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => {
+                    let w = self.workspaces.get(k)?;
+                    crate::components::visible_rows::search_scope_covers(
+                        self.search.as_ref(),
+                        w,
+                        &self.projects,
+                        &self.workspaces,
+                    )
+                    .then(|| k.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        self.searched_keys = keys;
     }
 }
 

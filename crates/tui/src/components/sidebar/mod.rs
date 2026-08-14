@@ -813,6 +813,27 @@ impl Sidebar {
         }
     }
 
+    /// Optimistically flip a workspace's merge-on-green arm so the `⚡`
+    /// row glyph lands the instant the user presses `g g`, instead of only
+    /// after the daemon persists the flag and rebroadcasts the workspace
+    /// (a full round-trip that's invisible under output-heavy load). Mirrors
+    /// [`Self::mark_workspace_merged`] / [`Self::mark_remote`]. If the daemon
+    /// ultimately declines to arm (the merge-on-green author gate), its next
+    /// `WorkspaceUpserted` echo carries the real `false` and the glyph clears
+    /// — the same self-correcting contract every optimistic tag here uses.
+    /// Returns whether a workspace was found to update.
+    pub fn mark_auto_merge_on_green(&mut self, sk: &SessionKey, enabled: bool) -> bool {
+        if let Some(workspace) = self.workspaces.get_mut(sk) {
+            if workspace.auto_merge_on_green != enabled {
+                workspace.auto_merge_on_green = enabled;
+                self.recompute_visible();
+            }
+            true
+        } else {
+            false
+        }
+    }
+
     /// Toggle whether merged + closed PRs surface in the Inbox view.
     /// Wired from `DisplayConfig::show_inactive_in_inbox`; idempotent
     /// — calling with the current value is a no-op so a YAML hot-

@@ -1120,11 +1120,18 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if !ctx.auto_merge_armed {
         return Cell::empty();
     }
+    // Filled `success` block, not a fg-only glyph: `⚡` is the *actionable*
+    // arm — the one merge-on-green state the user drives with `g g` — so it
+    // reads at a glance the way the old ` ARM ` block did, while staying one
+    // glyph wide (keeping #1046's column budget). Its passive siblings `◆`
+    // (GitHub-native AUTO) and `🔧` (FIX) stay fg-only, so the block draws
+    // the eye to the arm you toggled.
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
         Style::default()
-            .fg(ctx.theme.success)
+            .bg(ctx.theme.success)
+            .fg(ratatui::style::Color::Black)
             .add_modifier(Modifier::BOLD)
     };
     Cell::from_span(Span::styled(
@@ -2368,11 +2375,19 @@ mod tests {
         );
         let arm_style = arm.spans[0].style;
         let auto_style = auto.spans[0].style;
-        assert_eq!(arm_style.fg, Some(theme.success), "ARM is lazybox-green");
+        // `⚡` is the actionable arm, so it's a filled lazybox-green block
+        // (green background, black glyph) — reads at a glance like the old
+        // ` ARM ` pill; `◆` (AUTO) stays a fg-only GitHub-accent glyph.
+        assert_eq!(
+            arm_style.bg,
+            Some(theme.success),
+            "ARM is a filled lazybox-green block"
+        );
         assert_eq!(auto_style.fg, Some(theme.accent), "AUTO is GitHub-accent");
         assert_ne!(
-            arm_style.fg, auto_style.fg,
-            "ARM and AUTO must not share a color"
+            (arm_style.fg, arm_style.bg),
+            (auto_style.fg, auto_style.bg),
+            "ARM and AUTO must not share a look"
         );
     }
 

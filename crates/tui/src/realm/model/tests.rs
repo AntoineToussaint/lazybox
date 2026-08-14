@@ -7617,6 +7617,44 @@ mod merge_focus_follow_tests {
         assert!(m.modal_flow.is_none());
     }
 
+    /// Pressing `g g` (`Action::ToggleAutoMerge`) arms merge-on-green
+    /// *optimistically*: the local workspace flag flips on the keypress so the
+    /// `⚡` row glyph shows immediately, instead of only after the daemon
+    /// persists the flag and rebroadcasts the workspace — a round-trip that's
+    /// invisible under output-heavy load (#1090). The daemon command still
+    /// goes out; its echo confirms (or, if the author gate declines, clears it).
+    #[test]
+    fn toggle_auto_merge_arms_optimistically() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let ws = workspace("owner/repo#1", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        assert!(
+            !m.sidebar
+                .selected_workspace()
+                .expect("selected")
+                .auto_merge_on_green,
+            "precondition: not armed"
+        );
+
+        let cmds = m.dispatch_action(&Action::ToggleAutoMerge);
+
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, IpcCommand::SetAutoMergeOnGreen { enabled: true, .. })),
+            "must still tell the daemon to arm"
+        );
+        assert!(
+            m.sidebar
+                .selected_workspace()
+                .expect("selected")
+                .auto_merge_on_green,
+            "g g must arm optimistically so the ⚡ glyph shows on the keypress",
+        );
+    }
+
     /// Picking an auto-fix row toggles the per-session arm. On a default
     /// (unlabeled) PR that means Default → Disarm →
     /// `SetAutoFixPolicy { kind: CiFailure, arm: Disarm }`.

@@ -780,22 +780,36 @@ impl SetupRunner {
                     .selected_scopes
                     .entry(provider_id)
                     .or_default();
-                // Replace this org's subscription with exactly the
-                // picked repos: drop the whole-org entry AND any
-                // previously-narrowed repo under it, then re-add the
-                // current picks. Without clearing the old repos,
-                // un-ticking one would leave its stale entry behind.
+                // Clear this org's whole slate first — the org-level
+                // entry AND any previously-narrowed repo under it — then
+                // re-derive it from the picks below. Without clearing,
+                // un-ticking one repo would leave its stale entry behind.
                 let prefix = format!("{parent_id}/");
                 entry.retain(|id| *id != parent_id && !id.starts_with(&prefix));
-                // Confirming with nothing ticked is a real submission
-                // meaning "no repos from this org" (#1098): the `retain`
-                // above already dropped the whole-org entry and every
-                // narrowed repo, so leaving `picked` empty leaves the org
-                // unsubscribed. Re-inserting `parent_id` here would
-                // resubscribe the whole org — the very repos the user
-                // just deselected — the opposite of what they asked for.
-                for s in picked {
-                    entry.insert(s.id);
+                if picked.is_empty() {
+                    // Nothing ticked is a real submission meaning "no
+                    // repos from this org" (#1098): the `retain` above
+                    // already dropped the whole-org entry and every
+                    // narrowed repo, so leaving the org unsubscribed is
+                    // the answer. Re-inserting `parent_id` would
+                    // resubscribe the very repos the user just
+                    // deselected — the opposite of what they asked for.
+                } else if picked.len() == items.len() {
+                    // Every repo ticked == the whole org. Keep the
+                    // dynamic org-level entry rather than freezing
+                    // today's repo list: an org-level subscription
+                    // auto-includes repos added later and polls as one
+                    // `org:` qualifier, whereas enumerating every repo
+                    // would drop future repos and can blow past the
+                    // search-query length limit. This is what a freshly
+                    // added org's all-ticked picker confirms to, and
+                    // what a whole-org subscriber preserves by pressing
+                    // Enter unchanged in "Add / remove repos".
+                    entry.insert(parent_id);
+                } else {
+                    for s in picked {
+                        entry.insert(s.id);
+                    }
                 }
                 self.next_repo_step()
             }
@@ -900,7 +914,8 @@ impl SetupRunner {
                     RunnerStep::show(screen)
                 }
                 Ok(scopes) => {
-                    let screen = self.screen_repo_pick(&provider_id, &parent_label, scopes);
+                    let screen =
+                        self.screen_repo_pick(&provider_id, &parent_id, &parent_label, scopes);
                     self.expecting = ExpectingStep::RepoPickFor(provider_id, parent_id);
                     RunnerStep::show(screen)
                 }
@@ -1073,6 +1088,7 @@ impl SetupRunner {
     fn screen_repo_pick(
         &mut self,
         provider_id: &str,
+        parent_id: &str,
         parent_label: &str,
         mut scopes: Vec<Scope>,
     ) -> Screen {
@@ -1083,9 +1099,17 @@ impl SetupRunner {
         // Pre-tick this provider's existing repo subscriptions. Pre-
         // seeding matters most for Settings → "Add / remove repos" —
         // opening the picker and seeing zero ticks looks like all your
-        // repos vanished.
+        // repos vanished. A whole-org subscription is stored as the
+        // org-level id (`parent_id`) with no per-repo entries, so it
+        // must pre-tick EVERY repo — otherwise the picker renders a
+        // fully-subscribed org as all-unticked, and confirming (Enter)
+        // would silently unsubscribe the whole org (#1098).
         let already = self.subscribed(provider_id);
-        let selected = scopes.iter().map(|s| already.contains(&s.id)).collect();
+        let whole_org = already.contains(parent_id);
+        let selected = scopes
+            .iter()
+            .map(|s| whole_org || already.contains(&s.id))
+            .collect();
         self.current_choice = Some(CurrentChoice::RepoPick(scopes.clone()));
         Screen::RepoPick {
             provider_id: provider_id.to_string(),
@@ -1766,6 +1790,54 @@ mod tests {
         }
     }
 
+    /// Regression (#1098): a whole-org subscription is stored as the
+    /// org-level id with NO per-repo entries. The repo picker must
+    /// pre-tick every repo for it — otherwise it renders a
+    /// fully-subscribed org as all-unticked, and confirming (Enter)
+    /// would silently unsubscribe the whole org via the empty-drop path.
+    #[test]
+    fn whole_org_subscription_pre_ticks_every_repo() {
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:acme".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            scope_providers: BTreeSet::new(),
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::RepoLoadFor(
+                "github".into(),
+                "github:acme".into(),
+                "acme".into(),
+            ),
+            current_choice: None,
+            edit_scopes: true,
+        };
+        let repo = |name: &str| Scope {
+            id: format!("github:acme/{name}"),
+            label: format!("acme/{name}"),
+            parent: Some("github:acme".into()),
+            kind: lazybox_core::ScopeKind::Repo,
+            private: false,
+        };
+        let repos = vec![repo("web"), repo("api"), repo("docs")];
+
+        let step = runner.step_loading_resolved(LoadResult::Scopes(Ok(repos)));
+        match step {
+            RunnerStep::Show {
+                screen: Screen::RepoPick { selected, .. },
+                effect: None,
+            } => assert!(
+                selected.iter().all(|&s| s),
+                "whole-org subscription must pre-tick every repo, got {selected:?}"
+            ),
+            _ => panic!("expected a RepoPick screen"),
+        }
+    }
+
     // ── Load-path tests ───────────────────────────────────────────────
     //
     // These exercise the load → resolve transitions that the old
@@ -2000,6 +2072,67 @@ mod tests {
         assert!(
             !after.contains("github:acme/drop"),
             "narrowed repos dropped"
+        );
+    }
+
+    /// Regression (#1098): confirming the repo picker with EVERY repo
+    /// ticked means "the whole org." It must collapse back to the
+    /// dynamic org-level entry — NOT enumerate today's repos as a static
+    /// list (which drops future repos and can overflow the search
+    /// query). This is the path a whole-org subscriber takes when they
+    /// walk "Add / remove repos" and press Enter on the all-pre-ticked
+    /// picker: their subscription must survive unchanged.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ticking_all_repos_keeps_the_whole_org_entry() {
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:acme".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            scope_providers: BTreeSet::new(),
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::RepoPickFor("github".into(), "github:acme".into()),
+            current_choice: None,
+            edit_scopes: true,
+        };
+        let items = vec![
+            Scope {
+                id: "github:acme/web".into(),
+                label: "web".into(),
+                parent: Some("github:acme".into()),
+                kind: lazybox_core::ScopeKind::Repo,
+                private: false,
+            },
+            Scope {
+                id: "github:acme/api".into(),
+                label: "api".into(),
+                parent: Some("github:acme".into()),
+                kind: lazybox_core::ScopeKind::Repo,
+                private: false,
+            },
+        ];
+        runner.current_choice = Some(CurrentChoice::RepoPick(items));
+
+        // Confirm unchanged: every repo ticked (indices 0 and 1).
+        let _step = runner.step_choice_picked(vec![0, 1]);
+
+        let after = runner
+            .accumulator
+            .selected_scopes
+            .get("github")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            after.contains("github:acme"),
+            "all-ticked must keep the dynamic whole-org entry: {after:?}"
+        );
+        assert!(
+            !after.contains("github:acme/web") && !after.contains("github:acme/api"),
+            "all-ticked must not freeze a static repo list: {after:?}"
         );
     }
 

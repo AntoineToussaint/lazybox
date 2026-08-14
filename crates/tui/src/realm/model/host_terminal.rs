@@ -242,6 +242,11 @@ mod fatal {
     }
 
     extern "C" fn handle(sig: c_int) {
+        // Take fd 1 back from the off-thread render writer before writing the
+        // reset sequence to it, so the two can't interleave and strand the
+        // shell (#1045). Async-signal-safe (atomics + a bounded spin); a no-op
+        // when async rendering isn't engaged.
+        super::super::render_writer::muzzle_writer();
         // Same one-shot flag the guard/panic paths use: if teardown
         // already ran, re-emitting would pop a keyboard-flags entry the
         // host owned before lazybox started.
@@ -315,6 +320,13 @@ pub fn restore_host_terminal() {
     if RESTORED.swap(true, Ordering::SeqCst) {
         return;
     }
+    // Take fd 1 back from the off-thread render writer before writing the
+    // reset sequence directly (#1045). On the panic hook this runs while the
+    // writer is still live (unwinding tears it down only afterwards), so
+    // without the handoff the reset could interleave with an in-flight frame
+    // and strand the shell (#211). On the clean-exit Drop path the writer is
+    // already shut down, so this is a cheap no-op.
+    super::render_writer::muzzle_writer();
     let mut out = std::io::stdout();
     for mode in HostMode::ALL.into_iter().rev() {
         mode.disable(&mut out);

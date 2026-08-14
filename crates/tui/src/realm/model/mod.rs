@@ -1482,7 +1482,7 @@ pub struct Model<T: TerminalAdapter> {
     /// costly rendering.
     last_render_flush: std::time::Duration,
     /// Bytes handed to the off-thread render writer but not yet drained to
-    /// the terminal, when async rendering is on (`LAZYBOX_ASYNC_RENDER`).
+    /// the terminal (the default path; `None` under `LAZYBOX_SYNC_RENDER`).
     /// The run loop skips rendering a new frame while this is over its cap,
     /// so a slow terminal write can't back up the input thread (#1090).
     /// `None` in the default (synchronous) mode — the loop never skips.
@@ -2368,11 +2368,11 @@ fn install_panic_hook() {
 impl Model<AsyncCrosstermAdapter> {
     pub fn new(client: Client, snippets: lazybox_config::Snippets) -> anyhow::Result<Self> {
         install_panic_hook();
-        // The production adapter renders straight to stdout by default;
-        // `LAZYBOX_ASYNC_RENDER=1` opts into the off-thread writer so a slow
-        // terminal write can't freeze the input thread (#1090 / #1045). Kept
-        // opt-in until the terminal-owner architecture makes the writer
-        // crash-safe by default (would otherwise regress #211).
+        // The production adapter renders through the off-thread writer by
+        // default (#1045): a slow terminal write can't freeze the input
+        // thread (#1090), and the fd-1 muzzle handoff keeps the crash / panic
+        // reset from interleaving with a live writer, so this no longer
+        // regresses #211. `LAZYBOX_SYNC_RENDER=1` forces the old direct path.
         let terminal = AsyncCrosstermAdapter::new()?;
         let render_pending = terminal.pending_handle();
         // Enable raw mode, the alt screen, mouse capture, bracketed

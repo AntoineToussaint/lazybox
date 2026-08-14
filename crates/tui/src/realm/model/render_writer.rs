@@ -96,11 +96,37 @@ impl Fd1Handoff {
         self.muzzled.load(Ordering::Acquire)
     }
 
-    /// Bracket the writer's actual fd-1 write, so [`Self::muzzle`] can tell
-    /// when it is safe to write the reset sequence itself.
+    /// Announce an imminent fd-1 write and check the muzzle in one race-free
+    /// step — the writer half of a Dekker handshake with [`Self::muzzle`].
+    /// Store `in_write`, *then* load `muzzled`; [`Self::muzzle`] does the
+    /// mirror (store `muzzled`, then load `in_write`). Both store→load pairs
+    /// are `SeqCst`, so under the single total order the two sides can never
+    /// *both* miss each other: if this returns `true` the caller owns fd 1 and
+    /// `muzzle` is guaranteed to spin until [`Self::exit_write`]; if it returns
+    /// `false` a restore path won the handoff and the caller must not write.
+    ///
+    /// The order matters. Checking `muzzled` *before* marking `in_write` (the
+    /// naive way) leaves a window: a restore could set `muzzled`, see
+    /// `in_write == false`, and start the reset in the gap between this check
+    /// and the mark — then the frame writes over the reset and strands the
+    /// shell (#211). Marking first closes it.
+    fn try_begin_write(&self) -> bool {
+        self.in_write.store(true, Ordering::SeqCst);
+        if self.muzzled.load(Ordering::SeqCst) {
+            self.in_write.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
+    }
+
+    /// Simulate a writer wedged mid-write (`try_begin_write` without the
+    /// matching `exit_write`), so a test can drive [`Self::muzzle`]'s bounded
+    /// spin. Production marks `in_write` only through [`Self::try_begin_write`].
+    #[cfg(test)]
     fn enter_write(&self) {
         self.in_write.store(true, Ordering::SeqCst);
     }
+
     fn exit_write(&self) {
         self.in_write.store(false, Ordering::Release);
     }
@@ -111,10 +137,15 @@ impl Fd1Handoff {
     /// bound is hit only when the writer is wedged inside `write()` (a
     /// terminal that stopped accepting output), where the reset is compromised
     /// either way — never worse than the sync path.
+    ///
+    /// `SeqCst` on the store and the spin's load is what makes the [Dekker]
+    /// handshake with [`Self::try_begin_write`] airtight — see there.
+    ///
+    /// [Dekker]: Self::try_begin_write
     fn muzzle(&self) {
         self.muzzled.store(true, Ordering::SeqCst);
         let mut spins = 0u32;
-        while self.in_write.load(Ordering::Acquire) {
+        while self.in_write.load(Ordering::SeqCst) {
             if spins >= MUZZLE_SPIN_LIMIT {
                 break;
             }
@@ -336,29 +367,28 @@ pub(super) fn spawn<W: Write + Send + 'static>(mut out: W) -> (ChannelWriter, Fr
                 match msg {
                     WriterMsg::Frame(bytes) => {
                         let n = bytes.len();
-                        // A restore path has claimed fd 1 (crash / panic):
-                        // drop the frame rather than interleave with the reset
-                        // sequence it's about to write (#1045). Still account
-                        // it as drained so the backpressure gate can't stall.
-                        if handoff_thread.is_muzzled() {
+                        // Claim fd 1 for this write, unless a restore path
+                        // (crash / panic) already took it — then drop the frame
+                        // rather than interleave with the reset sequence it's
+                        // about to write (#1045). `try_begin_write` marks
+                        // `in_write` *before* checking the muzzle, so `muzzle`
+                        // can never slip its reset between our check and our
+                        // write. Either way still account the bytes as drained
+                        // so the backpressure gate can't stall. The blocking
+                        // write is on THIS thread, not the input/render thread.
+                        if !handoff_thread.try_begin_write() {
                             pending_thread.fetch_sub(n, Ordering::AcqRel);
                             continue;
                         }
-                        // `enter/exit_write` brackets the fd-1 write so
-                        // `muzzle` can spin until we're demonstrably not
-                        // mid-write. The blocking write is on THIS thread, not
-                        // the input/render thread.
-                        handoff_thread.enter_write();
                         let _ = out.write_all(&bytes);
                         let _ = out.flush();
                         handoff_thread.exit_write();
                         pending_thread.fetch_sub(n, Ordering::AcqRel);
                     }
                     WriterMsg::Raw(bytes) => {
-                        if handoff_thread.is_muzzled() {
+                        if !handoff_thread.try_begin_write() {
                             continue;
                         }
-                        handoff_thread.enter_write();
                         let _ = out.write_all(&bytes);
                         let _ = out.flush();
                         handoff_thread.exit_write();
@@ -764,6 +794,30 @@ mod tests {
             start.elapsed(),
         );
         assert!(handoff.is_muzzled());
+    }
+
+    /// The writer half of the handoff: once muzzled, `try_begin_write` refuses
+    /// the write and leaves `in_write` clear, so a restore path that already
+    /// won the muzzle never waits on a write that won't happen. Marking
+    /// `in_write` before checking `muzzled` (both `SeqCst`) is what closes the
+    /// interleave window — a restore can't slip its reset between the writer's
+    /// muzzle-check and its write (#1045 / #211).
+    #[test]
+    fn try_begin_write_refuses_once_muzzled() {
+        let handoff = Fd1Handoff::new();
+        // Before any muzzle the writer claims fd 1 and must release it.
+        assert!(handoff.try_begin_write());
+        handoff.exit_write();
+
+        handoff.muzzle();
+        assert!(
+            !handoff.try_begin_write(),
+            "a muzzled handoff must refuse the write",
+        );
+        assert!(
+            !handoff.in_write.load(Ordering::SeqCst),
+            "a refused write must leave in_write clear so muzzle can't hang",
+        );
     }
 
     /// An empty flush is a no-op — it must not enqueue a zero-length frame

@@ -110,6 +110,19 @@ impl Terminals {
         self.inner.terminal_agent_id(id)
     }
 
+    /// Label of the terminal keystrokes currently flow to — the agent id
+    /// (`claude`, `codex`, …) or `shell` for a plain shell. `None` when
+    /// no terminal is active. Drives the footer's `▶ typing to: <agent>`
+    /// focus chip (#1110); uses the focused leaf (Splits) / active tab
+    /// (Tabs), which is exactly where a keystroke would land.
+    pub fn active_typing_target(&self) -> Option<String> {
+        let id = self.inner.focused_terminal_id()?;
+        Some(match self.inner.terminal_agent_id(id) {
+            Some(agent) => agent.to_string(),
+            None => "shell".to_string(),
+        })
+    }
+
     pub(crate) fn terminal_is_on_main(&self, id: TerminalId) -> bool {
         self.inner.terminal_is_on_main(id)
     }
@@ -288,35 +301,44 @@ impl Terminals {
     }
 
     /// Crossterm `(col, row)` → screen-absolute grid coords
-    /// `(col, screen_row)` for the focused terminal, clamped into the
-    /// grid. The anchor / focus of a lazybox drag-selection are stored in
-    /// this space so they stay pinned to content across an auto-scroll.
+    /// `(col, screen_row)` for terminal `id`, clamped into `id`'s grid. The
+    /// anchor / focus of a lazybox drag-selection are stored in this space
+    /// so they stay pinned to content across an auto-scroll, and clamping
+    /// to `id`'s grid scopes the selection to the tile the drag started in
+    /// (#1101).
     pub fn selection_point(
         &self,
+        id: TerminalId,
         rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
     ) -> Option<(u16, u32)> {
-        self.inner.selection_point(rect, col, row)
+        self.inner.selection_point(id, rect, col, row)
     }
 
     /// Extract the plain text of a screen-absolute selection span from
-    /// the focused terminal — the whole passage, including rows scrolled
-    /// off the viewport. Used by the mouse-up selection-copy path.
-    pub fn extract_selection(&mut self, anchor: (u16, u32), focus: (u16, u32)) -> String {
-        self.inner.extract_selection(anchor, focus)
+    /// terminal `id` — the whole passage, including rows scrolled off the
+    /// viewport. Used by the mouse-up selection-copy path.
+    pub fn extract_selection(
+        &mut self,
+        id: TerminalId,
+        anchor: (u16, u32),
+        focus: (u16, u32),
+    ) -> String {
+        self.inner.extract_selection(id, anchor, focus)
     }
 
-    /// Project a screen-absolute selection span back to the on-screen
-    /// crossterm cells currently visible in `rect`, for the reverse-video
-    /// highlight overlay. `None` when nothing is focused.
+    /// Project a screen-absolute selection span back to terminal `id`'s
+    /// on-screen crossterm cells currently visible in `rect`, for the
+    /// reverse-video highlight overlay. `None` when `id` is unknown.
     pub fn selection_screen_span(
         &self,
+        id: TerminalId,
         rect: tuirealm::ratatui::layout::Rect,
         anchor: (u16, u32),
         focus: (u16, u32),
     ) -> Option<((u16, u16), (u16, u16))> {
-        self.inner.selection_screen_span(rect, anchor, focus)
+        self.inner.selection_screen_span(id, rect, anchor, focus)
     }
 
     /// Forward `visible_text` — dump a terminal's whole visible grid

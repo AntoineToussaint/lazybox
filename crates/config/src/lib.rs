@@ -67,6 +67,13 @@ pub struct Config {
     /// to override; new ids extend.
     #[serde(default)]
     pub editors: Vec<EditorEntry>,
+    /// Config-driven "Open with…" apps (issue #1100) — arbitrary launch
+    /// commands surfaced behind the `x o` picker, decoupled from the
+    /// single `editors:` code-editor slot. Args support `{path}`
+    /// (worktree), `{url}`, `{branch}`, and `{repo}` tokens. Empty by
+    /// default. See [`OpenWithEntry`].
+    #[serde(default)]
+    pub open_with: Vec<OpenWithEntry>,
     /// What counts as "needs attention" for the per-repo counter
     /// in the sidebar header. Toggle individual signals off here.
     #[serde(default)]
@@ -498,6 +505,41 @@ pub struct EditorEntry {
     pub command: String,
     #[serde(default)]
     pub args: Option<Vec<String>>,
+}
+
+/// One entry under `open_with:` (issue #1100) — an arbitrary app
+/// launched on the focused workspace, decoupled from the single
+/// `editors:` code-editor slot. Args support `{path}` (worktree),
+/// `{url}`, `{branch}`, and `{repo}` tokens, substituted at launch.
+///
+/// ```yaml
+/// open_with:
+///   - name: Obsidian
+///     command: open
+///     args: ["-a", "Obsidian", "{path}"]
+///   - name: Finder
+///     command: open
+///     args: ["{path}"]
+///   - name: Preview PR in browser
+///     command: open
+///     args: ["{url}"]
+///   - name: Obsidian            # bind a favorite to a direct key
+///     command: open
+///     args: ["-a", "Obsidian", "{path}"]
+///     key: "O"
+/// ```
+///
+/// An optional `key` binds the app to a direct Workspace-section chord
+/// (a `ui.action_keys`-style spec) so a favorite skips the `x o` picker.
+/// See `lazybox_tui_core::editors::OpenWithApp`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenWithEntry {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// `attention:` block — controls which signals contribute to the
@@ -4104,6 +4146,46 @@ agents:
             }
             .spawn_argv(),
             None
+        );
+    }
+
+    #[test]
+    fn open_with_entries_parse_with_tokens_and_default_empty() {
+        assert!(
+            serde_yaml::from_str::<Config>("{}")
+                .expect("empty parse")
+                .open_with
+                .is_empty(),
+            "open_with defaults to empty"
+        );
+
+        let yaml = r#"
+open_with:
+  - name: Obsidian
+    command: open
+    args: ["-a", "Obsidian", "{path}"]
+    key: "O"
+  - name: Finder
+    command: open
+  - name: Preview PR in browser
+    command: open
+    args: ["{url}"]
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse open_with");
+        assert_eq!(cfg.open_with.len(), 3);
+        assert_eq!(cfg.open_with[0].name, "Obsidian");
+        assert_eq!(
+            cfg.open_with[0].args.as_deref(),
+            Some(&["-a".to_string(), "Obsidian".into(), "{path}".into()][..])
+        );
+        // Optional favorite key parses; omitted → None.
+        assert_eq!(cfg.open_with[0].key.as_deref(), Some("O"));
+        assert_eq!(cfg.open_with[1].key, None);
+        // `args` is optional — defaults handled at launch, not parse.
+        assert_eq!(cfg.open_with[1].args, None);
+        assert_eq!(
+            cfg.open_with[2].args.as_deref(),
+            Some(&["{url}".to_string()][..])
         );
     }
 }

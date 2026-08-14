@@ -90,6 +90,15 @@ pub enum Action {
     SpawnShellOnMain,
     /// Open the workspace's worktree in the user's editor.
     OpenEditor,
+    /// Open the focused workspace in a configured `open_with:` app
+    /// (Obsidian / Finder / browser / …) — the config-driven
+    /// "Open with…" picker, decoupled from the single code-editor slot.
+    OpenWith,
+    /// Launch one specific `open_with:` app directly, bound to a favorite
+    /// key (`open_with[].key`) — the picker-skipping counterpart of
+    /// [`Action::OpenWith`]. Carries the app's `name`; one generated
+    /// catalog row per keyed app, like [`Action::SpawnAgent`].
+    OpenWithApp(String),
     /// Review the workspace's combined staged/unstaged worktree diff.
     ViewDiff,
     /// Create a brand-new pre-PR workspace (asks for a name).
@@ -448,6 +457,8 @@ pub enum ActionKind {
     SpawnAgentOnMain,
     SpawnShellOnMain,
     OpenEditor,
+    OpenWith,
+    OpenWithApp,
     ViewDiff,
     NewWorkspace,
     RenameWorkspace,
@@ -591,6 +602,8 @@ impl ActionKind {
         Self::NewProject,
         Self::ImportCheckout,
         Self::AddScanRoot,
+        Self::OpenWith,
+        Self::OpenWithApp,
         Self::AdoptSessions,
         Self::SendToSession,
         Self::ConvertSession,
@@ -697,6 +710,8 @@ impl Action {
             Action::SpawnAgentOnMain(_) => ActionKind::SpawnAgentOnMain,
             Action::SpawnShellOnMain => ActionKind::SpawnShellOnMain,
             Action::OpenEditor => ActionKind::OpenEditor,
+            Action::OpenWith => ActionKind::OpenWith,
+            Action::OpenWithApp(_) => ActionKind::OpenWithApp,
             Action::ViewDiff => ActionKind::ViewDiff,
             Action::NewWorkspace => ActionKind::NewWorkspace,
             Action::RenameWorkspace => ActionKind::RenameWorkspace,
@@ -1066,6 +1081,23 @@ impl ActionDef {
                 default_keys: "e",
                 label: "editor",
                 describe: "Open the worktree in the configured editor.",
+                section: Section::Workspace,
+            },
+            ActionKind::OpenWith => &Self {
+                kind: ActionKind::OpenWith,
+                default_keys: "x o",
+                label: "open with",
+                describe: "Open the focused workspace in a configured `open_with:` app (Obsidian, Finder, browser, …) — separate from the `e` code editor. Tokens {path}/{url}/{branch}/{repo} are substituted at launch.",
+                section: Section::Workspace,
+            },
+            // Placeholder for the per-app rows generated in `catalog_full`
+            // (one per `open_with:` entry with a `key:`); it never appears
+            // in the runtime catalog itself, like the `SpawnAgent` row.
+            ActionKind::OpenWithApp => &Self {
+                kind: ActionKind::OpenWithApp,
+                default_keys: "",
+                label: "open with app",
+                describe: "Launch one configured `open_with:` app bound to a favorite key, skipping the picker.",
                 section: Section::Workspace,
             },
             ActionKind::ViewDiff => &Self {
@@ -1893,6 +1925,8 @@ impl ActionKind {
             ActionKind::SpawnAgentOnMain => "spawn_agent_on_main",
             ActionKind::SpawnShellOnMain => "spawn_shell_on_main",
             ActionKind::OpenEditor => "open_editor",
+            ActionKind::OpenWith => "open_with",
+            ActionKind::OpenWithApp => "open_with_app",
             ActionKind::ViewDiff => "view_diff",
             ActionKind::NewWorkspace => "new_workspace",
             ActionKind::RenameWorkspace => "rename_workspace",
@@ -1987,6 +2021,9 @@ pub enum Param {
     /// Model-tier alias for a generated tier row (`S`, `M`, `L`) under
     /// the `w` / `a` leaders.
     Tier(String),
+    /// `open_with:` app name for a generated per-app "open with" row,
+    /// bound to that app's favorite `key` (#1100).
+    OpenWith(String),
 }
 
 /// The guard between a keypress and an action firing — the per-row
@@ -2172,6 +2209,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::AdoptSessions
         | ActionKind::SendToSession
         | ActionKind::ConvertSession
+        | ActionKind::OpenWith
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -2240,18 +2278,34 @@ impl ActionDef {
         tiers: &[lazybox_core::ModelTier],
         remotes: &[String],
     ) -> Vec<CatalogEntry> {
+        Self::catalog_complete(agents, overrides, tiers, remotes, &[])
+    }
+
+    /// [`ActionDef::catalog_full`] plus the per-app "open with" chords
+    /// (#1100): one row per `(name, key_spec)` in `open_with` — a
+    /// `open_with:` entry that carries a favorite `key`. The row binds
+    /// that key directly to launching the named app, skipping the `x o`
+    /// picker, and is remappable via `ui.action_keys` (`open_with_app.<name>`).
+    pub fn catalog_complete(
+        agents: &[String],
+        overrides: &std::collections::BTreeMap<String, String>,
+        tiers: &[lazybox_core::ModelTier],
+        remotes: &[String],
+        open_with: &[(String, String)],
+    ) -> Vec<CatalogEntry> {
         let mut out: Vec<CatalogEntry> = Vec::new();
         for def in ActionDef::all() {
-            // The static SpawnAgent / WorkWith / SpawnAgentOnMain rows
-            // are placeholders for the generated per-agent rows below —
-            // drop them. (SpawnShellOnMain is a real static row and
-            // stays.)
+            // The static SpawnAgent / WorkWith / SpawnAgentOnMain /
+            // OpenWithApp rows are placeholders for the generated rows
+            // below — drop them. (SpawnShellOnMain is a real static row
+            // and stays.)
             if matches!(
                 def.kind,
                 ActionKind::SpawnAgent
                     | ActionKind::SpawnAgentRemote
                     | ActionKind::WorkWith
                     | ActionKind::SpawnAgentOnMain
+                    | ActionKind::OpenWithApp
             ) {
                 continue;
             }
@@ -2483,6 +2537,34 @@ impl ActionDef {
                 section: spawn.section,
                 label: std::borrow::Cow::Owned(tier.label.clone()),
                 describe: spawn.describe,
+                chords,
+                keys_display,
+                config_key,
+            });
+        }
+        // Per-app "open with" rows (#1100): one direct-key row per
+        // `open_with:` entry that declared a favorite `key`. The default
+        // chord is that key spec; `ui.action_keys.open_with_app.<name>`
+        // overrides it. A key that doesn't parse yields no row (the app
+        // is still reachable through the `x o` picker).
+        let open_with_def = ActionDef::for_kind(ActionKind::OpenWithApp);
+        for (name, key_spec) in open_with {
+            let parsed: Vec<Chord> = key_spec.split('|').filter_map(Chord::parse).collect();
+            if parsed.is_empty() {
+                continue;
+            }
+            let config_key = format!("open_with_app.{name}");
+            let (chords, keys_display) = generated_row_chords(
+                overrides,
+                &config_key,
+                (parsed, std::borrow::Cow::Owned(key_spec.clone())),
+            );
+            out.push(CatalogEntry {
+                kind: ActionKind::OpenWithApp,
+                param: Some(Param::OpenWith(name.clone())),
+                section: open_with_def.section,
+                label: std::borrow::Cow::Owned(format!("open with {name}")),
+                describe: open_with_def.describe,
                 chords,
                 keys_display,
                 config_key,
@@ -2724,6 +2806,14 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::AddAssignees
         | ActionKind::ManageLabels
         | ActionKind::OpenInBrowser
+        // "Open with…" targets any workspace under the cursor; the
+        // picker itself surfaces a notice when no `open_with:` apps are
+        // configured (like `e` with no editor). Apps needing a token
+        // the workspace can't supply fail at launch, named. The per-app
+        // key rows (`OpenWithApp`) only exist when configured, so gating
+        // them on the workspace alone can never surface an unusable chord.
+        | ActionKind::OpenWith
+        | ActionKind::OpenWithApp
         // Notes attach to any workspace — even a session-less/empty
         // one — so gate purely on a workspace being under the cursor.
         | ActionKind::EditNotes => has_ws,
@@ -4349,6 +4439,40 @@ mod tests {
             "work_with.<id> override must replace the default `w c` chord",
         );
         assert_eq!(row.keys_display, "Ctrl-k");
+    }
+
+    #[test]
+    fn open_with_key_generates_a_direct_workspace_row() {
+        use std::collections::BTreeMap;
+        let binds = vec![("Obsidian".to_string(), "O".to_string())];
+        let catalog = ActionDef::catalog_complete(&[], &BTreeMap::new(), &[], &[], &binds);
+        let row = catalog
+            .iter()
+            .find(|e| e.param == Some(Param::OpenWith("Obsidian".into())))
+            .expect("open_with_app.Obsidian row");
+        assert_eq!(row.kind, ActionKind::OpenWithApp);
+        assert_eq!(row.section, Section::Workspace);
+        assert_eq!(row.keys_display, "O");
+        // A `ui.action_keys` override wins over the config `key`.
+        let mut overrides = BTreeMap::new();
+        overrides.insert("open_with_app.Obsidian".to_string(), "Ctrl-o".to_string());
+        let catalog = ActionDef::catalog_complete(&[], &overrides, &[], &[], &binds);
+        let row = catalog
+            .iter()
+            .find(|e| e.param == Some(Param::OpenWith("Obsidian".into())))
+            .expect("row");
+        assert_eq!(row.keys_display, "Ctrl-o");
+    }
+
+    #[test]
+    fn open_with_key_that_does_not_parse_yields_no_row() {
+        use std::collections::BTreeMap;
+        let binds = vec![("X".to_string(), String::new())];
+        let catalog = ActionDef::catalog_complete(&[], &BTreeMap::new(), &[], &[], &binds);
+        assert!(
+            catalog.iter().all(|e| e.kind != ActionKind::OpenWithApp),
+            "an unparseable key produces no row (still reachable via `x o`)",
+        );
     }
 
     #[test]

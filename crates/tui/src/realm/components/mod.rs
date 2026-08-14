@@ -8,6 +8,7 @@
 pub mod choice;
 pub mod confirm;
 pub mod diff_review;
+pub mod editors_panel;
 pub mod error;
 pub mod error_inbox;
 pub mod filterable;

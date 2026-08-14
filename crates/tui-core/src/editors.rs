@@ -297,6 +297,106 @@ pub fn discover_at_startup(user: Vec<UserEditorEntry>) -> Vec<EditorTemplate> {
     detect_available(&merged)
 }
 
+/// Whether a configured editor's `command` resolves right now: an
+/// absolute path that exists and is executable, or a bare name found on
+/// PATH. Drives the "not found" badge in the Settings editors panel so
+/// a typo or an uninstalled tool is visible without launching it.
+pub fn command_available(command: &str) -> bool {
+    which::which(command).is_ok()
+}
+
+/// Split a launch command line into whitespace-separated tokens, where a
+/// `'…'` or `"…"` group preserves the spaces inside it. Backslashes are
+/// **literal** — unlike a POSIX shell, this is a path-and-flags field, so
+/// `C:\Program Files\Code.exe` must survive verbatim; only quotes group.
+/// Returns `None` on an unterminated quote (a parse the user must fix).
+fn split_launch_line(line: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false;
+    let mut quote: Option<char> = None;
+    for ch in line.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => {
+                if ch == '"' || ch == '\'' {
+                    quote = Some(ch);
+                    in_token = true;
+                } else if ch.is_whitespace() {
+                    if in_token {
+                        tokens.push(std::mem::take(&mut cur));
+                        in_token = false;
+                    }
+                } else {
+                    cur.push(ch);
+                    in_token = true;
+                }
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    Some(tokens)
+}
+
+/// Quote a single token for `join_launch_command` so it round-trips back
+/// through `split_launch_line` as one token. Only tokens that would
+/// otherwise re-split (contain whitespace) or vanish (empty) are quoted;
+/// double quotes are preferred, single quotes used when the token itself
+/// carries a `"`.
+fn quote_launch_token(token: &str) -> String {
+    if !token.is_empty() && !token.chars().any(char::is_whitespace) {
+        return token.to_string();
+    }
+    if token.contains('"') {
+        format!("'{token}'")
+    } else {
+        format!("\"{token}\"")
+    }
+}
+
+/// Split a user-typed launch command line into `(program, args)`,
+/// guaranteeing a `{path}` placeholder so the worktree directory is
+/// always handed to the editor. A quoted path with spaces stays one
+/// token — `"/Applications/Sublime Text.app/.../subl" {path}` parses as
+/// the program plus `{path}` and round-trips through
+/// [`join_launch_command`] without corruption — while backslashes stay
+/// literal so Windows paths survive. A line without `{path}` gets one
+/// appended, matching the common "open this folder" default.
+///
+/// Returns `None` for a blank line or an unterminated quote (nothing to
+/// save, or a parse the user needs to fix).
+pub fn parse_launch_command(line: &str) -> Option<(String, Vec<String>)> {
+    let mut tokens = split_launch_line(line)?.into_iter();
+    let command = tokens.next()?;
+    let mut args: Vec<String> = tokens.collect();
+    if !args.iter().any(|arg| arg.contains("{path}")) {
+        args.push("{path}".to_string());
+    }
+    Some((command, args))
+}
+
+/// Render a stored `(command, args)` back into one editable line for the
+/// edit prompt, quoting any token that contains whitespace so it
+/// round-trips through [`parse_launch_command`] unchanged.
+pub fn join_launch_command(command: &str, args: &[String]) -> String {
+    std::iter::once(command)
+        .chain(args.iter().map(String::as_str))
+        .map(quote_launch_token)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Build the launcher argv for opening `url`, honoring an optional
 /// `browser` override. Split out from [`open_url`] so the
 /// platform-specific command shape is unit-testable without spawning.
@@ -545,7 +645,42 @@ fn spawn_editor(launch: EditorLaunch, current_dir: Option<&Path>) -> std::io::Re
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::null());
     command.stderr(std::process::Stdio::null());
-    command.spawn().map(|_| ())
+    let child = command.spawn()?;
+    // A macOS `open` handoff hands the target to Launch Services and exits
+    // within milliseconds; without a `wait()` that fast-exiting child
+    // lingers as a zombie until lazybox itself exits. Reap it off-thread
+    // (mirroring `open_url`) so it can't accumulate. A `DetachedEditor` is
+    // `setsid`-detached and long-lived — leave it to the OS as before.
+    if launch.process_handling == ProcessHandling::MacosApplicationHandoff {
+        spawn_handoff_reaper(child, launch.program)
+            .map(|_| ())
+            .unwrap_or_else(|e| tracing::warn!("open-with handoff reaper spawn failed: {e}"));
+    }
+    Ok(())
+}
+
+fn spawn_handoff_reaper(
+    mut child: std::process::Child,
+    program: String,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let span = tracing::Span::current();
+    std::thread::Builder::new()
+        .name("lazybox-open-handoff".into())
+        .spawn(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                let _guard = span.enter();
+                match child.wait() {
+                    Ok(status) if !status.success() => {
+                        tracing::warn!(%program, %status, "open-with launcher exited non-zero");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(%program, "open-with launcher wait failed: {e}");
+                    }
+                }
+            });
+        })
 }
 
 /// Open a single `file` in `template`, optionally jumping to
@@ -568,6 +703,177 @@ pub fn open_file(
 
 pub fn launch(template: &EditorTemplate, worktree: &Path) -> std::io::Result<()> {
     spawn_editor(worktree_launch(template, worktree), Some(worktree))
+}
+
+/// One configured "Open with…" target (issue #1100): an arbitrary app
+/// launched on the focused workspace, decoupled from the single
+/// code-editor slot. Unlike [`EditorTemplate`] it carries no go-to-file
+/// semantics and no macOS app-bundle auto-detection — the command line
+/// is taken verbatim (the user writes `open -a Obsidian {path}`), with
+/// tokens substituted at launch. Reuses the editor spawn primitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenWithApp {
+    /// User-visible name shown in the picker.
+    pub name: String,
+    pub command: String,
+    /// Defaults to `["{path}"]` when omitted, matching the common
+    /// "open this folder" case.
+    pub args: Option<Vec<String>>,
+    /// Optional key-spec (`ui.action_keys`-style, e.g. `"O"`, `"Ctrl-o"`)
+    /// that binds this app to a direct Workspace-section chord, skipping
+    /// the picker (#1100). `None` → reachable only through the `x o`
+    /// picker.
+    pub key: Option<String>,
+}
+
+impl OpenWithApp {
+    /// The launch args, defaulting to `["{path}"]` when omitted.
+    fn resolved_args(&self) -> Vec<String> {
+        self.args
+            .clone()
+            .unwrap_or_else(|| vec!["{path}".to_string()])
+    }
+
+    /// Whether the command references the worktree `{path}` token — the
+    /// default when `args` is omitted. `{path}` is a server-side location
+    /// over `--connect` and absent until a session provisions a worktree,
+    /// so a path app can't run against a remote or not-yet-provisioned
+    /// worktree; `{url}`/`{repo}`/`{branch}` apps (e.g. "open the PR in a
+    /// browser") have no such dependency and run regardless (#1100).
+    pub fn references_path(&self) -> bool {
+        self.resolved_args()
+            .iter()
+            .any(|arg| arg.contains("{path}"))
+    }
+
+    /// The first `{…}` token the app needs that this workspace can't
+    /// supply, or `None` when it can run. `{url}`/`{repo}`/`{branch}` need
+    /// a concrete value in `ctx`; `{path}` counts as suppliable when
+    /// `path_ok` (a local worktree exists or can be provisioned — false on
+    /// a remote daemon, whose worktree is server-side). Drives the picker's
+    /// "hide what can't run here" filter (#1100).
+    pub fn missing_token(&self, ctx: &OpenWithContext, path_ok: bool) -> Option<&'static str> {
+        let args = self.resolved_args();
+        [
+            ("{path}", path_ok),
+            ("{url}", ctx.url.is_some()),
+            ("{branch}", ctx.branch.is_some()),
+            ("{repo}", ctx.repo.is_some()),
+        ]
+        .into_iter()
+        .find(|(token, available)| !available && args.iter().any(|arg| arg.contains(token)))
+        .map(|(token, _)| token)
+    }
+
+    /// Whether this app can launch on the workspace described by `ctx`
+    /// (see [`Self::missing_token`]).
+    pub fn is_actionable(&self, ctx: &OpenWithContext, path_ok: bool) -> bool {
+        self.missing_token(ctx, path_ok).is_none()
+    }
+
+    /// A compact `command args…` string shown beneath the name in the
+    /// picker so the user sees what each entry actually launches (#1100).
+    pub fn command_preview(&self) -> String {
+        let mut parts = vec![self.command.clone()];
+        if let Some(args) = &self.args {
+            parts.extend(args.iter().cloned());
+        }
+        parts.join(" ")
+    }
+}
+
+/// Whether `command` is the macOS `open` launcher — matched by file name
+/// so an absolute `/usr/bin/open` is recognized too (#1100). `open` hands
+/// off to Launch Services and must not be `setsid`-detached (that severs
+/// the GUI bootstrap it needs), so it takes the handoff spawn path.
+fn is_open_launcher(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("open")
+}
+
+/// Values available to the `{…}` tokens in an [`OpenWithApp`]'s args.
+/// Every field is optional: a token referenced by an app whose value is
+/// `None` here (e.g. `{url}` on a workspace with no PR) makes the launch
+/// fail with a message naming the token, rather than passing a literal
+/// `{url}` through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenWithContext {
+    /// The worktree directory (`{path}`).
+    pub path: Option<String>,
+    /// The workspace's PR / issue URL (`{url}`).
+    pub url: Option<String>,
+    /// The tracked branch (`{branch}`).
+    pub branch: Option<String>,
+    /// The `owner/repo` (`{repo}`).
+    pub repo: Option<String>,
+}
+
+/// Substitute `{path}` / `{url}` / `{branch}` / `{repo}` in `args`
+/// against `ctx`. A token whose value is absent is an error naming it,
+/// so an app wired to a token the workspace can't supply fails loudly
+/// instead of launching with a stray placeholder.
+fn resolve_open_with_args(args: &[String], ctx: &OpenWithContext) -> Result<Vec<String>, String> {
+    let tokens = [
+        ("{path}", &ctx.path),
+        ("{url}", &ctx.url),
+        ("{branch}", &ctx.branch),
+        ("{repo}", &ctx.repo),
+    ];
+    args.iter()
+        .map(|arg| {
+            let mut resolved = arg.clone();
+            for (token, value) in &tokens {
+                if resolved.contains(token) {
+                    match value {
+                        Some(value) => resolved = resolved.replace(token, value),
+                        None => {
+                            return Err(format!("{token} is unavailable on this workspace"));
+                        }
+                    }
+                }
+            }
+            Ok(resolved)
+        })
+        .collect()
+}
+
+fn open_with_launch(app: &OpenWithApp, ctx: &OpenWithContext) -> Result<EditorLaunch, String> {
+    let args = app
+        .args
+        .clone()
+        .unwrap_or_else(|| vec!["{path}".to_string()]);
+    let args = resolve_open_with_args(&args, ctx)?;
+    // `open` hands the target off to Launch Services and exits — it must
+    // NOT be detached, since `setsid()` severs the macOS GUI bootstrap it
+    // needs (the same reason [`open_url`] never detaches). Any other
+    // command is a GUI binary we detach like an editor so it outlives
+    // lazybox.
+    let process_handling = if is_open_launcher(&app.command) {
+        ProcessHandling::MacosApplicationHandoff
+    } else {
+        ProcessHandling::DetachedEditor
+    };
+    Ok(EditorLaunch {
+        program: app.command.clone(),
+        args,
+        process_handling,
+    })
+}
+
+/// Launch an "Open with…" app on the focused workspace, substituting
+/// its command's `{…}` tokens from `ctx`. A token the workspace can't
+/// supply is an `Err` naming it; otherwise the command is spawned
+/// through the shared editor spawn path (detach / macOS handoff).
+pub fn launch_open_with(app: &OpenWithApp, ctx: &OpenWithContext) -> Result<(), String> {
+    let launch = open_with_launch(app, ctx)?;
+    let current_dir = ctx
+        .path
+        .as_deref()
+        .map(Path::new)
+        .filter(|path| path.is_dir());
+    spawn_editor(launch, current_dir).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1173,5 +1479,299 @@ mod tests {
         let t = tpl("myedit", &["--flag"]);
         let (launch, _) = open_file_launch(&t, "/a/b.rs", None, None);
         assert_eq!(launch.args, vec!["--flag", "/a/b.rs"]);
+    }
+
+    fn open_with(command: &str, args: &[&str]) -> OpenWithApp {
+        OpenWithApp {
+            name: command.to_string(),
+            command: command.to_string(),
+            args: Some(args.iter().map(|s| s.to_string()).collect()),
+            key: None,
+        }
+    }
+
+    #[test]
+    fn open_with_defaults_args_to_the_path_placeholder() {
+        let app = OpenWithApp {
+            name: "Finder".into(),
+            command: "open".into(),
+            args: None,
+            key: None,
+        };
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            ..OpenWithContext::default()
+        };
+        let launch = open_with_launch(&app, &ctx).expect("launch built");
+        assert_eq!(launch.program, "open");
+        assert_eq!(launch.args, vec!["/repo/wt"]);
+        // `open` hands off to Launch Services; never detached.
+        assert_eq!(
+            launch.process_handling,
+            ProcessHandling::MacosApplicationHandoff
+        );
+    }
+
+    #[test]
+    fn open_with_substitutes_every_token() {
+        let app = open_with(
+            "open",
+            &["-a", "Obsidian", "{path}", "{url}", "{branch}", "{repo}"],
+        );
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            url: Some("https://github.com/acme/widget/pull/7".into()),
+            branch: Some("feat/x".into()),
+            repo: Some("acme/widget".into()),
+        };
+        let launch = open_with_launch(&app, &ctx).expect("launch built");
+        assert_eq!(
+            launch.args,
+            vec![
+                "-a",
+                "Obsidian",
+                "/repo/wt",
+                "https://github.com/acme/widget/pull/7",
+                "feat/x",
+                "acme/widget",
+            ]
+        );
+    }
+
+    #[test]
+    fn open_with_errors_on_a_token_the_workspace_cannot_supply() {
+        let app = open_with("open", &["{url}"]);
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            ..OpenWithContext::default()
+        };
+        let err = open_with_launch(&app, &ctx).unwrap_err();
+        assert!(
+            err.contains("{url}"),
+            "error names the missing token: {err}"
+        );
+    }
+
+    #[test]
+    fn references_path_gates_only_apps_that_use_the_worktree_token() {
+        // Default args are `["{path}"]`, so an omitted-args app needs the
+        // worktree.
+        assert!(
+            OpenWithApp {
+                name: "Finder".into(),
+                command: "open".into(),
+                args: None,
+                key: None,
+            }
+            .references_path()
+        );
+        assert!(open_with("open", &["-a", "Obsidian", "{path}"]).references_path());
+        // A `{url}`-only app (e.g. "open the PR in a browser") has no
+        // worktree dependency — it must NOT be gated as local/session-only.
+        assert!(!open_with("open", &["{url}"]).references_path());
+        assert!(!open_with("open", &["{repo}", "{branch}"]).references_path());
+    }
+
+    #[test]
+    fn is_open_launcher_matches_open_by_file_name() {
+        assert!(is_open_launcher("open"));
+        // An absolute path must still be recognized so it takes the
+        // handoff path rather than being setsid-detached (#1100).
+        assert!(is_open_launcher("/usr/bin/open"));
+        assert!(!is_open_launcher("xdg-open"));
+        assert!(!is_open_launcher("obsidian"));
+    }
+
+    #[test]
+    fn open_with_launch_recognizes_an_absolute_open_path_as_a_handoff() {
+        let app = open_with("/usr/bin/open", &["-a", "Obsidian", "{path}"]);
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            ..OpenWithContext::default()
+        };
+        let launch = open_with_launch(&app, &ctx).expect("launch built");
+        assert_eq!(
+            launch.process_handling,
+            ProcessHandling::MacosApplicationHandoff,
+            "/usr/bin/open must hand off, not be setsid-detached",
+        );
+    }
+
+    #[test]
+    fn missing_token_reports_only_unsatisfiable_tokens() {
+        // Workspace with a URL + branch + repo but no local worktree.
+        let ctx = OpenWithContext {
+            path: None,
+            url: Some("https://x/pr/1".into()),
+            branch: Some("feat".into()),
+            repo: Some("o/r".into()),
+        };
+        // `{url}` app runs even with no worktree.
+        assert!(open_with("open", &["{url}"]).is_actionable(&ctx, false));
+        // `{path}` app can't run when path isn't OK (remote → can't provision).
+        assert_eq!(
+            open_with("open", &["{path}"]).missing_token(&ctx, false),
+            Some("{path}"),
+        );
+        // …but is fine once `{path}` is suppliable (local, provisionable).
+        assert!(open_with("open", &["{path}"]).is_actionable(&ctx, true));
+        // A `{url}` app on a PR-less workspace is not actionable.
+        let bare = OpenWithContext::default();
+        assert_eq!(
+            open_with("open", &["{url}"]).missing_token(&bare, true),
+            Some("{url}"),
+        );
+    }
+
+    #[test]
+    fn command_preview_shows_the_command_and_args() {
+        assert_eq!(
+            open_with("open", &["-a", "Obsidian", "{path}"]).command_preview(),
+            "open -a Obsidian {path}",
+        );
+        assert_eq!(
+            OpenWithApp {
+                name: "Finder".into(),
+                command: "open".into(),
+                args: None,
+                key: None,
+            }
+            .command_preview(),
+            "open",
+        );
+    }
+
+    #[test]
+    fn open_with_detaches_a_non_open_gui_binary() {
+        let app = open_with("obsidian", &["{path}"]);
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            ..OpenWithContext::default()
+        };
+        let launch = open_with_launch(&app, &ctx).expect("launch built");
+        assert_eq!(launch.process_handling, ProcessHandling::DetachedEditor);
+    }
+
+    #[test]
+    fn parse_launch_command_splits_program_and_args() {
+        assert_eq!(
+            parse_launch_command("code --new-window {path}"),
+            Some((
+                "code".to_string(),
+                vec!["--new-window".to_string(), "{path}".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_launch_command_appends_path_when_absent() {
+        // Bare command: the worktree still needs to be passed, so a
+        // `{path}` token is synthesized.
+        assert_eq!(
+            parse_launch_command("code"),
+            Some(("code".to_string(), vec!["{path}".to_string()]))
+        );
+        // Args present but none carry the placeholder → append it.
+        assert_eq!(
+            parse_launch_command("edit --workspace"),
+            Some((
+                "edit".to_string(),
+                vec!["--workspace".to_string(), "{path}".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_launch_command_keeps_a_provided_placeholder_in_place() {
+        assert_eq!(
+            parse_launch_command("edit --file {path} --wait"),
+            Some((
+                "edit".to_string(),
+                vec![
+                    "--file".to_string(),
+                    "{path}".to_string(),
+                    "--wait".to_string()
+                ]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_launch_command_rejects_a_blank_line() {
+        assert_eq!(parse_launch_command("   "), None);
+        assert_eq!(parse_launch_command(""), None);
+    }
+
+    #[test]
+    fn parse_launch_command_keeps_a_quoted_path_with_spaces_intact() {
+        assert_eq!(
+            parse_launch_command("\"/Applications/Sublime Text.app/bin/subl\" {path}"),
+            Some((
+                "/Applications/Sublime Text.app/bin/subl".to_string(),
+                vec!["{path}".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_launch_command_rejects_unbalanced_quoting() {
+        assert_eq!(parse_launch_command("edit \"unclosed {path}"), None);
+    }
+
+    #[test]
+    fn parse_launch_command_keeps_backslashes_literal() {
+        // A Windows path typed raw must survive verbatim — a POSIX-shell
+        // tokenizer would treat `\` as an escape and eat it.
+        assert_eq!(
+            parse_launch_command(r"C:\Program\Code.exe"),
+            Some((
+                r"C:\Program\Code.exe".to_string(),
+                vec!["{path}".to_string()]
+            ))
+        );
+        // Spaces in a Windows path still need quoting, and backslashes
+        // inside the quotes stay literal.
+        assert_eq!(
+            parse_launch_command("\"C:\\Program Files\\Code.exe\" {path}"),
+            Some((
+                r"C:\Program Files\Code.exe".to_string(),
+                vec!["{path}".to_string()]
+            ))
+        );
+    }
+
+    #[test]
+    fn launch_command_round_trips_through_join_and_parse() {
+        // The edit prompt joins a stored entry back to a line; re-parsing
+        // it must reproduce the same (command, args) — including a path
+        // with spaces (naive whitespace-splitting would corrupt it) and a
+        // backslash path (a shell tokenizer would eat the backslashes).
+        for (command, args) in [
+            (
+                "/Applications/Sublime Text.app/bin/subl",
+                vec!["--wait".to_string(), "{path}".to_string()],
+            ),
+            (
+                r"C:\Program Files\Microsoft VS Code\Code.exe",
+                vec!["{path}".to_string()],
+            ),
+        ] {
+            let line = join_launch_command(command, &args);
+            assert_eq!(
+                parse_launch_command(&line),
+                Some((command.to_string(), args)),
+                "round-trip failed for {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn command_available_finds_a_command_on_path() {
+        // `sh` exists on every unix CI runner; a random name never does.
+        #[cfg(unix)]
+        assert!(command_available("sh"));
+        assert!(!command_available(
+            "lazybox-definitely-not-a-real-editor-xyz"
+        ));
     }
 }

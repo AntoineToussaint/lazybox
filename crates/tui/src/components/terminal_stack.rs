@@ -1952,55 +1952,56 @@ impl TerminalStack {
         }
     }
 
-    /// The render-time hit the focused terminal recorded this frame —
-    /// its exact grid rect (chrome, recap rows, and scrollbar gutter
-    /// already removed) and the viewport offset it was painted at
-    /// (recorded in [`Self::render_one_terminal`]). This is the single
-    /// source of truth every screen↔grid mapping reads, so none of them
-    /// recompute the recap/chrome inset or re-read a live scroll offset
-    /// and drift against what was actually painted — including split
-    /// tiles, whose grid does not begin at the pane's top (#1021). `None`
-    /// when the focused terminal was not part of the last render.
-    fn focused_hit(&self) -> Option<TerminalHit> {
-        let id = self.focused_terminal_id()?;
+    /// The render-time hit `id` recorded this frame — its exact grid rect
+    /// (chrome, recap rows, and scrollbar gutter already removed) and the
+    /// viewport offset it was painted at (recorded in
+    /// [`Self::render_one_terminal`]). This is the single source of truth
+    /// every screen↔grid mapping reads, so none of them recompute the
+    /// recap/chrome inset or re-read a live scroll offset and drift against
+    /// what was actually painted — including split tiles, whose grid does
+    /// not begin at the pane's top (#1021). `None` when `id` was not part
+    /// of the last render.
+    fn hit_for(&self, id: TerminalId) -> Option<TerminalHit> {
         self.tile_hits
             .iter()
             .find(|hit| hit.terminal_id == id)
             .copied()
     }
 
-    /// The viewport offset to compose a focused-terminal selection
-    /// against: the offset of the frame the user clicked on (recorded in
-    /// [`Self::focused_hit`]), falling back to the live VT offset only
-    /// before the first render, when there is no painted frame yet. `None`
-    /// when the scrollbar is unavailable — the caller then declines the
-    /// mapping rather than guessing.
-    fn focused_frame_offset(&self) -> Option<u64> {
-        match self.focused_hit() {
+    /// The viewport offset to compose a selection against for `id`: the
+    /// offset of the frame the user clicked on (recorded in
+    /// [`Self::hit_for`]), falling back to the live VT offset only before
+    /// the first render, when there is no painted frame yet. `None` when
+    /// the scrollbar is unavailable — the caller then declines the mapping
+    /// rather than guessing.
+    fn frame_offset_for(&self, id: TerminalId) -> Option<u64> {
+        match self.hit_for(id) {
             Some(hit) => hit.offset,
-            None => {
-                let id = self.focused_terminal_id()?;
-                self.terminals
-                    .get(&id)?
-                    .vt
-                    .terminal
-                    .scrollbar()
-                    .ok()
-                    .map(|b| b.offset)
-            }
+            None => self
+                .terminals
+                .get(&id)?
+                .vt
+                .terminal
+                .scrollbar()
+                .ok()
+                .map(|b| b.offset),
         }
     }
 
-    /// Screen-absolute grid bounds of the focused terminal's cell grid:
-    /// `(inner_x, inner_y, last_col, last_row)` in crossterm screen
-    /// coordinates. Read straight from the rect the renderer drew
-    /// ([`Self::focused_hit`]) so the mapping can never diverge from the
-    /// frame the user clicked on. `rect` is consulted ONLY on the
-    /// pre-first-render fallback path (no painted frame to read yet); once
-    /// anything has rendered it is ignored in favour of the recorded grid.
-    /// `None` when nothing is focused or the grid holds no cell.
-    fn grid_bounds(&self, rect: tuirealm::ratatui::layout::Rect) -> Option<(u16, u16, u16, u16)> {
-        if let Some(hit) = self.focused_hit() {
+    /// Screen-absolute grid bounds of `id`'s cell grid: `(inner_x,
+    /// inner_y, last_col, last_row)` in crossterm screen coordinates. Read
+    /// straight from the rect the renderer drew ([`Self::hit_for`]) so the
+    /// mapping can never diverge from the frame the user clicked on. `rect`
+    /// is consulted ONLY on the pre-first-render fallback path (no painted
+    /// frame to read yet); once anything has rendered it is ignored in
+    /// favour of the recorded grid. `None` when `id` is unknown or its grid
+    /// holds no cell.
+    fn grid_bounds(
+        &self,
+        id: TerminalId,
+        rect: tuirealm::ratatui::layout::Rect,
+    ) -> Option<(u16, u16, u16, u16)> {
+        if let Some(hit) = self.hit_for(id) {
             let grid = hit.grid;
             if grid.width == 0 || grid.height == 0 {
                 return None;
@@ -2009,7 +2010,6 @@ impl TerminalStack {
             let last_row = grid.y + grid.height - 1;
             return Some((grid.x, grid.y, last_col, last_row));
         }
-        let id = self.focused_terminal_id()?;
         let slot = self.terminals.get(&id)?;
         let inner_x = rect.x.saturating_add(1);
         // Use the SAME body height the renderer feeds `recap_rows` — the
@@ -2030,27 +2030,32 @@ impl TerminalStack {
     }
 
     /// Translate a crossterm `(col, row)` into **screen-absolute grid
-    /// coordinates** `(grid_col, screen_row)` for the focused terminal,
-    /// where `screen_row` counts from the top of the scrollback (the
-    /// libghostty `Point::Screen` space). The point is clamped into the
-    /// grid, so an edge / chrome position resolves to the nearest cell —
-    /// exactly what an edge-drag auto-scroll needs. Returns `None` when
-    /// nothing is focused or the scrollbar state is unavailable.
+    /// coordinates** `(grid_col, screen_row)` for terminal `id`, where
+    /// `screen_row` counts from the top of the scrollback (the libghostty
+    /// `Point::Screen` space). The point is clamped into `id`'s grid, so a
+    /// position past the tile boundary (a drag that strayed into a
+    /// neighbouring tile) resolves to `id`'s nearest edge cell rather than
+    /// reading the adjacent grid — this is what scopes a split-tile
+    /// selection to the tile it started in (#1101). An edge / chrome
+    /// position likewise resolves to the nearest cell, which is what an
+    /// edge-drag auto-scroll needs. Returns `None` when `id` is unknown or
+    /// the scrollbar state is unavailable.
     ///
     /// Storing a drag-selection in this space (rather than on-screen
     /// crossterm cells) is what lets the anchor stay pinned to its
     /// content while the viewport auto-scrolls under the drag (#432).
     pub fn selection_point(
         &self,
+        id: TerminalId,
         rect: tuirealm::ratatui::layout::Rect,
         col: u16,
         row: u16,
     ) -> Option<(u16, u32)> {
-        let (inner_x, inner_y, last_col, last_row) = self.grid_bounds(rect)?;
+        let (inner_x, inner_y, last_col, last_row) = self.grid_bounds(id, rect)?;
         // The offset of the frame the user clicked on — NOT a live re-read,
         // which output arriving between that frame and the click may have
         // advanced (#1021).
-        let offset = self.focused_frame_offset()?;
+        let offset = self.frame_offset_for(id)?;
         let vx = col.clamp(inner_x, last_col) - inner_x;
         let vy = u64::from(row.clamp(inner_y, last_row) - inner_y);
         // `offset` is the viewport top's row in the total scrollable area,
@@ -2061,18 +2066,17 @@ impl TerminalStack {
 
     /// Extract the plain text of the selection spanning two
     /// screen-absolute grid points (see [`Self::selection_point`]) from
-    /// the focused terminal. Unlike a viewport read, this covers rows
-    /// that have scrolled off-screen, so a passage longer than one screen
-    /// copies in a single gesture (#432).
+    /// terminal `id`. Pinning extraction to the terminal the drag started
+    /// in — rather than whatever is focused at release — is what keeps a
+    /// split-tile copy scoped to its own tile (#1101). Unlike a viewport
+    /// read, this covers rows that have scrolled off-screen, so a passage
+    /// longer than one screen copies in a single gesture (#432).
     ///
     /// Uses libghostty's own flowing-text selection + plain formatter, so
     /// the semantics (first row from the anchor, whole middle rows, last
     /// row to the focus; wide glyphs and trailing blanks handled) match
     /// what the terminal itself would copy. Empty on any error.
-    pub fn extract_selection(&mut self, a: (u16, u32), b: (u16, u32)) -> String {
-        let Some(id) = self.focused_terminal_id() else {
-            return String::new();
-        };
+    pub fn extract_selection(&mut self, id: TerminalId, a: (u16, u32), b: (u16, u32)) -> String {
         let Some(slot) = self.terminals.get_mut(&id) else {
             return String::new();
         };
@@ -2119,20 +2123,24 @@ impl TerminalStack {
     }
 
     /// Project a screen-absolute selection span back to the on-screen
-    /// crossterm cells currently visible in `rect`, for the reverse-video
-    /// highlight. Endpoints scrolled outside the viewport clamp to the
-    /// pane edges so the visible portion of a scrollback-spanning
-    /// selection still highlights. `None` when nothing is focused.
+    /// crossterm cells of terminal `id` currently visible in `rect`, for
+    /// the reverse-video highlight. Because the endpoints map through
+    /// `id`'s own grid, the highlight stays inside `id`'s tile even when
+    /// the drag strayed into a neighbour (#1101). Endpoints scrolled
+    /// outside the viewport clamp to the pane edges so the visible portion
+    /// of a scrollback-spanning selection still highlights. `None` when
+    /// `id` is unknown.
     pub fn selection_screen_span(
         &self,
+        id: TerminalId,
         rect: tuirealm::ratatui::layout::Rect,
         a: (u16, u32),
         b: (u16, u32),
     ) -> Option<((u16, u16), (u16, u16))> {
-        let (inner_x, inner_y, _last_col, _last_row) = self.grid_bounds(rect)?;
+        let (inner_x, inner_y, _last_col, _last_row) = self.grid_bounds(id, rect)?;
         // Project against the same recorded frame offset the anchor was
         // captured with, so highlight and extraction agree (#1021).
-        let offset = self.focused_frame_offset()? as i64;
+        let offset = self.frame_offset_for(id)? as i64;
         let max_x = i64::from(rect.x.saturating_add(rect.width.saturating_sub(1)));
         let max_y = i64::from(rect.y.saturating_add(rect.height.saturating_sub(1)));
         let project = |p: (u16, u32)| -> (u16, u16) {
@@ -2422,7 +2430,8 @@ impl TerminalStack {
         col: u16,
         row: u16,
     ) -> Option<(u32, u32)> {
-        let (inner_x, inner_y, last_col, last_row) = self.grid_bounds(rect)?;
+        let id = self.focused_terminal_id()?;
+        let (inner_x, inner_y, last_col, last_row) = self.grid_bounds(id, rect)?;
         // Reject points OUTSIDE the grid — the border columns, the top
         // chrome / recap rows, the bottom margin, and the scrollbar gutter
         // are never grid cells, so a click there must not be forwarded to
@@ -3602,15 +3611,24 @@ impl TerminalStack {
         // re-records every visible tile's rect from scratch so the
         // wheel handler hit-tests against the current layout.
         self.tile_hits.clear();
-        // Title row: "Terminals" plus an icon+label per active terminal
+        // Title row: a mode label plus an icon+label per active terminal
         // (e.g. `Terminals    claude   _ shell`). Active is bold-accent;
         // inactive is dim grey. Two-tab common case looks like a tab
         // strip; single-terminal shows just one entry.
-        let title_prefix = "Terminals  ";
-        let mut title_spans: Vec<Span<'static>> = vec![
-            Span::styled("Terminals", theme.title(focused)),
-            Span::raw("  "),
-        ];
+        //
+        // When the pane has focus the label becomes an explicit
+        // "▶ typing to" pointer (#1110): co-located with the tab strip,
+        // it makes the focused terminal unmistakable so a user can't
+        // mistake navigation mode for "typing to the agent". Unfocused
+        // it reads as the quiet "Terminals" heading. The two forms are
+        // padded to the same width so the tab strip doesn't jump.
+        let title_prefix = if focused {
+            "▶ typing to  "
+        } else {
+            "Terminals    "
+        };
+        let mut title_spans: Vec<Span<'static>> =
+            vec![Span::styled(title_prefix, theme.title(focused))];
         // Cursor in cells — used to compute the column range each
         // tab label occupies for click-hit-testing.
         let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
@@ -6110,11 +6128,14 @@ mod selection_offset_tests {
         start: (u16, u16),
         end: (u16, u16),
     ) -> String {
+        let id = stack.focused_terminal_id().expect("focused");
         let a = stack
-            .selection_point(rect, start.0, start.1)
+            .selection_point(id, rect, start.0, start.1)
             .expect("anchor");
-        let b = stack.selection_point(rect, end.0, end.1).expect("focus");
-        stack.extract_selection(a, b)
+        let b = stack
+            .selection_point(id, rect, end.0, end.1)
+            .expect("focus");
+        stack.extract_selection(id, a, b)
     }
 
     #[test]
@@ -6173,8 +6194,9 @@ mod selection_offset_tests {
             term.draw(|f| stack.render(area, f, true)).unwrap();
             let buf = term.backend().buffer().clone();
 
-            let (inner_x, inner_y, last_col, last_row) =
-                stack.grid_bounds(area).expect("focused grid");
+            let (inner_x, inner_y, last_col, last_row) = stack
+                .grid_bounds(TerminalId(1), area)
+                .expect("focused grid");
             // The top grid row must map to the viewport-top content row —
             // the crisp no-off-by-one check.
             let bar = stack.terminals[&TerminalId(1)]
@@ -6183,7 +6205,7 @@ mod selection_offset_tests {
                 .scrollbar()
                 .unwrap();
             assert_eq!(
-                stack.selection_point(area, inner_x, inner_y),
+                stack.selection_point(TerminalId(1), area, inner_x, inner_y),
                 Some((0, bar.offset as u32)),
                 "grid-top screen row must map to the viewport-top content row",
             );
@@ -6249,9 +6271,9 @@ mod selection_offset_tests {
         let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
         term.draw(|f| stack.render(area, f, true)).unwrap();
 
-        let (inner_x, inner_y, _, _) = stack.grid_bounds(area).expect("grid");
+        let (inner_x, inner_y, _, _) = stack.grid_bounds(TerminalId(1), area).expect("grid");
         let rendered = stack
-            .selection_point(area, inner_x, inner_y)
+            .selection_point(TerminalId(1), area, inner_x, inner_y)
             .expect("grid-top maps");
 
         // More output arrives and advances the viewport — but WITHOUT another
@@ -6276,7 +6298,7 @@ mod selection_offset_tests {
         // The click at the same on-screen cell must still map to the painted
         // frame's content row, not the advanced live offset.
         assert_eq!(
-            stack.selection_point(area, inner_x, inner_y),
+            stack.selection_point(TerminalId(1), area, inner_x, inner_y),
             Some(rendered),
             "selection must reuse the painted frame's offset, not a live re-read",
         );
@@ -6413,7 +6435,9 @@ mod selection_offset_tests {
         term.draw(|f| stack.render(area, f, true)).unwrap();
         let buf = term.backend().buffer().clone();
 
-        let (inner_x, inner_y, last_col, last_row) = stack.grid_bounds(area).expect("focused grid");
+        let (inner_x, inner_y, last_col, last_row) = stack
+            .grid_bounds(TerminalId(2), area)
+            .expect("focused grid");
         // The recorded grid is the bottom tile's — its top sits far below the
         // pane's own top chrome (which would put a naive mapping at row 3).
         assert!(
@@ -6476,7 +6500,7 @@ mod selection_offset_tests {
         let mut stack = stack_with(TerminalKind::Shell, None, &refs);
         // Screen-absolute rows: `row000` is screen row 0, so rows 10..=19
         // are deep in scrollback, well above the live viewport.
-        let text = stack.extract_selection((0, 10), (6, 19));
+        let text = stack.extract_selection(TerminalId(1), (0, 10), (6, 19));
         let want: String = (10..=19)
             .map(|i| format!("row{i:03}"))
             .collect::<Vec<_>>()
@@ -6491,9 +6515,15 @@ mod selection_offset_tests {
         // very cells `selection_point` mapped them from.
         let stack = stack_with(TerminalKind::Shell, None, &["line0", "line1", "line2"]);
         let rect = Rect::new(0, 0, 80, 30);
-        let a = stack.selection_point(rect, 3, 3).expect("anchor");
-        let b = stack.selection_point(rect, 5, 5).expect("focus");
-        let (pa, pb) = stack.selection_screen_span(rect, a, b).expect("span");
+        let a = stack
+            .selection_point(TerminalId(1), rect, 3, 3)
+            .expect("anchor");
+        let b = stack
+            .selection_point(TerminalId(1), rect, 5, 5)
+            .expect("focus");
+        let (pa, pb) = stack
+            .selection_screen_span(TerminalId(1), rect, a, b)
+            .expect("span");
         assert_eq!(pa, (3, 3));
         assert_eq!(pb, (5, 5));
     }
@@ -6508,9 +6538,11 @@ mod selection_offset_tests {
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         let stack = stack_with(TerminalKind::Shell, None, &refs);
         let rect = Rect::new(0, 10, 80, 20);
-        let visible = stack.selection_point(rect, 3, 13).expect("focus");
+        let visible = stack
+            .selection_point(TerminalId(1), rect, 3, 13)
+            .expect("focus");
         let ((_ax, ay), _b) = stack
-            .selection_screen_span(rect, (0, 0), visible)
+            .selection_screen_span(TerminalId(1), rect, (0, 0), visible)
             .expect("span");
         assert_eq!(
             ay, rect.y,
@@ -6527,10 +6559,12 @@ mod selection_offset_tests {
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         let mut stack = stack_with(TerminalKind::Shell, None, &refs);
         let rect = Rect::new(0, 0, 80, 30);
-        let bottom = stack.selection_point(rect, 1, 3).expect("at live bottom");
+        let bottom = stack
+            .selection_point(TerminalId(1), rect, 1, 3)
+            .expect("at live bottom");
         let _ = stack.scroll_active(-5);
         let scrolled = stack
-            .selection_point(rect, 1, 3)
+            .selection_point(TerminalId(1), rect, 1, 3)
             .expect("after scrolling up");
         assert_eq!(
             bottom.0, scrolled.0,
@@ -6827,9 +6861,10 @@ mod resync_tests {
 
     fn row(stack: &mut TerminalStack, at: (u16, u16)) -> String {
         let rect = Rect::new(0, 0, 80, 30);
-        let a = stack.selection_point(rect, at.0, at.1).expect("anchor");
-        let b = stack.selection_point(rect, 20, at.1).expect("focus");
-        stack.extract_selection(a, b)
+        let id = stack.focused_terminal_id().expect("focused");
+        let a = stack.selection_point(id, rect, at.0, at.1).expect("anchor");
+        let b = stack.selection_point(id, rect, 20, at.1).expect("focus");
+        stack.extract_selection(id, a, b)
     }
 
     #[test]
@@ -7550,9 +7585,12 @@ mod hidden_feed_tests {
 
     fn row0(stack: &mut TerminalStack) -> String {
         let rect = Rect::new(0, 0, W, H);
-        let a = stack.selection_point(rect, ROW0.0, ROW0.1).expect("anchor");
-        let b = stack.selection_point(rect, 20, ROW0.1).expect("focus");
-        stack.extract_selection(a, b)
+        let id = stack.focused_terminal_id().expect("focused");
+        let a = stack
+            .selection_point(id, rect, ROW0.0, ROW0.1)
+            .expect("anchor");
+        let b = stack.selection_point(id, rect, 20, ROW0.1).expect("focus");
+        stack.extract_selection(id, a, b)
     }
 
     /// Two sessions, one terminal each; A is active. After a render, A's
@@ -7806,7 +7844,17 @@ mod footer_scroll_independence {
             let pane = Rect::new(0, 0, W, H - 1);
             let footer = Rect::new(0, H - 1, W, 1);
             stack.render(pane, f, true);
-            crate::realm::components::footer::render(f, footer, &binds, &[], &[], "?", None, None);
+            crate::realm::components::footer::render(
+                f,
+                footer,
+                None,
+                &binds,
+                &[],
+                &[],
+                "?",
+                None,
+                None,
+            );
         })
         .unwrap();
         let buf = term.backend().buffer().clone();

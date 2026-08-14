@@ -138,7 +138,16 @@ fn set_mouse_capture(out: &mut impl Write, enabled: bool) -> std::io::Result<()>
 }
 
 pub(crate) fn request_mouse_capture(enabled: bool) -> std::io::Result<()> {
-    set_mouse_capture(&mut std::io::stdout(), enabled)
+    // Route through the render writer, not stdout directly: in async mode a
+    // bare stdout write here would race the writer thread mid-frame and
+    // corrupt it (or split the mouse-mode escape). `enqueue_raw` serializes
+    // it behind the current frame on the one channel; in sync mode it writes
+    // stdout directly, as before (#1090 finding #1). Encode into a buffer
+    // first so the whole escape is enqueued as one atomic unit.
+    let mut buf = Vec::new();
+    set_mouse_capture(&mut buf, enabled)?;
+    super::render_writer::enqueue_raw(&buf);
+    Ok(())
 }
 
 /// Set the first time [`restore_host_terminal`] runs. The guard's

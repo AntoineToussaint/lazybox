@@ -227,9 +227,10 @@ failing CI) → hidden → full, remembered per workspace with a
 has no activity), `.`
 toggle focus mode (near-fullscreen agent terminal behind a slim event
 header; from inside a terminal use `]]f`, and `]]q` exits),
-`]]<digit>` jump the focused terminal straight to the Nth agent
-workspace (sidebar order; the number rides a badge on each agent row
-and the `]]` leader popup), `Shift-arrows` resize splitters
+`]]<digit>` jump the focused terminal straight to the Nth **focused**
+(starred) workspace (sidebar order; the number rides a badge on each
+focused row and the `]]` leader popup — only focused workspaces are
+numbered), `Shift-arrows` resize splitters
 (`Shift-←/→` everywhere; `Shift-↑/↓` too, except in the sidebar where
 they extend the multi-select instead — #932), `F8` /
 `Alt-s` / `Ctrl-Alt-s` toggle mouse capture (host-native text
@@ -272,7 +273,17 @@ session (agent-to-agent handoff, #431 — capture the focused agent's
 on-screen output, pick a target workspace, edit the brief, and
 inject + submit it into that session's agent; the source is excluded
 so a handoff can't loop back to itself, and a visible `source →
-target` notice records the trail), `x j` join issue
+target` notice records the trail), `x o` open with… (a config-driven
+picker over `open_with:` apps — Obsidian / Finder / browser / … —
+decoupled from the `e` code editor; `{path}`/`{url}`/`{branch}`/`{repo}`
+tokens substituted at launch, each picker row showing its command;
+apps whose tokens the workspace can't supply are hidden, a `{path}` app
+on a worktreeless workspace provisions one first like `e`, and only
+`{path}` apps are worktree-bound (decline on a remote workspace, `{url}`
+apps open like `g o` per #742); a per-app `key:` binds a favorite to a
+direct chord that skips the picker (`open_with_app.<name>`, remappable);
+#1100), `x j` join
+issue
 into PR, `x z` long snooze, `x x` archive, `x c` close issue
 (as not-planned, upstream; issue workspaces only, confirmed first) —
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).
@@ -420,7 +431,7 @@ report; Cmd isn't encoded and most emulators eat it, so don't rely on
 it); both need capture on, while `]]u` works even with capture off.
 `]]f`
 toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
-the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
+the Nth focused (starred) workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that

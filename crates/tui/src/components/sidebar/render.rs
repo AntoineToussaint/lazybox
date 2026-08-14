@@ -310,12 +310,16 @@ impl Sidebar {
         let row0 = Rect::new(area.x + l_pad, area.y, inner_width, 1.min(area.height));
         frame.render_widget(Paragraph::new(Line::from(header_spans)), row0);
 
-        // Row 1 — filter + sort chips, both clickable. Each chip is
-        // dim while at its default, accent-bold when the user has
-        // selected a non-default value, so the row stays quiet by
-        // default but visually shouts when a filter is on. The filter
-        // chip lists every active filter (comma-joined) — clicking it
-        // opens the filter menu.
+        // Row 1 — filter + sort + search chips. Each is a plain
+        // key-plus-label hint (`f filter`, `o recent`, `# find`), dim
+        // while at its default and accent-bold once a non-default value
+        // is set, so the row stays quiet by default but shouts when a
+        // filter is on. The chips are still clickable, but deliberately
+        // rendered as labels, not bracketed buttons: the `[…]` framing
+        // read as a clickable button and invited the "type a word and
+        // fire a burst of shortcuts" failure the header is meant to
+        // avoid (#1110). The filter chip lists every active filter
+        // (comma-joined); clicking it opens the filter menu.
         if area.height >= 2 {
             let row1 = Rect::new(area.x + l_pad, area.y + 1, inner_width, 1);
 
@@ -325,7 +329,9 @@ impl Sidebar {
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD);
             let dim_style = Style::default().fg(theme.text_dim);
-            let key_style = active_style;
+            // The shortcut keys are hints, not buttons — kept dim so the
+            // row never reads as a strip of pressable controls (#1110).
+            let key_style = dim_style;
 
             let filter_prefix = "f ";
             // Collapse past two chips to `a, b, +N` so a wide active
@@ -333,18 +339,17 @@ impl Sidebar {
             // label mid-word — the full set is one `f` away.
             let filter_chip = if filter_active {
                 let chips = self.filters.chips();
-                let shown = if chips.len() <= 2 {
+                if chips.len() <= 2 {
                     chips.join(", ")
                 } else {
                     format!("{}, +{}", chips[..2].join(", "), chips.len() - 2)
-                };
-                format!("[{shown}]")
+                }
             } else {
-                "[filter]".to_string()
+                "filter".to_string()
             };
             let sep = "  ";
             let sort_prefix = "o ";
-            let sort_chip = format!("[{}]", self.sort_mode.chip_label());
+            let sort_chip = self.sort_mode.chip_label().to_string();
 
             let filter_prefix_cells = visual_width(filter_prefix) as u16;
             let filter_chip_cells = visual_width(&filter_chip) as u16;
@@ -411,17 +416,17 @@ impl Sidebar {
             let box_start = search_x + search_prefix_cells;
             // Cells left for the chip body after the leading `# `.
             let chip_room = (row1.x + row1.width).saturating_sub(box_start);
-            // The `[⌕ …]` frame around the query; its width is measured
+            // The `⌕ …` frame around the query; its width is measured
             // rather than assumed so a wider search glyph can't push the
             // chip past the room the guard below reserved for it.
-            const SEARCH_FRAME: &str = "[⌕ ]";
+            const SEARCH_FRAME: &str = "⌕ ";
             let search_chip = match global_query {
                 Some(q) => {
                     let q_room =
                         chip_room.saturating_sub(visual_width(SEARCH_FRAME) as u16) as usize;
-                    format!("[⌕ {}]", truncate_ellipsis(q, q_room.max(1)))
+                    format!("⌕ {}", truncate_ellipsis(q, q_room.max(1)))
                 }
-                None => "[find]".to_string(),
+                None => "find".to_string(),
             };
             let search_chip_cells = visual_width(&search_chip) as u16;
             if search_chip_cells <= chip_room {
@@ -1239,12 +1244,12 @@ impl Sidebar {
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
     ) -> Vec<Option<Line<'static>>> {
-        // 1-based jump numbers for the first nine agent workspaces, in
+        // 1-based jump numbers for the first nine focused workspaces, in
         // sidebar order — the badge that pairs with the `]]<digit>`
         // jump. Past the ninth there's no single-digit key, so it gets
         // no badge.
         let agent_numbers: std::collections::HashMap<SessionKey, usize> = self
-            .agent_workspace_keys()
+            .numbered_workspace_keys()
             .into_iter()
             .take(9)
             .enumerate()

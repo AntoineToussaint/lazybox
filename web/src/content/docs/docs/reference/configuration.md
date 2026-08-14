@@ -22,6 +22,7 @@ which is the canonical source of truth for defaults and field names.
 | [`setup`](#setup) | Wizard output: enabled providers / agents, filters, scopes, default agent |
 | [`desktop`](#desktop) | Private desktop analytics opt-in |
 | [`editors`](#editors) | Override / extend the detected editors |
+| [`open_with`](#open_with) | Config-driven "Open with…" apps launched on a workspace (`x o`) |
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
 | [`agent`](#agent) | Permission prompts, LLM gateway, agent state-detection timers |
 | [`agents`](#agentsid) | Custom CLI definitions and per-agent model-tier overrides |
@@ -201,6 +202,25 @@ matches a builtin overrides it; a new `id` adds an editor.
 | `display` | string | Name shown in the picker |
 | `command` | string | Executable to run |
 | `args` | list of string | Arguments; `{path}` expands to the worktree directory |
+
+## `open_with`
+
+A list of arbitrary apps launched on the focused workspace through the
+"Open with…" picker (`x o`), decoupled from the single `editors:` code
+editor. Empty by default.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string | Name shown in the picker |
+| `command` | string | Executable to run (`open` on macOS hands off to Launch Services) |
+| `args` | list of string | Arguments; `{path}` (worktree), `{url}` (PR/issue), `{branch}`, `{repo}` expand at launch. Defaults to `["{path}"]` |
+| `key` | string | Optional favorite key that binds this app to a direct chord, skipping the picker (remappable via `ui.action_keys.open_with_app.<name>`) |
+
+Apps whose token the workspace can't supply (a `{url}` app with no PR) are
+hidden from the picker; a `{path}` app on a workspace with no worktree yet
+provisions one first, and on a remote (`--connect`) daemon declines with a
+pointer to `s` (the worktree is server-side). See
+[Workspaces & worktrees](/docs/features/workspaces-and-worktrees/).
 
 ## `repos`
 

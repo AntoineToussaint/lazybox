@@ -4746,6 +4746,192 @@ snippets:
         );
     }
 
+    /// #1100: the remote gate is per-app, not per-feature. A `{url}` app
+    /// (open the PR in a browser) has no worktree dependency, so it must
+    /// NOT be refused on a remote daemon the way a `{path}` app is — the
+    /// same reasoning that lets `g o` open-in-browser work over `--connect`.
+    /// The favorite-key / direct path launches without the picker's
+    /// availability filter, so on this PR-less workspace the `{url}` app
+    /// falls through to the launcher and fails on the missing token — NOT
+    /// on a remote block, proving it was never remote-gated.
+    #[test]
+    fn open_with_url_app_is_not_remote_blocked() {
+        let worktree = tmp_worktree_with_skill("ow-url-remote");
+        let mut m = model_with_agent_at_worktree(worktree).with_remote();
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "PR in browser".into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+            key: None,
+        }]);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenWithApp(
+            "PR in browser".into(),
+        ));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            !notice.contains("remote daemon"),
+            "a {{url}} app must not be refused on a remote daemon: {notice:?}",
+        );
+        assert!(
+            notice.contains("unavailable"),
+            "it should fall through to the missing-{{url}} token error: {notice:?}",
+        );
+    }
+
+    /// #1100: a `{path}` app IS worktree-bound — the worktree is a
+    /// server-side path over `--connect`, so it declines on a remote
+    /// daemon and points at the server shell.
+    #[test]
+    fn open_with_path_app_declines_on_remote() {
+        let worktree = tmp_worktree_with_skill("ow-path-remote");
+        let mut m = model_with_agent_at_worktree(worktree).with_remote();
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "Obsidian".into(),
+            command: "open".into(),
+            args: Some(vec!["-a".into(), "Obsidian".into(), "{path}".into()]),
+            key: None,
+        }]);
+        m.open_with_picker();
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("remote daemon")),
+            "a {{path}} app must decline on a remote daemon",
+        );
+    }
+
+    /// #1100: a `{path}` app on a workspace with no session yet has no
+    /// worktree on disk to open. Rather than error, it provisions one
+    /// (spawns a shell) and defers the launch — exactly what `e` does.
+    #[test]
+    fn open_with_path_app_without_a_worktree_provisions_one() {
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#7");
+        let session_key: SessionKey = (&ws_key).into();
+        // No `add_session` — the workspace has no worktree on disk.
+        let ws = lazybox_core::Workspace::empty(ws_key, "main", chrono::Utc::now());
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "Obsidian".into(),
+            command: "open".into(),
+            args: None,
+            key: None,
+        }]);
+        m.open_with_picker();
+        assert_eq!(
+            m.setup
+                .pending_open_with_launch
+                .as_ref()
+                .map(|(key, _)| key.clone()),
+            Some(session_key),
+            "the launch is queued behind a worktree provision",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("Provisioning")),
+        );
+    }
+
+    /// #1100: the queued `{path}` launch fires once the provisioned
+    /// worktree lands (a `TerminalSpawned` for the target), resolving its
+    /// worktree by key — the deferred-launch counterpart of `e`.
+    #[test]
+    fn open_with_deferred_launch_fires_when_the_worktree_lands() {
+        let worktree = tmp_worktree_with_skill("ow-deferred");
+        let mut m = model_with_agent_at_worktree(worktree);
+        let session_key: SessionKey = (&WorkspaceKey::new("github:o/r#1")).into();
+        // A prior provision left this launch waiting; the command can't
+        // spawn, so nothing real is launched — we only assert it fired.
+        m.setup.pending_open_with_launch = Some((
+            session_key.clone(),
+            crate::editors::OpenWithApp {
+                name: "Obsidian".into(),
+                command: "/nonexistent-open-with-launcher".into(),
+                args: Some(vec!["{path}".into()]),
+                key: None,
+            },
+        ));
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: lazybox_ipc::TerminalId(2),
+            session_key,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        assert!(
+            m.setup.pending_open_with_launch.is_none(),
+            "the deferred launch fired and cleared once the worktree existed",
+        );
+    }
+
+    /// #1100 picker polish: apps whose tokens the workspace can't supply
+    /// are filtered out, so the picker never offers a choice that would
+    /// just fail. Two `{url}` apps on a PR-less workspace leave nothing to
+    /// run — no picker mounts, and the notice explains why.
+    #[test]
+    fn open_with_picker_filters_out_unavailable_apps() {
+        let worktree = tmp_worktree_with_skill("ow-filter");
+        let mut m = model_with_agent_at_worktree(worktree);
+        let url_app = |name: &str| crate::editors::OpenWithApp {
+            name: name.into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+            key: None,
+        };
+        m.cache_open_with(vec![url_app("PR"), url_app("PR2")]);
+        m.open_with_picker();
+        assert!(
+            m.top_modal().is_none(),
+            "no picker mounts when every app's token is unavailable",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("can run")),
+        );
+    }
+
+    /// #1100 per-app key: dispatching `OpenWithApp("<name>")` (what a
+    /// favorite `key:` binds) launches that specific app directly. Here
+    /// the workspace has no PR, so the `{url}` app surfaces the named
+    /// token error — proving the key path reached the launcher.
+    #[test]
+    fn open_with_favorite_key_launches_the_named_app() {
+        let worktree = tmp_worktree_with_skill("ow-fav-key");
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "PR".into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+            key: Some("O".into()),
+        }]);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenWithApp("PR".into()));
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("unavailable")),
+            "the favorite key reached launch_open_with for the named app",
+        );
+    }
+
     // ── `]]` leader chord (issue #205) ──────────────────────────────
 
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
@@ -6203,6 +6389,7 @@ mod stale_input_tests {
                 | Id::ErrorInboxClearConfirm
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
+                | Id::EditorRemoveConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
                 Id::SidebarContext | Id::InspectList | Id::ImportCheckoutList => false,
@@ -6223,6 +6410,11 @@ mod stale_input_tests {
                 | Id::NewWorkspaceRepo
                 | Id::LinearTeamRepo
                 | Id::Editor
+                // Open-with launches an external app — an outward
+                // effect a stale Enter must not trigger.
+                | Id::OpenWith
+                | Id::EditorsPanel
+                | Id::EditorForm
                 | Id::Setup
                 | Id::AdoptTarget
                 | Id::StartAgentProject
@@ -6267,6 +6459,10 @@ mod stale_input_tests {
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
             Id::Editor,
+            Id::OpenWith,
+            Id::EditorsPanel,
+            Id::EditorForm,
+            Id::EditorRemoveConfirm,
             Id::Setup,
             Id::RemoveOutOfScope,
             Id::MergeConfirm,
@@ -6447,6 +6643,7 @@ mod watchdog_tests {
             ticks: Duration::from_millis(2),
             messages: Duration::from_millis(3),
             render: Duration::from_millis(40),
+            ..Default::default()
         };
         let (name, dur) = timings.worst();
         assert_eq!(name, "drain");
@@ -11403,6 +11600,112 @@ mod terminal_url_mouse_tests {
             .join("\n")
     }
 
+    /// A drag selection across two side-by-side split tiles stays scoped
+    /// to the tile the drag STARTED in: the copy holds only that terminal's
+    /// rows, never the neighbour's, and the on-screen highlight never
+    /// crosses the tile boundary (#1101). The drag begins in the
+    /// *non-focused* left tile, so this pins the mouse-down's
+    /// focus-the-clicked-tile step — drop it and the anchor would land in
+    /// the previously-focused right tile and copy its text instead. The
+    /// highlight-span check covers the reverse-video overlay path
+    /// (`selection_screen_span`) that the copy never exercises, and pins the
+    /// column clamp directly: selection maps screen coords through the start
+    /// tile's recorded grid (#1021), so a column past the tile boundary
+    /// clamps to the tile's edge instead of projecting into the adjacent
+    /// grid's cells.
+    #[test]
+    fn drag_selection_scoped_to_the_start_tile() {
+        let (mut model, _server, _opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Splits {
+                tree: lazybox_core::TileTree::HSplit {
+                    left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                    right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                    ratio: 50,
+                },
+                // Focus the RIGHT tile; the drag below starts in the left one.
+                focused: vec![1],
+            });
+        feed(&mut model, 1, b"AAA0\r\nAAA1\r\nAAA2\r\n".to_vec());
+        feed(&mut model, 2, b"BBB0\r\nBBB1\r\nBBB2\r\n".to_vec());
+        let pane = render(&mut model);
+        let (lx, ly) = body_origin(&model, pane, 1);
+        let (rx, _) = body_origin(&model, pane, 2);
+        // Press in the interior of the left tile — its horizontal midpoint,
+        // maximally clear of the sidebar/right splitter seam that hugs the
+        // tile's left edge and would otherwise steal the click as a resize.
+        let press_col = (lx + rx) / 2;
+
+        // Press in the left tile's first row, then drag across the tile
+        // boundary into the right tile two rows lower.
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: press_col,
+            row: ly,
+            modifiers: KeyModifiers::empty(),
+        });
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: rx + 3,
+            row: ly + 2,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        let drag = model.terminal_drag.expect("left-press claims a drag");
+        // The drag binds to the tile it STARTED in (left / terminal 1), not
+        // the tile that was focused when it began (right / terminal 2).
+        assert_eq!(
+            drag.terminal,
+            TerminalId(1),
+            "the drag anchors to the start tile, not the focused one",
+        );
+
+        // The copy holds only the start tile's text. The middle row is
+        // fully spanned regardless of the anchor/focus columns, so it must
+        // be the start tile's row — and only that.
+        let copied = model
+            .terminals
+            .extract_selection(drag.terminal, drag.anchor, drag.focus);
+        assert!(
+            copied.contains("AAA1"),
+            "the start tile's rows are copied: {copied:?}",
+        );
+        assert!(
+            !copied.contains("BBB"),
+            "the adjacent tile never bleeds into the copy: {copied:?}",
+        );
+
+        // The highlight span is clamped to the start tile: both projected
+        // endpoints stay left of the right tile's first column. A regression
+        // that mapped the drag through the whole pane instead of the tile's
+        // grid would project the focus into the right tile (>= rx).
+        let (hstart, hend) = model
+            .terminals
+            .selection_screen_span(drag.terminal, pane, drag.anchor, drag.focus)
+            .expect("a visible selection span");
+        assert!(
+            hstart.0 < rx && hend.0 < rx,
+            "the highlight never crosses into the right tile (rx={rx}): {hstart:?} {hend:?}",
+        );
+
+        // Focus divergence mid-gesture must not redirect the copy: if an
+        // event refocuses the other tile before release, extraction still
+        // reads the tile the drag started in (`drag.terminal`), not live
+        // focus — the guarantee that makes scoping correct-by-construction
+        // rather than a side effect of focus following the click.
+        let mut cmds = Vec::new();
+        model.terminals.focus_tile(TerminalId(2), &mut cmds);
+        let after_refocus =
+            model
+                .terminals
+                .extract_selection(drag.terminal, drag.anchor, drag.focus);
+        assert!(
+            after_refocus.contains("AAA1") && !after_refocus.contains("BBB"),
+            "copy stays pinned to the start tile after focus moves: {after_refocus:?}",
+        );
+    }
+
     #[test]
     fn right_click_opens_plain_url_through_model_launcher() {
         let (mut model, _server, opened) = build_model(1);
@@ -13785,11 +14088,11 @@ mod focus_mode_tests {
         );
     }
 
-    /// `]]<digit>` moves the displayed terminal to the Nth agent
-    /// workspace in sidebar order and keeps focus mode on, so the user
-    /// hops to a specific agent heads-down.
+    /// `]]<digit>` moves the displayed terminal to the Nth **focused**
+    /// (starred) workspace in sidebar order and keeps focus mode on, so
+    /// the user hops to a curated workspace heads-down.
     #[test]
-    fn bracket_digit_jumps_to_agent_workspace_in_focus_mode() {
+    fn bracket_digit_jumps_to_focused_workspace_in_focus_mode() {
         let mut m = build_model();
         let ws1 = workspace_with_agent("owner/repo#1");
         let ws2 = workspace_with_agent("owner/repo#2");
@@ -13798,10 +14101,17 @@ mod focus_mode_tests {
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
 
+        // Only focused workspaces are numbered now — star both so they
+        // enter the roster.
+        assert!(m.sidebar.focus_workspace_key(&key1));
+        m.sidebar.toggle_focus_at_cursor();
+        assert!(m.sidebar.focus_workspace_key(&key2));
+        m.sidebar.toggle_focus_at_cursor();
+
         // The jump number is the slot in this roster (sidebar order),
         // which the badge mirrors — read it rather than assume an order.
-        let roster = m.sidebar.agent_workspace_keys();
-        assert_eq!(roster.len(), 2, "both agents in the roster");
+        let roster = m.sidebar.numbered_workspace_keys();
+        assert_eq!(roster.len(), 2, "both focused workspaces in the roster");
         assert!(roster.contains(&key1) && roster.contains(&key2));
 
         // Start parked on slot 2 so `]]1` is a real move to slot 1.
@@ -13818,8 +14128,31 @@ mod focus_mode_tests {
         assert_eq!(
             m.sidebar.selected_workspace_key(),
             Some(&slot1),
-            "`]]1` jumps to the first agent workspace in the roster",
+            "`]]1` jumps to the first focused workspace in the roster",
         );
+    }
+
+    /// An unfocused workspace gets no jump number, and `]]<digit>`
+    /// past the focused count flashes instead of moving.
+    #[test]
+    fn unfocused_workspaces_are_not_numbered() {
+        let mut m = build_model();
+        let ws1 = workspace_with_agent("owner/repo#1");
+        let ws2 = workspace_with_agent("owner/repo#2");
+        let key1 = SessionKey::from(&ws1.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
+
+        // Nothing starred → nothing numbered.
+        assert!(
+            m.sidebar.numbered_workspace_keys().is_empty(),
+            "no focused workspace, so no jump numbers"
+        );
+
+        // Star just one → exactly one slot, in first position.
+        assert!(m.sidebar.focus_workspace_key(&key1));
+        m.sidebar.toggle_focus_at_cursor();
+        assert_eq!(m.sidebar.numbered_workspace_keys(), vec![key1.clone()]);
     }
 
     /// The attention summary the header reads counts unread / asking /
@@ -21900,6 +22233,215 @@ mod remote_spawn_tests {
         assert!(
             matches!(box_rx.try_recv(), Ok(IpcCommand::Spawn { .. })),
             "a connected box accepts the spawn"
+        );
+    }
+}
+
+/// The focus indicator + burst guard from issue #1110: keystrokes must
+/// have an unmistakable destination, and a typed word in the sidebar
+/// must not fire a chain of shortcuts.
+#[cfg(test)]
+mod focus_indicator_and_burst_guard_tests {
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn build_model() -> TestModel {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        m
+    }
+
+    fn empty_ws(key: &str) -> Workspace {
+        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now())
+    }
+
+    fn press(m: &mut TestModel, code: Key) {
+        m.dispatch_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn footer_text(m: &mut TestModel) -> String {
+        m.view();
+        let buffer = m.terminal.raw().backend().buffer();
+        let last = buffer.area.height - 1;
+        (0..buffer.area.width)
+            .map(|col| buffer[(col, last)].symbol())
+            .collect::<String>()
+    }
+
+    /// With focus in a live agent terminal the footer names the agent
+    /// keystrokes flow to — the unmistakable "typing to" signal.
+    #[test]
+    fn footer_names_the_agent_when_terminal_focused() {
+        let mut m = build_model();
+        let session = SessionKey::from("github:o/r#1");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.terminals.set_active_session(Some(session.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: session,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.set_focus(PaneFocus::Terminals);
+
+        assert!(
+            footer_text(&mut m).contains("typing to: claude"),
+            "terminal focus must say where typing goes: {:?}",
+            footer_text(&mut m)
+        );
+    }
+
+    /// Navigation panes read as a distinct "navigating" chip — never
+    /// "typing to", so the two modes can't be confused.
+    #[test]
+    fn footer_reads_navigating_when_sidebar_focused() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        let footer = footer_text(&mut m);
+        assert!(footer.contains("navigating"), "sidebar chip: {footer:?}");
+        assert!(
+            !footer.contains("typing to"),
+            "navigation must not claim to type to an agent: {footer:?}"
+        );
+    }
+
+    /// A single deliberate shortcut in the sidebar fires normally — the
+    /// burst guard must never swallow an intentional press.
+    #[test]
+    fn a_single_sidebar_shortcut_is_not_suppressed() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        press(&mut m, Key::Char(' '));
+        assert!(
+            m.status.notice.is_none(),
+            "a lone press draws no burst warning"
+        );
+    }
+
+    /// A rapid run of *varied* bare single-key shortcuts (a word typed
+    /// at the wrong pane) is suppressed after the first couple of keys
+    /// and the user is nudged to focus the terminal.
+    #[test]
+    fn a_sidebar_burst_is_suppressed_and_warns() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        // Alternate two benign guarded shortcuts (cycle-sort / collapse)
+        // back-to-back — distinct keys at typing cadence, well inside
+        // the burst window at test speed.
+        for _ in 0..3 {
+            press(&mut m, Key::Char('o'));
+            press(&mut m, Key::Char(' '));
+        }
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a suppressed burst raises a nudge");
+        assert!(
+            notice.message.contains("sidebar") && notice.message.contains("agent"),
+            "nudge must explain the mode mixup: {:?}",
+            notice.message
+        );
+    }
+
+    /// Spamming a *single* key (cycling sort, scrolling) is deliberate,
+    /// not a typed word — it must never be mistaken for a burst.
+    #[test]
+    fn repeating_one_sidebar_key_is_never_suppressed() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        for _ in 0..6 {
+            press(&mut m, Key::Char('o'));
+        }
+        assert!(
+            m.status.notice.is_none(),
+            "repeating one key is intentional, not a burst"
+        );
+    }
+
+    /// The focus-into-terminal move is exempt from the guard: it's the
+    /// escape hatch, so it fires even mid-burst.
+    #[test]
+    fn focus_into_terminal_survives_a_burst() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+        m.sidebar
+            .focus_workspace_key(&SessionKey::from("github:o/r#1"));
+
+        for _ in 0..3 {
+            press(&mut m, Key::Char('o'));
+            press(&mut m, Key::Char(' '));
+        }
+        // → must still move focus off the sidebar despite the live burst.
+        press(&mut m, Key::Right);
+        assert_ne!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "→ escapes the sidebar even during a burst"
+        );
+    }
+
+    /// A deliberate focus change ends the burst run, so bouncing to a
+    /// terminal and back doesn't leave a stale guard that swallows the
+    /// next genuine sidebar shortcut (#1110).
+    #[test]
+    fn focus_change_resets_the_burst_so_the_next_shortcut_fires() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        // Drive the guard into its suppressing state (3 distinct rapid
+        // keys), leaving the last key as `o`.
+        press(&mut m, Key::Char('o'));
+        press(&mut m, Key::Char(' '));
+        press(&mut m, Key::Char('o'));
+        assert!(m.status.notice.is_some(), "burst is suppressing");
+        m.status.notice = None;
+
+        // Bounce focus to the terminal pane and back — each transition
+        // must reset the run.
+        m.set_focus(PaneFocus::Terminals);
+        m.set_focus(PaneFocus::Sidebar);
+
+        // A single deliberate press of a key *distinct* from the last
+        // burst key must now fire (run restarts at 1), not be swallowed
+        // as the 4th key of the old run.
+        press(&mut m, Key::Char(' '));
+        assert!(
+            m.status.notice.is_none(),
+            "focus bounce reset the run — the next press is not a burst"
         );
     }
 }

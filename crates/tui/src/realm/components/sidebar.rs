@@ -565,17 +565,22 @@ impl Sidebar {
         self.inner.limit_reached_workspace_count()
     }
 
-    /// Move the cursor onto the `n`th (1-based) agent workspace in
-    /// sidebar order. Returns true when that slot exists. Backs the
-    /// `]]<digit>` focus-mode jump.
-    pub fn focus_nth_agent_workspace(&mut self, n: usize) -> bool {
-        self.inner.focus_nth_agent_workspace(n)
+    /// Move the cursor onto the `n`th (1-based) numbered (focused)
+    /// workspace in sidebar order. Returns true when that slot exists.
+    /// Backs the `]]<digit>` focus-mode jump.
+    pub fn focus_nth_numbered_workspace(&mut self, n: usize) -> bool {
+        self.inner.focus_nth_numbered_workspace(n)
     }
 
-    /// The visible agent workspaces in sidebar (top-down) order — the
-    /// roster the `]]<digit>` jump and its badges read from.
+    /// The visible agent workspaces in sidebar (top-down) order.
     pub fn agent_workspace_keys(&self) -> Vec<lazybox_core::SessionKey> {
         self.inner.agent_workspace_keys()
+    }
+
+    /// The numbered (focused) workspaces in sidebar order — the roster
+    /// the `]]<digit>` jump and its badges read from.
+    pub fn numbered_workspace_keys(&self) -> Vec<lazybox_core::SessionKey> {
+        self.inner.numbered_workspace_keys()
     }
 
     /// At-a-glance attention tallies for the focus-mode event header.

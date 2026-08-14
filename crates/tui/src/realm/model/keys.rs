@@ -639,6 +639,27 @@ impl<T: TerminalAdapter> Model<T> {
                 return;
             }
             if let Some(action) = action {
+                // Burst-typing guard (#1110): in the sidebar a rapid run
+                // of bare single-key shortcuts is almost always a
+                // sentence typed at the wrong pane ("I thought I was in
+                // the agent"). Suppress the chain — after the first
+                // couple of keys — and nudge the user to focus the
+                // terminal, instead of firing filter/snooze/split/…
+                // down the length of a word. Pane navigation and the
+                // focus-into-terminal moves are exempt: they're how the
+                // user *leaves* the sidebar, so a burst must never
+                // swallow them.
+                if rfocus == PaneFocus::Sidebar
+                    && burst_guarded(&action)
+                    && self.sidebar_burst.note(std::time::Instant::now(), stroke)
+                {
+                    self.q_latch.disarm();
+                    self.flash_hint(
+                        "typing in the sidebar, not the agent — press Enter or → to focus the terminal",
+                    );
+                    self.redraw = true;
+                    return;
+                }
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.
                 self.q_latch.disarm();
@@ -799,7 +820,7 @@ impl<T: TerminalAdapter> Model<T> {
         );
         rows.extend(
             self.sidebar
-                .agent_workspace_keys()
+                .numbered_workspace_keys()
                 .into_iter()
                 .take(9)
                 .enumerate()
@@ -856,7 +877,7 @@ impl<T: TerminalAdapter> Model<T> {
         // a previous `]]s`-from-the-sidebar target (#871).
         self.leader_target = None;
         match cmd {
-            LeaderCmd::JumpAgent(n) => self.jump_to_agent_workspace(n),
+            LeaderCmd::JumpNumbered(n) => self.jump_to_numbered_workspace(n),
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
@@ -1899,14 +1920,26 @@ impl<T: TerminalAdapter> Model<T> {
                     // viewport auto-scrolling under an edge drag; a
                     // press-release with no cell change (`dragged` never
                     // set) is treated as a plain click in the Up handler.
+                    // The drag binds to the tile under the press (falling
+                    // back to the focused tile at a seam/chrome miss), and
+                    // every later mapping composes against that terminal —
+                    // so the selection can't spill into a neighbour (#1101).
                     if focus == PaneFocus::Terminals
                         && matches!(button, crossterm::event::MouseButton::Left)
                         && claim_for_selection
-                        && let Some(anchor) =
-                            self.terminals
-                                .selection_point(right_bottom_rect, m.column, m.row)
+                        && let Some(terminal) = self
+                            .terminals
+                            .tile_at(m.column, m.row)
+                            .or_else(|| self.terminals.focused_terminal_id())
+                        && let Some(anchor) = self.terminals.selection_point(
+                            terminal,
+                            right_bottom_rect,
+                            m.column,
+                            m.row,
+                        )
                     {
                         self.terminal_drag = Some(TerminalDrag {
+                            terminal,
                             down: (m.column, m.row),
                             anchor,
                             focus: anchor,
@@ -1973,7 +2006,11 @@ impl<T: TerminalAdapter> Model<T> {
                 let mut click_no_drag_at: Option<(u16, u16)> = None;
                 if let Some(drag) = self.terminal_drag.take() {
                     if drag.dragged {
-                        let text = self.terminals.extract_selection(drag.anchor, drag.focus);
+                        let text = self.terminals.extract_selection(
+                            drag.terminal,
+                            drag.anchor,
+                            drag.focus,
+                        );
                         if !text.trim().is_empty() {
                             emit_clipboard_copy(&text);
                             let lines = text.lines().count();
@@ -2131,13 +2168,15 @@ impl<T: TerminalAdapter> Model<T> {
     /// auto-scroll (`tick_terminal_drag`) so a pointer held still at the
     /// edge keeps scrolling (#432).
     pub(super) fn drive_terminal_drag(&mut self, col: u16, row: u16) {
-        let (rect, down) = match &self.terminal_drag {
-            Some(drag) => (drag.rect, drag.down),
+        let (terminal, rect, down) = match &self.terminal_drag {
+            Some(drag) => (drag.terminal, drag.rect, drag.down),
             None => return,
         };
         let delta = edge_scroll_delta(rect, row);
         if delta != 0 {
-            let _ = self.terminals.scroll_active(delta);
+            // Scroll the tile the drag started in — not whatever is focused
+            // — so an edge drag extends the selection within its own tile.
+            let _ = self.terminals.scroll_terminal(terminal, delta);
             // Reaching for scrollback above the local grid arms the same
             // deep-scrollback fetch the wheel/keyboard scroll paths do, so
             // an edge drag can select as deep as the daemon retained (#393).
@@ -2145,7 +2184,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.send_cmd(IpcCommand::FetchScrollback { terminal_id });
             }
         }
-        let focus = self.terminals.selection_point(rect, col, row);
+        let focus = self.terminals.selection_point(terminal, rect, col, row);
         if let Some(drag) = self.terminal_drag.as_mut() {
             drag.pointer = (col, row);
             if (col, row) != down {
@@ -2306,9 +2345,26 @@ pub(super) fn action_from_entry(
         (ActionKind::SpawnAgentOnMain, Some(Param::Agent(id))) => {
             return Some(Action::SpawnAgentOnMain(id.clone()));
         }
+        (ActionKind::OpenWithApp, Some(Param::OpenWith(name))) => {
+            return Some(Action::OpenWithApp(name.clone()));
+        }
         _ => {}
     }
     action_from_kind(entry.kind)
+}
+
+/// Whether a resolved sidebar action participates in the burst-typing
+/// guard (#1110). Pane cycling and the directional focus moves are
+/// exempt — they're how the user *leaves* the sidebar for the agent, so
+/// a burst must never swallow them. Every other bare single-key sidebar
+/// shortcut (filter, sort, snooze, mark-read, collapse-group, …) is
+/// guarded.
+fn burst_guarded(action: &lazybox_tui_core::action::Action) -> bool {
+    use lazybox_tui_core::action::Action;
+    !matches!(
+        action,
+        Action::CyclePane | Action::FocusPaneRight | Action::FocusPaneLeft
+    )
 }
 
 /// Reconstruct a runtime `Action` from a catalog `ActionKind`, for the
@@ -2327,6 +2383,7 @@ pub(super) fn action_from_kind(
         ActionKind::MarkAllRead => Action::MarkAllRead,
         ActionKind::Work => Action::Work,
         ActionKind::OpenEditor => Action::OpenEditor,
+        ActionKind::OpenWith => Action::OpenWith,
         ActionKind::ViewDiff => Action::ViewDiff,
         ActionKind::NewWorkspace => Action::NewWorkspace,
         ActionKind::RenameWorkspace => Action::RenameWorkspace,

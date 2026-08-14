@@ -32,6 +32,7 @@ mod inputs;
 mod keys;
 mod modals;
 mod optimistic;
+mod render_writer;
 mod terminal_leader;
 #[cfg(test)]
 mod tests;
@@ -70,7 +71,9 @@ use tuirealm::application::Application;
 use tuirealm::event::Event as RealmEvent;
 use tuirealm::listener::{EventListenerCfg, Poll, PortError, PortResult};
 use tuirealm::ratatui::layout::Rect;
-use tuirealm::terminal::{CrosstermTerminalAdapter, TerminalAdapter};
+use tuirealm::terminal::TerminalAdapter;
+
+use render_writer::AsyncCrosstermAdapter;
 
 const SIDEBAR_PID: PaneId = PaneId::new(1);
 const RIGHT_PID: PaneId = PaneId::new(2);
@@ -138,6 +141,22 @@ pub enum Id {
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
+    /// Config-driven "Open with…" picker (`x o`, issue #1100). Single-
+    /// pick `Choice` over the `open_with:` apps; each row is an index
+    /// into `setup.open_with`. Submit → `editors::launch_open_with`.
+    OpenWith,
+    /// Settings "Editors" panel (#1102): lists the custom `editors:`
+    /// entries with an on-PATH badge; `a`/`e`/`d` add / edit / remove.
+    /// Mounted from the Settings palette; each write hot-reloads the
+    /// editor cache so the `e` picker updates without a restart.
+    EditorsPanel,
+    /// Single-line input driving the editors-panel add/edit flow. Add is
+    /// two stages (id → launch command); edit is one (launch command,
+    /// prefilled). The stage + target id live in `ModalFlow::EditorForm`.
+    EditorForm,
+    /// Confirm before removing a custom editor from the panel (#1102).
+    /// The target id lives in `ModalFlow::EditorRemoveConfirm`.
+    EditorRemoveConfirm,
     /// Active setup-wizard step. Each transition unmounts the
     /// previous component at this id and mounts the next; only one
     /// setup step is ever live.
@@ -849,6 +868,12 @@ pub(crate) enum ModalFlow {
     ConvertSession { draft: ConversionDraft },
     /// Prompt-history picker (#523) → resend into this terminal.
     PromptHistory { terminal: lazybox_ipc::TerminalId },
+    /// Editors-panel add/edit form (#1102). Carries the current stage so
+    /// the shared `Id::EditorForm` input knows whether a submit collects
+    /// the id (add, stage 1) or the launch command (add stage 2 / edit).
+    EditorForm { stage: EditorFormStage },
+    /// Editors-panel remove confirm (#1102): the id awaiting a yes/no.
+    EditorRemoveConfirm { id: String },
     /// The tour handed control to the real snippet picker. A confirmed
     /// delivery resumes at `success_step`; cancelling or rejecting the
     /// delivery returns to `return_step`.
@@ -857,6 +882,30 @@ pub(crate) enum ModalFlow {
         return_step: usize,
         success_step: usize,
     },
+}
+
+/// Convert a config `EditorEntry` into the `editors` module's owned
+/// user-entry shape for re-discovery after a Settings write (#1102).
+pub(crate) fn editor_entry_to_user(
+    e: lazybox_config::EditorEntry,
+) -> crate::editors::UserEditorEntry {
+    crate::editors::UserEditorEntry {
+        id: e.id,
+        display: e.display,
+        command: e.command,
+        args: e.args,
+    }
+}
+
+/// Which field the editors-panel form is currently collecting.
+#[derive(Debug, Clone)]
+pub(crate) enum EditorFormStage {
+    /// Add flow, step 1: the stable `id` (also seeds the display name).
+    AwaitId,
+    /// The launch command line. Reached after the id on add, or directly
+    /// on edit (where `id` is fixed and `display` preserves any custom
+    /// name the entry already had).
+    AwaitCommand { id: String, display: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -942,6 +991,15 @@ pub enum Msg {
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
+    /// `a` in the Settings editors panel (#1102) — start the add-editor
+    /// input flow (id → launch command).
+    EditorAdd,
+    /// `e`/Enter in the editors panel — edit the launch command of the
+    /// editor with this id (prefilled with its current command).
+    EditorEdit(String),
+    /// `d`/`x` in the editors panel — remove the editor with this id
+    /// from `editors:` and hot-reload.
+    EditorRemove(String),
     LoadingResolved(PayloadCarrier),
     /// The `Loading` modal's liveness backstop fired — its awaited result
     /// never landed (produced but dropped on an overflowed event channel,
@@ -1205,6 +1263,13 @@ impl PaneFocus {
 /// extracted from libghostty on release.
 #[derive(Debug, Clone, Copy)]
 struct TerminalDrag {
+    /// The terminal the drag STARTED in — the tile under the mouse-down,
+    /// resolved once and fixed for the drag's lifetime. Every selection
+    /// mapping (anchor, focus, extraction, highlight) is composed against
+    /// THIS terminal's grid, so a drag that strays into a neighbouring tile
+    /// stays scoped to the tile it began in regardless of what is focused
+    /// at release (#1101).
+    terminal: lazybox_ipc::TerminalId,
     /// Crossterm cell of the initial mouse-down. A press-release with no
     /// intervening cell change is a plain click, forwarded to a
     /// mouse-tracking inner program from this position.
@@ -1382,6 +1447,22 @@ pub struct Model<T: TerminalAdapter> {
     /// it opens `?` so the hidden hints are reachable instead of the
     /// count being a dead end (#805).
     footer_overflow_rect: Option<Rect>,
+    /// Last frame's widget-build cost (walking the tree into the back
+    /// buffer — CPU), split out from the flush by `view()` so the
+    /// watchdog can tell an expensive render from a blocked terminal
+    /// write (#1090 / audit R-0).
+    last_render_build: std::time::Duration,
+    /// Last frame's flush cost (diff + stdout write inside `terminal.draw`
+    /// — I/O that blocks on the host terminal). A slow frame that is
+    /// nearly all flush is the terminal write freezing the UI thread, not
+    /// costly rendering.
+    last_render_flush: std::time::Duration,
+    /// Bytes handed to the off-thread render writer but not yet drained to
+    /// the terminal, when async rendering is on (`LAZYBOX_ASYNC_RENDER`).
+    /// The run loop skips rendering a new frame while this is over its cap,
+    /// so a slow terminal write can't back up the input thread (#1090).
+    /// `None` in the default (synchronous) mode — the loop never skips.
+    render_pending: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// True if the user has typed at least one non-Tab key since
     /// focus entered the terminal pane. While `false`, Tab in the
     /// terminal pane cycles focus like everywhere else; once the
@@ -1470,6 +1551,13 @@ pub struct Model<T: TerminalAdapter> {
     /// disarms it (`set_focus`) so a held `]` can't resolve in the pane you
     /// moved to.
     escape_latch: crate::confirm_latch::DoubleTapLatch,
+    /// Burst-typing guard for the sidebar (#1110). When the user thinks
+    /// focus is inside an agent terminal and types a sentence, each
+    /// letter fires a bare single-key shortcut. This tracks the cadence
+    /// of guarded single-stroke sidebar actions; once several land in
+    /// rapid succession it suppresses the chain and nudges the user to
+    /// focus the terminal instead of silently firing shortcuts.
+    sidebar_burst: crate::confirm_latch::BurstGuard<lazybox_tui_core::action::KeyStroke>,
     /// Whether the `]]` leader is armed. Set when `]]` completes; the
     /// *next* key selects a binding. Its meaning follows the pane it armed
     /// in (#871): in the terminal it addresses the focused tile (snippets,
@@ -1949,6 +2037,14 @@ use lazybox_config::ActivityPaneMode;
 /// no `Msg`. See `Model::forward_modal_event`.
 const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 
+/// Max gap between two guarded sidebar keystrokes for them to count as
+/// one burst, and how many rapid presses trip the guard (#1110). Tuned
+/// so a slow, deliberate shortcut always fires (its gap exceeds the
+/// window) while a typed word's cadence — sub-second between letters —
+/// suppresses the chain after the first couple of keys.
+const SIDEBAR_BURST_WINDOW: Duration = Duration::from_millis(350);
+const SIDEBAR_BURST_THRESHOLD: usize = 3;
+
 /// Banner shown while a self-healing `--connect` transport re-dials a
 /// dropped daemon. Matched exactly to retract it once the link returns.
 const RECONNECTING_NOTICE: &str = "⟳ daemon connection lost — reconnecting…";
@@ -2097,11 +2193,18 @@ impl<T: TerminalAdapter> Model<T> {
             leader_highlight: None,
             leader_fallback: None,
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
+            sidebar_burst: crate::confirm_latch::BurstGuard::new(
+                SIDEBAR_BURST_WINDOW,
+                SIDEBAR_BURST_THRESHOLD,
+            ),
             terminal_leader_armed: false,
             terminal_leader_highlight: None,
             leader_target: None,
             last_click: None,
             footer_overflow_rect: None,
+            last_render_build: std::time::Duration::ZERO,
+            last_render_flush: std::time::Duration::ZERO,
+            render_pending: None,
             terminal_user_typed_since_focus: false,
             pending_refresh_ack: false,
             sync_error_source: None,
@@ -2238,10 +2341,16 @@ fn install_panic_hook() {
     });
 }
 
-impl Model<CrosstermTerminalAdapter> {
+impl Model<AsyncCrosstermAdapter> {
     pub fn new(client: Client, snippets: lazybox_config::Snippets) -> anyhow::Result<Self> {
         install_panic_hook();
-        let terminal = CrosstermTerminalAdapter::new()?;
+        // The production adapter renders straight to stdout by default;
+        // `LAZYBOX_ASYNC_RENDER=1` opts into the off-thread writer so a slow
+        // terminal write can't freeze the input thread (#1090 / #1045). Kept
+        // opt-in until the terminal-owner architecture makes the writer
+        // crash-safe by default (would otherwise regress #211).
+        let terminal = AsyncCrosstermAdapter::new()?;
+        let render_pending = terminal.pending_handle();
         // Enable raw mode, the alt screen, mouse capture, bracketed
         // paste, focus reporting and the Kitty keyboard protocol. The
         // guard owns the whole set: dropping it (clean exit, error, or
@@ -2258,6 +2367,7 @@ impl Model<CrosstermTerminalAdapter> {
         );
         model.apply_snippets(snippets);
         model.term_guard = Some(term_guard);
+        model.render_pending = render_pending;
         // Subscribe up-front for both first-run and returning users.
         // First-run gets an empty snapshot before the wizard finishes
         // (no polling has run yet) so nothing flickers in behind the
@@ -2596,6 +2706,33 @@ impl<T: TerminalAdapter> Model<T> {
     /// reads from this list; empty list = footer notice on `E`.
     pub fn cache_editors(&mut self, editors: Vec<crate::editors::EditorTemplate>) {
         self.setup.editors = editors;
+    }
+
+    /// Hand in the config-driven "Open with…" apps (issue #1100). The
+    /// `x o` picker reads from this list; an empty list = footer notice.
+    /// Rebuilds the catalog so any app with a favorite `key` gets its
+    /// direct-key row.
+    pub fn cache_open_with(&mut self, apps: Vec<crate::editors::OpenWithApp>) {
+        self.setup.open_with = apps;
+        self.rebuild_catalog();
+    }
+
+    /// Re-merge `editors:` with the builtins and re-detect what's
+    /// installed from an already-loaded config — so an add/edit/remove
+    /// from the Settings editors panel (#1102) takes effect on the next
+    /// `e` without a restart. Mirrors the boot-time discovery and the
+    /// snippet hot-reload handoff (`apply_snippets`); the write already
+    /// persisted the change, so this only refreshes the cached list.
+    /// Takes the config by reference so the post-write path can reuse one
+    /// load for both this and the panel rebuild.
+    pub(crate) fn reload_editors_from(&mut self, cfg: &lazybox_config::Config) {
+        let user = cfg
+            .editors
+            .iter()
+            .cloned()
+            .map(editor_entry_to_user)
+            .collect();
+        self.setup.editors = crate::editors::discover_at_startup(user);
     }
 
     /// Apply `~/.lazybox/config.yaml::attention` +
@@ -3472,11 +3609,20 @@ impl<T: TerminalAdapter> Model<T> {
         // Remote names gate the `r <agent>` chords — no remotes, no `r`
         // leader (the default keymap is byte-for-byte unchanged).
         let remotes: Vec<String> = self.remote_clients.keys().cloned().collect();
-        self.catalog = lazybox_tui_core::action::ActionDef::catalog_full(
+        // `open_with:` apps that declared a favorite `key` get a direct
+        // Workspace-section row each (#1100).
+        let open_with_binds: Vec<(String, String)> = self
+            .setup
+            .open_with
+            .iter()
+            .filter_map(|app| app.key.clone().map(|key| (app.name.clone(), key)))
+            .collect();
+        self.catalog = lazybox_tui_core::action::ActionDef::catalog_complete(
             &self.agents,
             &self.action_key_overrides,
             tiers,
             &remotes,
+            &open_with_binds,
         );
     }
 
@@ -4435,6 +4581,187 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Editor, modal);
     }
 
+    /// `x o` — the config-driven "Open with…" picker (issue #1100).
+    /// Surfaces the `open_with:` apps (Obsidian / Finder / browser / …)
+    /// on the focused workspace, decoupled from the single `e` code
+    /// editor. One app → launch directly; 2+ → a Choice picker; none →
+    /// a footer notice pointing at the config file. The remote / no-
+    /// worktree constraints are per-app, not global: only `{path}` apps
+    /// need a local, provisioned worktree, so the gate lives in
+    /// `launch_open_with` — a `{url}` browser app runs against a remote or
+    /// not-yet-provisioned workspace just like `g o` does.
+    pub fn open_with_picker(&mut self) {
+        if self.sidebar.selected_workspace_key().is_none() {
+            return;
+        }
+        if self.setup.open_with.is_empty() {
+            let path = lazybox_core::paths::config_yaml();
+            self.flash_info(format!(
+                "no `open_with:` apps configured — add some under `open_with:` in {}",
+                path.display(),
+            ));
+            return;
+        }
+        let Some((apps, ctx)) = self.actionable_open_with() else {
+            return;
+        };
+        match apps.len() {
+            0 => self.flash_info(
+                "no `open_with:` app can run here — its token (a PR url / worktree) isn't available on this workspace",
+            ),
+            1 => self.launch_open_with(&apps[0], &ctx),
+            _ => self.mount_open_with_picker(apps),
+        }
+    }
+
+    /// Launch a specific `open_with:` app by name — the favorite-key
+    /// path (`open_with[].key`, #1100). Same launch path as a pick, so
+    /// remote / no-worktree gating and provisioning apply; an unknown
+    /// name (config changed under a stale binding) is a silent no-op.
+    fn open_with_app_by_name(&mut self, name: &str) {
+        let Some(app) = self
+            .setup
+            .open_with
+            .iter()
+            .find(|app| app.name == name)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(ctx) = self.open_with_context() else {
+            return;
+        };
+        self.launch_open_with(&app, &ctx);
+    }
+
+    /// The `open_with:` apps worth offering on the focused workspace,
+    /// paired with its token context (#1100). Apps whose `{url}`/`{repo}`/
+    /// `{branch}` token can't be supplied — a browser app with no PR — are
+    /// filtered out, since there's nothing for them to open. A `{path}`
+    /// app is always kept (`path_ok = true`): locally a missing worktree
+    /// is provisioned on launch, and on a remote daemon `launch_open_with`
+    /// declines it with the actionable "use `s`" message rather than the
+    /// picker hiding it silently.
+    fn actionable_open_with(
+        &self,
+    ) -> Option<(
+        Vec<crate::editors::OpenWithApp>,
+        crate::editors::OpenWithContext,
+    )> {
+        let ctx = self.open_with_context()?;
+        let apps = self
+            .setup
+            .open_with
+            .iter()
+            .filter(|app| app.is_actionable(&ctx, true))
+            .cloned()
+            .collect();
+        Some((apps, ctx))
+    }
+
+    fn mount_open_with_picker(&mut self, apps: Vec<crate::editors::OpenWithApp>) {
+        use crate::realm::components::choice::Choice;
+        // Each row shows the app name and, dimmed beneath it, the command
+        // it launches so the choice isn't blind (#1100).
+        let rows: Vec<(String, String)> = apps
+            .into_iter()
+            .map(|app| {
+                let preview = app.command_preview();
+                (app.name, preview)
+            })
+            .collect();
+        let modal = Choice::single("Open with…", rows)
+            .title("Open with")
+            .label(|(name, preview): &(String, String)| format!("{name}   ·   {preview}"));
+        self.mount_modal(Id::OpenWith, modal);
+    }
+
+    /// Assemble the token context for an "Open with…" launch from the
+    /// focused workspace (`{path}` / `{url}` / `{branch}` / `{repo}`).
+    pub(super) fn open_with_context(&self) -> Option<crate::editors::OpenWithContext> {
+        self.sidebar
+            .selected_workspace()
+            .map(Self::open_with_context_for)
+    }
+
+    /// [`Self::open_with_context`] for an explicit workspace — used by the
+    /// deferred-launch handler, which resolves its target by key (not the
+    /// cursor) so a launch fires even after the user navigates away.
+    pub(super) fn open_with_context_for(
+        workspace: &lazybox_core::Workspace,
+    ) -> crate::editors::OpenWithContext {
+        crate::editors::OpenWithContext {
+            path: workspace
+                .sessions
+                .first()
+                .map(|session| session.worktree_path.to_string_lossy().into_owned()),
+            url: workspace.primary_task().map(|task| task.url.clone()),
+            branch: Some(workspace.branch.clone()),
+            repo: workspace.primary_task().and_then(|task| task.repo.clone()),
+        }
+    }
+
+    fn launch_open_with(
+        &mut self,
+        app: &crate::editors::OpenWithApp,
+        ctx: &crate::editors::OpenWithContext,
+    ) {
+        // Gate per app, not per feature (#1100): only a `{path}` app needs
+        // the worktree, which is server-side over `--connect` and absent
+        // until a session provisions it. A `{url}`/`{repo}`/`{branch}` app
+        // (e.g. "open the PR in a browser") falls through and runs, exactly
+        // as `g o` open-in-browser does on the same workspace.
+        if app.references_path() {
+            if self.remote {
+                self.flash_info(
+                    "this opens the worktree on your machine — unavailable for a remote daemon; use `s` for a server shell",
+                );
+                return;
+            }
+            if ctx.path.is_none() {
+                // No worktree on disk yet — provision one (spawn a shell)
+                // and fire the launch when it lands, exactly like `e`.
+                self.provision_worktree_then_open_with(app.clone());
+                return;
+            }
+        }
+        match crate::editors::launch_open_with(app, ctx) {
+            Ok(()) => {
+                tracing::info!(app = %app.name, "launched open-with app");
+                self.flash_info(format!("opening in {}…", app.name));
+            }
+            Err(e) => {
+                tracing::warn!(app = %app.name, "open-with launch failed: {e}");
+                self.flash_error(format!("failed to open {}: {e}", app.name));
+            }
+        }
+    }
+
+    /// Spawn a shell on the focused workspace to provision its worktree,
+    /// then open `app` once the matching `TerminalSpawned` arrives (#1100).
+    /// Mirrors the editor's deferred-launch flow ([`Self::open_editor`]).
+    fn provision_worktree_then_open_with(&mut self, app: crate::editors::OpenWithApp) {
+        let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() else {
+            return;
+        };
+        self.setup.pending_open_with_launch = Some((workspace_key.clone(), app.clone()));
+        self.send_cmd(IpcCommand::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: workspace_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            cwd: None,
+            initial_prompt: None,
+            on_main: false,
+        });
+        self.flash_info(format!(
+            "Provisioning worktree for {workspace_key} — opening in {} when ready…",
+            app.name
+        ));
+    }
+
     /// Route a [`crate::components::terminal_stack::ClickTarget`] produced by a right-click in the agent
     /// view to the right opener: URLs and `#N` / `owner/repo#N` issue
     /// references go to the system browser; file paths open in the
@@ -4786,6 +5113,9 @@ impl<T: TerminalAdapter> Model<T> {
             enabled: cfg.agent.skip_permissions,
         });
         actions.push(SettingsAction::EditSnippets);
+        actions.push(SettingsAction::EditEditors {
+            count: cfg.editors.len(),
+        });
         actions.push(SettingsAction::EditTheme {
             current: crate::theme::current().name.to_string(),
         });
@@ -4835,6 +5165,12 @@ impl<T: TerminalAdapter> Model<T> {
         // Theme picker is its own live-preview modal — not a wizard step.
         if matches!(action, SettingsAction::EditTheme { .. }) {
             self.mount_theme_picker();
+            return;
+        }
+        // Editors panel is its own list modal that writes straight to
+        // YAML and hot-reloads — no wizard runner, no cached inputs.
+        if matches!(action, SettingsAction::EditEditors { .. }) {
+            self.mount_editors_panel();
             return;
         }
         // LLM gateway editor is a single URL input that writes straight
@@ -4912,6 +5248,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::CheckAgentUpdates | SettingsAction::UpdateAgentClis => return,
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme { .. } => return,
+            SettingsAction::EditEditors { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,
             SettingsAction::ShellCommand { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
@@ -5163,6 +5500,16 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         let notice = self.status.notice.clone();
+        // Focus-mode chip for the footer's left edge (#1110): the
+        // unmistakable answer to "where do my keystrokes go?" — the
+        // active agent/shell name when focus is in a live terminal, and
+        // a quiet "navigating" chip on every navigation pane. Computed
+        // here (immutable borrow) so it can move into the draw closure.
+        let focus_chip = crate::realm::components::footer::FocusChip {
+            typing_to: (self.focus == PaneFocus::Terminals)
+                .then(|| self.terminals.active_typing_target())
+                .flatten(),
+        };
         // Which-key rows for an armed catalog leader — the
         // `(next-key, label)` continuations of the armed prefix, a pure
         // function of the catalog. Built only while a leader is armed.
@@ -5218,11 +5565,12 @@ impl<T: TerminalAdapter> Model<T> {
                 .or_else(|| self.sidebar.selected_workspace())
                 .map(|w| w.name.clone())
                 .unwrap_or_else(|| "no workspace".to_string());
-            // Prefix the title with this agent's jump number (its
-            // 1-based slot in the sidebar-order agent roster) so the
-            // user knows which `]]<digit>` lands back here.
-            let agents = self.sidebar.agent_workspace_keys();
-            let number = active.and_then(|k| agents.iter().position(|a| a == k));
+            // Prefix the title with this workspace's jump number (its
+            // 1-based slot in the sidebar-order focused roster) so the
+            // user knows which `]]<digit>` lands back here. Unnumbered
+            // (unfocused) workspaces show no prefix.
+            let numbered = self.sidebar.numbered_workspace_keys();
+            let number = active.and_then(|k| numbered.iter().position(|a| a == k));
             let title = match number {
                 Some(i) => format!("{} · {name}", i + 1),
                 None => name,
@@ -5238,6 +5586,16 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let mut captured_area = Rect::default();
         let mut footer_overflow: Option<Rect> = None;
+        // Split the `terminal.draw` cost into *build* (walking the widget
+        // tree into the back buffer — CPU) vs *flush* (diffing + writing
+        // the frame to stdout — I/O that blocks on the host terminal).
+        // The run-loop watchdog brackets `view()` as one "render" number,
+        // but a multi-second "render" is never CPU (a full grid walk is
+        // ~1-2ms) — it's the flush blocking on a slow/suspended terminal
+        // (issue #1090 / audit R-0). `build_end` is stamped at the end of
+        // the draw closure; everything after it inside `draw` is flush.
+        let draw_start = std::time::Instant::now();
+        let build_end: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
         let _ = self.terminal.draw(|f| {
             let area = f.area();
             captured_area = area;
@@ -5282,10 +5640,10 @@ impl<T: TerminalAdapter> Model<T> {
             // selection (compare to the host terminal's native
             // selection, which crosses panes).
             if let Some(drag) = self.terminal_drag.as_ref() {
-                let (anchor, focus) = (drag.anchor, drag.focus);
+                let (terminal, anchor, focus) = (drag.terminal, drag.anchor, drag.focus);
                 if let Some((start, end)) =
                     self.terminals
-                        .selection_screen_span(right_bottom, anchor, focus)
+                        .selection_screen_span(terminal, right_bottom, anchor, focus)
                 {
                     paint_selection(f.buffer_mut(), right_bottom, start, end);
                 }
@@ -5298,6 +5656,7 @@ impl<T: TerminalAdapter> Model<T> {
             footer_overflow = crate::realm::components::footer::render(
                 f,
                 footer_area,
+                Some(&focus_chip),
                 &keymap,
                 &globals,
                 &evergreen,
@@ -5350,7 +5709,22 @@ impl<T: TerminalAdapter> Model<T> {
             if let Some(top) = self.modal_stack.last() {
                 self.app.view(top, f, area);
             }
+            // End of widget build; the diff + stdout flush happens after
+            // this closure returns, inside `draw`.
+            build_end.set(Some(std::time::Instant::now()));
         });
+        // Attribute the frame's wall-clock to build vs flush. A slow frame
+        // whose time is nearly all `flush` is the terminal write blocking
+        // the UI thread, not expensive rendering — the distinction the
+        // watchdog needs so it stops crying "render" at an I/O stall.
+        let render_total = draw_start.elapsed();
+        let render_build = build_end
+            .get()
+            .map(|end| end.saturating_duration_since(draw_start))
+            .unwrap_or(render_total);
+        let render_flush = render_total.saturating_sub(render_build);
+        self.last_render_build = render_build;
+        self.last_render_flush = render_flush;
         self.layout.last_area = captured_area;
         self.footer_overflow_rect = footer_overflow;
         // Resize commands are queued by the terminal stack's render
@@ -5534,6 +5908,9 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.open_snippets_file();
             }
+            Msg::EditorAdd => self.start_editor_add(),
+            Msg::EditorEdit(id) => self.start_editor_edit(&id),
+            Msg::EditorRemove(id) => self.prompt_remove_editor(id),
             // The component's `on(Tick)` already advanced the spinner;
             // here we walk the displayed checklist toward the daemon's
             // truth (gated by the min-dwell) and tear the modal down once

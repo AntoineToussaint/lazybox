@@ -133,6 +133,11 @@ pub enum SettingsAction {
     /// Opens a single URL input; persists to `~/.lazybox/config.yaml`.
     /// `set` is whether a URL is currently configured, for the label.
     EditLlmGateway { set: bool },
+    /// Run the remote-sandbox onboarding flow (#1112) — pick provider,
+    /// project, zone, user, and the auto-connect toggle, persisted to the
+    /// `sandbox:` block. `configured` is whether a `sandbox:` block already
+    /// exists, for the label.
+    SetUpSandbox { configured: bool },
     /// Show the effective command for new plain-shell sessions and
     /// whether it came from `shell.command` or automatic resolution.
     ShellCommand { command: String, configured: bool },
@@ -184,6 +189,10 @@ impl SettingsAction {
                 "Configure LLM gateway · {}",
                 if *set { "on" } else { "off" }
             ),
+            Self::SetUpSandbox { configured } => format!(
+                "Set up remote sandbox · {}",
+                if *configured { "configured" } else { "off" }
+            ),
             Self::ShellCommand {
                 command,
                 configured,
@@ -216,6 +225,7 @@ impl SettingsAction {
             | Self::EditDefaultModel { .. }
             | Self::ToggleSkipPermissions { .. }
             | Self::EditLlmGateway { .. }
+            | Self::SetUpSandbox { .. }
             | Self::ShellCommand { .. } => SettingsSection::Agents,
             Self::EditTheme { .. } | Self::EditSnippets | Self::EditEditors { .. } => {
                 SettingsSection::Appearance

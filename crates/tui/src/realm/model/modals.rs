@@ -977,6 +977,151 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::LlmGatewayUrl, modal);
     }
 
+    /// Start the remote-sandbox onboarding flow (#1112) at the
+    /// provider-pick step. Reached from the `,` Settings palette and from
+    /// a `Shift-C` fired with no `sandbox:` config, so a first-time user
+    /// can produce a valid `sandbox:` block without hand-editing YAML.
+    pub(crate) fn start_sandbox_onboarding(&mut self) {
+        if matches!(
+            self.modal_stack.last(),
+            Some(Id::SandboxProviderPick | Id::SandboxInput | Id::SandboxConfirm)
+        ) {
+            return;
+        }
+        // Pre-seed from any existing block so re-running on a configured box
+        // carries the current values into the prompts instead of re-asking
+        // from blank (#1112 review). A fresh machine seeds an empty draft.
+        let draft = match lazybox_config::Config::load() {
+            Ok(cfg) => crate::sandbox_flow::SandboxDraft::from_config(&cfg.sandbox),
+            Err(_) => crate::sandbox_flow::SandboxDraft::new(),
+        };
+        self.mount_sandbox_stage(draft);
+    }
+
+    /// Mount the modal for `draft.stage` and stash the draft in
+    /// `ModalFlow::SandboxOnboarding` so the answer handler can resume.
+    /// Each `set_*` on the draft advances its stage; this re-mounts the
+    /// next question until the final auto-connect toggle finishes.
+    pub(crate) fn mount_sandbox_stage(&mut self, draft: crate::sandbox_flow::SandboxDraft) {
+        use crate::realm::components::{choice::Choice, confirm::Confirm, input::Input};
+        use crate::sandbox_flow::{DEFAULT_USER, DEFAULT_ZONE, PROVIDERS, SandboxStage};
+
+        let stage = draft.stage;
+        // Prefill for the text-input steps — the carried-over answer on a
+        // re-run, else the field default (computed before the draft moves
+        // into the flow).
+        let prefill = draft.input_prefill();
+        self.set_modal_flow(ModalFlow::SandboxOnboarding { draft });
+        match stage {
+            SandboxStage::Provider => {
+                let items: Vec<String> = PROVIDERS.iter().map(|s| s.to_string()).collect();
+                let modal = Choice::single("Which sandbox provider?", items)
+                    .title("Set up remote sandbox")
+                    .label(|id: &String| match id.as_str() {
+                        "gcp" => "Google Cloud (GCE)".to_string(),
+                        "e2b" => "E2B".to_string(),
+                        other => other.to_string(),
+                    })
+                    .payload_for(|id: &String| ChoicePayload::Text(id.clone()));
+                self.mount_modal(Id::SandboxProviderPick, modal);
+            }
+            SandboxStage::GcpKey => {
+                // The box authenticates from a service-account key (the API
+                // credential, #1047) rather than an interactive `gcloud`
+                // login — no CLI. Submit validates the file is readable
+                // (`handle_input_submitted`), which is the credential-state
+                // check. Blank keeps ambient credentials.
+                let modal = Input::new("GCP service-account key (JSON) path")
+                    .title("Set up remote sandbox")
+                    .placeholder("~/.lazybox/gcp-sa.json  (blank = ambient credentials)")
+                    .with_input(prefill);
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::E2bSignIn => {
+                // E2B reads its API key from the environment. Detect whether
+                // `E2B_API_KEY` is set and surface that state rather than
+                // persist a box that can't authenticate.
+                let present = std::env::var_os("E2B_API_KEY").is_some();
+                let body = if present {
+                    "E2B_API_KEY is set in this environment. Choose Yes to continue."
+                } else {
+                    "E2B authenticates with an API key, but E2B_API_KEY is not set in this \
+                     environment. Set it (then relaunch lazybox), and choose Yes to continue."
+                };
+                let modal = Confirm::new(body).default_yes();
+                self.mount_modal(Id::SandboxConfirm, modal);
+            }
+            SandboxStage::Project => {
+                let modal = Input::new("GCP project id")
+                    .title("Set up remote sandbox")
+                    .placeholder("e.g. my-gcp-project")
+                    .with_input(prefill);
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::Zone => {
+                let modal = Input::new("GCE zone")
+                    .title("Set up remote sandbox")
+                    .placeholder(format!("default {DEFAULT_ZONE}"))
+                    .with_input(prefill);
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::User => {
+                let modal = Input::new("Login user on the box")
+                    .title("Set up remote sandbox")
+                    .placeholder(format!("default {DEFAULT_USER}"))
+                    .with_input(prefill);
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::E2bTemplate => {
+                let modal = Input::new("E2B template id")
+                    .title("Set up remote sandbox")
+                    .placeholder("e.g. lazybox-e2b")
+                    .with_input(prefill);
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::AutoConnect => {
+                let modal = Confirm::new(
+                    "Auto-connect to the box at launch? No keeps it asleep until you press Shift-C.",
+                )
+                .default_no();
+                self.mount_modal(Id::SandboxConfirm, modal);
+            }
+        }
+    }
+
+    /// Persist the finished draft's `sandbox:` block and tell the user
+    /// how to bring the box up. The box worker is wired at startup from
+    /// config, so a freshly-written box needs a relaunch before `Shift-C`
+    /// can connect — say so rather than imply an instant connect.
+    ///
+    /// Only the fields the flow collects are written; everything else in
+    /// an existing `sandbox:` block (`auth`, `ports`, `region`,
+    /// `require_connect`, `terraform_dir`, `deployment`, …) is preserved,
+    /// so re-running onboarding on a hand-tuned box can't silently drop
+    /// the parts it never asked about. Provider-irrelevant fields take
+    /// their `to_config` value (`None` for the other provider), so a
+    /// provider switch still clears the now-stale ones.
+    pub(crate) fn finish_sandbox_onboarding(&mut self, draft: &crate::sandbox_flow::SandboxDraft) {
+        let cfg = draft.to_config();
+        match lazybox_config::Config::save_with(|c| {
+            c.sandbox.provider = cfg.provider.clone();
+            c.sandbox.project = cfg.project.clone();
+            c.sandbox.region = cfg.region.clone();
+            c.sandbox.zone = cfg.zone.clone();
+            c.sandbox.user = cfg.user.clone();
+            c.sandbox.template = cfg.template.clone();
+            c.sandbox.auto_connect = cfg.auto_connect;
+            // Only the key is flow-owned; impersonation / config-dir sub-fields
+            // of `auth` are left untouched.
+            c.sandbox.auth.service_account_key = cfg.auth.service_account_key.clone();
+        }) {
+            Ok(()) => self.flash_info(
+                "sandbox saved to config.yaml — restart lazybox, then press Shift-C to connect",
+            ),
+            Err(e) => self.flash_error(format!("couldn't save sandbox config: {e}")),
+        }
+    }
+
     /// Mount / refresh the Settings editors panel (#1102) from a fresh
     /// config load. Re-mounting under the same id replaces the component,
     /// so this doubles as the panel's own reopen path. The post-write

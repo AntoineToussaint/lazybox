@@ -31,6 +31,7 @@ pub mod lazybox_theme;
 pub mod pane;
 pub mod perf;
 pub mod realm;
+pub mod sandbox_flow;
 pub mod setup;
 pub mod setup_flow;
 pub mod theme;

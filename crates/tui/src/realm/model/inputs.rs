@@ -570,6 +570,66 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Some(Id::SandboxInput) => {
+                use crate::sandbox_flow::SandboxStage;
+                let Some(ModalFlow::SandboxOnboarding { mut draft }) = self.modal_flow.take()
+                else {
+                    tracing::warn!("sandbox input submit without a stashed draft — dropped");
+                    return cmds;
+                };
+                match draft.stage {
+                    SandboxStage::GcpKey => {
+                        // Non-interactive credential-state check (#1112): a
+                        // blank path means ambient credentials; a given path
+                        // must be a readable file, else re-ask with an
+                        // actionable error. No CLI, no network — just an fs
+                        // read, mirroring `GcpProvider::check_auth`'s offline
+                        // key validation.
+                        let trimmed = text.trim();
+                        if trimmed.is_empty() {
+                            draft.set_key(None);
+                        } else {
+                            let typed = std::path::PathBuf::from(trimmed);
+                            let expanded = expand_scan_root(&typed);
+                            match std::fs::File::open(&expanded) {
+                                // Store the `~/`-form the user typed so the
+                                // YAML stays readable, like scan roots.
+                                Ok(_) => draft.set_key(Some(typed)),
+                                Err(e) => {
+                                    self.flash_error(format!(
+                                        "can't read service-account key {}: {e} — point it at a \
+                                         readable JSON key, or leave blank for ambient credentials",
+                                        expanded.display()
+                                    ));
+                                    draft.stage = SandboxStage::GcpKey;
+                                }
+                            }
+                        }
+                    }
+                    SandboxStage::Project => {
+                        draft.set_project(text);
+                        if draft.needs_project() {
+                            // A GCP box can't be provisioned without a
+                            // project — re-ask rather than persist a config
+                            // that would fail at connect time.
+                            draft.stage = SandboxStage::Project;
+                            self.flash_error("a GCP project id is required");
+                        }
+                    }
+                    SandboxStage::Zone => draft.set_zone(text),
+                    SandboxStage::User => draft.set_user(text),
+                    SandboxStage::E2bTemplate => draft.set_template(text),
+                    // No other stage mounts an Input modal.
+                    other => {
+                        tracing::warn!(
+                            ?other,
+                            "sandbox input submit at a non-input stage — dropped"
+                        );
+                        return cmds;
+                    }
+                }
+                self.mount_sandbox_stage(draft);
+            }
             // RequestReviewers / AddAssignees used to go through an
             // Input modal but were migrated to a `Choice::multi`
             // picker — see `mount_request_reviewers` /
@@ -1167,6 +1227,29 @@ showing keybinding search only",
                     && yes
                 {
                     self.remove_editor(&id);
+                }
+            }
+            Some(Id::SandboxConfirm) => {
+                use crate::sandbox_flow::SandboxStage;
+                if let Some(ModalFlow::SandboxOnboarding { mut draft }) = self.modal_flow.take() {
+                    match draft.stage {
+                        // E2B credential gate: Yes continues the walk; No
+                        // abandons onboarding (the flow was already taken
+                        // above). GCP has no confirm gate — its key step is an
+                        // Input handled in `handle_input_submitted`.
+                        SandboxStage::E2bSignIn if yes => {
+                            draft.confirm_e2b_signin();
+                            self.mount_sandbox_stage(draft);
+                        }
+                        SandboxStage::E2bSignIn => {}
+                        // Final answer: record the toggle either way and
+                        // persist the collected config.
+                        SandboxStage::AutoConnect => {
+                            draft.set_auto_connect(yes);
+                            self.finish_sandbox_onboarding(&draft);
+                        }
+                        _ => {}
+                    }
                 }
             }
             Some(Id::CleanWorktreesConfirm) => {

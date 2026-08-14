@@ -6422,7 +6422,10 @@ mod stale_input_tests {
                 | Id::AddScanRoot
                 | Id::BroadcastSnippet
                 | Id::HandoffTarget
-                | Id::ConvertSessionRole => false,
+                | Id::ConvertSessionRole
+                | Id::SandboxProviderPick
+                | Id::SandboxInput
+                | Id::SandboxConfirm => false,
                 // Drop — read-only / progress / streamed surfaces.
                 Id::Splash
                 | Id::Help
@@ -22101,16 +22104,283 @@ mod remote_spawn_tests {
         assert_eq!(m.status.remote_conn, RemoteConnState::Disconnected);
     }
 
-    /// `ConnectBox` with no `sandbox:` box flashes an error rather than
-    /// silently doing nothing.
+    /// `ConnectBox` with no `sandbox:` config routes the user into the
+    /// onboarding flow rather than a bare error (#1112) — the connect
+    /// button is now the discovery path for setting a box up.
     #[test]
-    fn connect_box_without_a_box_flashes_an_error() {
+    fn connect_box_without_a_box_opens_onboarding() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-connect-onboard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator here.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
         let (client, _server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         m.dispatch_action(&Action::ConnectBox);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxProviderPick),
+            "a missing box routes into onboarding",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The full GCP onboarding walk (#1112): provider → service-account key
+    /// → project → zone → user → auto-connect, ending with a persisted
+    /// `sandbox:` block carrying the API credential and a region derived
+    /// from the chosen zone.
+    #[test]
+    fn sandbox_onboarding_gcp_walk_persists_config() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-sbx-gcp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator here.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        // A readable key file so the credential-state check passes.
+        let key = home.join("sa.json");
+        std::fs::write(&key, "{}").unwrap();
+
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.start_sandbox_onboarding();
+        assert_eq!(m.modal_stack.last(), Some(&Id::SandboxProviderPick));
+
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("gcp".into())]);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "gcp advances to the service-account-key step",
+        );
+
+        let _ = m.handle_input_submitted(key.display().to_string());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "a readable key advances to the project prompt",
+        );
+
+        let _ = m.handle_input_submitted("my-proj".into());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "project → zone"
+        );
+        // A non-default zone, then a blank user (keeps the default).
+        let _ = m.handle_input_submitted("europe-west1-b".into());
+        assert_eq!(m.modal_stack.last(), Some(&Id::SandboxInput), "zone → user");
+        let _ = m.handle_input_submitted(String::new());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxConfirm),
+            "user → auto-connect toggle",
+        );
+
+        let _ = m.handle_confirmed(false);
+        assert!(m.top_modal().is_none(), "the toggle answer ends the flow");
+
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert_eq!(cfg.sandbox.provider.as_deref(), Some("gcp"));
+        assert_eq!(
+            cfg.sandbox.auth.service_account_key.as_deref(),
+            Some(key.as_path()),
+            "the API credential is persisted",
+        );
+        assert_eq!(cfg.sandbox.project.as_deref(), Some("my-proj"));
+        assert_eq!(cfg.sandbox.zone.as_deref(), Some("europe-west1-b"));
+        assert_eq!(
+            cfg.sandbox.region.as_deref(),
+            Some("europe-west1"),
+            "region derived from the zone survives the persist path",
+        );
+        assert_eq!(
+            cfg.sandbox.user.as_deref(),
+            Some(crate::sandbox_flow::DEFAULT_USER)
+        );
+        assert_eq!(cfg.sandbox.auto_connect, Some(false));
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The service-account-key step is the non-interactive credential check
+    /// (#1112): an unreadable path re-asks with an actionable error instead
+    /// of persisting a box that can't authenticate; a blank path is accepted
+    /// as ambient credentials.
+    #[test]
+    fn sandbox_onboarding_gcp_key_validates_readability() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.start_sandbox_onboarding();
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("gcp".into())]);
+        assert_eq!(m.modal_stack.last(), Some(&Id::SandboxInput), "key step");
+
+        // A path that doesn't exist → re-ask, with a status notice.
+        let _ = m.handle_input_submitted("/no/such/key.json".into());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "an unreadable key re-asks",
+        );
+        assert!(m.status.notice.is_some(), "surfaces the credential error");
+
+        // Blank → ambient credentials, advances to the project prompt.
+        let _ = m.handle_input_submitted(String::new());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "a blank key (ambient) advances to the project prompt",
+        );
+    }
+
+    /// The E2B walk skips the GCP-only steps: provider → API-key gate →
+    /// template → auto-connect, persisting the template and no
+    /// `project`/`zone`.
+    #[test]
+    fn sandbox_onboarding_e2b_walk_persists_template() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-sbx-e2b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator here.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.start_sandbox_onboarding();
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("e2b".into())]);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxConfirm),
+            "e2b advances to the API-key gate",
+        );
+        let _ = m.handle_confirmed(true);
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "API-key gate advances to the template prompt",
+        );
+        let _ = m.handle_input_submitted("lazybox-e2b".into());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxConfirm),
+            "template → auto-connect toggle",
+        );
+        let _ = m.handle_confirmed(true);
+        assert!(m.top_modal().is_none());
+
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert_eq!(cfg.sandbox.provider.as_deref(), Some("e2b"));
+        assert_eq!(cfg.sandbox.template.as_deref(), Some("lazybox-e2b"));
+        assert_eq!(cfg.sandbox.auto_connect, Some(true));
+        assert!(
+            cfg.sandbox.project.is_none(),
+            "no GCP fields for an e2b box"
+        );
+        assert!(cfg.sandbox.zone.is_none());
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Re-running onboarding on a hand-tuned box preserves the fields the
+    /// flow never asks about — `ports`, `require_connect`, and the `auth`
+    /// sub-fields it doesn't own (impersonation) — rather than clobbering the
+    /// whole `sandbox:` block (regression guard).
+    #[test]
+    fn sandbox_onboarding_preserves_hand_authored_fields() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-sbx-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator here.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let key = home.join("sa.json");
+        std::fs::write(&key, "{}").unwrap();
+
+        // Seed a config whose sandbox block carries fields the flow leaves
+        // untouched.
+        let mut seed = lazybox_config::Config::default();
+        seed.sandbox.provider = Some("gcp".into());
+        seed.sandbox.require_connect = Some(true);
+        seed.sandbox.ports = vec![3000];
+        seed.sandbox.auth.impersonate_service_account = Some("deploy@proj.iam".into());
+        seed.save_to(&home.join("config.yaml")).unwrap();
+
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.start_sandbox_onboarding();
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("gcp".into())]);
+        let _ = m.handle_input_submitted(key.display().to_string());
+        let _ = m.handle_input_submitted("new-proj".into());
+        let _ = m.handle_input_submitted(String::new());
+        let _ = m.handle_input_submitted(String::new());
+        let _ = m.handle_confirmed(false);
+
+        let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
+        assert_eq!(
+            cfg.sandbox.project.as_deref(),
+            Some("new-proj"),
+            "walked field updated"
+        );
+        assert_eq!(
+            cfg.sandbox.auth.service_account_key.as_deref(),
+            Some(key.as_path()),
+            "flow-owned key written"
+        );
+        assert_eq!(
+            cfg.sandbox.require_connect,
+            Some(true),
+            "untouched toggle kept"
+        );
+        assert_eq!(cfg.sandbox.ports, vec![3000], "untouched ports kept");
+        assert_eq!(
+            cfg.sandbox.auth.impersonate_service_account.as_deref(),
+            Some("deploy@proj.iam"),
+            "untouched auth sub-field kept",
+        );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// A blank GCP project id re-asks instead of persisting a box that
+    /// would fail at connect time.
+    #[test]
+    fn sandbox_onboarding_reprompts_on_empty_project() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.start_sandbox_onboarding();
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("gcp".into())]);
+        // Blank key (ambient) advances past the credential step.
+        let _ = m.handle_input_submitted(String::new());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "project prompt"
+        );
+        let _ = m.handle_input_submitted("   ".into());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "a blank project re-asks",
+        );
         assert!(
             m.status.notice.is_some(),
-            "a missing box surfaces a footer notice"
+            "explains the project is required"
+        );
+        let _ = m.handle_input_submitted("real-proj".into());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "a real project advances to the zone prompt",
         );
     }
 

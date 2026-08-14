@@ -16,6 +16,12 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(top) = self.modal_stack.last().cloned() else {
             return Vec::new();
         };
+        // Sandbox onboarding drives its own draft state machine rather than
+        // the tui-core PickFlow catalog (#1112).
+        if top == Id::SandboxProviderPick {
+            self.sandbox_provider_picked(&picks);
+            return Vec::new();
+        }
         let outcome = resolve_pick(&picks, self.pick_flow(&top, submit));
         if let PickOutcome::Runner(indices) = outcome {
             if let Some(mut runner) = self.setup.runner.take() {
@@ -28,6 +34,23 @@ impl<T: TerminalAdapter> Model<T> {
         self.consume_pick_state(&top, &outcome);
         self.pop_modal();
         self.apply_pick_outcome(outcome)
+    }
+
+    /// Provider row picked in sandbox onboarding: record it on the draft
+    /// and mount the provider's first question. A missing draft or empty
+    /// pick (Esc) just cancels — `mount_sandbox_stage` re-stashes the flow
+    /// only when it actually advances.
+    fn sandbox_provider_picked(&mut self, picks: &[ChoicePayload]) {
+        let Some(ModalFlow::SandboxOnboarding { mut draft }) = self.modal_flow.take() else {
+            self.pop_modal();
+            return;
+        };
+        self.pop_modal();
+        let Some(ChoicePayload::Text(provider)) = picks.first() else {
+            return;
+        };
+        draft.set_provider(provider.clone());
+        self.mount_sandbox_stage(draft);
     }
 
     fn pick_flow(&self, top: &Id, submit: bool) -> lazybox_tui_core::choice::PickFlow {

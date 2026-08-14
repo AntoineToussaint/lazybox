@@ -1484,6 +1484,16 @@ impl<T: TerminalAdapter> Model<T> {
                         } else {
                             self.flash_info(format!("auto-merge on green: off for {name}"));
                         }
+                        // Optimistically flip the arm locally so the `⚡`
+                        // glyph lands on this keypress, not one daemon
+                        // round-trip later (invisible under output-heavy
+                        // load, #1090). The daemon's echo confirms it — or,
+                        // if the merge-on-green author gate declines, carries
+                        // the real `false` back and the glyph clears.
+                        self.sidebar.mark_auto_merge_on_green(
+                            &lazybox_core::SessionKey::from(&workspace_key),
+                            enabled,
+                        );
                         cmds.push(IpcCommand::SetAutoMergeOnGreen {
                             session_key: lazybox_core::SessionKey::from(&workspace_key),
                             enabled,

@@ -171,6 +171,18 @@ impl Sidebar {
         self.inner.unmark_remote(sk);
     }
 
+    /// Optimistic local update: flip a workspace's merge-on-green arm so the
+    /// `⚡` row glyph lands the instant `g g` is pressed, before the daemon
+    /// persists the flag and rebroadcasts the workspace. Returns whether a
+    /// workspace was found to update.
+    pub fn mark_auto_merge_on_green(
+        &mut self,
+        sk: &lazybox_core::SessionKey,
+        enabled: bool,
+    ) -> bool {
+        self.inner.mark_auto_merge_on_green(sk, enabled)
+    }
+
     /// Forward `find_agent_terminal` — first running agent terminal
     /// for `(workspace_key, agent_id)` if any. The `w` flow uses
     /// this to decide between InjectPrompt (existing) and Spawn (new).

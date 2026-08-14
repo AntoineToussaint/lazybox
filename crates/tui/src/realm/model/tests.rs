@@ -4746,6 +4746,192 @@ snippets:
         );
     }
 
+    /// #1100: the remote gate is per-app, not per-feature. A `{url}` app
+    /// (open the PR in a browser) has no worktree dependency, so it must
+    /// NOT be refused on a remote daemon the way a `{path}` app is — the
+    /// same reasoning that lets `g o` open-in-browser work over `--connect`.
+    /// The favorite-key / direct path launches without the picker's
+    /// availability filter, so on this PR-less workspace the `{url}` app
+    /// falls through to the launcher and fails on the missing token — NOT
+    /// on a remote block, proving it was never remote-gated.
+    #[test]
+    fn open_with_url_app_is_not_remote_blocked() {
+        let worktree = tmp_worktree_with_skill("ow-url-remote");
+        let mut m = model_with_agent_at_worktree(worktree).with_remote();
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "PR in browser".into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+            key: None,
+        }]);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenWithApp(
+            "PR in browser".into(),
+        ));
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            !notice.contains("remote daemon"),
+            "a {{url}} app must not be refused on a remote daemon: {notice:?}",
+        );
+        assert!(
+            notice.contains("unavailable"),
+            "it should fall through to the missing-{{url}} token error: {notice:?}",
+        );
+    }
+
+    /// #1100: a `{path}` app IS worktree-bound — the worktree is a
+    /// server-side path over `--connect`, so it declines on a remote
+    /// daemon and points at the server shell.
+    #[test]
+    fn open_with_path_app_declines_on_remote() {
+        let worktree = tmp_worktree_with_skill("ow-path-remote");
+        let mut m = model_with_agent_at_worktree(worktree).with_remote();
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "Obsidian".into(),
+            command: "open".into(),
+            args: Some(vec!["-a".into(), "Obsidian".into(), "{path}".into()]),
+            key: None,
+        }]);
+        m.open_with_picker();
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("remote daemon")),
+            "a {{path}} app must decline on a remote daemon",
+        );
+    }
+
+    /// #1100: a `{path}` app on a workspace with no session yet has no
+    /// worktree on disk to open. Rather than error, it provisions one
+    /// (spawns a shell) and defers the launch — exactly what `e` does.
+    #[test]
+    fn open_with_path_app_without_a_worktree_provisions_one() {
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#7");
+        let session_key: SessionKey = (&ws_key).into();
+        // No `add_session` — the workspace has no worktree on disk.
+        let ws = lazybox_core::Workspace::empty(ws_key, "main", chrono::Utc::now());
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "Obsidian".into(),
+            command: "open".into(),
+            args: None,
+            key: None,
+        }]);
+        m.open_with_picker();
+        assert_eq!(
+            m.setup
+                .pending_open_with_launch
+                .as_ref()
+                .map(|(key, _)| key.clone()),
+            Some(session_key),
+            "the launch is queued behind a worktree provision",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("Provisioning")),
+        );
+    }
+
+    /// #1100: the queued `{path}` launch fires once the provisioned
+    /// worktree lands (a `TerminalSpawned` for the target), resolving its
+    /// worktree by key — the deferred-launch counterpart of `e`.
+    #[test]
+    fn open_with_deferred_launch_fires_when_the_worktree_lands() {
+        let worktree = tmp_worktree_with_skill("ow-deferred");
+        let mut m = model_with_agent_at_worktree(worktree);
+        let session_key: SessionKey = (&WorkspaceKey::new("github:o/r#1")).into();
+        // A prior provision left this launch waiting; the command can't
+        // spawn, so nothing real is launched — we only assert it fired.
+        m.setup.pending_open_with_launch = Some((
+            session_key.clone(),
+            crate::editors::OpenWithApp {
+                name: "Obsidian".into(),
+                command: "/nonexistent-open-with-launcher".into(),
+                args: Some(vec!["{path}".into()]),
+                key: None,
+            },
+        ));
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: lazybox_ipc::TerminalId(2),
+            session_key,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        assert!(
+            m.setup.pending_open_with_launch.is_none(),
+            "the deferred launch fired and cleared once the worktree existed",
+        );
+    }
+
+    /// #1100 picker polish: apps whose tokens the workspace can't supply
+    /// are filtered out, so the picker never offers a choice that would
+    /// just fail. Two `{url}` apps on a PR-less workspace leave nothing to
+    /// run — no picker mounts, and the notice explains why.
+    #[test]
+    fn open_with_picker_filters_out_unavailable_apps() {
+        let worktree = tmp_worktree_with_skill("ow-filter");
+        let mut m = model_with_agent_at_worktree(worktree);
+        let url_app = |name: &str| crate::editors::OpenWithApp {
+            name: name.into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+            key: None,
+        };
+        m.cache_open_with(vec![url_app("PR"), url_app("PR2")]);
+        m.open_with_picker();
+        assert!(
+            m.top_modal().is_none(),
+            "no picker mounts when every app's token is unavailable",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("can run")),
+        );
+    }
+
+    /// #1100 per-app key: dispatching `OpenWithApp("<name>")` (what a
+    /// favorite `key:` binds) launches that specific app directly. Here
+    /// the workspace has no PR, so the `{url}` app surfaces the named
+    /// token error — proving the key path reached the launcher.
+    #[test]
+    fn open_with_favorite_key_launches_the_named_app() {
+        let worktree = tmp_worktree_with_skill("ow-fav-key");
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "PR".into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+            key: Some("O".into()),
+        }]);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenWithApp("PR".into()));
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("unavailable")),
+            "the favorite key reached launch_open_with for the named app",
+        );
+    }
+
     // ── `]]` leader chord (issue #205) ──────────────────────────────
 
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
@@ -6224,6 +6410,9 @@ mod stale_input_tests {
                 | Id::NewWorkspaceRepo
                 | Id::LinearTeamRepo
                 | Id::Editor
+                // Open-with launches an external app — an outward
+                // effect a stale Enter must not trigger.
+                | Id::OpenWith
                 | Id::EditorsPanel
                 | Id::EditorForm
                 | Id::Setup
@@ -6270,6 +6459,7 @@ mod stale_input_tests {
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
             Id::Editor,
+            Id::OpenWith,
             Id::EditorsPanel,
             Id::EditorForm,
             Id::EditorRemoveConfirm,

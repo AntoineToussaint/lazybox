@@ -266,6 +266,17 @@ pub(crate) struct SetupCtx {
     /// The Choice picker resolves to a template, at which point we
     /// move it to `pending_editor_launch`.
     pub pending_editor_workspace: Option<SessionKey>,
+    /// Config-driven "Open with…" apps (issue #1100) loaded from
+    /// `~/.lazybox/config.yaml::open_with`. Drives the `x o` picker,
+    /// decoupled from the single `editors:` code-editor slot. Empty when
+    /// nothing is configured.
+    pub open_with: Vec<crate::editors::OpenWithApp>,
+    /// An "Open with…" launch of a `{path}` app deferred behind a
+    /// session spawn (#1100): set when the user picked a path app on a
+    /// workspace with no worktree yet. The orchestrator spawns a shell to
+    /// provision one and fires the launch on the matching `TerminalSpawned`
+    /// — the same shape as [`Self::pending_editor_launch`].
+    pub pending_open_with_launch: Option<(SessionKey, crate::editors::OpenWithApp)>,
     /// Hook invoked every time setup finishes successfully (first-run
     /// wizard AND partial flows from the Settings palette — "Add a
     /// repo", "Edit filters", etc.). `main.rs::run_embedded_realm`
@@ -291,6 +302,8 @@ impl SetupCtx {
             editor_choices: Vec::new(),
             pending_editor_launch: None,
             pending_editor_workspace: None,
+            open_with: Vec::new(),
+            pending_open_with_launch: None,
             on_complete: None,
             detector: None,
         }

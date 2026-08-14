@@ -2379,6 +2379,11 @@ impl<T: TerminalAdapter> Model<T> {
                         .pending_editor_launch
                         .as_ref()
                         .is_some_and(|(k, _)| k == sk)
+                    || self
+                        .setup
+                        .pending_open_with_launch
+                        .as_ref()
+                        .is_some_and(|(k, _)| k == sk)
             });
             let interactive_modal_up = self
                 .modal_stack
@@ -2428,6 +2433,22 @@ impl<T: TerminalAdapter> Model<T> {
             {
                 self.setup.pending_editor_launch = None;
                 self.launch_editor(&editor, &worktree);
+            }
+            // Open-with-deferred-by-spawn (#1100): the user picked a
+            // `{path}` app on a worktreeless workspace, so we spawned a
+            // shell to provision one. Resolve the target by key (not the
+            // cursor) and fire once its worktree exists, mirroring the
+            // editor path above.
+            if let Some((target_key, app)) = self.setup.pending_open_with_launch.clone() {
+                let ctx = self
+                    .sidebar
+                    .workspace_by_key(&target_key)
+                    .map(Self::open_with_context_for)
+                    .filter(|ctx| ctx.path.is_some());
+                if let Some(ctx) = ctx {
+                    self.setup.pending_open_with_launch = None;
+                    self.launch_open_with(&app, &ctx);
+                }
             }
         } else {
             self.needs_pane_sync = true;

@@ -244,6 +244,102 @@ Detection runs at startup; `e` resolves the editor command and spawns it with
 ### Known sharp edges
 - Detection is best-effort by binary path; an editor installed in a nonstandard location needs a custom `editors:` entry.
 
+### Stopgap: one alternate app via `editors:`
+Before `open_with:` existed, a single non-editor app (e.g. Obsidian) could be
+added as an `editors:` entry and picked with `e`:
+
+```yaml
+editors:
+  - id: obsidian
+    display: Obsidian
+    command: open
+    args: ["-a", "Obsidian", "{path}"]
+```
+
+This still works, but `editors:` is scoped to *the* code editor (it carries
+go-to-`file:line` semantics). For multiple distinct "open with" targets, use
+`open_with:` below.
+
+---
+
+## Open with… (arbitrary apps)
+
+**Status:** stable
+**Crate(s):** `config` (`OpenWithEntry`), `tui-core` (`editors::OpenWithApp`), `tui`
+**Config / flags:** `open_with:`
+**Key bindings:** `x o`, plus per-app `key:`
+
+### What it does
+A config-driven list of arbitrary apps to launch on the focused workspace —
+Obsidian, Finder, a browser, anything — decoupled from the single `e` code
+editor. `x o` opens an "Open with…" picker over the configured apps (each row
+shows the command it runs; one app launches directly). Apps whose tokens the
+workspace can't supply are hidden from the picker. A favorite can carry a
+`key:` to bind a direct chord that skips the picker.
+
+### How to use it
+Add apps under `open_with:`; each is a launch command with optional `args` and
+an optional favorite `key:`:
+
+```yaml
+open_with:
+  - name: Obsidian
+    command: open
+    args: ["-a", "Obsidian", "{path}"]
+    key: "O"                # optional: `O` launches Obsidian directly
+  - name: Finder
+    command: open
+    args: ["{path}"]
+  - name: Preview PR in browser
+    command: open
+    args: ["{url}"]
+```
+
+Tokens substituted at launch: `{path}` (the worktree dir), `{url}` (the PR /
+issue URL), `{branch}`, and `{repo}` (`owner/repo`). `args` defaults to
+`["{path}"]` when omitted. An app that references a token the workspace can't
+supply (e.g. `{url}` with no PR) is dropped from the picker; launched directly
+(via its `key:`) it fails with a footer notice naming the token, rather than
+launching with a stray placeholder. A `{path}` app on a workspace with no
+worktree yet provisions one first (spawns a shell) and opens when it's ready —
+exactly like `e`. `key:` is a `ui.action_keys`-style spec and is remappable via
+`ui.action_keys.open_with_app.<name>`.
+
+On Linux (or for any app with a direct binary rather than a launcher) name the
+executable as `command` — no `open`:
+
+```yaml
+open_with:
+  - name: Obsidian
+    command: obsidian
+    args: ["{path}"]
+  - name: Preview PR in browser
+    command: xdg-open
+    args: ["{url}"]
+```
+
+### How it works (brief)
+`open_with:` entries load at startup and reuse the editor launch primitive
+(`tui-core` `editors::launch_open_with`): command + args + token substitution,
+detaching a GUI binary and handing `open` off to Launch Services (a fast-
+exiting `open` handoff is reaped so it can't zombie; `open` is matched by file
+name so `/usr/bin/open` works too). An app with a `key:` becomes one generated
+Workspace-section catalog row (`Action::OpenWithApp`), the same machinery as the
+per-agent `a c` / `a x` chords. `editors:` / `e` are unchanged — `open_with:` is
+the general escape hatch.
+
+### Test checklist
+- [ ] `x o` with 2+ apps shows a picker (each row shows its command); a single app launches directly.
+- [ ] `{path}` / `{url}` / `{branch}` / `{repo}` are substituted at launch.
+- [ ] A `{url}` app is hidden from the picker on a workspace with no PR.
+- [ ] A favorite `key:` launches its app directly, skipping the picker.
+- [ ] With no `open_with:` configured, `x o` points at the config file.
+- [ ] A `{path}` app on a workspace with no session yet provisions a worktree, then opens.
+- [ ] On a remote (`--connect`) daemon a `{path}` app declines (points at `s`) but a `{url}` app still opens.
+
+### Known sharp edges
+- Only `{path}` apps are local-and-worktree-bound (#742): the worktree lives on the box over `--connect` and doesn't exist until a session provisions it, so a `{path}` app declines on a remote daemon or a session-less workspace and points at `s` / `w`. `{url}` / `{repo}` / `{branch}` apps have no worktree dependency and run regardless — the same as the `g o` open-in-browser action.
+
 ---
 
 ## Per-repo overrides

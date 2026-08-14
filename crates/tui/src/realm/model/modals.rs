@@ -2106,6 +2106,7 @@ impl<T: TerminalAdapter> Model<T> {
             Action::SpawnAgent("claude".into()),
             Action::SpawnShell,
             Action::OpenEditor,
+            Action::OpenWith,
             Action::MarkAllRead,
             Action::MergePr,
             Action::Archive,
@@ -2121,6 +2122,11 @@ impl<T: TerminalAdapter> Model<T> {
                 // The catalog can't know about lazybox's setup state,
                 // so the menu enforces this one.
                 if a.kind() == ActionKind::OpenEditor && self.setup.editors.is_empty() {
+                    return false;
+                }
+                // Likewise, only offer "open with…" when the user has
+                // configured at least one `open_with:` app.
+                if a.kind() == ActionKind::OpenWith && self.setup.open_with.is_empty() {
                     return false;
                 }
                 true

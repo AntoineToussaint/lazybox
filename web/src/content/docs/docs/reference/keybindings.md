@@ -209,6 +209,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x p` | new project |
 | `x i` | import checkout |
 | `x r` | add scan root |
+| `x o` | open with |
 | `x a` | adopt sessions |
 | `x s` | send to session |
 | `x f` | convert session |

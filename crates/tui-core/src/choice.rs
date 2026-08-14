@@ -12,7 +12,10 @@ use lazybox_ipc::{
     Command, DiscoveredCheckoutDto, TerminalId, TerminalKind, WorktreeInspectionDto,
 };
 
-use crate::{action::Action, editors::EditorTemplate};
+use crate::{
+    action::Action,
+    editors::{EditorTemplate, OpenWithApp, OpenWithContext},
+};
 
 /// Payload access needed by [`resolve_pick`]. The renderer owns its picker
 /// payload enum; this trait keeps the pure resolver independent of it.
@@ -144,6 +147,13 @@ pub enum PickFlow {
         pending_workspace: Option<SessionKey>,
         worktree: Option<PathBuf>,
     },
+    /// Config-driven "Open with…" picker (issue #1100). Each row is an
+    /// index into `apps`; the pick launches that app on the focused
+    /// workspace with `ctx`'s tokens substituted.
+    OpenWith {
+        apps: Vec<OpenWithApp>,
+        ctx: OpenWithContext,
+    },
     Settings {
         action_count: usize,
     },
@@ -244,6 +254,12 @@ pub enum PickOutcome<F> {
     LaunchEditor {
         editor: EditorTemplate,
         worktree: PathBuf,
+    },
+    /// Launch a picked "Open with…" app on the focused workspace
+    /// (issue #1100). The renderer resolves tokens + spawns.
+    LaunchOpenWith {
+        app: OpenWithApp,
+        ctx: OpenWithContext,
     },
     DispatchSettings(usize),
     Runner(Vec<usize>),
@@ -592,6 +608,12 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 }
             }
         }
+        PickFlow::OpenWith { apps, ctx } => picks
+            .first()
+            .and_then(P::as_index)
+            .and_then(|index| apps.get(index).cloned())
+            .map(|app| PickOutcome::LaunchOpenWith { app, ctx })
+            .unwrap_or(PickOutcome::NoOp),
         PickFlow::Settings { action_count } => picks
             .first()
             .and_then(P::as_index)
@@ -1249,6 +1271,43 @@ mod tests {
             ),
             PickOutcome::LaunchEditor { worktree, .. }
                 if worktree.as_path() == std::path::Path::new("/worktree")
+        ));
+    }
+
+    #[test]
+    fn open_with_pick_resolves_the_indexed_app() {
+        let apps = vec![
+            OpenWithApp {
+                name: "Obsidian".into(),
+                command: "open".into(),
+                args: Some(vec!["-a".into(), "Obsidian".into(), "{path}".into()]),
+                key: None,
+            },
+            OpenWithApp {
+                name: "Finder".into(),
+                command: "open".into(),
+                args: None,
+                key: None,
+            },
+        ];
+        let ctx = OpenWithContext {
+            path: Some("/worktree".into()),
+            ..OpenWithContext::default()
+        };
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::Index(1)],
+                PickFlow::OpenWith {
+                    apps: apps.clone(),
+                    ctx: ctx.clone(),
+                },
+            ),
+            PickOutcome::LaunchOpenWith { app, .. } if app.name == "Finder"
+        ));
+        // An out-of-range index (stale modal) is a no-op, never a panic.
+        assert!(matches!(
+            resolve_pick(&[Payload::Index(9)], PickFlow::OpenWith { apps, ctx }),
+            PickOutcome::NoOp
         ));
     }
 }

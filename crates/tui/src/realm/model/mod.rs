@@ -138,6 +138,10 @@ pub enum Id {
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
+    /// Config-driven "Open with…" picker (`x o`, issue #1100). Single-
+    /// pick `Choice` over the `open_with:` apps; each row is an index
+    /// into `setup.open_with`. Submit → `editors::launch_open_with`.
+    OpenWith,
     /// Settings "Editors" panel (#1102): lists the custom `editors:`
     /// entries with an on-PATH badge; `a`/`e`/`d` add / edit / remove.
     /// Mounted from the Settings palette; each write hot-reloads the
@@ -2656,6 +2660,15 @@ impl<T: TerminalAdapter> Model<T> {
         self.setup.editors = editors;
     }
 
+    /// Hand in the config-driven "Open with…" apps (issue #1100). The
+    /// `x o` picker reads from this list; an empty list = footer notice.
+    /// Rebuilds the catalog so any app with a favorite `key` gets its
+    /// direct-key row.
+    pub fn cache_open_with(&mut self, apps: Vec<crate::editors::OpenWithApp>) {
+        self.setup.open_with = apps;
+        self.rebuild_catalog();
+    }
+
     /// Re-merge `editors:` with the builtins and re-detect what's
     /// installed from an already-loaded config — so an add/edit/remove
     /// from the Settings editors panel (#1102) takes effect on the next
@@ -3548,11 +3561,20 @@ impl<T: TerminalAdapter> Model<T> {
         // Remote names gate the `r <agent>` chords — no remotes, no `r`
         // leader (the default keymap is byte-for-byte unchanged).
         let remotes: Vec<String> = self.remote_clients.keys().cloned().collect();
-        self.catalog = lazybox_tui_core::action::ActionDef::catalog_full(
+        // `open_with:` apps that declared a favorite `key` get a direct
+        // Workspace-section row each (#1100).
+        let open_with_binds: Vec<(String, String)> = self
+            .setup
+            .open_with
+            .iter()
+            .filter_map(|app| app.key.clone().map(|key| (app.name.clone(), key)))
+            .collect();
+        self.catalog = lazybox_tui_core::action::ActionDef::catalog_complete(
             &self.agents,
             &self.action_key_overrides,
             tiers,
             &remotes,
+            &open_with_binds,
         );
     }
 
@@ -4509,6 +4531,187 @@ impl<T: TerminalAdapter> Model<T> {
             .title("Open editor")
             .label(|s: &String| s.clone());
         self.mount_modal(Id::Editor, modal);
+    }
+
+    /// `x o` — the config-driven "Open with…" picker (issue #1100).
+    /// Surfaces the `open_with:` apps (Obsidian / Finder / browser / …)
+    /// on the focused workspace, decoupled from the single `e` code
+    /// editor. One app → launch directly; 2+ → a Choice picker; none →
+    /// a footer notice pointing at the config file. The remote / no-
+    /// worktree constraints are per-app, not global: only `{path}` apps
+    /// need a local, provisioned worktree, so the gate lives in
+    /// `launch_open_with` — a `{url}` browser app runs against a remote or
+    /// not-yet-provisioned workspace just like `g o` does.
+    pub fn open_with_picker(&mut self) {
+        if self.sidebar.selected_workspace_key().is_none() {
+            return;
+        }
+        if self.setup.open_with.is_empty() {
+            let path = lazybox_core::paths::config_yaml();
+            self.flash_info(format!(
+                "no `open_with:` apps configured — add some under `open_with:` in {}",
+                path.display(),
+            ));
+            return;
+        }
+        let Some((apps, ctx)) = self.actionable_open_with() else {
+            return;
+        };
+        match apps.len() {
+            0 => self.flash_info(
+                "no `open_with:` app can run here — its token (a PR url / worktree) isn't available on this workspace",
+            ),
+            1 => self.launch_open_with(&apps[0], &ctx),
+            _ => self.mount_open_with_picker(apps),
+        }
+    }
+
+    /// Launch a specific `open_with:` app by name — the favorite-key
+    /// path (`open_with[].key`, #1100). Same launch path as a pick, so
+    /// remote / no-worktree gating and provisioning apply; an unknown
+    /// name (config changed under a stale binding) is a silent no-op.
+    fn open_with_app_by_name(&mut self, name: &str) {
+        let Some(app) = self
+            .setup
+            .open_with
+            .iter()
+            .find(|app| app.name == name)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(ctx) = self.open_with_context() else {
+            return;
+        };
+        self.launch_open_with(&app, &ctx);
+    }
+
+    /// The `open_with:` apps worth offering on the focused workspace,
+    /// paired with its token context (#1100). Apps whose `{url}`/`{repo}`/
+    /// `{branch}` token can't be supplied — a browser app with no PR — are
+    /// filtered out, since there's nothing for them to open. A `{path}`
+    /// app is always kept (`path_ok = true`): locally a missing worktree
+    /// is provisioned on launch, and on a remote daemon `launch_open_with`
+    /// declines it with the actionable "use `s`" message rather than the
+    /// picker hiding it silently.
+    fn actionable_open_with(
+        &self,
+    ) -> Option<(
+        Vec<crate::editors::OpenWithApp>,
+        crate::editors::OpenWithContext,
+    )> {
+        let ctx = self.open_with_context()?;
+        let apps = self
+            .setup
+            .open_with
+            .iter()
+            .filter(|app| app.is_actionable(&ctx, true))
+            .cloned()
+            .collect();
+        Some((apps, ctx))
+    }
+
+    fn mount_open_with_picker(&mut self, apps: Vec<crate::editors::OpenWithApp>) {
+        use crate::realm::components::choice::Choice;
+        // Each row shows the app name and, dimmed beneath it, the command
+        // it launches so the choice isn't blind (#1100).
+        let rows: Vec<(String, String)> = apps
+            .into_iter()
+            .map(|app| {
+                let preview = app.command_preview();
+                (app.name, preview)
+            })
+            .collect();
+        let modal = Choice::single("Open with…", rows)
+            .title("Open with")
+            .label(|(name, preview): &(String, String)| format!("{name}   ·   {preview}"));
+        self.mount_modal(Id::OpenWith, modal);
+    }
+
+    /// Assemble the token context for an "Open with…" launch from the
+    /// focused workspace (`{path}` / `{url}` / `{branch}` / `{repo}`).
+    pub(super) fn open_with_context(&self) -> Option<crate::editors::OpenWithContext> {
+        self.sidebar
+            .selected_workspace()
+            .map(Self::open_with_context_for)
+    }
+
+    /// [`Self::open_with_context`] for an explicit workspace — used by the
+    /// deferred-launch handler, which resolves its target by key (not the
+    /// cursor) so a launch fires even after the user navigates away.
+    pub(super) fn open_with_context_for(
+        workspace: &lazybox_core::Workspace,
+    ) -> crate::editors::OpenWithContext {
+        crate::editors::OpenWithContext {
+            path: workspace
+                .sessions
+                .first()
+                .map(|session| session.worktree_path.to_string_lossy().into_owned()),
+            url: workspace.primary_task().map(|task| task.url.clone()),
+            branch: Some(workspace.branch.clone()),
+            repo: workspace.primary_task().and_then(|task| task.repo.clone()),
+        }
+    }
+
+    fn launch_open_with(
+        &mut self,
+        app: &crate::editors::OpenWithApp,
+        ctx: &crate::editors::OpenWithContext,
+    ) {
+        // Gate per app, not per feature (#1100): only a `{path}` app needs
+        // the worktree, which is server-side over `--connect` and absent
+        // until a session provisions it. A `{url}`/`{repo}`/`{branch}` app
+        // (e.g. "open the PR in a browser") falls through and runs, exactly
+        // as `g o` open-in-browser does on the same workspace.
+        if app.references_path() {
+            if self.remote {
+                self.flash_info(
+                    "this opens the worktree on your machine — unavailable for a remote daemon; use `s` for a server shell",
+                );
+                return;
+            }
+            if ctx.path.is_none() {
+                // No worktree on disk yet — provision one (spawn a shell)
+                // and fire the launch when it lands, exactly like `e`.
+                self.provision_worktree_then_open_with(app.clone());
+                return;
+            }
+        }
+        match crate::editors::launch_open_with(app, ctx) {
+            Ok(()) => {
+                tracing::info!(app = %app.name, "launched open-with app");
+                self.flash_info(format!("opening in {}…", app.name));
+            }
+            Err(e) => {
+                tracing::warn!(app = %app.name, "open-with launch failed: {e}");
+                self.flash_error(format!("failed to open {}: {e}", app.name));
+            }
+        }
+    }
+
+    /// Spawn a shell on the focused workspace to provision its worktree,
+    /// then open `app` once the matching `TerminalSpawned` arrives (#1100).
+    /// Mirrors the editor's deferred-launch flow ([`Self::open_editor`]).
+    fn provision_worktree_then_open_with(&mut self, app: crate::editors::OpenWithApp) {
+        let Some(workspace_key) = self.sidebar.selected_workspace_key().cloned() else {
+            return;
+        };
+        self.setup.pending_open_with_launch = Some((workspace_key.clone(), app.clone()));
+        self.send_cmd(IpcCommand::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: workspace_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            cwd: None,
+            initial_prompt: None,
+            on_main: false,
+        });
+        self.flash_info(format!(
+            "Provisioning worktree for {workspace_key} — opening in {} when ready…",
+            app.name
+        ));
     }
 
     /// Route a [`crate::components::terminal_stack::ClickTarget`] produced by a right-click in the agent

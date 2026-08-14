@@ -181,6 +181,12 @@ impl<T: TerminalAdapter> Model<T> {
                         .map(|session| session.worktree_path.clone())
                 }),
             },
+            // Reconstruct the SAME filtered list the picker was mounted
+            // with (#1100) so the picked index maps to the right app.
+            Id::OpenWith => match self.actionable_open_with() {
+                Some((apps, ctx)) => PickFlow::OpenWith { apps, ctx },
+                None => PickFlow::Plain,
+            },
             Id::Setup if self.setup.runner.is_some() => PickFlow::Runner,
             Id::Setup if !self.setup.settings_actions.is_empty() => PickFlow::Settings {
                 action_count: self.setup.settings_actions.len(),
@@ -588,6 +594,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
             PickOutcome::LaunchEditor { editor, worktree } => {
                 self.launch_editor(&editor, &worktree);
+            }
+            PickOutcome::LaunchOpenWith { app, ctx } => {
+                self.launch_open_with(&app, &ctx);
             }
             PickOutcome::DispatchSettings(index) => {
                 let action = self.setup.settings_actions.get(index).cloned();

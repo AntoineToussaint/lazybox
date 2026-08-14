@@ -645,7 +645,42 @@ fn spawn_editor(launch: EditorLaunch, current_dir: Option<&Path>) -> std::io::Re
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::null());
     command.stderr(std::process::Stdio::null());
-    command.spawn().map(|_| ())
+    let child = command.spawn()?;
+    // A macOS `open` handoff hands the target to Launch Services and exits
+    // within milliseconds; without a `wait()` that fast-exiting child
+    // lingers as a zombie until lazybox itself exits. Reap it off-thread
+    // (mirroring `open_url`) so it can't accumulate. A `DetachedEditor` is
+    // `setsid`-detached and long-lived — leave it to the OS as before.
+    if launch.process_handling == ProcessHandling::MacosApplicationHandoff {
+        spawn_handoff_reaper(child, launch.program)
+            .map(|_| ())
+            .unwrap_or_else(|e| tracing::warn!("open-with handoff reaper spawn failed: {e}"));
+    }
+    Ok(())
+}
+
+fn spawn_handoff_reaper(
+    mut child: std::process::Child,
+    program: String,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
+    let span = tracing::Span::current();
+    std::thread::Builder::new()
+        .name("lazybox-open-handoff".into())
+        .spawn(move || {
+            tracing::dispatcher::with_default(&dispatch, || {
+                let _guard = span.enter();
+                match child.wait() {
+                    Ok(status) if !status.success() => {
+                        tracing::warn!(%program, %status, "open-with launcher exited non-zero");
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(%program, "open-with launcher wait failed: {e}");
+                    }
+                }
+            });
+        })
 }
 
 /// Open a single `file` in `template`, optionally jumping to
@@ -668,6 +703,177 @@ pub fn open_file(
 
 pub fn launch(template: &EditorTemplate, worktree: &Path) -> std::io::Result<()> {
     spawn_editor(worktree_launch(template, worktree), Some(worktree))
+}
+
+/// One configured "Open with…" target (issue #1100): an arbitrary app
+/// launched on the focused workspace, decoupled from the single
+/// code-editor slot. Unlike [`EditorTemplate`] it carries no go-to-file
+/// semantics and no macOS app-bundle auto-detection — the command line
+/// is taken verbatim (the user writes `open -a Obsidian {path}`), with
+/// tokens substituted at launch. Reuses the editor spawn primitive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenWithApp {
+    /// User-visible name shown in the picker.
+    pub name: String,
+    pub command: String,
+    /// Defaults to `["{path}"]` when omitted, matching the common
+    /// "open this folder" case.
+    pub args: Option<Vec<String>>,
+    /// Optional key-spec (`ui.action_keys`-style, e.g. `"O"`, `"Ctrl-o"`)
+    /// that binds this app to a direct Workspace-section chord, skipping
+    /// the picker (#1100). `None` → reachable only through the `x o`
+    /// picker.
+    pub key: Option<String>,
+}
+
+impl OpenWithApp {
+    /// The launch args, defaulting to `["{path}"]` when omitted.
+    fn resolved_args(&self) -> Vec<String> {
+        self.args
+            .clone()
+            .unwrap_or_else(|| vec!["{path}".to_string()])
+    }
+
+    /// Whether the command references the worktree `{path}` token — the
+    /// default when `args` is omitted. `{path}` is a server-side location
+    /// over `--connect` and absent until a session provisions a worktree,
+    /// so a path app can't run against a remote or not-yet-provisioned
+    /// worktree; `{url}`/`{repo}`/`{branch}` apps (e.g. "open the PR in a
+    /// browser") have no such dependency and run regardless (#1100).
+    pub fn references_path(&self) -> bool {
+        self.resolved_args()
+            .iter()
+            .any(|arg| arg.contains("{path}"))
+    }
+
+    /// The first `{…}` token the app needs that this workspace can't
+    /// supply, or `None` when it can run. `{url}`/`{repo}`/`{branch}` need
+    /// a concrete value in `ctx`; `{path}` counts as suppliable when
+    /// `path_ok` (a local worktree exists or can be provisioned — false on
+    /// a remote daemon, whose worktree is server-side). Drives the picker's
+    /// "hide what can't run here" filter (#1100).
+    pub fn missing_token(&self, ctx: &OpenWithContext, path_ok: bool) -> Option<&'static str> {
+        let args = self.resolved_args();
+        [
+            ("{path}", path_ok),
+            ("{url}", ctx.url.is_some()),
+            ("{branch}", ctx.branch.is_some()),
+            ("{repo}", ctx.repo.is_some()),
+        ]
+        .into_iter()
+        .find(|(token, available)| !available && args.iter().any(|arg| arg.contains(token)))
+        .map(|(token, _)| token)
+    }
+
+    /// Whether this app can launch on the workspace described by `ctx`
+    /// (see [`Self::missing_token`]).
+    pub fn is_actionable(&self, ctx: &OpenWithContext, path_ok: bool) -> bool {
+        self.missing_token(ctx, path_ok).is_none()
+    }
+
+    /// A compact `command args…` string shown beneath the name in the
+    /// picker so the user sees what each entry actually launches (#1100).
+    pub fn command_preview(&self) -> String {
+        let mut parts = vec![self.command.clone()];
+        if let Some(args) = &self.args {
+            parts.extend(args.iter().cloned());
+        }
+        parts.join(" ")
+    }
+}
+
+/// Whether `command` is the macOS `open` launcher — matched by file name
+/// so an absolute `/usr/bin/open` is recognized too (#1100). `open` hands
+/// off to Launch Services and must not be `setsid`-detached (that severs
+/// the GUI bootstrap it needs), so it takes the handoff spawn path.
+fn is_open_launcher(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("open")
+}
+
+/// Values available to the `{…}` tokens in an [`OpenWithApp`]'s args.
+/// Every field is optional: a token referenced by an app whose value is
+/// `None` here (e.g. `{url}` on a workspace with no PR) makes the launch
+/// fail with a message naming the token, rather than passing a literal
+/// `{url}` through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OpenWithContext {
+    /// The worktree directory (`{path}`).
+    pub path: Option<String>,
+    /// The workspace's PR / issue URL (`{url}`).
+    pub url: Option<String>,
+    /// The tracked branch (`{branch}`).
+    pub branch: Option<String>,
+    /// The `owner/repo` (`{repo}`).
+    pub repo: Option<String>,
+}
+
+/// Substitute `{path}` / `{url}` / `{branch}` / `{repo}` in `args`
+/// against `ctx`. A token whose value is absent is an error naming it,
+/// so an app wired to a token the workspace can't supply fails loudly
+/// instead of launching with a stray placeholder.
+fn resolve_open_with_args(args: &[String], ctx: &OpenWithContext) -> Result<Vec<String>, String> {
+    let tokens = [
+        ("{path}", &ctx.path),
+        ("{url}", &ctx.url),
+        ("{branch}", &ctx.branch),
+        ("{repo}", &ctx.repo),
+    ];
+    args.iter()
+        .map(|arg| {
+            let mut resolved = arg.clone();
+            for (token, value) in &tokens {
+                if resolved.contains(token) {
+                    match value {
+                        Some(value) => resolved = resolved.replace(token, value),
+                        None => {
+                            return Err(format!("{token} is unavailable on this workspace"));
+                        }
+                    }
+                }
+            }
+            Ok(resolved)
+        })
+        .collect()
+}
+
+fn open_with_launch(app: &OpenWithApp, ctx: &OpenWithContext) -> Result<EditorLaunch, String> {
+    let args = app
+        .args
+        .clone()
+        .unwrap_or_else(|| vec!["{path}".to_string()]);
+    let args = resolve_open_with_args(&args, ctx)?;
+    // `open` hands the target off to Launch Services and exits — it must
+    // NOT be detached, since `setsid()` severs the macOS GUI bootstrap it
+    // needs (the same reason [`open_url`] never detaches). Any other
+    // command is a GUI binary we detach like an editor so it outlives
+    // lazybox.
+    let process_handling = if is_open_launcher(&app.command) {
+        ProcessHandling::MacosApplicationHandoff
+    } else {
+        ProcessHandling::DetachedEditor
+    };
+    Ok(EditorLaunch {
+        program: app.command.clone(),
+        args,
+        process_handling,
+    })
+}
+
+/// Launch an "Open with…" app on the focused workspace, substituting
+/// its command's `{…}` tokens from `ctx`. A token the workspace can't
+/// supply is an `Err` naming it; otherwise the command is spawned
+/// through the shared editor spawn path (detach / macOS handoff).
+pub fn launch_open_with(app: &OpenWithApp, ctx: &OpenWithContext) -> Result<(), String> {
+    let launch = open_with_launch(app, ctx)?;
+    let current_dir = ctx
+        .path
+        .as_deref()
+        .map(Path::new)
+        .filter(|path| path.is_dir());
+    spawn_editor(launch, current_dir).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1273,6 +1479,177 @@ mod tests {
         let t = tpl("myedit", &["--flag"]);
         let (launch, _) = open_file_launch(&t, "/a/b.rs", None, None);
         assert_eq!(launch.args, vec!["--flag", "/a/b.rs"]);
+    }
+
+    fn open_with(command: &str, args: &[&str]) -> OpenWithApp {
+        OpenWithApp {
+            name: command.to_string(),
+            command: command.to_string(),
+            args: Some(args.iter().map(|s| s.to_string()).collect()),
+            key: None,
+        }
+    }
+
+    #[test]
+    fn open_with_defaults_args_to_the_path_placeholder() {
+        let app = OpenWithApp {
+            name: "Finder".into(),
+            command: "open".into(),
+            args: None,
+            key: None,
+        };
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            ..OpenWithContext::default()
+        };
+        let launch = open_with_launch(&app, &ctx).expect("launch built");
+        assert_eq!(launch.program, "open");
+        assert_eq!(launch.args, vec!["/repo/wt"]);
+        // `open` hands off to Launch Services; never detached.
+        assert_eq!(
+            launch.process_handling,
+            ProcessHandling::MacosApplicationHandoff
+        );
+    }
+
+    #[test]
+    fn open_with_substitutes_every_token() {
+        let app = open_with(
+            "open",
+            &["-a", "Obsidian", "{path}", "{url}", "{branch}", "{repo}"],
+        );
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            url: Some("https://github.com/acme/widget/pull/7".into()),
+            branch: Some("feat/x".into()),
+            repo: Some("acme/widget".into()),
+        };
+        let launch = open_with_launch(&app, &ctx).expect("launch built");
+        assert_eq!(
+            launch.args,
+            vec![
+                "-a",
+                "Obsidian",
+                "/repo/wt",
+                "https://github.com/acme/widget/pull/7",
+                "feat/x",
+                "acme/widget",
+            ]
+        );
+    }
+
+    #[test]
+    fn open_with_errors_on_a_token_the_workspace_cannot_supply() {
+        let app = open_with("open", &["{url}"]);
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            ..OpenWithContext::default()
+        };
+        let err = open_with_launch(&app, &ctx).unwrap_err();
+        assert!(
+            err.contains("{url}"),
+            "error names the missing token: {err}"
+        );
+    }
+
+    #[test]
+    fn references_path_gates_only_apps_that_use_the_worktree_token() {
+        // Default args are `["{path}"]`, so an omitted-args app needs the
+        // worktree.
+        assert!(
+            OpenWithApp {
+                name: "Finder".into(),
+                command: "open".into(),
+                args: None,
+                key: None,
+            }
+            .references_path()
+        );
+        assert!(open_with("open", &["-a", "Obsidian", "{path}"]).references_path());
+        // A `{url}`-only app (e.g. "open the PR in a browser") has no
+        // worktree dependency — it must NOT be gated as local/session-only.
+        assert!(!open_with("open", &["{url}"]).references_path());
+        assert!(!open_with("open", &["{repo}", "{branch}"]).references_path());
+    }
+
+    #[test]
+    fn is_open_launcher_matches_open_by_file_name() {
+        assert!(is_open_launcher("open"));
+        // An absolute path must still be recognized so it takes the
+        // handoff path rather than being setsid-detached (#1100).
+        assert!(is_open_launcher("/usr/bin/open"));
+        assert!(!is_open_launcher("xdg-open"));
+        assert!(!is_open_launcher("obsidian"));
+    }
+
+    #[test]
+    fn open_with_launch_recognizes_an_absolute_open_path_as_a_handoff() {
+        let app = open_with("/usr/bin/open", &["-a", "Obsidian", "{path}"]);
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            ..OpenWithContext::default()
+        };
+        let launch = open_with_launch(&app, &ctx).expect("launch built");
+        assert_eq!(
+            launch.process_handling,
+            ProcessHandling::MacosApplicationHandoff,
+            "/usr/bin/open must hand off, not be setsid-detached",
+        );
+    }
+
+    #[test]
+    fn missing_token_reports_only_unsatisfiable_tokens() {
+        // Workspace with a URL + branch + repo but no local worktree.
+        let ctx = OpenWithContext {
+            path: None,
+            url: Some("https://x/pr/1".into()),
+            branch: Some("feat".into()),
+            repo: Some("o/r".into()),
+        };
+        // `{url}` app runs even with no worktree.
+        assert!(open_with("open", &["{url}"]).is_actionable(&ctx, false));
+        // `{path}` app can't run when path isn't OK (remote → can't provision).
+        assert_eq!(
+            open_with("open", &["{path}"]).missing_token(&ctx, false),
+            Some("{path}"),
+        );
+        // …but is fine once `{path}` is suppliable (local, provisionable).
+        assert!(open_with("open", &["{path}"]).is_actionable(&ctx, true));
+        // A `{url}` app on a PR-less workspace is not actionable.
+        let bare = OpenWithContext::default();
+        assert_eq!(
+            open_with("open", &["{url}"]).missing_token(&bare, true),
+            Some("{url}"),
+        );
+    }
+
+    #[test]
+    fn command_preview_shows_the_command_and_args() {
+        assert_eq!(
+            open_with("open", &["-a", "Obsidian", "{path}"]).command_preview(),
+            "open -a Obsidian {path}",
+        );
+        assert_eq!(
+            OpenWithApp {
+                name: "Finder".into(),
+                command: "open".into(),
+                args: None,
+                key: None,
+            }
+            .command_preview(),
+            "open",
+        );
+    }
+
+    #[test]
+    fn open_with_detaches_a_non_open_gui_binary() {
+        let app = open_with("obsidian", &["{path}"]);
+        let ctx = OpenWithContext {
+            path: Some("/repo/wt".into()),
+            ..OpenWithContext::default()
+        };
+        let launch = open_with_launch(&app, &ctx).expect("launch built");
+        assert_eq!(launch.process_handling, ProcessHandling::DetachedEditor);
     }
 
     #[test]

@@ -12491,6 +12491,18 @@ mod tests {
             ),
             "an evicted watermark must fall back to a full snapshot, not a truncated delta",
         );
+
+        // Eviction gates ONLY the below-watermark case: a watermark at/after the
+        // oldest retained byte still yields a normal gap-free delta.
+        handle_terminal_delta_request(&config, &sender, id, 6).await;
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Ok(Event::TerminalDelta { terminal_id, from_offset, to_offset, bytes })
+                    if terminal_id == id && from_offset == 6 && to_offset == 11 && bytes == b"world"
+            ),
+            "a still-retained watermark must serve its delta even after older bytes evicted",
+        );
     }
 
     /// The pump's gap recovery must serve a wrapped ring, not drop the torn

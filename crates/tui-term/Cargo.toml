@@ -13,12 +13,5 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 libghostty-vt = { workspace = true }
 
-[dev-dependencies]
-criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-
-[[bench]]
-name = "render_walk"
-harness = false
-
 [lints]
 workspace = true

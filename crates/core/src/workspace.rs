@@ -32,6 +32,7 @@
 use crate::task::{Activity, Task, TaskId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -1080,11 +1081,20 @@ impl Workspace {
     /// reports its repo. `None` for a repo-less/local/Linear workspace,
     /// or a GitHub key whose owner-or-repo boundary is ambiguous
     /// ([`crate::ProjectKey::unambiguous_github_slug`]).
-    pub fn repo_slug(&self) -> Option<String> {
-        if let Some(repo) = self.primary_task().and_then(|task| task.repo.clone()) {
-            return Some(repo);
+    ///
+    /// Returns a [`Cow`] so the authoritative task-repo path borrows
+    /// `task.repo` with no allocation — this is called once per render
+    /// frame from the focus-mode header, and the previous `.clone()`
+    /// allocated a fresh `String` every frame for a value that is static
+    /// between polls. Only the project-key fallback, which *synthesizes*
+    /// the slug, owns its `String`.
+    pub fn repo_slug(&self) -> Option<Cow<'_, str>> {
+        if let Some(repo) = self.primary_task().and_then(|task| task.repo.as_deref()) {
+            return Some(Cow::Borrowed(repo));
         }
-        workspace_project_key(self).and_then(|key| key.unambiguous_github_slug())
+        workspace_project_key(self)
+            .and_then(|key| key.unambiguous_github_slug())
+            .map(Cow::Owned)
     }
 }
 

@@ -108,6 +108,31 @@ local terminal's ring + scrollback file. On the wire this is one new command,
 a straight generalization of the existing `RequestTerminalResync{required_seq}`
 (`ipc/src/lib.rs:790`) from "whole ring" to "since N".
 
+> **Phase 1 shipped — divergence from the sketch above (#1095/#1097).** The
+> landed primitive differs from this design, and the ADR is deliberately left
+> un-reconciled on one point because the right resolution needs the Phase-2
+> consumer, which does not exist yet:
+> - **Cursor is a byte offset, not `seq`.** `read_since` is cursored on the ring's
+>   `total_written` (live bytes since spawn), and the wire command is
+>   `RequestTerminalDelta { terminal_id, since_offset }` — byte-addressed to match
+>   the byte ring, not the per-chunk `seq` sketched here. `OutputSource` /
+>   `latest_offset()` were not added to the backend trait; only `read_since`
+>   shipped (`DaemonPty::total_written` exists but is not yet on the wire).
+> - **No `covers_offset`; eviction returns nothing.** `OutputDelta` dropped the
+>   `covers_offset` field. When the ring has evicted the requested watermark the
+>   daemon replies `TerminalDeltaUnavailable` (mirroring `TerminalResyncUnavailable`)
+>   instead of a truncated suffix, so a caller never resets a parser onto a tail
+>   that can begin mid-UTF-8 / mid-CSI.
+> - **Open question for Phase 2.** The `None`-on-eviction choice assumes the consumer
+>   would feed the delta to a *VT parser reset*. If Phase 2 instead splices bytes into
+>   the ring + scrollback file (as "Transfer =" above intends) and rebuilds the
+>   display from the *trimmed* scrollback, then the retained suffix is harmless and
+>   the original `covers_offset` design preserved *more* degraded-path history.
+>   Reconcile against the real consumer's consumption model: keep `None`-on-eviction,
+>   or restore the suffix + `covers_offset`. Likewise decide there whether the
+>   resume-after-fallback cursor comes from a wire `latest_offset()` or from
+>   `ReplaySnapshot.last_seq`.
+
 **Ring-window, not a durable append log** (the issue's headline open question):
 
 - **Fidelity is the agent transcript's job, not the ring's.** For a resumable
@@ -265,8 +290,9 @@ Each phase is independently landable and useful; 1–2 have no box dependency.
 ## Risks / decisions
 
 - **Ring-window loses deep scrollback for the degraded path.** Accepted:
-  `covers_offset=false` makes it explicit; resumable agents are unaffected
-  because resume replays the transcript.
+  truncation is explicit — the sketch used `covers_offset=false`, the shipped
+  Phase 1 uses `TerminalDeltaUnavailable` (see the Phase-1 divergence note above);
+  resumable agents are unaffected because resume replays the transcript.
 - **`wip: transfer` auto-commit mutates history on the pushable path.** Named to
   the user; reversible with a normal `git reset` after transfer. The bundle path
   avoids it entirely.

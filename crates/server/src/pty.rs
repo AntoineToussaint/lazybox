@@ -385,6 +385,38 @@ impl ReplayRing {
     pub fn is_complete(&self) -> bool {
         self.total_written == self.buf.len() as u64
     }
+
+    /// Absolute position — in the terminal's lifetime output stream — of
+    /// the oldest byte still retained. Everything below this has been
+    /// evicted. The ring holds `[oldest_offset(), total_written)`.
+    pub fn oldest_offset(&self) -> u64 {
+        self.total_written - self.buf.len() as u64
+    }
+
+    /// Retained bytes at absolute position `>= from`, in stream order,
+    /// together with whether `from` was still inside the retained window
+    /// — the delta a transferring puller splices (#1089). `true` ⇒ the
+    /// bytes are the gap-free continuation from `from`; `false` ⇒ older
+    /// bytes were evicted and the bytes are only the retained suffix, so
+    /// the caller must NOT append or reset onto them (an evicted tail can
+    /// begin mid-UTF-8 / mid-CSI) — it discards them and falls back to a
+    /// full snapshot. A `from` past `total_written` (caller already
+    /// current) yields empty bytes and `true`.
+    pub fn read_since(&self, from: u64) -> (Vec<u8>, bool) {
+        let oldest = self.oldest_offset();
+        let covers = from >= oldest;
+        let start = from.clamp(oldest, self.total_written);
+        let skip = (start - oldest) as usize;
+        let (front, back) = (&self.buf[self.head..], &self.buf[..self.head]);
+        let mut out = Vec::new();
+        if skip < front.len() {
+            out.extend_from_slice(&front[skip..]);
+            out.extend_from_slice(back);
+        } else {
+            out.extend_from_slice(&back[skip - front.len()..]);
+        }
+        (out, covers)
+    }
 }
 
 /// Append-backed on-disk mirror of a terminal's output, keeping the
@@ -1110,6 +1142,35 @@ impl DaemonPty {
     pub async fn total_written(&self) -> u64 {
         self.ring.lock().await.total_written
     }
+
+    /// A gap-free delta of the output bytes emitted since byte offset
+    /// `from` — the delta pull session transfer reads
+    /// (`docs/session-transfer-adr.md`, #1089). The offset counts live
+    /// reader bytes since spawn (the ring's `total_written`), matching
+    /// [`Self::total_written`] — NOT chunk seqs, and excluding the durable
+    /// reattach seed (a reconstruction baseline, delivered by
+    /// `snapshot_only`). `to_offset` is the current high-water; pass it
+    /// back as `from` for the next incremental pull.
+    ///
+    /// `None` when `from` predates the oldest retained byte: the ring
+    /// already evicted that watermark, so no gap-free delta exists and the
+    /// caller must fall back to the full-snapshot path (which rebuilds a
+    /// clean VT baseline) rather than reset onto an untrimmed ring tail
+    /// that can begin mid-UTF-8 / mid-CSI. Mirrors `TerminalResync` →
+    /// `TerminalResyncUnavailable`.
+    pub async fn read_since(&self, from: u64) -> Option<crate::backend::OutputDelta> {
+        let ring = self.ring.lock().await;
+        let to_offset = ring.total_written;
+        let (bytes, covers) = ring.read_since(from);
+        if !covers {
+            return None;
+        }
+        Some(crate::backend::OutputDelta {
+            from_offset: from.min(to_offset),
+            to_offset,
+            bytes,
+        })
+    }
 }
 
 /// Open a per-PTY capture file when `LAZYBOX_CAPTURE_PTY=<dir>` is set,
@@ -1248,6 +1309,56 @@ mod ring_tests {
         // Total: 7 bytes written, last 5 retained: "cdefg".
         assert_eq!(r.snapshot(), b"cdefg");
         assert_eq!(r.total_written, 7);
+    }
+
+    #[test]
+    fn read_since_full_window_is_gap_free() {
+        let mut r = ReplayRing::with_capacity(16);
+        r.push(b"hello world"); // 11 bytes, nothing evicted
+        assert_eq!(r.oldest_offset(), 0);
+        let (out, covers) = r.read_since(0);
+        assert!(covers);
+        assert_eq!(out, b"hello world");
+        let (out, covers) = r.read_since(6);
+        assert!(covers);
+        assert_eq!(out, b"world");
+        // Caller already current — empty delta, still gap-free.
+        let (out, covers) = r.read_since(11);
+        assert!(covers);
+        assert!(out.is_empty());
+        // Caller ahead of us (shouldn't happen) clamps to empty.
+        let (out, covers) = r.read_since(99);
+        assert!(covers);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn read_since_across_wrap_boundary() {
+        let mut r = ReplayRing::with_capacity(5);
+        r.push(b"abc");
+        r.push(b"def");
+        r.push(b"g");
+        // Retained "cdefg" (positions 2..7); the ring wrapped, head != 0.
+        assert_eq!(r.oldest_offset(), 2);
+        // Exactly at the oldest retained byte — gap-free suffix.
+        let (out, covers) = r.read_since(2);
+        assert!(covers);
+        assert_eq!(out, b"cdefg");
+        // Mid-window, crossing the internal segment split.
+        let (out, covers) = r.read_since(4);
+        assert!(covers);
+        assert_eq!(out, b"efg");
+        // A watermark that lands in the wrapped-back segment.
+        let (out, covers) = r.read_since(6);
+        assert!(covers);
+        assert_eq!(out, b"g");
+        // Below the eviction boundary — NOT covered. The caller discards
+        // these bytes and falls back to a full snapshot rather than reset
+        // onto them (they may begin mid-sequence).
+        let (_out, covers) = r.read_since(0);
+        assert!(!covers);
+        let (_out, covers) = r.read_since(1);
+        assert!(!covers);
     }
 
     #[test]

@@ -1977,6 +1977,10 @@ mod search_tests {
     fn issue_ws_in_repo(repo: &str, num: &str, title: &str) -> Workspace {
         let mut t = base_task();
         t.id.key = format!("{repo}#{num}");
+        // `group_label` keys on `task.repo`, so set it too — otherwise every
+        // workspace inherits base_task's fixed repo and collapses into one
+        // group regardless of the `repo` argument.
+        t.repo = Some(repo.to_string());
         t.title = title.into();
         t.url = format!("https://github.com/{repo}/issues/{num}");
         let mut w = Workspace::from_task(t, chrono::Utc::now());
@@ -2304,6 +2308,123 @@ mod search_tests {
 
     fn search_bar_row(sb: &mut Sidebar) -> String {
         search_bar_row_at(sb, 60)
+    }
+
+    /// Render the whole sidebar to a newline-joined string of cell
+    /// symbols, for asserting on content-area panels.
+    fn full_screen(sb: &mut Sidebar, width: u16, height: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// While the bar is capturing keystrokes it reads as an unmistakable
+    /// field: the `🔍` glyph, the vim `/` prefix, the typed query, and a
+    /// solid block cursor (#1099).
+    #[test]
+    fn editing_search_bar_is_a_prominent_field_with_a_block_cursor() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_search();
+        type_query(&mut sb, "al");
+        let bar = search_bar_row(&mut sb);
+        assert!(bar.contains('🔍'), "search glyph present: {bar:?}");
+        assert!(bar.contains('█'), "block cursor while editing: {bar:?}");
+        assert!(bar.contains("al"), "shows the typed query: {bar:?}");
+    }
+
+    /// A search that filters every workspace away shows an explicit
+    /// empty-state panel — naming the query and the Esc exit — instead of
+    /// a blank pane that reads as "everything vanished / broke" (#1099).
+    #[test]
+    fn empty_search_result_shows_a_no_matches_panel() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.open_global_search();
+        type_query(&mut sb, "zzzqqq");
+        assert_eq!(sb.workspace_count(), 0, "the query matches nothing");
+        let screen = full_screen(&mut sb, 46, 16);
+        assert!(
+            screen.contains("No matches"),
+            "explicit empty state: {screen:?}"
+        );
+        assert!(
+            screen.contains("Esc to clear"),
+            "names the exit: {screen:?}"
+        );
+    }
+
+    /// The highlight set tracks the search's *scope*, not raw title text:
+    /// under a scoped `/` search, an out-of-scope row whose title happens
+    /// to contain the query is left visible but NOT highlighted, exactly as
+    /// the filter leaves it untouched. Guards the filter/highlight from
+    /// drifting apart (#1099) — both read `search_scope_covers`.
+    #[test]
+    fn scoped_highlight_set_tracks_filter_scope_not_title_text() {
+        // Distinct repo groups (`o/a`, `o/b`) so the scoped search pins to
+        // one and the other stays out of scope.
+        let a = issue_ws_in_repo("o/a", "1", "Add search bar");
+        let b = issue_ws_in_repo("o/b", "2", "search everywhere");
+        let a_key = SessionKey::from(&a.key);
+        let b_key = SessionKey::from(&b.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(b_key.clone(), b);
+        sb.recompute_visible();
+        // Cursor lands on the first (alphabetically `o/a`) workspace, so the
+        // scoped `/` search pins to `o/a`.
+        sb.open_search();
+        type_query(&mut sb, "search");
+        assert!(
+            sb.searched_keys.contains(&a_key),
+            "the in-scope match is highlighted",
+        );
+        assert!(
+            !sb.searched_keys.contains(&b_key),
+            "an out-of-scope row is not highlighted even though its title contains the term",
+        );
+        assert_eq!(
+            sb.workspace_count(),
+            2,
+            "the out-of-scope row stays visible (scoped search leaves other repos untouched)",
+        );
+    }
+
+    /// A matching row underlines the searched substring in its title so
+    /// the user can see *what* matched — the vim `/pattern` cue (#1099).
+    #[test]
+    fn matching_rows_underline_the_searched_substring() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut sb = sidebar_with_issues(&[("1", "Add Search bar")]);
+        sb.open_search();
+        type_query(&mut sb, "Search");
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let underlined = (0..buffer.area.height).any(|y| {
+            (0..buffer.area.width).any(|x| {
+                let cell = &buffer[(x, y)];
+                cell.modifier.contains(ratatui::style::Modifier::UNDERLINED)
+                    && "Search".contains(cell.symbol())
+                    && !cell.symbol().trim().is_empty()
+            })
+        });
+        assert!(underlined, "the matched substring is underlined in the row");
     }
 
     /// A scoped `/` search names the project it's pinned to and points

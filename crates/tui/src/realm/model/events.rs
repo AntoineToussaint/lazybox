@@ -976,6 +976,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentAuthReplay { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
+                | IpcEvent::TerminalDelta { .. }
+                | IpcEvent::TerminalDeltaUnavailable { .. }
                 | IpcEvent::TerminalScrollback { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }
@@ -1815,6 +1817,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentAuthReplay { .. }
             | IpcEvent::TerminalResync { .. }
             | IpcEvent::TerminalResyncUnavailable { .. }
+            | IpcEvent::TerminalDelta { .. }
+            | IpcEvent::TerminalDeltaUnavailable { .. }
             | IpcEvent::TerminalScrollback { .. }
             | IpcEvent::TerminalExited { .. }
             | IpcEvent::TerminalFocusRequested { .. }
@@ -2083,6 +2087,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentAuthReplay { .. }
                 | IpcEvent::TerminalResync { .. }
                 | IpcEvent::TerminalResyncUnavailable { .. }
+                | IpcEvent::TerminalDelta { .. }
+                | IpcEvent::TerminalDeltaUnavailable { .. }
                 | IpcEvent::TerminalScrollback { .. }
                 | IpcEvent::TerminalExited { .. }
                 | IpcEvent::TerminalFocusRequested { .. }

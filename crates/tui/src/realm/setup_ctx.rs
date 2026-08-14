@@ -125,6 +125,10 @@ pub enum SettingsAction {
     /// active theme name so the row shows current state like its
     /// siblings.
     EditTheme { current: String },
+    /// Open the editors panel (#1102) — list / add / edit / remove the
+    /// custom `editors:` apps, hot-reloaded on write. Carries the count
+    /// of configured entries for the row badge.
+    EditEditors { count: usize },
     /// Configure the global LLM gateway base URL (`agent.llm_gateway_url`).
     /// Opens a single URL input; persists to `~/.lazybox/config.yaml`.
     /// `set` is whether a URL is currently configured, for the label.
@@ -175,6 +179,7 @@ impl SettingsAction {
             ),
             Self::EditSnippets => "Browse snippets (]]s<key> shortcuts)".into(),
             Self::EditTheme { current } => format!("Change theme (live preview) · {current}"),
+            Self::EditEditors { count } => format!("Editors · {count} configured"),
             Self::EditLlmGateway { set } => format!(
                 "Configure LLM gateway · {}",
                 if *set { "on" } else { "off" }
@@ -212,7 +217,9 @@ impl SettingsAction {
             | Self::ToggleSkipPermissions { .. }
             | Self::EditLlmGateway { .. }
             | Self::ShellCommand { .. } => SettingsSection::Agents,
-            Self::EditTheme { .. } | Self::EditSnippets => SettingsSection::Appearance,
+            Self::EditTheme { .. } | Self::EditSnippets | Self::EditEditors { .. } => {
+                SettingsSection::Appearance
+            }
             Self::FullSetup
             | Self::CleanWorktrees
             | Self::InspectWorktrees
@@ -362,6 +369,19 @@ mod tests {
             }
             .label(),
             "Default model · codex"
+        );
+    }
+
+    #[test]
+    fn editors_label_counts_configured_entries() {
+        use super::SettingsSection;
+        assert_eq!(
+            SettingsAction::EditEditors { count: 2 }.label(),
+            "Editors · 2 configured"
+        );
+        assert_eq!(
+            SettingsAction::EditEditors { count: 0 }.section(),
+            SettingsSection::Appearance
         );
     }
 

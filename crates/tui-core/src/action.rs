@@ -234,10 +234,12 @@ pub enum Action {
     /// repo group at once, especially for jumping to a PR/issue by
     /// number without knowing its repo.
     OpenGlobalSearch,
-    /// Collapse or expand the repo group the cursor sits in (or on).
+    /// Collapse or expand the repo (or Space) group the cursor sits ON.
     /// Folds a project's workspaces into a single header row — the
-    /// "group the sessions" shortcut. Acts on the list, not a single
-    /// workspace, so it lives in the Sidebar section.
+    /// "group the sessions" shortcut. Gated to header rows so a bare
+    /// `Space` on a workspace row can't fold the group mid-navigation
+    /// (#1099). Acts on the list, not a single workspace, so it lives in
+    /// the Sidebar section.
     ToggleRepoGroup,
     /// Pin or unpin the cursor's repo group to the top of the sidebar.
     /// Pinned groups render first, in pin order; the rest keep the
@@ -1337,7 +1339,7 @@ impl ActionDef {
                 kind: ActionKind::ToggleRepoGroup,
                 default_keys: "Space",
                 label: "collapse group",
-                describe: "Collapse or expand the repo group the cursor is in — fold a project's workspaces into a single header row, and unfold it again. The collapsed set persists across restarts.",
+                describe: "Collapse or expand the repo (or Space) group the cursor sits ON — fold a project's workspaces into a single header row, and unfold it again. Only acts on a header row: on a workspace row a bare Space is inert so it can't fold the group you're navigating. The collapsed set persists across restarts.",
                 section: Section::Sidebar,
             },
             ActionKind::ToggleRepoPin => &Self {

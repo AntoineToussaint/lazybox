@@ -1988,6 +1988,75 @@ mod search_tests {
         w
     }
 
+    /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
+    /// per-frame widget build must stay cheap at scale.
+    /// `prebuild_workspace_lines` rebuilds every visible row every frame
+    /// (audit R-3c, unmemoized); a change that makes a row expensive — the
+    /// #1059-class "compute in the render path" regression — is caught here
+    /// rather than in the field.
+    ///
+    /// Timing is only meaningful in an optimized build (debug carries a
+    /// ~25× penalty), so the assertion is `not(debug_assertions)`-gated and
+    /// the whole test is `#[ignore]`d under debug: CI runs it with
+    /// `cargo test --release -p lazybox-tui sidebar_build_budget`. Under a
+    /// normal debug `cargo test` it is skipped, so it never slows that run.
+    #[cfg_attr(debug_assertions, ignore)]
+    #[test]
+    fn sidebar_build_budget_at_scale() {
+        use ratatui::backend::TestBackend;
+
+        let mut sb = Sidebar::new(PaneId::new(1));
+        // 300 workspaces across 30 repos — a heavy but realistic inbox.
+        for repo in 0..30 {
+            for num in 0..10 {
+                let w = issue_ws_in_repo(
+                    &format!("owner/repo-{repo:02}"),
+                    &format!("{num}"),
+                    &format!("Issue {repo}-{num}: a fairly typical title of moderate length"),
+                );
+                sb.workspaces.insert(SessionKey::from(&w.key), w);
+            }
+        }
+        sb.recompute_visible();
+        let visible = sb.visible.len();
+
+        let backend = TestBackend::new(48, 60);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        // Warm once (first render primes any lazy state).
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .unwrap();
+
+        let iters = 200u32;
+        let start = std::time::Instant::now();
+        for _ in 0..iters {
+            terminal
+                .draw(|frame| sb.render(frame.area(), frame, true))
+                .unwrap();
+        }
+        let per = start.elapsed() / iters;
+        println!(
+            "sidebar build: {visible} visible rows, {:?}/frame ({:.2}ms)",
+            per,
+            per.as_secs_f64() * 1000.0
+        );
+
+        // Release baseline is ~2.85ms for ~300 rows; gate at 20ms leaves
+        // ~7× headroom (no flakiness on a loaded CI box) while still
+        // catching an order-of-magnitude regression. Assertion only in an
+        // optimized build — debug timings are not representative.
+        #[cfg(not(debug_assertions))]
+        {
+            let budget = std::time::Duration::from_millis(20);
+            assert!(
+                per < budget,
+                "sidebar per-frame build {per:?} exceeded the {budget:?} budget \
+                 for {visible} rows — a row got expensive to build (regression \
+                 of the #1090 class). Profile prebuild_workspace_lines."
+            );
+        }
+    }
+
     fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
     }

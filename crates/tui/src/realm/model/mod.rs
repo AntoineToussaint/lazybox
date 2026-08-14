@@ -5594,21 +5594,28 @@ impl<T: TerminalAdapter> Model<T> {
         let focus_mode = self.focus_mode;
         let (focus_title, focus_summary, focus_hint) = if focus_mode {
             let active = self.terminals.active_session();
-            let name = active
+            let workspace = active
                 .and_then(|k| self.sidebar.workspace_by_key(k))
-                .or_else(|| self.sidebar.selected_workspace())
+                .or_else(|| self.sidebar.selected_workspace());
+            let name = workspace
                 .map(|w| w.name.clone())
                 .unwrap_or_else(|| "no workspace".to_string());
+            // The sidebar (hidden in focus mode) is the only place the
+            // repo normally shows, so surface it here too — appended in
+            // parentheses after the workspace name (issue #1118). Uses
+            // the canonical `owner/repo` slug the sidebar groups by.
+            let repo = workspace.and_then(|w| w.repo_slug());
             // Prefix the title with this workspace's jump number (its
             // 1-based slot in the sidebar-order focused roster) so the
             // user knows which `]]<digit>` lands back here. Unnumbered
             // (unfocused) workspaces show no prefix.
             let numbered = self.sidebar.numbered_workspace_keys();
             let number = active.and_then(|k| numbered.iter().position(|a| a == k));
-            let title = match number {
-                Some(i) => format!("{} · {name}", i + 1),
-                None => name,
-            };
+            let title = crate::realm::components::focus_header::compose_title(
+                &name,
+                repo.as_deref(),
+                number,
+            );
             // Inside focus mode the PTY owns the keyboard, so the
             // reachable controls are all `]]` leader chords: `]]<digit>`
             // jumps to another agent, `]]q` exits back to the sidebar.

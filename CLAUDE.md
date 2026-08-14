@@ -227,9 +227,10 @@ failing CI) → hidden → full, remembered per workspace with a
 has no activity), `.`
 toggle focus mode (near-fullscreen agent terminal behind a slim event
 header; from inside a terminal use `]]f`, and `]]q` exits),
-`]]<digit>` jump the focused terminal straight to the Nth agent
-workspace (sidebar order; the number rides a badge on each agent row
-and the `]]` leader popup), `Shift-arrows` resize splitters
+`]]<digit>` jump the focused terminal straight to the Nth **focused**
+(starred) workspace (sidebar order; the number rides a badge on each
+focused row and the `]]` leader popup — only focused workspaces are
+numbered), `Shift-arrows` resize splitters
 (`Shift-←/→` everywhere; `Shift-↑/↓` too, except in the sidebar where
 they extend the multi-select instead — #932), `F8` /
 `Alt-s` / `Ctrl-Alt-s` toggle mouse capture (host-native text
@@ -420,7 +421,7 @@ report; Cmd isn't encoded and most emulators eat it, so don't rely on
 it); both need capture on, while `]]u` works even with capture off.
 `]]f`
 toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
-the Nth agent workspace, and `` ]]` `` opens the fuzzy workspace
+the Nth focused (starred) workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with
 a live body-preview pane, filtering on key+description+category, that

@@ -799,7 +799,7 @@ impl<T: TerminalAdapter> Model<T> {
         );
         rows.extend(
             self.sidebar
-                .agent_workspace_keys()
+                .numbered_workspace_keys()
                 .into_iter()
                 .take(9)
                 .enumerate()
@@ -856,7 +856,7 @@ impl<T: TerminalAdapter> Model<T> {
         // a previous `]]s`-from-the-sidebar target (#871).
         self.leader_target = None;
         match cmd {
-            LeaderCmd::JumpAgent(n) => self.jump_to_agent_workspace(n),
+            LeaderCmd::JumpNumbered(n) => self.jump_to_numbered_workspace(n),
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),

@@ -91,6 +91,23 @@ fn sidebar() -> Sidebar {
     s
 }
 
+/// Star `key` (add it to the focused set) purely in-memory — jump
+/// numbers ride only focused workspaces now. Goes through `apply_config`
+/// rather than `toggle_focus_at_cursor` so the test never writes the
+/// real `ui.focused_workspaces` to disk.
+fn star_workspace(s: &mut Sidebar, key: &SessionKey) {
+    s.apply_config(
+        lazybox_config::AttentionConfig::default(),
+        std::collections::BTreeSet::new(),
+        Vec::new(),
+        vec![key.clone()],
+        Vec::new(),
+        std::collections::BTreeSet::new(),
+        None,
+        &lazybox_config::DisplayConfig::default(),
+    );
+}
+
 fn render_to_string(component: &mut Sidebar, w: u16, h: u16, focused: bool) -> String {
     let backend = TestBackend::new(w, h);
     let mut term = Terminal::new(backend).unwrap();
@@ -169,6 +186,11 @@ fn sidebar_multiple_agent_badges_shows_counts() {
             model_label: None,
         });
     }
+
+    // Jump numbers now ride only focused (starred) workspaces, so star
+    // this row in-memory (via config apply, no disk write) to make its
+    // `]]1` badge render alongside the agent badges.
+    star_workspace(&mut s, &key);
 
     let rendered = render_to_string(&mut s, 40, 8, true);
     assert!(

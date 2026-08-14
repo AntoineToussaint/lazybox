@@ -321,12 +321,12 @@ pub(crate) fn enable_host_terminal() {
 ///
 /// This is the **normal-context** restore (clean exit, panic hook,
 /// graceful-signal task). The fd-1 escape half routes through the off-thread
-/// render writer ([`super::render_writer::write_restore`]) — the sole fd-1
-/// owner — so it serializes behind any in-flight frame and can never
-/// interleave with one and strand the shell (#211 / #1122). Raw mode is a
-/// *termios* change on stdin, not an fd-1 write, so it is restored directly.
-/// The fatal-signal path in [`fatal`] cannot allocate or block and takes the
-/// signal-safe `muzzle_writer` + raw-`write(2)` path instead.
+/// render writer (`render_writer::write_restore`) — the sole fd-1 owner — so it
+/// serializes behind any in-flight frame and can never interleave with one and
+/// strand the shell (#211 / #1122). Raw mode is a *termios* change on stdin,
+/// not an fd-1 write, so it is restored directly. The fatal-signal path in
+/// `fatal` cannot allocate or block and takes the signal-safe `muzzle_writer` +
+/// raw-`write(2)` path instead.
 pub fn restore_host_terminal() {
     if RESTORED.swap(true, Ordering::SeqCst) {
         return;

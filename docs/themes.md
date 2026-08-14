@@ -34,6 +34,7 @@ or renamed) silently falls back to the default palette.
 | Rose Pine | dark |
 | Lazybox Light | light |
 | High Contrast | accessible |
+| Bloomberg Terminal | dark |
 
 ## Slots
 

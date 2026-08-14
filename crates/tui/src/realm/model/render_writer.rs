@@ -31,18 +31,111 @@
 //! a wedged terminal can't hang the exit) lives with the Model; this module
 //! is the transport and is unit-tested in isolation over an in-memory sink.
 //!
-//! Opt-in behind `LAZYBOX_ASYNC_RENDER` for now: the writer is not yet the
-//! *sole* owner of fd 1 (the signal-safe crash restore in `host_terminal`
-//! still writes it directly), so async-by-default would regress the #211
-//! stranded-shell guarantee. Making it default is the terminal-owner
-//! architecture's job (#1045).
+//! **Default since #1045.** The one thing that kept this opt-in — the
+//! signal-safe crash restore and the writer both touching fd 1 — is resolved
+//! by the [`muzzle_writer`] handoff below: a restore path takes fd 1 back
+//! before writing the reset sequence, so it can never interleave with a
+//! half-written frame and strand the shell (#211). `LAZYBOX_SYNC_RENDER=1`
+//! forces the old direct-to-stdout path as an escape hatch.
 
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+// ── fd-1 ownership handoff for crash / panic restore (#1045) ───────────────
+//
+// In async mode the writer thread is the sole writer of fd 1 — *except* the
+// two terminal-restore paths that must run when the writer can't help:
+//   • the fatal-signal handler (`host_terminal::fatal::handle`) — SIGSEGV /
+//     SIGABRT / …, which don't unwind, so it writes the reset sequence with a
+//     raw `write(2)`;
+//   • `restore_host_terminal` on the panic hook, which runs *before* unwinding
+//     tears the writer down, so the writer is still live.
+//
+// If either writes fd 1 while the writer thread is mid-`write()`, the reset
+// bytes interleave with a half-written frame and the shell is left in the
+// alternate screen / raw mode — the #211 stranding this whole feature must not
+// regress. In sync mode there is no such race (flush and handler are the same
+// thread; a signal just interrupts the flush), which is why async was opt-in.
+//
+// The handoff: a restore path calls [`muzzle_writer`] first. It sets
+// `MUZZLED` (the writer then drops any further frame instead of writing it)
+// and bounded-spins until `IN_WRITE` clears, so the writer is guaranteed not
+// to be inside a `write()` when the reset bytes go out. It touches only
+// lock-free atomics and a bounded spin — no locks, no allocation, no
+// unbounded blocking — so it is async-signal-safe. The bound is only ever hit
+// on an already-wedged terminal (writer stuck in `write()`), where the restore
+// is compromised regardless — never worse than the pre-existing sync path.
+
+/// Upper bound on the muzzle spin. A healthy `write(2)` to fd 1 completes in
+/// microseconds, so the spin almost always breaks on the first few
+/// iterations; this cap only bounds the pathological "writer wedged inside
+/// `write()`" case so a crash handler can never hang.
+const MUZZLE_SPIN_LIMIT: u32 = 2_000_000;
+
+/// The fd-1 handoff between the writer thread and a restore path. Two
+/// lock-free flags: `muzzled` (a restore has claimed fd 1; the writer must
+/// stop) and `in_write` (the writer is inside a `write()` right now).
+struct Fd1Handoff {
+    muzzled: AtomicBool,
+    in_write: AtomicBool,
+}
+
+impl Fd1Handoff {
+    const fn new() -> Self {
+        Self {
+            muzzled: AtomicBool::new(false),
+            in_write: AtomicBool::new(false),
+        }
+    }
+
+    fn is_muzzled(&self) -> bool {
+        self.muzzled.load(Ordering::Acquire)
+    }
+
+    /// Bracket the writer's actual fd-1 write, so [`Self::muzzle`] can tell
+    /// when it is safe to write the reset sequence itself.
+    fn enter_write(&self) {
+        self.in_write.store(true, Ordering::SeqCst);
+    }
+    fn exit_write(&self) {
+        self.in_write.store(false, Ordering::Release);
+    }
+
+    /// Claim fd 1 for a direct write: stop the writer from starting another
+    /// write, then bounded-spin until it is demonstrably not mid-write.
+    /// Async-signal-safe — only lock-free atomics and a bounded spin. The
+    /// bound is hit only when the writer is wedged inside `write()` (a
+    /// terminal that stopped accepting output), where the reset is compromised
+    /// either way — never worse than the sync path.
+    fn muzzle(&self) {
+        self.muzzled.store(true, Ordering::SeqCst);
+        let mut spins = 0u32;
+        while self.in_write.load(Ordering::Acquire) {
+            if spins >= MUZZLE_SPIN_LIMIT {
+                break;
+            }
+            spins += 1;
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// The live writer's handoff, published by [`spawn`] (first-wins, one writer
+/// per process). `None` in sync mode, so [`muzzle_writer`] pays nothing.
+static FD1_HANDOFF: OnceLock<Arc<Fd1Handoff>> = OnceLock::new();
+
+/// Take fd 1 back from the off-thread writer before a restore path writes the
+/// terminal-reset sequence directly (crash / panic restore). Async-signal-safe
+/// and a no-op in sync mode. See [`Fd1Handoff::muzzle`].
+pub(crate) fn muzzle_writer() {
+    if let Some(handoff) = FD1_HANDOFF.get() {
+        handoff.muzzle();
+    }
+}
 
 /// How long teardown waits for the writer to drain before giving up and
 /// detaching it (#1090 finding #2). A wedged terminal can block the writer
@@ -143,6 +236,12 @@ pub(super) struct FrameWriter {
     /// wedged terminal can't hang the exit (#1090 finding #2).
     done: Receiver<()>,
     handle: Option<JoinHandle<()>>,
+    /// This writer's fd-1 handoff (also published to the global for the
+    /// signal handler). Retained so tests can drive the muzzle against this
+    /// writer without touching the process-global; production reaches it only
+    /// through the global, so the field is read on the test path alone.
+    #[cfg_attr(not(test), allow(dead_code))]
+    handoff: Arc<Fd1Handoff>,
 }
 
 impl FrameWriter {
@@ -192,6 +291,14 @@ impl FrameWriter {
     fn send_raw_for_test(&self, bytes: &[u8]) {
         let _ = self.tx.send(WriterMsg::Raw(bytes.to_vec()));
     }
+
+    /// This writer's fd-1 handoff, so a test can muzzle it directly (the
+    /// process-global one the signal handler uses is first-wins and shared
+    /// across the suite, so tests drive this per-writer clone instead).
+    #[cfg(test)]
+    fn handoff_for_test(&self) -> Arc<Fd1Handoff> {
+        Arc::clone(&self.handoff)
+    }
 }
 
 impl Drop for FrameWriter {
@@ -214,6 +321,13 @@ pub(super) fn spawn<W: Write + Send + 'static>(mut out: W) -> (ChannelWriter, Fr
     // channel — the single-writer invariant that keeps them from splicing
     // into a frame. `set` only takes the first writer; a process has one.
     let _ = RAW_SINK.set(Mutex::new(tx.clone()));
+    // The fd-1 handoff for the crash/panic restore paths (#1045). Published
+    // to the global so the signal handler's `muzzle_writer` can reach it
+    // (first-wins — one writer per process); the writer thread keeps its own
+    // clone so tests can exercise the handoff without the global.
+    let handoff = Arc::new(Fd1Handoff::new());
+    let _ = FD1_HANDOFF.set(Arc::clone(&handoff));
+    let handoff_thread = Arc::clone(&handoff);
 
     let handle = std::thread::Builder::new()
         .name("lazybox-render-writer".to_string())
@@ -222,25 +336,48 @@ pub(super) fn spawn<W: Write + Send + 'static>(mut out: W) -> (ChannelWriter, Fr
                 match msg {
                     WriterMsg::Frame(bytes) => {
                         let n = bytes.len();
-                        // The blocking write — but on THIS thread, not the
-                        // input/render thread.
+                        // A restore path has claimed fd 1 (crash / panic):
+                        // drop the frame rather than interleave with the reset
+                        // sequence it's about to write (#1045). Still account
+                        // it as drained so the backpressure gate can't stall.
+                        if handoff_thread.is_muzzled() {
+                            pending_thread.fetch_sub(n, Ordering::AcqRel);
+                            continue;
+                        }
+                        // `enter/exit_write` brackets the fd-1 write so
+                        // `muzzle` can spin until we're demonstrably not
+                        // mid-write. The blocking write is on THIS thread, not
+                        // the input/render thread.
+                        handoff_thread.enter_write();
                         let _ = out.write_all(&bytes);
                         let _ = out.flush();
+                        handoff_thread.exit_write();
                         pending_thread.fetch_sub(n, Ordering::AcqRel);
                     }
                     WriterMsg::Raw(bytes) => {
+                        if handoff_thread.is_muzzled() {
+                            continue;
+                        }
+                        handoff_thread.enter_write();
                         let _ = out.write_all(&bytes);
                         let _ = out.flush();
+                        handoff_thread.exit_write();
                     }
                     WriterMsg::Shutdown => break,
                 }
             }
             // A Shutdown can race ahead of trailing work already queued;
-            // drain it so the final screen state reaches the terminal.
+            // drain it so the final screen state reaches the terminal —
+            // unless a restore path muzzled us (panic teardown: the reset
+            // sequence is already on fd 1, and replaying these queued frames
+            // would clobber it). On the clean-exit path muzzle is unset and
+            // this drains normally.
             while let Ok(msg) = rx.try_recv() {
                 match msg {
                     WriterMsg::Frame(bytes) | WriterMsg::Raw(bytes) => {
-                        let _ = out.write_all(&bytes);
+                        if !handoff_thread.is_muzzled() {
+                            let _ = out.write_all(&bytes);
+                        }
                     }
                     WriterMsg::Shutdown => {}
                 }
@@ -264,16 +401,17 @@ pub(super) fn spawn<W: Write + Send + 'static>(mut out: W) -> (ChannelWriter, Fr
             tx,
             done: done_rx,
             handle: Some(handle),
+            handoff,
         },
     )
 }
 
-/// The `io::Write` the ratatui `CrosstermBackend` targets. `Sync` is the
-/// pre-#1090 behavior — writes go straight to stdout on the render thread;
-/// `Async` routes them through the off-thread [`ChannelWriter`]. Keeping
-/// both behind one enum means a single `Model`/adapter type and a flag that
-/// only changes the sink — the default (`Sync`) is byte-for-byte the old
-/// path, so it carries no risk while the async path is validated.
+/// The `io::Write` the ratatui `CrosstermBackend` targets. `Async` (the
+/// default since #1045) routes writes through the off-thread
+/// [`ChannelWriter`]; `Sync` is the `LAZYBOX_SYNC_RENDER` escape hatch that
+/// writes stdout straight from the render thread (the pre-#1090 behavior).
+/// Keeping both behind one enum means a single `Model`/adapter type and a
+/// flag that only changes the sink.
 pub enum RenderSink {
     Sync(io::Stdout),
     Async(ChannelWriter),
@@ -296,8 +434,8 @@ impl Write for RenderSink {
 }
 
 /// A `tuirealm::TerminalAdapter` whose backend writes through [`RenderSink`]
-/// — direct stdout by default, or the off-thread writer when
-/// `LAZYBOX_ASYNC_RENDER` is set. Replaces `CrosstermTerminalAdapter` as the
+/// — the off-thread writer by default, or direct stdout under
+/// `LAZYBOX_SYNC_RENDER`. Replaces `CrosstermTerminalAdapter` as the
 /// production adapter; the host-terminal *modes* (raw / alt screen / mouse /
 /// paste / focus / kitty) are still owned by `host_terminal`, so this
 /// adapter's mode methods are intentionally no-ops.
@@ -311,21 +449,20 @@ pub struct AsyncCrosstermAdapter {
 }
 
 impl AsyncCrosstermAdapter {
-    /// Build the production adapter. Direct-to-stdout (the pre-#1090 path)
-    /// by **default**; `LAZYBOX_ASYNC_RENDER=1` opts into the off-thread
-    /// writer, which keeps a slow terminal write off the input thread so
-    /// keystrokes and modals never freeze behind it (#1090). Opt-in — not
-    /// default — until the terminal-owner architecture makes the writer the
-    /// sole owner of fd 1 (frames, OSC, mouse, setup/teardown, crash
-    /// restore) and thus crash-safe (#1045); today the fatal-signal restore
-    /// and the writer thread can both touch fd 1, so async-by-default would
-    /// regress the #211 stranded-shell guarantee.
+    /// Build the production adapter. The off-thread writer is now the
+    /// **default** (#1045): the flush runs on its own thread, so a slow /
+    /// wedged terminal can never freeze the input thread — the #1090 freeze.
+    /// The fd-1 handoff ([`muzzle_writer`]) makes the crash / panic restore
+    /// safe against the writer, so this no longer regresses the #211
+    /// stranded-shell guarantee. `LAZYBOX_SYNC_RENDER=1` forces the old
+    /// direct-to-stdout path as an escape hatch.
     pub(crate) fn new() -> io::Result<Self> {
-        let (sink, writer) = if std::env::var_os("LAZYBOX_ASYNC_RENDER").is_some() {
+        let force_sync = std::env::var_os("LAZYBOX_SYNC_RENDER").is_some();
+        let (sink, writer) = if force_sync {
+            (RenderSink::Sync(io::stdout()), None)
+        } else {
             let (channel_writer, frame_writer) = spawn(io::stdout());
             (RenderSink::Async(channel_writer), Some(frame_writer))
-        } else {
-            (RenderSink::Sync(io::stdout()), None)
         };
         let backend = ratatui::backend::CrosstermBackend::new(sink);
         let terminal = ratatui::Terminal::new(backend)?;
@@ -553,6 +690,80 @@ mod tests {
         handle.shutdown();
         assert_eq!(recorded.lock().unwrap().as_slice(), b"abbccc");
         assert_eq!(pending.load(Ordering::Acquire), 0);
+    }
+
+    /// #1045: once a restore path muzzles the writer (it has claimed fd 1 for
+    /// a crash / panic reset), the writer must stop writing — no further frame
+    /// may reach fd 1 and interleave with the reset sequence.
+    #[test]
+    fn a_muzzled_writer_stops_touching_fd1() {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let sink = SharedSink(Arc::clone(&recorded));
+        let (mut writer, mut handle) = spawn(sink);
+        let pending = handle.pending_handle();
+        let handoff = handle.handoff_for_test();
+
+        // A normal frame writes through.
+        writer.write_all(b"[before]").unwrap();
+        writer.flush().unwrap();
+        while pending.load(Ordering::Acquire) != 0 {
+            std::hint::spin_loop();
+        }
+        assert_eq!(recorded.lock().unwrap().as_slice(), b"[before]");
+
+        // A restore path claims fd 1.
+        handoff.muzzle();
+        assert!(handoff.is_muzzled());
+
+        // Anything enqueued now is dropped by the writer (accounted as
+        // drained so the gate can't stall), never written to fd 1.
+        writer.write_all(b"[after-muzzle]").unwrap();
+        writer.flush().unwrap();
+        while pending.load(Ordering::Acquire) != 0 {
+            std::hint::spin_loop();
+        }
+        assert_eq!(
+            recorded.lock().unwrap().as_slice(),
+            b"[before]",
+            "a muzzled writer must not write to fd 1",
+        );
+        // The muzzled frame was already drained above, so shutdown's drain
+        // loop has nothing left to flush — no race.
+        handle.shutdown();
+        assert_eq!(recorded.lock().unwrap().as_slice(), b"[before]");
+    }
+
+    /// The muzzle returns immediately when the writer is not mid-write — the
+    /// common crash case, where the reset sequence then goes out cleanly.
+    #[test]
+    fn muzzle_returns_at_once_when_writer_is_idle() {
+        let handoff = Fd1Handoff::new();
+        let start = std::time::Instant::now();
+        handoff.muzzle();
+        assert!(handoff.is_muzzled());
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "muzzle spun despite the writer being idle: {:?}",
+            start.elapsed(),
+        );
+    }
+
+    /// The muzzle is *bounded*: if the writer is wedged inside `write()`
+    /// (a terminal that stopped draining), the spin gives up rather than
+    /// hanging the crash handler forever. The reset is compromised in that
+    /// case either way — but the handler never hangs.
+    #[test]
+    fn muzzle_is_bounded_when_the_writer_is_stuck_in_write() {
+        let handoff = Fd1Handoff::new();
+        handoff.enter_write(); // simulate a writer wedged mid-write
+        let start = std::time::Instant::now();
+        handoff.muzzle();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "muzzle failed to bound its spin on a wedged writer: {:?}",
+            start.elapsed(),
+        );
+        assert!(handoff.is_muzzled());
     }
 
     /// An empty flush is a no-op — it must not enqueue a zero-length frame

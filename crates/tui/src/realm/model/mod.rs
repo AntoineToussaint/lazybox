@@ -138,6 +138,18 @@ pub enum Id {
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
+    /// Settings "Editors" panel (#1102): lists the custom `editors:`
+    /// entries with an on-PATH badge; `a`/`e`/`d` add / edit / remove.
+    /// Mounted from the Settings palette; each write hot-reloads the
+    /// editor cache so the `e` picker updates without a restart.
+    EditorsPanel,
+    /// Single-line input driving the editors-panel add/edit flow. Add is
+    /// two stages (id → launch command); edit is one (launch command,
+    /// prefilled). The stage + target id live in `ModalFlow::EditorForm`.
+    EditorForm,
+    /// Confirm before removing a custom editor from the panel (#1102).
+    /// The target id lives in `ModalFlow::EditorRemoveConfirm`.
+    EditorRemoveConfirm,
     /// Active setup-wizard step. Each transition unmounts the
     /// previous component at this id and mounts the next; only one
     /// setup step is ever live.
@@ -849,6 +861,12 @@ pub(crate) enum ModalFlow {
     ConvertSession { draft: ConversionDraft },
     /// Prompt-history picker (#523) → resend into this terminal.
     PromptHistory { terminal: lazybox_ipc::TerminalId },
+    /// Editors-panel add/edit form (#1102). Carries the current stage so
+    /// the shared `Id::EditorForm` input knows whether a submit collects
+    /// the id (add, stage 1) or the launch command (add stage 2 / edit).
+    EditorForm { stage: EditorFormStage },
+    /// Editors-panel remove confirm (#1102): the id awaiting a yes/no.
+    EditorRemoveConfirm { id: String },
     /// The tour handed control to the real snippet picker. A confirmed
     /// delivery resumes at `success_step`; cancelling or rejecting the
     /// delivery returns to `return_step`.
@@ -857,6 +875,30 @@ pub(crate) enum ModalFlow {
         return_step: usize,
         success_step: usize,
     },
+}
+
+/// Convert a config `EditorEntry` into the `editors` module's owned
+/// user-entry shape for re-discovery after a Settings write (#1102).
+pub(crate) fn editor_entry_to_user(
+    e: lazybox_config::EditorEntry,
+) -> crate::editors::UserEditorEntry {
+    crate::editors::UserEditorEntry {
+        id: e.id,
+        display: e.display,
+        command: e.command,
+        args: e.args,
+    }
+}
+
+/// Which field the editors-panel form is currently collecting.
+#[derive(Debug, Clone)]
+pub(crate) enum EditorFormStage {
+    /// Add flow, step 1: the stable `id` (also seeds the display name).
+    AwaitId,
+    /// The launch command line. Reached after the id on add, or directly
+    /// on edit (where `id` is fixed and `display` preserves any custom
+    /// name the entry already had).
+    AwaitCommand { id: String, display: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -942,6 +984,15 @@ pub enum Msg {
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
+    /// `a` in the Settings editors panel (#1102) — start the add-editor
+    /// input flow (id → launch command).
+    EditorAdd,
+    /// `e`/Enter in the editors panel — edit the launch command of the
+    /// editor with this id (prefilled with its current command).
+    EditorEdit(String),
+    /// `d`/`x` in the editors panel — remove the editor with this id
+    /// from `editors:` and hot-reload.
+    EditorRemove(String),
     LoadingResolved(PayloadCarrier),
     /// The `Loading` modal's liveness backstop fired — its awaited result
     /// never landed (produced but dropped on an overflowed event channel,
@@ -2596,6 +2647,24 @@ impl<T: TerminalAdapter> Model<T> {
     /// reads from this list; empty list = footer notice on `E`.
     pub fn cache_editors(&mut self, editors: Vec<crate::editors::EditorTemplate>) {
         self.setup.editors = editors;
+    }
+
+    /// Re-merge `editors:` with the builtins and re-detect what's
+    /// installed from an already-loaded config — so an add/edit/remove
+    /// from the Settings editors panel (#1102) takes effect on the next
+    /// `e` without a restart. Mirrors the boot-time discovery and the
+    /// snippet hot-reload handoff (`apply_snippets`); the write already
+    /// persisted the change, so this only refreshes the cached list.
+    /// Takes the config by reference so the post-write path can reuse one
+    /// load for both this and the panel rebuild.
+    pub(crate) fn reload_editors_from(&mut self, cfg: &lazybox_config::Config) {
+        let user = cfg
+            .editors
+            .iter()
+            .cloned()
+            .map(editor_entry_to_user)
+            .collect();
+        self.setup.editors = crate::editors::discover_at_startup(user);
     }
 
     /// Apply `~/.lazybox/config.yaml::attention` +
@@ -4786,6 +4855,9 @@ impl<T: TerminalAdapter> Model<T> {
             enabled: cfg.agent.skip_permissions,
         });
         actions.push(SettingsAction::EditSnippets);
+        actions.push(SettingsAction::EditEditors {
+            count: cfg.editors.len(),
+        });
         actions.push(SettingsAction::EditTheme {
             current: crate::theme::current().name.to_string(),
         });
@@ -4835,6 +4907,12 @@ impl<T: TerminalAdapter> Model<T> {
         // Theme picker is its own live-preview modal — not a wizard step.
         if matches!(action, SettingsAction::EditTheme { .. }) {
             self.mount_theme_picker();
+            return;
+        }
+        // Editors panel is its own list modal that writes straight to
+        // YAML and hot-reloads — no wizard runner, no cached inputs.
+        if matches!(action, SettingsAction::EditEditors { .. }) {
+            self.mount_editors_panel();
             return;
         }
         // LLM gateway editor is a single URL input that writes straight
@@ -4912,6 +4990,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::CheckAgentUpdates | SettingsAction::UpdateAgentClis => return,
             SettingsAction::EditSnippets => return,
             SettingsAction::EditTheme { .. } => return,
+            SettingsAction::EditEditors { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,
             SettingsAction::ShellCommand { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
@@ -5534,6 +5613,9 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.open_snippets_file();
             }
+            Msg::EditorAdd => self.start_editor_add(),
+            Msg::EditorEdit(id) => self.start_editor_edit(&id),
+            Msg::EditorRemove(id) => self.prompt_remove_editor(id),
             // The component's `on(Tick)` already advanced the spinner;
             // here we walk the displayed checklist toward the daemon's
             // truth (gated by the min-dwell) and tear the modal down once

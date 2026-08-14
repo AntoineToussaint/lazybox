@@ -531,6 +531,45 @@ impl<T: TerminalAdapter> Model<T> {
                     Err(e) => self.flash_info(format!("couldn't save config: {e}")),
                 }
             }
+            Some(Id::EditorForm) => {
+                use crate::realm::components::input::Input;
+                use crate::realm::model::EditorFormStage;
+                let stage = match self.modal_flow.take() {
+                    Some(ModalFlow::EditorForm { stage }) => stage,
+                    _ => {
+                        tracing::warn!("editor-form submit without a stashed stage — dropped");
+                        return cmds;
+                    }
+                };
+                let text = text.trim().to_string();
+                match stage {
+                    EditorFormStage::AwaitId => {
+                        // A blank id would collide with itself and can't be
+                        // launched — reject and drop back to the panel.
+                        if text.is_empty() {
+                            self.flash_error("editor id can't be empty");
+                            self.mount_editors_panel();
+                        } else {
+                            // Advance to the launch-command prompt; display
+                            // is left unset so the launch path titlecases
+                            // the id (matching `From<UserEditorEntry>`).
+                            self.set_modal_flow(ModalFlow::EditorForm {
+                                stage: EditorFormStage::AwaitCommand {
+                                    id: text,
+                                    display: None,
+                                },
+                            });
+                            let modal = Input::new("Launch command")
+                                .title("Add editor")
+                                .placeholder("e.g. code {path}");
+                            self.mount_modal(Id::EditorForm, modal);
+                        }
+                    }
+                    EditorFormStage::AwaitCommand { id, display } => {
+                        self.save_editor_entry(&id, display, &text);
+                    }
+                }
+            }
             // RequestReviewers / AddAssignees used to go through an
             // Input modal but were migrated to a `Choice::multi`
             // picker — see `mount_request_reviewers` /
@@ -1121,6 +1160,13 @@ showing keybinding search only",
                 {
                     cmds.extend(self.dispatch_conflict_resolve(&workspace));
                     self.redraw = true;
+                }
+            }
+            Some(Id::EditorRemoveConfirm) => {
+                if let Some(ModalFlow::EditorRemoveConfirm { id }) = self.modal_flow.take()
+                    && yes
+                {
+                    self.remove_editor(&id);
                 }
             }
             Some(Id::CleanWorktreesConfirm) => {

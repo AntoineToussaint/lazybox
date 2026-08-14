@@ -4464,8 +4464,8 @@ impl<T: TerminalAdapter> Model<T> {
     /// a footer notice pointing at the config file. The remote / no-
     /// worktree constraints are per-app, not global: only `{path}` apps
     /// need a local, provisioned worktree, so the gate lives in
-    /// [`Self::launch_open_with`] — a `{url}` browser app runs against a
-    /// remote or not-yet-provisioned workspace just like `g o` does.
+    /// `launch_open_with` — a `{url}` browser app runs against a remote or
+    /// not-yet-provisioned workspace just like `g o` does.
     pub fn open_with_picker(&mut self) {
         if self.sidebar.selected_workspace_key().is_none() {
             return;

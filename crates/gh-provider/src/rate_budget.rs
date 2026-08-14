@@ -614,7 +614,7 @@ impl RateBudget {
         for (resource, state) in &self.resources {
             let allowance = if state.reset_at <= wall_now {
                 self.background_credit.remove(resource);
-                expired_window_probe_allowance(resource)
+                expired_window_allowance()
             } else {
                 let grant = sustainable_allowance_exact(
                     state,
@@ -1466,10 +1466,24 @@ fn sustainable_allowance_exact(
 /// so the window was never re-learned — sync stalled for the entire window
 /// even with thousands of points free (observed as a ~300s "sync" with 4796
 /// GraphQL points available). Granting a sweep unit lets exactly one batch
-/// through to refresh the window; the hard `RemoteLow` / `ReserveProtected`
-/// guards in [`RateBudget::admit`] still protect the real reserve once the
-/// fresh headers land, so a genuinely-scarce window can't be overspent here.
-fn expired_window_probe_allowance(_resource: &str) -> u32 {
+/// through to refresh the window.
+///
+/// On an expired window the `RemoteLow` / `ReserveProtected` guards in
+/// [`RateBudget::admit`] are **inert** — they are gated on `reset_at > now` —
+/// so this allowance is the *sole* gate, and the sweep unit is spent
+/// unguarded. That is deliberate, and it is why (unlike the external-burn
+/// floor in [`RateBudget::begin_background_tick`]) the grant is **not** clamped
+/// by `state.remaining`: an expired window's `remaining` is the last value of
+/// the spent, now-elapsed window — characteristically low or zero — so
+/// clamping by it would refuse the batch and re-deadlock the exact case this
+/// fixes. The overspend is bounded and self-correcting instead: at most one
+/// sweep unit is spent unguarded per tick, and the batch's response headers
+/// re-learn the window and re-arm the admit guards immediately (even mid-tick,
+/// for the next admission). The residual exposure is a local clock running
+/// ahead of GitHub's, which classifies a still-live window as expired for the
+/// final skew-seconds of each window; that spends up to one sweep unit against
+/// the real budget before the next observed header clamps it back.
+fn expired_window_allowance() -> u32 {
     MIN_BACKGROUND_TICK_ALLOWANCE
 }
 
@@ -1979,7 +1993,11 @@ mod tests {
         let wall_now = Utc::now();
         let mono_now = Instant::now();
         let mut budget = RateBudget::new(100, 6000.0);
-        // Healthy primary budget, but the observed window has expired.
+        // Healthy primary budget, but the observed window has expired with its
+        // last-seen `remaining` spent down to 0 — the characteristic shape at
+        // window end. The expired grant must NOT be clamped by that stale
+        // `remaining`; clamping (as the non-expired external-burn floor does)
+        // would yield 0 here and re-deadlock the exact case this fixes.
         budget.observe_primary(
             "graphql",
             5000,

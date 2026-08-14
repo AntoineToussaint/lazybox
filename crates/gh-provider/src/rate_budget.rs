@@ -1456,8 +1456,21 @@ fn sustainable_allowance_exact(
     (f64::from(headroom) * interval.as_secs_f64() / reset_secs).min(f64::from(headroom))
 }
 
+/// Allowance for a tick whose rate window looks expired (`reset_at <= now`)
+/// — we haven't observed the fresh window yet, so `remaining` is stale and
+/// the sustainable-rate math can't be trusted.
+///
+/// This must be enough to admit **one complete background sweep unit**, not a
+/// single point. A hot-target batch is one GraphQL query but costs several
+/// points; granting only `1` here refused the batch, so no request went out,
+/// so the window was never re-learned — sync stalled for the entire window
+/// even with thousands of points free (observed as a ~300s "sync" with 4796
+/// GraphQL points available). Granting a sweep unit lets exactly one batch
+/// through to refresh the window; the hard `RemoteLow` / `ReserveProtected`
+/// guards in [`RateBudget::admit`] still protect the real reserve once the
+/// fresh headers land, so a genuinely-scarce window can't be overspent here.
 fn expired_window_probe_allowance(_resource: &str) -> u32 {
-    1
+    MIN_BACKGROUND_TICK_ALLOWANCE
 }
 
 fn percentile(sorted: &[u64], percentile: usize) -> Option<u64> {
@@ -1939,7 +1952,10 @@ mod tests {
         );
 
         let plan = budget.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
-        assert_eq!(plan.graphql_points, 1);
+        // A complete sweep unit, not a single point — enough for a hot-target
+        // batch (one query, several points) to go through and re-learn the
+        // window. The old `1` deadlocked sync (see fn docs).
+        assert_eq!(plan.graphql_points, MIN_BACKGROUND_TICK_ALLOWANCE);
         assert!(!plan.graphql_budget_current);
         budget
             .admit_at(
@@ -1951,6 +1967,44 @@ mod tests {
                 mono_now,
             )
             .expect("expired observation must allow one reset probe");
+    }
+
+    /// #1090-adjacent regression: an expired GraphQL window must admit a
+    /// multi-point hot-target batch, not just a 1-point probe. The old
+    /// `expired_window_probe_allowance == 1` refused the batch, so no query
+    /// re-learned the window and sync stalled for the whole window even with
+    /// the primary budget healthy (a ~300s "sync" with 4796 points free).
+    #[test]
+    fn expired_window_admits_a_multi_point_hot_batch() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        // Healthy primary budget, but the observed window has expired.
+        budget.observe_primary(
+            "graphql",
+            5000,
+            0,
+            5000,
+            wall_now - chrono::Duration::seconds(1),
+            mono_now,
+        );
+        let plan = budget.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
+        assert!(
+            plan.graphql_points >= 5,
+            "an expired window must admit a full sweep unit, got {}",
+            plan.graphql_points,
+        );
+        // A batch costing several points is admitted (not deadlocked).
+        budget
+            .admit_at(
+                ApiResource::Graphql,
+                "hot-target-batch",
+                RequestPriority::Recent,
+                5,
+                wall_now,
+                mono_now,
+            )
+            .expect("expired window must admit a multi-point batch to re-learn itself");
     }
 
     #[test]

@@ -1514,7 +1514,17 @@ impl TaskSource for GhSource {
             .await;
             let governor = self.governor_status();
             log_rate_budget(&governor);
-            self.emit_progress(format!("Governor: {governor}"));
+            // A `Governor:` progress event lights the client's "syncing
+            // github…" spinner. On a tick that did no work because the
+            // governor self-throttled, that spinner is a lie — the tick
+            // driver surfaces the throttle as an explicit rate-limit wait,
+            // and re-lighting the spinner here would flicker over it on
+            // every (agent-hook-driven) wake. Skip it in that case; the
+            // wait event carries the same budget numbers for Shift-D.
+            let self_throttled = matches!(&result, Err(e) if e.is_self_throttle());
+            if !self_throttled {
+                self.emit_progress(format!("Governor: {governor}"));
+            }
             self.persist_sync_cursors().await;
             self.persist_rate_state().await;
             result

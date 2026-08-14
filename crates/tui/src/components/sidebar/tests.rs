@@ -4325,6 +4325,10 @@ mod rebadge_attention_tests {
         ));
         sb.on_event(&Event::WorkspaceUpserted(Box::new(workspace)));
 
+        // Jump numbers now ride only focused (starred) workspaces, so star
+        // the PR row to make its `]]1` badge render alongside the agents.
+        sb.focused_workspaces.push(pr.clone());
+
         let backend = TestBackend::new(40, 10);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal

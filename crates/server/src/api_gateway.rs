@@ -1611,7 +1611,8 @@ pub async fn agents_response(config: &ServerConfig) -> Result<AgentsResponse, Ga
             workspace_name: workspace
                 .map(|workspace| workspace.name.clone())
                 .unwrap_or_default(),
-            repo: workspace.and_then(|workspace| workspace.repo_slug()),
+            repo: workspace
+                .and_then(|workspace| workspace.repo_slug().map(|slug| slug.into_owned())),
             agent: runtime.agent_id,
             state: runtime.agent_state,
             task,

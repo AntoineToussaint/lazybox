@@ -39,6 +39,11 @@ pub enum SandboxStage {
     Zone,
     /// Login user on the box (defaulted).
     User,
+    /// E2B credential guidance: E2B authenticates with an API key from the
+    /// `E2B_API_KEY` environment variable, so the flow surfaces that
+    /// prerequisite instead of silently persisting a box that can't
+    /// authenticate.
+    E2bSignIn,
     /// E2B template id / alias.
     E2bTemplate,
     /// Auto-connect-at-launch toggle.
@@ -82,6 +87,22 @@ impl SandboxDraft {
         Self::default()
     }
 
+    /// Pre-seed a draft from an existing `sandbox:` block so re-running
+    /// onboarding on a configured box carries the current values forward
+    /// (the input steps prefill them via [`Self::input_prefill`]) instead
+    /// of re-asking from blank. Always starts at the provider pick.
+    pub fn from_config(cfg: &SandboxConfig) -> Self {
+        Self {
+            provider: cfg.provider.clone().unwrap_or_default(),
+            project: cfg.project.clone(),
+            zone: cfg.zone.clone(),
+            user: cfg.user.clone(),
+            template: cfg.template.clone(),
+            auto_connect: cfg.auto_connect.unwrap_or(false),
+            stage: SandboxStage::Provider,
+        }
+    }
+
     fn is_gcp(&self) -> bool {
         self.provider == "gcp"
     }
@@ -94,13 +115,37 @@ impl SandboxDraft {
         self.stage = if self.is_gcp() {
             SandboxStage::GcpSignIn
         } else {
-            SandboxStage::E2bTemplate
+            SandboxStage::E2bSignIn
         };
     }
 
     /// Advance past the GCP sign-in guidance to the project question.
     pub fn confirm_gcp_signin(&mut self) {
         self.stage = SandboxStage::Project;
+    }
+
+    /// Advance past the E2B credential guidance to the template question.
+    pub fn confirm_e2b_signin(&mut self) {
+        self.stage = SandboxStage::E2bTemplate;
+    }
+
+    /// The value to prefill the current input step with — the carried-over
+    /// answer (on a re-run) or the field's default. Empty for steps that
+    /// aren't a text input.
+    pub fn input_prefill(&self) -> String {
+        match self.stage {
+            SandboxStage::Project => self.project.clone().unwrap_or_default(),
+            SandboxStage::Zone => self
+                .zone
+                .clone()
+                .unwrap_or_else(|| DEFAULT_ZONE.to_string()),
+            SandboxStage::User => self
+                .user
+                .clone()
+                .unwrap_or_else(|| DEFAULT_USER.to_string()),
+            SandboxStage::E2bTemplate => self.template.clone().unwrap_or_default(),
+            _ => String::new(),
+        }
     }
 
     /// Record the GCP project and advance to the zone question.
@@ -210,9 +255,66 @@ mod tests {
     fn e2b_walk_skips_gcp_only_steps() {
         let mut d = SandboxDraft::new();
         d.set_provider("e2b");
+        assert_eq!(d.stage, SandboxStage::E2bSignIn);
+        d.confirm_e2b_signin();
         assert_eq!(d.stage, SandboxStage::E2bTemplate);
         d.set_template("lazybox-e2b");
         assert_eq!(d.stage, SandboxStage::AutoConnect);
+    }
+
+    #[test]
+    fn from_config_carries_values_forward_at_the_provider_step() {
+        let cfg = SandboxConfig {
+            provider: Some("gcp".into()),
+            project: Some("keep-proj".into()),
+            zone: Some("europe-west1-b".into()),
+            user: Some("dev".into()),
+            auto_connect: Some(true),
+            ..SandboxConfig::default()
+        };
+        let d = SandboxDraft::from_config(&cfg);
+        assert_eq!(
+            d.stage,
+            SandboxStage::Provider,
+            "always re-picks the provider"
+        );
+        assert_eq!(d.project.as_deref(), Some("keep-proj"));
+        assert_eq!(d.zone.as_deref(), Some("europe-west1-b"));
+        assert_eq!(d.user.as_deref(), Some("dev"));
+        assert!(d.auto_connect);
+    }
+
+    #[test]
+    fn input_prefill_uses_carried_values_then_defaults() {
+        // Seeded draft: prefills carry the existing value.
+        let cfg = SandboxConfig {
+            provider: Some("gcp".into()),
+            project: Some("keep-proj".into()),
+            zone: Some("us-east1-b".into()),
+            ..SandboxConfig::default()
+        };
+        let mut d = SandboxDraft::from_config(&cfg);
+        d.set_provider("gcp");
+        d.confirm_gcp_signin();
+        assert_eq!(
+            d.input_prefill(),
+            "keep-proj",
+            "project prefilled from config"
+        );
+        d.stage = SandboxStage::Zone;
+        assert_eq!(
+            d.input_prefill(),
+            "us-east1-b",
+            "zone prefilled from config"
+        );
+        // Fresh draft: prefills fall back to the field defaults.
+        let mut fresh = SandboxDraft::new();
+        fresh.stage = SandboxStage::Zone;
+        assert_eq!(fresh.input_prefill(), DEFAULT_ZONE);
+        fresh.stage = SandboxStage::User;
+        assert_eq!(fresh.input_prefill(), DEFAULT_USER);
+        fresh.stage = SandboxStage::Project;
+        assert_eq!(fresh.input_prefill(), "");
     }
 
     #[test]

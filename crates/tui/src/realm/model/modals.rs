@@ -988,7 +988,14 @@ impl<T: TerminalAdapter> Model<T> {
         ) {
             return;
         }
-        self.mount_sandbox_stage(crate::sandbox_flow::SandboxDraft::new());
+        // Pre-seed from any existing block so re-running on a configured box
+        // carries the current values into the prompts instead of re-asking
+        // from blank (#1112 review). A fresh machine seeds an empty draft.
+        let draft = match lazybox_config::Config::load() {
+            Ok(cfg) => crate::sandbox_flow::SandboxDraft::from_config(&cfg.sandbox),
+            Err(_) => crate::sandbox_flow::SandboxDraft::new(),
+        };
+        self.mount_sandbox_stage(draft);
     }
 
     /// Mount the modal for `draft.stage` and stash the draft in
@@ -1000,6 +1007,10 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::sandbox_flow::{DEFAULT_USER, DEFAULT_ZONE, PROVIDERS, SandboxStage};
 
         let stage = draft.stage;
+        // Prefill for the text-input steps — the carried-over answer on a
+        // re-run, else the field default (computed before the draft moves
+        // into the flow).
+        let prefill = draft.input_prefill();
         self.set_modal_flow(ModalFlow::SandboxOnboarding { draft });
         match stage {
             SandboxStage::Provider => {
@@ -1025,30 +1036,43 @@ impl<T: TerminalAdapter> Model<T> {
                 .default_yes();
                 self.mount_modal(Id::SandboxConfirm, modal);
             }
+            SandboxStage::E2bSignIn => {
+                // E2B has no interactive login: it reads an API key from the
+                // environment. Surface that prerequisite rather than persist a
+                // box that can't authenticate.
+                let modal = Confirm::new(
+                    "E2B authenticates with an API key. Set `E2B_API_KEY` in the environment \
+                     lazybox runs in (then relaunch), and choose Yes to continue.",
+                )
+                .default_yes();
+                self.mount_modal(Id::SandboxConfirm, modal);
+            }
             SandboxStage::Project => {
                 let modal = Input::new("GCP project id")
                     .title("Set up remote sandbox")
-                    .placeholder("e.g. my-gcp-project");
+                    .placeholder("e.g. my-gcp-project")
+                    .with_input(prefill);
                 self.mount_modal(Id::SandboxInput, modal);
             }
             SandboxStage::Zone => {
                 let modal = Input::new("GCE zone")
                     .title("Set up remote sandbox")
                     .placeholder(format!("default {DEFAULT_ZONE}"))
-                    .with_input(DEFAULT_ZONE);
+                    .with_input(prefill);
                 self.mount_modal(Id::SandboxInput, modal);
             }
             SandboxStage::User => {
                 let modal = Input::new("Login user on the box")
                     .title("Set up remote sandbox")
                     .placeholder(format!("default {DEFAULT_USER}"))
-                    .with_input(DEFAULT_USER);
+                    .with_input(prefill);
                 self.mount_modal(Id::SandboxInput, modal);
             }
             SandboxStage::E2bTemplate => {
                 let modal = Input::new("E2B template id")
                     .title("Set up remote sandbox")
-                    .placeholder("e.g. lazybox-e2b");
+                    .placeholder("e.g. lazybox-e2b")
+                    .with_input(prefill);
                 self.mount_modal(Id::SandboxInput, modal);
             }
             SandboxStage::AutoConnect => {

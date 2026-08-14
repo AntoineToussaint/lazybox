@@ -21968,8 +21968,9 @@ mod remote_spawn_tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// The E2B walk skips the GCP-only steps: provider → template →
-    /// auto-connect, persisting the template and no `project`/`zone`.
+    /// The E2B walk skips the GCP-only steps: provider → API-key gate →
+    /// template → auto-connect, persisting the template and no
+    /// `project`/`zone`.
     #[test]
     fn sandbox_onboarding_e2b_walk_persists_template() {
         let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -21985,8 +21986,14 @@ mod remote_spawn_tests {
         let _ = m.handle_choice_picked(vec![ChoicePayload::Text("e2b".into())]);
         assert_eq!(
             m.modal_stack.last(),
+            Some(&Id::SandboxConfirm),
+            "e2b advances to the API-key gate",
+        );
+        let _ = m.handle_confirmed(true);
+        assert_eq!(
+            m.modal_stack.last(),
             Some(&Id::SandboxInput),
-            "e2b jumps straight to the template prompt",
+            "API-key gate advances to the template prompt",
         );
         let _ = m.handle_input_submitted("lazybox-e2b".into());
         assert_eq!(

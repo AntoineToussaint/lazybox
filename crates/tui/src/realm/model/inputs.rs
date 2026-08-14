@@ -1205,13 +1205,18 @@ showing keybinding search only",
                 use crate::sandbox_flow::SandboxStage;
                 if let Some(ModalFlow::SandboxOnboarding { mut draft }) = self.modal_flow.take() {
                     match draft.stage {
-                        // Sign-in gate: Yes continues the walk; No abandons
-                        // onboarding (the flow was already taken above).
+                        // Sign-in / credential gate: Yes continues the walk;
+                        // No abandons onboarding (the flow was already taken
+                        // above).
                         SandboxStage::GcpSignIn if yes => {
                             draft.confirm_gcp_signin();
                             self.mount_sandbox_stage(draft);
                         }
-                        SandboxStage::GcpSignIn => {}
+                        SandboxStage::E2bSignIn if yes => {
+                            draft.confirm_e2b_signin();
+                            self.mount_sandbox_stage(draft);
+                        }
+                        SandboxStage::GcpSignIn | SandboxStage::E2bSignIn => {}
                         // Final answer: record the toggle either way and
                         // persist the collected config.
                         SandboxStage::AutoConnect => {

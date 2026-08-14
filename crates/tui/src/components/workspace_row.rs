@@ -148,6 +148,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// badge letter so two agents sharing a tier label keep distinct
     /// shorts. Sourced from `Sidebar::model_shorts`.
     pub model_shorts: &'a std::collections::HashMap<(char, String), String>,
+    /// Active search term to highlight within this row's title, or `None`
+    /// when no search touches this row. `Some` underlines the matched span
+    /// so the user can see *what* matched — the vim `/pattern` cue (#1099).
+    /// Already `#`-stripped and trimmed by the caller.
+    pub highlight_query: Option<&'a str>,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -574,9 +579,61 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // when the row is too narrow (see `Cell::atomic_tail`).
     let labels = label_spans(ctx);
     let tail = labels.len();
-    let mut spans = vec![Span::styled(ctx.raw_title().to_string(), style)];
+    let mut spans = title_spans(ctx.raw_title(), ctx.highlight_query, style, ctx.theme);
     spans.extend(labels);
     Cell::new(spans).atomic_tail(tail)
+}
+
+/// Split a title into styled spans, underlining the first case-insensitive
+/// occurrence of the active search term so the user can see what matched
+/// (the vim `/pattern` cue, #1099). With no query — or no contiguous match
+/// (a purely fuzzy/metadata hit) — the title is one plain span, unchanged.
+fn title_spans(
+    title: &str,
+    query: Option<&str>,
+    style: Style,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    let Some(range) = query.and_then(|q| ci_match_range(title, q)) else {
+        return vec![Span::styled(title.to_string(), style)];
+    };
+    let hl = style
+        .fg(theme.accent)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut spans = Vec::with_capacity(3);
+    if range.start > 0 {
+        spans.push(Span::styled(title[..range.start].to_string(), style));
+    }
+    spans.push(Span::styled(title[range.clone()].to_string(), hl));
+    if range.end < title.len() {
+        spans.push(Span::styled(title[range.end..].to_string(), style));
+    }
+    spans
+}
+
+/// Byte range of the first case-insensitive occurrence of `needle` in
+/// `hay`, expressed in `hay`'s ORIGINAL byte offsets, or `None`.
+///
+/// The match is found in lowercased space, but `to_lowercase()` can shift
+/// byte offsets (non-ASCII case-folds grow or shrink, and per-char shifts
+/// can even cancel to an equal total length while skewing interior
+/// boundaries). So the lowercased offsets are validated against the
+/// original before use: they must land on real char boundaries AND the
+/// original slice must itself case-fold back to the needle. When they
+/// don't, we skip the highlight rather than slice mid-codepoint — which
+/// would panic in this render path on an attacker-chosen title.
+fn ci_match_range(hay: &str, needle: &str) -> Option<std::ops::Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let needle_lower = needle.to_lowercase();
+    let hay_lower = hay.to_lowercase();
+    let start = hay_lower.find(&needle_lower)?;
+    let end = start + needle_lower.len();
+    (hay.is_char_boundary(start)
+        && hay.is_char_boundary(end)
+        && hay[start..end].to_lowercase() == needle_lower)
+        .then_some(start..end)
 }
 
 /// Hard cap on a single chip's text (before the `…`). A verbose
@@ -1300,6 +1357,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         }
     }
 
@@ -1712,6 +1770,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -2154,6 +2213,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -3352,6 +3412,7 @@ mod tests {
             sent_snippet_count: 0,
             stack: None,
             model_shorts: empty_shorts(),
+            highlight_query: None,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];
@@ -3516,6 +3577,115 @@ mod tests {
             !line_text(&lines[1]).contains(long),
             "occupied snippet column must steal width from the title: {:?}",
             line_text(&lines[1]),
+        );
+    }
+
+    #[test]
+    fn ci_match_range_is_case_insensitive_and_byte_correct() {
+        assert_eq!(ci_match_range("Add Search bar", "search"), Some(4..10));
+        assert_eq!(ci_match_range("Add Search bar", "ADD"), Some(0..3));
+        assert_eq!(ci_match_range("Add Search bar", "bar"), Some(11..14));
+        assert_eq!(ci_match_range("Add Search bar", "xyz"), None);
+        assert_eq!(ci_match_range("anything", ""), None);
+    }
+
+    #[test]
+    fn ci_match_range_stays_correct_and_panic_free_under_case_fold_skew() {
+        // A grow-on-fold (İ → i̇, +1 byte) skews later offsets: naively
+        // mapping the lowercased match back would highlight "tanb", so the
+        // helper must decline instead.
+        assert_eq!(ci_match_range("İstanbul", "stan"), None);
+        // A net-zero fold (ẞ→ß shrinks −1, İ→i̇ grows +1) leaves total length
+        // equal but skews an interior boundary — the lowercased offset lands
+        // mid-codepoint in the original. Must return None, never panic.
+        assert_eq!(ci_match_range("ẞxİy", "x"), None);
+        // A length-preserving non-ASCII fold still highlights the right span.
+        assert_eq!(ci_match_range("Café", "café"), Some(0..5));
+    }
+
+    #[test]
+    fn title_spans_underlines_only_the_matched_substring() {
+        let theme = theme();
+        let base = Style::default().fg(theme.text_dim);
+        let spans = title_spans("Add Search bar", Some("search"), base, &theme);
+        assert_eq!(spans.len(), 3, "before / match / after: {spans:?}");
+        assert_eq!(spans[0].content, "Add ");
+        assert_eq!(spans[1].content, "Search");
+        assert!(
+            spans[1].style.add_modifier.contains(Modifier::UNDERLINED),
+            "the matched span is underlined",
+        );
+        assert_eq!(spans[1].style.fg, Some(theme.accent));
+        assert_eq!(spans[2].content, " bar");
+        // The unmatched flanks keep the base style untouched.
+        assert_eq!(spans[0].style.fg, base.fg);
+        assert_eq!(spans[2].style.fg, base.fg);
+    }
+
+    #[test]
+    fn title_spans_is_one_plain_span_without_a_match() {
+        let theme = theme();
+        let base = Style::default().fg(theme.text_dim);
+        assert_eq!(
+            title_spans("Add Search bar", None, base, &theme).len(),
+            1,
+            "no query → no split",
+        );
+        assert_eq!(
+            title_spans("Add Search bar", Some("zzz"), base, &theme).len(),
+            1,
+            "a non-matching query → no split",
+        );
+    }
+
+    /// A highlighted (multi-span) title must survive the table's column
+    /// truncation: at a wide budget the whole match is underlined, and at a
+    /// narrow budget the row elides with `…` and stays within budget —
+    /// never panics or overflows (#1099).
+    #[test]
+    fn highlighted_title_truncates_within_budget() {
+        let theme = theme();
+        let title = "Refactor the search indexer and cache eviction policy";
+        let task = make_task("owner/repo#1", title);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.highlight_query = Some("search");
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx)];
+
+        let underlined = |line: &ratatui::text::Line<'_>| -> String {
+            line.spans
+                .iter()
+                .filter(|s| s.style.add_modifier.contains(Modifier::UNDERLINED))
+                .map(|s| s.content.to_string())
+                .collect()
+        };
+
+        // Wide: the whole match is underlined and the title is intact.
+        let wide = crate::components::table::render_table(&rows, &columns, 100);
+        assert!(
+            line_text(&wide[0]).contains(title),
+            "full title at width 100"
+        );
+        assert_eq!(underlined(&wide[0]), "search", "the match is underlined");
+
+        // Narrow: the title elides, the row stays within budget, and the
+        // underlined fragment (if any) is still a prefix of the match — the
+        // multi-span head truncated cleanly rather than panicking.
+        let narrow = crate::components::table::render_table(&rows, &columns, 22);
+        let text = line_text(&narrow[0]);
+        assert!(
+            text.contains('…'),
+            "narrow budget elides the title: {text:?}"
+        );
+        assert!(
+            crate::util::visual_width(&text) <= 22,
+            "row must not exceed budget: {text:?}",
+        );
+        let frag = underlined(&narrow[0]);
+        assert!(
+            "search".starts_with(frag.as_str()),
+            "the underlined fragment is a clean prefix of the match: {frag:?}",
         );
     }
 }

@@ -2789,6 +2789,49 @@ snippets:
         (m, keys)
     }
 
+    /// `Space` collapses a repo group ONLY when the cursor sits on its
+    /// header row — on a workspace row it is inert, so a reflexive Space
+    /// mid-navigation can't fold the group you're inside (#1099). Drives
+    /// the real key routing so the dispatch guard, not just the catalog
+    /// resolution, is under test.
+    #[test]
+    fn space_collapse_is_gated_to_the_header_row() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+        let space = || RealmKey::new(Key::Char(' '), RealmMods::NONE);
+        let up = || RealmKey::new(Key::Char('k'), RealmMods::NONE);
+
+        let (mut m, _keys) = model_with_broadcast_targets(&[None, None]);
+        assert_eq!(m.sidebar.visible_workspace_count(), 2, "both rows visible");
+        // Cursor starts on a workspace row: Space must leave the group open
+        // (a collapse would drop the workspace rows from the visible list).
+        assert!(!m.sidebar.cursor_on_repo_header());
+        m.dispatch_key(space());
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            2,
+            "a bare Space on a workspace row must not collapse the group",
+        );
+
+        // Walk up onto the repo header (j/k stop on headers), where Space
+        // is the intended collapse toggle.
+        for _ in 0..6 {
+            if m.sidebar.cursor_on_repo_header() {
+                break;
+            }
+            m.dispatch_key(up());
+        }
+        assert!(
+            m.sidebar.cursor_on_repo_header(),
+            "k navigation reaches the repo header row",
+        );
+        m.dispatch_key(space());
+        assert_eq!(
+            m.sidebar.visible_workspace_count(),
+            0,
+            "Space on the header row collapses the group",
+        );
+    }
+
     /// Like [`model_with_broadcast_targets`], but every seeded workspace
     /// carries a GitHub project scope, so a session-less target is
     /// spawnable (`worktree_scope().is_some()`) rather than skipped —

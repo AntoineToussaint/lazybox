@@ -1593,6 +1593,17 @@ pub struct AgentSection {
     /// Global LLM-gateway base URL. See [`AgentSection::gateway_url`].
     #[serde(default)]
     pub llm_gateway_url: Option<String>,
+    /// Route every spawned agent's LLM traffic through lazybox's local
+    /// metering proxy (#1062), the real data source behind the header's
+    /// usage summary (#1109). The proxy forwards each request to the true
+    /// upstream (or to `llm_gateway_url` when that is set) and reads the
+    /// token counts off the response, so both Claude *and* Codex — and
+    /// interactive terminal sessions, which emit no structured usage —
+    /// report real per-provider quota. Off by default: it inserts a
+    /// loopback hop in front of every agent API call, so it is opt-in
+    /// until you want live usage. Set `true` to enable.
+    #[serde(default)]
+    pub metering_proxy: bool,
     /// Fail-safe watchdog window: seconds a `Working` agent terminal
     /// may sit with no meaningful screen change (spinner/status churn
     /// doesn't count) before the daemon classifies the screen and
@@ -1617,6 +1628,7 @@ impl Default for AgentSection {
             autonomous_skip_permissions: true,
             skip_permissions: false,
             llm_gateway_url: None,
+            metering_proxy: false,
             working_watchdog_secs: None,
             quiet_classify_secs: None,
         }

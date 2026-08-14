@@ -391,6 +391,9 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::AgentUsage { run_id, usage } => {
                 self.sidebar.add_agent_usage(*run_id, usage);
             }
+            IpcEvent::AgentSessionUsage { agent_id, usage } => {
+                self.sidebar.add_agent_session_usage(agent_id, usage);
+            }
             IpcEvent::AgentTurnFinished { run_id, .. } => {
                 self.sidebar.commit_agent_turn(*run_id);
             }
@@ -1010,6 +1013,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentPermissionRequest { .. }
                 | IpcEvent::AgentUserQuestion { .. }
                 | IpcEvent::AgentUsage { .. }
+                | IpcEvent::AgentSessionUsage { .. }
                 | IpcEvent::AgentTurnFinished { .. }
                 | IpcEvent::AgentRunFinished { .. }
                 | IpcEvent::ProviderCredentialUpdated { .. }
@@ -1848,6 +1852,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentPermissionRequest { .. }
             | IpcEvent::AgentUserQuestion { .. }
             | IpcEvent::AgentUsage { .. }
+            | IpcEvent::AgentSessionUsage { .. }
             | IpcEvent::AgentTurnFinished { .. }
             | IpcEvent::AgentRunFinished { .. }
             | IpcEvent::ProviderCredentialUpdated { .. }
@@ -2118,6 +2123,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentPermissionRequest { .. }
                 | IpcEvent::AgentUserQuestion { .. }
                 | IpcEvent::AgentUsage { .. }
+                | IpcEvent::AgentSessionUsage { .. }
                 | IpcEvent::AgentTurnFinished { .. }
                 | IpcEvent::AgentRunFinished { .. }
                 | IpcEvent::ProviderCredentialUpdated { .. }

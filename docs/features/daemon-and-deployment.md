@@ -337,7 +337,7 @@ Top-level keys (`crates/config/src/lib.rs`):
 | `worktree` | Global `mounts`, `scripts`, `auto_cleanup_merged` |
 | `providers` | Per-provider settings (e.g. `github.poll_interval`) |
 | `slack` | `bot_token`, `app_token`, `anchor_channel`, `channel_prefix`, `per_workspace_channels` |
-| `agent` | `autonomous_skip_permissions`, `skip_permissions`, `llm_gateway_url`, nested agent config |
+| `agent` | `autonomous_skip_permissions`, `skip_permissions`, `llm_gateway_url`, `metering_proxy` (route agent LLM traffic through the local usage-metering proxy — real per-provider quota for the header summary; opt-in), nested agent config |
 | `agents.<id>` | Per-agent overrides — today the model-tier menu `models` (`default` + ordered `tiers` of `alias`/`label`/`args`, an optional `short` glyph per tier for the compact sidebar badge, plus `priority` aliases) |
 | `attention` | Which signals flag a row: `unread`, `ci_failing`, `review_pending`, `agent_asking`, `mentioned`, `desktop_notify`, `notifier` (`auto` \| `osc` \| `subprocess` banner delivery), `terminal_bundle_id` (optional macOS click activation override) |
 | `ui` | View/behavior: `auto_mark_delay`, `quit_double_tap_window`, `split_step_percent`, `task_body_max_rows`, `short_snooze`, `long_snooze`, `action_keys` (incl. `spawn_agent.<id>` keys), `keymap_preset`, `theme`, `tour_seen`, `tips_seen` |

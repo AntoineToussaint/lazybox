@@ -10494,7 +10494,7 @@ mod tests {
 
         let claude = lazybox_agents::agent::builtins::Claude;
         assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&claude)),
+            gateway_env_for_agent(&cfg, Some(&claude), true),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://gateway.internal".to_string()
@@ -10506,7 +10506,7 @@ mod tests {
             &lazybox_agents::agent::builtins::Cursor,
         ] {
             assert_eq!(
-                gateway_env_for_agent(&cfg, Some(agent)),
+                gateway_env_for_agent(&cfg, Some(agent), true),
                 vec![(
                     "OPENAI_BASE_URL".to_string(),
                     "http://gateway.internal".to_string()
@@ -10520,13 +10520,13 @@ mod tests {
         // No gateway configured → nothing for any agent.
         let bare = lazybox_config::Config::default();
         let claude = lazybox_agents::agent::builtins::Claude;
-        assert!(gateway_env_for_agent(&bare, Some(&claude)).is_empty());
+        assert!(gateway_env_for_agent(&bare, Some(&claude), true).is_empty());
 
         let mut cfg = lazybox_config::Config::default();
         cfg.agent.llm_gateway_url = Some("http://gateway.internal".into());
 
         // Non-agent spawn (shell / log tail) passes `None`.
-        assert!(gateway_env_for_agent(&cfg, None).is_empty());
+        assert!(gateway_env_for_agent(&cfg, None, true).is_empty());
 
         // A GenericCli agent has no inferable provider → no injection.
         let generic = lazybox_agents::agent::builtins::GenericCli {
@@ -10536,12 +10536,35 @@ mod tests {
             resume_cmd: None,
             asking_patterns: vec![],
         };
-        assert!(gateway_env_for_agent(&cfg, Some(&generic)).is_empty());
+        assert!(gateway_env_for_agent(&cfg, Some(&generic), true).is_empty());
 
         // A whitespace-only URL is treated as unset.
         let mut blank = lazybox_config::Config::default();
         blank.agent.llm_gateway_url = Some("   ".into());
-        assert!(gateway_env_for_agent(&blank, Some(&claude)).is_empty());
+        assert!(gateway_env_for_agent(&blank, Some(&claude), true).is_empty());
+    }
+
+    #[test]
+    fn metering_proxy_routes_only_metered_spawns() {
+        // With the proxy enabled and bound, an interactive (metered) spawn
+        // is pointed at the per-agent proxy URL. A structured run passes
+        // `meter = false` and keeps the direct routing, so its usage isn't
+        // counted twice — once via the proxy, once via its stream-json
+        // (#1109).
+        crate::proxy::set_port(45999);
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.metering_proxy = true;
+        let claude = lazybox_agents::agent::builtins::Claude;
+
+        assert_eq!(
+            gateway_env_for_agent(&cfg, Some(&claude), true),
+            vec![(
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://127.0.0.1:45999/anthropic/claude".to_string()
+            )]
+        );
+        // Structured run opts out: no proxy URL, and no gateway configured.
+        assert!(gateway_env_for_agent(&cfg, Some(&claude), false).is_empty());
     }
 
     #[test]

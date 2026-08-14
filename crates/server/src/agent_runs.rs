@@ -121,8 +121,12 @@ pub async fn handle_start_agent_run(
     // they need the same LLM-gateway base-URL routing
     // (`agent.llm_gateway_url` → ANTHROPIC_BASE_URL / OPENAI_BASE_URL)
     // and the same per-agent spawn-env defaults (Codex brew suppression).
+    // They opt OUT of the metering proxy (`meter = false`): a structured
+    // run already reports its token usage by parsing its own stream-json,
+    // so routing it through the proxy too would count every turn twice in
+    // the header summary (#1109).
     let yaml = lazybox_config::Config::load().unwrap_or_default();
-    let env = crate::spawn_plan::gateway_env_for_agent(&yaml, Some(agent_impl.as_ref()));
+    let env = crate::spawn_plan::gateway_env_for_agent(&yaml, Some(agent_impl.as_ref()), false);
     let env = crate::spawn_plan::with_agent_spawn_defaults(env, Some(agent_impl.as_ref()));
 
     let mut stream_config = AgentStreamConfig::new(protocol, program.clone());

@@ -508,6 +508,13 @@ impl Sidebar {
         self.usage.finish_run(&run_id);
     }
 
+    /// Observe usage the metering proxy attributed to an agent directly
+    /// (`AgentSessionUsage`) — the data source for interactive terminals
+    /// and for Codex, which emit no structured `AgentUsage` (#1109).
+    pub fn add_agent_session_usage(&mut self, agent_id: &str, usage: &lazybox_ipc::AgentUsage) {
+        self.usage.observe_session_usage(agent_id, usage);
+    }
+
     /// Attribute a usage-limit reset hint to the terminal's agent, so the
     /// summary can show ` · resets 3pm` while that provider is limited
     /// (`AgentUsageLimit`). A hint for a terminal we don't track is
@@ -539,19 +546,23 @@ impl Sidebar {
     }
 
     /// The always-visible per-provider usage summaries, in stable (id)
-    /// order. The display set is every agent with a live terminal *or* any
-    /// accumulated usage — the latter so a structured run's tokens surface
-    /// even when no interactive terminal for that agent is open (usage
-    /// events come only from structured runs, which spawn no terminal).
-    /// Empty when the summary is disabled or nothing qualifies. The reset
-    /// fragment is folded in only while that agent is actually limited.
+    /// order. The display set is every agent with real accumulated usage,
+    /// plus any agent with a live terminal *and* a configured plan budget —
+    /// the budget is what turns the row into a real quota bar. A live
+    /// terminal without a budget and without usage is deliberately excluded:
+    /// it has no real figure to show and would render a meaningless
+    /// "Claude 0 used" (#1109). Empty when the summary is disabled or
+    /// nothing qualifies. The reset fragment is folded in only while that
+    /// agent is actually limited.
     fn usage_summaries(&self) -> Vec<lazybox_tui_core::usage::UsageSummary> {
         if !self.usage_summary {
             return Vec::new();
         }
         let mut agent_ids: BTreeSet<&str> = BTreeSet::new();
         for (_, kind) in self.running_terminals.values() {
-            if let TerminalKind::Agent(id) = kind {
+            if let TerminalKind::Agent(id) = kind
+                && self.usage_budgets.contains_key(id.as_str())
+            {
                 agent_ids.insert(id.as_str());
             }
         }

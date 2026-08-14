@@ -2130,6 +2130,17 @@ pub enum Event {
         run_id: AgentRunId,
         usage: AgentUsage,
     },
+    /// Token usage observed for an agent by the metering proxy (#1062),
+    /// attributed directly to an agent id rather than a structured
+    /// `run_id`. This is the data source for interactive terminal agents —
+    /// which drive the real CLI in a PTY and so emit no structured
+    /// `AgentUsage` — and covers Codex uniformly with Claude (#1109). Each
+    /// event carries one upstream response's usage; the tracker sums them
+    /// per agent for the header's quota widget.
+    AgentSessionUsage {
+        agent_id: String,
+        usage: AgentUsage,
+    },
     AgentTurnFinished {
         run_id: AgentRunId,
         result: Option<String>,

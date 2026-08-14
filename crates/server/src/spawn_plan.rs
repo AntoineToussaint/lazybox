@@ -157,7 +157,7 @@ pub(crate) fn build_spawn_plan(
         .zip(hook_command.as_deref())
         .is_some_and(|(agent, command)| !agent.hook_command_args(command).is_empty());
     let mut env = repo_env;
-    for (key, value) in gateway_env_for_agent(cfg, agent.as_deref()) {
+    for (key, value) in gateway_env_for_agent(cfg, agent.as_deref(), true) {
         if !env.iter().any(|(existing, _)| existing == &key) {
             env.push((key, value));
         }
@@ -257,16 +257,40 @@ pub(crate) fn argv_for(
     }
 }
 
+/// Base-URL env for an agent spawn. `meter` routes the agent through the
+/// local metering proxy when it is enabled and running; pass it only for
+/// interactive PTY spawns, whose usage has no other source. Structured
+/// runs must pass `false`: they already report token usage by parsing
+/// their own stream-json, so proxying them too would count every turn
+/// twice in the header summary (#1109).
 pub(crate) fn gateway_env_for_agent(
     cfg: &lazybox_config::Config,
     agent: Option<&dyn Agent>,
+    meter: bool,
 ) -> Vec<(String, String)> {
-    let Some(provider) = agent.and_then(Agent::llm_provider) else {
+    let Some(agent) = agent else {
         return Vec::new();
     };
+    let Some(provider) = agent.llm_provider() else {
+        return Vec::new();
+    };
+    let env_var = provider.base_url_env().to_string();
+
+    // Metering proxy on and serving: point this provider's traffic at its
+    // per-agent proxy URL so the response's token usage is captured
+    // (#1109). The proxy forwards to the real upstream (or the configured
+    // gateway), so this supersedes the plain gateway injection below.
+    if meter
+        && cfg.agent.metering_proxy
+        && let Some(port) = crate::proxy::port()
+    {
+        let url = crate::proxy::injected_base_url(port, provider, agent.id());
+        return vec![(env_var, url)];
+    }
+
     cfg.agent
         .gateway_url()
-        .map(|url| vec![(provider.base_url_env().to_string(), url.to_string())])
+        .map(|url| vec![(env_var, url.to_string())])
         .unwrap_or_default()
 }
 

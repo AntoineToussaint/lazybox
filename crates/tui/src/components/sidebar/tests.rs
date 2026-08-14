@@ -2247,6 +2247,40 @@ mod search_tests {
         );
     }
 
+    /// A live agent terminal with no configured budget and no accumulated
+    /// usage must not manufacture a row. Before #1109 the display set
+    /// included every live terminal regardless of whether a real figure
+    /// existed, so a freshly-spawned interactive Claude (which emits no
+    /// structured usage) rendered a meaningless "Claude 0 used". Now such
+    /// a terminal contributes nothing until it has a budget or real usage.
+    #[test]
+    fn usage_summary_omits_a_live_terminal_with_no_budget_and_no_usage() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        spawn_agent(&mut sb, 1, &session_key, "claude");
+
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.usage_row_height(area), 0);
+        let row = usage_row(&mut sb);
+        assert!(!row.contains("used"), "{row:?}");
+        assert!(!row.contains("Claude"), "{row:?}");
+    }
+
+    /// A live agent terminal with a configured budget but no usage yet
+    /// shows the proactive quota bar at 0% — the budget is what makes the
+    /// row a real quota display rather than a bare token count (#1109).
+    #[test]
+    fn usage_summary_shows_a_budgeted_live_terminal_at_zero_percent() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        spawn_agent(&mut sb, 1, &session_key, "claude");
+        sb.set_usage_budgets([("claude".to_string(), 200_000u64)].into_iter().collect());
+
+        let row = usage_row(&mut sb);
+        assert!(row.contains("Claude") && row.contains("0%"), "{row:?}");
+        assert!(!row.contains("used"), "{row:?}");
+    }
+
     /// Without a budget the widget degrades to a bare token total ("show
     /// what's known"), and the reset hint is folded in only while the
     /// agent is actually limited.

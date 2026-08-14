@@ -131,6 +131,9 @@ pub const LAZYBOX_LIGHT: Theme = from_palette(&palette::LAZYBOX_LIGHT);
 /// bright status hues on a pure-black surface.
 pub const HIGH_CONTRAST: Theme = from_palette(&palette::HIGH_CONTRAST);
 
+/// Bloomberg Terminal — the hallmark amber-on-black financial display.
+pub const BLOOMBERG_TERMINAL: Theme = from_palette(&palette::BLOOMBERG_TERMINAL);
+
 /// Built-in themes shipped with the kit, in cycle order. Index 0 is
 /// the default. The runtime registry (see [`register`]) starts with
 /// these and grows as apps register their own. Derived from
@@ -143,6 +146,7 @@ pub const BUILT_IN_THEMES: &[&Theme] = &[
     &ROSE_PINE,
     &LAZYBOX_LIGHT,
     &HIGH_CONTRAST,
+    &BLOOMBERG_TERMINAL,
 ];
 
 /// Mutable theme registry — built-ins plus anything the host has

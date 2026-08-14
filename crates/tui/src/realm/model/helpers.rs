@@ -907,7 +907,7 @@ pub(super) const FRAME_BUDGET: Duration = Duration::from_millis(50);
 /// rather than piling diffs onto a writer the slow terminal is starving.
 /// ~512 KiB is several full-screen frames of headroom — enough to ride out
 /// a brief write stall without skipping, but bounded so a wedged terminal
-/// can't grow the queue without limit. Only consulted in async mode.
+/// can't grow the queue without limit.
 const RENDER_BACKPRESSURE_CAP: usize = 512 * 1024;
 
 /// Minimum spacing between watchdog warn lines. A pathological case
@@ -1379,7 +1379,8 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             // diffs onto it. `redraw` stays set, so we paint the moment it
             // drains; coalescing happens at the frame boundary, so ratatui's
             // previous-frame state stays exactly the last frame we sent and
-            // no diff is ever split or lost. `None` (sync mode) never skips.
+            // no diff is ever split or lost. `None` (headless test model,
+            // which has no writer) never skips.
             let writer_behind = model.render_pending.as_ref().is_some_and(|pending| {
                 pending.load(std::sync::atomic::Ordering::Acquire) > RENDER_BACKPRESSURE_CAP
             });
@@ -1418,8 +1419,7 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         // the escape bytes are serialized behind this iteration's frame on
         // the one channel and can't interleave with a half-written frame —
         // which would paint the payload as literal text and lose the banner
-        // (#296). In sync mode `enqueue_raw` writes stdout directly, still
-        // after the frame flush above, preserving the same ordering.
+        // (#296).
         for seq in crate::notify::take_pending_osc() {
             super::render_writer::enqueue_raw(seq.as_bytes());
         }

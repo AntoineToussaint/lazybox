@@ -1322,6 +1322,17 @@ struct ShellCommandConfig {
 /// Top-level application state.
 pub struct Model<T: TerminalAdapter> {
     pub app: Application<Id, Msg, UserEvent>,
+    /// RAII owner of the host-terminal modes (#211). `Some` only for the
+    /// real crossterm `Model::new`; dropping it restores raw mode / alt
+    /// screen / mouse / paste / focus / Kitty keyboard on every exit
+    /// path. `None` for headless test models, which never touch the
+    /// host terminal. See `host_terminal`.
+    ///
+    /// Declared *before* `terminal` so it drops first: its channel-routed
+    /// reset ([`host_terminal::restore_host_terminal`]) reaches the still-live
+    /// off-thread writer — the sole fd-1 owner — instead of falling back to a
+    /// direct write after `terminal` has already torn the writer down (#1122).
+    term_guard: Option<HostTerminalGuard>,
     pub terminal: T,
     /// Z-stack of modal ids — top is rendered last + receives input.
     pub modal_stack: Vec<Id>,
@@ -1482,9 +1493,9 @@ pub struct Model<T: TerminalAdapter> {
     /// costly rendering.
     last_render_flush: std::time::Duration,
     /// Bytes handed to the off-thread render writer but not yet drained to
-    /// the terminal (the default path; `None` under `LAZYBOX_SYNC_RENDER`).
-    /// The run loop skips rendering a new frame while this is over its cap,
-    /// so a slow terminal write can't back up the input thread (#1090).
+    /// the terminal (`None` only for headless test models, which have no
+    /// writer). The run loop skips rendering a new frame while this is over its
+    /// cap, so a slow terminal write can't back up the input thread (#1090).
     /// `None` in the default (synchronous) mode — the loop never skips.
     render_pending: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
     /// True if the user has typed at least one non-Tab key since
@@ -1994,12 +2005,6 @@ pub struct Model<T: TerminalAdapter> {
     /// without blocking the loop. `None` when no modal input is in
     /// flight. See `forward_modal_event`.
     modal_redraw_until: Option<std::time::Instant>,
-    /// RAII owner of the host-terminal modes (#211). `Some` only for the
-    /// real crossterm `Model::new`; dropping it restores raw mode / alt
-    /// screen / mouse / paste / focus / Kitty keyboard on every exit
-    /// path. `None` for headless test models, which never touch the
-    /// host terminal. See `host_terminal`.
-    term_guard: Option<HostTerminalGuard>,
 }
 
 /// State tracked for the trackpad-scroll damper (see
@@ -2368,13 +2373,13 @@ fn install_panic_hook() {
 impl Model<AsyncCrosstermAdapter> {
     pub fn new(client: Client, snippets: lazybox_config::Snippets) -> anyhow::Result<Self> {
         install_panic_hook();
-        // The production adapter renders through the off-thread writer by
-        // default (#1045): a slow terminal write can't freeze the input
-        // thread (#1090), and the fd-1 muzzle handoff keeps the crash / panic
-        // reset from interleaving with a live writer, so this no longer
-        // regresses #211. `LAZYBOX_SYNC_RENDER=1` forces the old direct path.
+        // The production adapter renders through the off-thread writer, the
+        // sole fd-1 owner (#1045): a slow terminal write can't freeze the input
+        // thread (#1090), and every fd-1 write — frames, OSC/mouse, and the
+        // terminal reset — is serialized through it, so nothing interleaves
+        // with a half-written frame to strand the shell (#211).
         let terminal = AsyncCrosstermAdapter::new()?;
-        let render_pending = terminal.pending_handle();
+        let render_pending = Some(terminal.pending_handle());
         // Enable raw mode, the alt screen, mouse capture, bracketed
         // paste, focus reporting and the Kitty keyboard protocol. The
         // guard owns the whole set: dropping it (clean exit, error, or

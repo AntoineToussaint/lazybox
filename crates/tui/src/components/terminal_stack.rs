@@ -7055,6 +7055,16 @@ mod deep_scrollback_tests {
     //! content-only capture cannot carry itself.
     use super::*;
 
+    /// Serializes the two tests that pin a specific process-global
+    /// `CLIENT_SCROLLBACK_LINES` (`apply_ui_defaults` stores it) and then
+    /// build a VT that reads it. Under `cargo test`'s parallelism
+    /// `wide_pane`'s `8_000` could otherwise land between
+    /// `raised_scrollback`'s `30_000` store and its VT spawn, clipping the
+    /// 15k capture to ~8k — the flake mis-read as a macOS libghostty bug
+    /// (#1108). No other `apply_ui_defaults` caller stores below the feed
+    /// size, so a lock shared by just these two is sufficient.
+    static SCROLLBACK_GLOBAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn agent_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
@@ -7156,8 +7166,16 @@ mod deep_scrollback_tests {
     /// the last 10k lines and the deeper tmux history the daemon fetched
     /// never becomes scrollable. The VT reads the depth at creation, so
     /// `apply_ui_defaults` runs before the terminal is spawned.
+    ///
+    /// Holds [`SCROLLBACK_GLOBAL_LOCK`] across the whole test: the depth is
+    /// a process-global, so a concurrent `wide_pane` store of `8_000`
+    /// between the `30_000` store here and the spawn below would clip the
+    /// capture to ~8k (the flake filed as #1108).
     #[test]
     fn raised_scrollback_lines_lets_client_retain_beyond_old_cap() {
+        let _serial = SCROLLBACK_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let sk = SessionKey::new("s");
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.apply_ui_defaults(&lazybox_config::UiDefaults {
@@ -7194,6 +7212,9 @@ mod deep_scrollback_tests {
     /// wider than the default must still hold ~all of the configured lines.
     #[test]
     fn wide_pane_retains_the_configured_line_depth() {
+        let _serial = SCROLLBACK_GLOBAL_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let sk = SessionKey::new("s");
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.apply_ui_defaults(&lazybox_config::UiDefaults {

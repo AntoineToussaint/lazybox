@@ -138,11 +138,10 @@ fn set_mouse_capture(out: &mut impl Write, enabled: bool) -> std::io::Result<()>
 }
 
 pub(crate) fn request_mouse_capture(enabled: bool) -> std::io::Result<()> {
-    // Route through the render writer, not stdout directly: in async mode a
-    // bare stdout write here would race the writer thread mid-frame and
-    // corrupt it (or split the mouse-mode escape). `enqueue_raw` serializes
-    // it behind the current frame on the one channel; in sync mode it writes
-    // stdout directly, as before (#1090 finding #1). Encode into a buffer
+    // Route through the render writer, not stdout directly: a bare stdout
+    // write here would race the writer thread mid-frame and corrupt it (or
+    // split the mouse-mode escape). `enqueue_raw` serializes it behind the
+    // current frame on the one channel (#1090 finding #1). Encode into a buffer
     // first so the whole escape is enqueued as one atomic unit.
     let mut buf = Vec::new();
     set_mouse_capture(&mut buf, enabled)?;
@@ -244,8 +243,11 @@ mod fatal {
     extern "C" fn handle(sig: c_int) {
         // Take fd 1 back from the off-thread render writer before writing the
         // reset sequence to it, so the two can't interleave and strand the
-        // shell (#1045). Async-signal-safe (atomics + a bounded spin); a no-op
-        // when async rendering isn't engaged.
+        // shell (#1045). This is the one restore path that can't route through
+        // the writer's channel — a fatal signal doesn't unwind and can't
+        // allocate or block — so it writes fd 1 directly, made safe by this
+        // signal-safe handoff (atomics + a bounded spin). No-op until the
+        // writer has spawned.
         super::super::render_writer::muzzle_writer();
         // Same one-shot flag the guard/panic paths use: if teardown
         // already ran, re-emitting would pop a keyboard-flags entry the
@@ -314,26 +316,29 @@ pub(crate) fn enable_host_terminal() {
 
 /// Restore every `HostMode` (reverse of the enable order), at most
 /// once per process. Idempotent across the `HostTerminalGuard`'s
-/// `Drop`, the panic hook, and the signal handler so the host shell is
+/// `Drop`, the panic hook, and the graceful-signal task so the host shell is
 /// always left out of raw mode and Kitty keyboard protocol on exit.
+///
+/// This is the **normal-context** restore (clean exit, panic hook,
+/// graceful-signal task). The fd-1 escape half routes through the off-thread
+/// render writer ([`super::render_writer::write_restore`]) — the sole fd-1
+/// owner — so it serializes behind any in-flight frame and can never
+/// interleave with one and strand the shell (#211 / #1122). Raw mode is a
+/// *termios* change on stdin, not an fd-1 write, so it is restored directly.
+/// The fatal-signal path in [`fatal`] cannot allocate or block and takes the
+/// signal-safe `muzzle_writer` + raw-`write(2)` path instead.
 pub fn restore_host_terminal() {
     if RESTORED.swap(true, Ordering::SeqCst) {
         return;
     }
-    // Take fd 1 back from the off-thread render writer before writing the
-    // reset sequence directly (#1045). On the panic hook this runs while the
-    // writer is still live (unwinding tears it down only afterwards), so
-    // without the handoff the reset could interleave with an in-flight frame
-    // and strand the shell (#211). On the clean-exit Drop path the writer is
-    // already shut down, so this is a cheap no-op.
-    super::render_writer::muzzle_writer();
-    let mut out = std::io::stdout();
-    for mode in HostMode::ALL.into_iter().rev() {
-        mode.disable(&mut out);
-    }
-    // Flush so the host terminal sees the resets before the shell
-    // prompt (or a panic message) takes over the screen.
-    let _ = out.flush();
+    // The fd-1 escapes (alt screen, mouse, paste, focus, Kitty keyboard), in
+    // teardown order, minus raw mode. Routed through the writer, which emits
+    // them behind any queued frame and then seals fd 1, and blocks until they
+    // are out so they land before the shell prompt / a panic message.
+    super::render_writer::write_restore(&signal_restore_bytes());
+    // Raw mode last, to match the reverse-of-enable order — a termios change
+    // on stdin, so it never contends with the writer's fd-1 writes.
+    let _ = disable_raw_mode();
 }
 
 /// RAII owner of the host-terminal modes. Constructing it enables every

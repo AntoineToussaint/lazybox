@@ -31,12 +31,21 @@
 //! a wedged terminal can't hang the exit) lives with the Model; this module
 //! is the transport and is unit-tested in isolation over an in-memory sink.
 //!
-//! **Default since #1045.** The one thing that kept this opt-in — the
-//! signal-safe crash restore and the writer both touching fd 1 — is resolved
-//! by the [`muzzle_writer`] handoff below: a restore path takes fd 1 back
-//! before writing the reset sequence, so it can never interleave with a
-//! half-written frame and strand the shell (#211). `LAZYBOX_SYNC_RENDER=1`
-//! forces the old direct-to-stdout path as an escape hatch.
+//! ## Sole fd-1 owner (#1045 / #1122)
+//!
+//! The writer thread is the **only** thing that writes fd 1 — frames, OSC,
+//! mouse toggles, and the terminal-restore sequence all reach it. The
+//! normal-context restore paths (clean exit, the panic hook, the
+//! graceful-signal task) enqueue their reset through [`write_restore`], so it
+//! serializes behind any in-flight frame on the one channel and can never
+//! interleave with a half-written frame and strand the shell (#211).
+//!
+//! The lone exception is the fatal-signal handler (SIGSEGV / SIGABRT / …),
+//! which cannot allocate, lock, or block — so it cannot use the channel. It
+//! takes fd 1 back from the writer through the signal-safe [`muzzle_writer`]
+//! handoff below and writes the reset with a raw `write(2)`; the handoff
+//! guarantees the writer is not mid-write, so even that path cannot
+//! interleave with a frame.
 
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -45,23 +54,21 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-// ── fd-1 ownership handoff for crash / panic restore (#1045) ───────────────
+// ── fd-1 ownership handoff for the fatal-signal restore (#1045) ────────────
 //
-// In async mode the writer thread is the sole writer of fd 1 — *except* the
-// two terminal-restore paths that must run when the writer can't help:
-//   • the fatal-signal handler (`host_terminal::fatal::handle`) — SIGSEGV /
-//     SIGABRT / …, which don't unwind, so it writes the reset sequence with a
-//     raw `write(2)`;
-//   • `restore_host_terminal` on the panic hook, which runs *before* unwinding
-//     tears the writer down, so the writer is still live.
+// The writer thread is the sole writer of fd 1. Normal-context restores route
+// their reset through the channel ([`write_restore`]), so they are naturally
+// serialized behind any in-flight frame. The one path that cannot is the
+// fatal-signal handler (`host_terminal::fatal::handle`) — SIGSEGV / SIGABRT /
+// …, which don't unwind and cannot allocate, lock, or block, so it writes the
+// reset sequence with a raw `write(2)` instead of enqueueing it.
 //
-// If either writes fd 1 while the writer thread is mid-`write()`, the reset
+// If that raw write lands while the writer thread is mid-`write()`, the reset
 // bytes interleave with a half-written frame and the shell is left in the
 // alternate screen / raw mode — the #211 stranding this whole feature must not
-// regress. In sync mode there is no such race (flush and handler are the same
-// thread; a signal just interrupts the flush), which is why async was opt-in.
+// regress.
 //
-// The handoff: a restore path calls [`muzzle_writer`] first. It sets
+// The handoff: the fatal path calls [`muzzle_writer`] first. It sets
 // `MUZZLED` (the writer then drops any further frame instead of writing it)
 // and bounded-spins until `IN_WRITE` clears, so the writer is guaranteed not
 // to be inside a `write()` when the reset bytes go out. It touches only
@@ -153,15 +160,25 @@ impl Fd1Handoff {
             std::hint::spin_loop();
         }
     }
+
+    /// Seal fd 1 from the writer thread itself, after it has emitted the
+    /// channel-routed reset: no later frame may clobber it. Unlike
+    /// [`Self::muzzle`] there is no in-write spin — the writer is the caller,
+    /// so it is by definition not concurrently inside a `write()`.
+    fn seal(&self) {
+        self.muzzled.store(true, Ordering::SeqCst);
+    }
 }
 
 /// The live writer's handoff, published by [`spawn`] (first-wins, one writer
-/// per process). `None` in sync mode, so [`muzzle_writer`] pays nothing.
+/// per process). Absent only until the writer spawns / in headless tests, so
+/// [`muzzle_writer`] then pays nothing.
 static FD1_HANDOFF: OnceLock<Arc<Fd1Handoff>> = OnceLock::new();
 
-/// Take fd 1 back from the off-thread writer before a restore path writes the
-/// terminal-reset sequence directly (crash / panic restore). Async-signal-safe
-/// and a no-op in sync mode. See [`Fd1Handoff::muzzle`].
+/// Take fd 1 back from the off-thread writer before the fatal-signal handler
+/// writes the terminal-reset sequence with a raw `write(2)`. Async-signal-safe;
+/// a no-op before the writer has spawned. See [`Fd1Handoff::muzzle`]. The
+/// normal-context restore paths route through [`write_restore`] instead.
 pub(crate) fn muzzle_writer() {
     if let Some(handoff) = FD1_HANDOFF.get() {
         handoff.muzzle();
@@ -175,20 +192,20 @@ pub(crate) fn muzzle_writer() {
 /// terminal the drain completes in microseconds, so this bound is never hit.
 const TEARDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The single writer thread's `Sender`, published while async rendering is
-/// active. Out-of-band terminal escapes — OSC notifications, mouse-capture
-/// toggles — enqueue through here ([`enqueue_raw`]) instead of writing
-/// stdout directly, so they can never interleave with a frame the writer is
-/// mid-write on (the #296 regression a naive off-thread writer reintroduces).
-/// Wrapped in a `Mutex` only because `Sender` is not `Sync`; contention is
-/// nil (raw escapes are rare and frames use their own `Sender` clone).
+/// The single writer thread's `Sender`, published by [`spawn`]. Out-of-band
+/// terminal escapes — OSC notifications, mouse-capture toggles — and the
+/// normal-context terminal reset enqueue through here ([`enqueue_raw`] /
+/// [`write_restore`]) instead of writing stdout directly, so they can never
+/// interleave with a frame the writer is mid-write on (the #296 regression a
+/// naive off-thread writer reintroduces). Wrapped in a `Mutex` only because
+/// `Sender` is not `Sync`; contention is nil (raw escapes are rare and frames
+/// use their own `Sender` clone).
 static RAW_SINK: OnceLock<Mutex<Sender<WriterMsg>>> = OnceLock::new();
 
 /// Route an out-of-band terminal escape (OSC banner, mouse-capture toggle)
-/// to the terminal. In async mode it is queued on the same channel as
-/// frames, so it is serialized behind the current frame and never splices
-/// into a half-written one. In sync mode (no writer thread registered) it
-/// writes stdout directly — the pre-#1090 behavior. Non-blocking either way.
+/// to the terminal. It is queued on the same channel as frames, so it is
+/// serialized behind the current frame and never splices into a half-written
+/// one. Non-blocking.
 pub(super) fn enqueue_raw(bytes: &[u8]) {
     if let Some(sink) = RAW_SINK.get() {
         if let Ok(tx) = sink.lock() {
@@ -207,6 +224,40 @@ pub(super) fn enqueue_raw(bytes: &[u8]) {
     let _ = out.flush();
 }
 
+/// Route the terminal-reset sequence through the writer thread — the sole
+/// fd-1 owner — so it serializes behind any in-flight frame and can never
+/// interleave with one (#1045 / #1122). The writer emits the bytes, then seals
+/// fd 1 so no later frame can clobber the reset. Blocks until the writer has
+/// emitted it — bounded, so a wedged terminal can't hang teardown — so the
+/// reset reaches the host before a panic message or the returning shell prompt.
+///
+/// Used by every normal-context restore (clean exit, the panic hook, the
+/// graceful-signal task). The fatal-signal handler cannot allocate or block,
+/// so it takes the signal-safe [`muzzle_writer`] + raw-`write(2)` path instead.
+pub(crate) fn write_restore(bytes: &[u8]) {
+    if let Some(sink) = RAW_SINK.get() {
+        if let Ok(tx) = sink.lock() {
+            let (ack_tx, ack_rx) = channel();
+            if tx
+                .send(WriterMsg::Restore {
+                    bytes: bytes.to_vec(),
+                    ack: ack_tx,
+                })
+                .is_ok()
+            {
+                let _ = ack_rx.recv_timeout(TEARDOWN_DRAIN_TIMEOUT);
+                return;
+            }
+        }
+    }
+    // The writer thread is gone (its `Drop` already tore it down) or was never
+    // spawned (a headless test model). No other fd-1 writer exists, so a direct
+    // write is safe and can't interleave.
+    let mut out = io::stdout();
+    let _ = out.write_all(bytes);
+    let _ = out.flush();
+}
+
 /// Work item for the writer thread.
 enum WriterMsg {
     /// One frame's worth of terminal bytes (a ratatui diff), to write and
@@ -216,6 +267,12 @@ enum WriterMsg {
     /// with the frames. Not counted against backpressure — it is small and
     /// must always go out (a dropped mouse-mode toggle wedges input).
     Raw(Vec<u8>),
+    /// The terminal-reset sequence, routed here so the writer stays the sole
+    /// fd-1 owner (#1122). Written in order behind any queued frame, after
+    /// which fd 1 is sealed so no later frame can clobber the reset; `ack`
+    /// signals the enqueuer once the bytes are out (it blocks on it so the
+    /// reset lands before a panic message / the shell prompt).
+    Restore { bytes: Vec<u8>, ack: Sender<()> },
     /// Stop the loop: drain any trailing work, flush, and exit.
     Shutdown,
 }
@@ -323,6 +380,19 @@ impl FrameWriter {
         let _ = self.tx.send(WriterMsg::Raw(bytes.to_vec()));
     }
 
+    /// Enqueue a channel-routed terminal reset on this writer's own channel —
+    /// the same path `write_restore` takes in production — and return the ack
+    /// receiver so a test can wait until the writer has emitted it.
+    #[cfg(test)]
+    fn send_restore_for_test(&self, bytes: &[u8]) -> Receiver<()> {
+        let (ack_tx, ack_rx) = channel();
+        let _ = self.tx.send(WriterMsg::Restore {
+            bytes: bytes.to_vec(),
+            ack: ack_tx,
+        });
+        ack_rx
+    }
+
     /// This writer's fd-1 handoff, so a test can muzzle it directly (the
     /// process-global one the signal handler uses is first-wins and shared
     /// across the suite, so tests drive this per-writer clone instead).
@@ -393,6 +463,21 @@ pub(super) fn spawn<W: Write + Send + 'static>(mut out: W) -> (ChannelWriter, Fr
                         let _ = out.flush();
                         handoff_thread.exit_write();
                     }
+                    WriterMsg::Restore { bytes, ack } => {
+                        // The authorized terminal reset. Claim fd 1 through the
+                        // same handoff as a frame so a fatal-signal muzzle
+                        // racing us waits rather than interleaving; if the fatal
+                        // path already claimed fd 1 it has emitted the reset
+                        // itself, so skip ours. Either way seal fd 1 so no later
+                        // frame can clobber the reset, then ack the enqueuer.
+                        if handoff_thread.try_begin_write() {
+                            let _ = out.write_all(&bytes);
+                            let _ = out.flush();
+                            handoff_thread.exit_write();
+                        }
+                        handoff_thread.seal();
+                        let _ = ack.send(());
+                    }
                     WriterMsg::Shutdown => break,
                 }
             }
@@ -408,6 +493,13 @@ pub(super) fn spawn<W: Write + Send + 'static>(mut out: W) -> (ChannelWriter, Fr
                         if !handoff_thread.is_muzzled() {
                             let _ = out.write_all(&bytes);
                         }
+                    }
+                    WriterMsg::Restore { bytes, ack } => {
+                        if !handoff_thread.is_muzzled() {
+                            let _ = out.write_all(&bytes);
+                            handoff_thread.seal();
+                        }
+                        let _ = ack.send(());
                     }
                     WriterMsg::Shutdown => {}
                 }
@@ -436,78 +528,43 @@ pub(super) fn spawn<W: Write + Send + 'static>(mut out: W) -> (ChannelWriter, Fr
     )
 }
 
-/// The `io::Write` the ratatui `CrosstermBackend` targets. `Async` (the
-/// default since #1045) routes writes through the off-thread
-/// [`ChannelWriter`]; `Sync` is the `LAZYBOX_SYNC_RENDER` escape hatch that
-/// writes stdout straight from the render thread (the pre-#1090 behavior).
-/// Keeping both behind one enum means a single `Model`/adapter type and a
-/// flag that only changes the sink.
-pub enum RenderSink {
-    Sync(io::Stdout),
-    Async(ChannelWriter),
-}
-
-impl Write for RenderSink {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        match self {
-            RenderSink::Sync(out) => out.write(bytes),
-            RenderSink::Async(out) => out.write(bytes),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            RenderSink::Sync(out) => out.flush(),
-            RenderSink::Async(out) => out.flush(),
-        }
-    }
-}
-
-/// A `tuirealm::TerminalAdapter` whose backend writes through [`RenderSink`]
-/// — the off-thread writer by default, or direct stdout under
-/// `LAZYBOX_SYNC_RENDER`. Replaces `CrosstermTerminalAdapter` as the
-/// production adapter; the host-terminal *modes* (raw / alt screen / mouse /
-/// paste / focus / kitty) are still owned by `host_terminal`, so this
-/// adapter's mode methods are intentionally no-ops.
+/// A `tuirealm::TerminalAdapter` whose backend writes through the off-thread
+/// [`ChannelWriter`], so a slow / wedged terminal write can never freeze the
+/// input thread (#1090). Replaces `CrosstermTerminalAdapter` as the production
+/// adapter; the host-terminal *modes* (raw / alt screen / mouse / paste /
+/// focus / kitty) are still owned by `host_terminal`, so this adapter's mode
+/// methods are intentionally no-ops.
 pub struct AsyncCrosstermAdapter {
-    terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<RenderSink>>,
-    /// `Some` only in async mode; its `Drop` drains + joins the writer
-    /// thread on teardown (the `Model` drops `terminal` before its
-    /// `HostTerminalGuard`, so the last frames land before the alt screen
-    /// comes down).
-    writer: Option<FrameWriter>,
+    terminal: ratatui::Terminal<ratatui::backend::CrosstermBackend<ChannelWriter>>,
+    /// Its `Drop` drains + joins the writer thread on teardown. The `Model`
+    /// drops its `HostTerminalGuard` before `terminal`, so the guard's
+    /// channel-routed reset ([`write_restore`]) reaches the still-live writer
+    /// and lands after the final frame, before this drains and joins it.
+    writer: FrameWriter,
 }
 
 impl AsyncCrosstermAdapter {
-    /// Build the production adapter. The off-thread writer is now the
-    /// **default** (#1045): the flush runs on its own thread, so a slow /
-    /// wedged terminal can never freeze the input thread — the #1090 freeze.
-    /// The fd-1 handoff ([`muzzle_writer`]) makes the crash / panic restore
-    /// safe against the writer, so this no longer regresses the #211
-    /// stranded-shell guarantee. `LAZYBOX_SYNC_RENDER=1` forces the old
-    /// direct-to-stdout path as an escape hatch.
+    /// Build the production adapter. The off-thread writer is the sole fd-1
+    /// owner (#1045): the flush runs on its own thread, so a slow / wedged
+    /// terminal can never freeze the input thread (the #1090 freeze), and every
+    /// fd-1 write — frames, OSC/mouse, and the terminal reset — is serialized
+    /// through it, so nothing interleaves with a half-written frame to strand
+    /// the shell (#211).
     pub(crate) fn new() -> io::Result<Self> {
-        let force_sync = std::env::var_os("LAZYBOX_SYNC_RENDER").is_some();
-        let (sink, writer) = if force_sync {
-            (RenderSink::Sync(io::stdout()), None)
-        } else {
-            let (channel_writer, frame_writer) = spawn(io::stdout());
-            (RenderSink::Async(channel_writer), Some(frame_writer))
-        };
-        let backend = ratatui::backend::CrosstermBackend::new(sink);
+        let (channel_writer, writer) = spawn(io::stdout());
+        let backend = ratatui::backend::CrosstermBackend::new(channel_writer);
         let terminal = ratatui::Terminal::new(backend)?;
         Ok(Self { terminal, writer })
     }
 
-    /// Backpressure handle for the run loop's render-skip gate; `None`
-    /// (sync mode) means the loop never skips.
-    pub(crate) fn pending_handle(&self) -> Option<Arc<AtomicUsize>> {
-        self.writer.as_ref().map(FrameWriter::pending_handle)
+    /// Backpressure handle for the run loop's render-skip gate.
+    pub(crate) fn pending_handle(&self) -> Arc<AtomicUsize> {
+        self.writer.pending_handle()
     }
 }
 
 impl tuirealm::terminal::TerminalAdapter for AsyncCrosstermAdapter {
-    type Backend = ratatui::backend::CrosstermBackend<RenderSink>;
+    type Backend = ratatui::backend::CrosstermBackend<ChannelWriter>;
 
     fn enable_raw_mode(&mut self) -> tuirealm::terminal::TerminalResult<()> {
         Ok(())
@@ -761,6 +818,134 @@ mod tests {
         // loop has nothing left to flush — no race.
         handle.shutdown();
         assert_eq!(recorded.lock().unwrap().as_slice(), b"[before]");
+    }
+
+    /// #1122 acceptance: a queued frame and a fatal-signal restore never
+    /// interleave. Models the fatal path exactly — a frame is *in flight* on
+    /// fd 1 and another is *queued* behind it when the signal handler claims
+    /// fd 1 via `muzzle`. The muzzle must (a) block until the in-flight frame's
+    /// write completes, so the reset can't splice into it, and (b) leave the
+    /// queued frame dropped, so it can't land after the reset. The recorded
+    /// fd-1 byte stream is therefore exactly `[in-flight frame][reset]` — the
+    /// queued frame never appears, and the reset never appears mid-frame.
+    #[test]
+    fn a_queued_frame_and_a_fatal_restore_never_interleave() {
+        use std::sync::Condvar;
+
+        /// A sink that signals when a write *starts*, then parks until
+        /// released — lets the test pin the writer mid-`write()` (in_write set)
+        /// so `muzzle` genuinely has an in-flight frame to wait out.
+        struct GatedSink {
+            recorded: Arc<Mutex<Vec<u8>>>,
+            entered: Arc<(Mutex<bool>, Condvar)>,
+            release: Arc<(Mutex<bool>, Condvar)>,
+        }
+        impl Write for GatedSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                {
+                    let (lock, cvar) = &*self.entered;
+                    *lock.lock().unwrap() = true;
+                    cvar.notify_all();
+                }
+                let (lock, cvar) = &*self.release;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = cvar.wait(released).unwrap();
+                }
+                self.recorded.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let sink = GatedSink {
+            recorded: Arc::clone(&recorded),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        };
+        let (mut writer, mut handle) = spawn(sink);
+        let handoff = handle.handoff_for_test();
+
+        // Frame 1 goes in flight: the writer claims fd 1 and parks inside the
+        // sink's `write` (in_write == true).
+        writer.write_all(b"[in-flight]").unwrap();
+        writer.flush().unwrap();
+        {
+            let (lock, cvar) = &*entered;
+            let mut started = lock.lock().unwrap();
+            while !*started {
+                started = cvar.wait(started).unwrap();
+            }
+        }
+
+        // Frame 2 is queued behind it.
+        writer.write_all(b"[queued]").unwrap();
+        writer.flush().unwrap();
+
+        // The fatal-signal handler claims fd 1. `muzzle` sets the flag, then
+        // spins on in_write — it must not return while frame 1 is mid-write.
+        let muzzle_thread = {
+            let handoff = Arc::clone(&handoff);
+            std::thread::spawn(move || handoff.muzzle())
+        };
+        while !handoff.is_muzzled() {
+            std::hint::spin_loop();
+        }
+        // Muzzle is set and spinning; the reset must not be on the wire yet —
+        // it can only follow the in-flight frame.
+        assert!(
+            recorded.lock().unwrap().is_empty(),
+            "the reset must wait for the in-flight frame to finish"
+        );
+
+        // Let frame 1 finish. in_write clears, so muzzle returns; the writer
+        // then reaches frame 2 and drops it (muzzled).
+        {
+            let (lock, cvar) = &*release;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+        muzzle_thread.join().unwrap();
+
+        // Now the handler writes the reset directly, as `fatal::handle` does.
+        recorded.lock().unwrap().extend_from_slice(b"[reset]");
+        handle.shutdown();
+
+        // Exactly the in-flight frame then the reset — the queued frame never
+        // reached fd 1, and the reset never spliced into the frame.
+        assert_eq!(recorded.lock().unwrap().as_slice(), b"[in-flight][reset]");
+    }
+
+    /// #1122: the normal-context reset routes through the writer channel
+    /// (`write_restore`) — it lands after any queued frame, then seals fd 1 so
+    /// a later frame can't clobber it, and the ack fires once it is out.
+    #[test]
+    fn channel_routed_restore_lands_after_frames_then_seals() {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let sink = SharedSink(Arc::clone(&recorded));
+        let (mut writer, mut handle) = spawn(sink);
+
+        // A frame, then the reset, then a frame that must be dropped.
+        writer.write_all(b"[frame]").unwrap();
+        writer.flush().unwrap();
+        let ack = handle.send_restore_for_test(b"[reset]");
+        ack.recv_timeout(Duration::from_secs(5))
+            .expect("restore acked once written");
+
+        writer.write_all(b"[after-reset]").unwrap();
+        writer.flush().unwrap();
+        handle.shutdown();
+
+        assert_eq!(
+            recorded.lock().unwrap().as_slice(),
+            b"[frame][reset]",
+            "the reset lands after the frame and seals fd 1 against later frames",
+        );
     }
 
     /// The muzzle returns immediately when the writer is not mid-write — the

@@ -2361,6 +2361,54 @@ mod search_tests {
         );
     }
 
+    /// The highlight set tracks the search's *scope*, not raw title text:
+    /// under a scoped `/` search, an out-of-scope row whose title happens
+    /// to contain the query is left visible but NOT highlighted, exactly as
+    /// the filter leaves it untouched. Guards the filter/highlight from
+    /// drifting apart (#1099) — both read `search_scope_covers`.
+    #[test]
+    fn scoped_highlight_set_tracks_filter_scope_not_title_text() {
+        // Distinct repo groups: `group_label` keys on `task.repo`, so the
+        // fixture must set it (the shared `issue_ws_in_repo` helper leaves
+        // base_task's repo in place, which would collapse both into one
+        // group and defeat the scope distinction this test exercises).
+        let in_repo = |repo: &str, num: &str, title: &str| {
+            let mut t = base_task();
+            t.id.key = format!("{repo}#{num}");
+            t.repo = Some(repo.to_string());
+            t.title = title.into();
+            t.url = format!("https://github.com/{repo}/issues/{num}");
+            let mut w = Workspace::from_task(t, chrono::Utc::now());
+            w.name = title.into();
+            w
+        };
+        let a = in_repo("o/a", "1", "Add search bar");
+        let b = in_repo("o/b", "2", "search everywhere");
+        let a_key = SessionKey::from(&a.key);
+        let b_key = SessionKey::from(&b.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(b_key.clone(), b);
+        sb.recompute_visible();
+        // Cursor lands on the first (alphabetically `o/a`) workspace, so the
+        // scoped `/` search pins to `o/a`.
+        sb.open_search();
+        type_query(&mut sb, "search");
+        assert!(
+            sb.searched_keys.contains(&a_key),
+            "the in-scope match is highlighted",
+        );
+        assert!(
+            !sb.searched_keys.contains(&b_key),
+            "an out-of-scope row is not highlighted even though its title contains the term",
+        );
+        assert_eq!(
+            sb.workspace_count(),
+            2,
+            "the out-of-scope row stays visible (scoped search leaves other repos untouched)",
+        );
+    }
+
     /// A matching row underlines the searched substring in its title so
     /// the user can see *what* matched — the vim `/pattern` cue (#1099).
     #[test]

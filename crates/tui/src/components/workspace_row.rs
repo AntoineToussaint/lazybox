@@ -3637,4 +3637,55 @@ mod tests {
             "a non-matching query → no split",
         );
     }
+
+    /// A highlighted (multi-span) title must survive the table's column
+    /// truncation: at a wide budget the whole match is underlined, and at a
+    /// narrow budget the row elides with `…` and stays within budget —
+    /// never panics or overflows (#1099).
+    #[test]
+    fn highlighted_title_truncates_within_budget() {
+        let theme = theme();
+        let title = "Refactor the search indexer and cache eviction policy";
+        let task = make_task("owner/repo#1", title);
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.highlight_query = Some("search");
+        let columns = build_columns(4);
+        let rows = vec![build_row(&ctx)];
+
+        let underlined = |line: &ratatui::text::Line<'_>| -> String {
+            line.spans
+                .iter()
+                .filter(|s| s.style.add_modifier.contains(Modifier::UNDERLINED))
+                .map(|s| s.content.to_string())
+                .collect()
+        };
+
+        // Wide: the whole match is underlined and the title is intact.
+        let wide = crate::components::table::render_table(&rows, &columns, 100);
+        assert!(
+            line_text(&wide[0]).contains(title),
+            "full title at width 100"
+        );
+        assert_eq!(underlined(&wide[0]), "search", "the match is underlined");
+
+        // Narrow: the title elides, the row stays within budget, and the
+        // underlined fragment (if any) is still a prefix of the match — the
+        // multi-span head truncated cleanly rather than panicking.
+        let narrow = crate::components::table::render_table(&rows, &columns, 22);
+        let text = line_text(&narrow[0]);
+        assert!(
+            text.contains('…'),
+            "narrow budget elides the title: {text:?}"
+        );
+        assert!(
+            crate::util::visual_width(&text) <= 22,
+            "row must not exceed budget: {text:?}",
+        );
+        let frag = underlined(&narrow[0]);
+        assert!(
+            "search".starts_with(frag.as_str()),
+            "the underlined fragment is a clean prefix of the match: {frag:?}",
+        );
+    }
 }

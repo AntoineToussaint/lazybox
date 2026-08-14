@@ -6,4 +6,5 @@
 
 pub use lazybox_tui_core::inbox::{
     ComputeInputs, ComputeOutcome, compute_visible, group_label, project_label, search_matches,
+    search_scope_covers,
 };

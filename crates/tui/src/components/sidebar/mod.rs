@@ -317,6 +317,14 @@ pub struct Sidebar {
     /// search is in flight; `Some` while the `/` input bar is open or
     /// a query stays applied after `Enter`. See [`SearchState`].
     search: Option<SearchState>,
+    /// Workspace keys the active search's scope covers — the rows whose
+    /// titles get the match highlight (#1099). Precomputed once per
+    /// [`Self::recompute_visible`] from the same `search_scope_covers`
+    /// predicate the visible-row filter uses, so a highlighted row is
+    /// exactly a row the search kept (no drift) and `render` needs only an
+    /// O(1) lookup instead of re-deriving each row's group label per frame.
+    /// Empty when no search is active.
+    searched_keys: std::collections::HashSet<SessionKey>,
     /// Workspace rows the user multi-selected with `v` (or swept with
     /// Shift-↑/↓). While non-empty, every bulk-appropriate workspace
     /// action targets this whole set instead of the cursor row (#932) —
@@ -410,6 +418,7 @@ impl Sidebar {
             search_bar_rect: None,
             now_override: None,
             search: None,
+            searched_keys: std::collections::HashSet::new(),
             broadcast_selected: std::collections::HashSet::new(),
             keep_awake: false,
             show_agent_model: true,
@@ -2792,6 +2801,7 @@ impl Sidebar {
         self.visible = outcome.visible;
         self.repo_summaries = outcome.summaries;
         self.recompute_stacks();
+        self.recompute_searched_keys();
 
         // Preserve cursor on a repo header across reorderings — j/k
         // can land on headers (collapse target), and snapshots
@@ -2841,6 +2851,34 @@ impl Sidebar {
             .iter()
             .position(|r| matches!(r, VisibleRow::Workspace(_) | VisibleRow::Session { .. }))
             .unwrap_or(0);
+    }
+
+    /// Rebuild [`Self::searched_keys`] from the freshly-computed visible
+    /// list — the workspace keys the active search's scope covers, which
+    /// `render` highlights. Uses the shared `search_scope_covers`
+    /// predicate (the same one the visible-row filter uses) so a
+    /// highlighted row can never diverge from what the filter kept, and
+    /// keeps the per-row `group_label` work here (once per recompute)
+    /// rather than in the per-frame render path (#1099).
+    fn recompute_searched_keys(&mut self) {
+        let keys: std::collections::HashSet<SessionKey> = self
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => {
+                    let w = self.workspaces.get(k)?;
+                    crate::components::visible_rows::search_scope_covers(
+                        self.search.as_ref(),
+                        w,
+                        &self.projects,
+                        &self.workspaces,
+                    )
+                    .then(|| k.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        self.searched_keys = keys;
     }
 }
 

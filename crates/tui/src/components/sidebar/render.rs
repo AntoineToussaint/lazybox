@@ -1256,25 +1256,13 @@ impl Sidebar {
                 continue;
             };
             let workspace = self.workspaces.get(key);
-            // The search term to underline in this row's title — only when a
-            // search actually touches this row: any global (`#`) search, or a
-            // scoped (`/`) search on this row's own repo group (#1099).
+            // The search term to underline in this row's title. `render` is
+            // per-frame, so the "does the search touch this row?" decision is
+            // precomputed into `searched_keys` at recompute time (#1099) —
+            // here it's an O(1) lookup, and it can't diverge from the filter.
             let highlight_query: Option<&str> = self.search.as_ref().and_then(|s| {
                 let q = s.query.trim().trim_start_matches('#');
-                if q.is_empty() {
-                    return None;
-                }
-                let in_scope = match &s.scope {
-                    None => true,
-                    Some(scope) => workspace.is_some_and(|w| {
-                        crate::components::visible_rows::group_label(
-                            w,
-                            &self.projects,
-                            &self.workspaces,
-                        ) == *scope
-                    }),
-                };
-                in_scope.then_some(q)
+                (!q.is_empty() && self.searched_keys.contains(key)).then_some(q)
             });
             let ctx = WorkspaceRowCtx {
                 workspace,

@@ -170,16 +170,14 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         // Free-text search. A scoped search (`scope: Some`) filters
         // only the matching project's rows and leaves every other
         // project fully visible; a global search (`scope: None`)
-        // filters every repo group at once.
-        .filter(|(_, w)| match input.search {
-            Some(s) if !s.query.is_empty() => match &s.scope {
-                None => search_matches(&s.query, w),
-                Some(scope) if group_label(w, input.projects, input.workspaces) == *scope => {
-                    search_matches(&s.query, w)
-                }
-                Some(_) => true,
-            },
-            _ => true,
+        // filters every repo group at once. A row is kept unless the
+        // search's scope *covers* it and it doesn't match —
+        // `search_scope_covers` is the single definition of "in scope",
+        // shared with the sidebar's match-highlight decision so the two
+        // can't drift (#1099).
+        .filter(|(_, w)| {
+            !search_scope_covers(input.search, w, input.projects, input.workspaces)
+                || input.search.is_some_and(|s| search_matches(&s.query, w))
         })
         .collect();
 
@@ -549,6 +547,32 @@ pub fn search_matches(query: &str, w: &Workspace) -> bool {
         .map(|t| t.title.as_str())
         .unwrap_or_else(|| w.name.as_str());
     is_subsequence(&title.to_lowercase(), &q)
+}
+
+/// Whether the active search's scope *covers* workspace `w` — the set of
+/// rows the search actually filters. A global search (`scope: None`)
+/// covers every row; a scoped search (`scope: Some`) covers only its own
+/// repo group; no search, or an empty query, covers nothing.
+///
+/// This is the single source of truth shared by [`compute_visible`]'s
+/// search filter and the sidebar's match-highlight decision, so the two
+/// can't drift (#1099): a covered row that survives the filter is exactly
+/// a row the query matched — hence the one whose title gets highlighted —
+/// while an uncovered (out-of-scope) row is shown untouched and never
+/// highlighted even if its title happens to contain the query text.
+pub fn search_scope_covers(
+    search: Option<&SearchState>,
+    w: &Workspace,
+    projects: &BTreeMap<ProjectKey, Project>,
+    workspaces: &HashMap<SessionKey, Workspace>,
+) -> bool {
+    match search {
+        Some(s) if !s.query.is_empty() => match &s.scope {
+            None => true,
+            Some(scope) => group_label(w, projects, workspaces) == *scope,
+        },
+        _ => false,
+    }
 }
 
 /// True when every char of `needle` appears in `haystack` in order
@@ -1431,6 +1455,55 @@ mod tests {
         // owner/a is filtered to k1; owner/b keeps its row regardless.
         assert_eq!(out.summaries.get("owner/a").unwrap().active, 1);
         assert_eq!(out.summaries.get("owner/b").unwrap().active, 1);
+    }
+
+    /// `search_scope_covers` is the single predicate the visible-row filter
+    /// and the sidebar's match-highlight both read, so it must classify
+    /// scope exactly the way the filter keeps rows: a scoped search covers
+    /// only its own repo (even when an out-of-scope row's title contains
+    /// the query text), a global search covers every repo, and no / empty
+    /// search covers nothing (#1099).
+    #[test]
+    fn search_scope_covers_matches_the_filter_scope() {
+        let in_scope = titled("k1", "owner/a", 1, "Add search bar");
+        let out_of_scope = titled("k2", "owner/b", 2, "search everywhere");
+        let projects = BTreeMap::new();
+        let ws = HashMap::new();
+
+        let scoped = search("owner/a", "search");
+        assert!(search_scope_covers(
+            Some(&scoped),
+            &in_scope,
+            &projects,
+            &ws
+        ));
+        assert!(
+            !search_scope_covers(Some(&scoped), &out_of_scope, &projects, &ws),
+            "an out-of-scope row is not covered even though its title contains the term",
+        );
+
+        let global = global_search("search");
+        assert!(search_scope_covers(
+            Some(&global),
+            &in_scope,
+            &projects,
+            &ws
+        ));
+        assert!(search_scope_covers(
+            Some(&global),
+            &out_of_scope,
+            &projects,
+            &ws
+        ));
+
+        assert!(!search_scope_covers(None, &in_scope, &projects, &ws));
+        let empty = search("owner/a", "");
+        assert!(!search_scope_covers(
+            Some(&empty),
+            &in_scope,
+            &projects,
+            &ws
+        ));
     }
 
     /// A global search (`scope: None`) filters EVERY project at once —

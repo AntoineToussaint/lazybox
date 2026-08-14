@@ -1470,6 +1470,13 @@ pub struct Model<T: TerminalAdapter> {
     /// disarms it (`set_focus`) so a held `]` can't resolve in the pane you
     /// moved to.
     escape_latch: crate::confirm_latch::DoubleTapLatch,
+    /// Burst-typing guard for the sidebar (#1110). When the user thinks
+    /// focus is inside an agent terminal and types a sentence, each
+    /// letter fires a bare single-key shortcut. This tracks the cadence
+    /// of guarded single-stroke sidebar actions; once several land in
+    /// rapid succession it suppresses the chain and nudges the user to
+    /// focus the terminal instead of silently firing shortcuts.
+    sidebar_burst: crate::confirm_latch::BurstGuard<lazybox_tui_core::action::KeyStroke>,
     /// Whether the `]]` leader is armed. Set when `]]` completes; the
     /// *next* key selects a binding. Its meaning follows the pane it armed
     /// in (#871): in the terminal it addresses the focused tile (snippets,
@@ -1949,6 +1956,14 @@ use lazybox_config::ActivityPaneMode;
 /// no `Msg`. See `Model::forward_modal_event`.
 const MODAL_REDRAW_WINDOW: Duration = Duration::from_millis(120);
 
+/// Max gap between two guarded sidebar keystrokes for them to count as
+/// one burst, and how many rapid presses trip the guard (#1110). Tuned
+/// so a slow, deliberate shortcut always fires (its gap exceeds the
+/// window) while a typed word's cadence — sub-second between letters —
+/// suppresses the chain after the first couple of keys.
+const SIDEBAR_BURST_WINDOW: Duration = Duration::from_millis(350);
+const SIDEBAR_BURST_THRESHOLD: usize = 3;
+
 /// Banner shown while a self-healing `--connect` transport re-dials a
 /// dropped daemon. Matched exactly to retract it once the link returns.
 const RECONNECTING_NOTICE: &str = "⟳ daemon connection lost — reconnecting…";
@@ -2097,6 +2112,10 @@ impl<T: TerminalAdapter> Model<T> {
             leader_highlight: None,
             leader_fallback: None,
             escape_latch: crate::confirm_latch::DoubleTapLatch::new(),
+            sidebar_burst: crate::confirm_latch::BurstGuard::new(
+                SIDEBAR_BURST_WINDOW,
+                SIDEBAR_BURST_THRESHOLD,
+            ),
             terminal_leader_armed: false,
             terminal_leader_highlight: None,
             leader_target: None,
@@ -5163,6 +5182,16 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         let notice = self.status.notice.clone();
+        // Focus-mode chip for the footer's left edge (#1110): the
+        // unmistakable answer to "where do my keystrokes go?" — the
+        // active agent/shell name when focus is in a live terminal, and
+        // a quiet "navigating" chip on every navigation pane. Computed
+        // here (immutable borrow) so it can move into the draw closure.
+        let focus_chip = crate::realm::components::footer::FocusChip {
+            typing_to: (self.focus == PaneFocus::Terminals)
+                .then(|| self.terminals.active_typing_target())
+                .flatten(),
+        };
         // Which-key rows for an armed catalog leader — the
         // `(next-key, label)` continuations of the armed prefix, a pure
         // function of the catalog. Built only while a leader is armed.
@@ -5298,6 +5327,7 @@ impl<T: TerminalAdapter> Model<T> {
             footer_overflow = crate::realm::components::footer::render(
                 f,
                 footer_area,
+                Some(&focus_chip),
                 &keymap,
                 &globals,
                 &evergreen,

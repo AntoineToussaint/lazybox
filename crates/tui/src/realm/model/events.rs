@@ -179,6 +179,11 @@ impl<T: TerminalAdapter> Model<T> {
         // terminal → drop the held `]`" rule, applied symmetrically.
         if self.focus != focus {
             self.escape_latch.disarm();
+            // A deliberate focus change ends any in-flight sidebar
+            // typing run (#1110), so bouncing to a terminal and back
+            // doesn't leave a stale burst that suppresses the next
+            // genuine shortcut.
+            self.sidebar_burst.reset();
         }
         self.focus = focus;
         self.set_focus_attr();

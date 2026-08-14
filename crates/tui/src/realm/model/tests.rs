@@ -21860,3 +21860,212 @@ mod remote_spawn_tests {
         );
     }
 }
+
+/// The focus indicator + burst guard from issue #1110: keystrokes must
+/// have an unmistakable destination, and a typed word in the sidebar
+/// must not fire a chain of shortcuts.
+#[cfg(test)]
+mod focus_indicator_and_burst_guard_tests {
+    use super::super::*;
+    use chrono::Utc;
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    fn build_model() -> TestModel {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        m
+    }
+
+    fn empty_ws(key: &str) -> Workspace {
+        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now())
+    }
+
+    fn press(m: &mut TestModel, code: Key) {
+        m.dispatch_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn footer_text(m: &mut TestModel) -> String {
+        m.view();
+        let buffer = m.terminal.raw().backend().buffer();
+        let last = buffer.area.height - 1;
+        (0..buffer.area.width)
+            .map(|col| buffer[(col, last)].symbol())
+            .collect::<String>()
+    }
+
+    /// With focus in a live agent terminal the footer names the agent
+    /// keystrokes flow to — the unmistakable "typing to" signal.
+    #[test]
+    fn footer_names_the_agent_when_terminal_focused() {
+        let mut m = build_model();
+        let session = SessionKey::from("github:o/r#1");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.terminals.set_active_session(Some(session.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: session,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.set_focus(PaneFocus::Terminals);
+
+        assert!(
+            footer_text(&mut m).contains("typing to: claude"),
+            "terminal focus must say where typing goes: {:?}",
+            footer_text(&mut m)
+        );
+    }
+
+    /// Navigation panes read as a distinct "navigating" chip — never
+    /// "typing to", so the two modes can't be confused.
+    #[test]
+    fn footer_reads_navigating_when_sidebar_focused() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        let footer = footer_text(&mut m);
+        assert!(footer.contains("navigating"), "sidebar chip: {footer:?}");
+        assert!(
+            !footer.contains("typing to"),
+            "navigation must not claim to type to an agent: {footer:?}"
+        );
+    }
+
+    /// A single deliberate shortcut in the sidebar fires normally — the
+    /// burst guard must never swallow an intentional press.
+    #[test]
+    fn a_single_sidebar_shortcut_is_not_suppressed() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        press(&mut m, Key::Char(' '));
+        assert!(
+            m.status.notice.is_none(),
+            "a lone press draws no burst warning"
+        );
+    }
+
+    /// A rapid run of *varied* bare single-key shortcuts (a word typed
+    /// at the wrong pane) is suppressed after the first couple of keys
+    /// and the user is nudged to focus the terminal.
+    #[test]
+    fn a_sidebar_burst_is_suppressed_and_warns() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        // Alternate two benign guarded shortcuts (cycle-sort / collapse)
+        // back-to-back — distinct keys at typing cadence, well inside
+        // the burst window at test speed.
+        for _ in 0..3 {
+            press(&mut m, Key::Char('o'));
+            press(&mut m, Key::Char(' '));
+        }
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("a suppressed burst raises a nudge");
+        assert!(
+            notice.message.contains("sidebar") && notice.message.contains("agent"),
+            "nudge must explain the mode mixup: {:?}",
+            notice.message
+        );
+    }
+
+    /// Spamming a *single* key (cycling sort, scrolling) is deliberate,
+    /// not a typed word — it must never be mistaken for a burst.
+    #[test]
+    fn repeating_one_sidebar_key_is_never_suppressed() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        for _ in 0..6 {
+            press(&mut m, Key::Char('o'));
+        }
+        assert!(
+            m.status.notice.is_none(),
+            "repeating one key is intentional, not a burst"
+        );
+    }
+
+    /// The focus-into-terminal move is exempt from the guard: it's the
+    /// escape hatch, so it fires even mid-burst.
+    #[test]
+    fn focus_into_terminal_survives_a_burst() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+        m.sidebar
+            .focus_workspace_key(&SessionKey::from("github:o/r#1"));
+
+        for _ in 0..3 {
+            press(&mut m, Key::Char('o'));
+            press(&mut m, Key::Char(' '));
+        }
+        // → must still move focus off the sidebar despite the live burst.
+        press(&mut m, Key::Right);
+        assert_ne!(
+            m.focus(),
+            PaneFocus::Sidebar,
+            "→ escapes the sidebar even during a burst"
+        );
+    }
+
+    /// A deliberate focus change ends the burst run, so bouncing to a
+    /// terminal and back doesn't leave a stale guard that swallows the
+    /// next genuine sidebar shortcut (#1110).
+    #[test]
+    fn focus_change_resets_the_burst_so_the_next_shortcut_fires() {
+        let mut m = build_model();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+            "github:o/r#1",
+        ))));
+        m.set_focus(PaneFocus::Sidebar);
+
+        // Drive the guard into its suppressing state (3 distinct rapid
+        // keys), leaving the last key as `o`.
+        press(&mut m, Key::Char('o'));
+        press(&mut m, Key::Char(' '));
+        press(&mut m, Key::Char('o'));
+        assert!(m.status.notice.is_some(), "burst is suppressing");
+        m.status.notice = None;
+
+        // Bounce focus to the terminal pane and back — each transition
+        // must reset the run.
+        m.set_focus(PaneFocus::Terminals);
+        m.set_focus(PaneFocus::Sidebar);
+
+        // A single deliberate press of a key *distinct* from the last
+        // burst key must now fire (run restarts at 1), not be swallowed
+        // as the 4th key of the old run.
+        press(&mut m, Key::Char(' '));
+        assert!(
+            m.status.notice.is_none(),
+            "focus bounce reset the run — the next press is not a burst"
+        );
+    }
+}

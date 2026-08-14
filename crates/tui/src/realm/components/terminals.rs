@@ -110,6 +110,19 @@ impl Terminals {
         self.inner.terminal_agent_id(id)
     }
 
+    /// Label of the terminal keystrokes currently flow to — the agent id
+    /// (`claude`, `codex`, …) or `shell` for a plain shell. `None` when
+    /// no terminal is active. Drives the footer's "▶ typing to: <agent>"
+    /// focus chip (#1110); uses the focused leaf (Splits) / active tab
+    /// (Tabs), which is exactly where a keystroke would land.
+    pub fn active_typing_target(&self) -> Option<String> {
+        let id = self.inner.focused_terminal_id()?;
+        Some(match self.inner.terminal_agent_id(id) {
+            Some(agent) => agent.to_string(),
+            None => "shell".to_string(),
+        })
+    }
+
     pub(crate) fn terminal_is_on_main(&self, id: TerminalId) -> bool {
         self.inner.terminal_is_on_main(id)
     }

@@ -100,18 +100,64 @@ impl Notice {
     }
 }
 
+/// The persistent "where do my keystrokes go" indicator at the left
+/// edge of the footer (#1110). The daily "am I inside the agent?"
+/// confusion has an unmissable answer here: terminal focus reads as a
+/// bright accent `▶ typing to: <agent>` pill; every navigation pane
+/// (sidebar / activity) reads as a quiet `◇ navigating` chip, so the
+/// two modes can never be mistaken for each other.
+pub struct FocusChip {
+    /// Agent/shell label when focus is in a live terminal; `None` when
+    /// focus is on a navigation pane.
+    pub typing_to: Option<String>,
+}
+
+/// Build the focus chip's styled line plus its display width.
+fn focus_chip_line(
+    chip: &FocusChip,
+    theme: &crate::theme::Theme,
+    bg: Style,
+) -> (Line<'static>, u16) {
+    let line = match &chip.typing_to {
+        Some(agent) => Line::from(vec![
+            Span::styled(" ", bg),
+            Span::styled(
+                format!(" ▶ typing to: {agent} "),
+                Style::default()
+                    .bg(theme.accent)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        None => Line::from(vec![
+            Span::styled(" ", bg),
+            Span::styled(
+                " ◇ navigating ",
+                Style::default()
+                    .bg(theme.surface)
+                    .fg(theme.text_dim)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]),
+    };
+    let width = line.width() as u16;
+    (line, width)
+}
+
 /// Pure render. The orchestrator passes in everything Footer needs:
-/// the focused pane's keymap, the escape-hatch `globals` tail, the
-/// low-value `evergreen` hints (dropped first), the effective help key
-/// (`help_key` — what the overflow cell tells the user to press, so a
-/// remap of `OpenHelp` is honored), the optional polling status, and
-/// the optional notice. Paints directly and returns the screen rect of
-/// the `… +N` overflow cell when one was drawn, so the caller can make
-/// it clickable (opening help); `None` when everything fit (#805).
+/// the `focus_chip` mode indicator, the focused pane's keymap, the
+/// escape-hatch `globals` tail, the low-value `evergreen` hints
+/// (dropped first), the effective help key (`help_key` — what the
+/// overflow cell tells the user to press, so a remap of `OpenHelp` is
+/// honored), the optional polling status, and the optional notice.
+/// Paints directly and returns the screen rect of the `… +N` overflow
+/// cell when one was drawn, so the caller can make it clickable
+/// (opening help); `None` when everything fit (#805).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
     area: Rect,
+    focus_chip: Option<&FocusChip>,
     keymap: &[Binding],
     globals: &[Binding],
     evergreen: &[Binding],
@@ -219,6 +265,35 @@ pub fn render(
         y: area.y,
         width: area.width.saturating_sub(right_width),
         height: 1,
+    };
+
+    // Left-most: the persistent focus-mode chip (#1110). Rendered
+    // before the hint bar and carved off the left of `left_rect`, so
+    // everything downstream (elision budget, overflow-cell offset) sees
+    // the reduced remainder. Dropped only when the row is too narrow to
+    // hold both the chip and any hints — the hints win a starvation
+    // fight, since the chip's message is also carried by the terminal
+    // header's own focus treatment.
+    let left_rect = if let Some(chip) = focus_chip {
+        let (line, want) = focus_chip_line(chip, theme, bg);
+        // Keep at least a handful of columns for the hint bar.
+        let w = want.min(left_rect.width.saturating_sub(8));
+        if w >= want {
+            let chip_rect = Rect {
+                width: w,
+                ..left_rect
+            };
+            f.render_widget(Paragraph::new(line).style(bg), chip_rect);
+            Rect {
+                x: left_rect.x + w,
+                width: left_rect.width - w,
+                ..left_rect
+            }
+        } else {
+            left_rect
+        }
+    } else {
+        left_rect
     };
 
     // Left zone: focused-pane contextual bindings, then the tail
@@ -457,6 +532,7 @@ mod tests {
             overflow = render(
                 f,
                 Rect::new(0, 0, w, 1),
+                None,
                 keymap,
                 globals,
                 evergreen,

@@ -21901,9 +21901,10 @@ mod remote_spawn_tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// The full GCP onboarding walk (#1112): provider → sign-in gate →
-    /// project → zone → user → auto-connect, ending with a persisted
-    /// `sandbox:` block carrying the defaults for the fields left blank.
+    /// The full GCP onboarding walk (#1112): provider → service-account key
+    /// → project → zone → user → auto-connect, ending with a persisted
+    /// `sandbox:` block carrying the API credential and a region derived
+    /// from the chosen zone.
     #[test]
     fn sandbox_onboarding_gcp_walk_persists_config() {
         let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -21913,6 +21914,10 @@ mod remote_spawn_tests {
         // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator here.
         unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
 
+        // A readable key file so the credential-state check passes.
+        let key = home.join("sa.json");
+        std::fs::write(&key, "{}").unwrap();
+
         let (client, _server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         m.start_sandbox_onboarding();
@@ -21921,15 +21926,15 @@ mod remote_spawn_tests {
         let _ = m.handle_choice_picked(vec![ChoicePayload::Text("gcp".into())]);
         assert_eq!(
             m.modal_stack.last(),
-            Some(&Id::SandboxConfirm),
-            "gcp advances to the sign-in gate",
+            Some(&Id::SandboxInput),
+            "gcp advances to the service-account-key step",
         );
 
-        let _ = m.handle_confirmed(true);
+        let _ = m.handle_input_submitted(key.display().to_string());
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::SandboxInput),
-            "sign-in gate advances to the project prompt",
+            "a readable key advances to the project prompt",
         );
 
         let _ = m.handle_input_submitted("my-proj".into());
@@ -21938,8 +21943,8 @@ mod remote_spawn_tests {
             Some(&Id::SandboxInput),
             "project → zone"
         );
-        // Blank zone / user keep the defaults.
-        let _ = m.handle_input_submitted(String::new());
+        // A non-default zone, then a blank user (keeps the default).
+        let _ = m.handle_input_submitted("europe-west1-b".into());
         assert_eq!(m.modal_stack.last(), Some(&Id::SandboxInput), "zone → user");
         let _ = m.handle_input_submitted(String::new());
         assert_eq!(
@@ -21953,10 +21958,17 @@ mod remote_spawn_tests {
 
         let cfg = lazybox_config::Config::load_from(&home.join("config.yaml")).expect("config");
         assert_eq!(cfg.sandbox.provider.as_deref(), Some("gcp"));
-        assert_eq!(cfg.sandbox.project.as_deref(), Some("my-proj"));
         assert_eq!(
-            cfg.sandbox.zone.as_deref(),
-            Some(crate::sandbox_flow::DEFAULT_ZONE)
+            cfg.sandbox.auth.service_account_key.as_deref(),
+            Some(key.as_path()),
+            "the API credential is persisted",
+        );
+        assert_eq!(cfg.sandbox.project.as_deref(), Some("my-proj"));
+        assert_eq!(cfg.sandbox.zone.as_deref(), Some("europe-west1-b"));
+        assert_eq!(
+            cfg.sandbox.region.as_deref(),
+            Some("europe-west1"),
+            "region derived from the zone survives the persist path",
         );
         assert_eq!(
             cfg.sandbox.user.as_deref(),
@@ -21966,6 +21978,36 @@ mod remote_spawn_tests {
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The service-account-key step is the non-interactive credential check
+    /// (#1112): an unreadable path re-asks with an actionable error instead
+    /// of persisting a box that can't authenticate; a blank path is accepted
+    /// as ambient credentials.
+    #[test]
+    fn sandbox_onboarding_gcp_key_validates_readability() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.start_sandbox_onboarding();
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Text("gcp".into())]);
+        assert_eq!(m.modal_stack.last(), Some(&Id::SandboxInput), "key step");
+
+        // A path that doesn't exist → re-ask, with a status notice.
+        let _ = m.handle_input_submitted("/no/such/key.json".into());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "an unreadable key re-asks",
+        );
+        assert!(m.status.notice.is_some(), "surfaces the credential error");
+
+        // Blank → ambient credentials, advances to the project prompt.
+        let _ = m.handle_input_submitted(String::new());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::SandboxInput),
+            "a blank key (ambient) advances to the project prompt",
+        );
     }
 
     /// The E2B walk skips the GCP-only steps: provider → API-key gate →
@@ -22019,8 +22061,9 @@ mod remote_spawn_tests {
     }
 
     /// Re-running onboarding on a hand-tuned box preserves the fields the
-    /// flow never asks about — `auth`, `ports`, `require_connect` — rather
-    /// than clobbering the whole `sandbox:` block (regression guard).
+    /// flow never asks about — `ports`, `require_connect`, and the `auth`
+    /// sub-fields it doesn't own (impersonation) — rather than clobbering the
+    /// whole `sandbox:` block (regression guard).
     #[test]
     fn sandbox_onboarding_preserves_hand_authored_fields() {
         let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -22030,20 +22073,23 @@ mod remote_spawn_tests {
         // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator here.
         unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
 
+        let key = home.join("sa.json");
+        std::fs::write(&key, "{}").unwrap();
+
         // Seed a config whose sandbox block carries fields the flow leaves
         // untouched.
         let mut seed = lazybox_config::Config::default();
         seed.sandbox.provider = Some("gcp".into());
         seed.sandbox.require_connect = Some(true);
         seed.sandbox.ports = vec![3000];
-        seed.sandbox.auth.service_account_key = Some("/keys/sa.json".into());
+        seed.sandbox.auth.impersonate_service_account = Some("deploy@proj.iam".into());
         seed.save_to(&home.join("config.yaml")).unwrap();
 
         let (client, _server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         m.start_sandbox_onboarding();
         let _ = m.handle_choice_picked(vec![ChoicePayload::Text("gcp".into())]);
-        let _ = m.handle_confirmed(true);
+        let _ = m.handle_input_submitted(key.display().to_string());
         let _ = m.handle_input_submitted("new-proj".into());
         let _ = m.handle_input_submitted(String::new());
         let _ = m.handle_input_submitted(String::new());
@@ -22056,15 +22102,20 @@ mod remote_spawn_tests {
             "walked field updated"
         );
         assert_eq!(
+            cfg.sandbox.auth.service_account_key.as_deref(),
+            Some(key.as_path()),
+            "flow-owned key written"
+        );
+        assert_eq!(
             cfg.sandbox.require_connect,
             Some(true),
             "untouched toggle kept"
         );
         assert_eq!(cfg.sandbox.ports, vec![3000], "untouched ports kept");
         assert_eq!(
-            cfg.sandbox.auth.service_account_key.as_deref(),
-            Some(std::path::Path::new("/keys/sa.json")),
-            "untouched auth kept",
+            cfg.sandbox.auth.impersonate_service_account.as_deref(),
+            Some("deploy@proj.iam"),
+            "untouched auth sub-field kept",
         );
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
@@ -22079,7 +22130,8 @@ mod remote_spawn_tests {
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         m.start_sandbox_onboarding();
         let _ = m.handle_choice_picked(vec![ChoicePayload::Text("gcp".into())]);
-        let _ = m.handle_confirmed(true);
+        // Blank key (ambient) advances past the credential step.
+        let _ = m.handle_input_submitted(String::new());
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::SandboxInput),

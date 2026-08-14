@@ -15,10 +15,11 @@
 //! [`SandboxConfig`] the config writer persists. No widgets, no IO here.
 
 use lazybox_config::SandboxConfig;
+use std::path::PathBuf;
 
 /// Default GCE zone, matching the issue's "sensible defaults".
 pub const DEFAULT_ZONE: &str = "us-central1-a";
-/// Default SSH/gcloud login user on the box.
+/// Default login user on the box.
 pub const DEFAULT_USER: &str = "lazybox";
 
 /// One step of the onboarding flow. The order is provider-dependent —
@@ -28,11 +29,11 @@ pub const DEFAULT_USER: &str = "lazybox";
 pub enum SandboxStage {
     /// Pick the provider (gcp / e2b). Always first.
     Provider,
-    /// GCP sign-in guidance: the app can't shell an interactive browser
-    /// login, so it points the user at `! gcloud auth login` and waits
-    /// for them to confirm they're signed in (the safe v1 from the
-    /// issue's open questions).
-    GcpSignIn,
+    /// GCP service-account key path — the API credential (#1047). The box
+    /// authenticates from this key rather than an interactive `gcloud`
+    /// login, so onboarding stays CLI-free; the Model validates the file is
+    /// readable and surfaces the credential state.
+    GcpKey,
     /// GCP project id.
     Project,
     /// GCE zone (defaulted).
@@ -56,6 +57,9 @@ pub enum SandboxStage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxDraft {
     pub provider: String,
+    /// GCP service-account key path (`sandbox.auth.service_account_key`).
+    /// `None` = ambient credentials.
+    pub auth_key: Option<PathBuf>,
     pub project: Option<String>,
     pub zone: Option<String>,
     pub user: Option<String>,
@@ -68,6 +72,7 @@ impl Default for SandboxDraft {
     fn default() -> Self {
         Self {
             provider: String::new(),
+            auth_key: None,
             project: None,
             zone: None,
             user: None,
@@ -94,6 +99,7 @@ impl SandboxDraft {
     pub fn from_config(cfg: &SandboxConfig) -> Self {
         Self {
             provider: cfg.provider.clone().unwrap_or_default(),
+            auth_key: cfg.auth.service_account_key.clone(),
             project: cfg.project.clone(),
             zone: cfg.zone.clone(),
             user: cfg.user.clone(),
@@ -113,14 +119,17 @@ impl SandboxDraft {
     pub fn set_provider(&mut self, provider: impl Into<String>) {
         self.provider = provider.into();
         self.stage = if self.is_gcp() {
-            SandboxStage::GcpSignIn
+            SandboxStage::GcpKey
         } else {
             SandboxStage::E2bSignIn
         };
     }
 
-    /// Advance past the GCP sign-in guidance to the project question.
-    pub fn confirm_gcp_signin(&mut self) {
+    /// Record the GCP service-account key (`None` = ambient) and advance to
+    /// the project question. Readability is validated by the caller before
+    /// this is called; the pure flow only stores the value.
+    pub fn set_key(&mut self, key: Option<PathBuf>) {
+        self.auth_key = key;
         self.stage = SandboxStage::Project;
     }
 
@@ -134,6 +143,11 @@ impl SandboxDraft {
     /// aren't a text input.
     pub fn input_prefill(&self) -> String {
         match self.stage {
+            SandboxStage::GcpKey => self
+                .auth_key
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             SandboxStage::Project => self.project.clone().unwrap_or_default(),
             SandboxStage::Zone => self
                 .zone
@@ -212,6 +226,13 @@ impl SandboxDraft {
             }),
             template: (!gcp).then(|| self.template.clone()).flatten(),
             auto_connect: Some(self.auto_connect),
+            auth: lazybox_config::SandboxAuthConfig {
+                // Only the service-account key is flow-owned; the merge in
+                // `finish_sandbox_onboarding` preserves the other auth
+                // sub-fields (impersonation, config dir).
+                service_account_key: gcp.then(|| self.auth_key.clone()).flatten(),
+                ..lazybox_config::SandboxAuthConfig::default()
+            },
             ..SandboxConfig::default()
         }
     }
@@ -236,12 +257,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gcp_walk_visits_signin_project_zone_user_autoconnect() {
+    fn gcp_walk_visits_key_project_zone_user_autoconnect() {
         let mut d = SandboxDraft::new();
         assert_eq!(d.stage, SandboxStage::Provider);
         d.set_provider("gcp");
-        assert_eq!(d.stage, SandboxStage::GcpSignIn);
-        d.confirm_gcp_signin();
+        assert_eq!(d.stage, SandboxStage::GcpKey);
+        d.set_key(Some(PathBuf::from("/keys/sa.json")));
         assert_eq!(d.stage, SandboxStage::Project);
         d.set_project("my-proj");
         assert_eq!(d.stage, SandboxStage::Zone);
@@ -291,11 +312,20 @@ mod tests {
             provider: Some("gcp".into()),
             project: Some("keep-proj".into()),
             zone: Some("us-east1-b".into()),
+            auth: lazybox_config::SandboxAuthConfig {
+                service_account_key: Some("/keys/sa.json".into()),
+                ..Default::default()
+            },
             ..SandboxConfig::default()
         };
         let mut d = SandboxDraft::from_config(&cfg);
         d.set_provider("gcp");
-        d.confirm_gcp_signin();
+        assert_eq!(
+            d.input_prefill(),
+            "/keys/sa.json",
+            "key prefilled from config",
+        );
+        d.set_key(None);
         assert_eq!(
             d.input_prefill(),
             "keep-proj",
@@ -321,7 +351,7 @@ mod tests {
     fn blank_zone_and_user_fall_back_to_defaults() {
         let mut d = SandboxDraft::new();
         d.set_provider("gcp");
-        d.confirm_gcp_signin();
+        d.set_key(None);
         d.set_project("my-proj");
         d.set_zone("   ");
         d.set_user("");
@@ -332,16 +362,21 @@ mod tests {
     }
 
     #[test]
-    fn gcp_config_carries_project_zone_user_no_template() {
+    fn gcp_config_carries_key_project_zone_user_no_template() {
         let mut d = SandboxDraft::new();
         d.set_provider("gcp");
-        d.confirm_gcp_signin();
+        d.set_key(Some(PathBuf::from("/keys/sa.json")));
         d.set_project("my-proj");
         d.set_zone("us-east1-b");
         d.set_user("alice");
         d.set_auto_connect(true);
         let cfg = d.to_config();
         assert_eq!(cfg.provider.as_deref(), Some("gcp"));
+        assert_eq!(
+            cfg.auth.service_account_key.as_deref(),
+            Some(std::path::Path::new("/keys/sa.json")),
+            "the API credential is persisted",
+        );
         assert_eq!(cfg.project.as_deref(), Some("my-proj"));
         assert_eq!(cfg.zone.as_deref(), Some("us-east1-b"));
         assert_eq!(
@@ -352,6 +387,22 @@ mod tests {
         assert_eq!(cfg.user.as_deref(), Some("alice"));
         assert_eq!(cfg.auto_connect, Some(true));
         assert!(cfg.template.is_none());
+    }
+
+    #[test]
+    fn ambient_gcp_writes_no_service_account_key() {
+        let mut d = SandboxDraft::new();
+        d.set_provider("gcp");
+        d.set_key(None);
+        d.set_project("my-proj");
+        d.set_zone("");
+        d.set_user("");
+        d.set_auto_connect(false);
+        let cfg = d.to_config();
+        assert!(
+            cfg.auth.service_account_key.is_none(),
+            "blank key leaves ambient credentials",
+        );
     }
 
     #[test]
@@ -387,7 +438,7 @@ mod tests {
     fn empty_project_is_flagged_for_reprompt() {
         let mut d = SandboxDraft::new();
         d.set_provider("gcp");
-        d.confirm_gcp_signin();
+        d.set_key(None);
         d.set_project("   ");
         assert!(d.needs_project());
         d.set_project("real-proj");
@@ -398,7 +449,7 @@ mod tests {
     fn produced_config_round_trips_through_yaml() {
         let mut d = SandboxDraft::new();
         d.set_provider("gcp");
-        d.confirm_gcp_signin();
+        d.set_key(None);
         d.set_project("my-proj");
         d.set_zone("");
         d.set_user("");

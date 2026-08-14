@@ -578,6 +578,34 @@ impl<T: TerminalAdapter> Model<T> {
                     return cmds;
                 };
                 match draft.stage {
+                    SandboxStage::GcpKey => {
+                        // Non-interactive credential-state check (#1112): a
+                        // blank path means ambient credentials; a given path
+                        // must be a readable file, else re-ask with an
+                        // actionable error. No CLI, no network — just an fs
+                        // read, mirroring `GcpProvider::check_auth`'s offline
+                        // key validation.
+                        let trimmed = text.trim();
+                        if trimmed.is_empty() {
+                            draft.set_key(None);
+                        } else {
+                            let typed = std::path::PathBuf::from(trimmed);
+                            let expanded = expand_scan_root(&typed);
+                            match std::fs::File::open(&expanded) {
+                                // Store the `~/`-form the user typed so the
+                                // YAML stays readable, like scan roots.
+                                Ok(_) => draft.set_key(Some(typed)),
+                                Err(e) => {
+                                    self.flash_error(format!(
+                                        "can't read service-account key {}: {e} — point it at a \
+                                         readable JSON key, or leave blank for ambient credentials",
+                                        expanded.display()
+                                    ));
+                                    draft.stage = SandboxStage::GcpKey;
+                                }
+                            }
+                        }
+                    }
                     SandboxStage::Project => {
                         draft.set_project(text);
                         if draft.needs_project() {
@@ -1205,18 +1233,15 @@ showing keybinding search only",
                 use crate::sandbox_flow::SandboxStage;
                 if let Some(ModalFlow::SandboxOnboarding { mut draft }) = self.modal_flow.take() {
                     match draft.stage {
-                        // Sign-in / credential gate: Yes continues the walk;
-                        // No abandons onboarding (the flow was already taken
-                        // above).
-                        SandboxStage::GcpSignIn if yes => {
-                            draft.confirm_gcp_signin();
-                            self.mount_sandbox_stage(draft);
-                        }
+                        // E2B credential gate: Yes continues the walk; No
+                        // abandons onboarding (the flow was already taken
+                        // above). GCP has no confirm gate — its key step is an
+                        // Input handled in `handle_input_submitted`.
                         SandboxStage::E2bSignIn if yes => {
                             draft.confirm_e2b_signin();
                             self.mount_sandbox_stage(draft);
                         }
-                        SandboxStage::GcpSignIn | SandboxStage::E2bSignIn => {}
+                        SandboxStage::E2bSignIn => {}
                         // Final answer: record the toggle either way and
                         // persist the collected config.
                         SandboxStage::AutoConnect => {

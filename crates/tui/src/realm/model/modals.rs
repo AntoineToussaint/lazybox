@@ -1025,26 +1025,30 @@ impl<T: TerminalAdapter> Model<T> {
                     .payload_for(|id: &String| ChoicePayload::Text(id.clone()));
                 self.mount_modal(Id::SandboxProviderPick, modal);
             }
-            SandboxStage::GcpSignIn => {
-                // The app can't shell an interactive browser login, so it
-                // guides the `!`-prefixed shell and waits for the user to
-                // confirm — the safe v1 from the issue's open questions.
-                let modal = Confirm::new(
-                    "Sign in to Google Cloud: type `! gcloud auth login` in the prompt, \
-                     complete the browser login, then choose Yes to continue.",
-                )
-                .default_yes();
-                self.mount_modal(Id::SandboxConfirm, modal);
+            SandboxStage::GcpKey => {
+                // The box authenticates from a service-account key (the API
+                // credential, #1047) rather than an interactive `gcloud`
+                // login — no CLI. Submit validates the file is readable
+                // (`handle_input_submitted`), which is the credential-state
+                // check. Blank keeps ambient credentials.
+                let modal = Input::new("GCP service-account key (JSON) path")
+                    .title("Set up remote sandbox")
+                    .placeholder("~/.lazybox/gcp-sa.json  (blank = ambient credentials)")
+                    .with_input(prefill);
+                self.mount_modal(Id::SandboxInput, modal);
             }
             SandboxStage::E2bSignIn => {
-                // E2B has no interactive login: it reads an API key from the
-                // environment. Surface that prerequisite rather than persist a
-                // box that can't authenticate.
-                let modal = Confirm::new(
-                    "E2B authenticates with an API key. Set `E2B_API_KEY` in the environment \
-                     lazybox runs in (then relaunch), and choose Yes to continue.",
-                )
-                .default_yes();
+                // E2B reads its API key from the environment. Detect whether
+                // `E2B_API_KEY` is set and surface that state rather than
+                // persist a box that can't authenticate.
+                let present = std::env::var_os("E2B_API_KEY").is_some();
+                let body = if present {
+                    "E2B_API_KEY is set in this environment. Choose Yes to continue."
+                } else {
+                    "E2B authenticates with an API key, but E2B_API_KEY is not set in this \
+                     environment. Set it (then relaunch lazybox), and choose Yes to continue."
+                };
+                let modal = Confirm::new(body).default_yes();
                 self.mount_modal(Id::SandboxConfirm, modal);
             }
             SandboxStage::Project => {
@@ -1102,10 +1106,14 @@ impl<T: TerminalAdapter> Model<T> {
         match lazybox_config::Config::save_with(|c| {
             c.sandbox.provider = cfg.provider.clone();
             c.sandbox.project = cfg.project.clone();
+            c.sandbox.region = cfg.region.clone();
             c.sandbox.zone = cfg.zone.clone();
             c.sandbox.user = cfg.user.clone();
             c.sandbox.template = cfg.template.clone();
             c.sandbox.auto_connect = cfg.auto_connect;
+            // Only the key is flow-owned; impersonation / config-dir sub-fields
+            // of `auth` are left untouched.
+            c.sandbox.auth.service_account_key = cfg.auth.service_account_key.clone();
         }) {
             Ok(()) => self.flash_info(
                 "sandbox saved to config.yaml — restart lazybox, then press Shift-C to connect",

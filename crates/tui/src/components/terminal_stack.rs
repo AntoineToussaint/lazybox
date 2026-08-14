@@ -3611,15 +3611,24 @@ impl TerminalStack {
         // re-records every visible tile's rect from scratch so the
         // wheel handler hit-tests against the current layout.
         self.tile_hits.clear();
-        // Title row: "Terminals" plus an icon+label per active terminal
+        // Title row: a mode label plus an icon+label per active terminal
         // (e.g. `Terminals    claude   _ shell`). Active is bold-accent;
         // inactive is dim grey. Two-tab common case looks like a tab
         // strip; single-terminal shows just one entry.
-        let title_prefix = "Terminals  ";
-        let mut title_spans: Vec<Span<'static>> = vec![
-            Span::styled("Terminals", theme.title(focused)),
-            Span::raw("  "),
-        ];
+        //
+        // When the pane has focus the label becomes an explicit
+        // "▶ typing to" pointer (#1110): co-located with the tab strip,
+        // it makes the focused terminal unmistakable so a user can't
+        // mistake navigation mode for "typing to the agent". Unfocused
+        // it reads as the quiet "Terminals" heading. The two forms are
+        // padded to the same width so the tab strip doesn't jump.
+        let title_prefix = if focused {
+            "▶ typing to  "
+        } else {
+            "Terminals    "
+        };
+        let mut title_spans: Vec<Span<'static>> =
+            vec![Span::styled(title_prefix, theme.title(focused))];
         // Cursor in cells — used to compute the column range each
         // tab label occupies for click-hit-testing.
         let mut cursor: u16 = title_area.x + title_prefix.chars().count() as u16;
@@ -7835,7 +7844,17 @@ mod footer_scroll_independence {
             let pane = Rect::new(0, 0, W, H - 1);
             let footer = Rect::new(0, H - 1, W, 1);
             stack.render(pane, f, true);
-            crate::realm::components::footer::render(f, footer, &binds, &[], &[], "?", None, None);
+            crate::realm::components::footer::render(
+                f,
+                footer,
+                None,
+                &binds,
+                &[],
+                &[],
+                "?",
+                None,
+                None,
+            );
         })
         .unwrap();
         let buf = term.backend().buffer().clone();

@@ -639,6 +639,27 @@ impl<T: TerminalAdapter> Model<T> {
                 return;
             }
             if let Some(action) = action {
+                // Burst-typing guard (#1110): in the sidebar a rapid run
+                // of bare single-key shortcuts is almost always a
+                // sentence typed at the wrong pane ("I thought I was in
+                // the agent"). Suppress the chain — after the first
+                // couple of keys — and nudge the user to focus the
+                // terminal, instead of firing filter/snooze/split/…
+                // down the length of a word. Pane navigation and the
+                // focus-into-terminal moves are exempt: they're how the
+                // user *leaves* the sidebar, so a burst must never
+                // swallow them.
+                if rfocus == PaneFocus::Sidebar
+                    && burst_guarded(&action)
+                    && self.sidebar_burst.note(std::time::Instant::now(), stroke)
+                {
+                    self.q_latch.disarm();
+                    self.flash_hint(
+                        "typing in the sidebar, not the agent — press Enter or → to focus the terminal",
+                    );
+                    self.redraw = true;
+                    return;
+                }
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.
                 self.q_latch.disarm();
@@ -2330,6 +2351,20 @@ pub(super) fn action_from_entry(
         _ => {}
     }
     action_from_kind(entry.kind)
+}
+
+/// Whether a resolved sidebar action participates in the burst-typing
+/// guard (#1110). Pane cycling and the directional focus moves are
+/// exempt — they're how the user *leaves* the sidebar for the agent, so
+/// a burst must never swallow them. Every other bare single-key sidebar
+/// shortcut (filter, sort, snooze, mark-read, collapse-group, …) is
+/// guarded.
+fn burst_guarded(action: &lazybox_tui_core::action::Action) -> bool {
+    use lazybox_tui_core::action::Action;
+    !matches!(
+        action,
+        Action::CyclePane | Action::FocusPaneRight | Action::FocusPaneLeft
+    )
 }
 
 /// Reconstruct a runtime `Action` from a catalog `ActionKind`, for the

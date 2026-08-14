@@ -2044,7 +2044,7 @@ mod search_tests {
         assert_eq!(sb.workspace_count(), 2, "matches in both repos survive");
     }
 
-    /// The header renders an always-visible `# [find]` box; a click on
+    /// The header renders an always-visible `# find` hint; a click on
     /// its rect is reported by `search_chip_hit` so the orchestrator
     /// can open the global search.
     #[test]
@@ -2063,7 +2063,7 @@ mod search_tests {
         let header: String = (0..buffer.area.width)
             .map(|x| buffer[(x, 1)].symbol())
             .collect();
-        assert!(header.contains("# [find]"), "{header:?}");
+        assert!(header.contains("# find"), "{header:?}");
 
         // A click on the box's rect hits; a click well off it misses.
         let rect = sb.search_chip_rect.expect("search chip rect recorded");
@@ -2512,7 +2512,7 @@ mod search_tests {
     }
 
     /// While a global query is applied the header box shows the query
-    /// rather than the `[find]` placeholder.
+    /// rather than the `find` placeholder.
     #[test]
     fn header_search_box_shows_the_active_query() {
         use ratatui::Terminal;
@@ -2531,11 +2531,11 @@ mod search_tests {
             .map(|x| buffer[(x, 1)].symbol())
             .collect();
         assert!(header.contains("720"), "{header:?}");
-        assert!(!header.contains("[find]"), "{header:?}");
+        assert!(!header.contains("find"), "{header:?}");
     }
 
     /// A query too long for the header box is truncated to exactly the
-    /// room the `[⌕ …]` frame leaves — the chip stays inside the pane,
+    /// room the `⌕ …` frame leaves — the chip stays inside the pane,
     /// ends with an ellipsis, and drops precisely the overflowing
     /// characters (pins the measured frame width, not a guessed one).
     #[test]
@@ -2556,16 +2556,16 @@ mod search_tests {
             .map(|x| buffer[(x, 1)].symbol())
             .collect();
 
-        // With `f [filter]  o [split]  # ` (25 cells) ahead of it and a
-        // 38-cell inner width, 13 cells remain — a 4-cell `[⌕ ]` frame
-        // leaves 9 for the query, so 8 chars survive before the `…`.
+        // With `f filter  o split  # ` (21 cells) ahead of it and a
+        // 38-cell inner width, 17 cells remain — a 2-cell `⌕ ` frame
+        // leaves 15 for the query, so 14 chars survive before the `…`.
         assert!(
-            header.contains("abcdefgh…"),
+            header.contains("abcdefghijklmn…"),
             "truncated to room: {header:?}"
         );
         assert!(
-            !header.contains("abcdefghi"),
-            "9th char dropped: {header:?}"
+            !header.contains("abcdefghijklmno"),
+            "15th char dropped: {header:?}"
         );
         let rect = sb.search_chip_rect.expect("box still renders");
         assert!(
@@ -3486,7 +3486,7 @@ mod broadcast_select_tests {
             "3 filters should collapse the 3rd into `+1`:\n{screen}",
         );
         assert!(
-            screen.contains("[split]"),
+            screen.contains("o split"),
             "the sort chip must stay on the row:\n{screen}",
         );
     }

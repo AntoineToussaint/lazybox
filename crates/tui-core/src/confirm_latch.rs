@@ -316,6 +316,75 @@ impl<G: Clone> LeaderLatch<G> {
     }
 }
 
+/// Detects a *burst* of keystrokes fired in typing cadence (#1110).
+///
+/// The daily "am I inside the agent?" failure: the user believes focus
+/// is in a terminal and starts typing a sentence, but focus is on the
+/// sidebar, so each letter fires a bare single-key shortcut. This guard
+/// watches the interval between guarded keystrokes; once `threshold` of
+/// *distinct* keys land back-to-back within `window`, it reports that
+/// the run is a burst so the caller can suppress the shortcut and nudge
+/// the user instead of silently firing a chain.
+///
+/// A run only advances on a key that *differs* from the previous one.
+/// Repeating the same key (spamming `o` to cycle sort, `j` to scroll)
+/// is deliberate, not a typed word, so a repeat restarts the run and
+/// never trips the guard — only the varied-key cadence of prose does.
+///
+/// Contract:
+/// - `note(now, key)` records a guarded keystroke and returns `true`
+///   when the current run has reached `threshold` rapid *distinct*
+///   presses — i.e. this key (and every rapid one after it) should be
+///   suppressed. The first `threshold - 1` presses of a run return
+///   `false` and fire normally, since a lone deliberate shortcut must
+///   always work.
+/// - A gap longer than `window`, or a repeat of the previous key,
+///   resets the run.
+/// - `reset()` clears the run (e.g. when focus leaves the guarded pane).
+///
+/// `now` is injected rather than read from `Instant::now()` so the
+/// cadence logic is testable without sleeping. `K` identifies a key so
+/// same-key repeats can be told apart from varied typing.
+#[derive(Debug, Clone)]
+pub struct BurstGuard<K> {
+    window: std::time::Duration,
+    threshold: usize,
+    last: Option<(std::time::Instant, K)>,
+    run: usize,
+}
+
+impl<K: PartialEq + Copy> BurstGuard<K> {
+    /// `window` is the maximum gap between two keys for them to count as
+    /// one run; `threshold` is how many rapid distinct presses trip
+    /// suppression (must be ≥ 2 so a single press is never suppressed).
+    pub fn new(window: std::time::Duration, threshold: usize) -> Self {
+        Self {
+            window,
+            threshold: threshold.max(2),
+            last: None,
+            run: 0,
+        }
+    }
+
+    /// Record a guarded keystroke `key` at `now`. Returns `true` when it
+    /// should be suppressed (the run has reached `threshold`).
+    pub fn note(&mut self, now: std::time::Instant, key: K) -> bool {
+        let advances = self
+            .last
+            .as_ref()
+            .is_some_and(|(t, k)| now.saturating_duration_since(*t) <= self.window && *k != key);
+        self.run = if advances { self.run + 1 } else { 1 };
+        self.last = Some((now, key));
+        self.run >= self.threshold
+    }
+
+    /// Clear the current run so the next keystroke starts fresh.
+    pub fn reset(&mut self) {
+        self.last = None;
+        self.run = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -590,5 +659,79 @@ mod tests {
         p.arm();
         assert!(p.take()); // 'j' lands on tile-action handler
         assert!(!p.take()); // 'k' does not
+    }
+
+    #[test]
+    fn burst_suppresses_only_after_threshold_rapid_distinct_keys() {
+        use std::time::{Duration, Instant};
+        let window = Duration::from_millis(300);
+        let mut g = BurstGuard::new(window, 3);
+        let t0 = Instant::now();
+        // Distinct keys, each 100ms apart — a typed word's cadence.
+        assert!(!g.note(t0, 'w'), "1st fires");
+        assert!(!g.note(t0 + Duration::from_millis(100), 'o'), "2nd fires");
+        assert!(
+            g.note(t0 + Duration::from_millis(200), 'r'),
+            "3rd suppressed"
+        );
+        assert!(
+            g.note(t0 + Duration::from_millis(300), 'd'),
+            "4th suppressed"
+        );
+    }
+
+    #[test]
+    fn burst_resets_on_a_slow_gap() {
+        use std::time::{Duration, Instant};
+        let window = Duration::from_millis(300);
+        let mut g = BurstGuard::new(window, 3);
+        let t0 = Instant::now();
+        assert!(!g.note(t0, 'a'));
+        assert!(!g.note(t0 + Duration::from_millis(100), 'b'));
+        // A deliberate press a full second later restarts the run, so
+        // it fires even though two rapid keys preceded it.
+        assert!(!g.note(t0 + Duration::from_secs(1), 'c'), "slow key fires");
+        assert!(!g.note(
+            t0 + Duration::from_secs(1) + Duration::from_millis(100),
+            'd'
+        ));
+    }
+
+    #[test]
+    fn burst_ignores_same_key_repeats() {
+        use std::time::{Duration, Instant};
+        let window = Duration::from_millis(300);
+        let mut g = BurstGuard::new(window, 3);
+        let t0 = Instant::now();
+        // Spamming one key fast — cycling a sort, scrolling — is
+        // deliberate, never a burst, no matter how many presses.
+        for i in 0..6 {
+            let now = t0 + Duration::from_millis(50 * i);
+            assert!(!g.note(now, 'o'), "same-key repeat #{i} must fire");
+        }
+    }
+
+    #[test]
+    fn burst_reset_clears_the_run() {
+        use std::time::{Duration, Instant};
+        let window = Duration::from_millis(300);
+        let mut g = BurstGuard::new(window, 3);
+        let t0 = Instant::now();
+        g.note(t0, 'a');
+        g.note(t0 + Duration::from_millis(100), 'b');
+        g.reset();
+        // After a reset the next distinct rapid keys start a fresh run.
+        assert!(!g.note(t0 + Duration::from_millis(150), 'c'));
+        assert!(!g.note(t0 + Duration::from_millis(200), 'd'));
+        assert!(g.note(t0 + Duration::from_millis(250), 'e'));
+    }
+
+    #[test]
+    fn burst_threshold_floored_at_two() {
+        // A threshold of 0/1 would suppress a lone deliberate press;
+        // the constructor floors it at 2.
+        use std::time::Instant;
+        let mut g = BurstGuard::new(std::time::Duration::from_millis(300), 1);
+        assert!(!g.note(Instant::now(), 'x'), "single press always fires");
     }
 }

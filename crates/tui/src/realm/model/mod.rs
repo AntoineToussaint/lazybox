@@ -427,6 +427,23 @@ pub enum Id {
     /// sharing the `Model::pr_chat_convo` state so daemon-event handlers
     /// stream the answer in without remounting.
     PrChat,
+    /// Provider-pick step of the remote-sandbox onboarding flow (#1112),
+    /// reached from the `,` Settings palette or a `Shift-C` with no
+    /// `sandbox:` config. Single-pick `Choice` over gcp / e2b, each row
+    /// carrying its id as a [`ChoicePayload::Text`]. The accumulating
+    /// [`crate::sandbox_flow::SandboxDraft`] lives in
+    /// `ModalFlow::SandboxOnboarding`.
+    SandboxProviderPick,
+    /// Single-line input for one onboarding answer (project / zone /
+    /// user / E2B template). The current
+    /// [`crate::sandbox_flow::SandboxStage`] in
+    /// `ModalFlow::SandboxOnboarding` disambiguates which field a submit
+    /// records.
+    SandboxInput,
+    /// Confirm step of onboarding — the GCP sign-in guidance gate and the
+    /// auto-connect toggle. The stage in `ModalFlow::SandboxOnboarding`
+    /// tells `Msg::Confirmed` which one is on screen.
+    SandboxConfirm,
 }
 
 impl Id {
@@ -874,6 +891,13 @@ pub(crate) enum ModalFlow {
         terminal: lazybox_ipc::TerminalId,
         return_step: usize,
         success_step: usize,
+    },
+    /// Remote-sandbox onboarding (#1112). Carries the accumulating
+    /// [`crate::sandbox_flow::SandboxDraft`]; each answer advances its
+    /// stage and re-mounts the next `Sandbox*` modal until the final
+    /// auto-connect toggle persists the `sandbox:` config.
+    SandboxOnboarding {
+        draft: crate::sandbox_flow::SandboxDraft,
     },
 }
 
@@ -4871,6 +4895,9 @@ impl<T: TerminalAdapter> Model<T> {
         actions.push(SettingsAction::EditLlmGateway {
             set: cfg.agent.gateway_url().is_some(),
         });
+        actions.push(SettingsAction::SetUpSandbox {
+            configured: !cfg.sandbox.is_empty(),
+        });
         if let Some(shell) = &self.shell_command_config {
             actions.push(SettingsAction::ShellCommand {
                 command: shell.command.clone(),
@@ -4926,6 +4953,12 @@ impl<T: TerminalAdapter> Model<T> {
         // to YAML — no wizard runner, no cached detection inputs.
         if matches!(action, SettingsAction::EditLlmGateway { .. }) {
             self.mount_gateway_url_input();
+            return;
+        }
+        // Remote-sandbox onboarding is its own staged flow (#1112) that
+        // writes the `sandbox:` block — not a setup-runner step.
+        if matches!(action, SettingsAction::SetUpSandbox { .. }) {
+            self.start_sandbox_onboarding();
             return;
         }
         if let SettingsAction::ShellCommand {
@@ -4999,6 +5032,7 @@ impl<T: TerminalAdapter> Model<T> {
             SettingsAction::EditTheme { .. } => return,
             SettingsAction::EditEditors { .. } => return,
             SettingsAction::EditLlmGateway { .. } => return,
+            SettingsAction::SetUpSandbox { .. } => return,
             SettingsAction::ShellCommand { .. } => return,
             SettingsAction::EditDefaultAgent { .. } => return,
             SettingsAction::EditDefaultModel { .. } => return,

@@ -1674,9 +1674,22 @@ impl<T: TerminalAdapter> Model<T> {
                 // footer indicator showing progress. A no-op flash when no
                 // `sandbox:` box is configured.
                 if self.remote_control.is_none() {
-                    self.flash_error(
-                        "no remote box configured — add a `sandbox:` block to connect",
-                    );
+                    // The box worker is wired at startup from the `sandbox:`
+                    // config (#1112). No control channel means it was absent
+                    // then — either nothing is configured (route the user
+                    // into onboarding instead of a bare error) or a block was
+                    // just written this session and needs a relaunch to take
+                    // effect.
+                    let configured = lazybox_config::Config::load()
+                        .map(|c| !c.sandbox.is_empty())
+                        .unwrap_or(false);
+                    if configured {
+                        self.flash_info(
+                            "sandbox configured — restart lazybox to bring the box up with Shift-C",
+                        );
+                    } else {
+                        self.start_sandbox_onboarding();
+                    }
                 } else if self.status.remote_conn.is_connected()
                     || self.status.remote_conn.is_busy()
                 {

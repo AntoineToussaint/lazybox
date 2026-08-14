@@ -570,6 +570,38 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Some(Id::SandboxInput) => {
+                use crate::sandbox_flow::SandboxStage;
+                let Some(ModalFlow::SandboxOnboarding { mut draft }) = self.modal_flow.take()
+                else {
+                    tracing::warn!("sandbox input submit without a stashed draft — dropped");
+                    return cmds;
+                };
+                match draft.stage {
+                    SandboxStage::Project => {
+                        draft.set_project(text);
+                        if draft.needs_project() {
+                            // A GCP box can't be provisioned without a
+                            // project — re-ask rather than persist a config
+                            // that would fail at connect time.
+                            draft.stage = SandboxStage::Project;
+                            self.flash_error("a GCP project id is required");
+                        }
+                    }
+                    SandboxStage::Zone => draft.set_zone(text),
+                    SandboxStage::User => draft.set_user(text),
+                    SandboxStage::E2bTemplate => draft.set_template(text),
+                    // No other stage mounts an Input modal.
+                    other => {
+                        tracing::warn!(
+                            ?other,
+                            "sandbox input submit at a non-input stage — dropped"
+                        );
+                        return cmds;
+                    }
+                }
+                self.mount_sandbox_stage(draft);
+            }
             // RequestReviewers / AddAssignees used to go through an
             // Input modal but were migrated to a `Choice::multi`
             // picker — see `mount_request_reviewers` /
@@ -1167,6 +1199,27 @@ showing keybinding search only",
                     && yes
                 {
                     self.remove_editor(&id);
+                }
+            }
+            Some(Id::SandboxConfirm) => {
+                use crate::sandbox_flow::SandboxStage;
+                if let Some(ModalFlow::SandboxOnboarding { mut draft }) = self.modal_flow.take() {
+                    match draft.stage {
+                        // Sign-in gate: Yes continues the walk; No abandons
+                        // onboarding (the flow was already taken above).
+                        SandboxStage::GcpSignIn if yes => {
+                            draft.confirm_gcp_signin();
+                            self.mount_sandbox_stage(draft);
+                        }
+                        SandboxStage::GcpSignIn => {}
+                        // Final answer: record the toggle either way and
+                        // persist the collected config.
+                        SandboxStage::AutoConnect => {
+                            draft.set_auto_connect(yes);
+                            self.finish_sandbox_onboarding(&draft);
+                        }
+                        _ => {}
+                    }
                 }
             }
             Some(Id::CleanWorktreesConfirm) => {

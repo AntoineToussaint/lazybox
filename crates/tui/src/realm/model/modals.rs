@@ -977,6 +977,119 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::LlmGatewayUrl, modal);
     }
 
+    /// Start the remote-sandbox onboarding flow (#1112) at the
+    /// provider-pick step. Reached from the `,` Settings palette and from
+    /// a `Shift-C` fired with no `sandbox:` config, so a first-time user
+    /// can produce a valid `sandbox:` block without hand-editing YAML.
+    pub(crate) fn start_sandbox_onboarding(&mut self) {
+        if matches!(
+            self.modal_stack.last(),
+            Some(Id::SandboxProviderPick | Id::SandboxInput | Id::SandboxConfirm)
+        ) {
+            return;
+        }
+        self.mount_sandbox_stage(crate::sandbox_flow::SandboxDraft::new());
+    }
+
+    /// Mount the modal for `draft.stage` and stash the draft in
+    /// `ModalFlow::SandboxOnboarding` so the answer handler can resume.
+    /// Each `set_*` on the draft advances its stage; this re-mounts the
+    /// next question until the final auto-connect toggle finishes.
+    pub(crate) fn mount_sandbox_stage(&mut self, draft: crate::sandbox_flow::SandboxDraft) {
+        use crate::realm::components::{choice::Choice, confirm::Confirm, input::Input};
+        use crate::sandbox_flow::{DEFAULT_USER, DEFAULT_ZONE, PROVIDERS, SandboxStage};
+
+        let stage = draft.stage;
+        self.set_modal_flow(ModalFlow::SandboxOnboarding { draft });
+        match stage {
+            SandboxStage::Provider => {
+                let items: Vec<String> = PROVIDERS.iter().map(|s| s.to_string()).collect();
+                let modal = Choice::single("Which sandbox provider?", items)
+                    .title("Set up remote sandbox")
+                    .label(|id: &String| match id.as_str() {
+                        "gcp" => "Google Cloud (GCE)".to_string(),
+                        "e2b" => "E2B".to_string(),
+                        other => other.to_string(),
+                    })
+                    .payload_for(|id: &String| ChoicePayload::Text(id.clone()));
+                self.mount_modal(Id::SandboxProviderPick, modal);
+            }
+            SandboxStage::GcpSignIn => {
+                // The app can't shell an interactive browser login, so it
+                // guides the `!`-prefixed shell and waits for the user to
+                // confirm — the safe v1 from the issue's open questions.
+                let modal = Confirm::new(
+                    "Sign in to Google Cloud: type `! gcloud auth login` in the prompt, \
+                     complete the browser login, then choose Yes to continue.",
+                )
+                .default_yes();
+                self.mount_modal(Id::SandboxConfirm, modal);
+            }
+            SandboxStage::Project => {
+                let modal = Input::new("GCP project id")
+                    .title("Set up remote sandbox")
+                    .placeholder("e.g. my-gcp-project");
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::Zone => {
+                let modal = Input::new("GCE zone")
+                    .title("Set up remote sandbox")
+                    .placeholder(format!("default {DEFAULT_ZONE}"))
+                    .with_input(DEFAULT_ZONE);
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::User => {
+                let modal = Input::new("Login user on the box")
+                    .title("Set up remote sandbox")
+                    .placeholder(format!("default {DEFAULT_USER}"))
+                    .with_input(DEFAULT_USER);
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::E2bTemplate => {
+                let modal = Input::new("E2B template id")
+                    .title("Set up remote sandbox")
+                    .placeholder("e.g. lazybox-e2b");
+                self.mount_modal(Id::SandboxInput, modal);
+            }
+            SandboxStage::AutoConnect => {
+                let modal = Confirm::new(
+                    "Auto-connect to the box at launch? No keeps it asleep until you press Shift-C.",
+                )
+                .default_no();
+                self.mount_modal(Id::SandboxConfirm, modal);
+            }
+        }
+    }
+
+    /// Persist the finished draft's `sandbox:` block and tell the user
+    /// how to bring the box up. The box worker is wired at startup from
+    /// config, so a freshly-written box needs a relaunch before `Shift-C`
+    /// can connect — say so rather than imply an instant connect.
+    ///
+    /// Only the fields the flow collects are written; everything else in
+    /// an existing `sandbox:` block (`auth`, `ports`, `region`,
+    /// `require_connect`, `terraform_dir`, `deployment`, …) is preserved,
+    /// so re-running onboarding on a hand-tuned box can't silently drop
+    /// the parts it never asked about. Provider-irrelevant fields take
+    /// their `to_config` value (`None` for the other provider), so a
+    /// provider switch still clears the now-stale ones.
+    pub(crate) fn finish_sandbox_onboarding(&mut self, draft: &crate::sandbox_flow::SandboxDraft) {
+        let cfg = draft.to_config();
+        match lazybox_config::Config::save_with(|c| {
+            c.sandbox.provider = cfg.provider.clone();
+            c.sandbox.project = cfg.project.clone();
+            c.sandbox.zone = cfg.zone.clone();
+            c.sandbox.user = cfg.user.clone();
+            c.sandbox.template = cfg.template.clone();
+            c.sandbox.auto_connect = cfg.auto_connect;
+        }) {
+            Ok(()) => self.flash_info(
+                "sandbox saved to config.yaml — restart lazybox, then press Shift-C to connect",
+            ),
+            Err(e) => self.flash_error(format!("couldn't save sandbox config: {e}")),
+        }
+    }
+
     /// Mount / refresh the Settings editors panel (#1102) from a fresh
     /// config load. Re-mounting under the same id replaces the component,
     /// so this doubles as the panel's own reopen path. The post-write

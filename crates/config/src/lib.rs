@@ -523,8 +523,14 @@ pub struct EditorEntry {
 ///   - name: Preview PR in browser
 ///     command: open
 ///     args: ["{url}"]
+///   - name: Obsidian            # bind a favorite to a direct key
+///     command: open
+///     args: ["-a", "Obsidian", "{path}"]
+///     key: "O"
 /// ```
 ///
+/// An optional `key` binds the app to a direct Workspace-section chord
+/// (a `ui.action_keys`-style spec) so a favorite skips the `x o` picker.
 /// See `lazybox_tui_core::editors::OpenWithApp`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenWithEntry {
@@ -532,6 +538,8 @@ pub struct OpenWithEntry {
     pub command: String,
     #[serde(default)]
     pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub key: Option<String>,
 }
 
 /// `attention:` block — controls which signals contribute to the
@@ -4156,6 +4164,7 @@ open_with:
   - name: Obsidian
     command: open
     args: ["-a", "Obsidian", "{path}"]
+    key: "O"
   - name: Finder
     command: open
   - name: Preview PR in browser
@@ -4169,6 +4178,9 @@ open_with:
             cfg.open_with[0].args.as_deref(),
             Some(&["-a".to_string(), "Obsidian".into(), "{path}".into()][..])
         );
+        // Optional favorite key parses; omitted → None.
+        assert_eq!(cfg.open_with[0].key.as_deref(), Some("O"));
+        assert_eq!(cfg.open_with[1].key, None);
         // `args` is optional — defaults handled at launch, not parse.
         assert_eq!(cfg.open_with[1].args, None);
         assert_eq!(

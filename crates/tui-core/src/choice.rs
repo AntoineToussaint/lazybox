@@ -1281,11 +1281,13 @@ mod tests {
                 name: "Obsidian".into(),
                 command: "open".into(),
                 args: Some(vec!["-a".into(), "Obsidian".into(), "{path}".into()]),
+                key: None,
             },
             OpenWithApp {
                 name: "Finder".into(),
                 command: "open".into(),
                 args: None,
+                key: None,
             },
         ];
         let ctx = OpenWithContext {

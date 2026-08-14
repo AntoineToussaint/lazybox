@@ -2306,6 +2306,9 @@ pub(super) fn action_from_entry(
         (ActionKind::SpawnAgentOnMain, Some(Param::Agent(id))) => {
             return Some(Action::SpawnAgentOnMain(id.clone()));
         }
+        (ActionKind::OpenWithApp, Some(Param::OpenWith(name))) => {
+            return Some(Action::OpenWithApp(name.clone()));
+        }
         _ => {}
     }
     action_from_kind(entry.kind)

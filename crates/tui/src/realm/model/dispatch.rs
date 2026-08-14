@@ -1209,6 +1209,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // → launch directly; multiple → picker; none → notice.
                 self.open_with_picker();
             }
+            Action::OpenWithApp(name) => {
+                // Favorite key (#1100): launch that specific `open_with:`
+                // app directly, skipping the picker. Same launch path as a
+                // pick — remote / no-worktree gating and provisioning
+                // handled in `launch_open_with`.
+                self.open_with_app_by_name(name);
+            }
             Action::ViewDiff => {
                 if let Some((workspace_key, target)) =
                     self.sidebar.selected_workspace().and_then(|workspace| {

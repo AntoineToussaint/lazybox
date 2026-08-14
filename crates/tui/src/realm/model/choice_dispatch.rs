@@ -181,11 +181,10 @@ impl<T: TerminalAdapter> Model<T> {
                         .map(|session| session.worktree_path.clone())
                 }),
             },
-            Id::OpenWith => match self.open_with_context() {
-                Some(ctx) => PickFlow::OpenWith {
-                    apps: self.setup.open_with.clone(),
-                    ctx,
-                },
+            // Reconstruct the SAME filtered list the picker was mounted
+            // with (#1100) so the picked index maps to the right app.
+            Id::OpenWith => match self.actionable_open_with() {
+                Some((apps, ctx)) => PickFlow::OpenWith { apps, ctx },
                 None => PickFlow::Plain,
             },
             Id::Setup if self.setup.runner.is_some() => PickFlow::Runner,

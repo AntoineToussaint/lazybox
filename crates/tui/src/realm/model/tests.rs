@@ -4707,9 +4707,10 @@ snippets:
     /// (open the PR in a browser) has no worktree dependency, so it must
     /// NOT be refused on a remote daemon the way a `{path}` app is — the
     /// same reasoning that lets `g o` open-in-browser work over `--connect`.
-    /// Here the workspace has a session (so `{path}` would resolve) but no
-    /// PR, so the `{url}` app falls through the gate and fails on the
-    /// missing token instead — proving it was never remote-blocked.
+    /// The favorite-key / direct path launches without the picker's
+    /// availability filter, so on this PR-less workspace the `{url}` app
+    /// falls through to the launcher and fails on the missing token — NOT
+    /// on a remote block, proving it was never remote-gated.
     #[test]
     fn open_with_url_app_is_not_remote_blocked() {
         let worktree = tmp_worktree_with_skill("ow-url-remote");
@@ -4718,8 +4719,11 @@ snippets:
             name: "PR in browser".into(),
             command: "open".into(),
             args: Some(vec!["{url}".into()]),
+            key: None,
         }]);
-        m.open_with_picker();
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenWithApp(
+            "PR in browser".into(),
+        ));
         let notice = m
             .status
             .notice
@@ -4747,6 +4751,7 @@ snippets:
             name: "Obsidian".into(),
             command: "open".into(),
             args: Some(vec!["-a".into(), "Obsidian".into(), "{path}".into()]),
+            key: None,
         }]);
         m.open_with_picker();
         assert!(
@@ -4759,11 +4764,10 @@ snippets:
     }
 
     /// #1100: a `{path}` app on a workspace with no session yet has no
-    /// worktree on disk to open. Rather than a bare "unavailable", the
-    /// notice names the fix — open a shell / agent first (the worktree is
-    /// provisioned as a side-effect), mirroring what `e` does implicitly.
+    /// worktree on disk to open. Rather than error, it provisions one
+    /// (spawns a shell) and defers the launch — exactly what `e` does.
     #[test]
-    fn open_with_path_app_without_a_worktree_points_at_shell() {
+    fn open_with_path_app_without_a_worktree_provisions_one() {
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#7");
         let session_key: SessionKey = (&ws_key).into();
@@ -4781,14 +4785,107 @@ snippets:
             name: "Obsidian".into(),
             command: "open".into(),
             args: None,
+            key: None,
         }]);
         m.open_with_picker();
+        assert_eq!(
+            m.setup
+                .pending_open_with_launch
+                .as_ref()
+                .map(|(key, _)| key.clone()),
+            Some(session_key),
+            "the launch is queued behind a worktree provision",
+        );
         assert!(
             m.status
                 .notice
                 .as_ref()
-                .is_some_and(|notice| notice.message.contains("no worktree")),
-            "a {{path}} app with no session should point the user at a shell first",
+                .is_some_and(|notice| notice.message.contains("Provisioning")),
+        );
+    }
+
+    /// #1100: the queued `{path}` launch fires once the provisioned
+    /// worktree lands (a `TerminalSpawned` for the target), resolving its
+    /// worktree by key — the deferred-launch counterpart of `e`.
+    #[test]
+    fn open_with_deferred_launch_fires_when_the_worktree_lands() {
+        let worktree = tmp_worktree_with_skill("ow-deferred");
+        let mut m = model_with_agent_at_worktree(worktree);
+        let session_key: SessionKey = (&WorkspaceKey::new("github:o/r#1")).into();
+        // A prior provision left this launch waiting; the command can't
+        // spawn, so nothing real is launched — we only assert it fired.
+        m.setup.pending_open_with_launch = Some((
+            session_key.clone(),
+            crate::editors::OpenWithApp {
+                name: "Obsidian".into(),
+                command: "/nonexistent-open-with-launcher".into(),
+                args: Some(vec!["{path}".into()]),
+                key: None,
+            },
+        ));
+        m.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: lazybox_ipc::TerminalId(2),
+            session_key,
+            kind: lazybox_ipc::TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+        });
+        assert!(
+            m.setup.pending_open_with_launch.is_none(),
+            "the deferred launch fired and cleared once the worktree existed",
+        );
+    }
+
+    /// #1100 picker polish: apps whose tokens the workspace can't supply
+    /// are filtered out, so the picker never offers a choice that would
+    /// just fail. Two `{url}` apps on a PR-less workspace leave nothing to
+    /// run — no picker mounts, and the notice explains why.
+    #[test]
+    fn open_with_picker_filters_out_unavailable_apps() {
+        let worktree = tmp_worktree_with_skill("ow-filter");
+        let mut m = model_with_agent_at_worktree(worktree);
+        let url_app = |name: &str| crate::editors::OpenWithApp {
+            name: name.into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+            key: None,
+        };
+        m.cache_open_with(vec![url_app("PR"), url_app("PR2")]);
+        m.open_with_picker();
+        assert!(
+            m.top_modal().is_none(),
+            "no picker mounts when every app's token is unavailable",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("can run")),
+        );
+    }
+
+    /// #1100 per-app key: dispatching `OpenWithApp("<name>")` (what a
+    /// favorite `key:` binds) launches that specific app directly. Here
+    /// the workspace has no PR, so the `{url}` app surfaces the named
+    /// token error — proving the key path reached the launcher.
+    #[test]
+    fn open_with_favorite_key_launches_the_named_app() {
+        let worktree = tmp_worktree_with_skill("ow-fav-key");
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "PR".into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+            key: Some("O".into()),
+        }]);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenWithApp("PR".into()));
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("unavailable")),
+            "the favorite key reached launch_open_with for the named app",
         );
     }
 

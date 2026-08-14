@@ -245,7 +245,9 @@ mod fatal {
         // Take fd 1 back from the off-thread render writer before writing the
         // reset sequence to it, so the two can't interleave and strand the
         // shell (#1045). Async-signal-safe (atomics + a bounded spin); a no-op
-        // when async rendering isn't engaged.
+        // when async rendering isn't engaged. Muzzle *before* the `RESTORED`
+        // guard — same order as `restore_host_terminal` — so the writer is
+        // silenced even on a call that then loses the swap.
         super::super::render_writer::muzzle_writer();
         // Same one-shot flag the guard/panic paths use: if teardown
         // already ran, re-emitting would pop a keyboard-flags entry the
@@ -317,16 +319,20 @@ pub(crate) fn enable_host_terminal() {
 /// `Drop`, the panic hook, and the signal handler so the host shell is
 /// always left out of raw mode and Kitty keyboard protocol on exit.
 pub fn restore_host_terminal() {
+    // Take fd 1 back from the off-thread render writer *first*, before the
+    // one-shot guard and before writing the reset sequence directly (#1045).
+    // On the panic hook this runs while the writer is still live (unwinding
+    // tears it down only afterwards), so without the handoff the reset could
+    // interleave with an in-flight frame and strand the shell (#211). On the
+    // clean-exit Drop path the writer is already shut down, so this is a cheap
+    // no-op. Muzzling ahead of the `RESTORED` guard — the same order the
+    // fatal-signal handler uses — makes it structurally impossible for a
+    // future edit to the guard to skip the muzzle and reopen the interleave;
+    // `muzzle_writer` is idempotent, so muzzling on a lost swap costs nothing.
+    super::render_writer::muzzle_writer();
     if RESTORED.swap(true, Ordering::SeqCst) {
         return;
     }
-    // Take fd 1 back from the off-thread render writer before writing the
-    // reset sequence directly (#1045). On the panic hook this runs while the
-    // writer is still live (unwinding tears it down only afterwards), so
-    // without the handoff the reset could interleave with an in-flight frame
-    // and strand the shell (#211). On the clean-exit Drop path the writer is
-    // already shut down, so this is a cheap no-op.
-    super::render_writer::muzzle_writer();
     let mut out = std::io::stdout();
     for mode in HostMode::ALL.into_iter().rev() {
         mode.disable(&mut out);

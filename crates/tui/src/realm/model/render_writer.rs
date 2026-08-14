@@ -141,6 +141,13 @@ impl Fd1Handoff {
     /// `SeqCst` on the store and the spin's load is what makes the [Dekker]
     /// handshake with [`Self::try_begin_write`] airtight — see there.
     ///
+    /// **One-way.** There is no un-muzzle: once claimed, the writer drops
+    /// every subsequent frame forever. Every caller is on a terminal path (a
+    /// fatal signal that re-raises, or the panic hook that unwinds to exit), so
+    /// the process is already dying and the writer is never needed again. If a
+    /// future `catch_unwind` ever resumes the run loop after a muzzle, on-screen
+    /// rendering would become a silent black hole — re-arm the handoff there.
+    ///
     /// [Dekker]: Self::try_begin_write
     fn muzzle(&self) {
         self.muzzled.store(true, Ordering::SeqCst);
@@ -267,11 +274,11 @@ pub(super) struct FrameWriter {
     /// wedged terminal can't hang the exit (#1090 finding #2).
     done: Receiver<()>,
     handle: Option<JoinHandle<()>>,
-    /// This writer's fd-1 handoff (also published to the global for the
-    /// signal handler). Retained so tests can drive the muzzle against this
-    /// writer without touching the process-global; production reaches it only
-    /// through the global, so the field is read on the test path alone.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// This writer's fd-1 handoff, kept only so a test can drive the muzzle
+    /// against this writer without touching the process-global. Production
+    /// reaches the handoff solely through the global (`FD1_HANDOFF`) and the
+    /// writer thread's own clone, so the field carries no weight outside tests.
+    #[cfg(test)]
     handoff: Arc<Fd1Handoff>,
 }
 
@@ -431,6 +438,7 @@ pub(super) fn spawn<W: Write + Send + 'static>(mut out: W) -> (ChannelWriter, Fr
             tx,
             done: done_rx,
             handle: Some(handle),
+            #[cfg(test)]
             handoff,
         },
     )

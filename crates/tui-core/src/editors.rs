@@ -305,19 +305,79 @@ pub fn command_available(command: &str) -> bool {
     which::which(command).is_ok()
 }
 
+/// Split a launch command line into whitespace-separated tokens, where a
+/// `'…'` or `"…"` group preserves the spaces inside it. Backslashes are
+/// **literal** — unlike a POSIX shell, this is a path-and-flags field, so
+/// `C:\Program Files\Code.exe` must survive verbatim; only quotes group.
+/// Returns `None` on an unterminated quote (a parse the user must fix).
+fn split_launch_line(line: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false;
+    let mut quote: Option<char> = None;
+    for ch in line.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => {
+                if ch == '"' || ch == '\'' {
+                    quote = Some(ch);
+                    in_token = true;
+                } else if ch.is_whitespace() {
+                    if in_token {
+                        tokens.push(std::mem::take(&mut cur));
+                        in_token = false;
+                    }
+                } else {
+                    cur.push(ch);
+                    in_token = true;
+                }
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    Some(tokens)
+}
+
+/// Quote a single token for [`join_launch_line`] so it round-trips back
+/// through [`split_launch_line`] as one token. Only tokens that would
+/// otherwise re-split (contain whitespace) or vanish (empty) are quoted;
+/// double quotes are preferred, single quotes used when the token itself
+/// carries a `"`.
+fn quote_launch_token(token: &str) -> String {
+    if !token.is_empty() && !token.chars().any(char::is_whitespace) {
+        return token.to_string();
+    }
+    if token.contains('"') {
+        format!("'{token}'")
+    } else {
+        format!("\"{token}\"")
+    }
+}
+
 /// Split a user-typed launch command line into `(program, args)`,
 /// guaranteeing a `{path}` placeholder so the worktree directory is
-/// always handed to the editor. Shell-style tokenization (via
-/// `shell_words`) so a quoted path with spaces stays one token —
-/// `"/Applications/Sublime Text.app/.../subl" {path}` parses as the
-/// program plus `{path}`, and round-trips through [`join_launch_command`]
-/// without corruption. A line without `{path}` gets one appended,
-/// matching the common "open this folder" default.
+/// always handed to the editor. A quoted path with spaces stays one
+/// token — `"/Applications/Sublime Text.app/.../subl" {path}` parses as
+/// the program plus `{path}` and round-trips through
+/// [`join_launch_command`] without corruption — while backslashes stay
+/// literal so Windows paths survive. A line without `{path}` gets one
+/// appended, matching the common "open this folder" default.
 ///
-/// Returns `None` for a blank line or unbalanced quoting (nothing to
+/// Returns `None` for a blank line or an unterminated quote (nothing to
 /// save, or a parse the user needs to fix).
 pub fn parse_launch_command(line: &str) -> Option<(String, Vec<String>)> {
-    let mut tokens = shell_words::split(line).ok()?.into_iter();
+    let mut tokens = split_launch_line(line)?.into_iter();
     let command = tokens.next()?;
     let mut args: Vec<String> = tokens.collect();
     if !args.iter().any(|arg| arg.contains("{path}")) {
@@ -327,10 +387,14 @@ pub fn parse_launch_command(line: &str) -> Option<(String, Vec<String>)> {
 }
 
 /// Render a stored `(command, args)` back into one editable line for the
-/// edit prompt, shell-quoting any token that contains whitespace so it
+/// edit prompt, quoting any token that contains whitespace so it
 /// round-trips through [`parse_launch_command`] unchanged.
 pub fn join_launch_command(command: &str, args: &[String]) -> String {
-    shell_words::join(std::iter::once(command).chain(args.iter().map(String::as_str)))
+    std::iter::once(command)
+        .chain(args.iter().map(String::as_str))
+        .map(quote_launch_token)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Build the launcher argv for opening `url`, honoring an optional
@@ -1278,17 +1342,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_launch_command_keeps_backslashes_literal() {
+        // A Windows path typed raw must survive verbatim — a POSIX-shell
+        // tokenizer would treat `\` as an escape and eat it.
+        assert_eq!(
+            parse_launch_command(r"C:\Program\Code.exe"),
+            Some((
+                r"C:\Program\Code.exe".to_string(),
+                vec!["{path}".to_string()]
+            ))
+        );
+        // Spaces in a Windows path still need quoting, and backslashes
+        // inside the quotes stay literal.
+        assert_eq!(
+            parse_launch_command("\"C:\\Program Files\\Code.exe\" {path}"),
+            Some((
+                r"C:\Program Files\Code.exe".to_string(),
+                vec!["{path}".to_string()]
+            ))
+        );
+    }
+
+    #[test]
     fn launch_command_round_trips_through_join_and_parse() {
         // The edit prompt joins a stored entry back to a line; re-parsing
         // it must reproduce the same (command, args) — including a path
-        // with spaces, which naive whitespace-splitting would corrupt.
-        let command = "/Applications/Sublime Text.app/bin/subl";
-        let args = vec!["--wait".to_string(), "{path}".to_string()];
-        let line = join_launch_command(command, &args);
-        assert_eq!(
-            parse_launch_command(&line),
-            Some((command.to_string(), args))
-        );
+        // with spaces (naive whitespace-splitting would corrupt it) and a
+        // backslash path (a shell tokenizer would eat the backslashes).
+        for (command, args) in [
+            (
+                "/Applications/Sublime Text.app/bin/subl",
+                vec!["--wait".to_string(), "{path}".to_string()],
+            ),
+            (
+                r"C:\Program Files\Microsoft VS Code\Code.exe",
+                vec!["{path}".to_string()],
+            ),
+        ] {
+            let line = join_launch_command(command, &args);
+            assert_eq!(
+                parse_launch_command(&line),
+                Some((command.to_string(), args)),
+                "round-trip failed for {command}"
+            );
+        }
     }
 
     #[test]

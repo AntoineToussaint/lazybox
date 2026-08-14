@@ -1162,6 +1162,13 @@ showing keybinding search only",
                     self.redraw = true;
                 }
             }
+            Some(Id::EditorRemoveConfirm) => {
+                if let Some(ModalFlow::EditorRemoveConfirm { id }) = self.modal_flow.take()
+                    && yes
+                {
+                    self.remove_editor(&id);
+                }
+            }
             Some(Id::CleanWorktreesConfirm) => {
                 if yes {
                     cmds.push(IpcCommand::CleanWorktrees);

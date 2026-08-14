@@ -977,14 +977,23 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::LlmGatewayUrl, modal);
     }
 
-    /// Mount / refresh the Settings editors panel (#1102): the custom
-    /// `editors:` entries with a live on-PATH badge. Built-ins are
-    /// auto-detected and stay implicit; only user entries are listed
-    /// because those are what's editable. Re-mounting under the same id
-    /// replaces the component, so this doubles as the post-write refresh.
+    /// Mount / refresh the Settings editors panel (#1102) from a fresh
+    /// config load. Re-mounting under the same id replaces the component,
+    /// so this doubles as the panel's own reopen path. The post-write
+    /// paths call [`Self::mount_editors_panel_from`] directly to reuse the
+    /// config they already loaded.
     pub(crate) fn mount_editors_panel(&mut self) {
-        use crate::realm::components::editors_panel::{EditorRow, EditorsPanel};
         let cfg = lazybox_config::Config::load().unwrap_or_default();
+        self.mount_editors_panel_from(&cfg);
+    }
+
+    /// Build the panel rows from an already-loaded config and mount it.
+    /// Lists the custom `editors:` entries (the editable ones) with a live
+    /// on-PATH badge, plus the display names of any built-in editors
+    /// detected on this machine so a user with no custom entries still
+    /// sees what `e` will offer.
+    pub(crate) fn mount_editors_panel_from(&mut self, cfg: &lazybox_config::Config) {
+        use crate::realm::components::editors_panel::{EditorRow, EditorsPanel};
         let rows = cfg
             .editors
             .iter()
@@ -995,8 +1004,21 @@ impl<T: TerminalAdapter> Model<T> {
                 available: crate::editors::command_available(&e.command),
             })
             .collect();
+        // Detected built-ins, minus any id a custom entry overrides — the
+        // reference set shown so the panel is never blank on a machine
+        // that only relies on auto-detection.
+        let overridden: std::collections::HashSet<&str> =
+            cfg.editors.iter().map(|e| e.id.as_str()).collect();
+        let detected_builtins = crate::editors::discover_at_startup(Vec::new())
+            .into_iter()
+            .filter(|b| !overridden.contains(b.id.as_str()))
+            .map(|b| b.display)
+            .collect();
         let path = lazybox_config::Config::default_path().display().to_string();
-        self.mount_modal(Id::EditorsPanel, EditorsPanel::new(rows, path));
+        self.mount_modal(
+            Id::EditorsPanel,
+            EditorsPanel::new(rows, detected_builtins, path),
+        );
     }
 
     /// `a` in the editors panel: start the two-step add flow, prompting
@@ -1023,8 +1045,8 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         // Reconstruct the line from the effective args (the launch path
-        // defaults an unset `args` to `["{path}"]`), shell-quoting so a
-        // command / arg with a space round-trips instead of re-splitting.
+        // defaults an unset `args` to `["{path}"]`), quoting so a command
+        // / arg with a space round-trips instead of re-splitting.
         let args = entry
             .args
             .clone()
@@ -1043,9 +1065,20 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::EditorForm, modal);
     }
 
-    /// `d`/`x` in the editors panel: drop this entry from `editors:` and
-    /// hot-reload. Low-risk — it only removes a launcher shortcut, undone
-    /// by re-adding — so it acts directly rather than behind a confirm.
+    /// `d`/`x` in the editors panel: confirm before dropping the entry.
+    /// Removal is recoverable (re-add), but it's a config write on a
+    /// single keystroke, so it goes through a yes/no like the other
+    /// mutating panel actions rather than firing on a stray key.
+    pub(crate) fn prompt_remove_editor(&mut self, id: String) {
+        use crate::realm::components::confirm::Confirm;
+        let modal = Confirm::new(format!("Remove editor {id}?"));
+        self.set_modal_flow(ModalFlow::EditorRemoveConfirm { id });
+        self.mount_modal(Id::EditorRemoveConfirm, modal);
+    }
+
+    /// Confirmed removal: drop the entry from `editors:`, hot-reload, and
+    /// refresh the panel. Reached from `handle_confirmed` after
+    /// [`Self::prompt_remove_editor`].
     pub(crate) fn remove_editor(&mut self, id: &str) {
         let id_owned = id.to_string();
         let mut removed = false;
@@ -1056,9 +1089,8 @@ impl<T: TerminalAdapter> Model<T> {
         });
         match saved {
             Ok(()) if removed => {
-                self.reload_editors();
                 self.flash_info(format!("removed editor {id}"));
-                self.mount_editors_panel();
+                self.refresh_editors_after_write();
             }
             Ok(()) => self.flash_info(format!("no configured editor with id {id}")),
             Err(e) => self.flash_error(format!("couldn't save config: {e}")),
@@ -1074,7 +1106,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_error("launch command can't be empty");
             return;
         };
-        let entry = lazybox_config::EditorEntry {
+        let mut entry = lazybox_config::EditorEntry {
             id: id.to_string(),
             display,
             command: command.clone(),
@@ -1082,6 +1114,12 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let saved = lazybox_config::Config::save_with(move |c| {
             if let Some(slot) = c.editors.iter_mut().find(|e| e.id == entry.id) {
+                // Keep an existing custom display when this write doesn't
+                // set one (the add flow always passes `None`), so re-adding
+                // an id doesn't silently wipe its label.
+                if entry.display.is_none() {
+                    entry.display = slot.display.clone();
+                }
                 *slot = entry;
             } else {
                 c.editors.push(entry);
@@ -1089,17 +1127,25 @@ impl<T: TerminalAdapter> Model<T> {
         });
         match saved {
             Ok(()) => {
-                self.reload_editors();
                 let note = if crate::editors::command_available(&command) {
                     ""
                 } else {
                     " — command not found on PATH"
                 };
                 self.flash_info(format!("saved editor {id}{note}"));
-                self.mount_editors_panel();
+                self.refresh_editors_after_write();
             }
             Err(e) => self.flash_error(format!("couldn't save config: {e}")),
         }
+    }
+
+    /// After a successful `editors:` write, refresh both the cached editor
+    /// list (so the next `e` sees it) and the open panel — from a single
+    /// config load rather than one per concern.
+    fn refresh_editors_after_write(&mut self) {
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        self.reload_editors_from(&cfg);
+        self.mount_editors_panel_from(&cfg);
     }
 
     /// Build the candidate-logins list for the picker. Source set

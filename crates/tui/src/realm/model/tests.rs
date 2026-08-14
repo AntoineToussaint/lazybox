@@ -6160,6 +6160,7 @@ mod stale_input_tests {
                 | Id::ErrorInboxClearConfirm
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
+                | Id::EditorRemoveConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
                 Id::SidebarContext | Id::InspectList | Id::ImportCheckoutList => false,
@@ -6228,6 +6229,7 @@ mod stale_input_tests {
             Id::Editor,
             Id::EditorsPanel,
             Id::EditorForm,
+            Id::EditorRemoveConfirm,
             Id::Setup,
             Id::RemoveOutOfScope,
             Id::MergeConfirm,

@@ -37,15 +37,24 @@ pub(crate) struct EditorRow {
 pub(crate) struct EditorsPanel {
     rows: Vec<EditorRow>,
     cursor: usize,
+    /// Display names of built-in editors detected on this machine (minus
+    /// any a custom entry overrides). Shown as reference so the panel is
+    /// never blank for a user who relies only on auto-detection.
+    detected_builtins: Vec<String>,
     /// Absolute config path, shown so the user knows where writes land.
     config_path: String,
 }
 
 impl EditorsPanel {
-    pub(crate) fn new(rows: Vec<EditorRow>, config_path: String) -> Self {
+    pub(crate) fn new(
+        rows: Vec<EditorRow>,
+        detected_builtins: Vec<String>,
+        config_path: String,
+    ) -> Self {
         Self {
             rows,
             cursor: 0,
+            detected_builtins,
             config_path,
         }
     }
@@ -110,6 +119,12 @@ impl Component for EditorsPanel {
             "Custom editors · built-ins are auto-detected",
             Style::default().fg(theme.text_dim),
         )));
+        if !self.detected_builtins.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("Detected: {}", self.detected_builtins.join(", ")),
+                Style::default().fg(theme.text_dim),
+            )));
+        }
         lines.push(Line::from(Span::styled(
             "─".repeat(inner.width as usize),
             Style::default().fg(theme.chrome),
@@ -264,7 +279,8 @@ mod tests {
 
     #[test]
     fn lists_rows_with_availability_badges() {
-        let mut comp = EditorsPanel::new(rows(), "/home/me/.lazybox/config.yaml".into());
+        let mut comp =
+            EditorsPanel::new(rows(), Vec::new(), "/home/me/.lazybox/config.yaml".into());
         let out = render(&mut comp, 90, 12);
         assert!(out.contains("JetBrains Fleet"), "{out}");
         assert!(out.contains("my-editor"), "{out}");
@@ -274,14 +290,25 @@ mod tests {
 
     #[test]
     fn empty_state_prompts_to_add() {
-        let mut comp = EditorsPanel::new(Vec::new(), "/c.yaml".into());
+        let mut comp = EditorsPanel::new(Vec::new(), Vec::new(), "/c.yaml".into());
         let out = render(&mut comp, 60, 10);
         assert!(out.contains("No custom editors"), "{out}");
     }
 
     #[test]
+    fn shows_detected_builtins_as_reference() {
+        let mut comp = EditorsPanel::new(
+            Vec::new(),
+            vec!["Zed".into(), "VS Code".into()],
+            "/c.yaml".into(),
+        );
+        let out = render(&mut comp, 60, 10);
+        assert!(out.contains("Detected: Zed, VS Code"), "{out}");
+    }
+
+    #[test]
     fn keys_emit_add_edit_remove_for_focused_row() {
-        let mut comp = EditorsPanel::new(rows(), "/c.yaml".into());
+        let mut comp = EditorsPanel::new(rows(), Vec::new(), "/c.yaml".into());
         assert_eq!(comp.on(&key(Key::Char('a'))), Some(Msg::EditorAdd));
         assert_eq!(
             comp.on(&key(Key::Enter)),
@@ -296,16 +323,23 @@ mod tests {
 
     #[test]
     fn esc_dismisses() {
-        let mut comp = EditorsPanel::new(rows(), "/c.yaml".into());
+        let mut comp = EditorsPanel::new(rows(), Vec::new(), "/c.yaml".into());
         assert_eq!(comp.on(&key(Key::Esc)), Some(Msg::ModalDismissed));
     }
 
     #[test]
     fn add_works_with_no_rows() {
-        let mut comp = EditorsPanel::new(Vec::new(), "/c.yaml".into());
+        let mut comp = EditorsPanel::new(Vec::new(), Vec::new(), "/c.yaml".into());
         assert_eq!(comp.on(&key(Key::Char('a'))), Some(Msg::EditorAdd));
         // Edit / remove are no-ops with nothing focused.
         assert_eq!(comp.on(&key(Key::Enter)), None);
         assert_eq!(comp.on(&key(Key::Char('d'))), None);
+    }
+
+    #[test]
+    fn tiny_terminal_does_not_panic() {
+        let mut comp = EditorsPanel::new(rows(), vec!["Zed".into()], "/c.yaml".into());
+        let out = render(&mut comp, 20, 3);
+        assert!(out.lines().count() <= 3);
     }
 }

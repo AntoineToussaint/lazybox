@@ -147,6 +147,9 @@ pub enum Id {
     /// two stages (id → launch command); edit is one (launch command,
     /// prefilled). The stage + target id live in `ModalFlow::EditorForm`.
     EditorForm,
+    /// Confirm before removing a custom editor from the panel (#1102).
+    /// The target id lives in `ModalFlow::EditorRemoveConfirm`.
+    EditorRemoveConfirm,
     /// Active setup-wizard step. Each transition unmounts the
     /// previous component at this id and mounts the next; only one
     /// setup step is ever live.
@@ -862,6 +865,8 @@ pub(crate) enum ModalFlow {
     /// the shared `Id::EditorForm` input knows whether a submit collects
     /// the id (add, stage 1) or the launch command (add stage 2 / edit).
     EditorForm { stage: EditorFormStage },
+    /// Editors-panel remove confirm (#1102): the id awaiting a yes/no.
+    EditorRemoveConfirm { id: String },
     /// The tour handed control to the real snippet picker. A confirmed
     /// delivery resumes at `success_step`; cancelling or rejecting the
     /// delivery returns to `return_step`.
@@ -870,6 +875,19 @@ pub(crate) enum ModalFlow {
         return_step: usize,
         success_step: usize,
     },
+}
+
+/// Convert a config `EditorEntry` into the `editors` module's owned
+/// user-entry shape for re-discovery after a Settings write (#1102).
+pub(crate) fn editor_entry_to_user(
+    e: lazybox_config::EditorEntry,
+) -> crate::editors::UserEditorEntry {
+    crate::editors::UserEditorEntry {
+        id: e.id,
+        display: e.display,
+        command: e.command,
+        args: e.args,
+    }
 }
 
 /// Which field the editors-panel form is currently collecting.
@@ -2631,23 +2649,20 @@ impl<T: TerminalAdapter> Model<T> {
         self.setup.editors = editors;
     }
 
-    /// Re-read `editors:` from `~/.lazybox/config.yaml`, re-merge with the
-    /// builtins, and re-detect what's installed — so an add/edit/remove
+    /// Re-merge `editors:` with the builtins and re-detect what's
+    /// installed from an already-loaded config — so an add/edit/remove
     /// from the Settings editors panel (#1102) takes effect on the next
     /// `e` without a restart. Mirrors the boot-time discovery and the
     /// snippet hot-reload handoff (`apply_snippets`); the write already
     /// persisted the change, so this only refreshes the cached list.
-    pub(crate) fn reload_editors(&mut self) {
-        let cfg = lazybox_config::Config::load().unwrap_or_default();
+    /// Takes the config by reference so the post-write path can reuse one
+    /// load for both this and the panel rebuild.
+    pub(crate) fn reload_editors_from(&mut self, cfg: &lazybox_config::Config) {
         let user = cfg
             .editors
-            .into_iter()
-            .map(|e| crate::editors::UserEditorEntry {
-                id: e.id,
-                display: e.display,
-                command: e.command,
-                args: e.args,
-            })
+            .iter()
+            .cloned()
+            .map(editor_entry_to_user)
             .collect();
         self.setup.editors = crate::editors::discover_at_startup(user);
     }
@@ -5600,7 +5615,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::EditorAdd => self.start_editor_add(),
             Msg::EditorEdit(id) => self.start_editor_edit(&id),
-            Msg::EditorRemove(id) => self.remove_editor(&id),
+            Msg::EditorRemove(id) => self.prompt_remove_editor(id),
             // The component's `on(Tick)` already advanced the spinner;
             // here we walk the displayed checklist toward the daemon's
             // truth (gated by the min-dwell) and tear the modal down once

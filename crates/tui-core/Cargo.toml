@@ -55,7 +55,6 @@ serde_json = { workspace = true }
 tracing   = { workspace = true }
 libc      = "0.2"
 which     = "8"
-shell-words = "1"
 unicode-width = "0.2"
 unicode-segmentation = { workspace = true }
 ts-rs      = { workspace = true, optional = true }

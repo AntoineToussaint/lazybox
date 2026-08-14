@@ -11409,6 +11409,112 @@ mod terminal_url_mouse_tests {
             .join("\n")
     }
 
+    /// A drag selection across two side-by-side split tiles stays scoped
+    /// to the tile the drag STARTED in: the copy holds only that terminal's
+    /// rows, never the neighbour's, and the on-screen highlight never
+    /// crosses the tile boundary (#1101). The drag begins in the
+    /// *non-focused* left tile, so this pins the mouse-down's
+    /// focus-the-clicked-tile step — drop it and the anchor would land in
+    /// the previously-focused right tile and copy its text instead. The
+    /// highlight-span check covers the reverse-video overlay path
+    /// (`selection_screen_span`) that the copy never exercises, and pins the
+    /// column clamp directly: selection maps screen coords through the start
+    /// tile's recorded grid (#1021), so a column past the tile boundary
+    /// clamps to the tile's edge instead of projecting into the adjacent
+    /// grid's cells.
+    #[test]
+    fn drag_selection_scoped_to_the_start_tile() {
+        let (mut model, _server, _opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Splits {
+                tree: lazybox_core::TileTree::HSplit {
+                    left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+                    right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                    ratio: 50,
+                },
+                // Focus the RIGHT tile; the drag below starts in the left one.
+                focused: vec![1],
+            });
+        feed(&mut model, 1, b"AAA0\r\nAAA1\r\nAAA2\r\n".to_vec());
+        feed(&mut model, 2, b"BBB0\r\nBBB1\r\nBBB2\r\n".to_vec());
+        let pane = render(&mut model);
+        let (lx, ly) = body_origin(&model, pane, 1);
+        let (rx, _) = body_origin(&model, pane, 2);
+        // Press in the interior of the left tile — its horizontal midpoint,
+        // maximally clear of the sidebar/right splitter seam that hugs the
+        // tile's left edge and would otherwise steal the click as a resize.
+        let press_col = (lx + rx) / 2;
+
+        // Press in the left tile's first row, then drag across the tile
+        // boundary into the right tile two rows lower.
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: press_col,
+            row: ly,
+            modifiers: KeyModifiers::empty(),
+        });
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: rx + 3,
+            row: ly + 2,
+            modifiers: KeyModifiers::empty(),
+        });
+
+        let drag = model.terminal_drag.expect("left-press claims a drag");
+        // The drag binds to the tile it STARTED in (left / terminal 1), not
+        // the tile that was focused when it began (right / terminal 2).
+        assert_eq!(
+            drag.terminal,
+            TerminalId(1),
+            "the drag anchors to the start tile, not the focused one",
+        );
+
+        // The copy holds only the start tile's text. The middle row is
+        // fully spanned regardless of the anchor/focus columns, so it must
+        // be the start tile's row — and only that.
+        let copied = model
+            .terminals
+            .extract_selection(drag.terminal, drag.anchor, drag.focus);
+        assert!(
+            copied.contains("AAA1"),
+            "the start tile's rows are copied: {copied:?}",
+        );
+        assert!(
+            !copied.contains("BBB"),
+            "the adjacent tile never bleeds into the copy: {copied:?}",
+        );
+
+        // The highlight span is clamped to the start tile: both projected
+        // endpoints stay left of the right tile's first column. A regression
+        // that mapped the drag through the whole pane instead of the tile's
+        // grid would project the focus into the right tile (>= rx).
+        let (hstart, hend) = model
+            .terminals
+            .selection_screen_span(drag.terminal, pane, drag.anchor, drag.focus)
+            .expect("a visible selection span");
+        assert!(
+            hstart.0 < rx && hend.0 < rx,
+            "the highlight never crosses into the right tile (rx={rx}): {hstart:?} {hend:?}",
+        );
+
+        // Focus divergence mid-gesture must not redirect the copy: if an
+        // event refocuses the other tile before release, extraction still
+        // reads the tile the drag started in (`drag.terminal`), not live
+        // focus — the guarantee that makes scoping correct-by-construction
+        // rather than a side effect of focus following the click.
+        let mut cmds = Vec::new();
+        model.terminals.focus_tile(TerminalId(2), &mut cmds);
+        let after_refocus =
+            model
+                .terminals
+                .extract_selection(drag.terminal, drag.anchor, drag.focus);
+        assert!(
+            after_refocus.contains("AAA1") && !after_refocus.contains("BBB"),
+            "copy stays pinned to the start tile after focus moves: {after_refocus:?}",
+        );
+    }
+
     #[test]
     fn right_click_opens_plain_url_through_model_launcher() {
         let (mut model, _server, opened) = build_model(1);

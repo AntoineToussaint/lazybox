@@ -2795,6 +2795,54 @@ mod workspace_removal_cursor_tests {
         sidebar
     }
 
+    /// #1090: the sidebar's per-row line build is the render hot spot, and a
+    /// chatty agent triggers a flood of `TerminalOutput` redraws that repaint
+    /// the whole frame without changing any sidebar state. `cached_workspace_lines`
+    /// must skip the rebuild on those unchanged frames, and rebuild exactly once
+    /// when a rendered input actually changes.
+    #[test]
+    fn unchanged_frames_reuse_the_cached_workspace_lines() {
+        let mut sb = sidebar_with_issues(5);
+        let now = chrono::Utc::now();
+        let theme = crate::theme::current();
+
+        // First frame builds.
+        let _ = sb.cached_workspace_lines(40, theme, now, true);
+        assert_eq!(sb.workspace_line_builds.get(), 1);
+
+        // Repeated identical frames — the streaming-redraw path — must hit the
+        // cache and never rebuild.
+        for _ in 0..10 {
+            let _ = sb.cached_workspace_lines(40, theme, now, true);
+        }
+        assert_eq!(
+            sb.workspace_line_builds.get(),
+            1,
+            "unchanged frames must reuse the cache"
+        );
+
+        // A width change re-lays out → one rebuild, then holds.
+        let _ = sb.cached_workspace_lines(30, theme, now, true);
+        let _ = sb.cached_workspace_lines(30, theme, now, true);
+        assert_eq!(sb.workspace_line_builds.get(), 2);
+
+        // A focus change restyles rows → one rebuild.
+        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        assert_eq!(sb.workspace_line_builds.get(), 3);
+
+        // Workspace data changing (any daemon upsert recomputes) bumps
+        // `data_version` → the cache invalidates.
+        sb.recompute_visible();
+        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        assert_eq!(
+            sb.workspace_line_builds.get(),
+            4,
+            "a recompute (workspace-data change) must invalidate the cache"
+        );
+        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        assert_eq!(sb.workspace_line_builds.get(), 4);
+    }
+
     fn visible_workspace_keys(sidebar: &Sidebar) -> Vec<SessionKey> {
         sidebar
             .visible_rows()

@@ -75,6 +75,42 @@ fn extend_cursor_fill(spans: &mut Vec<Span<'_>>, row_budget: usize, style: Style
     }
 }
 
+/// One-shot `DefaultHasher` over a single `Hash` value — a building block
+/// for the render-line cache signature (#1090).
+fn hash_one<H: std::hash::Hash>(v: &H) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    v.hash(&mut h);
+    h.finish()
+}
+
+/// Collapse an `AgentState` to a stable code for the signature. `AgentState`
+/// isn't `Hash` (and lives in `ipc`, where adding a derive would churn the
+/// wire fixture), so we fold it here — every variant that changes a row's
+/// glyph must map to a distinct value.
+fn agent_state_code(s: &lazybox_ipc::AgentState) -> u64 {
+    use lazybox_ipc::AgentState::*;
+    match s {
+        Working => 1,
+        InputNeeded => 2,
+        Idle => 3,
+        Done => 4,
+        Exited { code } => 5u64 ^ hash_one(code).rotate_left(8),
+        LimitReached => 6,
+    }
+}
+
+/// Same for `TerminalKind` — the variant (and the agent id) decides a row's
+/// runner badge, so it must move the signature.
+fn terminal_kind_code(k: &lazybox_ipc::TerminalKind) -> u64 {
+    use lazybox_ipc::TerminalKind::*;
+    match k {
+        Agent(id) => 0xA000 ^ hash_one(id),
+        Shell => 0x5000,
+        LogTail { path } => 0x1000 ^ hash_one(path),
+    }
+}
+
 impl Sidebar {
     /// Height the always-visible usage row adds to the header for a pane
     /// of this width — `1` when it renders, `0` otherwise. The click
@@ -615,7 +651,7 @@ impl Sidebar {
         // Sizing within a group keeps alignment clean where the eye
         // actually scans (issue #961).
         let mut rendered_workspace_lines =
-            self.prebuild_workspace_lines(row_budget, theme, now, focused);
+            self.cached_workspace_lines(row_budget, theme, now, focused);
 
         let lines: Vec<Line> = self
             .visible
@@ -1067,6 +1103,116 @@ impl Sidebar {
             Line::from(Span::styled(" # searches all repos", dim)),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
+    }
+
+    /// A signature over everything `prebuild_workspace_lines` reads, so the
+    /// built lines can be memoized across frames (#1090). Workspace *content*
+    /// (titles, CI, reviews, labels, unread, policies, …) is captured wholesale
+    /// by `data_version`, which bumps on every `recompute_visible_inner` — and
+    /// all of that content reaches the sidebar as a daemon upsert that
+    /// recomputes. Everything the render reads that *doesn't* go through a
+    /// recompute — the cursor, per-agent state, the spinner frame, the runner /
+    /// model / spawning / selection / stack maps, theme, search, width — is
+    /// folded in explicitly here. Maps are folded order-independently
+    /// (`wrapping_add` of per-entry hashes) since their iteration order is not
+    /// stable. A missed input can only cost one frame of cosmetic lag that the
+    /// next redraw heals; it can never desync dispatch, which reads live state.
+    fn workspace_lines_signature(
+        &self,
+        row_budget: usize,
+        focused: bool,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.data_version.hash(&mut h);
+        self.cursor.hash(&mut h);
+        self.working_spinner_frame.hash(&mut h);
+        // Relative timestamps ("2h", "3d") only shift at minute granularity,
+        // so quantize — otherwise every frame is a fresh second and the cache
+        // never hits.
+        (now.timestamp() / 60).hash(&mut h);
+        row_budget.hash(&mut h);
+        focused.hash(&mut h);
+        self.ascii_glyphs.hash(&mut h);
+        self.show_agent_model.hash(&mut h);
+        crate::theme::current().name.hash(&mut h);
+        match &self.search {
+            Some(s) => {
+                1u8.hash(&mut h);
+                s.query.hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
+        let mut fold: u64 = 0;
+        for (k, st) in &self.agents {
+            fold = fold.wrapping_add(hash_one(k) ^ agent_state_code(st).rotate_left(1));
+        }
+        fold.hash(&mut h);
+        let mut fold: u64 = 0;
+        for (tid, (sk, kind)) in &self.running_terminals {
+            fold = fold.wrapping_add(
+                hash_one(tid) ^ hash_one(sk).rotate_left(3) ^ terminal_kind_code(kind),
+            );
+        }
+        fold.hash(&mut h);
+        let mut fold: u64 = 0;
+        for (tid, model) in &self.terminal_models {
+            fold = fold.wrapping_add(hash_one(tid) ^ hash_one(model).rotate_left(5));
+        }
+        fold.hash(&mut h);
+        let mut fold: u64 = 0;
+        for k in &self.spawning {
+            fold = fold.wrapping_add(hash_one(k));
+        }
+        fold.hash(&mut h);
+        let mut fold: u64 = 0;
+        for k in &self.broadcast_selected {
+            fold = fold.wrapping_add(hash_one(k).rotate_left(7));
+        }
+        fold.hash(&mut h);
+        let mut fold: u64 = 0;
+        for (k, sp) in &self.stacks {
+            let mut e = hash_one(k);
+            e ^= (sp.position as u64).rotate_left(3);
+            e ^= (sp.depth as u64).rotate_left(11);
+            e ^= (sp.children.len() as u64).rotate_left(17);
+            e ^= hash_one(&sp.parent).rotate_left(23);
+            fold = fold.wrapping_add(e);
+        }
+        fold.hash(&mut h);
+        let mut fold: u64 = 0;
+        for (k, v) in &self.model_shorts {
+            fold = fold.wrapping_add(hash_one(k) ^ hash_one(v).rotate_left(9));
+        }
+        fold.hash(&mut h);
+        h.finish()
+    }
+
+    /// The memoized front door to `prebuild_workspace_lines` (#1090). On a
+    /// signature match — the common case, since a streaming agent triggers a
+    /// flood of `TerminalOutput` redraws that never touch sidebar state — it
+    /// clones the cached lines and skips the whole per-row `build_row` +
+    /// `render_table` pass. A miss rebuilds and re-stores.
+    pub(crate) fn cached_workspace_lines(
+        &mut self,
+        row_budget: usize,
+        theme: &crate::theme::Theme,
+        now: chrono::DateTime<chrono::Utc>,
+        focused: bool,
+    ) -> Vec<Option<Line<'static>>> {
+        let sig = self.workspace_lines_signature(row_budget, focused, now);
+        if let Some((cached_sig, lines)) = &self.workspace_line_cache {
+            if *cached_sig == sig {
+                return lines.clone();
+            }
+        }
+        let lines = self.prebuild_workspace_lines(row_budget, theme, now, focused);
+        #[cfg(test)]
+        self.workspace_line_builds
+            .set(self.workspace_line_builds.get() + 1);
+        self.workspace_line_cache = Some((sig, lines.clone()));
+        lines
     }
 
     /// Build & lay out every visible workspace row and scatter the

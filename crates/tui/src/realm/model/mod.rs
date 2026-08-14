@@ -4449,12 +4449,12 @@ impl<T: TerminalAdapter> Model<T> {
     /// Surfaces the `open_with:` apps (Obsidian / Finder / browser / …)
     /// on the focused workspace, decoupled from the single `e` code
     /// editor. One app → launch directly; 2+ → a Choice picker; none →
-    /// a footer notice pointing at the config file. Local-only, like the
-    /// editor (#742): a remote worktree path can't be opened here.
+    /// a footer notice pointing at the config file. The remote / no-
+    /// worktree constraints are per-app, not global: only `{path}` apps
+    /// need a local, provisioned worktree, so the gate lives in
+    /// [`Self::launch_open_with`] — a `{url}` browser app runs against a
+    /// remote or not-yet-provisioned workspace just like `g o` does.
     pub fn open_with_picker(&mut self) {
-        if self.editor_unavailable_remote() {
-            return;
-        }
         if self.sidebar.selected_workspace_key().is_none() {
             return;
         }
@@ -4505,7 +4505,7 @@ impl<T: TerminalAdapter> Model<T> {
                 .first()
                 .map(|session| session.worktree_path.to_string_lossy().into_owned()),
             url: workspace.primary_task().map(|task| task.url.clone()),
-            branch: (!workspace.branch.is_empty()).then(|| workspace.branch.clone()),
+            branch: Some(workspace.branch.clone()),
             repo: workspace.primary_task().and_then(|task| task.repo.clone()),
         })
     }
@@ -4515,6 +4515,25 @@ impl<T: TerminalAdapter> Model<T> {
         app: &crate::editors::OpenWithApp,
         ctx: &crate::editors::OpenWithContext,
     ) {
+        // Gate per app, not per feature (#1100): only a `{path}` app needs
+        // the worktree, which is server-side over `--connect` and absent
+        // until a session provisions it. A `{url}`/`{repo}`/`{branch}` app
+        // (e.g. "open the PR in a browser") falls through and runs, exactly
+        // as `g o` open-in-browser does on the same workspace.
+        if app.references_path() {
+            if self.remote {
+                self.flash_info(
+                    "this opens the worktree on your machine — unavailable for a remote daemon; use `s` for a server shell",
+                );
+                return;
+            }
+            if ctx.path.is_none() {
+                self.flash_info(
+                    "no worktree yet — start a shell (`s`) or agent (`w`) here first, then retry",
+                );
+                return;
+            }
+        }
         match crate::editors::launch_open_with(app, ctx) {
             Ok(()) => {
                 tracing::info!(app = %app.name, "launched open-with app");

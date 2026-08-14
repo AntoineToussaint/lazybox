@@ -267,7 +267,9 @@ so a handoff can't loop back to itself, and a visible `source →
 target` notice records the trail), `x o` open with… (a config-driven
 picker over `open_with:` apps — Obsidian / Finder / browser / … —
 decoupled from the `e` code editor; `{path}`/`{url}`/`{branch}`/`{repo}`
-tokens substituted at launch, local-only per #742; #1100), `x j` join
+tokens substituted at launch; only `{path}` apps are worktree-bound and
+decline on a remote/session-less workspace, `{url}` apps open like `g o`
+per #742; #1100), `x j` join
 issue
 into PR, `x z` long snooze, `x x` archive, `x c` close issue
 (as not-planned, upstream; issue workspaces only, confirmed first) —

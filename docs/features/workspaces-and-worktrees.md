@@ -297,6 +297,19 @@ issue URL), `{branch}`, and `{repo}` (`owner/repo`). `args` defaults to
 supply (e.g. `{url}` with no PR) fails with a footer notice naming the token,
 rather than launching with a stray placeholder.
 
+On Linux (or for any app with a direct binary rather than a launcher) name the
+executable as `command` — no `open`:
+
+```yaml
+open_with:
+  - name: Obsidian
+    command: obsidian
+    args: ["{path}"]
+  - name: Preview PR in browser
+    command: xdg-open
+    args: ["{url}"]
+```
+
 ### How it works (brief)
 `open_with:` entries load at startup and reuse the editor launch primitive
 (`tui-core` `editors::launch_open_with`): command + args + token substitution,
@@ -308,9 +321,11 @@ detaching a GUI binary and handing `open` off to Launch Services. `editors:` /
 - [ ] `{path}` / `{url}` / `{branch}` / `{repo}` are substituted at launch.
 - [ ] An app using `{url}` on a workspace with no PR fails with a named notice.
 - [ ] With no `open_with:` configured, `x o` points at the config file.
+- [ ] A `{path}` app on a workspace with no session yet points at `s` / `w`.
+- [ ] On a remote (`--connect`) daemon a `{path}` app declines but a `{url}` app still opens.
 
 ### Known sharp edges
-- Local-only, like the editor (#742): a remote (`--connect`) worktree path lives on the box, so `x o` declines on a remote daemon and points at `s` for a server shell.
+- Only `{path}` apps are local-and-worktree-bound (#742): the worktree lives on the box over `--connect` and doesn't exist until a session provisions it, so a `{path}` app declines on a remote daemon or a session-less workspace and points at `s` / `w`. `{url}` / `{repo}` / `{branch}` apps have no worktree dependency and run regardless — the same as the `g o` open-in-browser action.
 
 ---
 

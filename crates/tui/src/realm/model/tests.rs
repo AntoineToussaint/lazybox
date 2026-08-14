@@ -4703,6 +4703,95 @@ snippets:
         );
     }
 
+    /// #1100: the remote gate is per-app, not per-feature. A `{url}` app
+    /// (open the PR in a browser) has no worktree dependency, so it must
+    /// NOT be refused on a remote daemon the way a `{path}` app is — the
+    /// same reasoning that lets `g o` open-in-browser work over `--connect`.
+    /// Here the workspace has a session (so `{path}` would resolve) but no
+    /// PR, so the `{url}` app falls through the gate and fails on the
+    /// missing token instead — proving it was never remote-blocked.
+    #[test]
+    fn open_with_url_app_is_not_remote_blocked() {
+        let worktree = tmp_worktree_with_skill("ow-url-remote");
+        let mut m = model_with_agent_at_worktree(worktree).with_remote();
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "PR in browser".into(),
+            command: "open".into(),
+            args: Some(vec!["{url}".into()]),
+        }]);
+        m.open_with_picker();
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            !notice.contains("remote daemon"),
+            "a {{url}} app must not be refused on a remote daemon: {notice:?}",
+        );
+        assert!(
+            notice.contains("unavailable"),
+            "it should fall through to the missing-{{url}} token error: {notice:?}",
+        );
+    }
+
+    /// #1100: a `{path}` app IS worktree-bound — the worktree is a
+    /// server-side path over `--connect`, so it declines on a remote
+    /// daemon and points at the server shell.
+    #[test]
+    fn open_with_path_app_declines_on_remote() {
+        let worktree = tmp_worktree_with_skill("ow-path-remote");
+        let mut m = model_with_agent_at_worktree(worktree).with_remote();
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "Obsidian".into(),
+            command: "open".into(),
+            args: Some(vec!["-a".into(), "Obsidian".into(), "{path}".into()]),
+        }]);
+        m.open_with_picker();
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("remote daemon")),
+            "a {{path}} app must decline on a remote daemon",
+        );
+    }
+
+    /// #1100: a `{path}` app on a workspace with no session yet has no
+    /// worktree on disk to open. Rather than a bare "unavailable", the
+    /// notice names the fix — open a shell / agent first (the worktree is
+    /// provisioned as a side-effect), mirroring what `e` does implicitly.
+    #[test]
+    fn open_with_path_app_without_a_worktree_points_at_shell() {
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#7");
+        let session_key: SessionKey = (&ws_key).into();
+        // No `add_session` — the workspace has no worktree on disk.
+        let ws = lazybox_core::Workspace::empty(ws_key, "main", chrono::Utc::now());
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.cache_open_with(vec![crate::editors::OpenWithApp {
+            name: "Obsidian".into(),
+            command: "open".into(),
+            args: None,
+        }]);
+        m.open_with_picker();
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("no worktree")),
+            "a {{path}} app with no session should point the user at a shell first",
+        );
+    }
+
     // ── `]]` leader chord (issue #205) ──────────────────────────────
 
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};

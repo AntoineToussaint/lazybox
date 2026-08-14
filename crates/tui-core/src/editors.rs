@@ -576,15 +576,29 @@ pub fn launch(template: &EditorTemplate, worktree: &Path) -> std::io::Result<()>
 /// semantics and no macOS app-bundle auto-detection — the command line
 /// is taken verbatim (the user writes `open -a Obsidian {path}`), with
 /// tokens substituted at launch. Reuses the editor spawn primitive.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenWithApp {
     /// User-visible name shown in the picker.
     pub name: String,
     pub command: String,
     /// Defaults to `["{path}"]` when omitted, matching the common
     /// "open this folder" case.
-    #[serde(default)]
     pub args: Option<Vec<String>>,
+}
+
+impl OpenWithApp {
+    /// Whether the command references the worktree `{path}` token — the
+    /// default when `args` is omitted. `{path}` is a server-side location
+    /// over `--connect` and absent until a session provisions a worktree,
+    /// so a path app can't run against a remote or not-yet-provisioned
+    /// worktree; `{url}`/`{repo}`/`{branch}` apps (e.g. "open the PR in a
+    /// browser") have no such dependency and run regardless (#1100).
+    pub fn references_path(&self) -> bool {
+        match &self.args {
+            Some(args) => args.iter().any(|arg| arg.contains("{path}")),
+            None => true,
+        }
+    }
 }
 
 /// Values available to the `{…}` tokens in an [`OpenWithApp`]'s args.
@@ -1342,6 +1356,25 @@ mod tests {
             err.contains("{url}"),
             "error names the missing token: {err}"
         );
+    }
+
+    #[test]
+    fn references_path_gates_only_apps_that_use_the_worktree_token() {
+        // Default args are `["{path}"]`, so an omitted-args app needs the
+        // worktree.
+        assert!(
+            OpenWithApp {
+                name: "Finder".into(),
+                command: "open".into(),
+                args: None,
+            }
+            .references_path()
+        );
+        assert!(open_with("open", &["-a", "Obsidian", "{path}"]).references_path());
+        // A `{url}`-only app (e.g. "open the PR in a browser") has no
+        // worktree dependency — it must NOT be gated as local/session-only.
+        assert!(!open_with("open", &["{url}"]).references_path());
+        assert!(!open_with("open", &["{repo}", "{branch}"]).references_path());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! without a restart — the model re-discovers editors after every write
 //! (mirroring the snippet hot-reload path).
 //!
-//! Presentation-only, like [`super::settings::Settings`]: rows arrive
+//! Presentation-only, like the `Settings` component: rows arrive
 //! pre-built (id, display, command, availability) and key presses emit
 //! `Msg::Editor{Add,Edit,Remove}` for the model to act on. Built-in
 //! GUI editors are auto-detected and stay implicit — only the user's own

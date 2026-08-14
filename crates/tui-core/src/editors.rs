@@ -349,8 +349,8 @@ fn split_launch_line(line: &str) -> Option<Vec<String>> {
     Some(tokens)
 }
 
-/// Quote a single token for [`join_launch_line`] so it round-trips back
-/// through [`split_launch_line`] as one token. Only tokens that would
+/// Quote a single token for `join_launch_command` so it round-trips back
+/// through `split_launch_line` as one token. Only tokens that would
 /// otherwise re-split (contain whitespace) or vanish (empty) are quoted;
 /// double quotes are preferred, single quotes used when the token itself
 /// carries a `"`.

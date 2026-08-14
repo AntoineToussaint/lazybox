@@ -614,7 +614,7 @@ impl RateBudget {
         for (resource, state) in &self.resources {
             let allowance = if state.reset_at <= wall_now {
                 self.background_credit.remove(resource);
-                expired_window_probe_allowance(resource)
+                expired_window_allowance()
             } else {
                 let grant = sustainable_allowance_exact(
                     state,
@@ -653,8 +653,25 @@ impl RateBudget {
             .secondary_circuit
             .as_ref()
             .map(|circuit| circuit.retry_at);
-        let graphql_points = self.tick_allowance.get("graphql").copied().unwrap_or(1);
-        let rest_core_points = self.tick_allowance.get("core").copied().unwrap_or(1);
+        // A resource absent from `tick_allowance` was never observed — the
+        // loop above inserts every resource in `self.resources`, so a miss
+        // means an *unlearned* window, not a throttled one. Fall back to a full
+        // sweep unit, exactly as an expired window does (see
+        // `expired_window_allowance`): a lone `1` here reports a single-point
+        // plan, and `admit`'s tick gate then refuses any multi-point scheduled
+        // batch, so no request ever learns the window — the same
+        // self-reinforcing stall the expired path fixes, reached via a
+        // never-bootstrapped cold window instead.
+        let graphql_points = self
+            .tick_allowance
+            .get("graphql")
+            .copied()
+            .unwrap_or(MIN_BACKGROUND_TICK_ALLOWANCE);
+        let rest_core_points = self
+            .tick_allowance
+            .get("core")
+            .copied()
+            .unwrap_or(MIN_BACKGROUND_TICK_ALLOWANCE);
         let graphql_budget_current = self
             .resources
             .get("graphql")
@@ -765,11 +782,17 @@ impl RateBudget {
             }
         }
         if priority.is_scheduled() {
+            // No tick allowance means this resource's window was never observed
+            // (an expired window is still present in `self.resources` and gets
+            // a real entry above). Grant a full sweep unit so one scheduled
+            // batch can go out and learn the window, matching the expired-window
+            // backstop; `unwrap_or(1)` would refuse any multi-point batch and
+            // deadlock a cold, never-bootstrapped window (see `expired_window_allowance`).
             let allowance = self
                 .tick_allowance
                 .get(resource.key())
                 .copied()
-                .unwrap_or(1);
+                .unwrap_or(MIN_BACKGROUND_TICK_ALLOWANCE);
             let spent = self
                 .tick_scheduled
                 .get(resource.key())
@@ -1456,8 +1479,35 @@ fn sustainable_allowance_exact(
     (f64::from(headroom) * interval.as_secs_f64() / reset_secs).min(f64::from(headroom))
 }
 
-fn expired_window_probe_allowance(_resource: &str) -> u32 {
-    1
+/// Allowance for a tick whose rate window looks expired (`reset_at <= now`)
+/// — we haven't observed the fresh window yet, so `remaining` is stale and
+/// the sustainable-rate math can't be trusted.
+///
+/// This must be enough to admit **one complete background sweep unit**, not a
+/// single point. A hot-target batch is one GraphQL query but costs several
+/// points; granting only `1` here refused the batch, so no request went out,
+/// so the window was never re-learned — sync stalled for the entire window
+/// even with thousands of points free (observed as a ~300s "sync" with 4796
+/// GraphQL points available). Granting a sweep unit lets exactly one batch
+/// through to refresh the window.
+///
+/// On an expired window the `RemoteLow` / `ReserveProtected` guards in
+/// [`RateBudget::admit`] are **inert** — they are gated on `reset_at > now` —
+/// so this allowance is the *sole* gate, and the sweep unit is spent
+/// unguarded. That is deliberate, and it is why (unlike the external-burn
+/// floor in [`RateBudget::begin_background_tick`]) the grant is **not** clamped
+/// by `state.remaining`: an expired window's `remaining` is the last value of
+/// the spent, now-elapsed window — characteristically low or zero — so
+/// clamping by it would refuse the batch and re-deadlock the exact case this
+/// fixes. The overspend is bounded and self-correcting instead: at most one
+/// sweep unit is spent unguarded per tick, and the batch's response headers
+/// re-learn the window and re-arm the admit guards immediately (even mid-tick,
+/// for the next admission). The residual exposure is a local clock running
+/// ahead of GitHub's, which classifies a still-live window as expired for the
+/// final skew-seconds of each window; that spends up to one sweep unit against
+/// the real budget before the next observed header clamps it back.
+fn expired_window_allowance() -> u32 {
+    MIN_BACKGROUND_TICK_ALLOWANCE
 }
 
 fn percentile(sorted: &[u64], percentile: usize) -> Option<u64> {
@@ -1939,7 +1989,10 @@ mod tests {
         );
 
         let plan = budget.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
-        assert_eq!(plan.graphql_points, 1);
+        // A complete sweep unit, not a single point — enough for a hot-target
+        // batch (one query, several points) to go through and re-learn the
+        // window. The old `1` deadlocked sync (see fn docs).
+        assert_eq!(plan.graphql_points, MIN_BACKGROUND_TICK_ALLOWANCE);
         assert!(!plan.graphql_budget_current);
         budget
             .admit_at(
@@ -1951,6 +2004,84 @@ mod tests {
                 mono_now,
             )
             .expect("expired observation must allow one reset probe");
+    }
+
+    /// #1090-adjacent regression: an expired GraphQL window must admit a
+    /// multi-point hot-target batch, not just a 1-point probe. The old
+    /// `expired_window_probe_allowance == 1` refused the batch, so no query
+    /// re-learned the window and sync stalled for the whole window even with
+    /// the primary budget healthy (a ~300s "sync" with 4796 points free).
+    #[test]
+    fn expired_window_admits_a_multi_point_hot_batch() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        // Healthy primary budget, but the observed window has expired with its
+        // last-seen `remaining` spent down to 0 — the characteristic shape at
+        // window end. The expired grant must NOT be clamped by that stale
+        // `remaining`; clamping (as the non-expired external-burn floor does)
+        // would yield 0 here and re-deadlock the exact case this fixes.
+        budget.observe_primary(
+            "graphql",
+            5000,
+            0,
+            5000,
+            wall_now - chrono::Duration::seconds(1),
+            mono_now,
+        );
+        let plan = budget.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
+        assert!(
+            plan.graphql_points >= 5,
+            "an expired window must admit a full sweep unit, got {}",
+            plan.graphql_points,
+        );
+        // A batch costing several points is admitted (not deadlocked).
+        budget
+            .admit_at(
+                ApiResource::Graphql,
+                "hot-target-batch",
+                RequestPriority::Recent,
+                5,
+                wall_now,
+                mono_now,
+            )
+            .expect("expired window must admit a multi-point batch to re-learn itself");
+    }
+
+    /// Sibling of `expired_window_admits_a_multi_point_hot_batch` for the
+    /// *never-observed* window: a cold budget that was never bootstrapped (the
+    /// startup probe failed, or a non-full-sweep tick issues a scheduled batch
+    /// before any bootstrap) has no rate state at all. The tick-allowance
+    /// fallback must still grant a full sweep unit so one scheduled batch can go
+    /// out and learn the window; the old `unwrap_or(1)` refused any multi-point
+    /// batch → nothing learned the window → the same self-reinforcing stall as
+    /// the expired case, reached from a cold start.
+    #[test]
+    fn unlearned_window_admits_a_multi_point_scheduled_batch() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        // No observe_primary: the GraphQL window has never been observed, so
+        // `self.resources` is empty and `tick_allowance` gets no graphql entry.
+        let plan = budget.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
+        assert!(
+            plan.graphql_points >= 5,
+            "an unlearned window must plan a full sweep unit, got {}",
+            plan.graphql_points,
+        );
+        // The reserve guards are inert with no observed state (just like an
+        // expired window), so the sweep unit is the sole gate — and it must
+        // admit a multi-point scheduled batch rather than deadlock at 1.
+        budget
+            .admit_at(
+                ApiResource::Graphql,
+                "hot-target-batch",
+                RequestPriority::Recent,
+                5,
+                wall_now,
+                mono_now,
+            )
+            .expect("unlearned window must admit a multi-point batch to learn itself");
     }
 
     #[test]

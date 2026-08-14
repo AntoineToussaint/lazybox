@@ -653,8 +653,25 @@ impl RateBudget {
             .secondary_circuit
             .as_ref()
             .map(|circuit| circuit.retry_at);
-        let graphql_points = self.tick_allowance.get("graphql").copied().unwrap_or(1);
-        let rest_core_points = self.tick_allowance.get("core").copied().unwrap_or(1);
+        // A resource absent from `tick_allowance` was never observed — the
+        // loop above inserts every resource in `self.resources`, so a miss
+        // means an *unlearned* window, not a throttled one. Fall back to a full
+        // sweep unit, exactly as an expired window does (see
+        // `expired_window_allowance`): a lone `1` here reports a single-point
+        // plan, and `admit`'s tick gate then refuses any multi-point scheduled
+        // batch, so no request ever learns the window — the same
+        // self-reinforcing stall the expired path fixes, reached via a
+        // never-bootstrapped cold window instead.
+        let graphql_points = self
+            .tick_allowance
+            .get("graphql")
+            .copied()
+            .unwrap_or(MIN_BACKGROUND_TICK_ALLOWANCE);
+        let rest_core_points = self
+            .tick_allowance
+            .get("core")
+            .copied()
+            .unwrap_or(MIN_BACKGROUND_TICK_ALLOWANCE);
         let graphql_budget_current = self
             .resources
             .get("graphql")
@@ -765,11 +782,17 @@ impl RateBudget {
             }
         }
         if priority.is_scheduled() {
+            // No tick allowance means this resource's window was never observed
+            // (an expired window is still present in `self.resources` and gets
+            // a real entry above). Grant a full sweep unit so one scheduled
+            // batch can go out and learn the window, matching the expired-window
+            // backstop; `unwrap_or(1)` would refuse any multi-point batch and
+            // deadlock a cold, never-bootstrapped window (see `expired_window_allowance`).
             let allowance = self
                 .tick_allowance
                 .get(resource.key())
                 .copied()
-                .unwrap_or(1);
+                .unwrap_or(MIN_BACKGROUND_TICK_ALLOWANCE);
             let spent = self
                 .tick_scheduled
                 .get(resource.key())
@@ -2023,6 +2046,42 @@ mod tests {
                 mono_now,
             )
             .expect("expired window must admit a multi-point batch to re-learn itself");
+    }
+
+    /// Sibling of `expired_window_admits_a_multi_point_hot_batch` for the
+    /// *never-observed* window: a cold budget that was never bootstrapped (the
+    /// startup probe failed, or a non-full-sweep tick issues a scheduled batch
+    /// before any bootstrap) has no rate state at all. The tick-allowance
+    /// fallback must still grant a full sweep unit so one scheduled batch can go
+    /// out and learn the window; the old `unwrap_or(1)` refused any multi-point
+    /// batch → nothing learned the window → the same self-reinforcing stall as
+    /// the expired case, reached from a cold start.
+    #[test]
+    fn unlearned_window_admits_a_multi_point_scheduled_batch() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        // No observe_primary: the GraphQL window has never been observed, so
+        // `self.resources` is empty and `tick_allowance` gets no graphql entry.
+        let plan = budget.begin_background_tick(Duration::from_secs(60), wall_now, mono_now);
+        assert!(
+            plan.graphql_points >= 5,
+            "an unlearned window must plan a full sweep unit, got {}",
+            plan.graphql_points,
+        );
+        // The reserve guards are inert with no observed state (just like an
+        // expired window), so the sweep unit is the sole gate — and it must
+        // admit a multi-point scheduled batch rather than deadlock at 1.
+        budget
+            .admit_at(
+                ApiResource::Graphql,
+                "hot-target-batch",
+                RequestPriority::Recent,
+                5,
+                wall_now,
+                mono_now,
+            )
+            .expect("unlearned window must admit a multi-point batch to learn itself");
     }
 
     #[test]

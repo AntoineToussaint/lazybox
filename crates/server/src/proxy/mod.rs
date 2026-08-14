@@ -3,7 +3,8 @@
 //! Agents point their `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` at a
 //! per-agent URL on this loopback proxy; it forwards each request to the
 //! real upstream verbatim, streams the response straight back, and tees
-//! that stream through [`usage_parse`] to recover the token counts. The
+//! that stream through the `usage_parse` module to recover the token
+//! counts. The
 //! recovered usage is handed to a [`UsageSink`] — the daemon wires that to
 //! `Event::AgentSessionUsage`, which is the *only* usage source for
 //! interactive terminal agents (they drive the real CLI in a PTY and emit

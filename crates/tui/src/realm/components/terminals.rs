@@ -112,7 +112,7 @@ impl Terminals {
 
     /// Label of the terminal keystrokes currently flow to — the agent id
     /// (`claude`, `codex`, …) or `shell` for a plain shell. `None` when
-    /// no terminal is active. Drives the footer's "▶ typing to: <agent>"
+    /// no terminal is active. Drives the footer's `▶ typing to: <agent>`
     /// focus chip (#1110); uses the focused leaf (Splits) / active tab
     /// (Tabs), which is exactly where a keystroke would land.
     pub fn active_typing_target(&self) -> Option<String> {

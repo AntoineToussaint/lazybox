@@ -71,6 +71,30 @@ pub struct ReplaySnapshot {
     pub complete: bool,
 }
 
+/// A gap-free delta of a terminal's output since a byte watermark — the
+/// read primitive session transfer splices, unified so a puller treats
+/// local and remote sources alike (`docs/session-transfer-adr.md`,
+/// #1089).
+///
+/// Offsets count live output bytes emitted since the session spawned
+/// (the raw-PTY ring's `total_written`); they are NOT chunk `seq`s.
+/// `bytes` is exactly `[from_offset, to_offset)` and is always a
+/// gap-free continuation the consumer appends: `from_offset` equals the
+/// requested watermark (clamped down only when the caller was already
+/// past `to_offset`). A backend returns this ONLY when it still retains
+/// the requested watermark; once the bounded ring has evicted that byte
+/// there is no gap-free delta, so [`SessionBackend::read_since`] yields
+/// `None` (the caller falls back to the full snapshot) rather than a
+/// truncated suffix. Never treat any `bytes` here as a reset baseline —
+/// an evicted ring tail can begin mid-UTF-8 / mid-CSI, the corruption
+/// [`ReplaySnapshot`]'s `complete` flag guards against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputDelta {
+    pub from_offset: u64,
+    pub to_offset: u64,
+    pub bytes: Vec<u8>,
+}
+
 /// Capacity of a `Subscription`'s live channel. Bounded so a stalled
 /// consumer puts a hard ceiling on daemon-side buffering: producers
 /// `try_send` and drop chunks on overflow (the `seq` gap + resync
@@ -236,6 +260,24 @@ pub trait SessionBackend: Send + Sync + 'static {
                 "snapshot unimplemented for {key}"
             )))
         })
+    }
+
+    /// A gap-free [`OutputDelta`] of the output bytes emitted since byte
+    /// watermark `since` — the delta pull session transfer reads (#1089).
+    /// `Ok(None)` means no gap-free delta is available and the caller
+    /// must fall back to a full [`Self::snapshot`]: either the backend
+    /// cannot slice its history by byte offset (default impl — tmux keeps
+    /// only its own `capture-pane` history), or it can but has already
+    /// evicted `since` from its bounded ring. The raw-PTY backend, whose
+    /// ring counts bytes exactly, returns a real delta while `since` is
+    /// still retained and `None` once it has scrolled off.
+    fn read_since<'a>(
+        &'a self,
+        key: &'a str,
+        since: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<OutputDelta>, BackendError>> + Send + 'a>> {
+        let _ = (key, since);
+        Box::pin(async { Ok(None) })
     }
 
     /// Deep scrollback for a LIVE session, rebuilt from the backend's

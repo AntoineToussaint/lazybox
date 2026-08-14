@@ -2367,6 +2367,7 @@ pub(crate) fn control_event(mut event: Event) -> Option<Event> {
         }
         Event::TerminalOutput { .. }
         | Event::TerminalResync { .. }
+        | Event::TerminalDelta { .. }
         | Event::TerminalScrollback { .. } => None,
         _ => Some(event),
     }

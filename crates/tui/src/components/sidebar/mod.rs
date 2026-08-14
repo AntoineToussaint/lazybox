@@ -141,6 +141,32 @@ pub struct Sidebar {
     /// coalescing regression can assert one rebuild per batch (#1030).
     #[cfg(test)]
     recompute_count: usize,
+    /// Monotonic version bumped on every `recompute_visible_inner` — i.e.
+    /// whenever the daemon pushes workspace data (all task/CI/review/label
+    /// content arrives as an upsert that recomputes) or a local
+    /// filter/sort/collapse/pin change re-projects the list. Feeds the
+    /// render-line cache signature (#1090) so the expensive per-row line
+    /// build is skipped on the flood of `TerminalOutput`-driven redraws a
+    /// chatty agent triggers, which never touch workspace state.
+    data_version: u64,
+    /// Memoized output of `prebuild_workspace_lines`, keyed by
+    /// [`Sidebar::workspace_lines_signature`]. A cache hit (nothing the
+    /// sidebar draws has changed since the last frame) skips the whole
+    /// per-row `build_row` + `render_table` pass and just clones the
+    /// finished lines — the fix for #1090's render stall, where streaming
+    /// terminal output repainted the entire sidebar tens of times a
+    /// second. A miss (or `None`) rebuilds and re-stores. A stale signature
+    /// can only cost a frame of cosmetic lag that the next redraw heals —
+    /// dispatch always reads live state, never this cache.
+    #[cfg(not(test))]
+    workspace_line_cache: Option<(u64, Vec<Option<Line<'static>>>)>,
+    /// In tests we also track how many times the cache was actually
+    /// (re)built, so the #1090 regression can assert a hit skips the
+    /// rebuild.
+    #[cfg(test)]
+    workspace_line_cache: Option<(u64, Vec<Option<Line<'static>>>)>,
+    #[cfg(test)]
+    workspace_line_builds: std::cell::Cell<usize>,
     /// Index into `visible`. Always points at a `Workspace` variant
     /// when there is at least one — `recompute_visible` and the
     /// j/k handlers maintain that invariant.
@@ -387,6 +413,10 @@ impl Sidebar {
             recompute_pending: false,
             #[cfg(test)]
             recompute_count: 0,
+            data_version: 0,
+            workspace_line_cache: None,
+            #[cfg(test)]
+            workspace_line_builds: std::cell::Cell::new(0),
             cursor: 0,
             scroll: 0,
             scroll_detached: false,
@@ -2789,6 +2819,14 @@ impl Sidebar {
     fn recompute_visible_inner(&mut self, preserve_header_park: bool) {
         // This rebuild fulfills any recompute deferred during a batch.
         self.recompute_pending = false;
+        // Every workspace-data change the daemon pushes lands here (the
+        // upsert handlers recompute), as does any local filter/sort/
+        // collapse/pin re-projection — so bumping the version here is the
+        // one place that covers all workspace-content changes for the
+        // render-line cache (#1090). Render-time-only inputs (cursor,
+        // agent state, spinner, selection) are folded into the signature
+        // separately, since those don't recompute the list.
+        self.data_version = self.data_version.wrapping_add(1);
         #[cfg(test)]
         {
             self.recompute_count += 1;

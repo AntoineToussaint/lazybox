@@ -565,11 +565,12 @@ fn desktop_compatibility_fixture_is_current() {
     }
 
     let committed = std::fs::read_to_string(&path).expect(
-        "desktop compatibility fixture is missing; run the contract generator and update it",
+        "desktop compatibility fixture is missing; run `make desktop-contract` and commit apps/desktop/src/generated",
     );
     assert_eq!(
         committed, rendered,
-        "desktop compatibility fixture is stale; rerun with UPDATE_DESKTOP_CONTRACT=1"
+        "desktop compatibility fixture is stale; run `make desktop-contract` and commit apps/desktop/src/generated \
+         (UPDATE_DESKTOP_CONTRACT=1 alone only rewrites compatibility.json, not terminal-wire.ts)"
     );
 }
 
@@ -741,11 +742,11 @@ fn web_control_contract_fixture_is_current() {
     }
 
     let committed = std::fs::read_to_string(&path).expect(
-        "web-control contract fixture is missing; rerun with UPDATE_WEB_CONTROL_CONTRACT=1",
+        "web-control contract fixture is missing; run `make web-control-contract` and commit crates/server/src/api_client_contract.json",
     );
     assert_eq!(
         committed, rendered,
-        "web-control contract fixture is stale; rerun with UPDATE_WEB_CONTROL_CONTRACT=1"
+        "web-control contract fixture is stale; run `make web-control-contract` and commit crates/server/src/api_client_contract.json"
     );
 }
 

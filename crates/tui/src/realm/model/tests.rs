@@ -6035,9 +6035,10 @@ mod wake_burst_liveness_tests {
     /// A wake catch-up burst of the exact signal the #1131 warning names:
     /// the daemon dropping `TerminalOutput` on a full channel and emitting
     /// one `TerminalResync` per busy terminal per congestion episode as the
-    /// client falls behind. Cycled over a handful of terminals so the
-    /// events stay distinct (resyncs never coalesce) and every one is
-    /// counted by the `BacklogMonitor`.
+    /// client falls behind. Cycled over a handful of terminals to mirror
+    /// several busy terminals resyncing at once; `TerminalResync` is never
+    /// coalesced (only adjacent `TerminalOutput` is), so every event is
+    /// counted by the `BacklogMonitor` regardless of the terminal it names.
     fn overflow_burst(tx: &mpsc::Sender<Event>, n: usize) {
         for i in 0..n {
             tx.try_send(Event::TerminalResync {
@@ -6049,17 +6050,46 @@ mod wake_burst_liveness_tests {
         }
     }
 
-    /// Size a burst so a single bounded drain provably can't consume it —
-    /// the tail left behind is the proof the drain stayed bounded (#1113
-    /// D-0) rather than spinning on the burst, so the loop keeps reaching
-    /// the modal tick / keyboard read every iteration.
+    /// Fill the inbound channel to one below capacity — a burst larger
+    /// than any single bounded drain can consume, so a tail is always left
+    /// behind (the proof the drain stayed bounded, #1113 D-0). The
+    /// precondition asserted here is the real architectural invariant the
+    /// test rests on: the channel holds more than one drain's worth, so an
+    /// overflow episode outlives a single drain. It stays true across any
+    /// value of `MAX_EVENTS_PER_TICK` short of the channel capacity itself,
+    /// rather than coincidentally at today's 256-vs-512.
     fn burst_over_one_tick() -> usize {
-        let n = (MAX_EVENTS_PER_TICK * 2).min(EVENT_CHANNEL_CAPACITY - 1);
-        assert!(
-            n > MAX_EVENTS_PER_TICK,
-            "the burst must exceed one drain tick",
-        );
-        n
+        const {
+            assert!(
+                EVENT_CHANNEL_CAPACITY - 1 > MAX_EVENTS_PER_TICK,
+                "channel capacity must exceed one drain's cap for a burst to outlast a single drain",
+            )
+        };
+        EVENT_CHANNEL_CAPACITY - 1
+    }
+
+    /// Drive the bounded drain the way the run loop does — once per
+    /// iteration — until the overflow episode registers. A single drain
+    /// normally dispatches the whole first batch and registers it, but a
+    /// scheduler stall in the two statements before the drain takes its
+    /// first event off the channel could collect zero events, and thus
+    /// zero resyncs, on that call. Looping until one lands makes the
+    /// "overflow registered" assertion independent of that timing. Every
+    /// drain must still report a backlog: the burst is sized to outlast one
+    /// drain, and a drain that registers no resync also took nothing, so
+    /// the next drain still sees the whole burst queued.
+    fn drain_until_overflow_registers(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        let mut carried = Vec::new();
+        for _ in 0..4 {
+            assert!(
+                drain_daemon_events(m, &mut carried, || false),
+                "a bounded drain must leave the overflow burst's tail queued",
+            );
+            if m.event_backlog.resyncs() > 0 {
+                return;
+            }
+        }
+        panic!("overflow episode never registered across repeated bounded drains");
     }
 
     /// #1131: an overflow burst on focus-regain must not strand a `Loading`
@@ -6081,18 +6111,10 @@ mod wake_burst_liveness_tests {
 
         overflow_burst(&evt_tx, burst_over_one_tick());
 
-        // One bounded drain stays bounded (a tail remains) and registers
-        // the overflow episodes — so this is genuinely the #1131 signal,
+        // Drain stays bounded every call (a tail remains) and registers
+        // the overflow episode — so this is genuinely the #1131 signal,
         // not an ordinary sub-cap batch.
-        let mut carried = Vec::new();
-        assert!(
-            drain_daemon_events(&mut m, &mut carried, || false),
-            "a bounded drain must leave the overflow burst's tail queued",
-        );
-        assert!(
-            m.event_backlog.resyncs() > 0,
-            "the burst must register as an overflow episode",
-        );
+        drain_until_overflow_registers(&mut m);
         assert!(
             m.top_modal().is_some(),
             "the modal is still up right after the burst drain",
@@ -6146,15 +6168,7 @@ mod wake_burst_liveness_tests {
         m.mount_modal(Id::Setup, loading);
 
         overflow_burst(&evt_tx, burst_over_one_tick());
-        let mut carried = Vec::new();
-        assert!(
-            drain_daemon_events(&mut m, &mut carried, || false),
-            "a bounded drain must leave the overflow burst's tail queued",
-        );
-        assert!(
-            m.event_backlog.resyncs() > 0,
-            "the burst must register as an overflow episode",
-        );
+        drain_until_overflow_registers(&mut m);
         assert!(m.top_modal().is_some(), "the modal is up before Esc");
 
         // Esc through the real modal pipeline (listener → app.tick →

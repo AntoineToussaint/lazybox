@@ -892,11 +892,92 @@ fn is_expected_disconnect(error: &std::io::Error) -> bool {
 
 /// Log a writer I/O failure, quietly when it's a routine peer hangup and
 /// at `WARN` when it's a genuine fault. See [`is_expected_disconnect`].
+///
+/// A routine hangup is `DEBUG`, but a *storm* of them still earns one
+/// periodic `WARN`: downgrading every disconnect to `DEBUG` (#1130) would
+/// otherwise make an hour of a client reconnect-looping over SSH — the
+/// exact symptom #1130 was reported from — indistinguishable at default
+/// log levels from a healthy idle daemon, which has no UI status indicator
+/// to fall back on.
 fn log_writer_io_error(error: &std::io::Error) {
     if is_expected_disconnect(error) {
         tracing::debug!("writer: peer disconnected ({error})");
+        if let Some(count) = DISCONNECT_METER.record(std::time::Instant::now()) {
+            tracing::warn!(
+                count,
+                window_secs = DISCONNECT_STORM_WINDOW.as_secs(),
+                "socket peer(s) disconnecting repeatedly — a client is likely flapping or freezing"
+            );
+        }
     } else {
         tracing::warn!("writer: {error}");
+    }
+}
+
+/// One reconnect is routine; several inside [`DISCONNECT_STORM_WINDOW`] is a
+/// storm worth a single `WARN`. Tuned so an ordinary resume (one drop) never
+/// reaches the threshold and stays silent.
+const DISCONNECT_STORM_WINDOW: Duration = Duration::from_secs(60);
+const DISCONNECT_STORM_THRESHOLD: u32 = 5;
+
+/// Process-wide aggregate of routine peer-disconnects across every socket
+/// connection, so a flapping client surfaces even though each individual
+/// hangup is only `DEBUG`. See [`log_writer_io_error`].
+static DISCONNECT_METER: DisconnectMeter =
+    DisconnectMeter::new(DISCONNECT_STORM_WINDOW, DISCONNECT_STORM_THRESHOLD);
+
+/// Counts routine disconnects in tumbling windows and reports a window's
+/// total once, when it closes, if it met the threshold. Deliberately coarse
+/// — a storm detector, not an exact ledger.
+struct DisconnectMeter {
+    window: Duration,
+    threshold: u32,
+    state: std::sync::Mutex<DisconnectWindow>,
+}
+
+struct DisconnectWindow {
+    count: u32,
+    window_start: Option<std::time::Instant>,
+}
+
+impl DisconnectMeter {
+    const fn new(window: Duration, threshold: u32) -> Self {
+        Self {
+            window,
+            threshold,
+            state: std::sync::Mutex::new(DisconnectWindow {
+                count: 0,
+                window_start: None,
+            }),
+        }
+    }
+
+    /// Record one routine disconnect observed at `now`. Returns `Some(total)`
+    /// with the just-closed window's count when that window met the
+    /// threshold — the caller emits one summary `WARN` — otherwise `None`.
+    /// A poisoned lock (impossible here — the guarded code cannot panic)
+    /// degrades to `None` so metering never takes down a connection.
+    fn record(&self, now: std::time::Instant) -> Option<u32> {
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        match state.window_start {
+            Some(start) if now.saturating_duration_since(start) >= self.window => {
+                let closed = state.count;
+                state.window_start = Some(now);
+                state.count = 1;
+                (closed >= self.threshold).then_some(closed)
+            }
+            Some(_) => {
+                state.count = state.count.saturating_add(1);
+                None
+            }
+            None => {
+                state.window_start = Some(now);
+                state.count = 1;
+                None
+            }
+        }
     }
 }
 
@@ -1118,6 +1199,106 @@ mod batching_tests {
         )
         .await
         .expect("writer loop must terminate when the peer's pipe breaks");
+    }
+
+    /// Minimal `tracing` subscriber that records the level of every event on
+    /// the current thread — enough to prove *which* level a log call chose
+    /// without pulling in `tracing-subscriber`.
+    #[derive(Clone, Default)]
+    struct LevelCapture {
+        levels: std::sync::Arc<std::sync::Mutex<Vec<tracing::Level>>>,
+    }
+
+    impl LevelCapture {
+        fn recorded(&self) -> Vec<tracing::Level> {
+            self.levels.lock().expect("capture lock").clone()
+        }
+    }
+
+    impl tracing::Subscriber for LevelCapture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            self.levels
+                .lock()
+                .expect("capture lock")
+                .push(*event.metadata().level());
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The behavior #1130 changed: a routine peer hangup on the writer logs
+    /// at `DEBUG`, a genuine fault at `WARN`. Reverting `log_writer_io_error`
+    /// to an unconditional `warn!` must fail this test. Robust to the global
+    /// storm meter — a summary `WARN` needs a window to elapse, and even if
+    /// one somehow fired it would follow (not precede) the hangup's `DEBUG`.
+    #[test]
+    fn writer_routes_hangups_to_debug_and_faults_to_warn() {
+        let capture = LevelCapture::default();
+        let guard = tracing::subscriber::set_default(capture.clone());
+
+        log_writer_io_error(&std::io::Error::new(std::io::ErrorKind::BrokenPipe, "x"));
+        log_writer_io_error(&std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "x",
+        ));
+        drop(guard);
+
+        let levels = capture.recorded();
+        assert_eq!(
+            levels.first(),
+            Some(&tracing::Level::DEBUG),
+            "a broken pipe must route to DEBUG, not WARN — got {levels:?}"
+        );
+        assert!(
+            levels.contains(&tracing::Level::WARN),
+            "a genuine fault must stay at WARN — got {levels:?}"
+        );
+    }
+
+    #[test]
+    fn disconnect_meter_stays_quiet_for_isolated_reconnects() {
+        let meter = DisconnectMeter::new(Duration::from_secs(60), 5);
+        let t0 = std::time::Instant::now();
+        // One disconnect per window, each well under the threshold: a lone
+        // reconnect never earns a storm WARN.
+        assert_eq!(meter.record(t0), None);
+        assert_eq!(meter.record(t0 + Duration::from_secs(120)), None);
+        assert_eq!(meter.record(t0 + Duration::from_secs(240)), None);
+    }
+
+    #[test]
+    fn disconnect_meter_reports_once_per_window_on_a_storm() {
+        let meter = DisconnectMeter::new(Duration::from_secs(60), 5);
+        let t0 = std::time::Instant::now();
+        // Five disconnects inside the first window: the window is still open,
+        // so nothing is reported yet.
+        for i in 0..5 {
+            assert_eq!(meter.record(t0 + Duration::from_millis(i * 10)), None);
+        }
+        // The first record past the window boundary closes it and reports
+        // the five, then opens a fresh window at count 1.
+        assert_eq!(meter.record(t0 + Duration::from_secs(61)), Some(5));
+        // A lone follow-up window is back under threshold — quiet again.
+        assert_eq!(meter.record(t0 + Duration::from_secs(122)), None);
+    }
+
+    #[test]
+    fn disconnect_meter_needs_the_full_threshold_to_report() {
+        let meter = DisconnectMeter::new(Duration::from_secs(60), 5);
+        let t0 = std::time::Instant::now();
+        // Four in a window is under the threshold: closing it reports nothing.
+        for i in 0..4 {
+            assert_eq!(meter.record(t0 + Duration::from_millis(i * 10)), None);
+        }
+        assert_eq!(meter.record(t0 + Duration::from_secs(61)), None);
     }
 
     #[tokio::test]

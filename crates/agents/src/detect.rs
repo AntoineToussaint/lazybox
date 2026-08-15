@@ -617,6 +617,26 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
         return d;
     }
 
+    // Working: background shells still draining. After a turn's Stop hook
+    // fires Claude rests the composer but keeps painting
+    // `✻ Crunched for 2m 44s · 4 shells still running` while the shells it
+    // launched keep executing — real work in flight. That line carries no
+    // `esc to interrupt` hint, so `working_status_pos` never anchors it and
+    // the quiet timer would settle the agent to Done. Anchor "working" on
+    // the `shells still running` phrase instead; it disappears once the
+    // shells drain, so the agent settles to Done naturally then. A stale
+    // line from a prior turn is rejected by requiring ≤1 resting composer
+    // footer after it — a live frame pairs the status line with exactly the
+    // current footer, while a finished-then-repainted screen stacks a
+    // second. Placed after every InputNeeded branch so a real prompt still
+    // wins.
+    if let Some(shells_pos) = shells_running_pos(compact)
+        && resting_footers_after(compact, shells_pos) <= 1
+    {
+        d.state = AgentState::Working;
+        return d;
+    }
+
     // Working: Claude paints a live status line ONLY while busy. The
     // append-only buffer still holds a finished agent's last status line,
     // but Claude redraws the composer footer AFTER it — so treat the
@@ -1085,6 +1105,32 @@ fn resting_composer_pos(compact: &str) -> Option<usize> {
     .into_iter()
     .flatten()
     .max()
+}
+
+/// Byte offset of the most recent `N shell(s) still running` marker in the
+/// compacted buffer — the post-turn status line Claude keeps painting while
+/// the background shells it launched drain (issue #1136). Both the singular
+/// (`1 shell still running` → `shellstillrunning`) and plural (`4 shells
+/// still running` → `shellsstillrunning`) forms count.
+fn shells_running_pos(compact: &str) -> Option<usize> {
+    [
+        compact.rfind("shellsstillrunning"),
+        compact.rfind("shellstillrunning"),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+}
+
+/// How many resting composer footers (`? for shortcuts` / bypass
+/// `shift+tab to cycle`) sit AFTER byte offset `pos` in the compacted
+/// buffer — the staleness gate for the `shells still running` Working
+/// signal. A live frame pairs the status line with exactly one current
+/// footer; a finished-then-repainted screen leaves the old line above two
+/// stacked footers, so >1 marks the line as scrollback from a prior turn.
+fn resting_footers_after(compact: &str, pos: usize) -> usize {
+    let tail = &compact[pos..];
+    tail.matches("?forshortcuts").count() + tail.matches("shift+tabtocycle").count()
 }
 
 /// Start offset of the last line satisfying `pred`. Walks the buffer
@@ -2286,6 +2332,65 @@ mod tests {
         assert_eq!(
             claude_state("? for shortcuts\n* Done in (2s · 5 tokens)\n".as_bytes()),
             Some(AgentState::Idle),
+        );
+    }
+
+    #[test]
+    fn shells_still_running_keeps_agent_working() {
+        // Issue #1136: after a turn's Stop hook Claude rests the composer
+        // but keeps painting `✻ Crunched … · N shells still running` while
+        // the background shells drain. That line has no `esc to interrupt`
+        // hint, so the old classifier read the resting composer and settled
+        // the agent to Done while real work was in flight. A live frame
+        // pairs the status line with exactly one current footer, so it must
+        // read Working.
+        assert_eq!(
+            claude_state(
+                "✻ Crunched for 2m 44s · 4 shells still running\n? for shortcuts\n".as_bytes()
+            ),
+            Some(AgentState::Working),
+        );
+        // The bypass-mode composer footer is the live form under
+        // `--dangerously-skip-permissions`; still exactly one footer.
+        assert_eq!(
+            claude_state(
+                "✻ Crunched for 8s · 1 shell still running\nbypass permissions on (shift+tab to cycle)\n".as_bytes()
+            ),
+            Some(AgentState::Working),
+        );
+    }
+
+    #[test]
+    fn stale_shells_line_below_two_footers_settles_to_done() {
+        // A finished-then-repainted screen stacks a second resting composer
+        // footer beneath the old `shells still running` line still lingering
+        // in the append-only buffer. Two footers after the marker means it's
+        // scrollback from a prior turn, so the agent settles to Idle (Done).
+        assert_eq!(
+            claude_state(
+                "✻ Crunched for 2m 44s · 4 shells still running\n? for shortcuts\n? for shortcuts\n"
+                    .as_bytes()
+            ),
+            Some(AgentState::Idle),
+        );
+        // And once the shells drain the line is gone entirely — plain
+        // resting composer, Done.
+        assert_eq!(
+            claude_state("? for shortcuts\n".as_bytes()),
+            Some(AgentState::Idle),
+        );
+    }
+
+    #[test]
+    fn shells_running_yields_to_a_live_prompt() {
+        // A real approval dialog painted alongside the shells line must win
+        // — the Working branch sits after every InputNeeded branch.
+        assert_eq!(
+            claude_state(
+                "Do you want to proceed?\n❯ 1. Yes\n2. No\n✻ Crunched for 2m 44s · 4 shells still running\n"
+                    .as_bytes()
+            ),
+            Some(AgentState::InputNeeded),
         );
     }
 

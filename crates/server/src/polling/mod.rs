@@ -1269,6 +1269,54 @@ fn github_rate_limit_wait(
     )
 }
 
+/// A governor self-throttle is lazybox *deliberately* pacing itself against
+/// the GraphQL budget (local reserve protection or a spent background
+/// allowance) — not a stuck or slow sync. It carries a retry hint but,
+/// unlike a remote-budget exhaustion, the observed budget is still well
+/// above [`LOW_THRESHOLD`](lazybox_gh::rate_budget::LOW_THRESHOLD), so
+/// [`github_rate_limit_wait`] returns `None` and the failure would otherwise
+/// fall through to a debounced retryable `ProviderError`.
+///
+/// That path leaves the footer lying: the per-tick `Governor:` `PollProgress`
+/// lights the "syncing github… still working" spinner every wake, while the
+/// `ProviderError` that would clear it is coalesced onto one sentinel and
+/// suppressed after the first cycle (see
+/// [`TickState::broadcast_error_debounced`]). The spinner then spins forever
+/// with an ever-climbing elapsed time — the sync reads as hung when it is
+/// simply waiting out the budget window.
+///
+/// Surfacing the self-throttle as an explicit [`Event::GithubRateLimitWait`]
+/// — the same honest "GitHub rate-limited · ~Nm" countdown a remote limit
+/// gets — clears the phantom spinner on the client and states plainly that
+/// lazybox is waiting, not working. `remote` is the GraphQL primary-budget
+/// view, so its `remaining`/`limit` give the real budget in the label; the
+/// reset prefers the observed GraphQL window, falling back to the error's own
+/// retry hint when the budget hasn't been learned yet.
+fn github_self_throttle_wait(
+    error: &lazybox_core::ProviderError,
+    snapshot: &lazybox_gh::RateSnapshot,
+    now: chrono::DateTime<Utc>,
+) -> Option<GithubRateLimitWait> {
+    if !error.is_self_throttle() {
+        return None;
+    }
+    let remote = snapshot.remote.as_ref();
+    let reset_at = remote
+        .map(|limit| limit.reset_at)
+        .filter(|reset| *reset > now)
+        .or_else(|| {
+            error
+                .retry_after_secs()
+                .map(|secs| now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64))
+        })
+        .filter(|reset| *reset > now)?;
+    Some(GithubRateLimitWait {
+        remaining: remote.map_or(0, |limit| limit.remaining),
+        limit: remote.map_or(0, |limit| limit.limit),
+        reset_at,
+    })
+}
+
 #[cfg(test)]
 mod rate_limit_wait_tests {
     use super::*;
@@ -1342,6 +1390,73 @@ mod rate_limit_wait_tests {
         .expect("low remote budget");
 
         assert_eq!(wait.retry_after_secs(now), 414);
+    }
+
+    /// A governor self-throttle carries a healthy remote budget (well above
+    /// `LOW_THRESHOLD`), so `github_rate_limit_wait` alone stays quiet — yet
+    /// it must still become an explicit wait so the client clears its
+    /// "syncing… still working" spinner instead of spinning forever. The
+    /// label carries the real GraphQL budget and the countdown prefers the
+    /// observed reset window.
+    #[test]
+    fn self_throttle_becomes_a_wait_even_above_the_low_threshold() {
+        let now = Utc::now();
+        let snap = snapshot(2201, 5000, now + chrono::Duration::minutes(15));
+        assert!(
+            github_rate_limit_wait(&snap, now).is_none(),
+            "a healthy remote budget is not a remote-limit wait on its own"
+        );
+
+        let err = lazybox_core::ProviderError::self_throttle(
+            lazybox_gh::SOURCE,
+            "GitHub graphql reserve protected (2201 remaining, 2250 reserved)",
+            900,
+        );
+        let wait = github_self_throttle_wait(&err, &snap, now).expect("self-throttle → wait");
+        assert!(matches!(
+            wait.event(),
+            Event::GithubRateLimitWait {
+                remaining: 2201,
+                limit: 5000,
+                ..
+            }
+        ));
+        assert_eq!(
+            wait.reset_at,
+            now + chrono::Duration::minutes(15),
+            "the countdown uses the observed GraphQL reset window"
+        );
+    }
+
+    /// A plain retryable transient (5xx, network) is NOT a self-throttle —
+    /// it must stay on the debounced-error path, not masquerade as a
+    /// deliberate rate-limit wait.
+    #[test]
+    fn a_plain_transient_is_not_a_self_throttle_wait() {
+        let now = Utc::now();
+        let snap = snapshot(2201, 5000, now + chrono::Duration::minutes(15));
+        let err =
+            lazybox_core::ProviderError::retryable_after(lazybox_gh::SOURCE, "502 bad gateway", 30);
+        assert!(github_self_throttle_wait(&err, &snap, now).is_none());
+    }
+
+    /// Before the GraphQL budget has been learned (`remote: None`), a
+    /// self-throttle still surfaces an honest countdown from the error's
+    /// own retry hint rather than falling back to the phantom spinner.
+    #[test]
+    fn self_throttle_falls_back_to_the_retry_hint_before_budget_is_learned() {
+        let now = Utc::now();
+        let mut snap = snapshot(0, 0, now);
+        snap.remote = None;
+        let err = lazybox_core::ProviderError::self_throttle(
+            lazybox_gh::SOURCE,
+            "GitHub graphql background allowance spent (0/3)",
+            15,
+        );
+        let wait = github_self_throttle_wait(&err, &snap, now).expect("retry-hint fallback wait");
+        assert_eq!(wait.remaining, 0);
+        assert_eq!(wait.limit, 0);
+        assert_eq!(wait.retry_after_secs(now), 15);
     }
 }
 
@@ -1668,10 +1783,17 @@ pub async fn tick_with_state(
                 }
                 let now = Utc::now();
                 let rate_limit_wait = if source.name() == lazybox_gh::SOURCE {
-                    config
-                        .poll
-                        .cached_gh_client()
-                        .and_then(|client| github_rate_limit_wait(&client.rate_snapshot(), now))
+                    config.poll.cached_gh_client().and_then(|client| {
+                        let snapshot = client.rate_snapshot();
+                        // A remote-budget exhaustion / API 403 is an honest
+                        // wait; a governor self-throttle (still well above the
+                        // low threshold) is the same "waiting, not working"
+                        // condition and must surface as a wait too, or its
+                        // debounced retryable error leaves the "syncing…"
+                        // spinner spinning forever.
+                        github_rate_limit_wait(&snapshot, now)
+                            .or_else(|| github_self_throttle_wait(&e, &snapshot, now))
+                    })
                 } else {
                     None
                 };

@@ -6326,6 +6326,32 @@ mod stale_input_tests {
         assert!(!should_drop_stale_input(&Event::FocusLost, age, false));
     }
 
+    /// A stale Esc is ALWAYS delivered — on a confirm modal
+    /// (`modal_retains_keys == false`) and in a pane alike. Esc only
+    /// cancels / dismisses / backs out, so it carries none of the
+    /// destructive-replay risk that makes a stale `Enter`/`Y` unsafe. This
+    /// guarantees the user can always escape a modal that felt frozen under
+    /// a stall instead of having to kill the terminal. A stale destructive
+    /// key (`Enter`) on the same confirm still drops.
+    #[test]
+    fn stale_esc_always_survives_so_a_modal_can_always_be_dismissed() {
+        let age = STALE_INPUT_MAX_AGE + Duration::from_secs(2);
+        let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(
+            !should_drop_stale_input(&esc, age, false),
+            "a stale Esc must survive on a confirm modal so the user can bail out",
+        );
+        assert!(
+            !should_drop_stale_input(&esc, age, true),
+            "a stale Esc survives on a retaining modal too",
+        );
+        let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            should_drop_stale_input(&enter, age, false),
+            "a stale Enter must never replay a merge/archive confirm",
+        );
+    }
+
     /// #1055: while a filter-picker owns input, a buffered keystroke is
     /// kept, not dropped — its content is stable so the key still lands
     /// where the user aimed it. A stale *mouse* click stays dropped even

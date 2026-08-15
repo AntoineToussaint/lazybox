@@ -789,6 +789,20 @@ pub(super) fn should_drop_stale_input(
         return false;
     }
     match event {
+        // A stale Esc is ALWAYS delivered — even on a confirm modal, even
+        // in a pane. Esc only ever cancels / dismisses / backs out; it can
+        // never replay a destructive confirm (a merge, an archive), so the
+        // #1055 data-loss reasoning that drops a stale `Enter`/`Y` simply
+        // doesn't apply to it. Retaining it guarantees the user can ALWAYS
+        // escape a UI that stalled — the "couldn't dismiss the frozen
+        // modal, had to kill the terminal" complaint. The off-thread writer
+        // removes the render-flush stalls, but a stall in another phase
+        // (a slow poll tick has been seen at ~10s) can still age a
+        // keystroke out; Esc must survive that too. Every other key keeps
+        // the #1055 behavior.
+        crossterm::event::Event::Key(key) if matches!(key.code, crossterm::event::KeyCode::Esc) => {
+            false
+        }
         crossterm::event::Event::Key(_) => !modal_retains_keys,
         crossterm::event::Event::Mouse(_) => true,
         _ => false,

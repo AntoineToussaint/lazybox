@@ -8,7 +8,8 @@
 //! scripted fake, while the real HTTP + token glue lives in [`HttpCompute`].
 
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -18,6 +19,14 @@ use crate::{BoxHandle, PowerState};
 
 const COMPUTE_BASE: &str = "https://compute.googleapis.com/compute/v1";
 const PROVIDER: &str = "gcp";
+/// Bound on every Compute REST call so a stuck endpoint fails fast rather than
+/// hanging `status` (#1126).
+const COMPUTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Assumed token lifetime when the mint endpoint reports none.
+const TOKEN_CACHE_DEFAULT_TTL: Duration = Duration::from_secs(3600);
+/// Refresh a cached token this far before its real expiry, so an op never
+/// races the boundary and 401s on a just-expired token.
+const TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(60);
 
 /// The Compute Engine instance operations the box lifecycle needs. Boxed
 /// futures keep it object-safe so the provider can hold `Arc<dyn …>` and
@@ -25,9 +34,13 @@ const PROVIDER: &str = "gcp";
 pub trait ComputeClient: Send + Sync + Debug {
     /// `instances.get` → normalized power state.
     fn power<'a>(&'a self, handle: &'a BoxHandle) -> CommandFuture<'a, PowerState>;
-    /// `instances.start`.
+    /// `instances.start`. Returns once GCE *accepts* the request, not once the
+    /// instance reaches `RUNNING` — the REST call does not block on the
+    /// operation the way `gcloud instances start` did. Callers that need the
+    /// box actually up must poll [`power`](Self::power) / `status`
+    /// afterwards (as `connect`'s keepalive and `wait_until_reachable` do).
     fn start<'a>(&'a self, handle: &'a BoxHandle) -> CommandFuture<'a, ()>;
-    /// `instances.stop`.
+    /// `instances.stop`. Non-blocking in the same sense as [`start`](Self::start).
     fn stop<'a>(&'a self, handle: &'a BoxHandle) -> CommandFuture<'a, ()>;
     /// Mint a token and discard it — the auth preflight. Surfaces a stale
     /// credential as [`SandboxError::ReauthRequired`] before the first op.
@@ -63,13 +76,16 @@ pub fn parse_instance_power(body: &str) -> Result<PowerState, SandboxError> {
     Ok(parse_power_state(&parsed.status))
 }
 
-/// Classify a Compute API HTTP failure. A 401/403 means the token is stale
-/// or revoked — the same re-login remedy as a failed mint — so it maps to
-/// [`SandboxError::ReauthRequired`] rather than a generic API error (#1126).
+/// Classify a Compute API HTTP failure. Only **401** (invalid/expired token)
+/// carries the re-login remedy, so only it maps to
+/// [`SandboxError::ReauthRequired`]. A **403** is an IAM *permission* denial
+/// on an otherwise-valid identity — re-authenticating changes nothing, so it
+/// must stay a plain API error naming the denial, not a reauth prompt (#1126
+/// review).
 pub fn classify_http_error(status: u16, operation: &'static str, detail: &str) -> SandboxError {
-    if status == 401 || status == 403 {
+    if status == 401 {
         return SandboxError::ReauthRequired {
-            detail: format!("compute {operation} returned HTTP {status}: {detail}"),
+            detail: format!("compute {operation} returned HTTP 401: {detail}"),
         };
     }
     SandboxError::Api {
@@ -80,13 +96,24 @@ pub fn classify_http_error(status: u16, operation: &'static str, detail: &str) -
     }
 }
 
+/// A cached access token and the instant it should be refreshed by (real
+/// expiry minus [`TOKEN_REFRESH_MARGIN`]).
+#[derive(Debug, Clone)]
+struct CachedToken {
+    value: String,
+    refresh_at: Instant,
+}
+
 /// Production [`ComputeClient`]: a `reqwest` client that mints an ADC token
-/// per call and speaks the Compute REST API.
+/// (cached until near expiry) and speaks the Compute REST API.
 #[derive(Debug, Clone)]
 pub struct HttpCompute {
     client: reqwest::Client,
     auth: GcpAuth,
     base: String,
+    /// Last minted token, reused across ops until it nears expiry so a wake
+    /// poll-loop doesn't mint a fresh token on every `status` (#1126 review).
+    cache: Arc<Mutex<Option<CachedToken>>>,
 }
 
 impl HttpCompute {
@@ -95,11 +122,32 @@ impl HttpCompute {
             client: reqwest::Client::new(),
             auth,
             base: COMPUTE_BASE.to_string(),
+            cache: Arc::new(Mutex::new(None)),
         }
     }
 
+    /// A cached token that is still comfortably valid, if any. A poisoned lock
+    /// simply misses the cache (and re-mints) rather than propagating a panic.
+    fn cached(&self) -> Option<String> {
+        let guard = self.cache.lock().ok()?;
+        let cached = guard.as_ref()?;
+        (cached.refresh_at > Instant::now()).then(|| cached.value.clone())
+    }
+
     async fn token(&self) -> Result<String, SandboxError> {
-        self.auth.access_token(&self.client).await
+        if let Some(token) = self.cached() {
+            return Ok(token);
+        }
+        let minted = self.auth.access_token(&self.client).await?;
+        let ttl = minted.ttl.unwrap_or(TOKEN_CACHE_DEFAULT_TTL);
+        let refresh_at = Instant::now() + ttl.saturating_sub(TOKEN_REFRESH_MARGIN);
+        if let Ok(mut guard) = self.cache.lock() {
+            *guard = Some(CachedToken {
+                value: minted.value.clone(),
+                refresh_at,
+            });
+        }
+        Ok(minted.value)
     }
 
     /// Issue a Compute op that returns no body we read (`start`/`stop`). The
@@ -112,6 +160,7 @@ impl HttpCompute {
         let response = self
             .client
             .post(url)
+            .timeout(COMPUTE_REQUEST_TIMEOUT)
             .bearer_auth(token)
             .send()
             .await
@@ -141,6 +190,7 @@ impl ComputeClient for HttpCompute {
             let response = self
                 .client
                 .get(url)
+                .timeout(COMPUTE_REQUEST_TIMEOUT)
                 .bearer_auth(token)
                 .send()
                 .await
@@ -182,8 +232,8 @@ impl ComputeClient for HttpCompute {
     }
 }
 
-/// A default [`ComputeClient`] for provider construction sites that don't
-/// wire one explicitly (e.g. tests building a bare provider).
+/// The production [`ComputeClient`] — an [`HttpCompute`] over `auth` — boxed
+/// for the provider's `compute` field. The construction site in `tui-boot`.
 pub fn default_compute(auth: GcpAuth) -> Arc<dyn ComputeClient> {
     Arc::new(HttpCompute::new(auth))
 }
@@ -245,16 +295,25 @@ mod tests {
 
     #[test]
     fn unauthorized_maps_to_reauth_required() {
-        // A 401/403 from Compute is a stale/revoked token — actionable as a
-        // re-login, not a generic API error.
+        // A 401 from Compute is an invalid/expired token — actionable as a
+        // re-login.
         assert!(matches!(
             classify_http_error(401, "instance get", "Invalid Credentials"),
             SandboxError::ReauthRequired { .. }
         ));
-        assert!(matches!(
-            classify_http_error(403, "instance action", "forbidden"),
-            SandboxError::ReauthRequired { .. }
-        ));
+    }
+
+    #[test]
+    fn forbidden_is_a_permission_error_not_a_reauth_prompt() {
+        // A 403 is an IAM permission denial on a valid identity; re-auth won't
+        // fix it, so it must stay an Api error naming the denial (#1126 review).
+        match classify_http_error(403, "instance action", "compute.instances.start denied") {
+            SandboxError::Api { status, detail, .. } => {
+                assert_eq!(status, 403);
+                assert!(detail.contains("denied"), "{detail}");
+            }
+            other => panic!("expected Api, got {other:?}"),
+        }
     }
 
     #[test]
@@ -268,5 +327,28 @@ mod tests {
             }
             other => panic!("expected Api, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_cached_token_is_reused_until_its_refresh_deadline() {
+        // Guards #1126's fix: without caching, every op (and every 5s wake
+        // poll) mints a fresh token. `cached()` must return a live entry and
+        // reject an expired one so `token()` only re-mints past the deadline.
+        let hc = HttpCompute::new(GcpAuth::default());
+        *hc.cache.lock().expect("cache lock") = Some(CachedToken {
+            value: "ya29.cached".into(),
+            refresh_at: Instant::now() + Duration::from_secs(600),
+        });
+        assert_eq!(hc.cached().as_deref(), Some("ya29.cached"));
+
+        *hc.cache.lock().expect("cache lock") = Some(CachedToken {
+            value: "ya29.stale".into(),
+            refresh_at: Instant::now() - Duration::from_secs(1),
+        });
+        assert_eq!(
+            hc.cached(),
+            None,
+            "an expired cache entry must not be reused"
+        );
     }
 }

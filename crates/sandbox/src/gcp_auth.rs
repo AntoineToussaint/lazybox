@@ -25,6 +25,7 @@
 //! acceptance run).
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,11 @@ const METADATA_TOKEN_URI: &str =
 const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 /// SA-key JWT-bearer assertion lifetime; Google caps it at one hour.
 const JWT_LIFETIME_SECS: i64 = 3600;
+/// Bound on every credential-minting request. Without it a stuck endpoint —
+/// most sharply the metadata server dialed from a machine that isn't on GCE,
+/// where the connect can hang rather than refuse — would block `status` /
+/// `check_auth` indefinitely instead of failing fast (#1126).
+const TOKEN_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A resolved ADC credential source, before any impersonation is layered on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,10 +233,21 @@ pub fn jwt_bearer_form(assertion: String) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// A freshly minted token plus its reported lifetime, so callers can cache it
+/// and stop re-minting on every op (#1126). `ttl` is the endpoint's
+/// `expires_in`; `None` when it wasn't reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintedToken {
+    pub value: String,
+    pub ttl: Option<Duration>,
+}
+
 /// A successful token-endpoint response.
 #[derive(Debug, Deserialize)]
 struct TokenOk {
     access_token: String,
+    #[serde(default)]
+    expires_in: Option<u64>,
 }
 
 /// An OAuth2 token-endpoint error body (`{error, error_description}`).
@@ -241,31 +258,44 @@ struct TokenErr {
     error_description: String,
 }
 
-/// True when a token-endpoint error is the "user must log in again" signal:
-/// the `invalid_rapt` reauth challenge, or any `invalid_grant` on a refresh
-/// token (a revoked/expired login). This is the #1126 classification that
-/// turns a raw provision failure into an actionable reauth prompt.
-pub fn is_reauth_error(error: &str, description: &str) -> bool {
+/// True when a token-endpoint error is the "user must log in again" signal.
+/// `invalid_rapt` / an explicit `reauth` are source-agnostic re-login prompts.
+/// A **bare** `invalid_grant` is a re-login signal *only for the user
+/// (refresh-token) grant* (`user_grant`), where it means a revoked/expired
+/// login; on the service-account JWT-bearer path the same code means clock
+/// skew or a bad assertion — which a re-login can't fix — so it must NOT be
+/// classified as reauth there (#1126 review).
+pub fn is_reauth_error(error: &str, description: &str, user_grant: bool) -> bool {
     let desc = description.to_ascii_lowercase();
-    error == "invalid_grant" || desc.contains("invalid_rapt") || desc.contains("reauth")
+    desc.contains("invalid_rapt")
+        || desc.contains("reauth")
+        || (user_grant && error == "invalid_grant")
 }
 
 /// Interpret a token-endpoint response body. `success` is the transport's
-/// 2xx verdict; on failure the OAuth error is classified, mapping the reauth
-/// case to [`SandboxError::ReauthRequired`] and everything else to a
+/// 2xx verdict; `user_grant` says whether this was a refresh-token grant (see
+/// [`is_reauth_error`]). On failure the OAuth error is classified, mapping the
+/// reauth case to [`SandboxError::ReauthRequired`] and everything else to a
 /// transport-shaped API error.
-pub fn parse_token_response(success: bool, body: &str) -> Result<String, SandboxError> {
+pub fn parse_token_response(
+    success: bool,
+    body: &str,
+    user_grant: bool,
+) -> Result<MintedToken, SandboxError> {
     if success {
         let ok: TokenOk = serde_json::from_str(body).map_err(|e| SandboxError::Parse {
             what: "token response",
             detail: e.to_string(),
         })?;
-        return Ok(ok.access_token);
+        return Ok(MintedToken {
+            value: ok.access_token,
+            ttl: ok.expires_in.map(Duration::from_secs),
+        });
     }
     // A non-2xx body is normally the OAuth error JSON; fall back to the raw
     // body when it isn't so the detail is never lost.
     match serde_json::from_str::<TokenErr>(body) {
-        Ok(err) if is_reauth_error(&err.error, &err.error_description) => {
+        Ok(err) if is_reauth_error(&err.error, &err.error_description, user_grant) => {
             Err(SandboxError::ReauthRequired {
                 detail: format!("{}: {}", err.error, err.error_description),
             })
@@ -301,30 +331,39 @@ struct ImpersonateBody {
 struct ImpersonateOk {
     #[serde(rename = "accessToken")]
     access_token: String,
+    /// RFC3339 expiry (`expireTime`); used to derive the cache TTL.
+    #[serde(rename = "expireTime", default)]
+    expire_time: Option<String>,
 }
 
 impl GcpAuth {
     /// Mint an OAuth2 access token for the Compute/IAM APIs from whatever
     /// this config resolves to — natively, with no `gcloud` on PATH (#1126).
-    /// A stale login surfaces as [`SandboxError::ReauthRequired`].
-    pub async fn access_token(&self, client: &reqwest::Client) -> Result<String, SandboxError> {
+    /// Returns the token with its lifetime so the caller can cache it; a stale
+    /// login surfaces as [`SandboxError::ReauthRequired`].
+    pub async fn access_token(
+        &self,
+        client: &reqwest::Client,
+    ) -> Result<MintedToken, SandboxError> {
         let base = self.mint_base_token(client).await?;
         match &self.impersonate_service_account {
-            Some(target) => impersonate(client, &base, target).await,
+            Some(target) => impersonate(client, &base.value, target).await,
             None => Ok(base),
         }
     }
 
     /// Mint the base (pre-impersonation) token from the resolved ADC source.
-    async fn mint_base_token(&self, client: &reqwest::Client) -> Result<String, SandboxError> {
+    async fn mint_base_token(&self, client: &reqwest::Client) -> Result<MintedToken, SandboxError> {
         match resolve_adc(self)? {
             AdcSource::ServiceAccount(key) => {
                 let assertion = sign_assertion(&key, unix_now())?;
                 let token_uri = key.token_uri.as_deref().unwrap_or(TOKEN_URI);
-                post_token(client, token_uri, jwt_bearer_form(assertion)).await
+                // JWT-bearer, not a user login → bare invalid_grant is not reauth.
+                post_token(client, token_uri, jwt_bearer_form(assertion), false).await
             }
             AdcSource::AuthorizedUser(user) => {
-                post_token(client, TOKEN_URI, refresh_grant_form(&user)).await
+                // Refresh-token (user login) grant → bare invalid_grant is reauth.
+                post_token(client, TOKEN_URI, refresh_grant_form(&user), true).await
             }
             AdcSource::Metadata => metadata_token(client).await,
         }
@@ -337,23 +376,38 @@ fn unix_now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// The lifetime remaining until an RFC3339 instant, for the impersonation
+/// `expireTime`. `None` on an unparseable stamp or one already in the past,
+/// so a bogus/expired value falls back to the default TTL rather than caching
+/// a dead token.
+fn ttl_until_rfc3339(stamp: &str) -> Option<Duration> {
+    let expires = chrono::DateTime::parse_from_rfc3339(stamp).ok()?;
+    (expires.timestamp() - unix_now())
+        .try_into()
+        .ok()
+        .map(Duration::from_secs)
+}
+
 /// POST a form-encoded grant to a token endpoint and interpret the result.
+/// `user_grant` distinguishes a refresh-token login from a JWT-bearer grant
+/// for reauth classification (see [`is_reauth_error`]).
 async fn post_token(
     client: &reqwest::Client,
     uri: &str,
     form: Vec<(&'static str, String)>,
-) -> Result<String, SandboxError> {
-    let response =
-        client
-            .post(uri)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| SandboxError::ApiTransport {
-                provider: "gcp",
-                operation: "oauth token",
-                detail: e.to_string(),
-            })?;
+    user_grant: bool,
+) -> Result<MintedToken, SandboxError> {
+    let response = client
+        .post(uri)
+        .timeout(TOKEN_REQUEST_TIMEOUT)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| SandboxError::ApiTransport {
+            provider: "gcp",
+            operation: "oauth token",
+            detail: e.to_string(),
+        })?;
     let success = response.status().is_success();
     let body = response
         .text()
@@ -363,13 +417,15 @@ async fn post_token(
             operation: "oauth token",
             detail: e.to_string(),
         })?;
-    parse_token_response(success, &body)
+    parse_token_response(success, &body, user_grant)
 }
 
-/// Mint a token from the GCE metadata server.
-async fn metadata_token(client: &reqwest::Client) -> Result<String, SandboxError> {
+/// Mint a token from the GCE metadata server. Not a user login, so a bare
+/// `invalid_grant` here is never a reauth prompt.
+async fn metadata_token(client: &reqwest::Client) -> Result<MintedToken, SandboxError> {
     let response = client
         .get(METADATA_TOKEN_URI)
+        .timeout(TOKEN_REQUEST_TIMEOUT)
         .header("Metadata-Flavor", "Google")
         .send()
         .await
@@ -387,7 +443,7 @@ async fn metadata_token(client: &reqwest::Client) -> Result<String, SandboxError
             operation: "metadata token",
             detail: e.to_string(),
         })?;
-    parse_token_response(success, &body)
+    parse_token_response(success, &body, false)
 }
 
 /// Exchange a base token for an impersonated token via IAM Credentials.
@@ -395,9 +451,10 @@ async fn impersonate(
     client: &reqwest::Client,
     base_token: &str,
     target: &str,
-) -> Result<String, SandboxError> {
+) -> Result<MintedToken, SandboxError> {
     let response = client
         .post(impersonate_uri(target))
+        .timeout(TOKEN_REQUEST_TIMEOUT)
         .bearer_auth(base_token)
         .json(&ImpersonateBody {
             scope: vec![CLOUD_PLATFORM_SCOPE.to_string()],
@@ -430,7 +487,10 @@ async fn impersonate(
         what: "impersonate response",
         detail: e.to_string(),
     })?;
-    Ok(ok.access_token)
+    Ok(MintedToken {
+        value: ok.access_token,
+        ttl: ok.expire_time.as_deref().and_then(ttl_until_rfc3339),
+    })
 }
 
 #[cfg(test)]
@@ -529,29 +589,55 @@ mod tests {
     }
 
     #[test]
-    fn invalid_rapt_is_classified_as_reauth() {
+    fn invalid_rapt_is_classified_as_reauth_regardless_of_grant() {
         // The exact dogfooding failure: gcloud's stale ADC surfaced as this.
+        // `invalid_rapt` is a re-login prompt on either grant.
         assert!(is_reauth_error(
             "invalid_grant",
-            "reauth related error (invalid_rapt)"
+            "reauth related error (invalid_rapt)",
+            false
         ));
-        // A bare invalid_grant on a refresh token is also a re-login signal.
-        assert!(is_reauth_error("invalid_grant", ""));
-        // A genuinely different error is not a reauth prompt.
-        assert!(!is_reauth_error("invalid_scope", "bad scope"));
+        assert!(is_reauth_error(
+            "invalid_grant",
+            "reauth related error (invalid_rapt)",
+            true
+        ));
     }
 
     #[test]
-    fn token_success_extracts_the_access_token() {
-        let token =
-            parse_token_response(true, r#"{"access_token":"ya29.abc","expires_in":3599}"#).unwrap();
-        assert_eq!(token, "ya29.abc");
+    fn bare_invalid_grant_is_reauth_only_for_the_user_grant() {
+        // A refresh-token login → re-login. A service-account JWT-bearer grant
+        // → clock skew / bad assertion, which a re-login can't fix, so NOT
+        // reauth (#1126 review).
+        assert!(is_reauth_error("invalid_grant", "", true));
+        assert!(!is_reauth_error("invalid_grant", "", false));
+        // A genuinely different error is never a reauth prompt.
+        assert!(!is_reauth_error("invalid_scope", "bad scope", true));
+    }
+
+    #[test]
+    fn token_success_extracts_the_access_token_and_ttl() {
+        let minted = parse_token_response(
+            true,
+            r#"{"access_token":"ya29.abc","expires_in":3599}"#,
+            true,
+        )
+        .unwrap();
+        assert_eq!(minted.value, "ya29.abc");
+        assert_eq!(minted.ttl, Some(Duration::from_secs(3599)));
+    }
+
+    #[test]
+    fn token_success_without_expiry_reports_no_ttl() {
+        let minted = parse_token_response(true, r#"{"access_token":"ya29.abc"}"#, false).unwrap();
+        assert_eq!(minted.value, "ya29.abc");
+        assert_eq!(minted.ttl, None);
     }
 
     #[test]
     fn stale_login_maps_to_reauth_required_not_a_raw_error() {
         let body = r#"{"error":"invalid_grant","error_description":"reauth related error (invalid_rapt)"}"#;
-        let err = parse_token_response(false, body).unwrap_err();
+        let err = parse_token_response(false, body, true).unwrap_err();
         assert!(
             matches!(err, SandboxError::ReauthRequired { .. }),
             "{err:?}"
@@ -560,19 +646,37 @@ mod tests {
     }
 
     #[test]
+    fn service_account_invalid_grant_is_not_a_reauth_prompt() {
+        // Same OAuth code, JWT-bearer path: must be a plain error, never a
+        // "re-authenticate" prompt a headless deploy can't act on.
+        let body =
+            r#"{"error":"invalid_grant","error_description":"Invalid JWT: Token used too early"}"#;
+        let err = parse_token_response(false, body, false).unwrap_err();
+        assert!(matches!(err, SandboxError::Api { .. }), "{err:?}");
+    }
+
+    #[test]
     fn a_non_reauth_token_error_stays_a_plain_api_error() {
         let body = r#"{"error":"invalid_client","error_description":"bad client"}"#;
-        let err = parse_token_response(false, body).unwrap_err();
+        let err = parse_token_response(false, body, true).unwrap_err();
         assert!(matches!(err, SandboxError::Api { .. }), "{err:?}");
     }
 
     #[test]
     fn a_non_json_error_body_is_preserved_verbatim() {
-        let err = parse_token_response(false, "  upstream 502  ").unwrap_err();
+        let err = parse_token_response(false, "  upstream 502  ", true).unwrap_err();
         match err {
             SandboxError::Api { detail, .. } => assert_eq!(detail, "upstream 502"),
             other => panic!("expected Api, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ttl_until_rfc3339_is_none_for_a_past_or_bogus_stamp() {
+        assert_eq!(ttl_until_rfc3339("1999-01-01T00:00:00Z"), None);
+        assert_eq!(ttl_until_rfc3339("not-a-timestamp"), None);
+        // A far-future stamp yields a positive lifetime.
+        assert!(ttl_until_rfc3339("2999-01-01T00:00:00Z").is_some());
     }
 
     #[test]

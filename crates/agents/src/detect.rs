@@ -1109,15 +1109,22 @@ fn resting_composer_pos(compact: &str) -> Option<usize> {
     .max()
 }
 
-/// A "N shells still running" status line — Claude paints it while
+/// A live "N shells still running" status line — Claude paints it while
 /// background shells the agent launched during the turn keep executing
 /// after the model finished (`✻ Crunched for 2m 44s · 4 shells still
 /// running`). Compacted, "shells still running" → "shellsstillrunning" and
 /// the singular "shell still running" → "shellstillrunning"; both carry
-/// "stillrunning" alongside "shell", which prose about shells ("run the
-/// shell script") does not.
+/// "stillrunning" alongside "shell".
+///
+/// Anchored on a spinner glyph, exactly like [`is_live_counter_line`]: the
+/// status bar always leads with one of [`WORKING_SPINNER_GLYPHS`], but the
+/// agent's own PROSE about a shell ("the dev shell is still running in the
+/// background", "left the smoke tests still running") never does. Without
+/// that anchor the two bare substrings pin the agent to Working on ordinary
+/// end-of-turn prose — the false-Working mirror of the very bug this fixes,
+/// and more frequent than the background-shells case it detects.
 fn is_shells_running_line(line: &str) -> bool {
-    line.contains("shell") && line.contains("stillrunning")
+    line.contains(WORKING_SPINNER_GLYPHS) && line.contains("shell") && line.contains("stillrunning")
 }
 
 /// How many resting composer footers (`? for shortcuts` / bypass `shift+tab
@@ -2009,6 +2016,24 @@ mod tests {
             claude_state(blocked.as_bytes()),
             Some(AgentState::InputNeeded)
         );
+    }
+
+    #[test]
+    fn prose_about_a_running_shell_is_not_working() {
+        // #1136 regression: the shells signal must anchor on the live
+        // status bar (a spinner glyph), NOT two bare substrings. An agent's
+        // own end-of-turn prose that happens to mention a shell "still
+        // running" carries no spinner glyph, so it must stay Idle — pinning
+        // it to Working would be the false-Working mirror of the bug being
+        // fixed and would stall the settle-gated inject path forever.
+        let adjacent = "I started the dev server; the shell is still running in the background.\n? for shortcuts";
+        assert_eq!(claude_state(adjacent.as_bytes()), Some(AgentState::Idle));
+
+        // The two substrings need not even be adjacent — a bare
+        // `contains("shell") && contains("stillrunning")` matched this too.
+        let split =
+            "Reinstalled the shells and left the smoke tests still running.\n? for shortcuts";
+        assert_eq!(claude_state(split.as_bytes()), Some(AgentState::Idle));
     }
 
     #[test]

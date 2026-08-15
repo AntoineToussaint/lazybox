@@ -7,6 +7,7 @@
 //!   - `anthropic-ratelimit-unified-5h-reset`        — unix seconds
 //!   - `anthropic-ratelimit-unified-7d-utilization`  — fraction 0..1
 //!   - `anthropic-ratelimit-unified-7d-reset`        — unix seconds
+//!
 //! This mirrors what Claude Code's `/usage` surfaces; the metering proxy
 //! already holds the upstream `HeaderMap`, so reading it is free.
 //!

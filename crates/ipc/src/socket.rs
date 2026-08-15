@@ -849,14 +849,14 @@ where
                     // first so the peer's stream stays a clean prefix.
                     tracing::warn!("writer: {e}");
                     if let Err(io) = write_all_flush(&mut w, &buf).await {
-                        tracing::warn!("writer: {io}");
+                        log_writer_io_error(&io);
                     }
                     break 'conn;
                 }
             }
         }
         if let Err(e) = write_all_flush(&mut w, &buf).await {
-            tracing::warn!("writer: {e}");
+            log_writer_io_error(&e);
             break;
         }
     }
@@ -869,6 +869,35 @@ where
 {
     w.write_all(buf).await?;
     w.flush().await
+}
+
+/// A read/write failure that is simply the peer going away: the normal
+/// end of a client's connection — it froze and was transparently
+/// redialed, quit, slept, or its SSH tunnel reset. This is the write-side
+/// twin of a clean read EOF (which [`read_frame_limited`] already maps to
+/// `Ok(None)` and ends the reader silently). The connection is torn down
+/// and, for a self-healing client, redialed with a resync either way, so
+/// logging it at `WARN` only makes routine reconnects read as instability
+/// — the repeated `writer: Broken pipe` stream of #1130. A genuine wire
+/// fault stays `WARN`.
+fn is_expected_disconnect(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+/// Log a writer I/O failure, quietly when it's a routine peer hangup and
+/// at `WARN` when it's a genuine fault. See [`is_expected_disconnect`].
+fn log_writer_io_error(error: &std::io::Error) {
+    if is_expected_disconnect(error) {
+        tracing::debug!("writer: peer disconnected ({error})");
+    } else {
+        tracing::warn!("writer: {error}");
+    }
 }
 
 /// Bounded-channel reader. Like `reader_loop` but `.send().await`s on
@@ -896,6 +925,13 @@ where
             // `MAX_FRAME_BYTES`) still lands in the fatal arm below.
             Err(e @ FrameError::OversizedSkipped { .. }) => {
                 tracing::warn!("reader: {e} — dropping that message, connection stays up");
+            }
+            // A reset/abort mid-read is the same routine peer hangup a
+            // clean EOF is (`Ok(None)` above) — end quietly. A genuine
+            // wire fault (decode, framing, oversized prefix) stays `WARN`.
+            Err(FrameError::Io(io)) if is_expected_disconnect(&io) => {
+                tracing::debug!("reader: peer disconnected ({io})");
+                break;
             }
             Err(e) => {
                 tracing::warn!("reader: {e}");
@@ -1010,6 +1046,78 @@ mod batching_tests {
             bytes: vec![b'x'; 8],
             intent: crate::TerminalInputIntent::Compose,
         }
+    }
+
+    /// AsyncWrite that fails every write with a fixed error kind, so the
+    /// writer loop's disconnect teardown path can be driven directly.
+    struct FailingWriter {
+        kind: std::io::ErrorKind,
+    }
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::new(self.kind, "peer gone")))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn expected_disconnect_covers_peer_hangups_only() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::ConnectionAborted,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(
+                is_expected_disconnect(&std::io::Error::new(kind, "x")),
+                "{kind:?} is a routine peer hangup"
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::InvalidData,
+            std::io::ErrorKind::Other,
+        ] {
+            assert!(
+                !is_expected_disconnect(&std::io::Error::new(kind, "x")),
+                "{kind:?} is a genuine fault, not a routine hangup"
+            );
+        }
+    }
+
+    /// A broken pipe on the socket write is the peer going away: the
+    /// writer loop must end (tearing the connection down for redial),
+    /// not spin. Regression for #1130's repeated `writer: Broken pipe`.
+    #[tokio::test]
+    async fn writer_loop_ends_when_the_peer_pipe_breaks() {
+        let (tx, rx) = mpsc::channel::<Command>(4);
+        tx.try_send(cmd(1)).expect("capacity");
+        // Hold the sender open so the loop exits on the write failure —
+        // the disconnect teardown under test — not on a closed channel.
+        let _keepalive = tx;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            writer_loop_bounded(
+                FailingWriter {
+                    kind: std::io::ErrorKind::BrokenPipe,
+                },
+                rx,
+            ),
+        )
+        .await
+        .expect("writer loop must terminate when the peer's pipe breaks");
     }
 
     #[tokio::test]

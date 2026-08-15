@@ -2206,15 +2206,16 @@ pub async fn on_terminal_transition(
 /// just because it never had a worktree — `has_local_work` and
 /// `active_terminal_count` come back `false`/`0`.
 ///
-/// A **closed issue** is the end of that workspace's life, so it doesn't
-/// prompt when removal is safe (issue #552): a session-less issue (no
-/// worktree to reap), or one whose worktrees are all clean (no
-/// uncommitted/unpushed work) and has no live terminal attached, is
+/// A **closed issue** is the end of that workspace's life, so a
+/// *session-less* row (no worktree to reap, no terminal to kill) is
 /// removed immediately via [`remove_merged_workspace_with`] (without
 /// archiving, so reopening the issue on GitHub resurfaces it), with a
-/// footer notice. Genuine local work, an inspect we couldn't complete,
-/// or a live terminal all fall through to the keep/remove prompt so
-/// nothing is destroyed from under the user. Mirrors
+/// footer notice — there's nothing to lose and no reason to make the user
+/// dismiss a bare row (issue #552). But a closed issue that still has a
+/// backing session — even a clean, idle one — falls through to the
+/// keep/remove prompt: reclaiming its worktree and killing its agent
+/// without consent contradicts `auto_cleanup_merged: false` and was a
+/// silent mass-reap release blocker (issue #1129). Mirrors
 /// [`super::removal_candidate_state`].
 pub(crate) async fn prompt_merged_pr_removal_with(
     config: &ServerConfig,
@@ -2238,29 +2239,29 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         .filter(|k| !k.is_empty())
         .unwrap_or_else(|| key.as_str().to_string());
 
-    // A closed issue's primary outcome is removal, not a prompt, so it's
-    // evaluated up front and is NOT throttled — a session-less row, or
-    // one whose worktrees are all clean with no live terminal, is removed
-    // on sight (issue #552), on the open→closed transition and on the
-    // recovery sweep alike. Evaluating before the throttle also means a
-    // reprompt tick catches a dirty→clean flip immediately instead of
-    // waiting out the reprompt window. The removal does NOT archive, so
-    // reopening the issue on GitHub resurfaces it. Real local work
-    // (`Some(true)`), an inspect we couldn't complete (`None` — never
-    // force-delete the unverified), a live terminal, or a removal that
-    // fails all fall through to the throttled keep/remove prompt below.
-    // A merged PR never auto-removes and defers its worktree inspect past
-    // the throttle, so a throttled reprompt tick pays no filesystem cost.
+    // A closed issue is the end of that workspace's life, but reclaiming
+    // its backing worktree (often multi-GB) and killing its agent without
+    // consent contradicts the user's `auto_cleanup_merged: false` setting
+    // — a silent mass reap on a batch of closing issues is a release
+    // blocker (issue #1129). So only a *session-less* closed issue
+    // auto-removes on sight: that removal just drops the tracking row
+    // (nothing on disk to reclaim, no terminal to kill), so there's
+    // nothing to lose and no reason to make the user dismiss a bare row —
+    // the genuinely-safe half of issue #552. A closed issue that still
+    // has any backing session — even a clean, idle one — falls through to
+    // the throttled keep/remove prompt below, where the user consents
+    // before its worktree is destroyed. (When `auto_cleanup_merged` is
+    // on we never reach here: `on_terminal_transition` routes to the
+    // silent reaper instead.) Evaluated up front and NOT throttled so a
+    // bare row is cleared promptly. The removal does NOT archive, so
+    // reopening the issue on GitHub resurfaces it.
     if terminal_state == lazybox_ipc::RemovableTerminalState::Closed {
         let session_paths = workspace_worktree_paths(&workspace);
-        let local_work = workspace_local_work(config, mgr, key, &session_paths).await;
-        let idle = local_work == Some(false) && count_live_terminals(config, key).await == 0;
-        let removed = if idle {
-            remove_merged_workspace_with(config, key, /*archive=*/ false).await
-        } else {
-            None
-        };
-        if let Some(reclaimed) = removed {
+        let sessionless = session_paths.is_empty() && count_live_terminals(config, key).await == 0;
+        if sessionless
+            && let Some(reclaimed) =
+                remove_merged_workspace_with(config, key, /*archive=*/ false).await
+        {
             let mut body = format!("Removed workspace for closed {label}");
             if let Some(space) = crate::workspace::reclaimed_notice_body(reclaimed) {
                 body.push_str(" · ");
@@ -2272,8 +2273,8 @@ pub(crate) async fn prompt_merged_pr_removal_with(
             });
             return;
         }
-        // Removal skipped (not idle) or failed (row still present) — fall
-        // through to the throttled prompt rather than retry every tick.
+        // Not session-less, or the removal failed (row still present) —
+        // fall through to the throttled prompt rather than retry every tick.
     }
 
     {
@@ -4149,8 +4150,8 @@ mod inspect_tests {
     /// A closed **issue** whose worktree has local work emits the same
     /// `MergedPrRemovable` prompt as a merged PR, but tags
     /// `terminal_state = Closed` so the modal copy reads "closed" (#250).
-    /// A clean closed issue would auto-remove (#552), so the worktree is
-    /// dirtied here to force the prompt path under test.
+    /// The worktree is dirtied so the assertion is meaningful even under
+    /// the pre-#1129 clean-auto-remove behavior.
     #[tokio::test]
     async fn prompt_emits_closed_terminal_state_for_issue() {
         let fx = setup_fixture().await;
@@ -4214,11 +4215,15 @@ mod inspect_tests {
         assert_eq!(k, key);
     }
 
-    /// #552: a closed issue whose worktree is clean (no uncommitted /
-    /// unpushed work) auto-removes — the worktree is force-deleted and
-    /// the row dropped, no prompt.
+    /// #1129: a closed issue whose worktree is clean and idle must NOT be
+    /// silently reaped — reclaiming the worktree and killing its agent
+    /// without consent contradicts `auto_cleanup_merged: false`. It
+    /// prompts (`MergedPrRemovable`, `has_local_work: false`) and leaves
+    /// the worktree + row intact until the user answers. (Only a
+    /// session-less closed issue still auto-removes — see
+    /// `closed_issue_without_session_auto_removes`.)
     #[tokio::test]
-    async fn closed_issue_clean_session_auto_removes() {
+    async fn closed_issue_clean_session_prompts_not_reaped() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "issue-clean", "feat").await;
         let store = Arc::new(MemoryStore::new());
@@ -4236,12 +4241,25 @@ mod inspect_tests {
         )
         .await;
 
+        let evt = drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        let Event::MergedPrRemovable {
+            has_local_work,
+            terminal_state,
+            ..
+        } = evt
+        else {
+            unreachable!()
+        };
         assert!(
-            load_workspace(&config, &key).is_none(),
-            "clean closed issue must be removed"
+            !has_local_work,
+            "a clean worktree has no local work but must still prompt"
         );
-        assert!(!wt.exists(), "clean worktree must be force-deleted");
-        assert_no_event(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+        assert_eq!(terminal_state, lazybox_ipc::RemovableTerminalState::Closed);
+        assert!(wt.exists(), "clean worktree must survive without consent");
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "row must remain until the user answers the prompt"
+        );
     }
 
     /// #552: the auto-remove must NOT archive the key — unlike a

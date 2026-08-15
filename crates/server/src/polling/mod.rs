@@ -2866,8 +2866,8 @@ fn pr_workspace_claiming_issue(
 /// worktree — removal just drops the row, but the user shouldn't have to
 /// discover `x x` to be rid of it. A **closed issue** likewise qualifies
 /// with or without sessions (issue #552): `prompt_merged_pr_removal_with`
-/// auto-removes it when that's safe (session-less or clean worktrees) and
-/// only prompts when there's local work, so the level-trigger sweep must
+/// auto-removes a session-less row and prompts when there's a backing
+/// worktree (issue #1129), so the level-trigger sweep must
 /// reach even a bare closed-issue row that the open→closed transition
 /// missed (a daemon restart, a lagged broadcast).
 fn removal_candidate_state(

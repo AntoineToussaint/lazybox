@@ -735,6 +735,33 @@ async fn bare_head_branch(git: &dyn GitRunner, bare: &Path) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
+/// Whether `path` is still a usable git worktree — cheaply, without
+/// spawning git. A managed worktree carries `.git` as a *file* whose
+/// `gitdir:` line points into the bare clone's `worktrees/` metadata;
+/// once the bare clone is deleted that target vanishes and every `git`
+/// command run in the directory fails with "not a git repository". A
+/// plain `.git` *directory* (a standalone clone) is always live.
+async fn worktree_git_is_live(path: &Path) -> bool {
+    let dot_git = path.join(".git");
+    let Ok(meta) = tokio::fs::symlink_metadata(&dot_git).await else {
+        return false;
+    };
+    if meta.is_dir() {
+        return true;
+    }
+    let Ok(contents) = tokio::fs::read_to_string(&dot_git).await else {
+        return false;
+    };
+    let Some(gitdir) = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(|p| PathBuf::from(p.trim()))
+    else {
+        return false;
+    };
+    tokio::fs::metadata(&gitdir).await.is_ok()
+}
+
 async fn inspect_one(
     git: &dyn GitRunner,
     path: &Path,
@@ -766,17 +793,27 @@ async fn inspect_one(
 
     // Five independent probes per worktree: two ref lookups against
     // the bare clone (cheap stat calls), `git status --porcelain` and
-    // `git rev-list @{u}..HEAD` against the worktree (each ~5-15ms),
-    // and a recursive disk walk. They share no inputs, so fan them
-    // out together — wall-clock drops from sum to max. Each helper
-    // already converts failures to a defaulted value, so `join!`
-    // never fails the surrounding future.
+    // `git rev-list @{u}..HEAD` against the worktree (each ~5-15ms, and
+    // only when the worktree's git dir is still live — see below), and
+    // a recursive disk walk. They share no inputs, so fan them out
+    // together — wall-clock drops from sum to max. Each helper already
+    // converts failures to a defaulted value, so `join!` never fails
+    // the surrounding future.
     let branch_refs: Option<(String, String)> = branch.as_ref().map(|b| {
         (
             format!("refs/heads/{b}"),
             format!("refs/remotes/origin/{b}"),
         )
     });
+    // A managed worktree whose bare clone was deleted keeps a `.git`
+    // file pointing at a now-missing gitdir; every `git` command in it
+    // then fails with "not a git repository". Detect that from disk (no
+    // git spawn) and skip the two in-worktree probes — a severed dir is
+    // never registered in any bare clone, so `bare_path` is already
+    // `None`, and both probes would only fail-and-log before defaulting
+    // to exactly `(None, false)`. Skipping is behavior-preserving, just
+    // without the wasted `git status` / `rev-list` spawn per sweep.
+    let git_live = worktree_git_is_live(path).await;
     let (local_exists, remote_exists, size_pair, uncommitted_state, has_unpushed_commits) = tokio::join!(
         async {
             match (bare_path.as_ref(), branch_refs.as_ref()) {
@@ -791,8 +828,20 @@ async fn inspect_one(
             }
         },
         size_and_mtime(path),
-        uncommitted(git, path),
-        unpushed(git, path, bare_path.as_deref()),
+        async {
+            if git_live {
+                uncommitted(git, path).await
+            } else {
+                None
+            }
+        },
+        async {
+            if git_live {
+                unpushed(git, path, bare_path.as_deref()).await
+            } else {
+                false
+            }
+        },
     );
     let (size_bytes, last_modified) = size_pair;
     let has_uncommitted_changes = uncommitted_state.unwrap_or(false);

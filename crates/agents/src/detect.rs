@@ -1109,9 +1109,6 @@ fn resting_composer_pos(compact: &str) -> Option<usize> {
     .max()
 }
 
-/// Start offset of the last line satisfying `pred`. Walks the buffer
-/// once, keeping line boundaries (`split_inclusive`) so the returned
-/// offset is comparable against `rfind` positions in the same string.
 /// A "N shells still running" status line — Claude paints it while
 /// background shells the agent launched during the turn keep executing
 /// after the model finished (`✻ Crunched for 2m 44s · 4 shells still
@@ -1141,6 +1138,9 @@ fn resting_footers_after(compact: &str, pos: usize) -> usize {
     count
 }
 
+/// Start offset of the last line satisfying `pred`. Walks the buffer
+/// once, keeping line boundaries (`split_inclusive`) so the returned
+/// offset is comparable against `rfind` positions in the same string.
 fn last_line_pos(s: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
     let mut best = None;
     let mut offset = 0;

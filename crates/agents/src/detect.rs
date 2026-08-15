@@ -640,13 +640,30 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // settle it to `Done` mid-run (#1136). Treat it as `Working` until the
     // shells drain and the line disappears.
     //
-    // A STALE line from an earlier turn is rejected by
-    // [`resting_footers_after`]: a live frame pairs the status line with
-    // exactly the current composer footer (≤1 footer after it), whereas a
-    // finished-then-repainted screen stacks a second `? for shortcuts`
-    // below the now-stale line. Placed after every `InputNeeded` branch, so
-    // a shell awaiting approval (or any real prompt) still wins.
+    // Liveness is judged by STATUS-LINE RECENCY — the same idiom every
+    // other branch uses — adapted to a status line that, unlike
+    // `esc to interrupt`, renders ABOVE its own composer footer (so a bare
+    // positional compare against the footer never fires). A shells line is
+    // live only when:
+    //   1. it is the most recent status frame — no NEWER spinner-glyph line
+    //      has been painted over it. A drain either repaints a different
+    //      `✻ …` status (compacting, a summary) or, failing that, redraws
+    //      the composer; the former is caught here, and
+    //   2. at most its own composer footer sits below it. When the shells
+    //      finish and Claude redraws the resting composer with no new status
+    //      line, a SECOND `? for shortcuts` stacks below the now-stale line
+    //      and this guard settles it.
+    // Placed after every `InputNeeded` branch, so a shell awaiting approval
+    // (or any real prompt) still wins.
+    //
+    // Residual (the one case neither guard separates): a shells line that
+    // was re-painting BELOW its footer, then drained straight to rest with
+    // no fresh footer and no newer status line, leaves a byte window
+    // identical to a live single-frame shells line. We take the #1136-safe
+    // side and stay Working; the stale line settles once it scrolls out of
+    // the ~16 KiB detect window.
     if let Some(shells_pos) = last_line_pos(compact, is_shells_running_line)
+        && last_line_pos(compact, is_spinner_status_line) == Some(shells_pos)
         && resting_footers_after(compact, shells_pos) <= 1
     {
         d.state = AgentState::Working;
@@ -1127,11 +1144,25 @@ fn is_shells_running_line(line: &str) -> bool {
     line.contains(WORKING_SPINNER_GLYPHS) && line.contains("shell") && line.contains("stillrunning")
 }
 
+/// A line led by one of Claude's live [`WORKING_SPINNER_GLYPHS`] — the shape
+/// every status frame shares (`✻ Crunched…`, `✻ Compacting…`,
+/// `✻ Simmering…`) and that a shells-running line is one instance of.
+/// Compared by recency against the last shells line: when a NEWER
+/// spinner-status line exists, a fresh frame has been painted over the
+/// shells status, so the shells line is stale. Prose never carries these
+/// glyphs (see [`is_shells_running_line`]), so this matches only real
+/// status frames.
+fn is_spinner_status_line(line: &str) -> bool {
+    line.contains(WORKING_SPINNER_GLYPHS)
+}
+
 /// How many resting composer footers (`? for shortcuts` / bypass `shift+tab
-/// to cycle`) start after byte offset `pos`. Used to tell a LIVE
-/// shells-running frame (its status line pairs with exactly the current
-/// footer → ≤1 after) from a STALE one left in scrollback after the shells
-/// finished and Claude repainted the composer again (≥2 after). Excludes
+/// to cycle`) start after byte offset `pos`. Secondary staleness guard for
+/// the shells-running branch: when the shells drain STRAIGHT to rest with no
+/// newer status line (so the [`is_spinner_status_line`] recency check can't
+/// see the transition), Claude still redraws the composer, stacking a SECOND
+/// `? for shortcuts` below the now-stale line — `≥2 after` settles it, while
+/// a live frame carries only its own footer (`≤1 after`). Excludes
 /// `Tab to amend`, which a live command-approval dialog also renders.
 fn resting_footers_after(compact: &str, pos: usize) -> usize {
     let mut count = 0;
@@ -2034,6 +2065,32 @@ mod tests {
         let split =
             "Reinstalled the shells and left the smoke tests still running.\n? for shortcuts";
         assert_eq!(claude_state(split.as_bytes()), Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn background_shells_ticking_below_footer_reads_working() {
+        // The realistic live shape: the status line re-paints (spinner
+        // animating / count changing) AFTER the composer footer was drawn
+        // once, so the newest shells tick lands BELOW the footer in the
+        // append-only buffer. It is still the most recent status frame and
+        // carries no footer beneath it → Working. (A bare positional compare
+        // against the footer would already pass here; this pins the shape so
+        // a future refactor can't regress it.)
+        let ticking = "✻ Crunched for 2m 44s · 4 shells still running\n? for shortcuts\n✻ Crunched for 2m 45s · 4 shells still running";
+        assert_eq!(claude_state(ticking.as_bytes()), Some(AgentState::Working));
+    }
+
+    #[test]
+    fn newer_status_frame_supersedes_stale_shells() {
+        // The stale case the footer count alone missed: the shells line was
+        // re-painting below its footer, then drained and Claude painted a
+        // DIFFERENT `✻ …` status frame (here: compacting) over it — one
+        // footer, not two, sits below the stale shells line. The status-line
+        // recency guard catches it because a newer spinner-status line now
+        // outranks the shells line, so the agent no longer reads Working off
+        // a scrollback shells line.
+        let superseded = "✻ Crunched for 2m 44s · 4 shells still running\n✻ Compacting conversation…\n? for shortcuts";
+        assert_eq!(claude_state(superseded.as_bytes()), Some(AgentState::Idle));
     }
 
     #[test]

@@ -33,6 +33,12 @@ pub mod persist;
 #[cfg(feature = "gcp")]
 pub mod gcp;
 
+#[cfg(feature = "gcp")]
+pub mod gcp_auth;
+
+#[cfg(feature = "gcp")]
+pub mod gcp_compute;
+
 #[cfg(feature = "e2b")]
 pub mod e2b;
 

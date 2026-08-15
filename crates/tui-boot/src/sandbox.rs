@@ -412,6 +412,7 @@ pub(crate) fn resolve_provider(
                 .map(PathBuf::from)
                 .or_else(|| sc.terraform_dir.clone())
                 .unwrap_or_else(|| PathBuf::from("terraform/sandbox/gcp"));
+            let auth = resolve_auth(sc, args);
             Ok(ResolvedProvider::Gcp(GcpProvider {
                 terraform_dir,
                 state_file: state_file_for(worktree),
@@ -420,7 +421,8 @@ pub(crate) fn resolve_provider(
                 remote_socket,
                 local_socket,
                 runner: Arc::new(SystemRunner),
-                auth: resolve_auth(sc, args),
+                compute: lazybox_sandbox::gcp_compute::default_compute(auth.clone()),
+                auth,
             }))
         }
         "e2b" => {

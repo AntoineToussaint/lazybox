@@ -54,7 +54,16 @@ and event shape. Frontend tests pin the protocol version, fingerprint, and
 variant coverage. The desktop CI job regenerates the types and fails on any
 diff, so a Rust desktop wire change cannot silently leave the frontend
 contract stale. `make desktop-contract` runs both steps above with the pinned
-zig toolchain.
+zig toolchain; `make contracts` also regenerates the web-control fixture
+(`crates/server/src/api_client_contract.json`) in one shot.
+
+Regenerating by hand still means *remembering* to. `make install-hooks` opts
+into a pre-commit step that runs `make contracts` for you — but only when a
+commit stages a DTO source (`crates/{ipc,core,tui-core}/src` or
+`crates/server/src/api_gateway.rs`), re-staging the refreshed fixtures into the
+same commit. A cheap `git diff --cached` guard keeps that heavy build off every
+commit that touches no DTO, so drift is caught locally instead of in CI without
+slowing the common case.
 
 Because the fingerprint is hashed over `crates/{ipc,core}/src` + `Cargo.lock`,
 *any* edit under those crates rewrites `apps/desktop/src/generated/*` — so a

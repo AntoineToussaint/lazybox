@@ -317,28 +317,57 @@ snippets:
     description: Review the current diff
     category: Review
     body: |
-      Review the current diff (`git diff` against the base branch) for
-      correctness bugs: logic errors, off-by-one mistakes, missing error
-      handling, broken edge cases, and anything that wouldn't survive a
-      careful review. Read adversarially: treat each changed line as guilty
-      until you can trace why it's safe, and treat a safe-looking default —
-      an early return, a fallback, a delete-on-missing — as a footgun to
-      disprove, not a comfort. Report findings ranked by severity, each with
-      a `file:line` anchor and the concrete input or state that triggers the
-      wrong result — a falsifiable failure, not a vague worry. Look only at
-      the changed lines and the code they directly touch, not the whole
-      file. Call a line clean only after you've actually traced it, not as a
-      shortcut — but if it genuinely is, say so plainly rather than inventing
-      nits.
+      Review the current diff (`git diff` against the base branch) as a
+      rigorous code review — assume there IS a bug and your job is to find
+      it, not to confirm the code is fine. Read adversarially across every
+      lens that applies: correctness (logic errors, off-by-one, missing
+      error handling, broken edge cases), security (untrusted input
+      crossing a trust boundary), data loss, and concurrency. Treat each
+      changed line as guilty until you can trace why it's safe, and treat a
+      safe-looking default — an early return, a fallback, a delete-on-missing
+      — as a footgun to disprove, not a comfort. In scope is everything the
+      diff touches *and* everything that breaks because of it; scope is not
+      an escape hatch. Report findings ranked by severity, each with a
+      `file:line` anchor and the concrete input or state that triggers the
+      wrong result — a falsifiable failure, not a vague worry, and no
+      shallow nit dressed up as a bug. A finding is dismissed only by
+      refuting it with a specific failure scenario that proves it can't
+      happen; "out of scope," "not worth the complexity," "degrades
+      gracefully," and "should be fine" are banned as dismissals. Look only
+      at the changed lines and the code they directly touch, not the whole
+      file. Finish with a completeness check — what you did not examine and
+      why skipping it is justified with evidence — and, if a traced line is
+      genuinely clean, say so plainly rather than inventing nits.
 ```
 
 Review, fix, and security bodies go a step further — they are written to
-**bias toward action**: a finding is real until a specific, falsifiable
-reason refutes it, a safe-looking default is a claim to *disprove* rather
-than a resting place, and `fixall` implements the findings instead of
-curating reasons to skip them. See
+**bias toward action**, a standard toughened in #1145 and enforced by a
+regression test so it can't quietly soften back:
+
+- **A finding is real until refuted.** It is dismissed only by a specific,
+  falsifiable failure scenario that proves it can't happen — never by a
+  vague worry, and a safe-looking default is a claim to *disprove* rather
+  than a resting place.
+- **The weasel phrases are named and banned.** "Out of scope," "not worth
+  the complexity," "degrades gracefully," "should be fine," "for now," "as
+  a follow-up" and their kin are forbidden as dismissals — they read as
+  caution but ship bugs. Scope is redefined as *everything the change
+  touches and everything that breaks because of it*, so it can't be the
+  escape hatch.
+- **`fixall` implements, it does not curate.** The deliverable is a clean,
+  tested diff; "here are the changes I would make" is not an acceptable
+  output.
+- **The review bodies close with a completeness self-critique** — what was
+  not examined, and why skipping it is justified with evidence.
+
+Because snippets are the primary way to drive an agent from a phone (the
+`]]s`+key one-tap path), the built-in defaults carry this whole discipline
+themselves — you get the toughened behaviour with no editing. See
 [review-prompt-research.md](review-prompt-research.md) for the cited
-patterns behind that house style.
+patterns behind that house style, and
+[snippets-vs-skills.md](snippets-vs-skills.md) for why this strict prompt
+text lives in one place rather than being split between a snippet and a
+skill.
 
 > **Not yet supported:** placeholder / variable interpolation in bodies
 > (e.g. injecting the selected file or a typed argument). Bodies are

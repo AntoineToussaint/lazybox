@@ -76,6 +76,33 @@ practice, and where they do (a lazybox `rev` snippet vs. a Claude
 `code-review` skill), pick by whether you or the model should be the
 one pulling the trigger.
 
+## One standard, one home: the review discipline lives in the snippet
+
+The `rev` / `deepreview` / `fixall` overlap with a hypothetical Claude
+`code-review` skill is the sharpest place these two layers could **drift** —
+two copies of a long, carefully-tuned review prompt that soften apart over
+time. #1145 settles it: the strict prompt text is the **single source of
+truth, and it lives in the snippet body.**
+
+- **Today there is no built-in `code-review` skill body** — lazybox only
+  *discovers* the skills a repo or user already ships (`.claude/skills/`,
+  `~/.claude/skills/`); it does not vendor one. So there is exactly one
+  copy of the toughened review standard, in
+  [`crates/config/src/snippets.rs`](../crates/config/src/snippets.rs), and
+  a regression test (`no_soft_body_offers_a_banned_dismissal` and friends)
+  keeps it from regressing.
+- **The snippet is the right home** for it: the review discipline is a
+  deterministic, in-the-loop, agent-agnostic instruction you want to fire
+  *on your command* and see in the preview first — exactly a snippet's
+  properties, not a skill's autonomous-trigger ceiling. It also has to work
+  from a phone with one tap, where a snippet is the primary driver.
+- **If a `code-review` skill is ever added** (the bridging work below), it
+  must not fork the prompt: it should embed or reference the same standard
+  the snippet encodes, so the banned-phrase / bias-to-action / falsifiable-
+  skip rules have one authored source and one test guarding them. A skill
+  that quietly relaxes the wording would reintroduce precisely the drift
+  this decision exists to prevent.
+
 ## Recommendation and where this is headed
 
 Today the two are invisible to each other: lazybox does not know what

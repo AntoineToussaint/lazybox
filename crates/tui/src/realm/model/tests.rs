@@ -5935,13 +5935,15 @@ mod wake_burst_liveness_tests {
     //! The modal is held silent with its producer ALIVE (the #1045
     //! "produced-but-lost / task stalled" shape, distinct from a dropped
     //! sender, which `TakeOutcome::Cancelled` already covers).
-    use super::super::helpers::drain_daemon_events;
+    use super::super::helpers::{MAX_EVENTS_PER_TICK, drain_daemon_events};
     use super::super::{Id, Model};
     use crate::realm::Msg;
     use crate::realm::components::loading::Loading;
     use lazybox_core::{Workspace, WorkspaceKey};
-    use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event};
+    use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event, TerminalId};
+    use std::time::Duration;
     use tokio::sync::mpsc;
+    use tuirealm::application::PollStrategy;
     use tuirealm::ratatui::layout::Size;
 
     fn model_with_event_sender() -> (
@@ -6027,6 +6029,162 @@ mod wake_burst_liveness_tests {
         assert!(
             !carried.is_empty(),
             "the modal cleared while the burst tail was still pending — mid-burst, not after it drained",
+        );
+    }
+
+    /// A wake catch-up burst of the exact signal the #1131 warning names:
+    /// the daemon dropping `TerminalOutput` on a full channel and emitting
+    /// one `TerminalResync` per busy terminal per congestion episode as the
+    /// client falls behind. Cycled over a handful of terminals to mirror
+    /// several busy terminals resyncing at once; `TerminalResync` is never
+    /// coalesced (only adjacent `TerminalOutput` is), so every event is
+    /// counted by the `BacklogMonitor` regardless of the terminal it names.
+    fn overflow_burst(tx: &mpsc::Sender<Event>, n: usize) {
+        for i in 0..n {
+            tx.try_send(Event::TerminalResync {
+                terminal_id: TerminalId((i % 4) as u64 + 1),
+                replay: b"recovered grid".to_vec(),
+                seq: i as u64 + 1,
+            })
+            .expect("bounded channel must have room for the burst");
+        }
+    }
+
+    /// Fill the inbound channel to one below capacity — a burst larger
+    /// than any single bounded drain can consume, so a tail is always left
+    /// behind (the proof the drain stayed bounded, #1113 D-0). The
+    /// precondition asserted here is the real architectural invariant the
+    /// test rests on: the channel holds more than one drain's worth, so an
+    /// overflow episode outlives a single drain. It stays true across any
+    /// value of `MAX_EVENTS_PER_TICK` short of the channel capacity itself,
+    /// rather than coincidentally at today's 256-vs-512.
+    fn burst_over_one_tick() -> usize {
+        const {
+            assert!(
+                EVENT_CHANNEL_CAPACITY - 1 > MAX_EVENTS_PER_TICK,
+                "channel capacity must exceed one drain's cap for a burst to outlast a single drain",
+            )
+        };
+        EVENT_CHANNEL_CAPACITY - 1
+    }
+
+    /// Drive the bounded drain the way the run loop does — once per
+    /// iteration — until the overflow episode registers. A single drain
+    /// normally dispatches the whole first batch and registers it, but a
+    /// scheduler stall in the two statements before the drain takes its
+    /// first event off the channel could collect zero events, and thus
+    /// zero resyncs, on that call. Looping until one lands makes the
+    /// "overflow registered" assertion independent of that timing. Every
+    /// drain must still report a backlog: the burst is sized to outlast one
+    /// drain, and a drain that registers no resync also took nothing, so
+    /// the next drain still sees the whole burst queued.
+    fn drain_until_overflow_registers(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        let mut carried = Vec::new();
+        for _ in 0..4 {
+            assert!(
+                drain_daemon_events(m, &mut carried, || false),
+                "a bounded drain must leave the overflow burst's tail queued",
+            );
+            if m.event_backlog.resyncs() > 0 {
+                return;
+            }
+        }
+        panic!("overflow episode never registered across repeated bounded drains");
+    }
+
+    /// #1131: an overflow burst on focus-regain must not strand a `Loading`
+    /// modal. Its liveness backstop — driven by the modal's OWN tick, which
+    /// keeps firing every loop iteration since #1120 moved the render flush
+    /// off the UI thread — must still time out and be popped by the model
+    /// while the burst tail is still queued and unread.
+    #[test]
+    fn overflow_burst_still_lets_a_loading_modal_time_out() {
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+
+        // Modal awaits a value that never lands — producer held alive but
+        // silent (the #1045 "produced-but-lost / stalled" shape). A tiny
+        // timeout crosses on the first real listener tick instead of
+        // waiting out the production 60s.
+        let (loading, _never_sends) = Loading::pending("waking…");
+        let loading = loading.timeout(Duration::from_millis(1));
+        m.mount_modal(Id::Setup, loading);
+
+        overflow_burst(&evt_tx, burst_over_one_tick());
+
+        // Drain stays bounded every call (a tail remains) and registers
+        // the overflow episode — so this is genuinely the #1131 signal,
+        // not an ordinary sub-cap batch.
+        drain_until_overflow_registers(&mut m);
+        assert!(
+            m.top_modal().is_some(),
+            "the modal is still up right after the burst drain",
+        );
+
+        // Drive the modal's own tick (as the run loop does every
+        // iteration). The timeout backstop must resolve to
+        // `Msg::LoadingTimedOut` and the model must pop the modal — without
+        // the queued burst tail being drained first.
+        let queued_before = m.client.rx.len();
+        assert!(queued_before > 0, "the burst tail is still queued");
+        let mut saw_timeout = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while m.top_modal().is_some() && std::time::Instant::now() < deadline {
+            if let Ok(messages) = m.app.tick(PollStrategy::Once(Duration::from_millis(20))) {
+                for msg in messages {
+                    if matches!(msg, Msg::LoadingTimedOut) {
+                        saw_timeout = true;
+                    }
+                    m.update(msg);
+                }
+            }
+        }
+        assert!(
+            saw_timeout,
+            "the modal's own tick must fire its timeout backstop",
+        );
+        assert!(
+            m.top_modal().is_none(),
+            "a timed-out loading modal must be popped by the model, not left orphaned",
+        );
+        assert_eq!(
+            m.client.rx.len(),
+            queued_before,
+            "the modal cleared with the burst tail still queued — its liveness is independent of the burst draining",
+        );
+    }
+
+    /// #1131: the other liveness escape hatch — `Esc` must still dismiss a
+    /// `Loading` modal mid-overflow-burst. Uses the production 60s timeout
+    /// so the ONLY thing that can pop the modal within the test is the
+    /// user's keypress reaching it through the real listener pipeline while
+    /// the burst tail is still queued.
+    #[test]
+    fn overflow_burst_leaves_a_loading_modal_esc_dismissable() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+
+        let (loading, _never_sends) = Loading::pending("waking…");
+        m.mount_modal(Id::Setup, loading);
+
+        overflow_burst(&evt_tx, burst_over_one_tick());
+        drain_until_overflow_registers(&mut m);
+        assert!(m.top_modal().is_some(), "the modal is up before Esc");
+
+        // Esc through the real modal pipeline (listener → app.tick →
+        // Msg::ModalDismissed → model). The burst tail is still queued and
+        // undrained, yet Esc must reach the modal and pop it.
+        let queued_before = m.client.rx.len();
+        assert!(queued_before > 0, "the burst tail is still queued");
+        m.dispatch_modal_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(
+            m.top_modal().is_none(),
+            "Esc must dismiss the loading modal mid-overflow-burst",
+        );
+        assert_eq!(
+            m.client.rx.len(),
+            queued_before,
+            "Esc cleared the modal with the burst tail still queued — not by draining it first",
         );
     }
 }

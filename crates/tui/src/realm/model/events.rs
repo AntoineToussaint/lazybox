@@ -394,6 +394,9 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::AgentSessionUsage { agent_id, usage } => {
                 self.sidebar.add_agent_session_usage(agent_id, usage);
             }
+            IpcEvent::AgentProviderQuota { agent_id, quota } => {
+                self.sidebar.note_provider_quota(agent_id, *quota);
+            }
             IpcEvent::AgentTurnFinished { run_id, .. } => {
                 self.sidebar.commit_agent_turn(*run_id);
             }
@@ -1014,6 +1017,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentUserQuestion { .. }
                 | IpcEvent::AgentUsage { .. }
                 | IpcEvent::AgentSessionUsage { .. }
+                | IpcEvent::AgentProviderQuota { .. }
                 | IpcEvent::AgentTurnFinished { .. }
                 | IpcEvent::AgentRunFinished { .. }
                 | IpcEvent::ProviderCredentialUpdated { .. }
@@ -1853,6 +1857,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentUserQuestion { .. }
             | IpcEvent::AgentUsage { .. }
             | IpcEvent::AgentSessionUsage { .. }
+            | IpcEvent::AgentProviderQuota { .. }
             | IpcEvent::AgentTurnFinished { .. }
             | IpcEvent::AgentRunFinished { .. }
             | IpcEvent::ProviderCredentialUpdated { .. }
@@ -2124,6 +2129,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentUserQuestion { .. }
                 | IpcEvent::AgentUsage { .. }
                 | IpcEvent::AgentSessionUsage { .. }
+                | IpcEvent::AgentProviderQuota { .. }
                 | IpcEvent::AgentTurnFinished { .. }
                 | IpcEvent::AgentRunFinished { .. }
                 | IpcEvent::ProviderCredentialUpdated { .. }

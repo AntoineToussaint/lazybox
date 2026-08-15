@@ -37,6 +37,12 @@ fn usage_line_spans(
                     UsageSpanKind::Reset => {
                         Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)
                     }
+                    // The "can I keep working?" headroom figure — accented
+                    // (bold accent) so it reads as its own signal next to the
+                    // dim cost meta.
+                    UsageSpanKind::Quota => Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
                 };
                 Span::styled(text, style)
             })

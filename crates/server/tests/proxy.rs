@@ -44,7 +44,8 @@ async fn start_proxy(upstream: String, sink: proxy::UsageSink) -> u16 {
         anthropic: upstream.clone(),
         openai: upstream,
     };
-    tokio::spawn(proxy::serve(listener, upstreams, sink));
+    let quota_sink: proxy::QuotaSink = std::sync::Arc::new(|_, _| {});
+    tokio::spawn(proxy::serve(listener, upstreams, sink, quota_sink));
     port
 }
 

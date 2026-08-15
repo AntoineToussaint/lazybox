@@ -5233,4 +5233,47 @@ mod linear_team_repo_picker_tests {
             vec!["obin-ai/obin-platform".to_string()],
         );
     }
+
+    #[test]
+    fn quota_window_formats_percent_and_countdown() {
+        use super::super::{format_quota_window, format_reset_countdown};
+        use lazybox_ipc::QuotaWindow;
+
+        // 4512 bp → 45%; reset 2h out → "45% · 2h".
+        let window = QuotaWindow {
+            utilization_bp: 4512,
+            reset_at: Some(7_200),
+        };
+        assert_eq!(
+            format_quota_window(Some(window), 0),
+            Some("45% · 2h".to_string())
+        );
+        // No reset → bare percentage.
+        let no_reset = QuotaWindow {
+            utilization_bp: 6000,
+            reset_at: None,
+        };
+        assert_eq!(
+            format_quota_window(Some(no_reset), 0),
+            Some("60%".to_string())
+        );
+        // Absent window → nothing.
+        assert_eq!(format_quota_window(None, 0), None);
+        // A reset already in the past drops the countdown, keeps the %.
+        let past = QuotaWindow {
+            utilization_bp: 9000,
+            reset_at: Some(100),
+        };
+        assert_eq!(
+            format_quota_window(Some(past), 500),
+            Some("90%".to_string())
+        );
+
+        // Countdown units.
+        assert_eq!(format_reset_countdown(45, 0), Some("45s".to_string()));
+        assert_eq!(format_reset_countdown(120, 0), Some("2m".to_string()));
+        assert_eq!(format_reset_countdown(7_200, 0), Some("2h".to_string()));
+        assert_eq!(format_reset_countdown(172_800, 0), Some("2d".to_string()));
+        assert_eq!(format_reset_countdown(0, 0), None);
+    }
 }

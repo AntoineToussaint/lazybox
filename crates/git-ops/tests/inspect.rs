@@ -925,3 +925,69 @@ async fn severed_worktree_skips_in_worktree_probes() {
         "severed worktree must not be probed with git rev-list"
     );
 }
+
+/// Compute a path to `to` expressed relative to `from_dir` (both must be
+/// absolute). Used to hand-write a relative `gitdir:` pointer, which git
+/// resolves against the worktree — the same way `worktree_dir_ready`
+/// must.
+fn relative_to(from_dir: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from_dir.components().collect();
+    let to_c: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to_c).take_while(|(a, b)| a == b).count();
+    let mut rel = PathBuf::new();
+    for _ in common..from.len() {
+        rel.push("..");
+    }
+    for c in &to_c[common..] {
+        rel.push(c.as_os_str());
+    }
+    rel
+}
+
+/// A *live* worktree whose `.git` file records a **relative** `gitdir:`
+/// pointer (git resolves it against the worktree, and hand-repaired
+/// pointers can be relative) must still be probed. The earlier bespoke
+/// liveness check resolved the pointer against the process cwd, so a
+/// relative one failed to stat and the healthy worktree was wrongly
+/// skipped — reporting it clean and un-probed. `worktree_dir_ready`
+/// resolves relative pointers against the worktree itself, so the
+/// probes run. Regression for the review's Finding 1.
+#[tokio::test]
+async fn live_worktree_with_relative_gitdir_is_probed() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "orphan", "orphan", "main").await;
+
+    // Rewrite `.git` from git's absolute `gitdir:` to the equivalent
+    // relative pointer. The worktree stays fully functional (git
+    // resolves it against `wt`); only a cwd-relative reader would miss.
+    let dot_git = wt.join(".git");
+    let contents = std::fs::read_to_string(&dot_git).unwrap();
+    let abs_gitdir = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(|p| PathBuf::from(p.trim()))
+        .expect("worktree .git carries a gitdir pointer");
+    assert!(abs_gitdir.is_absolute(), "git writes an absolute gitdir");
+    // Canonicalize both before diffing: on macOS git records the real
+    // `/private/...` path while the tempdir handle is the `/var/...`
+    // symlink form, and a cross-prefix diff yields a root-climbing
+    // pointer instead of the short `../../…` a real repair would use.
+    let rel = relative_to(
+        &std::fs::canonicalize(&wt).unwrap(),
+        &std::fs::canonicalize(&abs_gitdir).unwrap(),
+    );
+    std::fs::write(&dot_git, format!("gitdir: {}\n", rel.display())).unwrap();
+
+    let rec = std::sync::Arc::new(RecordingGit::default());
+    let mgr = WorktreeManager::new(fx.base.path().to_path_buf())
+        .with_git_runner(rec.clone() as std::sync::Arc<dyn lazybox_git_ops::GitRunner>);
+
+    mgr.inspect_worktrees(&[]).await.unwrap();
+    assert!(
+        rec.count_in(&wt, "status") > 0 && rec.count_in(&wt, "rev-list") > 0,
+        "a live worktree with a relative gitdir must still be probed \
+         (status={}, rev-list={})",
+        rec.count_in(&wt, "status"),
+        rec.count_in(&wt, "rev-list"),
+    );
+}

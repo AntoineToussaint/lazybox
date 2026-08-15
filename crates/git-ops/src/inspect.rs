@@ -735,33 +735,6 @@ async fn bare_head_branch(git: &dyn GitRunner, bare: &Path) -> Option<String> {
     (!name.is_empty()).then_some(name)
 }
 
-/// Whether `path` is still a usable git worktree — cheaply, without
-/// spawning git. A managed worktree carries `.git` as a *file* whose
-/// `gitdir:` line points into the bare clone's `worktrees/` metadata;
-/// once the bare clone is deleted that target vanishes and every `git`
-/// command run in the directory fails with "not a git repository". A
-/// plain `.git` *directory* (a standalone clone) is always live.
-async fn worktree_git_is_live(path: &Path) -> bool {
-    let dot_git = path.join(".git");
-    let Ok(meta) = tokio::fs::symlink_metadata(&dot_git).await else {
-        return false;
-    };
-    if meta.is_dir() {
-        return true;
-    }
-    let Ok(contents) = tokio::fs::read_to_string(&dot_git).await else {
-        return false;
-    };
-    let Some(gitdir) = contents
-        .lines()
-        .find_map(|l| l.strip_prefix("gitdir:"))
-        .map(|p| PathBuf::from(p.trim()))
-    else {
-        return false;
-    };
-    tokio::fs::metadata(&gitdir).await.is_ok()
-}
-
 async fn inspect_one(
     git: &dyn GitRunner,
     path: &Path,
@@ -805,16 +778,7 @@ async fn inspect_one(
             format!("refs/remotes/origin/{b}"),
         )
     });
-    // A managed worktree whose bare clone was deleted keeps a `.git`
-    // file pointing at a now-missing gitdir; every `git` command in it
-    // then fails with "not a git repository". Detect that from disk (no
-    // git spawn) and skip the two in-worktree probes — a severed dir is
-    // never registered in any bare clone, so `bare_path` is already
-    // `None`, and both probes would only fail-and-log before defaulting
-    // to exactly `(None, false)`. Skipping is behavior-preserving, just
-    // without the wasted `git status` / `rev-list` spawn per sweep.
-    let git_live = worktree_git_is_live(path).await;
-    let (local_exists, remote_exists, size_pair, uncommitted_state, has_unpushed_commits) = tokio::join!(
+    let (local_exists, remote_exists, size_pair, (uncommitted_state, has_unpushed_commits)) = tokio::join!(
         async {
             match (bare_path.as_ref(), branch_refs.as_ref()) {
                 (Some(bare), Some((local_ref, _))) => ref_exists(git, bare, local_ref).await,
@@ -828,18 +792,29 @@ async fn inspect_one(
             }
         },
         size_and_mtime(path),
+        // The two in-worktree probes, gated on the worktree's git dir
+        // still being usable. A managed worktree whose bare clone was
+        // deleted keeps a `.git` file pointing at a now-missing gitdir;
+        // every `git` command in it then fails with "not a git
+        // repository", so each sweep re-spawned `git status` / `rev-list`
+        // only to fail-and-log before defaulting. `worktree_dir_ready`
+        // detects that from disk (no git spawn) — reusing the same helper
+        // the spawn fast path uses, which already handles symlinked and
+        // relative `.git` pointers correctly. Skipping is safe in the
+        // delete direction: `is_safe_to_delete` below requires
+        // `uncommitted_state == Some(false)`, which a skipped `git status`
+        // (→ `None`) can never satisfy — a skip can only ever hold that
+        // flag at false, never flip it to true. The liveness check rides
+        // this join arm so it overlaps the bare-clone lookups + disk walk
+        // rather than serializing ahead of the fan-out.
         async {
-            if git_live {
-                uncommitted(git, path).await
+            if crate::worktree_dir_ready(path).await {
+                tokio::join!(
+                    uncommitted(git, path),
+                    unpushed(git, path, bare_path.as_deref())
+                )
             } else {
-                None
-            }
-        },
-        async {
-            if git_live {
-                unpushed(git, path, bare_path.as_deref()).await
-            } else {
-                false
+                (None, false)
             }
         },
     );
@@ -1688,6 +1663,12 @@ mod tests {
         let worktree = tmp.path().join("worktrees/session");
         std::fs::create_dir_all(&bare).expect("bare dir");
         std::fs::create_dir_all(&worktree).expect("worktree dir");
+        // Mark the checkout as a live git worktree so the disk-only
+        // liveness gate (`worktree_dir_ready`) lets the in-worktree
+        // probes run through the injected runner. A `.git` *directory*
+        // is the standalone-clone shape the gate accepts outright — the
+        // scripted runner supplies (or fails) the status/rev-list answers.
+        std::fs::create_dir_all(worktree.join(".git")).expect("worktree .git");
         let git = Arc::new(ScriptedGit {
             bare: bare.clone(),
             worktree: worktree.clone(),
@@ -1742,6 +1723,12 @@ mod tests {
         let worktree = tmp.path().join("worktrees/session");
         std::fs::create_dir_all(&bare).expect("bare dir");
         std::fs::create_dir_all(&worktree).expect("worktree dir");
+        // Mark the checkout as a live git worktree so the disk-only
+        // liveness gate (`worktree_dir_ready`) lets the in-worktree
+        // probes run through the injected runner. A `.git` *directory*
+        // is the standalone-clone shape the gate accepts outright — the
+        // scripted runner supplies (or fails) the status/rev-list answers.
+        std::fs::create_dir_all(worktree.join(".git")).expect("worktree .git");
         let git = Arc::new(ScriptedGit {
             bare: bare.clone(),
             worktree: worktree.clone(),

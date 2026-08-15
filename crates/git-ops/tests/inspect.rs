@@ -823,3 +823,171 @@ async fn pristine_worktree_detection() {
     run(&wt, &["commit", "-q", "-m", "local only"]).await;
     assert!(!lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare)).await);
 }
+
+/// A [`GitRunner`] that records every command it is asked to run, then
+/// executes it for real. Lets a test assert *which* git spawns the
+/// inspector actually made.
+#[derive(Default)]
+struct RecordingGit {
+    calls: std::sync::Mutex<Vec<(Option<PathBuf>, Vec<String>)>>,
+}
+
+impl RecordingGit {
+    /// How many times a command whose first arg is `verb` was run with
+    /// cwd equal to `cwd`.
+    fn count_in(&self, cwd: &Path, verb: &str) -> usize {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, args)| {
+                c.as_deref() == Some(cwd) && args.first().map(String::as_str) == Some(verb)
+            })
+            .count()
+    }
+}
+
+impl lazybox_git_ops::GitRunner for RecordingGit {
+    fn run<'a>(
+        &'a self,
+        cwd: Option<&'a Path>,
+        args: &'a [&'a str],
+        env: &'a [(String, String)],
+    ) -> lazybox_git_ops::GitRunFuture<'a, std::process::Output> {
+        self.calls.lock().unwrap().push((
+            cwd.map(Path::to_path_buf),
+            args.iter().map(|s| s.to_string()).collect(),
+        ));
+        let cwd = cwd.map(Path::to_path_buf);
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let env: Vec<(String, String)> = env.to_vec();
+        Box::pin(async move {
+            let mut cmd = tokio::process::Command::new("git");
+            if let Some(cwd) = &cwd {
+                cmd.current_dir(cwd);
+            }
+            no_signing(&mut cmd);
+            let output = cmd
+                .args(&args)
+                .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                .output()
+                .await?;
+            Ok(output)
+        })
+    }
+}
+
+/// A worktree whose bare clone was deleted (an earlier data-loss
+/// incident) keeps a `.git` file pointing at a now-missing gitdir, so
+/// every `git` command in it fails with "not a git repository". The
+/// inspector must detect this from disk and skip the in-worktree
+/// `status` / `rev-list` probes — behavior-preserving (they defaulted
+/// to clean/not-ahead anyway) but without the wasted spawn + error log
+/// every sweep. Regression for #1133.
+#[tokio::test]
+async fn severed_worktree_skips_in_worktree_probes() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "orphan", "orphan", "main").await;
+
+    let rec = std::sync::Arc::new(RecordingGit::default());
+    let mgr = WorktreeManager::new(fx.base.path().to_path_buf())
+        .with_git_runner(rec.clone() as std::sync::Arc<dyn lazybox_git_ops::GitRunner>);
+
+    // Healthy sweep: the in-worktree probes run against the checkout.
+    mgr.inspect_worktrees(&[]).await.unwrap();
+    assert!(
+        rec.count_in(&wt, "status") > 0 && rec.count_in(&wt, "rev-list") > 0,
+        "healthy worktree should be probed with status + rev-list"
+    );
+
+    // Sever it: nuke the bare clone, leaving the checkout's `.git`
+    // pointing at a gitdir that no longer exists.
+    std::fs::remove_dir_all(fx.base.path().join("repos")).unwrap();
+    rec.calls.lock().unwrap().clear();
+
+    let report = mgr.inspect_worktrees(&[]).await.unwrap();
+    let row = report
+        .iter()
+        .find(|r| r.path.ends_with("orphan"))
+        .expect("orphan row still surfaced");
+    // Defaults preserved — the probes' old failure path yielded these.
+    assert!(!row.has_uncommitted_changes);
+    assert!(!row.has_unpushed_commits);
+    // ...but no git was spawned inside the severed checkout.
+    assert_eq!(
+        rec.count_in(&wt, "status"),
+        0,
+        "severed worktree must not be probed with git status"
+    );
+    assert_eq!(
+        rec.count_in(&wt, "rev-list"),
+        0,
+        "severed worktree must not be probed with git rev-list"
+    );
+}
+
+/// Compute a path to `to` expressed relative to `from_dir` (both must be
+/// absolute). Used to hand-write a relative `gitdir:` pointer, which git
+/// resolves against the worktree — the same way `worktree_dir_ready`
+/// must.
+fn relative_to(from_dir: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from_dir.components().collect();
+    let to_c: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to_c).take_while(|(a, b)| a == b).count();
+    let mut rel = PathBuf::new();
+    for _ in common..from.len() {
+        rel.push("..");
+    }
+    for c in &to_c[common..] {
+        rel.push(c.as_os_str());
+    }
+    rel
+}
+
+/// A *live* worktree whose `.git` file records a **relative** `gitdir:`
+/// pointer (git resolves it against the worktree, and hand-repaired
+/// pointers can be relative) must still be probed. The earlier bespoke
+/// liveness check resolved the pointer against the process cwd, so a
+/// relative one failed to stat and the healthy worktree was wrongly
+/// skipped — reporting it clean and un-probed. `worktree_dir_ready`
+/// resolves relative pointers against the worktree itself, so the
+/// probes run. Regression for the review's Finding 1.
+#[tokio::test]
+async fn live_worktree_with_relative_gitdir_is_probed() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "orphan", "orphan", "main").await;
+
+    // Rewrite `.git` from git's absolute `gitdir:` to the equivalent
+    // relative pointer. The worktree stays fully functional (git
+    // resolves it against `wt`); only a cwd-relative reader would miss.
+    let dot_git = wt.join(".git");
+    let contents = std::fs::read_to_string(&dot_git).unwrap();
+    let abs_gitdir = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("gitdir:"))
+        .map(|p| PathBuf::from(p.trim()))
+        .expect("worktree .git carries a gitdir pointer");
+    assert!(abs_gitdir.is_absolute(), "git writes an absolute gitdir");
+    // Canonicalize both before diffing: on macOS git records the real
+    // `/private/...` path while the tempdir handle is the `/var/...`
+    // symlink form, and a cross-prefix diff yields a root-climbing
+    // pointer instead of the short `../../…` a real repair would use.
+    let rel = relative_to(
+        &std::fs::canonicalize(&wt).unwrap(),
+        &std::fs::canonicalize(&abs_gitdir).unwrap(),
+    );
+    std::fs::write(&dot_git, format!("gitdir: {}\n", rel.display())).unwrap();
+
+    let rec = std::sync::Arc::new(RecordingGit::default());
+    let mgr = WorktreeManager::new(fx.base.path().to_path_buf())
+        .with_git_runner(rec.clone() as std::sync::Arc<dyn lazybox_git_ops::GitRunner>);
+
+    mgr.inspect_worktrees(&[]).await.unwrap();
+    assert!(
+        rec.count_in(&wt, "status") > 0 && rec.count_in(&wt, "rev-list") > 0,
+        "a live worktree with a relative gitdir must still be probed \
+         (status={}, rev-list={})",
+        rec.count_in(&wt, "status"),
+        rec.count_in(&wt, "rev-list"),
+    );
+}

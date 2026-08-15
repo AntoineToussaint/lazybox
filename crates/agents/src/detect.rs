@@ -631,6 +631,45 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
         return d;
     }
 
+    // Background shells outlive the model turn: after the turn's
+    // `esc to interrupt` status is gone, Claude keeps painting
+    // `✻ Crunched for 2m 44s · 4 shells still running` while shells the
+    // agent launched during the turn keep executing. That is real work in
+    // flight — the agent is not `Done` — but the resting composer footer
+    // beneath it would otherwise read as finished and let the quiet timer
+    // settle it to `Done` mid-run (#1136). Treat it as `Working` until the
+    // shells drain and the line disappears.
+    //
+    // Liveness is judged by STATUS-LINE RECENCY — the same idiom every
+    // other branch uses — adapted to a status line that, unlike
+    // `esc to interrupt`, renders ABOVE its own composer footer (so a bare
+    // positional compare against the footer never fires). A shells line is
+    // live only when:
+    //   1. it is the most recent status frame — no NEWER spinner-glyph line
+    //      has been painted over it. A drain either repaints a different
+    //      `✻ …` status (compacting, a summary) or, failing that, redraws
+    //      the composer; the former is caught here, and
+    //   2. at most its own composer footer sits below it. When the shells
+    //      finish and Claude redraws the resting composer with no new status
+    //      line, a SECOND `? for shortcuts` stacks below the now-stale line
+    //      and this guard settles it.
+    // Placed after every `InputNeeded` branch, so a shell awaiting approval
+    // (or any real prompt) still wins.
+    //
+    // Residual (the one case neither guard separates): a shells line that
+    // was re-painting BELOW its footer, then drained straight to rest with
+    // no fresh footer and no newer status line, leaves a byte window
+    // identical to a live single-frame shells line. We take the #1136-safe
+    // side and stay Working; the stale line settles once it scrolls out of
+    // the ~16 KiB detect window.
+    if let Some(shells_pos) = last_line_pos(compact, is_shells_running_line)
+        && last_line_pos(compact, is_spinner_status_line) == Some(shells_pos)
+        && resting_footers_after(compact, shells_pos) <= 1
+    {
+        d.state = AgentState::Working;
+        return d;
+    }
+
     // Nothing pending and not streaming: the input box is drawn and
     // quiet, or the output is plain non-interactive text.
     d
@@ -1085,6 +1124,56 @@ fn resting_composer_pos(compact: &str) -> Option<usize> {
     .into_iter()
     .flatten()
     .max()
+}
+
+/// A live "N shells still running" status line — Claude paints it while
+/// background shells the agent launched during the turn keep executing
+/// after the model finished (`✻ Crunched for 2m 44s · 4 shells still
+/// running`). Compacted, "shells still running" → "shellsstillrunning" and
+/// the singular "shell still running" → "shellstillrunning"; both carry
+/// "stillrunning" alongside "shell".
+///
+/// Anchored on a spinner glyph, exactly like [`is_live_counter_line`]: the
+/// status bar always leads with one of [`WORKING_SPINNER_GLYPHS`], but the
+/// agent's own PROSE about a shell ("the dev shell is still running in the
+/// background", "left the smoke tests still running") never does. Without
+/// that anchor the two bare substrings pin the agent to Working on ordinary
+/// end-of-turn prose — the false-Working mirror of the very bug this fixes,
+/// and more frequent than the background-shells case it detects.
+fn is_shells_running_line(line: &str) -> bool {
+    line.contains(WORKING_SPINNER_GLYPHS) && line.contains("shell") && line.contains("stillrunning")
+}
+
+/// A line led by one of Claude's live [`WORKING_SPINNER_GLYPHS`] — the shape
+/// every status frame shares (`✻ Crunched…`, `✻ Compacting…`,
+/// `✻ Simmering…`) and that a shells-running line is one instance of.
+/// Compared by recency against the last shells line: when a NEWER
+/// spinner-status line exists, a fresh frame has been painted over the
+/// shells status, so the shells line is stale. Prose never carries these
+/// glyphs (see [`is_shells_running_line`]), so this matches only real
+/// status frames.
+fn is_spinner_status_line(line: &str) -> bool {
+    line.contains(WORKING_SPINNER_GLYPHS)
+}
+
+/// How many resting composer footers (`? for shortcuts` / bypass `shift+tab
+/// to cycle`) start after byte offset `pos`. Secondary staleness guard for
+/// the shells-running branch: when the shells drain STRAIGHT to rest with no
+/// newer status line (so the [`is_spinner_status_line`] recency check can't
+/// see the transition), Claude still redraws the composer, stacking a SECOND
+/// `? for shortcuts` below the now-stale line — `≥2 after` settles it, while
+/// a live frame carries only its own footer (`≤1 after`). Excludes
+/// `Tab to amend`, which a live command-approval dialog also renders.
+fn resting_footers_after(compact: &str, pos: usize) -> usize {
+    let mut count = 0;
+    let mut offset = 0;
+    for line in compact.split_inclusive('\n') {
+        if offset > pos && (line.contains("?forshortcuts") || line.contains("shift+tabtocycle")) {
+            count += 1;
+        }
+        offset += line.len();
+    }
+    count
 }
 
 /// Start offset of the last line satisfying `pred`. Walks the buffer
@@ -1915,6 +2004,93 @@ mod tests {
             claude_state(recovered.as_bytes()),
             Some(AgentState::Working)
         );
+    }
+
+    #[test]
+    fn background_shells_running_read_as_working() {
+        // #1136: the model turn ended (no `esc to interrupt`), but shells
+        // the agent launched are still executing. The resting composer sits
+        // below the status line; without the shells signal this settles to
+        // Done mid-run. The live frame pairs the status line with exactly
+        // one composer footer, so it reads Working.
+        let live = "✻ Crunched for 2m 44s · 4 shells still running\n? for shortcuts";
+        assert_eq!(claude_state(live.as_bytes()), Some(AgentState::Working));
+
+        // Singular phrasing ("1 shell still running") fires too.
+        let single = "✻ Crunched for 12s · 1 shell still running\n? for shortcuts";
+        assert_eq!(claude_state(single.as_bytes()), Some(AgentState::Working));
+
+        // Bypass-mode footer instead of `? for shortcuts`.
+        let bypass = "✻ Crunched for 30s · 2 shells still running\nbypass permissions on (shift+tab to cycle)";
+        assert_eq!(claude_state(bypass.as_bytes()), Some(AgentState::Working));
+    }
+
+    #[test]
+    fn stale_shells_line_does_not_pin_working() {
+        // The shells finished and Claude repainted the composer again, so a
+        // SECOND `? for shortcuts` now sits below the now-stale status line.
+        // Two footers after it → scrollback, not a live frame → back to
+        // Idle so the quiet timer can settle it to Done.
+        let stale = "✻ Crunched for 2m 44s · 4 shells still running\n? for shortcuts\n✓ all shells finished — summary below\n? for shortcuts";
+        assert_eq!(claude_state(stale.as_bytes()), Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn a_prompt_still_wins_over_background_shells() {
+        // The shells-Working branch sits AFTER every InputNeeded branch, so
+        // a screen that independently reads InputNeeded stays InputNeeded
+        // even with shells running. Uses the interstitial shape (guaranteed
+        // InputNeeded) so the test asserts branch ordering, not a fragile
+        // hand-built dialog.
+        let blocked = "⚠ 1 MCP server needs authentication · run /mcp\n✻ 2 shells still running\n? for shortcuts";
+        assert_eq!(
+            claude_state(blocked.as_bytes()),
+            Some(AgentState::InputNeeded)
+        );
+    }
+
+    #[test]
+    fn prose_about_a_running_shell_is_not_working() {
+        // #1136 regression: the shells signal must anchor on the live
+        // status bar (a spinner glyph), NOT two bare substrings. An agent's
+        // own end-of-turn prose that happens to mention a shell "still
+        // running" carries no spinner glyph, so it must stay Idle — pinning
+        // it to Working would be the false-Working mirror of the bug being
+        // fixed and would stall the settle-gated inject path forever.
+        let adjacent = "I started the dev server; the shell is still running in the background.\n? for shortcuts";
+        assert_eq!(claude_state(adjacent.as_bytes()), Some(AgentState::Idle));
+
+        // The two substrings need not even be adjacent — a bare
+        // `contains("shell") && contains("stillrunning")` matched this too.
+        let split =
+            "Reinstalled the shells and left the smoke tests still running.\n? for shortcuts";
+        assert_eq!(claude_state(split.as_bytes()), Some(AgentState::Idle));
+    }
+
+    #[test]
+    fn background_shells_ticking_below_footer_reads_working() {
+        // The realistic live shape: the status line re-paints (spinner
+        // animating / count changing) AFTER the composer footer was drawn
+        // once, so the newest shells tick lands BELOW the footer in the
+        // append-only buffer. It is still the most recent status frame and
+        // carries no footer beneath it → Working. (A bare positional compare
+        // against the footer would already pass here; this pins the shape so
+        // a future refactor can't regress it.)
+        let ticking = "✻ Crunched for 2m 44s · 4 shells still running\n? for shortcuts\n✻ Crunched for 2m 45s · 4 shells still running";
+        assert_eq!(claude_state(ticking.as_bytes()), Some(AgentState::Working));
+    }
+
+    #[test]
+    fn newer_status_frame_supersedes_stale_shells() {
+        // The stale case the footer count alone missed: the shells line was
+        // re-painting below its footer, then drained and Claude painted a
+        // DIFFERENT `✻ …` status frame (here: compacting) over it — one
+        // footer, not two, sits below the stale shells line. The status-line
+        // recency guard catches it because a newer spinner-status line now
+        // outranks the shells line, so the agent no longer reads Working off
+        // a scrollback shells line.
+        let superseded = "✻ Crunched for 2m 44s · 4 shells still running\n✻ Compacting conversation…\n? for shortcuts";
+        assert_eq!(claude_state(superseded.as_bytes()), Some(AgentState::Idle));
     }
 
     #[test]

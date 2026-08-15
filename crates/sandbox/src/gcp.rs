@@ -2,22 +2,26 @@
 //!
 //! Split by cost, exactly as [`SandboxProvider`] prescribes:
 //!
-//! - **`ensure` / `destroy`** drive the `terraform/sandbox/gcp` module
-//!   (`terraform apply` / `destroy`) — the create/tear-down half.
-//! - **`start` / `stop` / `status` / `connect`** shell out to `gcloud`
-//!   (instance start/stop/describe) and build the IAP SSH `-L` forward —
-//!   the fast, native half. Waking a box is `gcloud instances start`, not
-//!   a Terraform plan.
+//! - **`start` / `stop` / `status`** drive the Compute Engine REST API
+//!   (`instances.start/stop/get`) through the [`ComputeClient`], authenticated
+//!   by a natively minted ADC token — no `gcloud` on PATH (#1126). Waking a
+//!   box is one HTTPS call, not a Terraform plan.
+//! - **`ensure` / `destroy`** still drive the `terraform/sandbox/gcp` module
+//!   (`terraform apply` / `destroy`), and **`connect`** still builds the IAP
+//!   SSH `-L` forward. Porting provisioning off terraform and the tunnel off
+//!   `gcloud` are the remaining phases of #1126; until then those two paths
+//!   keep the `CommandRunner` + [`GcpAuth::command_env`] plumbing.
 //!
-//! Every invocation is built by a pure `*_command` helper so the argv is
-//! unit-tested without a real GCP project (the same stance `tui-boot`'s
-//! tunnel supervisor takes).
+//! CLI invocations are built by pure `*_command` helpers and the REST calls
+//! by pure URL/parse helpers, so both are unit-tested without a real GCP
+//! project.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
 
+use crate::gcp_compute::ComputeClient;
 use crate::provider::{CommandRunner, SandboxError, SandboxProvider, Tunnel};
 use crate::{BoxHandle, BoxStatus, PowerState, SandboxSpec};
 
@@ -131,8 +135,13 @@ pub struct GcpProvider {
     pub runner: Arc<dyn CommandRunner>,
     /// Credentials injected into every `gcloud`/`terraform` call, so the
     /// lifecycle authenticates off configured creds rather than ambient
-    /// `gcloud auth login`/ADC (#1047).
+    /// `gcloud auth login`/ADC (#1047). Still read by the terraform
+    /// (`ensure`/`destroy`) and IAP-tunnel (`connect`) paths; the Compute
+    /// REST lifecycle mints its own token off the same [`GcpAuth`] instead.
     pub auth: GcpAuth,
+    /// Compute Engine REST client for `start`/`stop`/`status` (#1126).
+    /// `default_compute(auth)` in production; a scripted fake under test.
+    pub compute: Arc<dyn ComputeClient>,
 }
 
 impl GcpProvider {
@@ -196,39 +205,6 @@ impl GcpProvider {
             format!("zone={}", handle.zone),
             format!("instance_name={}", handle.id),
         ]
-    }
-
-    /// `gcloud compute instances <verb> <id> --zone --project --quiet`.
-    fn instance_command(handle: &BoxHandle, verb: &str) -> (String, Vec<String>) {
-        (
-            "gcloud".to_string(),
-            vec![
-                "compute".to_string(),
-                "instances".to_string(),
-                verb.to_string(),
-                handle.id.clone(),
-                format!("--zone={}", handle.zone),
-                format!("--project={}", handle.project),
-                "--quiet".to_string(),
-            ],
-        )
-    }
-
-    /// `gcloud … describe … --format='value(status)'` — the single field
-    /// the power probe reads, cheaper than parsing full JSON.
-    fn describe_command(handle: &BoxHandle) -> (String, Vec<String>) {
-        (
-            "gcloud".to_string(),
-            vec![
-                "compute".to_string(),
-                "instances".to_string(),
-                "describe".to_string(),
-                handle.id.clone(),
-                format!("--zone={}", handle.zone),
-                format!("--project={}", handle.project),
-                "--format=value(status)".to_string(),
-            ],
-        )
     }
 
     /// A one-shot IAP SSH that runs `true` with a short connect timeout —
@@ -409,23 +385,11 @@ impl GcpProvider {
             .await
     }
 
-    /// `gcloud auth print-access-token` — the preflight probe. It mints a
-    /// token from whatever [`GcpAuth`] resolves to (the injected key, an
-    /// impersonation target, or ambient creds), so it fails fast and locally
-    /// when credentials are absent or unusable.
-    fn auth_probe_command() -> (String, Vec<String>) {
-        (
-            "gcloud".to_string(),
-            vec!["auth".to_string(), "print-access-token".to_string()],
-        )
-    }
-
-    /// Read the box's power state (describe only — no reachability probe),
+    /// Read the box's power state (`instances.get`, no reachability probe),
     /// shared by `status` and the `connect` wake decision so the latter
     /// doesn't pay for a reachability round-trip it doesn't need.
     async fn power(&self, handle: &BoxHandle) -> Result<PowerState, SandboxError> {
-        let (prog, args) = Self::describe_command(handle);
-        Ok(parse_power_state(&self.run(&prog, &args).await?))
+        self.compute.power(handle).await
     }
 }
 
@@ -472,14 +436,15 @@ impl SandboxProvider for GcpProvider {
             return Ok(());
         }
         // No offline-checkable base credential (ambient, or impersonation whose
-        // base is ambient/metadata): a token probe is the only way to tell a
-        // configured-and-working setup from a missing login, and it yields the
-        // actionable fix hint instead of raw gcloud/terraform stderr deep in
-        // the first real op.
-        let (prog, args) = Self::auth_probe_command();
-        self.run(&prog, &args)
-            .await
-            .map_err(|e| SandboxError::Config(auth_failure_message(&self.auth, &e.to_string())))?;
+        // base is ambient/metadata): mint a token natively. It fails fast and
+        // locally when credentials are absent, and a *stale* login surfaces as
+        // the typed `ReauthRequired` (propagated untouched) rather than a raw
+        // error deep in the first real op. Any other mint failure becomes the
+        // actionable "not configured / not usable" hint.
+        self.compute.check_token().await.map_err(|e| match e {
+            SandboxError::ReauthRequired { .. } => e,
+            other => SandboxError::Config(auth_failure_message(&self.auth, &other.to_string())),
+        })?;
         Ok(())
     }
 
@@ -509,13 +474,11 @@ impl SandboxProvider for GcpProvider {
     }
 
     async fn start(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
-        let (prog, args) = Self::instance_command(handle, "start");
-        self.run(&prog, &args).await.map(|_| ())
+        self.compute.start(handle).await
     }
 
     async fn stop(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
-        let (prog, args) = Self::instance_command(handle, "stop");
-        self.run(&prog, &args).await.map(|_| ())
+        self.compute.stop(handle).await
     }
 
     async fn status(&self, handle: &BoxHandle) -> Result<BoxStatus, SandboxError> {
@@ -565,6 +528,7 @@ mod tests {
             local_socket: PathBuf::from("/tmp/lazybox.sock"),
             runner: Arc::new(SystemRunner),
             auth: GcpAuth::default(),
+            compute: Arc::new(ScriptedCompute::default()),
         }
     }
 
@@ -640,16 +604,109 @@ mod tests {
         p
     }
 
-    /// The action of a `gcloud compute …` call — `instances <verb>` yields
-    /// the verb (`describe`/`start`/…), `ssh` yields `"ssh"`. Used to assert
-    /// lifecycle sequencing across calls.
+    /// The scripted outcome of a [`ScriptedCompute::check_token`] call.
+    #[derive(Debug, Clone, Copy)]
+    enum TokenStep {
+        Ok,
+        /// A generic mint failure (missing/unusable creds).
+        Fail,
+        /// A stale login — the typed reauth signal.
+        Reauth,
+    }
+
+    /// A fake [`ComputeClient`] that returns queued power states and records
+    /// the lifecycle calls in order, so the provider's `status`/`connect`/
+    /// `check_auth` logic is asserted without a live Compute endpoint.
+    #[derive(Debug, Default)]
+    struct ScriptedCompute {
+        powers: Mutex<VecDeque<PowerState>>,
+        tokens: Mutex<VecDeque<TokenStep>>,
+        calls: Mutex<Vec<&'static str>>,
+    }
+
+    impl ScriptedCompute {
+        fn with_powers(powers: Vec<PowerState>) -> Arc<Self> {
+            Arc::new(Self {
+                powers: Mutex::new(powers.into()),
+                ..Self::default()
+            })
+        }
+
+        fn with_token(step: TokenStep) -> Arc<Self> {
+            Arc::new(Self {
+                tokens: Mutex::new(VecDeque::from([step])),
+                ..Self::default()
+            })
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.lock().expect("calls lock").clone()
+        }
+    }
+
+    impl ComputeClient for ScriptedCompute {
+        fn power<'a>(&'a self, _handle: &'a BoxHandle) -> CommandFuture<'a, PowerState> {
+            self.calls.lock().expect("calls lock").push("power");
+            let power = self
+                .powers
+                .lock()
+                .expect("powers lock")
+                .pop_front()
+                .expect("unexpected power probe");
+            Box::pin(async move { Ok(power) })
+        }
+
+        fn start<'a>(&'a self, _handle: &'a BoxHandle) -> CommandFuture<'a, ()> {
+            self.calls.lock().expect("calls lock").push("start");
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn stop<'a>(&'a self, _handle: &'a BoxHandle) -> CommandFuture<'a, ()> {
+            self.calls.lock().expect("calls lock").push("stop");
+            Box::pin(async move { Ok(()) })
+        }
+
+        fn check_token<'a>(&'a self) -> CommandFuture<'a, ()> {
+            self.calls.lock().expect("calls lock").push("check_token");
+            let step = self
+                .tokens
+                .lock()
+                .expect("tokens lock")
+                .pop_front()
+                .expect("unexpected check_token");
+            Box::pin(async move {
+                match step {
+                    TokenStep::Ok => Ok(()),
+                    TokenStep::Fail => Err(SandboxError::ApiTransport {
+                        provider: "gcp",
+                        operation: "oauth token",
+                        detail: "no credentials".to_string(),
+                    }),
+                    TokenStep::Reauth => Err(SandboxError::ReauthRequired {
+                        detail: "invalid_rapt".to_string(),
+                    }),
+                }
+            })
+        }
+    }
+
+    /// A provider whose Compute lifecycle is scripted; the terraform/gcloud
+    /// runner is left as the (unused, in these tests) default.
+    fn with_compute(compute: Arc<dyn ComputeClient>) -> GcpProvider {
+        let mut p = provider();
+        p.compute = compute;
+        p
+    }
+
+    /// The action of a `gcloud compute …` call. Only the IAP `ssh`
+    /// (reachability probe) still shells `gcloud`; instance lifecycle is now
+    /// the Compute REST client. Used to assert the reachability probe fires.
     fn gcloud_action(call: &RecordedCall) -> Option<&str> {
         let (prog, args, _env) = call;
         if prog != "gcloud" || args.first().map(String::as_str) != Some("compute") {
             return None;
         }
         match args.get(1).map(String::as_str) {
-            Some("instances") => args.get(2).map(String::as_str),
             Some("ssh") => Some("ssh"),
             other => other,
         }
@@ -740,20 +797,6 @@ mod tests {
         assert!(vars.contains(&"instance_name=lazybox-sbx-abc".to_string()));
         // No deployment recipe vars — state teardown needs only identity.
         assert!(!vars.iter().any(|v| v.starts_with("machine_type=")));
-    }
-
-    #[test]
-    fn instance_start_stop_target_the_right_zone_and_project() {
-        let (prog, args) = GcpProvider::instance_command(&handle(), "start");
-        assert_eq!(prog, "gcloud");
-        assert_eq!(args[..3], ["compute", "instances", "start"]);
-        assert_eq!(args[3], "lazybox-sbx-abc");
-        assert!(args.contains(&"--zone=us-central1-a".to_string()));
-        assert!(args.contains(&"--project=proj".to_string()));
-        assert!(args.contains(&"--quiet".to_string()));
-
-        let (_, args) = GcpProvider::instance_command(&handle(), "stop");
-        assert_eq!(args[2], "stop");
     }
 
     #[test]
@@ -892,81 +935,89 @@ mod tests {
         assert!(calls[2].1.contains(&"output".to_string()));
     }
 
+    /// A provider whose Compute power probe is scripted *and* whose gcloud
+    /// runner (reachability ssh) is scripted — `status` needs both.
+    fn with_compute_and_runner(
+        compute: Arc<dyn ComputeClient>,
+        runner: Arc<dyn CommandRunner>,
+    ) -> GcpProvider {
+        let mut p = provider();
+        p.compute = compute;
+        p.runner = runner;
+        p
+    }
+
     #[tokio::test]
     async fn connect_starts_a_stopped_box_before_forwarding() {
-        // describe → STOPPED, so connect must start the box, then hand back
-        // the forward without a second describe.
-        let runner = ScriptedRunner::new(vec![
-            Step::Out("TERMINATED".to_string()), // power probe
-            Step::Out(String::new()),            // instances start
-        ]);
-        let provider = with_runner(runner.clone());
+        // The Compute power probe says STOPPED, so connect must start the box,
+        // then hand back the forward without a second probe.
+        let compute = ScriptedCompute::with_powers(vec![PowerState::Stopped]);
+        let provider = with_compute(compute.clone());
 
         let tunnel = provider.connect(&handle(), &[3000]).await.unwrap();
 
         assert_eq!(tunnel.program, "gcloud");
-        let calls = runner.calls();
-        assert_eq!(calls.len(), 2, "power probe, then start");
-        assert_eq!(gcloud_action(&calls[0]), Some("describe"));
-        assert_eq!(gcloud_action(&calls[1]), Some("start"));
+        assert_eq!(
+            compute.calls(),
+            vec!["power", "start"],
+            "power probe, then start"
+        );
     }
 
     #[tokio::test]
     async fn connect_skips_start_when_the_box_is_running() {
-        let runner = ScriptedRunner::new(vec![Step::Out("RUNNING".to_string())]);
-        let provider = with_runner(runner.clone());
+        let compute = ScriptedCompute::with_powers(vec![PowerState::Running]);
+        let provider = with_compute(compute.clone());
 
         provider.connect(&handle(), &[]).await.unwrap();
 
-        let calls = runner.calls();
-        assert_eq!(calls.len(), 1, "a running box needs only the power probe");
-        assert_eq!(gcloud_action(&calls[0]), Some("describe"));
+        assert_eq!(
+            compute.calls(),
+            vec!["power"],
+            "a running box needs only the power probe"
+        );
     }
 
     #[tokio::test]
     async fn status_probes_reachability_only_when_running() {
-        // Running box: describe says RUNNING, then the reachability SSH is
-        // attempted — here it succeeds, so `reachable` is true.
-        let runner = ScriptedRunner::new(vec![
-            Step::Out("RUNNING".to_string()), // power probe
-            Step::Out(String::new()),         // reachability ssh
-        ]);
-        let provider = with_runner(runner.clone());
+        // Running box: the Compute probe says RUNNING, then the reachability
+        // SSH is attempted — here it succeeds, so `reachable` is true.
+        let compute = ScriptedCompute::with_powers(vec![PowerState::Running]);
+        let runner = ScriptedRunner::new(vec![Step::Out(String::new())]); // reachability ssh
+        let provider = with_compute_and_runner(compute.clone(), runner.clone());
 
         let status = provider.status(&handle()).await.unwrap();
         assert_eq!(status.power, PowerState::Running);
         assert!(status.reachable);
 
+        assert_eq!(compute.calls(), vec!["power"]);
         let calls = runner.calls();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(gcloud_action(&calls[0]), Some("describe"));
-        assert_eq!(gcloud_action(&calls[1]), Some("ssh"));
+        assert_eq!(calls.len(), 1, "exactly one reachability probe");
+        assert_eq!(gcloud_action(&calls[0]), Some("ssh"));
     }
 
     #[tokio::test]
     async fn status_of_a_stopped_box_never_probes() {
         // A stopped box is never reachable; probing would block on a doomed
         // SSH, so `status` must not attempt it.
-        let runner = ScriptedRunner::new(vec![Step::Out("TERMINATED".to_string())]);
-        let provider = with_runner(runner.clone());
+        let compute = ScriptedCompute::with_powers(vec![PowerState::Stopped]);
+        let runner = ScriptedRunner::new(vec![]);
+        let provider = with_compute_and_runner(compute, runner.clone());
 
         let status = provider.status(&handle()).await.unwrap();
         assert_eq!(status.power, PowerState::Stopped);
         assert!(!status.reachable);
-        assert_eq!(
-            runner.calls().len(),
-            1,
+        assert!(
+            runner.calls().is_empty(),
             "no reachability probe when stopped"
         );
     }
 
     #[tokio::test]
     async fn status_running_but_unreachable_when_the_probe_fails() {
-        let runner = ScriptedRunner::new(vec![
-            Step::Out("RUNNING".to_string()), // power probe
-            Step::Fail,                       // reachability ssh fails
-        ]);
-        let provider = with_runner(runner);
+        let compute = ScriptedCompute::with_powers(vec![PowerState::Running]);
+        let runner = ScriptedRunner::new(vec![Step::Fail]); // reachability ssh fails
+        let provider = with_compute_and_runner(compute, runner);
 
         let status = provider.status(&handle()).await.unwrap();
         assert_eq!(status.power, PowerState::Running);
@@ -1052,10 +1103,16 @@ mod tests {
 
     #[tokio::test]
     async fn injected_credentials_ride_a_real_provider_op() {
-        // The #1047 core: credentials ride *every* gcloud/terraform call, not
-        // just the preflight. `status` of a stopped box is one describe call —
-        // it must carry the injected override.
-        let runner = ScriptedRunner::new(vec![Step::Out("TERMINATED".to_string())]);
+        // The #1047 core, on the paths that still shell out: credentials ride
+        // *every* terraform call, not just the preflight. `ensure`'s first op
+        // (init) must carry the injected override. (The Compute REST lifecycle
+        // mints its own token instead, covered by the gcp_auth tests.)
+        let outputs = r#"{"instance_name":{"value":"i"},"zone":{"value":"z"}}"#;
+        let runner = ScriptedRunner::new(vec![
+            Step::Out(String::new()),       // init
+            Step::Out(String::new()),       // apply
+            Step::Out(outputs.to_string()), // output -json
+        ]);
         let mut provider = with_runner(runner.clone());
         provider.auth = GcpAuth {
             service_account_key: Some(PathBuf::from("/keys/sa.json")),
@@ -1063,11 +1120,9 @@ mod tests {
             config_dir: Some(PathBuf::from("/scoped/gcloud")),
         };
 
-        provider.status(&handle()).await.unwrap();
+        provider.ensure(&spec()).await.unwrap();
 
-        let calls = runner.calls();
-        assert_eq!(calls.len(), 1, "a stopped box is one describe call");
-        let env = env_of(&calls[0]);
+        let env = env_of(&runner.calls()[0]);
         assert!(env.contains(&(
             "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE".into(),
             "/keys/sa.json".into()
@@ -1122,20 +1177,47 @@ mod tests {
 
     #[tokio::test]
     async fn check_auth_probes_only_the_no_key_path_and_maps_failure_to_a_fix_hint() {
-        // Ambient path (no offline-checkable base): the probe fails (no login)
-        // → the actionable "configure credentials or run gcloud auth login"
-        // message, not raw stderr.
-        let runner = ScriptedRunner::new(vec![Step::Fail]);
-        let provider = with_runner(runner.clone());
+        // Ambient path (no offline-checkable base): the native token mint fails
+        // (no login) → the actionable "configure credentials or run gcloud auth
+        // login" message, not raw transport stderr.
+        let compute = ScriptedCompute::with_token(TokenStep::Fail);
+        let provider = with_compute(compute.clone());
         let err = provider.check_auth().await.unwrap_err();
         assert!(matches!(err, SandboxError::Config(_)), "{err:?}");
         assert!(err.to_string().contains("not configured"), "{err}");
         assert_eq!(
-            runner.calls().len(),
-            1,
-            "the no-key path probes exactly once"
+            compute.calls(),
+            vec!["check_token"],
+            "the no-key path mints exactly once"
         );
-        assert_eq!(runner.calls()[0].1, vec!["auth", "print-access-token"]);
+    }
+
+    #[tokio::test]
+    async fn check_auth_passes_when_the_ambient_mint_succeeds() {
+        // A working ambient login mints a token → preflight passes with no
+        // further ceremony.
+        let compute = ScriptedCompute::with_token(TokenStep::Ok);
+        let provider = with_compute(compute.clone());
+        provider
+            .check_auth()
+            .await
+            .expect("a good ambient token passes");
+        assert_eq!(compute.calls(), vec!["check_token"]);
+    }
+
+    #[tokio::test]
+    async fn check_auth_surfaces_a_stale_login_as_reauth_required() {
+        // A stale ambient login (invalid_rapt) must propagate as the typed
+        // ReauthRequired — the actionable in-app reauth prompt — not be
+        // flattened into the generic "not configured" Config message (#1126).
+        let compute = ScriptedCompute::with_token(TokenStep::Reauth);
+        let provider = with_compute(compute);
+        let err = provider.check_auth().await.unwrap_err();
+        assert!(
+            matches!(err, SandboxError::ReauthRequired { .. }),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("re-authenticate"), "{err}");
     }
 
     #[test]

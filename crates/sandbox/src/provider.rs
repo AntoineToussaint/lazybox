@@ -76,6 +76,13 @@ pub enum SandboxError {
     Serialize(String),
     #[error("{0}")]
     Config(String),
+    /// The configured credentials are present but no longer valid and the
+    /// user must re-authenticate — the `invalid_rapt` / expired-ADC case
+    /// (#1126). Distinct from [`Config`](Self::Config) so the UI can render
+    /// an actionable "re-authenticate" prompt instead of a generic setup
+    /// hint: the fix is a login, not a config edit.
+    #[error("gcp credentials expired — re-authenticate: {detail}")]
+    ReauthRequired { detail: String },
     #[error("{provider} API {operation}: {detail}")]
     ApiTransport {
         provider: &'static str,

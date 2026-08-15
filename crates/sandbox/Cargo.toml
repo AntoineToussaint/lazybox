@@ -10,7 +10,10 @@ publish.workspace = true
 # Box lifecycle providers live behind a feature so the crate builds
 # standalone and later providers (azure) land as their own gate.
 default = ["gcp"]
-gcp = []
+# The GCP provider talks to Compute/IAM/OAuth over REST with a natively
+# minted ADC token (#1126), so it needs the HTTP client and a JWT signer for
+# the service-account-key grant — no `gcloud` on PATH.
+gcp = ["dep:reqwest", "dep:jsonwebtoken"]
 e2b = ["dep:fs2", "dep:reqwest"]
 
 [dependencies]
@@ -21,7 +24,11 @@ serde_yaml = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "form", "rustls"], optional = true }
+# `aws_lc_rs` picks the crypto backend jsonwebtoken 10 no longer defaults to
+# (else RS256 signing panics at runtime); it is the same backend octocrab
+# already builds in this workspace. `use_pem` (default) keeps `from_rsa_pem`.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"], optional = true }
 fs2 = { workspace = true, optional = true }
 
 [dev-dependencies]

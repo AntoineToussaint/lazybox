@@ -2255,9 +2255,6 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     // silent reaper instead.) Evaluated up front and NOT throttled so a
     // bare row is cleared promptly. The removal does NOT archive, so
     // reopening the issue on GitHub resurfaces it.
-    // A session-less removal that succeeds is terminal; a failed one (row
-    // still present) falls through to the throttled prompt below rather
-    // than retry every tick.
     if terminal_state == lazybox_ipc::RemovableTerminalState::Closed {
         let session_paths = workspace_worktree_paths(&workspace);
         let sessionless = session_paths.is_empty() && count_live_terminals(config, key).await == 0;
@@ -2276,6 +2273,8 @@ pub(crate) async fn prompt_merged_pr_removal_with(
             });
             return;
         }
+        // Not session-less, or the removal failed (row still present) —
+        // fall through to the throttled prompt rather than retry every tick.
     }
 
     {

@@ -10965,6 +10965,230 @@ mod wheel_routing_tests {
 }
 
 #[cfg(test)]
+mod input_priority_tests {
+    //! Input-priority pre-dispatch (#1134): while a focused agent
+    //! terminal is repainting full-screen, the `!Send` VT build blocks
+    //! the loop for tens of ms. `drain_priority_input` forwards buffered
+    //! keystrokes to the PTY *before* that build runs, so a key reaches
+    //! the process a frame sooner. These freeze the reorder's contract:
+    //! it fires only for a focused terminal with a pending build, and it
+    //! leaves the buffer alone in every other pane/state.
+    use super::super::helpers::{
+        PerfMonitor, PhaseTimings, StaleInputTally, TimedInput, drain_priority_input,
+    };
+    use super::super::{Model, PaneFocus};
+    use crossterm::event::{
+        Event as CtEvent, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+    };
+    use lazybox_core::{SessionKey, Workspace, WorkspaceKey};
+    use lazybox_ipc::{Command, Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use std::time::Instant;
+    use tuirealm::ratatui::layout::{Rect, Size};
+
+    const TID: TerminalId = TerminalId(7);
+
+    /// A focused agent terminal backed by a real sidebar workspace. The
+    /// workspace matters: `handle_pane_key` re-runs `sync_panes` after
+    /// every dispatch, which re-binds the terminals to the sidebar's
+    /// selected workspace — without a matching row it would clear the
+    /// terminal out from under the second buffered key.
+    fn model_with_focused_agent() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        m.layout.last_area = Rect::new(0, 0, 120, 40);
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![Workspace::empty(ws_key, "main", chrono::Utc::now())],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TID,
+            session_key,
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.terminals.active_terminal_id(), Some(TID));
+        m.focus = PaneFocus::Terminals;
+        m.set_focus_attr();
+        (m, server)
+    }
+
+    fn key_input(c: char) -> TimedInput {
+        TimedInput {
+            read_at: Instant::now(),
+            event: CtEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+        }
+    }
+
+    fn wheel_input() -> TimedInput {
+        TimedInput {
+            read_at: Instant::now(),
+            event: CtEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 4,
+                row: 4,
+                modifiers: KeyModifiers::NONE,
+            }),
+        }
+    }
+
+    /// Drain the startup handshake (Subscribe etc.) so a later assertion
+    /// only sees what the pre-dispatch produced.
+    fn drain_startup(server: &mut lazybox_ipc::Connection) {
+        while server.rx.try_recv().is_ok() {}
+    }
+
+    fn written_bytes(server: &mut lazybox_ipc::Connection) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let Command::Write {
+                terminal_id, bytes, ..
+            } = cmd
+            {
+                assert_eq!(terminal_id, TID, "write must target the focused terminal");
+                out.extend(bytes);
+            }
+        }
+        out
+    }
+
+    /// The headline fix: with a build pending on a focused terminal, a
+    /// buffered keystroke is forwarded to the PTY by the pre-dispatch —
+    /// ahead of the render — and the buffer is drained.
+    #[test]
+    fn pending_keystroke_reaches_pty_before_the_build() {
+        let (mut m, mut server) = model_with_focused_agent();
+        drain_startup(&mut server);
+        m.redraw = true;
+
+        let (itx, mut irx) = tokio::sync::mpsc::channel(8);
+        itx.try_send(key_input('a')).expect("room");
+        itx.try_send(key_input('b')).expect("room");
+
+        let mut redraw_is_input = false;
+        drain_priority_input(
+            &mut m,
+            &mut irx,
+            &mut StaleInputTally::default(),
+            &mut PerfMonitor::new(),
+            &mut PhaseTimings::default(),
+            &mut redraw_is_input,
+        );
+
+        assert_eq!(
+            written_bytes(&mut server),
+            b"ab",
+            "both keys hit the PTY early"
+        );
+        assert!(irx.try_recv().is_err(), "the input buffer is drained");
+        assert!(redraw_is_input, "a discrete key arms the immediate paint");
+    }
+
+    /// A no-op unless a build is pending — with nothing to render there is
+    /// no frame to jump ahead of, so the key rides the normal post-wait
+    /// path and the buffer is left untouched.
+    #[test]
+    fn no_pending_render_leaves_the_buffer_alone() {
+        let (mut m, mut server) = model_with_focused_agent();
+        drain_startup(&mut server);
+        m.redraw = false;
+
+        let (itx, mut irx) = tokio::sync::mpsc::channel(8);
+        itx.try_send(key_input('a')).expect("room");
+
+        let mut redraw_is_input = false;
+        drain_priority_input(
+            &mut m,
+            &mut irx,
+            &mut StaleInputTally::default(),
+            &mut PerfMonitor::new(),
+            &mut PhaseTimings::default(),
+            &mut redraw_is_input,
+        );
+
+        assert!(written_bytes(&mut server).is_empty(), "no early write");
+        assert!(
+            irx.try_recv().is_ok(),
+            "the key stays buffered for the post-wait path"
+        );
+    }
+
+    /// Scoped to the terminal: with focus on another pane the pre-dispatch
+    /// is inert, so a sidebar key can't be diverted into the PTY.
+    #[test]
+    fn other_pane_focus_is_inert() {
+        let (mut m, mut server) = model_with_focused_agent();
+        m.focus = PaneFocus::Sidebar;
+        drain_startup(&mut server);
+        m.redraw = true;
+
+        let (itx, mut irx) = tokio::sync::mpsc::channel(8);
+        itx.try_send(key_input('a')).expect("room");
+
+        let mut redraw_is_input = false;
+        drain_priority_input(
+            &mut m,
+            &mut irx,
+            &mut StaleInputTally::default(),
+            &mut PerfMonitor::new(),
+            &mut PhaseTimings::default(),
+            &mut redraw_is_input,
+        );
+
+        assert!(
+            written_bytes(&mut server).is_empty(),
+            "no write off the terminal pane"
+        );
+        assert!(irx.try_recv().is_ok(), "the key stays buffered");
+    }
+
+    /// A scroll notch breaks the drain so scrollback keeps its
+    /// one-step-per-frame progression: the wheel event is serviced, but the
+    /// keystroke queued behind it is left for the next iteration.
+    #[test]
+    fn scroll_notch_breaks_the_drain() {
+        let (mut m, mut server) = model_with_focused_agent();
+        drain_startup(&mut server);
+        m.redraw = true;
+
+        let (itx, mut irx) = tokio::sync::mpsc::channel(8);
+        itx.try_send(wheel_input()).expect("room");
+        itx.try_send(key_input('a')).expect("room");
+
+        let mut redraw_is_input = false;
+        drain_priority_input(
+            &mut m,
+            &mut irx,
+            &mut StaleInputTally::default(),
+            &mut PerfMonitor::new(),
+            &mut PhaseTimings::default(),
+            &mut redraw_is_input,
+        );
+
+        // The wheel is a local scroll (no PTY bytes) and the drain stops
+        // there, so the buffered 'a' survives for the post-wait path.
+        assert!(
+            written_bytes(&mut server).is_empty(),
+            "wheel scrolls locally, no PTY write"
+        );
+        assert!(
+            irx.try_recv().is_ok(),
+            "the key behind the scroll stays buffered"
+        );
+    }
+}
+
+#[cfg(test)]
 mod leader_tile_tests {
     //! `]]` leader tile commands (#286): tile/split management rides
     //! the same leader as every other terminal-mode chord, replacing

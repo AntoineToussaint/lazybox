@@ -1371,6 +1371,20 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             redraw_is_input = true;
         }
 
+        // 3b. Input-priority (#1134): forward buffered keystrokes to the
+        // PTY *before* the expensive `!Send` terminal build in step 4, so a
+        // key that landed during a heavy agent redraw reaches the process
+        // this frame instead of waiting the build out. See
+        // `drain_priority_input`.
+        drain_priority_input(
+            model,
+            &mut input_rx,
+            &mut stale_tally,
+            &mut perf,
+            &mut timings,
+            &mut redraw_is_input,
+        );
+
         // 4. Render if dirty — before the blocking input read so the
         // user sees their last action immediately. Background-driven
         // frames (daemon output, spinner ticks) and high-rate mouse-wheel
@@ -1508,38 +1522,13 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
         timings = PhaseTimings::default();
         match wake {
             Wake::Input(timed) => {
-                // Input that sat buffered while the loop was stalled
-                // is discarded instead of replayed — a recovered UI
-                // must never burst-fire seconds of queued clicks and
-                // keystrokes (least of all a buffered quit chord).
-                let age = timed.read_at.elapsed();
-                // A user-opened filter-picker keeps its buffered keys
-                // across a stall — its content is stable, so a queued
-                // keystroke still lands where it was aimed (#1055).
-                let modal_retains_keys = model
-                    .modal_stack
-                    .last()
-                    .is_some_and(super::Id::retains_stale_keys);
-                if should_drop_stale_input(&timed.event, age, modal_retains_keys) {
-                    stale_tally.note(age);
-                } else {
-                    report_stale_drops(model, &mut stale_tally, &mut perf);
-                    let is_scroll = is_scroll_event(&timed.event);
-                    let dispatch_start = std::time::Instant::now();
-                    dispatch_event(model, timed.event);
-                    timings.dispatch = dispatch_start.elapsed();
-                    // Keystrokes and clicks are low-rate and paint at once
-                    // so the UI feels instant. Mouse-wheel scroll is the
-                    // exception: a flick outpaces a full repaint, so
-                    // painting per notch makes the loop fall behind, queued
-                    // wheel events age past the stale bound, and they get
-                    // dropped — surfacing as the "UI stalled" flash on an
-                    // otherwise-idle screen. Routing scroll redraws through
-                    // the background throttle coalesces them to the display
-                    // refresh: every notch still updates the offset, but
-                    // the screen repaints at ~60fps instead of per event.
-                    redraw_is_input = !is_scroll;
+                let dispatch_start = std::time::Instant::now();
+                if let Some(paint_now) =
+                    service_buffered_input(model, timed, &mut stale_tally, &mut perf)
+                {
+                    redraw_is_input = paint_now;
                 }
+                timings.dispatch += dispatch_start.elapsed();
             }
             // Any non-input wake means the buffered-input burst is
             // over (`biased` drains input first) — report the episode
@@ -1589,6 +1578,89 @@ fn report_stale_drops<T: TerminalAdapter>(
             if dropped == 1 { "" } else { "s" }
         ));
     }
+}
+
+/// Input-priority pre-dispatch (#1134). The libghostty VT parser is
+/// `!Send` and pinned to this thread, so an agent's full-screen repaint
+/// holds the loop for tens of ms building the terminal widget. A keystroke
+/// that landed while the daemon drain ran would otherwise wait out that
+/// whole build before `dispatch_event` turns it into a `Command::Write` —
+/// the write is a non-blocking channel send, so nothing but the loop order
+/// kept it behind the frame. Forwarding buffered keystrokes to the PTY here,
+/// ahead of the build, drops delivery latency by a frame; only the visual
+/// echo (which returns as PTY output) still waits one build.
+///
+/// Scoped to a focused terminal with no modal — the "typing into an agent"
+/// case the reorder targets. The gate is re-checked each pass so a key that
+/// opens a leader popup or leaves the pane hands the remaining buffered
+/// input back to the normal one-per-iteration post-wait path; a scroll notch
+/// breaks the drain so scrollback keeps its one-step-per-frame progression.
+/// A no-op unless a render is already pending (`model.redraw`) — with no
+/// build to jump ahead of, reordering the dispatch would buy nothing.
+pub(super) fn drain_priority_input<T: TerminalAdapter>(
+    model: &mut Model<T>,
+    input_rx: &mut tokio::sync::mpsc::Receiver<TimedInput>,
+    stale_tally: &mut StaleInputTally,
+    perf: &mut PerfMonitor,
+    timings: &mut PhaseTimings,
+    redraw_is_input: &mut bool,
+) {
+    while model.redraw && model.focus == PaneFocus::Terminals && model.modal_stack.is_empty() {
+        let Ok(timed) = input_rx.try_recv() else {
+            break;
+        };
+        let is_scroll = is_scroll_event(&timed.event);
+        let dispatch_start = std::time::Instant::now();
+        if let Some(paint_now) = service_buffered_input(model, timed, stale_tally, perf) {
+            *redraw_is_input = paint_now || *redraw_is_input;
+        }
+        timings.dispatch += dispatch_start.elapsed();
+        if is_scroll {
+            break;
+        }
+    }
+}
+
+/// Service one buffered host-input event: drop it if it went stale while
+/// the loop was stalled, otherwise dispatch it. Returns `Some(paint_now)`
+/// when dispatched — `paint_now` is the `redraw_is_input` verdict (true for
+/// discrete input that should bypass the background frame cap, false for a
+/// scroll notch that rides the throttle) — or `None` when the event was
+/// dropped. The stale-drop policy is shared by the input-priority
+/// pre-dispatch and the post-wait dispatch so the two paths can't drift.
+fn service_buffered_input<T: TerminalAdapter>(
+    model: &mut Model<T>,
+    timed: TimedInput,
+    stale_tally: &mut StaleInputTally,
+    perf: &mut PerfMonitor,
+) -> Option<bool> {
+    // Input that sat buffered while the loop was stalled is discarded
+    // instead of replayed — a recovered UI must never burst-fire seconds
+    // of queued clicks and keystrokes (least of all a buffered quit chord).
+    let age = timed.read_at.elapsed();
+    // A user-opened filter-picker keeps its buffered keys across a stall —
+    // its content is stable, so a queued keystroke still lands where it was
+    // aimed (#1055).
+    let modal_retains_keys = model
+        .modal_stack
+        .last()
+        .is_some_and(super::Id::retains_stale_keys);
+    if should_drop_stale_input(&timed.event, age, modal_retains_keys) {
+        stale_tally.note(age);
+        return None;
+    }
+    report_stale_drops(model, stale_tally, perf);
+    // Keystrokes and clicks are low-rate and paint at once so the UI feels
+    // instant. Mouse-wheel scroll is the exception: a flick outpaces a full
+    // repaint, so painting per notch makes the loop fall behind, queued
+    // wheel events age past the stale bound, and they get dropped —
+    // surfacing as the "UI stalled" flash on an otherwise-idle screen.
+    // Routing scroll redraws through the background throttle coalesces them
+    // to the display refresh: every notch still updates the offset, but the
+    // screen repaints at ~60fps instead of per event.
+    let is_scroll = is_scroll_event(&timed.event);
+    dispatch_event(model, timed.event);
+    Some(!is_scroll)
 }
 
 /// Route one crossterm event to the right handler. Extracted from

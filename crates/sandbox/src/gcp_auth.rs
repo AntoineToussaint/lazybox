@@ -171,7 +171,7 @@ pub struct JwtClaims {
 
 impl JwtClaims {
     /// Build the assertion claims for `key`, valid from `iat` for
-    /// [`JWT_LIFETIME_SECS`]. `aud` is the key's own `token_uri` when it
+    /// `JWT_LIFETIME_SECS`. `aud` is the key's own `token_uri` when it
     /// carries one, else the standard endpoint.
     pub fn for_key(key: &ServiceAccountKey, iat: i64) -> Self {
         Self {

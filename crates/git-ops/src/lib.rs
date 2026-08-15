@@ -1572,7 +1572,7 @@ impl WorktreeManager {
             .map(|_| ())
     }
 
-    /// Like [`remove_by_path`], but re-checks `still_removable()` **while
+    /// Like [`Self::remove_by_path`], but re-checks `still_removable()` **while
     /// holding the per-repo lock, immediately before the destructive
     /// `git worktree remove`** — and skips the removal (returning
     /// `Ok(false)` without touching disk) when the guard vetoes.

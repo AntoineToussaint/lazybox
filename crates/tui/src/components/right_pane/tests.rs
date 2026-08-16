@@ -2366,6 +2366,18 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
         // an ABA that makes an address comparison flake under parallel
         // test load (#1147). Content comparison tests the real invariant
         // and is immune to reuse.
+        //
+        // Match with whitespace collapsed so the check doesn't silently
+        // depend on the render fitting each body on one line: soft-wrap
+        // only reshapes whitespace (a space becomes a line break), so a
+        // phrase wrapped across rows must still count as present — and a
+        // future editor picking a longer body can't turn the negative
+        // assertion into a vacuous pass.
+        let contains_body = |haystack: &str, body: &str| {
+            let flat: String = haystack.split_whitespace().collect();
+            flat.contains(&body.split_whitespace().collect::<String>())
+        };
+
         let mut pane = RightPane::new(PaneId::new(0));
         pane.set_workspace(Some(ws_with_body("original body text")));
         pane.task_body_view = TaskBodyView::Preview;
@@ -2373,7 +2385,7 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
         assert_eq!(pane.task_body_cache.body, "original body text");
         let first = memo_text(&pane, 78);
         assert!(
-            first.contains("original body text"),
+            contains_body(&first, "original body text"),
             "memo should hold the original body, got {first:?}"
         );
 
@@ -2383,11 +2395,11 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
         assert_eq!(pane.task_body_cache.body, "a completely different body");
         let second = memo_text(&pane, 78);
         assert!(
-            second.contains("a completely different body"),
+            contains_body(&second, "a completely different body"),
             "a changed body must re-render into the memo, got {second:?}"
         );
         assert!(
-            !second.contains("original body text"),
+            !contains_body(&second, "original body text"),
             "the memo must not serve the stale body after a change, got {second:?}"
         );
     }

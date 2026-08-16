@@ -113,8 +113,9 @@ EOF
 fi
 
 # 4. Regenerate the generated wire contracts, but ONLY when this commit
-#    stages a DTO source (ipc/core/tui-core wire types or the api-gateway
-#    module). The guard is a cheap `git diff --cached`; the heavy build
+#    stages a fingerprint input (ipc/core/tui-core wire types, the
+#    api-gateway module, or Cargo.lock — a lock bump moves the fingerprint
+#    baked into the fixture). The guard is a cheap `git diff --cached`; the heavy build
 #    runs only on the rare commit that can actually move a fixture, and
 #    the regenerated files are re-staged into this commit — so DTO drift
 #    is caught here instead of turning a teammate's CI red. Skips silently

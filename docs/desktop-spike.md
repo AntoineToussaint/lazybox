@@ -59,9 +59,9 @@ zig toolchain; `make contracts` also regenerates the web-control fixture
 
 Regenerating by hand still means *remembering* to. `make install-hooks` opts
 into a pre-commit step that runs `make contracts` for you — but only when a
-commit stages a DTO source (`crates/{ipc,core,tui-core}/src` or
-`crates/server/src/api_gateway.rs`), re-staging the refreshed fixtures into the
-same commit. A cheap `git diff --cached` guard keeps that heavy build off every
+commit stages a fingerprint input (`crates/{ipc,core,tui-core}/src`,
+`crates/server/src/api_gateway.rs`, or `Cargo.lock` — a lock-only bump moves
+the fingerprint too), re-staging the refreshed fixtures into the same commit. A cheap `git diff --cached` guard keeps that heavy build off every
 commit that touches no DTO, so drift is caught locally instead of in CI without
 slowing the common case.
 

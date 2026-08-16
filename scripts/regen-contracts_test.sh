@@ -47,6 +47,7 @@ setup_repo() {
 	printf '{"committed":true}\n' > "$CLONE/$JSON"
 	printf 'src\n' > "$CLONE/crates/ipc/src/lib.rs"
 	printf 'dto\n' > "$CLONE/crates/server/src/api_gateway.rs"
+	printf 'lock\n' > "$CLONE/Cargo.lock"
 	printf 'readme\n' > "$CLONE/README.md"
 	git -C "$CLONE" add -A
 	git -C "$CLONE" commit -qm base
@@ -91,5 +92,26 @@ run >/dev/null
 # Nothing was `git add`ed, so the index stays clean in unconditional mode.
 [ -z "$(git -C "$CLONE" diff --cached --name-only)" ] \
 	|| fail "case4: unconditional mode should not stage anything"
+
+# ── Case 5: a staged Cargo.lock (a fingerprint input) triggers regen ──
+# `cargo update` stages ONLY Cargo.lock, but Cargo.lock feeds
+# lazybox_ipc::PROTOCOL_FINGERPRINT (crates/ipc/build.rs), which is baked
+# into the desktop compatibility fixture — so a lock-only bump moves a
+# generated contract with no source edit. The guard must fire on it.
+t5="$WORK/t5"; mkdir -p "$t5"; setup_repo "$t5"
+printf 'lock bumped\n' > "$CLONE/Cargo.lock"
+git -C "$CLONE" add Cargo.lock
+run --if-staged >/dev/null
+[ -f "$CLONE/make-ran" ] \
+	|| fail "case5: guard skipped regen despite a staged Cargo.lock (fingerprint input)"
+
+# ── Case 6: a staged DTO deletion triggers regen (removing a wire type) ──
+# Deleting a DTO source moves the contract too, so --diff-filter must
+# include D — ACM alone would silently skip this.
+t6="$WORK/t6"; mkdir -p "$t6"; setup_repo "$t6"
+git -C "$CLONE" rm -q crates/ipc/src/lib.rs
+run --if-staged >/dev/null
+[ -f "$CLONE/make-ran" ] \
+	|| fail "case6: guard skipped regen despite a staged DTO deletion"
 
 echo "PASS: scripts/regen-contracts_test.sh"

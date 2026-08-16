@@ -175,7 +175,7 @@ install-hooks: ## Activate .githooks/ with the FULL gate (fmt + clippy + rustdoc
 	@git config core.hooksPath .githooks
 	@git config lazybox.precommitFull true
 	@echo "Installed .githooks/ (full gate: fmt + clippy + rustdoc + contract regen)."
-	@echo "Contracts regenerate only when a commit stages DTO sources (ipc/core/tui-core/api-gateway)."
+	@echo "Contracts regenerate only when a commit stages a fingerprint input (ipc/core/tui-core/api-gateway/Cargo.lock)."
 	@echo "scripts/bootstrap.sh installs the fast fmt-only variant by default."
 	@echo "Bypass any hook with \`git commit --no-verify\`."
 

@@ -33,6 +33,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value};
 
@@ -137,6 +138,11 @@ pub fn seed_skip_dangerous_mode_prompt() -> io::Result<()> {
 /// unparseable one is left untouched (returns `Err`).
 fn seed_skip_dangerous_mode_prompt_in(settings_path: &Path) -> io::Result<()> {
     let mut root: Value = match std::fs::read_to_string(settings_path) {
+        // An empty (or whitespace-only) file carries no settings to
+        // preserve — treat it like a missing one and seed fresh, rather
+        // than parse-failing into a hang. A non-empty but malformed file
+        // still errors, so we never clobber real user content.
+        Ok(text) if text.trim().is_empty() => Value::Object(Map::new()),
         Ok(text) => serde_json::from_str(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Value::Object(Map::new()),
@@ -165,13 +171,20 @@ fn seed_skip_dangerous_mode_prompt_in(settings_path: &Path) -> io::Result<()> {
     std::fs::rename(&tmp, settings_path)
 }
 
-/// `<config>.lazybox-tmp` next to `config_path`, for the atomic write.
+/// `<config>.<pid>.<seq>.lazybox-tmp` next to `config_path`, for the
+/// atomic write. The pid + a process-monotonic sequence make the temp
+/// path unique per call, so two seeders racing on the same real file
+/// (concurrent unattended spawns, before the key is first persisted)
+/// never share a temp path — otherwise one's `rename` could publish the
+/// other's half-written `write`, corrupting the destination.
 fn tmp_sibling(config_path: &Path) -> io::Result<PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let name = config_path.file_name().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "config path has no file name")
     })?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = name.to_os_string();
-    tmp_name.push(".lazybox-tmp");
+    tmp_name.push(format!(".{}.{seq}.lazybox-tmp", std::process::id()));
     Ok(config_path.with_file_name(tmp_name))
 }
 
@@ -327,6 +340,34 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), "not json {");
+    }
+
+    #[test]
+    fn seeds_skip_dangerous_mode_over_empty_settings() {
+        // A zero-byte / whitespace-only settings file is not corrupt user
+        // content — it must seed fresh, not parse-fail into a hang.
+        let dir = scratch("skip-empty");
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, "   \n").unwrap();
+
+        seed_skip_dangerous_mode_prompt_in(&settings).unwrap();
+
+        assert!(skip_dangerous_set(&settings));
+    }
+
+    #[test]
+    fn tmp_sibling_is_unique_per_call() {
+        // Concurrent seeders write the same real file via temp + rename;
+        // if the temp path were shared, one rename could publish another's
+        // half-written temp. Distinct paths per call are what prevent that.
+        let target = Path::new("/some/dir/settings.json");
+        let a = tmp_sibling(target).unwrap();
+        let b = tmp_sibling(target).unwrap();
+        assert_ne!(a, b, "two temp siblings collided");
+        // Both are still siblings of the target (same parent dir), so the
+        // final rename stays a same-directory (atomic) move.
+        assert_eq!(a.parent(), target.parent());
+        assert_eq!(b.parent(), target.parent());
     }
 
     #[test]

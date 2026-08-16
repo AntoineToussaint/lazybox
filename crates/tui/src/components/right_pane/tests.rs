@@ -2310,6 +2310,28 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
             .unwrap_or(0)
     }
 
+    /// Plain text of the memoized render for `width` — every span's
+    /// content joined per line. Lets a test assert on the memo's
+    /// *content* rather than its allocation address, which is immune to
+    /// the ABA reuse an allocator can perform after the old `Rc` frees.
+    fn memo_text(pane: &RightPane, width: u16) -> String {
+        let (_, rc) = pane
+            .task_body_cache
+            .by_width
+            .iter()
+            .find(|(w, _)| *w == width)
+            .expect("width should be cached after a visible-body render");
+        rc.iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn render_reuses_the_body_memo_across_frames() {
         // Pre-fix, `render_body` ran twice per frame with no cache — a
@@ -2337,21 +2359,36 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
     fn changing_the_body_invalidates_the_memo() {
         // The cache is content-addressed, so a new body must never serve
         // the previous render (the stale-content failure mode).
+        //
+        // Assert on the memo's *content*, not its `Rc` address: when the
+        // body changes, `refresh_task_body_cache` frees the old `Rc`, and
+        // the allocator may hand the same slot back to the replacement —
+        // an ABA that makes an address comparison flake under parallel
+        // test load (#1147). Content comparison tests the real invariant
+        // and is immune to reuse.
         let mut pane = RightPane::new(PaneId::new(0));
         pane.set_workspace(Some(ws_with_body("original body text")));
         pane.task_body_view = TaskBodyView::Preview;
         draw(&mut pane);
-        let first = memo_ptr(&pane, 78);
         assert_eq!(pane.task_body_cache.body, "original body text");
+        let first = memo_text(&pane, 78);
+        assert!(
+            first.contains("original body text"),
+            "memo should hold the original body, got {first:?}"
+        );
 
         pane.set_workspace(Some(ws_with_body("a completely different body")));
         pane.task_body_view = TaskBodyView::Preview;
         draw(&mut pane);
         assert_eq!(pane.task_body_cache.body, "a completely different body");
-        assert_ne!(
-            first,
-            memo_ptr(&pane, 78),
-            "a changed body must re-render, not reuse the stale memo"
+        let second = memo_text(&pane, 78);
+        assert!(
+            second.contains("a completely different body"),
+            "a changed body must re-render into the memo, got {second:?}"
+        );
+        assert!(
+            !second.contains("original body text"),
+            "the memo must not serve the stale body after a change, got {second:?}"
         );
     }
 

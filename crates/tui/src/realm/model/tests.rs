@@ -6261,6 +6261,12 @@ mod wake_burst_liveness_tests {
                     "a backpressure skip must preserve the pending redraw, not clear it",
                 );
             }
+            // Yield to the listener thread that generates the modal's timeout
+            // tick — `run_loop_step` polls with `Once(ZERO)`, so without this
+            // the pump is a hot spin that could starve that thread on a
+            // single-core runner. In production the blocking wait (step 5)
+            // does the yielding.
+            std::thread::sleep(Duration::from_millis(1));
         }
 
         assert!(

@@ -798,40 +798,268 @@ pub(crate) fn notify_reclaimed(config: &ServerConfig, title: &str, reclaimed: Re
 /// backing terminal, so there is no live checkout to protect, and
 /// ephemeral on-main / linked checkouts are never persisted as sessions
 /// (issue #452) so this never touches the user's real repo.
-async fn reclaim_workspace_worktrees(config: &ServerConfig, workspace: &Workspace) -> Reclaimed {
-    let mgr = config.worktree_manager();
+///
+/// The measured total is returned synchronously, but the removal itself
+/// is spawned onto a detached task (see [`spawn_worktree_removal`]) so a
+/// multi-GB `rm` can't stall the poll/reconcile cycle this teardown runs
+/// inside (issue #1132). The second tuple element is that task's handle,
+/// which the deletion path drops (fire-and-forget) and tests await.
+async fn reclaim_workspace_worktrees(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> (Reclaimed, Option<tokio::task::JoinHandle<()>>) {
     let bare_path = workspace
         .primary_task()
         .and_then(|t| t.repo.as_deref())
         .and_then(|repo| repo.split_once('/'))
-        .map(|(owner, name)| mgr.bare_path(owner, name));
+        .map(|(owner, name)| config.worktree_manager().bare_path(owner, name));
 
+    // Measure the reclaim synchronously (a stat-only walk) so the
+    // returned total — and the "reclaimed N GB" notice — is accurate
+    // immediately, but hand the actual removal to a detached task: a
+    // multi-GB `git worktree remove --force` takes 7–11s, and this
+    // teardown runs inside the poll/reconcile cycle the user is
+    // watching sync (issue #1132).
     let mut reclaimed = Reclaimed::default();
+    let mut paths = Vec::new();
     for session in &workspace.sessions {
         let path = &session.worktree_path;
         if !path.exists() {
             continue;
         }
-        let size = dir_size(path).await;
-        if let Some(bare) = bare_path.as_ref() {
-            let _ = mgr.remove_by_path(bare, path).await;
-        } else {
-            let _ = tokio::fs::remove_dir_all(path).await;
-        }
-        if path.exists() {
-            tracing::warn!(
-                worktree = %path.display(),
-                "delete_workspace: worktree directory could not be reclaimed",
-            );
-            continue;
-        }
+        reclaimed.bytes += dir_size(path).await;
         reclaimed.worktrees += 1;
-        reclaimed.bytes += size;
+        paths.push(path.clone());
     }
 
     tombstone_legacy_remote_host(config, workspace);
 
-    reclaimed
+    let cleanup = (!paths.is_empty())
+        .then(|| spawn_worktree_removal(config, workspace.key.clone(), bare_path, paths));
+    (reclaimed, cleanup)
+}
+
+/// Force-remove reclaimed worktree directories on a detached task so a
+/// slow `git worktree remove --force` (seconds on multi-GB checkouts)
+/// can't stall the caller — the poll/reconcile cycle that triggered the
+/// teardown (issue #1132). The caller has already killed every backing
+/// terminal and dropped the session records.
+///
+/// Removal is *not* unconditional: worktree paths are deterministic
+/// (`<root>/<scope>/<slug>`), so a workspace that goes out of scope and
+/// comes back re-provisions the exact path a queued removal targets. The
+/// removal therefore re-checks [`worktree_path_is_reclaimed`] under the
+/// per-repo lock, immediately before deleting, and skips any path a fresh
+/// provision or a re-created session now owns — otherwise a slow `rm`
+/// could delete a live checkout (and its uncommitted work). `bare_path`
+/// is `None` only for repo-less scratch / pre-PR checkouts, which have no
+/// bare repo to reuse them and no `repo_lock` to coordinate under — a
+/// plain `rm -rf`. Returns the task handle for tests to await; the
+/// deletion path fire-and-forgets it.
+fn spawn_worktree_removal(
+    config: &ServerConfig,
+    key: WorkspaceKey,
+    bare_path: Option<std::path::PathBuf>,
+    paths: Vec<std::path::PathBuf>,
+) -> tokio::task::JoinHandle<()> {
+    let mgr = config.worktree_manager();
+    let config = config.clone();
+    tokio::spawn(async move {
+        for path in paths {
+            match bare_path.as_ref() {
+                Some(bare) => {
+                    let guard_config = config.clone();
+                    let guard_key = key.clone();
+                    let guard_path = path.clone();
+                    if let Ok(false) = mgr
+                        .remove_by_path_if(bare, &path, move || {
+                            !worktree_path_is_reclaimed(&guard_config, &guard_key, &guard_path)
+                        })
+                        .await
+                    {
+                        // A re-provision re-claimed this exact path
+                        // between teardown and now — leave it live.
+                        tracing::info!(
+                            worktree = %path.display(),
+                            "delete_workspace: worktree re-provisioned before removal — left in place",
+                        );
+                        continue;
+                    }
+                }
+                None => {
+                    let _ = tokio::fs::remove_dir_all(&path).await;
+                }
+            }
+            if path.exists() {
+                tracing::warn!(
+                    worktree = %path.display(),
+                    "delete_workspace: worktree directory could not be reclaimed",
+                );
+            }
+        }
+    })
+}
+
+/// True when a torn-down workspace's worktree `path` has been re-claimed
+/// by a live or in-flight session — either an in-flight provision holds a
+/// claim on it, or the workspace came back into scope and a committed
+/// session now points at it. The deferred worktree removal (#1132)
+/// consults this **under the per-repo lock** so a slow `rm` can never
+/// delete a freshly re-provisioned checkout at the same deterministic
+/// slug path. The claim covers the window from provision start to the
+/// session-row commit; the committed session covers it from the commit
+/// onward — together gap-free, so the check is never fooled by a
+/// provision in flight.
+fn worktree_path_is_reclaimed(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    path: &std::path::Path,
+) -> bool {
+    if crate::spawn_handler::provisioning_worktree_is_claimed(config, path) {
+        return true;
+    }
+    load_workspace(config, key).is_some_and(|workspace| {
+        workspace
+            .sessions
+            .iter()
+            .any(|session| crate::spawn_handler::session_paths_match(&session.worktree_path, path))
+    })
+}
+
+#[cfg(test)]
+mod reclaim_worktree_tests {
+    use super::*;
+    use lazybox_core::{SessionKind, WorkspaceSession as Session};
+
+    fn seed_worktree(dir: &std::path::Path, bytes: usize) {
+        std::fs::create_dir_all(dir).expect("create worktree dir");
+        std::fs::write(dir.join("payload"), vec![0u8; bytes]).expect("write payload");
+    }
+
+    #[tokio::test]
+    async fn spawn_worktree_removal_reclaims_repoless_dirs_off_the_caller() {
+        let config = ServerConfig::in_memory();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().join("scratch-worktree");
+        seed_worktree(&wt, 2048);
+
+        let handle = spawn_worktree_removal(
+            &config,
+            WorkspaceKey::new("local:scratch"),
+            None,
+            vec![wt.clone()],
+        );
+        handle.await.expect("removal task");
+
+        assert!(!wt.exists(), "the detached task removes the reclaimed dir");
+    }
+
+    // Regression for the re-provision data-loss race (#1132 review): a
+    // workspace goes out of scope and its worktree is queued for a slow
+    // removal, but the same deterministic slug path is re-provisioned (a
+    // committed session now points at it) before the `rm` runs. The
+    // guarded removal must leave the live checkout — and its uncommitted
+    // work — untouched.
+    #[tokio::test]
+    async fn deferred_removal_spares_a_reprovisioned_worktree() {
+        let config = ServerConfig::in_memory();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let bare = tmp.path().join("bare");
+        std::fs::create_dir_all(&bare).expect("mkdir bare");
+        let wt = tmp.path().join("scope").join("slug");
+        seed_worktree(&wt, 4096);
+
+        // A re-provision re-created the workspace with a session pointing
+        // at the exact path the removal was queued to delete.
+        let key = WorkspaceKey::new("local:reborn");
+        let mut workspace = Workspace::empty(key.clone(), "reborn", Utc::now());
+        workspace.sessions.push(Session::new(
+            key.clone(),
+            SessionKind::Shell,
+            wt.clone(),
+            Utc::now(),
+        ));
+        commit_upsert(&config, &key, workspace).expect("seed re-provisioned workspace");
+        assert!(
+            worktree_path_is_reclaimed(&config, &key, &wt),
+            "a committed session at the path reads as reclaimed",
+        );
+
+        spawn_worktree_removal(&config, key, Some(bare), vec![wt.clone()])
+            .await
+            .expect("removal task");
+
+        assert!(wt.exists(), "the re-provisioned checkout must survive");
+        assert!(
+            wt.join("payload").exists(),
+            "the live checkout's contents are untouched",
+        );
+    }
+
+    // The guard only spares *re-claimed* paths — a genuinely orphaned
+    // worktree (no claim, no session in the store) is still reclaimed.
+    #[tokio::test]
+    async fn worktree_path_is_reclaimed_is_false_for_an_orphan() {
+        let config = ServerConfig::in_memory();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().join("orphan");
+        assert!(
+            !worktree_path_is_reclaimed(&config, &WorkspaceKey::new("local:gone"), &wt),
+            "no claim and no live session → safe to remove",
+        );
+    }
+
+    #[tokio::test]
+    async fn reclaim_measures_bytes_but_defers_the_removal() {
+        let config = ServerConfig::in_memory();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().join("scratch-worktree");
+        seed_worktree(&wt, 4096);
+
+        let key = WorkspaceKey::new("local:scratch");
+        let mut workspace = Workspace::empty(key.clone(), "scratch", Utc::now());
+        workspace.sessions.push(Session::new(
+            key,
+            SessionKind::Shell,
+            wt.clone(),
+            Utc::now(),
+        ));
+
+        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace).await;
+
+        // Byte accounting is synchronous, so the notice is accurate the
+        // instant the poll path returns — before the slow `rm` runs.
+        assert_eq!(reclaimed.worktrees, 1);
+        assert!(
+            reclaimed.bytes >= 4096,
+            "measured the tree before removing it"
+        );
+
+        cleanup
+            .expect("removal deferred to a task")
+            .await
+            .expect("removal task");
+        assert!(!wt.exists(), "the deferred task reclaims the dir");
+    }
+
+    #[tokio::test]
+    async fn reclaim_skips_missing_worktrees_and_spawns_nothing() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("local:gone");
+        let mut workspace = Workspace::empty(key.clone(), "gone", Utc::now());
+        workspace.sessions.push(Session::new(
+            key,
+            SessionKind::Shell,
+            std::path::PathBuf::from("/nonexistent/worktree"),
+            Utc::now(),
+        ));
+
+        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace).await;
+
+        assert_eq!(reclaimed.worktrees, 0);
+        assert_eq!(reclaimed.bytes, 0);
+        assert!(cleanup.is_none(), "nothing on disk → no cleanup task");
+    }
 }
 
 /// Clear a legacy `remote-host:<workspace-key>` record left by the retired
@@ -1121,7 +1349,22 @@ pub(crate) async fn delete_workspace_internal(
         );
         return Some(Reclaimed::default());
     };
-    let reclaimed = reclaim_workspace_worktrees(config, &workspace).await;
+    // The removal runs on a detached task so a multi-GB `rm` can't stall
+    // this teardown — the poll/reconcile cycle the delete runs inside
+    // (issue #1132). Production drops the handle: dropping a tokio
+    // JoinHandle detaches the task rather than cancelling it, so the
+    // reclaim finishes in the background while this path returns. Tests
+    // join the real detached task instead, so assertions on the
+    // reclaimed worktree directory are deterministic rather than racing
+    // the background `rm` (the deferral itself is covered directly by
+    // `reclaim_measures_bytes_but_defers_the_removal`).
+    let (reclaimed, cleanup) = reclaim_workspace_worktrees(config, &workspace).await;
+    #[cfg(test)]
+    if let Some(handle) = cleanup {
+        let _ = handle.await;
+    }
+    #[cfg(not(test))]
+    drop(cleanup);
     if reclaimed.worktrees > 0 {
         tracing::info!(
             workspace = %key,

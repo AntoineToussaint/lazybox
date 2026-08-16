@@ -1567,8 +1567,44 @@ impl WorktreeManager {
         bare_path: &Path,
         worktree_path: &Path,
     ) -> Result<(), GitError> {
+        self.remove_by_path_if(bare_path, worktree_path, || true)
+            .await
+            .map(|_| ())
+    }
+
+    /// Like [`Self::remove_by_path`], but re-checks `still_removable()` **while
+    /// holding the per-repo lock, immediately before the destructive
+    /// `git worktree remove`** — and skips the removal (returning
+    /// `Ok(false)` without touching disk) when the guard vetoes.
+    ///
+    /// The deferred reclaim (#1132) uses this to defend against a real
+    /// race: worktree paths are deterministic (`<root>/<scope>/<slug>`),
+    /// so a workspace that goes out of scope and comes back re-provisions
+    /// the *same* path a queued removal is about to delete. Provisioning's
+    /// `checkout` and this removal both take the same `repo_lock`, so a
+    /// guard evaluated here cannot be invalidated between the check and
+    /// the `git worktree remove`: whichever operation wins the lock runs
+    /// atomically w.r.t. the other. The caller's guard returns `false`
+    /// once the path has been re-claimed (an in-flight provision holds a
+    /// claim on it, or a committed session now points at it), which is why
+    /// the check must live under the lock rather than at the call site.
+    pub async fn remove_by_path_if<F>(
+        &self,
+        bare_path: &Path,
+        worktree_path: &Path,
+        still_removable: F,
+    ) -> Result<bool, GitError>
+    where
+        F: FnOnce() -> bool + Send,
+    {
         let lock = repo_lock(bare_path);
         let _guard = lock.lock().await;
+        if !still_removable() {
+            // Re-claimed under the lock — the path now belongs to a live
+            // or in-flight session. Leaving it is correct; the new owner's
+            // own teardown will reclaim it later.
+            return Ok(false);
+        }
         if worktree_path.exists() {
             let result = run_git_in(
                 self.git_runner(),
@@ -1595,7 +1631,7 @@ impl WorktreeManager {
             // metadata catches up.
             let _ = run_git_in(self.git_runner(), bare_path, &["worktree", "prune"]).await;
         }
-        Ok(())
+        Ok(true)
     }
 
     /// The branch a valid managed worktree at `wt_path` currently sits on,
@@ -4012,6 +4048,61 @@ mod stalled_clone_tests {
             "retry must leave a healthy bare clone"
         );
         assert!(!partial.exists(), "stale partial must be cleared");
+    }
+}
+
+#[cfg(test)]
+mod remove_guard_tests {
+    use super::*;
+
+    // The deferred reclaim (#1132) hands a re-provision guard to
+    // `remove_by_path_if`; a vetoing guard must leave the directory
+    // untouched, because by the time the slow `rm` runs the same
+    // deterministic slug path may already belong to a fresh checkout.
+    #[tokio::test]
+    async fn a_vetoing_guard_leaves_the_worktree_on_disk() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        let bare = mgr.bare_clone_path("acme", "widgets");
+        std::fs::create_dir_all(&bare).expect("mkdir bare");
+        let wt = tmp.path().join("worktree");
+        std::fs::create_dir_all(&wt).expect("mkdir worktree");
+        std::fs::write(wt.join("payload"), b"fresh checkout").expect("write payload");
+
+        let removed = mgr
+            .remove_by_path_if(&bare, &wt, || false)
+            .await
+            .expect("guarded removal runs");
+
+        assert!(!removed, "veto reports the path was left in place");
+        assert!(
+            wt.exists(),
+            "a re-claimed path must survive the deferred rm"
+        );
+        assert!(
+            wt.join("payload").exists(),
+            "the fresh checkout's contents are untouched",
+        );
+    }
+
+    // With no veto the path is reclaimed as usual (the git remove fails
+    // on a bare that isn't a real repo, so the `rm -rf` fallback runs).
+    #[tokio::test]
+    async fn an_open_guard_reclaims_the_worktree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        let bare = mgr.bare_clone_path("acme", "widgets");
+        std::fs::create_dir_all(&bare).expect("mkdir bare");
+        let wt = tmp.path().join("worktree");
+        std::fs::create_dir_all(&wt).expect("mkdir worktree");
+
+        let removed = mgr
+            .remove_by_path_if(&bare, &wt, || true)
+            .await
+            .expect("guarded removal runs");
+
+        assert!(removed, "an open guard reports the path was reclaimed");
+        assert!(!wt.exists(), "the worktree directory is gone");
     }
 }
 

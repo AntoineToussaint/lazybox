@@ -2845,7 +2845,7 @@ impl Drop for ProvisioningWorktreeClaim {
     }
 }
 
-fn provisioning_worktree_is_claimed(config: &ServerConfig, candidate: &Path) -> bool {
+pub(crate) fn provisioning_worktree_is_claimed(config: &ServerConfig, candidate: &Path) -> bool {
     config
         .provisioning_worktree_claims
         .lock()

@@ -45,13 +45,15 @@ use std::path::{Path, PathBuf};
 
 /// The weasel phrases a review / fix / debug body may never offer as a
 /// *dismissal*. A finding is skipped only when refuted with a concrete,
-/// falsifiable failure scenario — never with one of these. This is the
-/// single written standard the toughened built-in bodies encode and the
-/// regression tests enforce (#1145), so the prompt text and the guard
-/// can't drift apart. "Out of scope" is the load-bearing one: scope is
-/// the escape hatch the agent reaches for most, so the bodies redefine
-/// scope as "everything the change touches and everything that breaks
-/// because of it" rather than accepting it as a reason to stop.
+/// falsifiable failure scenario — never with one of these. The standard
+/// itself lives in the prose of the toughened built-in bodies; this list
+/// is the regression tests' mirror of it (#1145), the oracle they check
+/// the bodies against so the prompt text and the guard can't drift apart —
+/// which is why it is `#[cfg(test)]`, not shipped code. "Out of scope" is
+/// the load-bearing one: scope is the escape hatch the agent reaches for
+/// most, so the bodies redefine scope as "everything the change touches
+/// and everything that breaks because of it" rather than accepting it as
+/// a reason to stop.
 #[cfg(test)]
 const BANNED_DISMISSALS: &[&str] = &[
     "out of scope",
@@ -1804,6 +1806,70 @@ snippets:
                 .body
                 .contains("not an acceptable output"),
             "fixall must reject producing a list instead of applying the fixes",
+        );
+    }
+
+    /// The priority three are exempt from the library-wide
+    /// `no_soft_body_offers_a_banned_dismissal` guard precisely because they
+    /// *quote* the weasel phrases in order to forbid them — and that
+    /// exemption is the weakest point in the whole guard (#1145 self-review):
+    /// a future edit could reuse an enumerated phrase as a real dismissal
+    /// ("skip anything genuinely out of scope") while leaving the ban list
+    /// intact, and the wholesale allowlist would wave it straight through.
+    /// Close the gap: in a priority body each banned phrase may appear **at
+    /// most once** — quoted the single time it is forbidden, or (for
+    /// deepreview's #924 cautionary line) warned against. A second occurrence
+    /// is the detectable signature of a phrase being *used* rather than
+    /// banned, and fails here instead of silently in production.
+    ///
+    /// This catches a repeat, not a first-and-only soft use of a phrase the
+    /// body doesn't already list; that residual needs a human reviewer, but
+    /// every enumerated phrase is already present once, so any soft reuse of
+    /// one becomes a second occurrence and is caught.
+    #[test]
+    fn priority_bodies_never_repeat_a_banned_phrase() {
+        for key in ["rev", "deepreview", "fixall"] {
+            let body = Snippets::builtin()
+                .get(key)
+                .expect("ships built-in")
+                .body
+                .to_ascii_lowercase();
+            for phrase in BANNED_DISMISSALS {
+                let count = body.matches(*phrase).count();
+                assert!(
+                    count <= 1,
+                    "`{key}` contains the banned phrase `{phrase}` {count} times — in a \
+                     priority body a weasel phrase is quoted at most once, where it is \
+                     forbidden; a repeat is the signature of it being used as an actual \
+                     dismissal rather than banned (#1145)",
+                );
+            }
+        }
+    }
+
+    /// The house-style section of `docs/snippets.md` reproduces the built-in
+    /// `rev` body and calls it "the built-in `rev`", so the doc and the code
+    /// can drift apart silently — the exact gap the #1145 self-review
+    /// flagged. Pin them: the doc must contain the shipped `rev` body
+    /// word-for-word (whitespace normalized, since the doc reflows it into a
+    /// YAML block). Editing the body without refreshing the example — or the
+    /// reverse — fails here instead of leaving the docs quietly wrong.
+    #[test]
+    fn docs_snippets_rev_example_matches_the_shipped_body() {
+        const DOC: &str = include_str!("../../../docs/snippets.md");
+        // The doc wraps the body across indented lines; collapsing every
+        // whitespace run to a single space on both sides makes the body a
+        // contiguous substring of the doc iff the words match exactly.
+        fn collapse(s: &str) -> String {
+            s.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let b = Snippets::builtin();
+        let body = &b.get("rev").expect("ships built-in").body;
+        assert!(
+            collapse(DOC).contains(&collapse(body)),
+            "the `rev` example in docs/snippets.md no longer matches the shipped \
+             built-in `rev` body — refresh the example so the documented prompt can't \
+             drift from the real one (#1145)",
         );
     }
 

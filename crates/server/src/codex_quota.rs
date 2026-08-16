@@ -24,7 +24,7 @@
 //! `Event::AgentProviderQuota { agent_id: "codex", .. }` when it changes.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
 use lazybox_ipc::{ProviderQuota, QuotaWindow};
@@ -37,6 +37,13 @@ const CODEX_AGENT_ID: &str = "codex";
 /// `token_count` event per turn, so a slow poll keeps the widget fresh
 /// without watching the file; the quota only changes when Codex runs.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How much of the newest rollout file to read, from the end. Codex writes a
+/// `token_count` event every turn, so the last populated `rate_limits` line
+/// sits comfortably within the final stretch; reading only the tail bounds
+/// each poll's IO regardless of a long session's total size (rollout files
+/// grow into the tens of MB), instead of re-reading the whole file.
+const TAIL_BYTES: u64 = 256 * 1024;
 
 /// Parse one session-log line into a [`ProviderQuota`]. Returns `None` for a
 /// line that is not a `token_count` event, carries no populated window, or
@@ -82,18 +89,47 @@ fn window(value: Option<&serde_json::Value>, stamped: Option<i64>) -> Option<Quo
     })
 }
 
-/// The most recent populated quota in `sessions_dir`, scanning the newest
-/// rollout file from the end. `None` when the directory is absent, empty, or
+/// The most recent populated quota in `sessions_dir`, scanning only the tail
+/// of the newest rollout file. `None` when the directory is absent, empty, or
 /// carries no windowed limit (a credits-only plan).
 pub fn read_latest_quota(sessions_dir: &Path) -> Option<ProviderQuota> {
-    let newest = newest_session_file(sessions_dir)?;
-    let contents = std::fs::read_to_string(&newest).ok()?;
-    contents.lines().rev().find_map(parse_session_line)
+    let (newest, _mtime) = newest_session_file(sessions_dir)?;
+    read_quota_from_tail(&newest)
+}
+
+/// Read the last [`TAIL_BYTES`] of `path` and return the newest populated
+/// quota in it, scanning complete lines from the end. Bounds the read so a
+/// multi-megabyte rollout doesn't get slurped whole every poll. `None` if the
+/// tail carries no populated `rate_limits` line.
+fn read_quota_from_tail(path: &Path) -> Option<ProviderQuota> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    // When we started mid-file the first line is very likely a fragment of a
+    // larger line; skip past the first newline so we never hand a truncated
+    // JSON object to the parser. At offset 0 the whole file is present, so
+    // the first line is real and we keep it.
+    let scan: &str = if start > 0 {
+        match text.find('\n') {
+            Some(i) => &text[i + 1..],
+            None => "",
+        }
+    } else {
+        &text
+    };
+    scan.lines().rev().find_map(parse_session_line)
 }
 
 /// The most-recently-modified `rollout-*.jsonl` under `sessions_dir`
-/// (recursively — Codex nests them under `YYYY/MM/DD/`).
-fn newest_session_file(sessions_dir: &Path) -> Option<PathBuf> {
+/// (recursively — Codex nests them under `YYYY/MM/DD/`), paired with its
+/// modification time so a caller can skip re-reading an unchanged file.
+fn newest_session_file(sessions_dir: &Path) -> Option<(PathBuf, SystemTime)> {
     fn walk(dir: &Path, best: &mut Option<(std::time::SystemTime, PathBuf)>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -116,7 +152,38 @@ fn newest_session_file(sessions_dir: &Path) -> Option<PathBuf> {
     }
     let mut best = None;
     walk(sessions_dir, &mut best);
-    best.map(|(_, path)| path)
+    best.map(|(mtime, path)| (path, mtime))
+}
+
+/// One poll's outcome against the last-seen newest-file mtime.
+enum QuotaPoll {
+    /// No rollout file exists yet.
+    Absent,
+    /// The newest file's mtime matches the previous poll — nothing re-read.
+    Unchanged,
+    /// The newest file is new or changed since the last poll: its mtime, and
+    /// the quota its tail carries (`None` if no populated window is present).
+    Fresh {
+        mtime: SystemTime,
+        quota: Option<ProviderQuota>,
+    },
+}
+
+/// Locate the newest rollout file and, only when its mtime differs from
+/// `since`, read its tail for the latest quota. Skipping the read on an
+/// unchanged mtime is the common case — the poll loop runs forever, but the
+/// quota only moves while Codex is actively writing.
+fn poll_quota(sessions_dir: &Path, since: Option<SystemTime>) -> QuotaPoll {
+    let Some((newest, mtime)) = newest_session_file(sessions_dir) else {
+        return QuotaPoll::Absent;
+    };
+    if Some(mtime) == since {
+        return QuotaPoll::Unchanged;
+    }
+    QuotaPoll::Fresh {
+        mtime,
+        quota: read_quota_from_tail(&newest),
+    }
 }
 
 /// The default Codex sessions directory, `~/.codex/sessions`.
@@ -138,14 +205,19 @@ pub fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHandle<()>
     let bus = config.bus.clone();
     Some(tokio::spawn(async move {
         let mut last: Option<ProviderQuota> = None;
+        let mut last_mtime: Option<SystemTime> = None;
         let mut ticker = tokio::time::interval(POLL_INTERVAL);
         loop {
             ticker.tick().await;
             let dir = sessions_dir.clone();
-            let quota = tokio::task::spawn_blocking(move || read_latest_quota(&dir))
+            let since = last_mtime;
+            let poll = tokio::task::spawn_blocking(move || poll_quota(&dir, since))
                 .await
-                .ok()
-                .flatten();
+                .unwrap_or(QuotaPoll::Absent);
+            let QuotaPoll::Fresh { mtime, quota } = poll else {
+                continue;
+            };
+            last_mtime = Some(mtime);
             if let Some(quota) = quota
                 && last.as_ref() != Some(&quota)
             {
@@ -209,5 +281,56 @@ mod tests {
         std::fs::write(&file, format!("{older}\n{newer}\n")).unwrap();
         let quota = read_latest_quota(dir.path()).expect("quota from newest file");
         assert_eq!(quota.five_hour.unwrap().utilization_bp, 8000);
+    }
+
+    #[test]
+    fn poll_skips_reread_when_mtime_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("2026/08/10");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("rollout-2026-08-10T00-00-00-abc.jsonl");
+        let line = r#"{"timestamp":"2026-08-10T00:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":42.0,"resets_in_seconds":60},"secondary":null}}}"#;
+        std::fs::write(&file, format!("{line}\n")).unwrap();
+
+        // First poll (no prior mtime) reads the file and reports the quota.
+        let QuotaPoll::Fresh { mtime, quota } = poll_quota(dir.path(), None) else {
+            panic!("first poll should be Fresh");
+        };
+        assert_eq!(quota.unwrap().five_hour.unwrap().utilization_bp, 4200);
+
+        // Second poll with the same mtime skips the read entirely.
+        assert!(
+            matches!(poll_quota(dir.path(), Some(mtime)), QuotaPoll::Unchanged),
+            "an unchanged mtime must not re-read the file"
+        );
+
+        // A stale `since` (older than the file) forces a re-read.
+        assert!(
+            matches!(
+                poll_quota(dir.path(), Some(SystemTime::UNIX_EPOCH)),
+                QuotaPoll::Fresh { .. }
+            ),
+            "a differing mtime must re-read"
+        );
+    }
+
+    #[test]
+    fn poll_reports_absent_without_any_rollout_file() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(poll_quota(dir.path(), None), QuotaPoll::Absent));
+    }
+
+    #[test]
+    fn tail_read_finds_the_last_line_past_a_leading_fragment() {
+        // A newest line whose byte offset forces the tail window to begin in
+        // the middle of an earlier, oversized line. The leading fragment must
+        // be discarded (not mis-parsed) and the real last line still found.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("rollout-2026-08-10T00-00-00-big.jsonl");
+        let filler = format!("{}\n", "x".repeat((TAIL_BYTES as usize) + 4_096));
+        let newest = r#"{"timestamp":"2026-08-10T00:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":77.0,"resets_in_seconds":60},"secondary":null}}}"#;
+        std::fs::write(&file, format!("{filler}{newest}\n")).unwrap();
+        let quota = read_quota_from_tail(&file).expect("quota from tail");
+        assert_eq!(quota.five_hour.unwrap().utilization_bp, 7700);
     }
 }

@@ -922,7 +922,7 @@ pub(super) const FRAME_BUDGET: Duration = Duration::from_millis(50);
 /// ~512 KiB is several full-screen frames of headroom — enough to ride out
 /// a brief write stall without skipping, but bounded so a wedged terminal
 /// can't grow the queue without limit.
-const RENDER_BACKPRESSURE_CAP: usize = 512 * 1024;
+pub(super) const RENDER_BACKPRESSURE_CAP: usize = 512 * 1024;
 
 /// Minimum spacing between watchdog warn lines. A pathological case
 /// (every iteration slow) logs a summary once a second instead of
@@ -1288,6 +1288,169 @@ pub(super) fn wait_for_wake(
     })
 }
 
+/// What the non-blocking work phase of one `run_loop` iteration reported
+/// back to the caller.
+pub(super) struct StepOutcome {
+    /// The bounded drain left an un-dispatched tail (or the channel still
+    /// held events) — the run loop uses this to service a queued key
+    /// without blocking and loop straight back for the rest.
+    pub(super) had_backlog: bool,
+    /// The pending paint was skipped *only* because the off-thread render
+    /// writer was backed up past `RENDER_BACKPRESSURE_CAP` — `model.redraw`
+    /// stays set and `redraw_is_input` is preserved. This is the #1120
+    /// anti-freeze signal: a slow terminal must cause frame-skipping here,
+    /// never a stalled loop.
+    pub(super) skipped_for_backpressure: bool,
+}
+
+/// Steps 1–4 of `run_loop`: drain daemon events, run the periodic ticks,
+/// process tuirealm messages, pre-dispatch buffered input (#1134), then
+/// render-or-skip. Factored out of the loop body — strictly
+/// behavior-preserving — so a test can pump one iteration with a backed-up
+/// writer and assert the paint is skipped while the loop stays live (the
+/// modal timeout still fires). `timings` is threaded in rather than created
+/// fresh: it already carries the previous wake's `dispatch` stamp, and this
+/// phase adds `drain`/`ticks`/`messages`/`dispatch`/`render` for the watchdog
+/// to read. `input_rx`/`stale_tally`/`perf` are threaded through solely for
+/// the step-3b input-priority pre-dispatch, which is a no-op unless a
+/// terminal is focused with no modal up — so a test with a modal mounted
+/// never touches `input_rx`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run_loop_step<T: TerminalAdapter>(
+    model: &mut Model<T>,
+    carried: &mut Vec<IpcEvent>,
+    input_rx: &mut tokio::sync::mpsc::Receiver<TimedInput>,
+    stale_tally: &mut StaleInputTally,
+    perf: &mut PerfMonitor,
+    render_throttle: &mut RenderThrottle,
+    redraw_is_input: &mut bool,
+    timings: &mut PhaseTimings,
+) -> StepOutcome {
+    // 1. Drain inbound daemon events — BOUNDED so heavy PTY output
+    // can never starve keyboard input, and yielding the instant a
+    // keystroke lands so it never waits out a burst's tail (see
+    // `drain_daemon_events`).
+    let drain_start = std::time::Instant::now();
+    let had_backlog = drain_daemon_events(model, carried, || !input_rx.is_empty());
+    timings.drain = drain_start.elapsed();
+
+    // 2. Polling-modal spinner heartbeat + retryable notice fade.
+    let ticks_start = std::time::Instant::now();
+    if let Some(msg) = model.polling_tick() {
+        model.dismiss_polling();
+        model.update(msg);
+    }
+    model.tick_notice();
+    model.tick_remote_notices();
+    model.tick_tips();
+    model.tick_right();
+    model.tick_working();
+    model.tick_terminal_leader();
+    model.tick_terminal_drag();
+    model.tick_mouse_capture();
+    // Surface a dead daemon channel within a frame of the first
+    // failed `send_cmd` — without this a `--connect` client whose
+    // daemon died keeps rendering as if everything works while
+    // every keypress silently goes nowhere.
+    model.tick_daemon_health();
+    timings.ticks = ticks_start.elapsed();
+
+    // 3. Process tuirealm-side messages (timer ticks for Loading,
+    // injected modal keys). Non-blocking — listener thread already
+    // queued any work it had.
+    let messages_start = std::time::Instant::now();
+    if let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO)) {
+        if !messages.is_empty() {
+            model.redraw = true;
+            for msg in messages {
+                model.update(msg);
+            }
+        }
+    }
+    timings.messages = messages_start.elapsed();
+
+    // A modal key just forwarded to the listener is delivered
+    // asynchronously and may mutate the modal without producing a
+    // `Msg` (Confirm arrows, Input typing). Re-render across the
+    // short window armed by `forward_modal_event` so the change
+    // shows up without blocking on it above.
+    if model.modal_redraw_pending() {
+        model.redraw = true;
+        // A modal key the user just pressed — paint it without
+        // waiting on the background frame cap.
+        *redraw_is_input = true;
+    }
+
+    // 3b. Input-priority (#1134): forward buffered keystrokes to the
+    // PTY *before* the expensive `!Send` terminal build in step 4, so a
+    // key that landed during a heavy agent redraw reaches the process
+    // this frame instead of waiting the build out. See
+    // `drain_priority_input`.
+    drain_priority_input(model, input_rx, stale_tally, perf, timings, redraw_is_input);
+
+    // 4. Render if dirty — before the blocking input read so the
+    // user sees their last action immediately. Background-driven
+    // frames (daemon output, spinner ticks) and high-rate mouse-wheel
+    // scroll are coalesced to one display refresh so neither an output
+    // flood nor a trackpad flick can saturate the render path;
+    // discrete input (keystrokes, clicks) bypasses the cap and paints
+    // at once. A frame the throttle defers keeps `model.redraw` set,
+    // so it paints on the next eligible iteration (≤ one refresh away).
+    // Whether a pending redraw was skipped this iteration *only* because
+    // the async writer was backed up. When so, we must NOT consume
+    // `redraw_is_input` below — the keystroke that armed the immediate
+    // paint hasn't been painted yet, and dropping its input-priority
+    // would route the deferred repaint through the background throttle,
+    // adding a visible ~refresh of lag after the key (#1090 finding #6).
+    let mut skipped_for_backpressure = false;
+    if model.redraw {
+        // Async-render backpressure (#1090): while the off-thread
+        // writer is behind — a slow terminal accepting the previous
+        // frames — skip generating a new frame instead of piling more
+        // diffs onto it. `redraw` stays set, so we paint the moment it
+        // drains; coalescing happens at the frame boundary, so ratatui's
+        // previous-frame state stays exactly the last frame we sent and
+        // no diff is ever split or lost. `None` (headless test model,
+        // which has no writer) never skips.
+        let writer_behind = model.render_pending.as_ref().is_some_and(|pending| {
+            pending.load(std::sync::atomic::Ordering::Acquire) > RENDER_BACKPRESSURE_CAP
+        });
+        skipped_for_backpressure = writer_behind;
+        let now = std::time::Instant::now();
+        if !writer_behind && render_throttle.should_render(now, *redraw_is_input) {
+            // Per-frame timing log behind the `lazybox=debug`
+            // filter. Lets us see in `/tmp/lazybox.log` whether a
+            // slow scroll is the render itself (would show large
+            // `frame_ms`) versus daemon round-trips between
+            // renders. Cheap — `Instant::now` is ~10ns and
+            // `tracing::debug!` is a no-op when the level isn't on.
+            model.view();
+            timings.render = now.elapsed();
+            // Split render into build (CPU) vs flush (terminal-write
+            // I/O), stamped by `view()` — so an over-budget "render"
+            // reveals whether the UI was expensive to build or the
+            // terminal write blocked the thread (#1090 / audit R-0).
+            timings.render_build = model.last_render_build;
+            timings.render_flush = model.last_render_flush;
+            let elapsed_ms = timings.render.as_micros() as f32 / 1000.0;
+            tracing::debug!(frame_ms = elapsed_ms, "render");
+            model.redraw = false;
+            render_throttle.record(now);
+        }
+    }
+    // Consume the one-shot input flag — unless the frame was held back
+    // purely by writer backpressure, in which case it must survive to
+    // the next iteration so the deferred paint stays immediate (#6).
+    if !skipped_for_backpressure {
+        *redraw_is_input = false;
+    }
+
+    StepOutcome {
+        had_backlog,
+        skipped_for_backpressure,
+    }
+}
+
 fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     let rt = LoopRuntime::acquire()?;
     let mut input_rx = spawn_input_reader()?;
@@ -1316,131 +1479,28 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     // watchdog reads it.
     let mut timings = PhaseTimings::default();
     while !model.quit {
-        // 1. Drain inbound daemon events — BOUNDED so heavy PTY output
-        // can never starve keyboard input, and yielding the instant a
-        // keystroke lands so it never waits out a burst's tail (see
-        // `drain_daemon_events`).
-        let drain_start = std::time::Instant::now();
-        let had_backlog = drain_daemon_events(model, &mut carried, || !input_rx.is_empty());
-        timings.drain = drain_start.elapsed();
-
-        // 2. Polling-modal spinner heartbeat + retryable notice fade.
-        let ticks_start = std::time::Instant::now();
-        if let Some(msg) = model.polling_tick() {
-            model.dismiss_polling();
-            model.update(msg);
-        }
-        model.tick_notice();
-        model.tick_remote_notices();
-        model.tick_tips();
-        model.tick_right();
-        model.tick_working();
-        model.tick_terminal_leader();
-        model.tick_terminal_drag();
-        model.tick_mouse_capture();
-        // Surface a dead daemon channel within a frame of the first
-        // failed `send_cmd` — without this a `--connect` client whose
-        // daemon died keeps rendering as if everything works while
-        // every keypress silently goes nowhere.
-        model.tick_daemon_health();
-        timings.ticks = ticks_start.elapsed();
-
-        // 3. Process tuirealm-side messages (timer ticks for Loading,
-        // injected modal keys). Non-blocking — listener thread already
-        // queued any work it had.
-        let messages_start = std::time::Instant::now();
-        if let Ok(messages) = model.app.tick(PollStrategy::Once(Duration::ZERO)) {
-            if !messages.is_empty() {
-                model.redraw = true;
-                for msg in messages {
-                    model.update(msg);
-                }
-            }
-        }
-        timings.messages = messages_start.elapsed();
-
-        // A modal key just forwarded to the listener is delivered
-        // asynchronously and may mutate the modal without producing a
-        // `Msg` (Confirm arrows, Input typing). Re-render across the
-        // short window armed by `forward_modal_event` so the change
-        // shows up without blocking on it above.
-        if model.modal_redraw_pending() {
-            model.redraw = true;
-            // A modal key the user just pressed — paint it without
-            // waiting on the background frame cap.
-            redraw_is_input = true;
-        }
-
-        // 3b. Input-priority (#1134): forward buffered keystrokes to the
-        // PTY *before* the expensive `!Send` terminal build in step 4, so a
-        // key that landed during a heavy agent redraw reaches the process
-        // this frame instead of waiting the build out. See
-        // `drain_priority_input`.
-        drain_priority_input(
+        // Steps 1–4 (drain → periodic ticks → `app.tick` → input-priority
+        // pre-dispatch → render-or-skip) are the non-blocking work phase,
+        // extracted so a test can pump a single iteration and assert the
+        // anti-freeze invariant (a slow terminal skips the paint, never
+        // stalls the loop). Everything past it is the blocking wait.
+        // The loop only needs the backlog signal for its wake decision
+        // below; `skipped_for_backpressure` is fully consumed inside the step
+        // (it gates the `redraw_is_input` carry) and is surfaced on the
+        // return purely so `run_loop_step`'s regression test can assert it.
+        let StepOutcome {
+            had_backlog,
+            skipped_for_backpressure: _skipped,
+        } = run_loop_step(
             model,
+            &mut carried,
             &mut input_rx,
             &mut stale_tally,
             &mut perf,
-            &mut timings,
+            &mut render_throttle,
             &mut redraw_is_input,
+            &mut timings,
         );
-
-        // 4. Render if dirty — before the blocking input read so the
-        // user sees their last action immediately. Background-driven
-        // frames (daemon output, spinner ticks) and high-rate mouse-wheel
-        // scroll are coalesced to one display refresh so neither an output
-        // flood nor a trackpad flick can saturate the render path;
-        // discrete input (keystrokes, clicks) bypasses the cap and paints
-        // at once. A frame the throttle defers keeps `model.redraw` set,
-        // so it paints on the next eligible iteration (≤ one refresh away).
-        // Whether a pending redraw was skipped this iteration *only* because
-        // the async writer was backed up. When so, we must NOT consume
-        // `redraw_is_input` below — the keystroke that armed the immediate
-        // paint hasn't been painted yet, and dropping its input-priority
-        // would route the deferred repaint through the background throttle,
-        // adding a visible ~refresh of lag after the key (#1090 finding #6).
-        let mut skipped_for_backpressure = false;
-        if model.redraw {
-            // Async-render backpressure (#1090): while the off-thread
-            // writer is behind — a slow terminal accepting the previous
-            // frames — skip generating a new frame instead of piling more
-            // diffs onto it. `redraw` stays set, so we paint the moment it
-            // drains; coalescing happens at the frame boundary, so ratatui's
-            // previous-frame state stays exactly the last frame we sent and
-            // no diff is ever split or lost. `None` (headless test model,
-            // which has no writer) never skips.
-            let writer_behind = model.render_pending.as_ref().is_some_and(|pending| {
-                pending.load(std::sync::atomic::Ordering::Acquire) > RENDER_BACKPRESSURE_CAP
-            });
-            skipped_for_backpressure = writer_behind;
-            let now = std::time::Instant::now();
-            if !writer_behind && render_throttle.should_render(now, redraw_is_input) {
-                // Per-frame timing log behind the `lazybox=debug`
-                // filter. Lets us see in `/tmp/lazybox.log` whether a
-                // slow scroll is the render itself (would show large
-                // `frame_ms`) versus daemon round-trips between
-                // renders. Cheap — `Instant::now` is ~10ns and
-                // `tracing::debug!` is a no-op when the level isn't on.
-                model.view();
-                timings.render = now.elapsed();
-                // Split render into build (CPU) vs flush (terminal-write
-                // I/O), stamped by `view()` — so an over-budget "render"
-                // reveals whether the UI was expensive to build or the
-                // terminal write blocked the thread (#1090 / audit R-0).
-                timings.render_build = model.last_render_build;
-                timings.render_flush = model.last_render_flush;
-                let elapsed_ms = timings.render.as_micros() as f32 / 1000.0;
-                tracing::debug!(frame_ms = elapsed_ms, "render");
-                model.redraw = false;
-                render_throttle.record(now);
-            }
-        }
-        // Consume the one-shot input flag — unless the frame was held back
-        // purely by writer backpressure, in which case it must survive to
-        // the next iteration so the deferred paint stays immediate (#6).
-        if !skipped_for_backpressure {
-            redraw_is_input = false;
-        }
 
         // Emit any OSC desktop notifications queued during this iteration's
         // drain. Routed through the render writer (not stdout directly) so

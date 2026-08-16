@@ -6187,6 +6187,96 @@ mod wake_burst_liveness_tests {
             "Esc cleared the modal with the burst tail still queued — not by draining it first",
         );
     }
+
+    /// #1146 (follow-up to #1131): the tests above hand-drive `app.tick` and
+    /// `drain_daemon_events` directly, so a revert of #1120's async-render /
+    /// backpressure-skip — the actual anti-freeze fix — leaves them green.
+    /// This one runs the REAL work phase of `run_loop` (`run_loop_step`, steps
+    /// 1–4) with the off-thread render writer wedged past the backpressure cap
+    /// and asserts the invariant that fix guards: a slow terminal makes the
+    /// loop SKIP the paint (`skipped_for_backpressure`, `model.redraw`
+    /// preserved), never block on `model.view()` — and because the paint is
+    /// skipped rather than stalled, the mounted `Loading` modal's own tick
+    /// still fires its timeout and the model pops it. A revert of #1120 (paint
+    /// unconditionally instead of skipping) fails the skip / redraw-preserved
+    /// assertions.
+    #[test]
+    fn run_loop_step_skips_paint_under_writer_backpressure_yet_modal_still_times_out() {
+        use super::super::helpers::{
+            PerfMonitor, PhaseTimings, RENDER_BACKPRESSURE_CAP, RenderThrottle, StaleInputTally,
+            TimedInput, run_loop_step,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+
+        // Modal awaits a value that never lands (producer alive but silent),
+        // with a tiny timeout so its liveness backstop crosses on the first
+        // real listener tick instead of waiting out the production 60s.
+        let (loading, _never_sends) = Loading::pending("waking…");
+        let loading = loading.timeout(Duration::from_millis(1));
+        m.mount_modal(Id::Setup, loading);
+
+        // The #1131 signal — an overflow backlog queued behind the modal …
+        overflow_burst(&evt_tx, burst_over_one_tick());
+        // … and the off-thread render writer backed up past the cap: a slow
+        // terminal that has stopped draining frames. `run_loop_step` must
+        // treat this as writer-behind and skip the paint every iteration.
+        m.render_pending = Some(Arc::new(AtomicUsize::new(RENDER_BACKPRESSURE_CAP + 1)));
+        assert!(m.redraw, "a fresh model has a paint pending");
+
+        let mut carried = Vec::new();
+        let mut throttle = RenderThrottle::default();
+        let mut redraw_is_input = false;
+        let mut timings = PhaseTimings::default();
+        // The step-3b input-priority pre-dispatch (#1134) is threaded through
+        // but inert here: a modal is mounted, so its `modal_stack.is_empty()`
+        // gate is false and it never reads `input_rx`. An empty channel (its
+        // sender kept alive) stands in for "no host input pending".
+        let (_input_tx, mut input_rx) = tokio::sync::mpsc::channel::<TimedInput>(4);
+        let mut stale_tally = StaleInputTally::default();
+        let mut perf = PerfMonitor::new();
+
+        // Pump the real work phase one iteration at a time — exactly what the
+        // run loop does between waits.
+        let mut saw_backpressure_skip = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while m.top_modal().is_some() && std::time::Instant::now() < deadline {
+            let outcome = run_loop_step(
+                &mut m,
+                &mut carried,
+                &mut input_rx,
+                &mut stale_tally,
+                &mut perf,
+                &mut throttle,
+                &mut redraw_is_input,
+                &mut timings,
+            );
+            if outcome.skipped_for_backpressure {
+                saw_backpressure_skip = true;
+                // The anti-freeze itself: the paint was deferred, not run.
+                assert!(
+                    m.redraw,
+                    "a backpressure skip must preserve the pending redraw, not clear it",
+                );
+            }
+        }
+
+        assert!(
+            saw_backpressure_skip,
+            "a wedged render writer must make the loop skip the paint (the #1120 anti-freeze)",
+        );
+        assert!(
+            m.redraw,
+            "the paint stayed deferred the whole time the writer was wedged — never executed",
+        );
+        assert!(
+            m.top_modal().is_none(),
+            "the modal's own tick timed out and the model popped it while the paint was starved — \
+             a skipped frame, not a stalled loop",
+        );
+    }
 }
 
 #[cfg(test)]

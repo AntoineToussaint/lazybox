@@ -2012,7 +2012,6 @@ async fn handle_spawn_inner(
     if let (Some(prompt), Some(agent)) = (initial_prompt, &agent_for_inject) {
         let requires_ready = agent.pty_protocol().requires_ready();
         let encoded_prompt = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
-        let initial_write_len = encoded_prompt.initial_write_len();
         let backend_key = backend_key.clone();
         let id = terminal_id;
         let first_output = first_output_signal_for_inject;
@@ -2020,158 +2019,23 @@ async fn handle_spawn_inner(
         let t0_for_inject = t0;
         let config_for_inject = config.clone();
         tokio::spawn(async move {
-            // Wait for the agent's input box to be drawn AND no
-            // permission gate to be up — i.e. "the agent is genuinely
-            // ready to receive a pasted prompt." The pump task fires
-            // `ready_signal` exactly once when `Agent::
-            // detect_ready_for_prompt` first returns true. This is
-            // strictly tighter than the previous "wait for not-
-            // Asking" approach: the loose Asking detector matched
-            // a normal idle screen and made the wait spin
-            // the full deadline before every inject.
-            //
-            // Fallback ladder (each step has its own deadline):
-            //   1. ready_signal — preferred path, fires within
-            //      seconds of the agent finishing its banner.
-            //   2. first_output + SETTLE — for agents whose
-            //      detector never reports ready (default impl),
-            //      we still write 600ms past first byte. Agents
-            //      with an authoritative readiness detector
-            //      (`PtyProtocol::requires_ready`) SKIP this rung — a
-            //      blind settle-write would land the paste in
-            //      a folder-trust prompt if it's still up.
-            //   3. HARD_DEADLINE — last resort, inject blindly so
-            //      a cold-start hang doesn't silently lose the
-            //      user's prompt.
-            const HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-            const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
-            tracing::info!(
-                terminal_id = ?id,
-                initial_write_len,
-                "initial_prompt: waiting for agent ready signal",
-            );
-
-            let trigger = await_inject_window(
-                requires_ready,
-                &ready_signal,
-                &first_output,
-                HARD_DEADLINE,
-                SETTLE,
-            )
-            .await;
-            // The deadline rung means `ready` never fired within
-            // HARD_DEADLINE. For an agent with an authoritative readiness
-            // detector that does NOT mean "safe to paste": under
-            // many concurrent spawns the pump lags behind the deadline, or
-            // the agent is still parked on a boot-time gate (folder-trust /
-            // login / bypass chooser). A blind paste here lands the
-            // work-context prompt in a half-drawn screen or, with its
-            // follow-up `\r`, ANSWERS the gate with it — the prompt is lost
-            // and the user has no signal it happened. So instead of dropping
-            // (the old `GATE_CAP` path) or pasting blindly, keep the prompt
-            // pending and deliver it the moment the agent genuinely reaches
-            // ready, bounded by terminal liveness AND `PENDING_READY_CAP` —
-            // a flaky readiness detector must not silently turn the inject
-            // into an unbounded wait (issue #425). The bare-deadline
-            // blind paste is kept for detector-less agents (`requires_ready`
-            // false), whose `ready` signal never fires — losing the prompt
-            // to a cold-start hang is worse there than a best-effort paste.
-            if trigger == InjectTrigger::Deadline && requires_ready {
-                let pending_t0 = std::time::Instant::now();
-                match await_pending_ready(
-                    id,
-                    &ready_signal,
-                    &config_for_inject.terminal.terminals,
-                    PENDING_READY_CAP,
-                )
-                .await
-                {
-                    PendingReady::Ready => {
-                        tracing::info!(
-                            terminal_id = ?id,
-                            waited_ms = pending_t0.elapsed().as_millis(),
-                            "initial_prompt: agent reached ready past the hard deadline",
-                        );
-                    }
-                    PendingReady::TerminalGone => {
-                        tracing::warn!(
-                            terminal_id = ?id,
-                            "initial_prompt: terminal exited before the agent became ready — work prompt not delivered"
-                        );
-                        let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
-                            terminal_id: id,
-                            message: "agent never became ready — press w again to retry".into(),
-                        });
-                        return;
-                    }
-                    PendingReady::Capped => {
-                        tracing::warn!(
-                            terminal_id = ?id,
-                            waited_ms = pending_t0.elapsed().as_millis(),
-                            "initial_prompt: agent never reported ready within the bounded wait — work prompt not delivered"
-                        );
-                        let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
-                            terminal_id: id,
-                            message: format!(
-                                "agent did not become ready within {}s — press w again to retry",
-                                (HARD_DEADLINE + PENDING_READY_CAP).as_secs()
-                            ),
-                        });
-                        return;
-                    }
-                }
-            }
-            tracing::info!(
-                terminal_id = ?id,
-                initial_write_len,
-                ?trigger,
-                elapsed_ms = t0_for_inject.elapsed().as_millis(),
-                "initial_prompt: inject window cleared — writing prompt sequence to backend",
-            );
-            let Some(interaction) =
-                terminal_io::acquire_live(&config_for_inject, id, &backend_key).await
-            else {
-                tracing::warn!(
-                    terminal_id = ?id,
-                    "initial_prompt: terminal exited before the prompt interaction began"
-                );
-                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
-                    terminal_id: id,
-                    message: "agent terminal closed before the work prompt landed — press w again to retry"
-                        .into(),
-                });
-                return;
-            };
-            match write_prompt_sequence(
+            let outcome = run_spawn_inject(
                 &config_for_inject,
                 id,
                 &backend_key,
+                requires_ready,
                 encoded_prompt,
-                true,
-                interaction,
+                &ready_signal,
+                &first_output,
+                t0_for_inject,
             )
-            .await
-            {
-                Ok(_) => {}
-                Err(PromptWriteError::Initial(e)) => {
-                    tracing::warn!(terminal_id = ?id, "initial_prompt: initial write failed: {e}");
-                    let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
-                        terminal_id: id,
-                        message: format!(
-                            "work prompt was not delivered ({e}) — press w again to retry"
-                        ),
-                    });
-                }
-                Err(PromptWriteError::Submit(e)) => {
-                    tracing::warn!(terminal_id = ?id, "initial_prompt: submit failed: {e}");
-                    let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
-                        terminal_id: id,
-                        message: format!(
-                            "work prompt was pasted but could not be submitted ({e}) — open the terminal and press Enter"
-                        ),
-                    });
-                }
-            }
+            .await;
+            tracing::info!(
+                terminal_id = ?id,
+                ?outcome,
+                elapsed_ms = t0_for_inject.elapsed().as_millis(),
+                "initial_prompt: spawn-time inject finished",
+            );
         });
     }
     Some(terminal_id)
@@ -2216,6 +2080,210 @@ async fn cancel_spawn_for_deleted_workspace(
         ));
     }
     true
+}
+
+/// Terminal outcome of one spawn-time prompt injection. The injector
+/// task used to be fire-and-forget — silent on success, a
+/// `TerminalInputRejected` on failure — so a caller (or a test) had no
+/// single value to observe. Every spawn-time inject now resolves to
+/// exactly one of these, independent of any other concurrent inject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InjectOutcome {
+    /// Prompt pasted AND submission confirmed — the composer cleared into
+    /// a turn (a `Working` transition or the `UserPromptSubmit` hook).
+    Submitted,
+    /// Prompt pasted into the composer but submission stayed unconfirmed
+    /// after the bounded Enter resends — a human must finish it. A loud
+    /// `TerminalInputRejected` was already surfaced by the confirm loop.
+    NeedsHuman,
+    /// Delivery failed before the prompt landed (agent never became
+    /// ready, the terminal exited, or the write itself failed). The
+    /// reason was surfaced to the client.
+    Failed,
+}
+
+/// Drive one spawn-time prompt injection through its explicit stages to a
+/// single [`InjectOutcome`].
+///
+/// Self-contained per terminal: the only inputs are this terminal's own
+/// `ready_signal` / `first_output` one-shots (fired by its own output
+/// pump) and its backend key. No mutable timing state is shared with any
+/// other injection, so N concurrent `run_spawn_inject` flows are fully
+/// independent and order-independent — the outcome of one never depends
+/// on how another interleaves.
+///
+/// The stages are explicit, each gated by an acknowledgement rather than a
+/// bare timer: await the inject window (the pump's ready ack, or — past
+/// the hard deadline on a detector-backed agent — the bounded
+/// pending-ready park) → paste the prompt → await the paste-settle ack
+/// (byte-echo of the pasted text, else an output-quiet window) → send the
+/// submit keystroke → await the submit ack (a `Working` transition or the
+/// `UserPromptSubmit` hook, with bounded idempotent Enter resends). The
+/// paste/settle/submit/confirm tail is [`write_prompt_sequence`], shared
+/// with the live-inject path.
+async fn run_spawn_inject(
+    config_for_inject: &ServerConfig,
+    id: TerminalId,
+    backend_key: &str,
+    requires_ready: bool,
+    encoded_prompt: lazybox_agents::EncodedPrompt,
+    ready_signal: &tokio::sync::Notify,
+    first_output: &tokio::sync::Notify,
+    t0_for_inject: std::time::Instant,
+) -> InjectOutcome {
+    let initial_write_len = encoded_prompt.initial_write_len();
+    // Wait for the agent's input box to be drawn AND no
+    // permission gate to be up — i.e. "the agent is genuinely
+    // ready to receive a pasted prompt." The pump task fires
+    // `ready_signal` exactly once when `Agent::
+    // detect_ready_for_prompt` first returns true. This is
+    // strictly tighter than the previous "wait for not-
+    // Asking" approach: the loose Asking detector matched
+    // a normal idle screen and made the wait spin
+    // the full deadline before every inject.
+    //
+    // Fallback ladder (each step has its own deadline):
+    //   1. ready_signal — preferred path, fires within
+    //      seconds of the agent finishing its banner.
+    //   2. first_output + SETTLE — for agents whose
+    //      detector never reports ready (default impl),
+    //      we still write 600ms past first byte. Agents
+    //      with an authoritative readiness detector
+    //      (`PtyProtocol::requires_ready`) SKIP this rung — a
+    //      blind settle-write would land the paste in
+    //      a folder-trust prompt if it's still up.
+    //   3. HARD_DEADLINE — last resort, inject blindly so
+    //      a cold-start hang doesn't silently lose the
+    //      user's prompt.
+    const HARD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+    const SETTLE: std::time::Duration = std::time::Duration::from_millis(600);
+    tracing::info!(
+        terminal_id = ?id,
+        initial_write_len,
+        "initial_prompt: waiting for agent ready signal",
+    );
+
+    let trigger = await_inject_window(
+        requires_ready,
+        ready_signal,
+        first_output,
+        HARD_DEADLINE,
+        SETTLE,
+    )
+    .await;
+    // The deadline rung means `ready` never fired within
+    // HARD_DEADLINE. For an agent with an authoritative readiness
+    // detector that does NOT mean "safe to paste": under
+    // many concurrent spawns the pump lags behind the deadline, or
+    // the agent is still parked on a boot-time gate (folder-trust /
+    // login / bypass chooser). A blind paste here lands the
+    // work-context prompt in a half-drawn screen or, with its
+    // follow-up `\r`, ANSWERS the gate with it — the prompt is lost
+    // and the user has no signal it happened. So instead of dropping
+    // (the old `GATE_CAP` path) or pasting blindly, keep the prompt
+    // pending and deliver it the moment the agent genuinely reaches
+    // ready, bounded by terminal liveness AND `PENDING_READY_CAP` —
+    // a flaky readiness detector must not silently turn the inject
+    // into an unbounded wait (issue #425). The bare-deadline
+    // blind paste is kept for detector-less agents (`requires_ready`
+    // false), whose `ready` signal never fires — losing the prompt
+    // to a cold-start hang is worse there than a best-effort paste.
+    if trigger == InjectTrigger::Deadline && requires_ready {
+        let pending_t0 = std::time::Instant::now();
+        match await_pending_ready(
+            id,
+            ready_signal,
+            &config_for_inject.terminal.terminals,
+            PENDING_READY_CAP,
+        )
+        .await
+        {
+            PendingReady::Ready => {
+                tracing::info!(
+                    terminal_id = ?id,
+                    waited_ms = pending_t0.elapsed().as_millis(),
+                    "initial_prompt: agent reached ready past the hard deadline",
+                );
+            }
+            PendingReady::TerminalGone => {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    "initial_prompt: terminal exited before the agent became ready — work prompt not delivered"
+                );
+                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: "agent never became ready — press w again to retry".into(),
+                });
+                return InjectOutcome::Failed;
+            }
+            PendingReady::Capped => {
+                tracing::warn!(
+                    terminal_id = ?id,
+                    waited_ms = pending_t0.elapsed().as_millis(),
+                    "initial_prompt: agent never reported ready within the bounded wait — work prompt not delivered"
+                );
+                let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                    terminal_id: id,
+                    message: format!(
+                        "agent did not become ready within {}s — press w again to retry",
+                        (HARD_DEADLINE + PENDING_READY_CAP).as_secs()
+                    ),
+                });
+                return InjectOutcome::Failed;
+            }
+        }
+    }
+    tracing::info!(
+        terminal_id = ?id,
+        initial_write_len,
+        ?trigger,
+        elapsed_ms = t0_for_inject.elapsed().as_millis(),
+        "initial_prompt: inject window cleared — writing prompt sequence to backend",
+    );
+    let Some(interaction) = terminal_io::acquire_live(config_for_inject, id, backend_key).await
+    else {
+        tracing::warn!(
+            terminal_id = ?id,
+            "initial_prompt: terminal exited before the prompt interaction began"
+        );
+        let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+            terminal_id: id,
+            message: "agent terminal closed before the work prompt landed — press w again to retry"
+                .into(),
+        });
+        return InjectOutcome::Failed;
+    };
+    match write_prompt_sequence(
+        config_for_inject,
+        id,
+        backend_key,
+        encoded_prompt,
+        true,
+        interaction,
+    )
+    .await
+    {
+        Ok(true) => InjectOutcome::Submitted,
+        Ok(false) => InjectOutcome::NeedsHuman,
+        Err(PromptWriteError::Initial(e)) => {
+            tracing::warn!(terminal_id = ?id, "initial_prompt: initial write failed: {e}");
+            let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                terminal_id: id,
+                message: format!("work prompt was not delivered ({e}) — press w again to retry"),
+            });
+            InjectOutcome::Failed
+        }
+        Err(PromptWriteError::Submit(e)) => {
+            tracing::warn!(terminal_id = ?id, "initial_prompt: submit failed: {e}");
+            let _ = config_for_inject.bus.send(Event::TerminalInputRejected {
+                terminal_id: id,
+                message: format!(
+                    "work prompt was pasted but could not be submitted ({e}) — open the terminal and press Enter"
+                ),
+            });
+            InjectOutcome::Failed
+        }
+    }
 }
 
 /// Which rung of the inject ladder released the spawn-time paste.
@@ -11797,6 +11865,150 @@ mod tests {
             config.spawn.prompt_submit_signals.lock().await.is_empty(),
             "second confirmation cleans up its own signal"
         );
+    }
+
+    /// Wait until the backend has recorded at least `n` writes for `key`,
+    /// yielding so the concurrent inject task can make progress. Bounded so
+    /// a stalled inject fails the test instead of hanging the suite.
+    async fn wait_for_write_count(mock: &crate::backend::MockBackend, key: &str, n: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while mock.writes_for(key).await.len() < n {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {n} writes to {key}"));
+    }
+
+    /// Release-blocker #1160: firing N spawn-time injects at once must end
+    /// with EVERY one delivered AND submitted, regardless of how the flows
+    /// interleave. Each [`run_spawn_inject`] is self-contained per terminal
+    /// — its ready / paste-echo / submit acks are its own — so a slow
+    /// booter among fast ones, and readiness that only fires after other
+    /// terminals have already submitted, must not perturb any other flow.
+    /// The driver acks each stage reactively off the actual bytes written,
+    /// so the assertion is on observed acknowledgements, never a timer.
+    #[tokio::test]
+    async fn concurrent_spawn_injects_all_reach_submitted() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            const N: usize = 8;
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let agent = lazybox_agents::registry()
+                .get("claude")
+                .expect("claude is a built-in agent");
+            let requires_ready = agent.pty_protocol().requires_ready();
+            assert!(
+                requires_ready,
+                "claude must be detector-backed or this test proves nothing",
+            );
+
+            let mut flows = Vec::new();
+            for i in 0..N {
+                let hint = format!("ww-{i}");
+                let key = mock
+                    .spawn(&["claude".into()], None, &[], &hint)
+                    .await
+                    .expect("spawn mock terminal");
+                let id = TerminalId(9000 + i as u64);
+                let session_key = SessionKey::new(hint.as_str());
+                config
+                    .terminal
+                    .terminals
+                    .lock()
+                    .await
+                    .insert(id, key.clone());
+                config.terminal.terminal_meta.lock().await.insert(
+                    id,
+                    (session_key.clone(), TerminalKind::Agent("claude".into())),
+                );
+                let prompt =
+                    format!("work item {i}: investigate the failure and fix its root cause");
+                let encoded = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
+                let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+                let first_output = std::sync::Arc::new(tokio::sync::Notify::new());
+
+                // Per-terminal driver: stagger readiness across a wide
+                // spread — a couple of terminals only become ready long
+                // after their siblings have already submitted — then ack
+                // paste (echo the bytes) and submit (flip to Working) the
+                // instant each write lands.
+                let driver = {
+                    let config = config.clone();
+                    let mock = mock.clone();
+                    let key = key.clone();
+                    let ready = ready.clone();
+                    let prompt = prompt.clone();
+                    let session_key = session_key.clone();
+                    tokio::spawn(async move {
+                        let ready_delay_ms = match i % 4 {
+                            0 => 0,
+                            1 => 5,
+                            2 => 40,
+                            _ => 150,
+                        };
+                        tokio::time::sleep(Duration::from_millis(ready_delay_ms)).await;
+                        ready.notify_one();
+
+                        // Paste ack: the composer echoes the pasted text.
+                        wait_for_write_count(&mock, &key, 1).await;
+                        let _ = config.bus.send(Event::TerminalOutput {
+                            terminal_id: id,
+                            bytes: prompt.clone().into_bytes(),
+                            first_seq: 1,
+                            seq: 1,
+                        });
+
+                        // Submit ack: the agent moves into its turn.
+                        wait_for_write_count(&mock, &key, 2).await;
+                        let _ = config.bus.send(Event::AgentState {
+                            session_key,
+                            terminal_id: id,
+                            state: lazybox_ipc::AgentState::Working,
+                        });
+                    })
+                };
+
+                let config_run = config.clone();
+                let key_run = key.clone();
+                flows.push(tokio::spawn(async move {
+                    let outcome = run_spawn_inject(
+                        &config_run,
+                        id,
+                        &key_run,
+                        requires_ready,
+                        encoded,
+                        &ready,
+                        &first_output,
+                        std::time::Instant::now(),
+                    )
+                    .await;
+                    driver.await.expect("driver task");
+                    (id, key_run, outcome)
+                }));
+            }
+
+            for flow in flows {
+                let (id, key, outcome) = flow.await.expect("inject task");
+                assert_eq!(
+                    outcome,
+                    InjectOutcome::Submitted,
+                    "terminal {id:?} must end delivered AND submitted",
+                );
+                let writes = mock.writes_for(&key).await;
+                let joined: Vec<u8> = writes.concat();
+                let text = String::from_utf8_lossy(&joined);
+                assert!(
+                    text.contains(&format!("work item {}", id.0 - 9000)),
+                    "terminal {id:?} must have received its own prompt text",
+                );
+                assert!(
+                    joined.contains(&b'\r'),
+                    "terminal {id:?} must have received a submit keystroke",
+                );
+            }
+        })
+        .await
+        .expect("concurrent spawn injects deadlocked");
     }
 
     /// Injection-safety regression: when the agent flips to

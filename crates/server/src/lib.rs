@@ -38,6 +38,7 @@ pub mod box_liveness;
 pub mod chat;
 pub mod client_kv;
 pub mod client_runtime;
+pub mod codex_quota;
 pub mod error_inbox;
 pub mod event_forward;
 pub mod keep_awake;

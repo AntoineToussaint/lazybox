@@ -545,6 +545,13 @@ impl Sidebar {
         self.usage.observe_session_usage(agent_id, usage);
     }
 
+    /// Record a provider plan-quota report (`AgentProviderQuota`) — the
+    /// "can I keep working?" 5h/weekly headroom that mirrors Claude's
+    /// `/usage` and Codex's `/status`. Merged per window by the tracker.
+    pub fn note_provider_quota(&mut self, agent_id: &str, quota: lazybox_ipc::ProviderQuota) {
+        self.usage.note_quota(agent_id, quota);
+    }
+
     /// Attribute a usage-limit reset hint to the terminal's agent, so the
     /// summary can show ` · resets 3pm` while that provider is limited
     /// (`AgentUsageLimit`). A hint for a terminal we don't track is
@@ -597,6 +604,11 @@ impl Sidebar {
             }
         }
         agent_ids.extend(self.usage.agents_with_usage());
+        // Quota-only agents surface too: "can I keep working?" is worth
+        // showing for a provider that has reported plan headroom even if no
+        // committed token total has landed yet.
+        agent_ids.extend(self.usage.agents_with_quota());
+        let now_unix = chrono::Utc::now().timestamp();
         agent_ids
             .into_iter()
             .map(|agent_id| {
@@ -605,12 +617,33 @@ impl Sidebar {
                     .agent_is_limited(agent_id)
                     .then(|| self.usage_reset.get(agent_id).cloned())
                     .flatten();
+                let (quota_5h, quota_weekly) = match self.usage.quota_for(agent_id) {
+                    Some(quota) => (
+                        format_quota_window(quota.five_hour, now_unix),
+                        format_quota_window(quota.weekly, now_unix),
+                    ),
+                    None => (None, None),
+                };
                 lazybox_tui_core::usage::UsageSummary::new(
                     label,
                     self.usage.tokens_for(agent_id),
                     self.usage_budgets.get(agent_id).copied(),
                     reset,
                 )
+                .with_quota(quota_5h, quota_weekly)
+            })
+            .filter(|summary| {
+                // Keep only rows that actually say something. A quota-only
+                // agent (surfaced solely by `agents_with_quota`) whose every
+                // window has gone stale past its reset drops both quota
+                // fragments to `None` above; with no tokens, budget, or reset
+                // it would otherwise render as a bare "X 0 used" — the same
+                // meaningless row #1109 excludes for budget-less terminals.
+                summary.tokens > 0
+                    || summary.budget.is_some()
+                    || summary.reset.is_some()
+                    || summary.quota_5h.is_some()
+                    || summary.quota_weekly.is_some()
             })
             .collect()
     }
@@ -3190,6 +3223,57 @@ impl Sidebar {
         }
         out
     }
+}
+
+/// Format one plan-quota window as the header fragment the summary shows:
+/// `"45%"`, or `"45% · 2h"` when a reset countdown is known and still in the
+/// future. `None` when the window is absent *or* its reset has already
+/// passed. `utilization_bp` is in basis points (0..=10000); it rounds to a
+/// whole percent. `now_unix` is passed in (not read from the clock here) so
+/// the mapping stays testable.
+fn format_quota_window(window: Option<lazybox_ipc::QuotaWindow>, now_unix: i64) -> Option<String> {
+    let window = window?;
+    // A reset that has already passed means the provider rolled the window
+    // over: the utilization we last observed describes the *previous* window,
+    // not the current one, so the honest answer is "unknown" — not the
+    // pre-reset ceiling. Drop the window entirely rather than reporting a
+    // stale percentage; the whole point of "can I keep working?" is that
+    // restored headroom reads as restored. A window with no reset at all is
+    // left alone: its staleness is unknowable, so we still show what we saw.
+    if let Some(reset_at) = window.reset_at
+        && reset_at <= now_unix
+    {
+        return None;
+    }
+    let pct = ((window.utilization_bp + 50) / 100).min(100);
+    match window
+        .reset_at
+        .and_then(|at| format_reset_countdown(at, now_unix))
+    {
+        Some(countdown) => Some(format!("{pct}% · {countdown}")),
+        None => Some(format!("{pct}%")),
+    }
+}
+
+/// A compact relative countdown to `reset_at_unix` from `now_unix`:
+/// `"45s"`, `"7m"`, `"2h"`, `"3d"`. `None` once the reset is in the past
+/// (the caller drops a passed-reset window entirely; this never emits a
+/// negative countdown).
+fn format_reset_countdown(reset_at_unix: i64, now_unix: i64) -> Option<String> {
+    let secs = reset_at_unix.checked_sub(now_unix)?;
+    if secs <= 0 {
+        return None;
+    }
+    let secs = secs as u64;
+    Some(if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        format!("{}m", secs.div_ceil(60))
+    } else if secs < 86_400 {
+        format!("{}h", secs.div_ceil(3_600))
+    } else {
+        format!("{}d", secs.div_ceil(86_400))
+    })
 }
 
 mod handlers;

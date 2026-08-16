@@ -276,6 +276,12 @@ impl Sidebar {
         self.inner.add_agent_session_usage(agent_id, usage);
     }
 
+    /// Record a provider plan-quota report (`AgentProviderQuota`) — the
+    /// 5h/weekly "can I keep working?" headroom.
+    pub fn note_provider_quota(&mut self, agent_id: &str, quota: lazybox_ipc::ProviderQuota) {
+        self.inner.note_provider_quota(agent_id, quota);
+    }
+
     /// Attribute a usage-limit reset hint to a terminal's agent
     /// (`AgentUsageLimit`).
     pub fn note_usage_limit_reset(&mut self, terminal_id: lazybox_ipc::TerminalId, hint: String) {

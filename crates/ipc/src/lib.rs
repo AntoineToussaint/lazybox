@@ -438,6 +438,44 @@ pub struct AgentUsage {
     pub cost_usd_micros: Option<u64>,
 }
 
+/// One rolling rate-limit window's utilization, as the provider reports it
+/// — the "can I keep working?" signal, distinct from token counts (which
+/// answer "what did this cost?"). Sourced by the metering proxy from
+/// Anthropic's `anthropic-ratelimit-unified-*` response headers and from
+/// Codex's in-stream `rate_limits` snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct QuotaWindow {
+    /// Fraction of the window consumed, in **basis points** (0..=10000, i.e.
+    /// hundredths of a percent). An integer wire value dodges float
+    /// cross-language compatibility issues, matching `cost_usd_micros`.
+    pub utilization_bp: u32,
+    /// Unix seconds when the window resets, if the provider gave one.
+    pub reset_at: Option<i64>,
+}
+
+/// A provider's plan-quota utilization across its rolling windows — the
+/// data behind Claude Code's `/usage` and Codex's `/status`. Read off live
+/// agent traffic by the metering proxy, so it refreshes whenever an agent
+/// makes a request. Fields are optional so a provider that reports only one
+/// window (or a response missing the data) still produces a partial update.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ProviderQuota {
+    /// The short rolling window (Anthropic 5h, Codex primary).
+    pub five_hour: Option<QuotaWindow>,
+    /// The long rolling window (Anthropic 7d, Codex secondary/weekly).
+    pub weekly: Option<QuotaWindow>,
+}
+
+impl ProviderQuota {
+    /// Whether any window carries data — an all-`None` quota is a no-op the
+    /// proxy shouldn't broadcast.
+    pub fn is_empty(&self) -> bool {
+        self.five_hour.is_none() && self.weekly.is_none()
+    }
+}
+
 /// Stable identity for the human or service account connected to a
 /// Lazybox daemon. The current local daemon uses `local`; remote/multi-user
 /// clients should authenticate into distinct principal ids.
@@ -2140,6 +2178,16 @@ pub enum Event {
     AgentSessionUsage {
         agent_id: String,
         usage: AgentUsage,
+    },
+    /// Provider plan-quota utilization (5h + weekly windows) read off live
+    /// agent traffic by the metering proxy — the "can I keep working?"
+    /// signal that mirrors Claude Code's `/usage` and Codex's `/status`.
+    /// Attributed to the `agent_id` whose request surfaced it, so the header
+    /// widget can show it on that provider's row. Refreshes on every metered
+    /// request; absent an active agent it simply holds its last value.
+    AgentProviderQuota {
+        agent_id: String,
+        quota: ProviderQuota,
     },
     AgentTurnFinished {
         run_id: AgentRunId,

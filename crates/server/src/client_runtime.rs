@@ -47,6 +47,9 @@ impl ClientRuntime {
         if let Some(task) = crate::proxy::spawn(&config).await {
             tasks.push(task);
         }
+        if let Some(task) = crate::codex_quota::spawn(&config) {
+            tasks.push(task);
+        }
         if let Some(slack) = options.slack
             && let Some(task) = crate::slack::spawn(config, slack)
         {

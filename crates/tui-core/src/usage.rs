@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use lazybox_ipc::{AgentRunId, AgentUsage};
+use lazybox_ipc::{AgentRunId, AgentUsage, ProviderQuota};
 
 /// Cells in the `▓▓▓░░` progress bar.
 const BAR_WIDTH: usize = 5;
@@ -57,6 +57,12 @@ pub struct UsageTracker {
     /// when the turn (or the run) ends, so the total gains each turn's
     /// authoritative figure exactly once.
     pending: HashMap<AgentRunId, u64>,
+    /// `agent id → latest plan-quota` (5h + weekly utilization), from
+    /// `AgentProviderQuota`. Distinct from `tokens` — that answers "what did
+    /// this cost?", this answers "can I keep working?". Each update replaces
+    /// the window(s) it carries, so a partial report (one window observed)
+    /// keeps the other window's last value.
+    quotas: HashMap<String, ProviderQuota>,
 }
 
 impl UsageTracker {
@@ -132,6 +138,38 @@ impl UsageTracker {
             .filter(|(_, tokens)| **tokens > 0)
             .map(|(agent, _)| agent.as_str())
     }
+
+    /// Record a plan-quota report for `agent_id`, merging window-by-window:
+    /// a report carrying only the 5h window updates that window and leaves
+    /// the weekly one at its last observed value (and vice-versa), so the
+    /// widget never blinks a window back to unknown on a partial update.
+    pub fn note_quota(&mut self, agent_id: &str, quota: ProviderQuota) {
+        let slot = self.quotas.entry(agent_id.to_string()).or_default();
+        if quota.five_hour.is_some() {
+            slot.five_hour = quota.five_hour;
+        }
+        if quota.weekly.is_some() {
+            slot.weekly = quota.weekly;
+        }
+    }
+
+    /// The latest plan-quota for `agent_id`, if any window has been observed.
+    pub fn quota_for(&self, agent_id: &str) -> Option<ProviderQuota> {
+        self.quotas
+            .get(agent_id)
+            .copied()
+            .filter(|quota| !quota.is_empty())
+    }
+
+    /// Agent ids that have an observed plan-quota — the other half of the
+    /// display set, so "can I keep working?" shows even for a provider that
+    /// has reported quota but no committed tokens yet.
+    pub fn agents_with_quota(&self) -> impl Iterator<Item = &str> {
+        self.quotas
+            .iter()
+            .filter(|(_, quota)| !quota.is_empty())
+            .map(|(agent, _)| agent.as_str())
+    }
 }
 
 /// Style role for one rendered fragment. The render layer maps these to
@@ -151,6 +189,9 @@ pub enum UsageSpanKind {
     Meta,
     /// The reset countdown (` · resets 3pm`) — carries the limit accent.
     Reset,
+    /// A plan-quota utilization figure (` · 5h 45%`) — the "can I keep
+    /// working?" headroom signal, accented distinctly from the cost figure.
+    Quota,
 }
 
 /// One provider's usage, ready to render. Built by [`UsageSummary::new`];
@@ -165,6 +206,13 @@ pub struct UsageSummary {
     pub budget: Option<u64>,
     /// Reset countdown fragment (`"3pm"`, `"2h"`), shown while known.
     pub reset: Option<String>,
+    /// Pre-formatted 5-hour plan-quota fragment (`"45%"` or `"45% · 2h"`) —
+    /// the "can I keep working?" signal, distinct from the token total.
+    /// Pre-formatted because the reset countdown needs a clock this
+    /// ratatui-free crate deliberately doesn't hold; the caller builds it.
+    pub quota_5h: Option<String>,
+    /// Pre-formatted weekly plan-quota fragment.
+    pub quota_weekly: Option<String>,
 }
 
 impl UsageSummary {
@@ -179,7 +227,16 @@ impl UsageSummary {
             tokens,
             budget: budget.filter(|b| *b > 0),
             reset,
+            quota_5h: None,
+            quota_weekly: None,
         }
+    }
+
+    /// Attach pre-formatted plan-quota fragments (see the field docs).
+    pub fn with_quota(mut self, quota_5h: Option<String>, quota_weekly: Option<String>) -> Self {
+        self.quota_5h = quota_5h;
+        self.quota_weekly = quota_weekly;
+        self
     }
 
     /// Percent of the budget consumed, clamped to 100. `None` without a
@@ -231,6 +288,18 @@ impl UsageSummary {
         if let Some(reset) = &self.reset {
             out.push((" · ".into(), UsageSpanKind::Meta));
             out.push((format!("resets {reset}"), UsageSpanKind::Reset));
+        }
+        // Plan-quota — the "can I keep working?" signal. Rendered after the
+        // token figure so one glance answers both "what did this cost?" and
+        // "how much headroom is left?". The `Quota` kind lets the theme
+        // accent it distinctly from the cost figure.
+        if let Some(five_hour) = &self.quota_5h {
+            out.push((" · 5h ".into(), UsageSpanKind::Meta));
+            out.push((five_hour.clone(), UsageSpanKind::Quota));
+        }
+        if let Some(weekly) = &self.quota_weekly {
+            out.push((" · wk ".into(), UsageSpanKind::Meta));
+            out.push((weekly.clone(), UsageSpanKind::Quota));
         }
         out
     }
@@ -405,6 +474,36 @@ mod tests {
     fn budget_summary_folds_in_the_reset_hint() {
         let summary = UsageSummary::new("Codex", 160_000, Some(200_000), Some("3pm".into()));
         assert_eq!(summary.text(), "Codex ▓▓▓▓░ 80% · 40k left · resets 3pm");
+    }
+
+    #[test]
+    fn plan_quota_renders_after_the_token_figure() {
+        // The "can I keep working?" fragments trail the cost figure — one
+        // glance answers both questions.
+        let summary = UsageSummary::new("Claude", 128_000, None, None)
+            .with_quota(Some("45% · 2h".into()), Some("60%".into()));
+        assert_eq!(summary.text(), "Claude 128k used · 5h 45% · 2h · wk 60%");
+        // The quota percentages carry the distinct Quota accent, not Figure.
+        assert!(
+            summary
+                .spans()
+                .iter()
+                .any(|(text, kind)| text == "45% · 2h" && *kind == UsageSpanKind::Quota)
+        );
+    }
+
+    #[test]
+    fn quota_is_omitted_when_absent() {
+        // Default (no with_quota) renders exactly as before — no trailing
+        // fragments, no Quota spans.
+        let summary = UsageSummary::new("Claude", 128_000, None, None);
+        assert_eq!(summary.text(), "Claude 128k used");
+        assert!(
+            summary
+                .spans()
+                .iter()
+                .all(|(_, kind)| *kind != UsageSpanKind::Quota)
+        );
     }
 
     #[test]

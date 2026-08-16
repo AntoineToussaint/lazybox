@@ -19,11 +19,28 @@
 //! blocker but aren't config-seedable (an MCP gate is suppressed at spawn
 //! with `--strict-mcp-config`; a promo that still slips through is caught
 //! by [`crate::detect`] surfacing it as `InputNeeded`).
+//!
+//! - **Bypass-permissions consent** — `--dangerously-skip-permissions`
+//!   itself paints a one-time "Bypass Permissions mode" warning on every
+//!   start; the flag does NOT suppress it. Claude clears it only when
+//!   `skipDangerousModePermissionPrompt` is `true` in a settings source it
+//!   reads (`~/.claude/settings.json` is `userSettings`), so
+//!   [`seed_skip_dangerous_mode_prompt`] persists it there
+//!   (anthropics/claude-code#25503). The per-session `--settings` file
+//!   (`flagSettings`) carries the same key via
+//!   [`crate::hook_settings::build_settings`], covering spawns whether or
+//!   not that file is generated.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+
+/// Settings key that suppresses Claude's one-time bypass-permissions
+/// consent screen. Shared with [`crate::hook_settings`] so the two
+/// seeding paths (user settings file here, per-session `--settings` file
+/// there) never spell it differently.
+pub(crate) const SKIP_DANGEROUS_MODE_KEY: &str = "skipDangerousModePermissionPrompt";
 
 /// Prepare `~/.claude.json` for an unattended launch in `worktree`:
 /// trust the worktree and mark onboarding complete. Best-effort: a
@@ -97,6 +114,55 @@ fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()>
     let tmp = tmp_sibling(config_path)?;
     std::fs::write(&tmp, serialized)?;
     std::fs::rename(&tmp, config_path)
+}
+
+/// Persist the one-time bypass-permissions consent into
+/// `~/.claude/settings.json` so an unattended
+/// `--dangerously-skip-permissions` launch doesn't stall on the
+/// "Bypass Permissions mode" warning. Best-effort like
+/// [`seed_unattended_env`]: a missing `$HOME` is a no-op (Ok).
+pub fn seed_skip_dangerous_mode_prompt() -> io::Result<()> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Ok(());
+    };
+    let settings_path = PathBuf::from(home).join(".claude").join("settings.json");
+    seed_skip_dangerous_mode_prompt_in(&settings_path)
+}
+
+/// Read-modify-write `settings_path`, setting
+/// `skipDangerousModePermissionPrompt = true` while preserving every
+/// other key. Writes atomically (temp + rename) so a concurrent Claude
+/// reader never sees a torn file, and skips the write when it is already
+/// set. A missing file (and its `~/.claude` parent) is created; an
+/// unparseable one is left untouched (returns `Err`).
+fn seed_skip_dangerous_mode_prompt_in(settings_path: &Path) -> io::Result<()> {
+    let mut root: Value = match std::fs::read_to_string(settings_path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Value::Object(Map::new()),
+        Err(e) => return Err(e),
+    };
+
+    let obj = root.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "claude settings.json root is not an object",
+        )
+    })?;
+
+    if obj.get(SKIP_DANGEROUS_MODE_KEY) == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    obj.insert(SKIP_DANGEROUS_MODE_KEY.into(), Value::Bool(true));
+
+    let serialized = serde_json::to_vec_pretty(&root)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = tmp_sibling(settings_path)?;
+    std::fs::write(&tmp, serialized)?;
+    std::fs::rename(&tmp, settings_path)
 }
 
 /// `<config>.lazybox-tmp` next to `config_path`, for the atomic write.
@@ -202,6 +268,65 @@ mod tests {
 
         // No rewrite — byte-for-byte unchanged.
         assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+    }
+
+    fn skip_dangerous_set(settings: &Path) -> bool {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(settings).unwrap()).unwrap();
+        v[SKIP_DANGEROUS_MODE_KEY] == Value::Bool(true)
+    }
+
+    #[test]
+    fn seeds_skip_dangerous_mode_creating_missing_settings() {
+        let dir = scratch("skip-missing").join(".claude");
+        let settings = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        seed_skip_dangerous_mode_prompt_in(&settings).unwrap();
+
+        assert!(skip_dangerous_set(&settings));
+    }
+
+    #[test]
+    fn seeds_skip_dangerous_mode_preserving_other_settings() {
+        let dir = scratch("skip-preserve");
+        let settings = dir.join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"model":"opus","hooks":{"Stop":[{"hooks":[]}]}}"#,
+        )
+        .unwrap();
+
+        seed_skip_dangerous_mode_prompt_in(&settings).unwrap();
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(v["model"], Value::from("opus"));
+        assert!(v["hooks"]["Stop"].is_array());
+        assert!(skip_dangerous_set(&settings));
+    }
+
+    #[test]
+    fn skip_dangerous_mode_idempotent_when_already_set() {
+        let dir = scratch("skip-idempotent");
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, format!("{{\"{SKIP_DANGEROUS_MODE_KEY}\":true}}")).unwrap();
+        let before = std::fs::read_to_string(&settings).unwrap();
+
+        seed_skip_dangerous_mode_prompt_in(&settings).unwrap();
+
+        // No rewrite — byte-for-byte unchanged.
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), before);
+    }
+
+    #[test]
+    fn skip_dangerous_mode_leaves_unparseable_settings_alone() {
+        let dir = scratch("skip-malformed");
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, "not json {").unwrap();
+
+        let err = seed_skip_dangerous_mode_prompt_in(&settings).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "not json {");
     }
 
     #[test]

@@ -697,6 +697,20 @@ pub mod builtins {
                     "claude: failed to prepare unattended env (trust/onboarding): {e}",
                 );
             }
+            // `--dangerously-skip-permissions` paints a bypass-mode consent
+            // screen on every start that the flag itself doesn't clear; the
+            // per-session `--settings` file seeds the same acceptance, but
+            // that file isn't guaranteed (it needs a resolvable hook exe), so
+            // persist it in user settings too. Log loudly on failure — this
+            // is the difference between an autonomous spawn working and
+            // hanging on a non-tool prompt.
+            if let Err(e) = crate::claude_env::seed_skip_dangerous_mode_prompt() {
+                tracing::warn!(
+                    "claude: failed to persist bypass-permissions consent \
+                     (skipDangerousModePermissionPrompt); an autonomous spawn may \
+                     hang on the bypass-mode warning: {e}",
+                );
+            }
         }
 
         fn update_channel(&self) -> Option<crate::update::UpdateChannel> {

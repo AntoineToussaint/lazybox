@@ -43,6 +43,29 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// The weasel phrases a review / fix / debug body may never offer as a
+/// *dismissal*. A finding is skipped only when refuted with a concrete,
+/// falsifiable failure scenario — never with one of these. The standard
+/// itself lives in the prose of the toughened built-in bodies; this list
+/// is the regression tests' mirror of it (#1145), the oracle they check
+/// the bodies against so the prompt text and the guard can't drift apart —
+/// which is why it is `#[cfg(test)]`, not shipped code. "Out of scope" is
+/// the load-bearing one: scope is the escape hatch the agent reaches for
+/// most, so the bodies redefine scope as "everything the change touches
+/// and everything that breaks because of it" rather than accepting it as
+/// a reason to stop.
+#[cfg(test)]
+const BANNED_DISMISSALS: &[&str] = &[
+    "out of scope",
+    "not worth the complexity",
+    "degrades gracefully",
+    "degrades safely",
+    "should be fine",
+    "for now",
+    "as a follow-up",
+    "left as an exercise",
+];
+
 /// Serialize `value` and write it to `path` atomically: a sibling
 /// `.tmp` file, then a rename, so a crash mid-write can never leave a
 /// half-written (and unparseable) snippets file behind. Creates the
@@ -303,19 +326,27 @@ impl Snippets {
                 entry(
                     "Review",
                     "Review the current diff",
-                    "Review the current diff (`git diff` against the base branch) for \
-                     correctness bugs: logic errors, off-by-one mistakes, missing error \
-                     handling, broken edge cases, and anything that wouldn't survive a \
-                     careful review. Read adversarially: treat each changed line as guilty \
-                     until you can trace why it's safe, and treat a safe-looking default — \
-                     an early return, a fallback, a delete-on-missing — as a footgun to \
-                     disprove, not a comfort. Report findings ranked by severity, each with \
-                     a `file:line` anchor and the concrete input or state that triggers the \
-                     wrong result — a falsifiable failure, not a vague worry. Look only at \
-                     the changed lines and the code they directly touch, not the whole \
-                     file. Call a line clean only after you've actually traced it, not as a \
-                     shortcut — but if it genuinely is, say so plainly rather than inventing \
-                     nits.",
+                    "Review the current diff (`git diff` against the base branch) as a \
+                     rigorous code review — assume there IS a bug and your job is to find \
+                     it, not to confirm the code is fine. Read adversarially across every \
+                     lens that applies: correctness (logic errors, off-by-one, missing \
+                     error handling, broken edge cases), security (untrusted input crossing \
+                     a trust boundary), data loss, and concurrency. Treat each changed line \
+                     as guilty until you can trace why it's safe, and treat a safe-looking \
+                     default — an early return, a fallback, a delete-on-missing — as a \
+                     footgun to disprove, not a comfort. In scope is everything the diff \
+                     touches *and* everything that breaks because of it; scope is not an \
+                     escape hatch. Report findings ranked by severity, each with a \
+                     `file:line` anchor and the concrete input or state that triggers the \
+                     wrong result — a falsifiable failure, not a vague worry, and no shallow \
+                     nit dressed up as a bug. A finding is dismissed only by refuting it \
+                     with a specific failure scenario that proves it can't happen; \"out of \
+                     scope,\" \"not worth the complexity,\" \"degrades gracefully,\" and \
+                     \"should be fine\" are banned as dismissals. Look only at the changed \
+                     lines and the code they directly touch, not the whole file. Finish \
+                     with a completeness check — what you did not examine and why skipping \
+                     it is justified with evidence — and, if a traced line is genuinely \
+                     clean, say so plainly rather than inventing nits.",
                 ),
             ),
             (
@@ -328,26 +359,33 @@ impl Snippets {
                     "Deep review: design, stress, blast radius (flagship)",
                     "Review the current diff (`git diff` against the base branch) as a \
                      skeptical senior engineer — deeper than surface bugs, in three \
-                     passes. Assume every finding is real until a specific, falsifiable \
+                     passes, starting from the premise that there IS a problem here worth \
+                     finding. Assume every finding is real until a specific, falsifiable \
                      reason refutes it, and treat a safe-looking default as the thing to \
                      disprove — \"it degrades safely to the old behavior\" is the exact \
                      reasoning that ships silent data loss, not a reason to wave a risk \
                      through. Design: are the abstractions, boundaries, and ownership \
                      right; does it fit the patterns already in this codebase; is there a \
                      materially simpler shape that does the same job? Correctness under \
-                     stress: trace the real code path and enumerate the edge cases, error \
-                     paths, and concurrency / partial-failure / bad-input scenarios that \
+                     stress, across every lens — correctness, security, performance, data \
+                     loss, concurrency: trace the real code path and enumerate the edge \
+                     cases, error paths, and partial-failure / bad-input scenarios that \
                      aren't handled — for each, give the concrete input or state that \
                      produces the wrong result, not a vague worry. Blast radius: what \
-                     breaks elsewhere if this is wrong, and is it reversible? Scope: flag \
-                     anything the task didn't need — opportunistic refactors, reformatting, \
-                     drive-by renames, unrelated edits — as out-of-scope; sprawl is a \
-                     finding, not a bonus. Rank findings \
-                     by severity, each with a `file:line` anchor, separating \"will break\" \
-                     (has a real failure scenario) from \"worth reconsidering\" (a design \
-                     smell). Don't pad — a weak nit dressed as a bug erodes trust. End with \
-                     a one-line verdict — ship / reshape / rethink — and, if it's sound, \
-                     the single risk you'd keep watching.",
+                     breaks elsewhere if this is wrong, and is it reversible? In scope is \
+                     everything the diff touches and everything that breaks because of it; \
+                     separately, flag anything the task didn't need — opportunistic \
+                     refactors, reformatting, drive-by renames, unrelated edits — as \
+                     sprawl, which is a finding, not a bonus. A finding is skipped only by \
+                     refuting it with a concrete failure scenario; \"out of scope,\" \"not \
+                     worth the complexity,\" \"degrades gracefully,\" \"for now,\" and \"as \
+                     a follow-up\" are banned as dismissals. Rank findings by severity, each \
+                     with a `file:line` anchor, separating \"will break\" (has a real \
+                     failure scenario) from \"worth reconsidering\" (a design smell). Don't \
+                     pad — a weak nit dressed as a bug erodes trust. Close with a \
+                     completeness self-critique — what you did not examine and why skipping \
+                     it is justified with evidence — then a one-line verdict: ship / \
+                     reshape / rethink, and the single risk you'd keep watching.",
                 ),
             ),
             (
@@ -389,21 +427,24 @@ impl Snippets {
                     "Review",
                     "Full pre-ship review: correctness, design, security, perf, tests",
                     "Give the current diff (`git diff` against the base branch) the full \
-                     pre-ship review, one lens at a time, reviewing adversarially — each \
-                     finding is real until you refute it with a concrete input that proves \
-                     it can't happen, and a safe-looking default is a claim to disprove, \
-                     not a resting place. Correctness: logic errors, \
-                     off-by-one, unhandled errors and edge cases. Design: are the \
+                     pre-ship review, one lens at a time, reviewing adversarially — assume \
+                     there IS a bug, each finding is real until you refute it with a \
+                     concrete input that proves it can't happen, and a safe-looking default \
+                     is a claim to disprove, not a resting place. Correctness: logic \
+                     errors, off-by-one, unhandled errors and edge cases. Design: are the \
                      boundaries and abstractions right, does it fit the surrounding code, \
                      is there a simpler shape. Security: untrusted input crossing a trust \
                      boundary, authz, injection, secret handling. Performance: \
                      allocations or I/O added to a hot path, N+1s, accidental \
                      quadratics. Tests: do they actually exercise the new behavior and \
-                     its failure paths. For each finding, trace the real code path and \
-                     give a concrete failure scenario — the input or state that produces \
-                     the wrong result — with a `file:line` anchor, ranked by severity. If \
-                     a lens is genuinely clean, say so in one line rather than padding the \
-                     list.",
+                     its failure paths. In scope is everything the diff touches and \
+                     everything that breaks because of it; scope is not an escape hatch, \
+                     and \"out of scope,\" \"not worth the complexity,\" and \"degrades \
+                     gracefully\" are banned as reasons to drop a finding. For each \
+                     finding, trace the real code path and give a concrete failure \
+                     scenario — the input or state that produces the wrong result — with a \
+                     `file:line` anchor, ranked by severity. If a lens is genuinely clean, \
+                     say so in one line rather than padding the list.",
                 ),
             ),
             (
@@ -455,27 +496,29 @@ impl Snippets {
                     "Review",
                     "Apply the review findings you just produced",
                     "Take the findings from the review you just produced and *implement* \
-                     them — the deliverable is a clean, tested diff, not a curated list of \
-                     reasons not to act. Go in severity order, highest first, and for each \
-                     finding fix the *real cause* at the `file:line` it names, not the \
-                     surface symptom. Default to fixing: a finding stays unfixed only when \
-                     you can refute it with a specific, falsifiable reason — a concrete \
-                     input or state that proves it can't happen. \"Not worth the \
-                     complexity,\" \"degrades safely to the prior behavior,\" \"out of \
-                     scope,\" and \"not a change I believe in\" are not reasons; they're the \
-                     reflex that ships bugs — one such \"the safe default is fine\" call \
-                     silently deleted real user data. Treat the safe-looking default as the \
-                     thing to disprove, and when you're unsure, fix it. Whenever a fix \
-                     changes behavior, add or adjust the test that would have caught the \
-                     original problem. When you're \
-                     done, re-run the build, tests, and linter to confirm the tree is \
-                     green, and stay strictly in scope — fix only the findings, and don't \
-                     refactor, reformat, or clean up anything they didn't call out. Commit \
-                     the fixes \
-                     with a clear message that says what was wrong and why the change is \
-                     the real fix, staging only the files you touched. Finish with a short \
-                     summary: what you fixed, each finding you left with its falsifiable \
-                     reason, and anything you noticed in the code that the review missed.",
+                     them — the deliverable is a clean, tested diff, not a list. \"Here are \
+                     the changes I would make\" is not an acceptable output; apply them. Go \
+                     in severity order, highest first, and for each finding fix the *real \
+                     cause* at the `file:line` it names, not the surface symptom. Default \
+                     to fixing: a finding stays unfixed only when you can refute it with a \
+                     specific, falsifiable reason — a concrete input or state that proves \
+                     it can't happen. \"Not worth the complexity,\" \"degrades gracefully,\" \
+                     \"degrades safely to the prior behavior,\" \"out of scope,\" \"for \
+                     now,\" \"as a follow-up,\" and \"not a change I believe in\" are banned \
+                     as reasons to skip — they're the reflex that ships bugs, and one such \
+                     \"the safe default is fine\" call silently deleted real user data. \
+                     Treat the safe-looking default as the thing to disprove, and when \
+                     you're unsure, fix it. In scope is every finding plus anything that \
+                     breaks because of your fix; scope is not an escape hatch. Whenever a \
+                     fix changes behavior, add or adjust the test that would have caught \
+                     the original problem. When you're done, re-run the build, tests, and \
+                     linter to confirm the tree is green, and stay strictly in scope — fix \
+                     only the findings and their fallout, and don't refactor, reformat, or \
+                     clean up anything they didn't call out. Commit the fixes with a clear \
+                     message that says what was wrong and why the change is the real fix, \
+                     staging only the files you touched. Finish with a short summary: what \
+                     you fixed, each finding you left with its falsifiable reason, and \
+                     anything you noticed in the code that the review missed.",
                 ),
             ),
             (
@@ -1090,12 +1133,13 @@ impl Snippets {
                     "Review the current diff for security issues: injection, missing \
                      authz/authn checks, unsafe deserialization, path traversal, secret \
                      handling, SSRF, and unchecked input crossing a trust boundary. Review \
-                     adversarially: assume every input is hostile and every check is \
-                     bypassable until you trace why it isn't, and don't retire a finding as \
-                     \"probably not exploitable\" without the specific reason the exploit \
-                     fails. For \
-                     each finding give the `file:line`, the concrete exploit path, and \
-                     the fix, ranked by exploitability. If the diff introduces no \
+                     adversarially: assume there IS an exploitable hole, every input is \
+                     hostile, and every check is bypassable until you trace why it isn't, \
+                     and don't retire a finding as \"probably not exploitable,\" \"out of \
+                     scope,\" or \"degrades gracefully\" without the specific reason the \
+                     exploit fails. For each finding give the `file:line`, the concrete \
+                     exploit path — the literal input that crosses the boundary — and the \
+                     fix, ranked by exploitability. If the diff introduces no \
                      security-relevant change, say so rather than padding the list.",
                 ),
             ),
@@ -1652,6 +1696,180 @@ snippets:
         assert!(
             !fixall.contains("not worth acting on"),
             "fixall must not offer the old 'not worth acting on' escape hatch",
+        );
+    }
+
+    /// #1145 makes the anti-hedging standard library-wide: a banned weasel
+    /// phrase may appear *only* in the review/fix bodies that explicitly
+    /// forbid or flag it, never as a soft escape hatch anywhere else. This
+    /// guards the whole catalog — not just the review three — against a
+    /// future body sneaking in "degrades gracefully / for now / out of
+    /// scope" as a way to dodge the work.
+    #[test]
+    fn no_soft_body_offers_a_banned_dismissal() {
+        // The only bodies whose job is to ban or flag these phrases, so the
+        // only bodies in which one may textually appear. Two groups:
+        // rev/deepreview/audit/arch/fixall/sec quote a phrase to *forbid* it
+        // as a dismissal; scout/selfrev/triage use "out of scope" the other
+        // way round — as the category of change to *flag* (scope creep,
+        // drive-by refactors), which is the opposite of an escape hatch.
+        // Everything else must be clean.
+        const MAY_REFERENCE: &[&str] = &[
+            "rev",
+            "deepreview",
+            "audit",
+            "arch",
+            "fixall",
+            "sec",
+            "scout",
+            "selfrev",
+            "triage",
+        ];
+        for (key, s) in Snippets::builtin().all() {
+            if MAY_REFERENCE.contains(&key) {
+                continue;
+            }
+            let body = s.body.to_ascii_lowercase();
+            for phrase in BANNED_DISMISSALS {
+                assert!(
+                    !body.contains(phrase),
+                    "built-in `{key}` uses the banned dismissal `{phrase}` as an escape \
+                     hatch — a finding is skipped only with a concrete, falsifiable \
+                     failure scenario (#1145)",
+                );
+            }
+        }
+    }
+
+    /// The priority three — review, deep review, fix-all — each enumerate
+    /// the banned weasel phrases and frame them as forbidden, so the
+    /// bias-to-action standard is baked into the default bodies a one-tap
+    /// mobile user gets with no editing (#1145).
+    #[test]
+    fn priority_bodies_enumerate_and_ban_the_weasel_phrases() {
+        let b = Snippets::builtin();
+        for key in ["rev", "deepreview", "fixall"] {
+            let body = b
+                .get(key)
+                .expect("ships built-in")
+                .body
+                .to_ascii_lowercase();
+            let named = BANNED_DISMISSALS
+                .iter()
+                .filter(|p| body.contains(**p))
+                .count();
+            assert!(
+                named >= 3,
+                "`{key}` should name the banned dismissals it forbids; named only {named}",
+            );
+            assert!(
+                body.contains("banned"),
+                "`{key}` must frame the weasel phrases as banned, not merely mention them",
+            );
+        }
+    }
+
+    /// The bias-to-action standard has three legs beyond the phrase ban:
+    /// fixall *implements* (a list is not an acceptable output), the review
+    /// bodies redefine scope so it can't be used as an escape hatch, and the
+    /// review bodies close with a completeness self-critique. Guard each so a
+    /// future soft-touch can't quietly drop them (#1145).
+    #[test]
+    fn priority_bodies_encode_scope_contract_and_self_critique() {
+        let b = Snippets::builtin();
+        // Scope contract: the task covers the change *and* its fallout, so
+        // "out of scope" can't be reached for.
+        for key in ["rev", "deepreview", "fixall"] {
+            assert!(
+                b.get(key)
+                    .expect("ships built-in")
+                    .body
+                    .contains("breaks because of"),
+                "`{key}` must define scope as the change plus everything it breaks",
+            );
+        }
+        // The review bodies close with a completeness self-critique.
+        for key in ["rev", "deepreview"] {
+            assert!(
+                b.get(key)
+                    .expect("ships built-in")
+                    .body
+                    .to_ascii_lowercase()
+                    .contains("completeness"),
+                "`{key}` must close with a completeness self-critique",
+            );
+        }
+        // fixall applies the fixes — producing a list is explicitly rejected.
+        assert!(
+            b.get("fixall")
+                .expect("ships built-in")
+                .body
+                .contains("not an acceptable output"),
+            "fixall must reject producing a list instead of applying the fixes",
+        );
+    }
+
+    /// The priority three are exempt from the library-wide
+    /// `no_soft_body_offers_a_banned_dismissal` guard precisely because they
+    /// *quote* the weasel phrases in order to forbid them — and that
+    /// exemption is the weakest point in the whole guard (#1145 self-review):
+    /// a future edit could reuse an enumerated phrase as a real dismissal
+    /// ("skip anything genuinely out of scope") while leaving the ban list
+    /// intact, and the wholesale allowlist would wave it straight through.
+    /// Close the gap: in a priority body each banned phrase may appear **at
+    /// most once** — quoted the single time it is forbidden, or (for
+    /// deepreview's #924 cautionary line) warned against. A second occurrence
+    /// is the detectable signature of a phrase being *used* rather than
+    /// banned, and fails here instead of silently in production.
+    ///
+    /// This catches a repeat, not a first-and-only soft use of a phrase the
+    /// body doesn't already list; that residual needs a human reviewer, but
+    /// every enumerated phrase is already present once, so any soft reuse of
+    /// one becomes a second occurrence and is caught.
+    #[test]
+    fn priority_bodies_never_repeat_a_banned_phrase() {
+        for key in ["rev", "deepreview", "fixall"] {
+            let body = Snippets::builtin()
+                .get(key)
+                .expect("ships built-in")
+                .body
+                .to_ascii_lowercase();
+            for phrase in BANNED_DISMISSALS {
+                let count = body.matches(*phrase).count();
+                assert!(
+                    count <= 1,
+                    "`{key}` contains the banned phrase `{phrase}` {count} times — in a \
+                     priority body a weasel phrase is quoted at most once, where it is \
+                     forbidden; a repeat is the signature of it being used as an actual \
+                     dismissal rather than banned (#1145)",
+                );
+            }
+        }
+    }
+
+    /// The house-style section of `docs/snippets.md` reproduces the built-in
+    /// `rev` body and calls it "the built-in `rev`", so the doc and the code
+    /// can drift apart silently — the exact gap the #1145 self-review
+    /// flagged. Pin them: the doc must contain the shipped `rev` body
+    /// word-for-word (whitespace normalized, since the doc reflows it into a
+    /// YAML block). Editing the body without refreshing the example — or the
+    /// reverse — fails here instead of leaving the docs quietly wrong.
+    #[test]
+    fn docs_snippets_rev_example_matches_the_shipped_body() {
+        const DOC: &str = include_str!("../../../docs/snippets.md");
+        // The doc wraps the body across indented lines; collapsing every
+        // whitespace run to a single space on both sides makes the body a
+        // contiguous substring of the doc iff the words match exactly.
+        fn collapse(s: &str) -> String {
+            s.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+        let b = Snippets::builtin();
+        let body = &b.get("rev").expect("ships built-in").body;
+        assert!(
+            collapse(DOC).contains(&collapse(body)),
+            "the `rev` example in docs/snippets.md no longer matches the shipped \
+             built-in `rev` body — refresh the example so the documented prompt can't \
+             drift from the real one (#1145)",
         );
     }
 

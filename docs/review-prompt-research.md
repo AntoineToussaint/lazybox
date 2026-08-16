@@ -141,6 +141,49 @@ The rewrite is regression-guarded by
 toughening can't silently soften back to "degrades safely / not worth the
 complexity."
 
+## #1145: making the standard library-wide and machine-checked
+
+#935 toughened the bodies; #1145 turns that toughening into an explicit,
+enforced *standard* and pushes it across the whole library:
+
+- **A named, banned list of weasel phrases.** The dismissals that read as
+  caution but ship bugs — "out of scope," "not worth the complexity,"
+  "degrades gracefully / safely," "should be fine," "for now," "as a
+  follow-up," "left as an exercise" — are now enumerated in one place
+  (`BANNED_DISMISSALS`) and quoted *in the priority bodies themselves* as
+  forbidden, so the model sees the ban, not just the vibe.
+- **Scope reframed so it can't be an escape hatch.** `rev`, `deepreview`,
+  and `fixall` define scope as "everything the change touches *and*
+  everything that breaks because of it." "Out of scope" is the load-bearing
+  dodge, and this removes the room for it.
+- **fixall is a diff, not a list.** The body now says outright that "here
+  are the changes I would make" is not an acceptable output — apply them.
+- **Completeness self-critique.** The review bodies close by naming what
+  they did *not* examine and justifying the skip with evidence, so an
+  unexamined corner is stated rather than hidden.
+- **Enforced, not just written.** Three tests guard it:
+  `no_soft_body_offers_a_banned_dismissal` fails if *any* non-review body
+  sneaks a banned phrase in as a soft escape hatch (the review/scope-flag
+  bodies that legitimately quote the phrases are allowlisted);
+  `priority_bodies_enumerate_and_ban_the_weasel_phrases` fails if `rev` /
+  `deepreview` / `fixall` stop naming and banning them; and
+  `priority_bodies_encode_scope_contract_and_self_critique` fails if the
+  scope contract or the self-critique is dropped.
+
+**iPhone-first framing.** Snippets are the primary way to drive an agent
+from a phone — `]]s`+key, one tap, no editing. So the *defaults* have to
+carry the full discipline out of the box rather than assume the user will
+sharpen the prompt. #1145 treats the built-in `rev` / `deepreview` /
+`fixall` bodies as the mobile-first product surface: excellent and
+self-sufficient with zero configuration.
+
+**Single source of truth (skills vs snippets).** The strict review prompt
+lives in exactly one place — the snippet body — and is not duplicated into
+a `code-review` skill (there is no built-in one; lazybox only discovers
+user/repo skills). See
+[snippets-vs-skills.md](snippets-vs-skills.md#one-standard-one-home-the-review-discipline-lives-in-the-snippet)
+for that decision.
+
 ## Deliberately deferred: external snippet library (design)
 
 Issue #935 also asks for an **external snippet library** — pulling snippet

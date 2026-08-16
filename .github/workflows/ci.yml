@@ -257,7 +257,8 @@ jobs:
         run: |
           cargo run -p lazybox-server --features desktop-contract --bin generate-desktop-contract
           cargo test -p lazybox-server --test api_gateway desktop_compatibility_fixture_is_current -- --exact
-          git diff --exit-code -- apps/desktop/src/generated
+          git diff --exit-code -- apps/desktop/src/generated \
+            || { echo "::error::desktop contract is stale — run 'make desktop-contract' and commit apps/desktop/src/generated"; exit 1; }
       - name: Install frontend dependencies
         working-directory: apps/desktop
         run: npm ci

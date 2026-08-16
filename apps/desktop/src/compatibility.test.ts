@@ -20,13 +20,18 @@ function variantTag(value: unknown): string {
 }
 
 describe("generated desktop compatibility fixture", () => {
+  const staleHint =
+    "generated desktop contract is stale — run `make desktop-contract` and commit apps/desktop/src/generated";
+
   it("matches the supported protocol version", () => {
-    expect(fixture.protocol_version).toBe(DESKTOP_PROTOCOL_VERSION);
-    expect(fixture.protocol_fingerprint).toBe(DESKTOP_PROTOCOL_FINGERPRINT);
+    expect(fixture.protocol_version, staleHint).toBe(DESKTOP_PROTOCOL_VERSION);
+    expect(fixture.protocol_fingerprint, staleHint).toBe(
+      DESKTOP_PROTOCOL_FINGERPRINT,
+    );
   });
 
   it("covers every exported command and event variant", () => {
-    expect(new Set(fixture.commands.map(variantTag)).size).toBe(31);
-    expect(new Set(fixture.events.map(variantTag)).size).toBe(21);
+    expect(new Set(fixture.commands.map(variantTag)).size, staleHint).toBe(31);
+    expect(new Set(fixture.events.map(variantTag)).size, staleHint).toBe(21);
   });
 });

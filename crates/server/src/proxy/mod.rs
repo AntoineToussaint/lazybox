@@ -123,7 +123,24 @@ struct ProxyState {
 /// response. Returns the serving task, or `None` when metering is off or
 /// the bind fails (in which case agents just reach the vendor directly —
 /// metering is best-effort, never a spawn blocker).
+/// Master kill switch for the metering proxy, independent of the
+/// `agent.metering_proxy` config opt-in. Forced off in code because the
+/// proxy can hard-fail agents: a daemon restart re-binds a fresh loopback
+/// port, but agents spawned before it keep the old `ANTHROPIC_BASE_URL`, so
+/// their API calls hit a dead port and get connection-refused (#1159). Until
+/// the proxy fails open (agents fall back to the real upstream when it's
+/// unreachable), keep it off so metering can never gate whether the model is
+/// reachable. Return `true` once #1159 lands; the config opt-in is honored
+/// again then. A function (not a `const`) so the disabled body doesn't read
+/// as unreachable under `-D warnings`.
+fn metering_proxy_enabled() -> bool {
+    false
+}
+
 pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHandle<()>> {
+    if !metering_proxy_enabled() {
+        return None;
+    }
     let cfg = lazybox_config::Config::load().unwrap_or_default();
     if !cfg.agent.metering_proxy {
         return None;

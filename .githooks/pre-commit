@@ -15,6 +15,9 @@
 #     a clippy warning or a broken doc link never leaves the laptop. Opt
 #     in with `make install-hooks`, which sets the flag. Heavier (a full
 #     workspace build); avoid it where many worktrees commit in parallel.
+#     It also regenerates the generated wire contracts, but only on a
+#     commit that stages a DTO source (a cheap `git diff --cached` guard
+#     keeps that ~11-min build off every other commit) — see step 4.
 #
 # Bypass for a one-off "I know what I'm doing" commit:
 #     git commit --no-verify
@@ -105,6 +108,25 @@ if ! RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet; then
 pre-commit: rustdoc errors above (usually a broken intra-doc link —
 a \`[\`Symbol\`]\` whose target isn't imported in that module). Fix the
 link or bypass with \`git commit --no-verify\`.
+EOF
+    exit 1
+fi
+
+# 4. Regenerate the generated wire contracts, but ONLY when this commit
+#    stages a fingerprint input (ipc/core/tui-core wire types, the
+#    api-gateway module, or Cargo.lock — a lock bump moves the fingerprint
+#    baked into the fixture). The guard is a cheap `git diff --cached`; the heavy build
+#    runs only on the rare commit that can actually move a fixture, and
+#    the regenerated files are re-staged into this commit — so DTO drift
+#    is caught here instead of turning a teammate's CI red. Skips silently
+#    (no build) on every commit that touches no DTO.
+echo "pre-commit: regen contracts (only if DTO sources are staged)"
+if ! "${repo_root}/scripts/regen-contracts.sh" --if-staged; then
+    cat <<EOF >&2
+
+pre-commit: contract regeneration failed above. Fix the DTO change (or
+run \`make contracts\` by hand) and re-commit, or bypass with
+\`git commit --no-verify\`.
 EOF
     exit 1
 fi

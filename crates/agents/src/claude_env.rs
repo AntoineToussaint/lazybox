@@ -19,11 +19,29 @@
 //! blocker but aren't config-seedable (an MCP gate is suppressed at spawn
 //! with `--strict-mcp-config`; a promo that still slips through is caught
 //! by [`crate::detect`] surfacing it as `InputNeeded`).
+//!
+//! - **Bypass-permissions consent** — `--dangerously-skip-permissions`
+//!   itself paints a one-time "Bypass Permissions mode" warning on every
+//!   start; the flag does NOT suppress it. Claude clears it only when
+//!   `skipDangerousModePermissionPrompt` is `true` in a settings source it
+//!   reads (`~/.claude/settings.json` is `userSettings`), so
+//!   [`seed_skip_dangerous_mode_prompt`] persists it there
+//!   (anthropics/claude-code#25503). The per-session `--settings` file
+//!   (`flagSettings`) carries the same key via
+//!   [`crate::hook_settings::build_settings`], covering spawns whether or
+//!   not that file is generated.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value};
+
+/// Settings key that suppresses Claude's one-time bypass-permissions
+/// consent screen. Shared with [`crate::hook_settings`] so the two
+/// seeding paths (user settings file here, per-session `--settings` file
+/// there) never spell it differently.
+pub(crate) const SKIP_DANGEROUS_MODE_KEY: &str = "skipDangerousModePermissionPrompt";
 
 /// Prepare `~/.claude.json` for an unattended launch in `worktree`:
 /// trust the worktree and mark onboarding complete. Best-effort: a
@@ -99,13 +117,74 @@ fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()>
     std::fs::rename(&tmp, config_path)
 }
 
-/// `<config>.lazybox-tmp` next to `config_path`, for the atomic write.
+/// Persist the one-time bypass-permissions consent into
+/// `~/.claude/settings.json` so an unattended
+/// `--dangerously-skip-permissions` launch doesn't stall on the
+/// "Bypass Permissions mode" warning. Best-effort like
+/// [`seed_unattended_env`]: a missing `$HOME` is a no-op (Ok).
+pub fn seed_skip_dangerous_mode_prompt() -> io::Result<()> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Ok(());
+    };
+    let settings_path = PathBuf::from(home).join(".claude").join("settings.json");
+    seed_skip_dangerous_mode_prompt_in(&settings_path)
+}
+
+/// Read-modify-write `settings_path`, setting
+/// `skipDangerousModePermissionPrompt = true` while preserving every
+/// other key. Writes atomically (temp + rename) so a concurrent Claude
+/// reader never sees a torn file, and skips the write when it is already
+/// set. A missing file (and its `~/.claude` parent) is created; an
+/// unparseable one is left untouched (returns `Err`).
+fn seed_skip_dangerous_mode_prompt_in(settings_path: &Path) -> io::Result<()> {
+    let mut root: Value = match std::fs::read_to_string(settings_path) {
+        // An empty (or whitespace-only) file carries no settings to
+        // preserve — treat it like a missing one and seed fresh, rather
+        // than parse-failing into a hang. A non-empty but malformed file
+        // still errors, so we never clobber real user content.
+        Ok(text) if text.trim().is_empty() => Value::Object(Map::new()),
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Value::Object(Map::new()),
+        Err(e) => return Err(e),
+    };
+
+    let obj = root.as_object_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "claude settings.json root is not an object",
+        )
+    })?;
+
+    if obj.get(SKIP_DANGEROUS_MODE_KEY) == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    obj.insert(SKIP_DANGEROUS_MODE_KEY.into(), Value::Bool(true));
+
+    let serialized = serde_json::to_vec_pretty(&root)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = tmp_sibling(settings_path)?;
+    std::fs::write(&tmp, serialized)?;
+    std::fs::rename(&tmp, settings_path)
+}
+
+/// `<config>.<pid>.<seq>.lazybox-tmp` next to `config_path`, for the
+/// atomic write. The pid + a process-monotonic sequence make the temp
+/// path unique per call, so two seeders racing on the same real file
+/// (concurrent unattended spawns, before the key is first persisted)
+/// never share a temp path — otherwise one's `rename` could publish the
+/// other's half-written `write`, corrupting the destination.
 fn tmp_sibling(config_path: &Path) -> io::Result<PathBuf> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let name = config_path.file_name().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "config path has no file name")
     })?;
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = name.to_os_string();
-    tmp_name.push(".lazybox-tmp");
+    tmp_name.push(format!(".{}.{seq}.lazybox-tmp", std::process::id()));
     Ok(config_path.with_file_name(tmp_name))
 }
 
@@ -202,6 +281,93 @@ mod tests {
 
         // No rewrite — byte-for-byte unchanged.
         assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
+    }
+
+    fn skip_dangerous_set(settings: &Path) -> bool {
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(settings).unwrap()).unwrap();
+        v[SKIP_DANGEROUS_MODE_KEY] == Value::Bool(true)
+    }
+
+    #[test]
+    fn seeds_skip_dangerous_mode_creating_missing_settings() {
+        let dir = scratch("skip-missing").join(".claude");
+        let settings = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        seed_skip_dangerous_mode_prompt_in(&settings).unwrap();
+
+        assert!(skip_dangerous_set(&settings));
+    }
+
+    #[test]
+    fn seeds_skip_dangerous_mode_preserving_other_settings() {
+        let dir = scratch("skip-preserve");
+        let settings = dir.join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"model":"opus","hooks":{"Stop":[{"hooks":[]}]}}"#,
+        )
+        .unwrap();
+
+        seed_skip_dangerous_mode_prompt_in(&settings).unwrap();
+
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(v["model"], Value::from("opus"));
+        assert!(v["hooks"]["Stop"].is_array());
+        assert!(skip_dangerous_set(&settings));
+    }
+
+    #[test]
+    fn skip_dangerous_mode_idempotent_when_already_set() {
+        let dir = scratch("skip-idempotent");
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, format!("{{\"{SKIP_DANGEROUS_MODE_KEY}\":true}}")).unwrap();
+        let before = std::fs::read_to_string(&settings).unwrap();
+
+        seed_skip_dangerous_mode_prompt_in(&settings).unwrap();
+
+        // No rewrite — byte-for-byte unchanged.
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), before);
+    }
+
+    #[test]
+    fn skip_dangerous_mode_leaves_unparseable_settings_alone() {
+        let dir = scratch("skip-malformed");
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, "not json {").unwrap();
+
+        let err = seed_skip_dangerous_mode_prompt_in(&settings).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "not json {");
+    }
+
+    #[test]
+    fn seeds_skip_dangerous_mode_over_empty_settings() {
+        // A zero-byte / whitespace-only settings file is not corrupt user
+        // content — it must seed fresh, not parse-fail into a hang.
+        let dir = scratch("skip-empty");
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, "   \n").unwrap();
+
+        seed_skip_dangerous_mode_prompt_in(&settings).unwrap();
+
+        assert!(skip_dangerous_set(&settings));
+    }
+
+    #[test]
+    fn tmp_sibling_is_unique_per_call() {
+        // Concurrent seeders write the same real file via temp + rename;
+        // if the temp path were shared, one rename could publish another's
+        // half-written temp. Distinct paths per call are what prevent that.
+        let target = Path::new("/some/dir/settings.json");
+        let a = tmp_sibling(target).unwrap();
+        let b = tmp_sibling(target).unwrap();
+        assert_ne!(a, b, "two temp siblings collided");
+        // Both are still siblings of the target (same parent dir), so the
+        // final rename stays a same-directory (atomic) move.
+        assert_eq!(a.parent(), target.parent());
+        assert_eq!(b.parent(), target.parent());
     }
 
     #[test]

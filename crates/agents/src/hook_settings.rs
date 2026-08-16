@@ -68,6 +68,18 @@ pub fn build_settings(user_settings: Option<&Value>, hook_command: &str) -> Valu
     }
 
     root.insert("hooks".to_string(), Value::Object(hooks));
+
+    // Clear Claude's one-time "Bypass Permissions mode" consent for every
+    // lazybox-managed launch. `--dangerously-skip-permissions` repaints that
+    // warning on each start unless this is set in a settings source Claude
+    // reads; the `--settings` file is one (`flagSettings`), so seeding it
+    // here forecloses the gate for autonomous spawns. Only consulted under
+    // bypass mode, so it's inert for interactive sessions
+    // (anthropics/claude-code#25503).
+    root.insert(
+        crate::claude_env::SKIP_DANGEROUS_MODE_KEY.to_string(),
+        Value::Bool(true),
+    );
     Value::Object(root)
 }
 
@@ -121,6 +133,19 @@ mod tests {
             "user hook dropped"
         );
         assert!(cmds.contains(&CMD.to_string()), "lazybox hook missing");
+    }
+
+    #[test]
+    fn clears_bypass_permissions_consent() {
+        // Autonomous Claude launches with `--dangerously-skip-permissions`,
+        // which paints a bypass-mode warning the flag doesn't suppress; the
+        // generated `--settings` file must carry the acceptance so the spawn
+        // doesn't hang on it (anthropics/claude-code#25503).
+        let settings = build_settings(None, CMD);
+        assert_eq!(
+            settings["skipDangerousModePermissionPrompt"],
+            Value::Bool(true)
+        );
     }
 
     #[test]

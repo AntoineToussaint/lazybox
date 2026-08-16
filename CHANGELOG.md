@@ -6,6 +6,44 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-08-16
+
+The responsiveness release. The headline: off-thread terminal rendering is now
+the default, so a chatty agent flooding the screen can no longer freeze the UI —
+the frame flush moved off the input thread, and a slow or wedged terminal makes
+the writer fall behind instead of blocking your keystrokes, the modal, or quit.
+A stale `Esc` now always dismisses a modal (you can never get stuck in one), a
+governor rate-limit backoff reads as an honest "GitHub rate-limited · ~Nm"
+instead of a spinner that looks hung, and an agent stays "working" while the
+background shells it launched are still running. Real per-provider usage
+metering for Claude *and* Codex lands in the header, the sandbox gains an
+SDK-native GCP lifecycle (no more shelling out to `gcloud`), and Linear grows
+comment threads plus assign/close. This supersedes the never-published 0.1.10,
+so it also carries everything documented under 0.1.10 below.
+
+### Highlights
+
+- **The UI stays live under load.** Off-thread render writer is the default;
+  the blocking stdout flush no longer runs on the input thread, so heavy agent
+  output can't wedge input, the modal, or quit.
+- **You can always escape a modal.** A stale `Esc` survives the input-staleness
+  guard, even on confirm modals — a queued `Enter` still can't replay a
+  destructive action.
+- **Honest sync status.** A GitHub governor self-throttle surfaces as a real
+  rate-limit countdown, not a perpetual "syncing… still working."
+- **Agents don't falsely finish.** An agent whose model turn ended but whose
+  background shells are still running reads as *working*, not done.
+- **Real usage in the header.** Opt-in metering proxy reports per-provider token
+  usage for Claude and Codex from live traffic.
+- **SDK-native GCP sandbox** lifecycle and typed reauth; `gcloud` is no longer
+  on the start/stop/status path.
+- **Linear**: comment threads and assign/close mutations.
+
+### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/download/v0.1.11/lazybox-tui-installer.sh | sh
+
 ## [0.1.10] - 2026-08-12
 
 A reliability and responsiveness patch on top of 0.1.9. Highlights: the UI no

@@ -234,7 +234,7 @@ impl<T> ResultExt<T> for Option<T> {
 /// fan out to every connected client. If a slow client lags more than
 /// `BUS_CAPACITY` events behind, it skips ahead — better than blocking
 /// every other client on the slowest one.
-pub const BUS_CAPACITY: usize = 1024;
+pub const BUS_CAPACITY: usize = lazybox_ipc::RAW_EVENT_CHANNEL_CAPACITY;
 
 /// Inline-lane budget. A command in the inline lane (see `command_lane`)
 /// that holds the serve loop longer than this is an architecture
@@ -352,6 +352,11 @@ pub struct ServerConfig {
     /// set insert; without this lock two concurrent deletes can each load the
     /// old set and overwrite the other's tombstone.
     pub archive_updates: Arc<parking_lot::Mutex<()>>,
+    /// Serializes workspace-key allocation through the matching durable
+    /// insert. Allocation is a check-then-save loop; without this boundary,
+    /// concurrent creates with the same display name can both observe the
+    /// same suffix as free and the later save overwrites the first row.
+    pub(crate) workspace_creations: Arc<parking_lot::Mutex<()>>,
     /// Debounce memory for "stored workspace row is unreadable —
     /// preserved, not overwritten" reports, keyed by workspace key →
     /// last report time. The poll tick re-hits the same corrupt row
@@ -504,6 +509,7 @@ impl ServerConfig {
             poll: PollState::default(),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
+            workspace_creations: Arc::new(parking_lot::Mutex::new(())),
             undecodable_row_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -1075,13 +1081,19 @@ impl Server {
                                     let mut terminals =
                                         spawn_handler::snapshot_terminals(&self.config).await;
                                     budget_snapshot_replay(&mut terminals);
-                                    let _ = conn.tx.send(Event::Snapshot {
+                                    let recovery = Event::Snapshot {
                                         workspaces: workspaces.values,
                                         terminals,
                                         projects: projects.values,
                                         recent_snippets: client_kv.recent_snippets,
                                         dismissed_updates: client_kv.dismissed_updates,
-                                    });
+                                    };
+                                    if let Err(error) = conn.tx.send_authoritative(recovery) {
+                                        tracing::warn!(
+                                            error = %error,
+                                            "lag-recovery snapshot could not enter reserved lane"
+                                        );
+                                    }
                                     if load_errors > 0 {
                                         let _ = conn.tx.send(storage_recovery_event(load_errors));
                                     }
@@ -1312,12 +1324,13 @@ pub async fn dispatch_command(
             // the marker set independently could therefore warn about a
             // terminal absent from this snapshot.
             let restart_required = {
-                let outdated = config.terminal.outdated_agent_terminals.lock().await;
+                let entries = config.terminal.entries.lock().await;
                 terminals
                     .iter()
                     .filter_map(|terminal| {
-                        outdated
-                            .contains(&terminal.terminal_id)
+                        entries
+                            .get(&terminal.terminal_id)
+                            .is_some_and(|entry| entry.outdated_agent)
                             .then_some(terminal.terminal_id)
                     })
                     .collect::<Vec<_>>()
@@ -1494,12 +1507,8 @@ pub async fn dispatch_command(
         } => {
             spawn_handler::handle_record_composing_buffer(config, terminal_id, &buffer).await;
         }
-        lazybox_ipc::Command::RequestTerminalResync {
-            terminal_id,
-            required_seq,
-        } => {
-            spawn_handler::handle_terminal_resync_request(config, tx, terminal_id, required_seq)
-                .await;
+        lazybox_ipc::Command::RequestTerminalResync { requests } => {
+            spawn_handler::handle_terminal_resync_requests(config, tx, requests).await;
         }
         lazybox_ipc::Command::RequestTerminalDelta {
             terminal_id,
@@ -1629,13 +1638,31 @@ pub async fn dispatch_command(
             name,
             project_key,
             spawn_agent,
+            client_request_id,
         } => {
             // create_empty_workspace returns the final key — which may
             // carry a `-2` collision suffix the client can't predict — so
             // chain any requested spawn off it here rather than
             // round-tripping through the client. Bare interactive spawn
             // (no prompt) keeps the human-in-the-loop approval gate.
-            let key = workspace::create_empty_workspace(config, &name, project_key);
+            let key = match workspace::create_empty_workspace(config, &name, project_key) {
+                Ok(key) => key,
+                Err(error) => {
+                    if let Some(client_request_id) = client_request_id {
+                        let _ = config.bus.send(lazybox_ipc::Event::CommandFailed {
+                            client_request_id,
+                            message: format!("workspace was not created: {error}"),
+                        });
+                    }
+                    return;
+                }
+            };
+            if let Some(client_request_id) = client_request_id.as_ref() {
+                let _ = config.bus.send(lazybox_ipc::Event::WorkspaceCreated {
+                    client_request_id: client_request_id.clone(),
+                    workspace_key: key.clone(),
+                });
+            }
             if let Some(agent_id) = spawn_agent {
                 let session_key: lazybox_core::SessionKey = (&key).into();
                 spawn_handler::handle_spawn(
@@ -1643,9 +1670,16 @@ pub async fn dispatch_command(
                     session_key,
                     None,
                     lazybox_ipc::TerminalKind::Agent(agent_id),
-                    spawn_handler::SpawnOptions::default(),
+                    spawn_handler::SpawnOptions {
+                        client_request_id,
+                        ..Default::default()
+                    },
                 )
                 .await;
+            } else if let Some(client_request_id) = client_request_id {
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::CommandCompleted { client_request_id });
             }
         }
         lazybox_ipc::Command::CreateProject { name } => {

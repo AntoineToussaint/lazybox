@@ -824,26 +824,26 @@ struct TerminalRebadgePlan {
 }
 
 fn prepare_terminal_rebadges(
-    terminals: &std::collections::HashMap<lazybox_ipc::TerminalId, String>,
-    terminal_meta: &std::collections::HashMap<
-        lazybox_ipc::TerminalId,
-        (lazybox_core::SessionKey, lazybox_ipc::TerminalKind),
-    >,
+    entries: &std::collections::HashMap<lazybox_ipc::TerminalId, crate::registries::TerminalEntry>,
     moves: Vec<(lazybox_core::SessionKey, lazybox_core::SessionKey)>,
 ) -> Result<(Vec<StoreMutation>, Vec<TerminalRebadgePlan>), CommitError> {
     let mut mutations = Vec::new();
     let mut plans = Vec::new();
     for (from, to) in moves {
         let mut terminal_ids = Vec::new();
-        for (terminal_id, (session_key, kind)) in terminal_meta {
+        for (terminal_id, entry) in entries {
+            let Some((session_key, kind)) = entry.meta.as_ref() else {
+                continue;
+            };
             if *session_key != from {
                 continue;
             }
-            let Some(backend_key) = terminals.get(terminal_id) else {
-                // Teardown claims `terminals` first. A metadata-only entry is
-                // already exiting and must not be resurrected durably here.
+            let Some(backend_key) = entry.backend_key.as_ref() else {
                 continue;
             };
+            if entry.finishing {
+                continue;
+            }
             let (key, value) =
                 crate::spawn_handler::encode_terminal_meta_record(backend_key, &to, kind).map_err(
                     |source| CommitError::SerializeTerminalMetadata {
@@ -881,31 +881,28 @@ pub(super) async fn commit_workspace_move(
     post_commit_events: Vec<Event>,
     workspace_guards: Vec<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<CommitOutcome, CommitError> {
-    let terminal_guards = if terminal_moves.is_empty() {
+    let terminal_guard = if terminal_moves.is_empty() {
         None
     } else {
-        let terminals = config.terminal.terminals.clone().lock_owned().await;
-        let terminal_meta = config.terminal.terminal_meta.clone().lock_owned().await;
-        Some((terminals, terminal_meta))
+        Some(config.terminal.entries.clone().lock_owned().await)
     };
     let config_owned = config.clone();
     tokio::task::spawn_blocking(move || {
-        let mut terminal_guards = terminal_guards;
-        let (terminal_mutations, rebadge_plans) = match terminal_guards.as_ref() {
-            Some((terminals, terminal_meta)) => {
-                prepare_terminal_rebadges(terminals, terminal_meta, terminal_moves)?
-            }
+        let mut terminal_guard = terminal_guard;
+        let (terminal_mutations, rebadge_plans) = match terminal_guard.as_ref() {
+            Some(entries) => prepare_terminal_rebadges(entries, terminal_moves)?,
             None => (Vec::new(), Vec::new()),
         };
         let committed =
             persist_workspace_batch(&config_owned, upserts, deletes, terminal_mutations)?;
         let outcome = committed.outcome;
 
-        if let Some((_, terminal_meta)) = terminal_guards.as_mut() {
+        if let Some(entries) = terminal_guard.as_mut() {
             for plan in rebadge_plans {
                 let mut changed = false;
                 for terminal_id in &plan.terminal_ids {
-                    if let Some((session_key, _)) = terminal_meta.get_mut(terminal_id)
+                    if let Some(entry) = entries.get_mut(terminal_id)
+                        && let Some((session_key, _)) = entry.meta.as_mut()
                         && *session_key == plan.from
                     {
                         *session_key = plan.to.clone();
@@ -923,7 +920,7 @@ pub(super) async fn commit_workspace_move(
                 }
             }
         }
-        drop(terminal_guards);
+        drop(terminal_guard);
         publish_workspace_batch(&config_owned, committed);
         for event in post_commit_events {
             let _ = config_owned.bus.send(event);

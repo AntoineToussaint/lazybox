@@ -13,6 +13,7 @@ use lazybox_core::SessionKey;
 use lazybox_ipc::Command as IpcCommand;
 use lazybox_ipc::Event as IpcEvent;
 use lazybox_ipc::TerminalId;
+use lazybox_ipc::TerminalResyncRequest;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
 use tuirealm::event::Event;
@@ -181,8 +182,14 @@ impl Terminals {
     }
 
     /// Client-observed terminal gaps that need a daemon replay request.
-    pub fn drain_pending_resync_requests(&mut self) -> Vec<(TerminalId, u64)> {
+    pub fn drain_pending_resync_requests(&mut self) -> Vec<TerminalResyncRequest> {
         self.inner.drain_pending_resync_requests()
+    }
+
+    /// Restore recovery debt when the bounded command channel rejects a
+    /// batch; the next daemon event retries it.
+    pub fn requeue_resync_requests(&mut self, requests: Vec<TerminalResyncRequest>) {
+        self.inner.requeue_resync_requests(requests);
     }
 
     /// Direct render entry point.

@@ -388,9 +388,19 @@ impl<T: TerminalAdapter> Model<T> {
                         // server handler). Same behavior for the global
                         // "start agent" shortcut, which funnels here.
                         let spawn_agent = Some(self.sidebar.default_agent().to_string());
+                        let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+                        self.pending_workspace_creates.insert(
+                            client_request_id.clone(),
+                            super::PendingWorkspaceCreate {
+                                name: name.clone(),
+                                spawn_agent: spawn_agent.is_some(),
+                                workspace_key: None,
+                            },
+                        );
                         tracing::info!(
                             workspace_name = %name,
                             project_key = %project_key,
+                            %client_request_id,
                             ?spawn_agent,
                             "creating new pre-PR workspace under project",
                         );
@@ -398,6 +408,7 @@ impl<T: TerminalAdapter> Model<T> {
                             name,
                             project_key,
                             spawn_agent,
+                            client_request_id: Some(client_request_id),
                         });
                     }
                     (false, None) => {

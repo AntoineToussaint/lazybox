@@ -729,6 +729,54 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     decision.idle_pos.is_some()
 }
 
+/// Recognize only startup consent gates whose affirmative answer was already
+/// authorized by an unattended launch. This deliberately excludes ordinary
+/// tool approvals and free-text questions: the fallback nudge is for a failed
+/// one-time trust/consent seed, never a general auto-approve mechanism.
+pub fn claude_unattended_startup_nudge(
+    recent_output: &[u8],
+) -> Option<crate::agent::UnattendedPromptNudge> {
+    use crate::agent::{UnattendedPromptKind, UnattendedPromptNudge};
+
+    let screen = strip_ansi_lossy(recent_output);
+    let compact = compact_lower(&screen);
+    let trust = last_compact_match_pos(
+        &compact,
+        &[
+            "do you trust the files in this folder",
+            "do you trust this folder",
+        ],
+    );
+    let bypass = last_compact_match_pos(
+        &compact,
+        &["bypass permissions mode", "bypass permissions warning"],
+    );
+    let (marker, kind) = match (trust, bypass) {
+        (Some(trust), Some(bypass)) if bypass > trust => {
+            (Some(bypass), UnattendedPromptKind::PermissionBypassConsent)
+        }
+        (Some(trust), _) => (Some(trust), UnattendedPromptKind::WorkspaceTrust),
+        (_, Some(bypass)) => (Some(bypass), UnattendedPromptKind::PermissionBypassConsent),
+        _ => return None,
+    };
+
+    // A newer idle/working anchor proves this phrase is scrollback. The
+    // revalidation immediately before writing runs this same test against a
+    // fresh backend snapshot, closing the detect→answer race.
+    let cleared = idle_box_pos(&compact).max(working_status_pos(&compact));
+    if !marker_at_least_as_recent(marker, cleared) {
+        return None;
+    }
+    let marker = marker.expect("matched startup marker");
+    let tail = &compact[marker..];
+    let affirmative_chooser =
+        tail.contains("1.yes") && (tail.contains("2.no") || tail.contains("esctocancel"));
+    affirmative_chooser.then_some(UnattendedPromptNudge {
+        kind,
+        response: b"1",
+    })
+}
+
 /// Whether a `Working` reading carries on-screen proof the agent moved
 /// PAST a dialog: an affirmative live status anchor (see
 /// `working_status_pos`) strictly more recent than the most recent

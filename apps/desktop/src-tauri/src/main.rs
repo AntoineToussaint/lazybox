@@ -1077,16 +1077,50 @@ async fn send_gateway_command(
         if !correlation_echo_ok(response.client_request_id.as_deref(), &client_request_id) {
             return Err("daemon returned a mismatched command response".to_string());
         }
-        Ok(response
+        let events = response
             .events
             .into_iter()
             .filter_map(desktop_event)
-            .collect())
+            .collect::<Vec<_>>();
+        if let Some(message) = correlated_command_failure(&events, &client_request_id) {
+            return Err(message);
+        }
+        Ok(events)
     } else {
         Err(response
             .error
             .unwrap_or_else(|| "daemon did not complete the desktop command".to_string()))
     }
+}
+
+/// Convert the daemon's correlated failure event into the command call's
+/// actual result. Returning `Ok` here let the webview close its create modal
+/// and paint "Creating…" over the failure it had just received. When durable
+/// creation preceded an agent-spawn failure, name that partial success so a
+/// retry cannot accidentally create a duplicate workspace.
+fn correlated_command_failure(events: &[DesktopEvent], request_id: &str) -> Option<String> {
+    let failure = events.iter().find_map(|event| match event {
+        DesktopEvent::CommandFailed {
+            client_request_id,
+            message,
+        } if client_request_id == request_id => Some(message.as_str()),
+        _ => None,
+    })?;
+    let created = events.iter().find_map(|event| match event {
+        DesktopEvent::WorkspaceCreated {
+            client_request_id,
+            workspace_key,
+        } if client_request_id == request_id => Some(workspace_key),
+        _ => None,
+    });
+    Some(match created {
+        Some(workspace_key) => {
+            format!(
+                "workspace {workspace_key} was created, but its agent failed to start: {failure}"
+            )
+        }
+        None => failure.to_string(),
+    })
 }
 
 /// Open a task URL in the user's default browser (the TUI's `g o`).
@@ -2941,6 +2975,28 @@ mod tests {
     }
 
     #[test]
+    fn correlated_workspace_failure_rejects_the_invoke_and_names_partial_creation() {
+        let events = vec![
+            DesktopEvent::WorkspaceCreated {
+                client_request_id: "req-1".into(),
+                workspace_key: lazybox_core::WorkspaceKey::new("workspace-2"),
+            },
+            DesktopEvent::CommandFailed {
+                client_request_id: "req-1".into(),
+                message: "terminal was not spawned".into(),
+            },
+        ];
+
+        let failure = correlated_command_failure(&events, "req-1")
+            .expect("matching failure rejects the command call");
+        assert!(failure.contains("workspace-2"));
+        assert!(failure.contains("was created"));
+        assert!(failure.contains("agent failed"));
+        assert!(failure.contains("terminal was not spawned"));
+        assert!(correlated_command_failure(&events, "other-request").is_none());
+    }
+
+    #[test]
     fn remote_gateway_defaults_to_local_when_unconfigured() {
         assert!(resolve_remote_gateway(None, None, None).is_none());
         // A `desktop.remote:` block with an empty URL is inert.
@@ -3203,6 +3259,7 @@ mod tests {
                 name,
                 project_key,
                 spawn_agent: Some(agent),
+                ..
             } if name == "first workspace"
                 && project_key == lazybox_core::ProjectKey::github("acme", "widget")
                 && agent == "codex"
@@ -3352,6 +3409,7 @@ mod tests {
                     tiers: vec![lazybox_core::ModelTier {
                         alias: "R".to_string(),
                         label: "Remote Large".to_string(),
+                        short: None,
                         args: vec!["--remote-large".to_string()],
                     }],
                     ..Default::default()
@@ -3822,6 +3880,7 @@ mod tests {
             mergeable: lazybox_core::Mergeable::Mergeable,
             is_behind_base: false,
             merge_blocked: false,
+            approval_policy: lazybox_core::ApprovalPolicy::Default,
             node_id: None,
             needs_reply: false,
             last_commenter: None,
@@ -4200,6 +4259,7 @@ mod tests {
             let output = std::process::Command::new("git")
                 .arg("-C")
                 .arg(repo)
+                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
                 .args(args)
                 .output()
                 .expect("run git");

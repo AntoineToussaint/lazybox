@@ -425,13 +425,6 @@ pub(crate) async fn detect_required(
     if config.agent_recovery.active(terminal_id).await {
         return;
     }
-    let superseded = config.terminal.superseded_terminals.lock().await.clone();
-    let authenticating = config
-        .terminal
-        .authenticating_terminals
-        .lock()
-        .await
-        .clone();
     // When this agent isolates its login per session (Codex → a private
     // `CODEX_HOME`), a re-auth only rewrites this session's own credential;
     // the rest of the fleet is untouched, so there is no cascade to warn
@@ -444,13 +437,16 @@ pub(crate) async fn detect_required(
     let other_session_count = if credentials_isolated {
         0
     } else {
-        let meta = config.terminal.terminal_meta.lock().await;
-        meta.iter()
-            .filter(|(id, (_, kind))| {
+        let entries = config.terminal.entries.lock().await;
+        entries
+            .iter()
+            .filter(|(id, entry)| {
                 **id != terminal_id
-                    && !superseded.contains(id)
-                    && !authenticating.contains(id)
-                    && matches!(kind, TerminalKind::Agent(agent_id) if agent_id == &context.agent_id)
+                    && !entry.superseded
+                    && !entry.authenticating
+                    && entry.meta.as_ref().is_some_and(|(_, kind)| {
+                        matches!(kind, TerminalKind::Agent(agent_id) if agent_id == &context.agent_id)
+                    })
             })
             .count()
     };

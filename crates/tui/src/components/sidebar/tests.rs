@@ -4066,6 +4066,34 @@ mod spawning_tests {
         assert_eq!(sb.working_spinner_frame, 5);
     }
 
+    /// Release regression #1156: the provisioning state belongs to the target
+    /// workspace, not the cursor. Navigating to another row must leave the
+    /// original row's animated spawning arc intact.
+    #[test]
+    fn spawning_arc_survives_focus_moving_to_another_workspace() {
+        let (mut sb, spawning_key) = one_workspace();
+        let mut other_task = base_task();
+        other_task.id.key = "o/r#2".into();
+        other_task.title = "Other work".into();
+        let other = Workspace::from_task(other_task, chrono::Utc::now());
+        let other_key = SessionKey::from(&other.key);
+        sb.workspaces.insert(other_key.clone(), other);
+        sb.recompute_visible();
+
+        sb.on_event(&progress(
+            &spawning_key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.focus_workspace_key(&other_key));
+
+        assert!(
+            sb.is_spawning(&spawning_key),
+            "focus changes cannot erase another workspace's provision state"
+        );
+        assert_eq!(sb.selected_session_key(), Some(&other_key));
+    }
+
     /// Acceptance render: the row shows the distinct spawning arc during
     /// provisioning, then yields to the working braille spinner once the
     /// agent goes live.

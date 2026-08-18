@@ -2,13 +2,24 @@
 
 use crate::ServerConfig;
 use crate::polling::{
-    CommitError, commit_upsert, commit_upsert_offloaded_reported, commit_upsert_reported,
-    load_workspace, load_workspace_offloaded, report_commit_error,
+    CommitError, commit_upsert, commit_upsert_offloaded_reported, load_workspace,
+    load_workspace_offloaded, report_commit_error,
 };
 use chrono::Utc;
 use lazybox_core::{Workspace, WorkspaceKey};
 use lazybox_ipc::Event;
-use lazybox_store::StoreMutation;
+use lazybox_store::{StoreError, StoreMutation};
+
+/// Failure to create a durable workspace record. Creation is a user-issued
+/// command, so callers must propagate this result instead of returning a key
+/// for a row that may never have reached the store.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateWorkspaceError {
+    #[error("allocate a collision-free workspace key: {0}")]
+    Allocate(#[source] StoreError),
+    #[error("persist workspace: {0}")]
+    Persist(String),
+}
 
 /// Create an empty workspace (no PR, no issues) named by the user.
 /// Generates a `WorkspaceKey` from the name's slug, disambiguating
@@ -21,47 +32,60 @@ pub fn create_empty_workspace(
     config: &ServerConfig,
     name: &str,
     project_key: lazybox_core::ProjectKey,
-) -> WorkspaceKey {
-    let key = allocate_workspace_key(config, name);
+) -> Result<WorkspaceKey, CreateWorkspaceError> {
+    let _creation_guard = config.workspace_creations.lock();
+    let key = allocate_workspace_key(config, name).map_err(|error| {
+        report_workspace_create_error(config, "allocate workspace key", &error);
+        CreateWorkspaceError::Allocate(error)
+    })?;
     let mut workspace = Workspace::empty(key.clone(), "main", Utc::now());
     if !name.trim().is_empty() {
         workspace.name = name.trim().to_string();
     }
     workspace.project_key = Some(project_key);
     workspace.local = true;
-    commit_upsert_reported(config, &key, workspace, "create empty workspace");
-    key
+    if let Err(error) = commit_upsert(config, &key, workspace) {
+        report_commit_error(config, "create empty workspace", &error);
+        return Err(CreateWorkspaceError::Persist(error.to_string()));
+    }
+    Ok(key)
 }
 
 /// Allocate a fresh, collision-free workspace key from a display name:
 /// slugify, then try `<base>`, `<base>-2`, … until the store reports no
 /// existing record. Falls back to `workspace` for an empty slug so the
 /// key is always non-empty.
-fn allocate_workspace_key(config: &ServerConfig, name: &str) -> WorkspaceKey {
+fn allocate_workspace_key(config: &ServerConfig, name: &str) -> Result<WorkspaceKey, StoreError> {
     let base = lazybox_core::slug::slugify(name);
     let base = if base.is_empty() {
         "workspace".to_string()
     } else {
         base
     };
-    (1..)
-        .map(|i| {
-            if i == 1 {
-                WorkspaceKey::new(base.clone())
-            } else {
-                WorkspaceKey::new(format!("{base}-{i}"))
-            }
-        })
-        .find(|k| {
-            config
-                .store
-                .get_workspace(k)
-                .ok()
-                .flatten()
-                .and_then(|r| r.workspace_json)
-                .is_none()
-        })
-        .expect("infinite range yields a free key")
+    for i in 1.. {
+        let key = if i == 1 {
+            WorkspaceKey::new(base.clone())
+        } else {
+            WorkspaceKey::new(format!("{base}-{i}"))
+        };
+        if config
+            .store
+            .get_workspace(&key)?
+            .and_then(|record| record.workspace_json)
+            .is_none()
+        {
+            return Ok(key);
+        }
+    }
+    unreachable!("an unbounded numeric suffix always yields a workspace key")
+}
+
+fn report_workspace_create_error(config: &ServerConfig, context: &'static str, error: &StoreError) {
+    tracing::error!(context, error = %error, "workspace creation failed");
+    let _ = config.bus.send(Event::provider_error_retryable(
+        "store",
+        format!("{context}: {error}"),
+    ));
 }
 
 /// Import an on-disk checkout as a **linked (no-worktree) workspace**.
@@ -105,13 +129,7 @@ pub async fn import_local_checkout(
         }
     };
     let branch = checkout.branch.unwrap_or_else(|| "main".to_string());
-    Some(create_linked_workspace(
-        config,
-        &name,
-        project_key,
-        path,
-        &branch,
-    ))
+    create_linked_workspace(config, &name, project_key, path, &branch).ok()
 }
 
 /// Create a linked (no-worktree) workspace pointing at `path`. Sibling
@@ -126,8 +144,12 @@ pub fn create_linked_workspace(
     project_key: lazybox_core::ProjectKey,
     path: std::path::PathBuf,
     branch: &str,
-) -> WorkspaceKey {
-    let key = allocate_workspace_key(config, name);
+) -> Result<WorkspaceKey, CreateWorkspaceError> {
+    let _creation_guard = config.workspace_creations.lock();
+    let key = allocate_workspace_key(config, name).map_err(|error| {
+        report_workspace_create_error(config, "allocate linked workspace key", &error);
+        CreateWorkspaceError::Allocate(error)
+    })?;
     let mut workspace = Workspace::empty(key.clone(), branch, Utc::now());
     if !name.trim().is_empty() {
         workspace.name = name.trim().to_string();
@@ -135,8 +157,11 @@ pub fn create_linked_workspace(
     workspace.project_key = Some(project_key);
     workspace.local = true;
     workspace.linked_checkout = Some(path);
-    commit_upsert_reported(config, &key, workspace, "import linked checkout");
-    key
+    if let Err(error) = commit_upsert(config, &key, workspace) {
+        report_commit_error(config, "import linked checkout", &error);
+        return Err(CreateWorkspaceError::Persist(error.to_string()));
+    }
+    Ok(key)
 }
 
 /// Create (or re-open) a local Project by name. Slugifies the name,
@@ -759,6 +784,296 @@ impl Reclaimed {
     }
 }
 
+/// One persisted worktree that prevents a workspace lifecycle removal.
+/// Destructive callers share this single predicate: a checkout must be
+/// freshly proven stopped, unlocked, clean, and fully pushed before any
+/// row/archive mutation can make it unreachable from the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceRemovalRisk {
+    pub path: std::path::PathBuf,
+    pub reasons: Vec<String>,
+}
+
+impl WorkspaceRemovalRisk {
+    fn describe(&self) -> String {
+        format!("{} ({})", self.path.display(), self.reasons.join(", "))
+    }
+}
+
+fn canonical_or_self(path: &std::path::Path) -> std::path::PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether `path` lives in the daemon-owned worktree namespace. Imported
+/// checkouts and on-main sessions point at user-owned repositories and must
+/// never enter the lifecycle reclaimer, even when an old record happens to
+/// persist their path.
+fn is_managed_worktree_path(config: &ServerConfig, path: &std::path::Path) -> bool {
+    canonical_or_self(path).starts_with(canonical_or_self(
+        &config.worktree_root_path().join("worktrees"),
+    ))
+}
+
+/// Snapshot every persisted session into the git inspector's source-agnostic
+/// shape. Workspace lifecycle owns this projection so cleanup, explicit
+/// removal, rescope, and diagnostics cannot drift onto different notions of
+/// which worktrees are still tracked.
+pub(crate) async fn collect_tracked_sessions(
+    config: &ServerConfig,
+) -> Result<Vec<lazybox_git_ops::TrackedSession>, String> {
+    let store = config.store.clone();
+    let scan = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let records = store
+            .list_workspaces()
+            .map_err(|error| format!("list workspaces: {error}"))?;
+        let mut tracked = Vec::with_capacity(records.len() * 2);
+        for record in records {
+            let json = record
+                .workspace_json
+                .ok_or_else(|| format!("workspace {} has no persisted payload", record.key))?;
+            let workspace = serde_json::from_str::<Workspace>(&json)
+                .map_err(|error| format!("decode workspace {}: {error}", record.key))?;
+            for session in workspace.sessions {
+                let raw = session.id.to_string();
+                tracked.push(lazybox_git_ops::TrackedSession {
+                    session_id: raw.get(..8).unwrap_or(&raw).to_string(),
+                    worktree_path: session.worktree_path,
+                    is_stopped: matches!(session.state, lazybox_core::SessionRunState::Stopped),
+                });
+            }
+        }
+        Ok(tracked)
+    })
+    .await;
+    match scan {
+        Ok(result) => result,
+        Err(error) => Err(format!("tracked-session scan task failed: {error}")),
+    }
+}
+
+/// Freshly inspect every on-disk worktree owned by `workspace` and return the
+/// reasons removal must stop. An inspection failure is an error, never an
+/// empty/safe answer. `is_safe_to_delete` deliberately supplies the final
+/// authority: besides dirty/ahead/locked state it requires the persisted
+/// session to be stopped, preventing a caller from deleting underneath a
+/// terminal whose map changed while teardown was beginning.
+pub(crate) async fn inspect_workspace_removal_risks(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> Result<Vec<WorkspaceRemovalRisk>, String> {
+    inspect_workspace_risks(config, workspace, true).await
+}
+
+/// Preflight variant used before a project cascade stops any terminals. It
+/// catches known local work across every child so an obviously-unsafe later
+/// child cannot leave the project half deleted. The final per-workspace gate
+/// still runs with `require_stopped=true` immediately before mutation.
+pub(crate) async fn inspect_workspace_local_risks(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> Result<Vec<WorkspaceRemovalRisk>, String> {
+    inspect_workspace_risks(config, workspace, false).await
+}
+
+async fn inspect_workspace_risks(
+    config: &ServerConfig,
+    workspace: &Workspace,
+    require_stopped: bool,
+) -> Result<Vec<WorkspaceRemovalRisk>, String> {
+    let paths: Vec<std::path::PathBuf> = workspace
+        .sessions
+        .iter()
+        .map(|session| session.worktree_path.clone())
+        .filter(|path| path.exists() && is_managed_worktree_path(config, path))
+        .collect();
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tracked = collect_tracked_sessions(config).await?;
+    let inspections = config
+        .worktree_manager()
+        .inspect_worktrees(&tracked)
+        .await
+        .map_err(|error| format!("could not inspect worktrees safely: {error}"))?;
+    let by_path: std::collections::HashMap<_, _> = inspections
+        .iter()
+        .map(|row| (canonical_or_self(&row.path), row))
+        .collect();
+
+    let mut risks = Vec::new();
+    for path in paths {
+        let Some(row) = by_path.get(&canonical_or_self(&path)) else {
+            risks.push(WorkspaceRemovalRisk {
+                path,
+                reasons: vec!["checkout could not be verified by the worktree inspector".into()],
+            });
+            continue;
+        };
+        if row.is_safe_to_delete {
+            continue;
+        }
+        let reasons = workspace_removal_reasons(row, require_stopped);
+        if !reasons.is_empty() {
+            risks.push(WorkspaceRemovalRisk { path, reasons });
+        }
+    }
+    Ok(risks)
+}
+
+fn workspace_removal_reasons(
+    row: &lazybox_git_ops::WorktreeInspection,
+    require_stopped: bool,
+) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked) {
+        reasons.push("locked".into());
+    }
+    if !row.status_verified {
+        reasons.push("cleanliness could not be proven".into());
+    }
+    if row.has_uncommitted_changes {
+        reasons.push("uncommitted changes".into());
+    }
+    if row.has_unpushed_commits {
+        reasons.push("unpushed commits".into());
+    }
+    if reasons.is_empty() && require_stopped && !row.is_safe_to_delete {
+        reasons.push("checkout is still active".into());
+    }
+    reasons
+}
+
+#[cfg(test)]
+mod removal_classification_tests {
+    use super::*;
+    use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation, WorkspaceRecord};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FailingWorkspaceListStore;
+
+    impl lazybox_store::Store for FailingWorkspaceListStore {
+        fn list_workspaces(
+            &self,
+        ) -> Result<Vec<lazybox_store::WorkspaceRecord>, lazybox_store::StoreError> {
+            Err(lazybox_store::StoreError::Backend(
+                "database is locked".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn tracked_session_scan_failure_is_not_an_empty_safe_set() {
+        let config = ServerConfig::with_store(std::sync::Arc::new(FailingWorkspaceListStore));
+        let error = collect_tracked_sessions(&config)
+            .await
+            .expect_err("a failed store scan must fail closed");
+        assert!(error.contains("database is locked"), "got: {error}");
+    }
+
+    struct SlowCreateStore {
+        inner: MemoryStore,
+        active_key_reads: AtomicUsize,
+        max_key_reads: AtomicUsize,
+    }
+
+    impl Store for SlowCreateStore {
+        fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+
+        fn get_workspace(&self, key: &WorkspaceKey) -> Result<Option<WorkspaceRecord>, StoreError> {
+            let active = self.active_key_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_key_reads.fetch_max(active, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            let result = self.inner.get_workspace(key);
+            self.active_key_reads.fetch_sub(1, Ordering::SeqCst);
+            result
+        }
+
+        fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+            self.inner.get_kv(key)
+        }
+
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+            self.inner.set_kv(key, value)
+        }
+
+        fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+            self.inner.delete_kv(key)
+        }
+
+        fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+            self.inner.list_workspaces()
+        }
+    }
+
+    #[test]
+    fn concurrent_workspace_creates_allocate_distinct_durable_keys() {
+        const CREATORS: usize = 8;
+        let store = std::sync::Arc::new(SlowCreateStore {
+            inner: MemoryStore::new(),
+            active_key_reads: AtomicUsize::new(0),
+            max_key_reads: AtomicUsize::new(0),
+        });
+        let config = ServerConfig::with_store(store.clone());
+        let start = std::sync::Arc::new(std::sync::Barrier::new(CREATORS));
+        let threads = (0..CREATORS)
+            .map(|_| {
+                let config = config.clone();
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    create_empty_workspace(
+                        &config,
+                        "Release",
+                        lazybox_core::ProjectKey::local("project"),
+                    )
+                    .expect("workspace creation")
+                })
+            })
+            .collect::<Vec<_>>();
+        let keys = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("creator thread"))
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(keys.len(), CREATORS, "every create owns a unique suffix");
+        assert_eq!(
+            store.max_key_reads.load(Ordering::SeqCst),
+            1,
+            "allocation and persistence share one creation boundary"
+        );
+        assert_eq!(store.list_workspaces().unwrap().len(), CREATORS);
+    }
+
+    #[test]
+    fn active_preflight_distinguishes_verified_clean_from_unknown_status() {
+        let mut row = lazybox_git_ops::WorktreeInspection {
+            path: "/tmp/lazybox-release-guard".into(),
+            bare_path: Some("/tmp/lazybox-release-guard.git".into()),
+            branch: Some("release".into()),
+            session_id: Some("session".into()),
+            reasons: Vec::new(),
+            size_bytes: 0,
+            last_modified: None,
+            has_uncommitted_changes: false,
+            status_verified: true,
+            has_unpushed_commits: false,
+            // An active tracked session is not deletable yet, even when its
+            // local-work probes succeeded.
+            is_safe_to_delete: false,
+        };
+        assert!(workspace_removal_reasons(&row, false).is_empty());
+
+        row.status_verified = false;
+        assert_eq!(
+            workspace_removal_reasons(&row, false),
+            vec!["cleanliness could not be proven"]
+        );
+    }
+}
+
 /// Human phrase for a reclaimed total, or `None` when nothing came back
 /// (a session-less workspace). Omits the byte figure for empty worktrees
 /// so the notice never reads "reclaimed 0 B".
@@ -789,15 +1104,11 @@ pub(crate) fn notify_reclaimed(config: &ServerConfig, title: &str, reclaimed: Re
     }
 }
 
-/// Force-reclaim every persisted session's worktree directory for a
-/// workspace being torn down, mirroring the per-session removal
-/// [`handle_clean_worktrees`] performs: `remove_by_path` when the
-/// upstream repo is known (so git's `worktrees/` index is pruned too),
-/// falling back to `remove_dir_all` for repo-less scratch / pre-PR
-/// checkouts. Unconditional — the delete path has already killed every
-/// backing terminal, so there is no live checkout to protect, and
-/// ephemeral on-main / linked checkouts are never persisted as sessions
-/// (issue #452) so this never touches the user's real repo.
+/// Reclaim every daemon-owned persisted session worktree for a workspace
+/// being torn down. User-owned linked/on-main paths are outside the managed
+/// namespace and are never candidates. The detached remover freshly
+/// re-inspects cleanliness and ownership before doing anything destructive;
+/// there is no force or blind `rm -rf` path.
 ///
 /// The measured total is returned synchronously, but the removal itself
 /// is spawned onto a detached task (see [`spawn_worktree_removal`]) so a
@@ -808,23 +1119,17 @@ async fn reclaim_workspace_worktrees(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> (Reclaimed, Option<tokio::task::JoinHandle<()>>) {
-    let bare_path = workspace
-        .primary_task()
-        .and_then(|t| t.repo.as_deref())
-        .and_then(|repo| repo.split_once('/'))
-        .map(|(owner, name)| config.worktree_manager().bare_path(owner, name));
-
     // Measure the reclaim synchronously (a stat-only walk) so the
     // returned total — and the "reclaimed N GB" notice — is accurate
     // immediately, but hand the actual removal to a detached task: a
-    // multi-GB `git worktree remove --force` takes 7–11s, and this
+    // multi-GB `git worktree remove` takes 7–11s, and this
     // teardown runs inside the poll/reconcile cycle the user is
     // watching sync (issue #1132).
     let mut reclaimed = Reclaimed::default();
     let mut paths = Vec::new();
     for session in &workspace.sessions {
         let path = &session.worktree_path;
-        if !path.exists() {
+        if !path.exists() || !is_managed_worktree_path(config, path) {
             continue;
         }
         reclaimed.bytes += dir_size(path).await;
@@ -834,67 +1139,96 @@ async fn reclaim_workspace_worktrees(
 
     tombstone_legacy_remote_host(config, workspace);
 
-    let cleanup = (!paths.is_empty())
-        .then(|| spawn_worktree_removal(config, workspace.key.clone(), bare_path, paths));
+    let cleanup =
+        (!paths.is_empty()).then(|| spawn_worktree_removal(config, workspace.key.clone(), paths));
     (reclaimed, cleanup)
 }
 
-/// Force-remove reclaimed worktree directories on a detached task so a
-/// slow `git worktree remove --force` (seconds on multi-GB checkouts)
+/// Safely remove reclaimed worktree directories on a detached task so a
+/// slow `git worktree remove` (seconds on multi-GB checkouts)
 /// can't stall the caller — the poll/reconcile cycle that triggered the
 /// teardown (issue #1132). The caller has already killed every backing
 /// terminal and dropped the session records.
 ///
-/// Removal is *not* unconditional: worktree paths are deterministic
+/// Removal is deliberately conservative: worktree paths are deterministic
 /// (`<root>/<scope>/<slug>`), so a workspace that goes out of scope and
 /// comes back re-provisions the exact path a queued removal targets. The
 /// removal therefore re-checks [`worktree_path_is_reclaimed`] under the
 /// per-repo lock, immediately before deleting, and skips any path a fresh
-/// provision or a re-created session now owns — otherwise a slow `rm`
-/// could delete a live checkout (and its uncommitted work). `bare_path`
-/// is `None` only for repo-less scratch / pre-PR checkouts, which have no
-/// bare repo to reuse them and no `repo_lock` to coordinate under — a
-/// plain `rm -rf`. Returns the task handle for tests to await; the
-/// deletion path fire-and-forgets it.
+/// provision or a re-created session now owns. It also re-runs the worktree
+/// inspector and the delete boundary re-probes locked/dirty/unpushed state
+/// under the repo lock. Missing or unverifiable inspection rows are preserved.
+/// Returns the task handle for tests to await; the deletion path
+/// fire-and-forgets it.
 fn spawn_worktree_removal(
     config: &ServerConfig,
     key: WorkspaceKey,
-    bare_path: Option<std::path::PathBuf>,
     paths: Vec<std::path::PathBuf>,
 ) -> tokio::task::JoinHandle<()> {
     let mgr = config.worktree_manager();
     let config = config.clone();
     tokio::spawn(async move {
-        for path in paths {
-            match bare_path.as_ref() {
-                Some(bare) => {
-                    let guard_config = config.clone();
-                    let guard_key = key.clone();
-                    let guard_path = path.clone();
-                    if let Ok(false) = mgr
-                        .remove_by_path_if(bare, &path, move || {
-                            !worktree_path_is_reclaimed(&guard_config, &guard_key, &guard_path)
-                        })
-                        .await
-                    {
-                        // A re-provision re-claimed this exact path
-                        // between teardown and now — leave it live.
-                        tracing::info!(
-                            worktree = %path.display(),
-                            "delete_workspace: worktree re-provisioned before removal — left in place",
-                        );
-                        continue;
-                    }
-                }
-                None => {
-                    let _ = tokio::fs::remove_dir_all(&path).await;
-                }
-            }
-            if path.exists() {
+        // Serialize with provisioning/adoption while taking the fresh
+        // inspector snapshot. The per-repo lock inside `delete_inspected_if`
+        // closes the final status-to-remove window.
+        let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        let tracked = match collect_tracked_sessions(&config).await {
+            Ok(tracked) => tracked,
+            Err(error) => {
                 tracing::warn!(
-                    worktree = %path.display(),
-                    "delete_workspace: worktree directory could not be reclaimed",
+                    workspace = %key,
+                    %error,
+                    "delete_workspace: could not classify tracked worktrees — preserving them",
                 );
+                return;
+            }
+        };
+        let inspections = match mgr.inspect_worktrees(&tracked).await {
+            Ok(inspections) => inspections,
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %key,
+                    %error,
+                    "delete_workspace: deferred safety inspection failed — preserving worktrees",
+                );
+                return;
+            }
+        };
+        let by_path: std::collections::HashMap<_, _> = inspections
+            .into_iter()
+            .map(|row| (canonical_or_self(&row.path), row))
+            .collect();
+
+        for path in paths {
+            let Some(row) = by_path.get(&canonical_or_self(&path)) else {
+                tracing::warn!(
+                    workspace = %key,
+                    worktree = %path.display(),
+                    "delete_workspace: worktree is not inspectable — preserving it",
+                );
+                continue;
+            };
+            let guard_config = config.clone();
+            let guard_key = key.clone();
+            let guard_path = path.clone();
+            match mgr
+                .delete_inspected_if(row, /*force=*/ false, move || {
+                    !worktree_path_is_reclaimed(&guard_config, &guard_key, &guard_path)
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => tracing::info!(
+                    workspace = %key,
+                    worktree = %path.display(),
+                    "delete_workspace: worktree re-provisioned before removal — left in place",
+                ),
+                Err(error) => tracing::warn!(
+                    workspace = %key,
+                    worktree = %path.display(),
+                    %error,
+                    "delete_workspace: worktree no longer proved safe — preserving it",
+                ),
             }
         }
     })
@@ -929,7 +1263,106 @@ fn worktree_path_is_reclaimed(
 #[cfg(test)]
 mod reclaim_worktree_tests {
     use super::*;
-    use lazybox_core::{SessionKind, WorkspaceSession as Session};
+    use lazybox_core::{SessionKind, SessionRunState, WorkspaceSession as Session};
+
+    async fn run_git(cwd: &std::path::Path, args: &[&str]) {
+        let output = tokio::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", "commit.gpgsign")
+            .env("GIT_CONFIG_VALUE_0", "false")
+            .env("GIT_CONFIG_KEY_1", "tag.gpgsign")
+            .env("GIT_CONFIG_VALUE_1", "false")
+            .output()
+            .await
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    async fn managed_checkout_fixture(
+        local_commit: bool,
+    ) -> (
+        tempfile::TempDir,
+        ServerConfig,
+        WorkspaceKey,
+        std::path::PathBuf,
+    ) {
+        let root = tempfile::tempdir().expect("worktree root");
+        let upstream = root.path().join("upstream");
+        std::fs::create_dir_all(&upstream).expect("upstream dir");
+        run_git(&upstream, &["init", "-q", "-b", "main"]).await;
+        run_git(&upstream, &["config", "user.email", "test@example.com"]).await;
+        run_git(&upstream, &["config", "user.name", "test"]).await;
+        std::fs::write(upstream.join("README.md"), "base\n").expect("seed readme");
+        run_git(&upstream, &["add", "."]).await;
+        run_git(&upstream, &["commit", "-q", "-m", "base"]).await;
+
+        let bare = root.path().join("repos/o/r.git");
+        std::fs::create_dir_all(bare.parent().expect("bare parent")).expect("bare parent dir");
+        run_git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        )
+        .await;
+        let worktree = root.path().join("worktrees/o-r-release-guard");
+        std::fs::create_dir_all(worktree.parent().expect("worktree parent"))
+            .expect("worktree parent dir");
+        run_git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "release-guard",
+                &worktree.to_string_lossy(),
+                "main",
+            ],
+        )
+        .await;
+        run_git(&worktree, &["config", "user.email", "test@example.com"]).await;
+        run_git(&worktree, &["config", "user.name", "test"]).await;
+        if local_commit {
+            std::fs::write(worktree.join("release-fix.txt"), "only local copy\n")
+                .expect("local work");
+            run_git(&worktree, &["add", "."]).await;
+            run_git(&worktree, &["commit", "-q", "-m", "release fix"]).await;
+        }
+
+        let store = std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let backend = std::sync::Arc::new(crate::backend::MockBackend::new());
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            backend,
+            root.path().to_path_buf(),
+        );
+        let key = WorkspaceKey::new("github:o/r#1166");
+        let mut workspace = Workspace::empty(key.clone(), "release-guard", Utc::now());
+        let mut session = Session::new(
+            key.clone(),
+            SessionKind::Agent {
+                agent_id: "codex".into(),
+            },
+            worktree.clone(),
+            Utc::now(),
+        );
+        session.state = SessionRunState::Stopped;
+        workspace.sessions.push(session);
+        commit_upsert(&config, &key, workspace).expect("persist workspace fixture");
+        (root, config, key, worktree)
+    }
 
     fn seed_worktree(dir: &std::path::Path, bytes: usize) {
         std::fs::create_dir_all(dir).expect("create worktree dir");
@@ -937,7 +1370,7 @@ mod reclaim_worktree_tests {
     }
 
     #[tokio::test]
-    async fn spawn_worktree_removal_reclaims_repoless_dirs_off_the_caller() {
+    async fn spawn_worktree_removal_preserves_unverifiable_dirs() {
         let config = ServerConfig::in_memory();
         let tmp = tempfile::tempdir().expect("tempdir");
         let wt = tmp.path().join("scratch-worktree");
@@ -946,12 +1379,11 @@ mod reclaim_worktree_tests {
         let handle = spawn_worktree_removal(
             &config,
             WorkspaceKey::new("local:scratch"),
-            None,
             vec![wt.clone()],
         );
         handle.await.expect("removal task");
 
-        assert!(!wt.exists(), "the detached task removes the reclaimed dir");
+        assert!(wt.exists(), "unmanaged content is never deleted blindly");
     }
 
     // Regression for the re-provision data-loss race (#1132 review): a
@@ -963,10 +1395,10 @@ mod reclaim_worktree_tests {
     #[tokio::test]
     async fn deferred_removal_spares_a_reprovisioned_worktree() {
         let config = ServerConfig::in_memory();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let bare = tmp.path().join("bare");
-        std::fs::create_dir_all(&bare).expect("mkdir bare");
-        let wt = tmp.path().join("scope").join("slug");
+        let wt = config
+            .worktree_root_path()
+            .join("worktrees")
+            .join("scope-slug");
         seed_worktree(&wt, 4096);
 
         // A re-provision re-created the workspace with a session pointing
@@ -985,7 +1417,7 @@ mod reclaim_worktree_tests {
             "a committed session at the path reads as reclaimed",
         );
 
-        spawn_worktree_removal(&config, key, Some(bare), vec![wt.clone()])
+        spawn_worktree_removal(&config, key, vec![wt.clone()])
             .await
             .expect("removal task");
 
@@ -1012,8 +1444,10 @@ mod reclaim_worktree_tests {
     #[tokio::test]
     async fn reclaim_measures_bytes_but_defers_the_removal() {
         let config = ServerConfig::in_memory();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let wt = tmp.path().join("scratch-worktree");
+        let wt = config
+            .worktree_root_path()
+            .join("worktrees")
+            .join("scratch-worktree");
         seed_worktree(&wt, 4096);
 
         let key = WorkspaceKey::new("local:scratch");
@@ -1039,7 +1473,10 @@ mod reclaim_worktree_tests {
             .expect("removal deferred to a task")
             .await
             .expect("removal task");
-        assert!(!wt.exists(), "the deferred task reclaims the dir");
+        assert!(
+            wt.exists(),
+            "an unmanaged directory is measured but preserved as unverifiable"
+        );
     }
 
     #[tokio::test]
@@ -1059,6 +1496,55 @@ mod reclaim_worktree_tests {
         assert_eq!(reclaimed.worktrees, 0);
         assert_eq!(reclaimed.bytes, 0);
         assert!(cleanup.is_none(), "nothing on disk → no cleanup task");
+    }
+
+    #[tokio::test]
+    async fn workspace_delete_preserves_committed_but_unpushed_work() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(true).await;
+        let mut events = config.bus.subscribe();
+
+        assert_eq!(
+            delete_workspace(&config, &key).await.map(|_| ()),
+            None,
+            "x x must fail closed when the branch is ahead"
+        );
+
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "workspace row survives"
+        );
+        assert!(worktree.exists(), "worktree survives");
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("release-fix.txt")).unwrap(),
+            "only local copy\n"
+        );
+        let mut visible_error = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(
+                event,
+                Event::ProviderError { ref message, .. }
+                    if message.contains("local work must be preserved")
+                        && message.contains("unpushed commits")
+            ) {
+                visible_error = true;
+            }
+        }
+        assert!(visible_error, "refusal is visible instead of silent");
+    }
+
+    #[tokio::test]
+    async fn workspace_delete_reclaims_a_freshly_verified_clean_worktree() {
+        let (_root, config, key, worktree) = managed_checkout_fixture(false).await;
+
+        assert!(
+            delete_workspace(&config, &key).await.is_some(),
+            "clean stopped work remains deletable"
+        );
+        assert!(
+            load_workspace(&config, &key).is_none(),
+            "workspace row removed"
+        );
+        assert!(!worktree.exists(), "managed worktree reclaimed");
     }
 }
 
@@ -1183,197 +1669,369 @@ mod tombstone_tests {
 /// caller surfaces the reclaimed total via `notify_reclaimed`.
 #[must_use]
 pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Option<Reclaimed> {
-    delete_workspace_with_archive(config, key, /*archive=*/ true).await
+    WorkspaceLifecycle::new(config)
+        .remove(key, WorkspaceRemovalReason::UserArchive)
+        .await
 }
 
-/// Like [`delete_workspace`] but with the archive decision explicit.
-/// `archive=true` records the key in `KV_KEY_ARCHIVED` so the next poll
-/// doesn't resurrect the row — the right choice for a user-intent
-/// removal (`x x`, a confirmed merged/closed removal). `archive=false`
-/// drops the row without archiving so a genuine upstream change can
-/// re-create it: the closed-issue auto-remove (issue #552) uses this so
-/// reopening the issue on GitHub brings its workspace back.
-#[must_use]
-pub async fn delete_workspace_with_archive(
-    config: &ServerConfig,
-    key: &WorkspaceKey,
-    archive: bool,
-) -> Option<Reclaimed> {
-    // Own the delete-vs-spawn serialization here so every destructive caller
-    // (single workspace, merged cleanup, project cascade) gets it. Keeping
-    // this only in one command-dispatch arm let other callers race a late
-    // spawn that recreated the terminal/worktree after deletion.
-    config
-        .deleted_workspaces
-        .lock()
-        .insert(key.as_str().to_string());
-    crate::spawn_handler::await_inflight_spawns(&config.spawn, key.as_str()).await;
-    let _workspace_guard = config.lock_workspace(key.as_str()).await;
-    let reclaimed = delete_workspace_internal(config, key, archive).await;
-    // The tombstone must not outlive the delete it guarded: a
-    // recreated same-name workspace re-allocates the same key
-    // (`allocate_workspace_key` only consults the store), and a stale
-    // tombstone would silently kill every spawn on the new row. The
-    // failure paths inside `delete_workspace_internal` already remove
-    // it on rollback; the success path releases it here, once no
-    // in-flight spawn that could still race the teardown remains (see
-    // `release_delete_tombstone` for why that's the safe point).
-    if reclaimed.is_some() {
-        crate::spawn_handler::release_delete_tombstone(config, key.as_str());
+/// Why a workspace is leaving the store. Archive policy is derived here,
+/// instead of being passed as an unlabelled boolean at each destructive call
+/// site. Every trigger still receives the same fresh terminal/worktree safety
+/// sequence from [`WorkspaceLifecycle`] (#1167).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceRemovalReason {
+    UserArchive,
+    MergedConfirmed,
+    ClosedAuto,
+    Rescope,
+    ProjectCascade,
+}
+
+impl WorkspaceRemovalReason {
+    fn archives(self) -> bool {
+        matches!(
+            self,
+            Self::UserArchive | Self::MergedConfirmed | Self::ProjectCascade
+        )
     }
-    reclaimed
 }
 
-/// Inner delete with the archive decision explicit. User-intent
-/// deletes (`x x`, project cascade, merged-PR removal) archive so
-/// the next poll doesn't resurrect the row. System-driven deletes
-/// (rescope) must NOT archive: the workspace fell out of the polled
-/// set for upstream/transient reasons (truncated query, scope edit, a
-/// PR that closed and later reopens), and the archive guard in
-/// `upsert` would permanently block it from ever being re-created.
-pub(crate) async fn delete_workspace_internal(
-    config: &ServerConfig,
-    key: &WorkspaceKey,
-    archive: bool,
-) -> Option<Reclaimed> {
-    let key_str = key.as_str();
+/// Single owner of workspace teardown: freeze new spawns, wait for in-flight
+/// provisioning, kill terminals, freshly inspect and preserve unsafe local
+/// work, apply reason-driven archive policy, drop the row, then reclaim only
+/// the verified managed checkout. No caller can select only part of that
+/// sequence.
+pub(crate) struct WorkspaceLifecycle<'a> {
+    config: &'a ServerConfig,
+}
 
-    // Snapshot the sessions before the store row is dropped — deleting
-    // the row also drops the session → worktree_path mapping we need to
-    // reclaim the on-disk directories afterwards.
-    let workspace_snapshot = load_workspace(config, key);
+impl<'a> WorkspaceLifecycle<'a> {
+    pub(crate) fn new(config: &'a ServerConfig) -> Self {
+        Self { config }
+    }
 
-    // Find every terminal whose session_key matches via
-    // terminal_meta — the authoritative wire-side mapping. Earlier
-    // we parsed the backend_key prefix, but the backend's session
-    // name format isn't part of any contract (tmux now uses
-    // `lazybox-{repo}-{kind}-{pid}-{n}`); the meta map is. Locks are
-    // taken + dropped before async backend.kill() calls.
-    let to_kill_ids: Vec<lazybox_ipc::TerminalId> = {
-        let meta = config.terminal.terminal_meta.lock().await;
-        meta.iter()
-            .filter(|(_, (sk, _))| sk.as_str() == key_str)
-            .map(|(tid, _)| *tid)
-            .collect()
-    };
-    let to_kill: Vec<(lazybox_ipc::TerminalId, String)> = {
-        let terminals = config.terminal.terminals.lock().await;
-        to_kill_ids
-            .into_iter()
-            .filter_map(|tid| terminals.get(&tid).map(|k| (tid, k.clone())))
-            .collect()
-    };
+    #[must_use]
+    pub(crate) async fn remove(
+        &self,
+        key: &WorkspaceKey,
+        reason: WorkspaceRemovalReason,
+    ) -> Option<Reclaimed> {
+        let config = self.config;
+        // Own delete-vs-spawn serialization here so every destructive reason
+        // gets it. Keeping this in one command arm let another caller race a
+        // late spawn that recreated the worktree after deletion.
+        config
+            .deleted_workspaces
+            .lock()
+            .insert(key.as_str().to_string());
+        crate::spawn_handler::await_inflight_spawns(&config.spawn, key.as_str()).await;
+        let _workspace_guard = config.lock_workspace(key.as_str()).await;
+        let reclaimed = self.remove_locked(key, reason).await;
+        if reclaimed.is_some() {
+            crate::spawn_handler::release_delete_tombstone(config, key.as_str());
+        }
+        reclaimed
+    }
 
-    if !to_kill.is_empty() {
-        tracing::info!(
-            "delete_workspace {key}: killing {} backing terminal(s)",
-            to_kill.len()
-        );
-        for (tid, backend_key) in to_kill {
-            let Some(interaction) =
-                crate::terminal_io::acquire_live(config, tid, &backend_key).await
-            else {
-                // The output pump won teardown after `to_kill` was
-                // snapshotted. There is no live session left to signal.
-                continue;
-            };
-            if let Err(e) = config.backend.kill(&backend_key).await {
-                tracing::warn!("kill {backend_key}: {e}");
-                let _ = config.bus.send(Event::provider_error_retryable(
+    async fn remove_locked(
+        &self,
+        key: &WorkspaceKey,
+        reason: WorkspaceRemovalReason,
+    ) -> Option<Reclaimed> {
+        let config = self.config;
+        let archive = reason.archives();
+        let key_str = key.as_str();
+
+        // Snapshot the sessions before the store row is dropped — deleting
+        // the row also drops the session → worktree_path mapping we need to
+        // reclaim the on-disk directories afterwards.
+        let workspace_snapshot = load_workspace(config, key);
+
+        // The poller reaches this path from a raw record scan, so `None` can
+        // mean either "another owner already removed it" or "the row exists
+        // but cannot be decoded." Only the former is safe to treat as gone.
+        // Preserve unreadable/erroring records: their unknown fields may be
+        // the only remaining pointers to sessions or local work.
+        if reason == WorkspaceRemovalReason::Rescope && workspace_snapshot.is_none() {
+            match config.store.get_workspace(key) {
+                Ok(None) => {}
+                Ok(Some(_)) => {
+                    tracing::warn!(
+                        workspace = %key,
+                        "rescope: stored workspace is unreadable — preserving"
+                    );
+                    let _ = config.bus.send(Event::provider_error_permanent(
+                        "store",
+                        format!(
+                            "workspace {key} was not removed from the inactive set because its stored record could not be decoded"
+                        ),
+                    ));
+                    config.deleted_workspaces.lock().remove(key_str);
+                    return None;
+                }
+                Err(error) => {
+                    tracing::warn!(workspace = %key, %error, "rescope: workspace reload failed");
+                    let _ = config.bus.send(Event::provider_error_retryable(
+                        "store",
+                        format!(
+                            "workspace {key} was not removed from the inactive set because its stored record could not be reloaded: {error}"
+                        ),
+                    ));
+                    config.deleted_workspaces.lock().remove(key_str);
+                    return None;
+                }
+            }
+        }
+
+        // Rescope is an automatic housekeeping decision, so it may only
+        // remove a genuinely empty row. Keep this final decision inside the
+        // lifecycle's tombstone + workspace-lock boundary: doing the check in
+        // the poller and then calling `remove` both left a race and, when the
+        // poller retained the lock, deadlocked on this method's lock attempt.
+        // Explicit removal reasons intentionally continue below and surface
+        // the normal terminal/worktree confirmation safety gates.
+        if reason == WorkspaceRemovalReason::Rescope
+            && let Some(workspace) = workspace_snapshot.as_ref()
+        {
+            let has_live_terminal = config.terminal.entries.lock().await.values().any(|entry| {
+                !entry.finishing
+                    && entry
+                        .meta
+                        .as_ref()
+                        .is_some_and(|(session_key, _)| session_key.as_str() == key_str)
+            });
+            if !workspace.sessions.is_empty() || workspace.has_notes() || has_live_terminal {
+                tracing::info!(
+                    workspace = %key,
+                    "rescope: workspace gained a session, terminal, or notes during sweep — preserving"
+                );
+                config.deleted_workspaces.lock().remove(key_str);
+                return None;
+            }
+
+            // A session-less row can still own an adoptable managed checkout
+            // after partial recovery. Resolve it from the branch while the
+            // workspace is frozen. Failure to inspect is not proof that the
+            // checkout is absent: fail closed and tell the client instead of
+            // silently dropping the only row that points at local work.
+            if let Some((owner, repo)) = workspace
+                .primary_task()
+                .and_then(|task| task.repo.as_deref())
+                .and_then(|repo| repo.split_once('/'))
+            {
+                match config
+                    .worktree_manager()
+                    .managed_worktrees_for_branch(owner, repo, &workspace.branch)
+                    .await
+                {
+                    Ok(worktrees) if worktrees.is_empty() => {}
+                    Ok(_) => {
+                        tracing::info!(
+                            workspace = %key,
+                            "rescope: preserving out-of-scope workspace with a worktree still on disk"
+                        );
+                        config.deleted_workspaces.lock().remove(key_str);
+                        return None;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            workspace = %key,
+                            %error,
+                            "rescope: could not verify whether the workspace has a managed worktree"
+                        );
+                        let _ = config.bus.send(Event::provider_error_retryable(
+                            "git",
+                            format!(
+                                "workspace {key} was not removed from the inactive set because its local worktrees could not be verified: {error}"
+                            ),
+                        ));
+                        config.deleted_workspaces.lock().remove(key_str);
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // Find every terminal whose session_key matches via
+        // terminal_meta — the authoritative wire-side mapping. Earlier
+        // we parsed the backend_key prefix, but the backend's session
+        // name format isn't part of any contract (tmux now uses
+        // `lazybox-{repo}-{kind}-{pid}-{n}`); the meta map is. Locks are
+        // taken + dropped before async backend.kill() calls.
+        let to_kill: Vec<(lazybox_ipc::TerminalId, String)> = config
+            .terminal
+            .entries
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, entry)| {
+                !entry.finishing
+                    && entry
+                        .meta
+                        .as_ref()
+                        .is_some_and(|(sk, _)| sk.as_str() == key_str)
+            })
+            .filter_map(|(tid, entry)| entry.backend_key.clone().map(|key| (*tid, key)))
+            .collect();
+
+        if !to_kill.is_empty() {
+            tracing::info!(
+                "delete_workspace {key}: killing {} backing terminal(s)",
+                to_kill.len()
+            );
+            for (tid, backend_key) in to_kill {
+                let Some(interaction) =
+                    crate::terminal_io::acquire_live(config, tid, &backend_key).await
+                else {
+                    // The output pump won teardown after `to_kill` was
+                    // snapshotted. There is no live session left to signal.
+                    continue;
+                };
+                if let Err(e) = config.backend.kill(&backend_key).await {
+                    tracing::warn!("kill {backend_key}: {e}");
+                    let _ = config.bus.send(Event::provider_error_retryable(
                     "terminal",
                     format!(
                         "could not stop terminal {backend_key}; workspace {key} was not deleted: {e}"
                     ),
                 ));
-                // Preserve the workspace and every live mapping so the user
-                // can retry. The backend contract deliberately keeps a slot
-                // after a transport/timeout failure; deleting our metadata
-                // here would orphan an agent we failed to stop. The client
-                // rolls back its optimistic row removal off this "terminal"
-                // error (#476).
-                config.deleted_workspaces.lock().remove(key_str);
-                return None;
+                    // Preserve the workspace and every live mapping so the user
+                    // can retry. The backend contract deliberately keeps a slot
+                    // after a transport/timeout failure; deleting our metadata
+                    // here would orphan an agent we failed to stop. The client
+                    // rolls back its optimistic row removal off this "terminal"
+                    // error (#476).
+                    config.deleted_workspaces.lock().remove(key_str);
+                    return None;
+                }
+                drop(interaction);
+                // One lifecycle owner handles every map, persisted terminal key,
+                // AgentState::Exited, and TerminalExited. The output pump may
+                // observe the child first or later; the owner's atomic claim
+                // makes both orders idempotent and leaves backend release to the
+                // pump that observed the real exit.
+                crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key).await;
             }
-            drop(interaction);
-            // One lifecycle owner handles every map, persisted terminal key,
-            // AgentState::Exited, and TerminalExited. The output pump may
-            // observe the child first or later; the owner's atomic claim
-            // makes both orders idempotent and leaves backend release to the
-            // pump that observed the real exit.
-            crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key).await;
         }
-    }
 
-    // Record the archive only after every requested terminal kill succeeded.
-    // Otherwise a transient backend failure both keeps the workspace alive
-    // and blocks the next poll from repairing/re-presenting it.
-    if archive && !archive_workspace_key(config, key_str) {
-        let _ = config.bus.send(Event::provider_error_retryable(
-            "store",
-            format!("could not archive workspace {key}; it was not deleted"),
-        ));
-        config.deleted_workspaces.lock().remove(key_str);
-        return None;
-    }
+        // The terminal teardown above is intentionally followed by a fresh
+        // server-side inspection. A client confirmation is not a cleanliness
+        // capability: the checkout may have changed while the modal was open,
+        // and a just-finished agent commonly leaves committed-but-unpushed work.
+        // Every destructive entry point funnels through this exact gate before
+        // archive/store mutation. There is currently no force override; unsafe
+        // work stays tracked and visible until the user pushes/stashes it.
+        if let Some(workspace) = workspace_snapshot.as_ref() {
+            match inspect_workspace_removal_risks(config, workspace).await {
+                Ok(risks) if risks.is_empty() => {}
+                Ok(risks) => {
+                    let detail = risks
+                        .iter()
+                        .map(WorkspaceRemovalRisk::describe)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    tracing::warn!(
+                        workspace = %key,
+                        risk_count = risks.len(),
+                        %detail,
+                        "workspace removal refused by fresh worktree safety gate",
+                    );
+                    let _ = config.bus.send(Event::provider_error_permanent(
+                        "store",
+                        format!(
+                            "workspace {key} was not deleted because local work must be preserved: \
+                         {detail}. Push, commit/stash, or clean the checkout, then retry"
+                        ),
+                    ));
+                    config.deleted_workspaces.lock().remove(key_str);
+                    return None;
+                }
+                Err(error) => {
+                    tracing::warn!(workspace = %key, "workspace removal inspection failed: {error}");
+                    let _ = config.bus.send(Event::provider_error_permanent(
+                        "store",
+                        format!(
+                            "workspace {key} was not deleted because its worktrees could not be \
+                         verified safely: {error}"
+                        ),
+                    ));
+                    config.deleted_workspaces.lock().remove(key_str);
+                    return None;
+                }
+            }
+        }
 
-    if let Err(e) = config.store.delete_workspace(key) {
-        tracing::warn!("delete_workspace failed: {e}");
-        let rollback_ok = !archive || unarchive_workspace_key(config, key_str);
-        if !rollback_ok {
-            tracing::error!(
+        // Record the archive only after every requested terminal kill succeeded.
+        // Otherwise a transient backend failure both keeps the workspace alive
+        // and blocks the next poll from repairing/re-presenting it.
+        if archive && !archive_workspace_key(config, key_str) {
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "store",
+                format!("could not archive workspace {key}; it was not deleted"),
+            ));
+            config.deleted_workspaces.lock().remove(key_str);
+            return None;
+        }
+
+        if let Err(e) = config.store.delete_workspace(key) {
+            tracing::warn!("delete_workspace failed: {e}");
+            let rollback_ok = !archive || unarchive_workspace_key(config, key_str);
+            if !rollback_ok {
+                tracing::error!(
+                    workspace = %key,
+                    "delete_workspace rollback: could not remove archive tombstone",
+                );
+            }
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "store",
+                format!("could not delete workspace {key}: {e}"),
+            ));
+            if rollback_ok {
+                config.deleted_workspaces.lock().remove(key_str);
+            }
+            return None;
+        }
+        let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
+
+        // The row (and its terminals) are gone — reclaim the worktree
+        // directories on disk. Without this every teardown that routes
+        // through delete_workspace (x x archive, project cascade,
+        // rescope/retire) leaked multi-GB worktrees forever (issue #575).
+        // The reclaimed total is returned, not announced here: the top-level
+        // caller emits one notice per user action (see `notify_reclaimed`).
+        let Some(workspace) = workspace_snapshot else {
+            tracing::warn!(
                 workspace = %key,
-                "delete_workspace rollback: could not remove archive tombstone",
+                "delete_workspace: no readable row to reclaim worktrees from",
+            );
+            return Some(Reclaimed::default());
+        };
+        // The removal runs on a detached task so a multi-GB `rm` can't stall
+        // this teardown — the poll/reconcile cycle the delete runs inside
+        // (issue #1132). Production drops the handle: dropping a tokio
+        // JoinHandle detaches the task rather than cancelling it, so the
+        // reclaim finishes in the background while this path returns. Tests
+        // join the real detached task instead, so assertions on the
+        // reclaimed worktree directory are deterministic rather than racing
+        // the background `rm` (the deferral itself is covered directly by
+        // `reclaim_measures_bytes_but_defers_the_removal`).
+        let (reclaimed, cleanup) = reclaim_workspace_worktrees(config, &workspace).await;
+        #[cfg(test)]
+        if let Some(handle) = cleanup {
+            let _ = handle.await;
+        }
+        #[cfg(not(test))]
+        drop(cleanup);
+        if reclaimed.worktrees > 0 {
+            tracing::info!(
+                workspace = %key,
+                worktrees = reclaimed.worktrees,
+                bytes = reclaimed.bytes,
+                "delete_workspace: reclaimed worktree directories",
             );
         }
-        let _ = config.bus.send(Event::provider_error_retryable(
-            "store",
-            format!("could not delete workspace {key}: {e}"),
-        ));
-        if rollback_ok {
-            config.deleted_workspaces.lock().remove(key_str);
-        }
-        return None;
+        Some(reclaimed)
     }
-    let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
-
-    // The row (and its terminals) are gone — reclaim the worktree
-    // directories on disk. Without this every teardown that routes
-    // through delete_workspace (x x archive, project cascade,
-    // rescope/retire) leaked multi-GB worktrees forever (issue #575).
-    // The reclaimed total is returned, not announced here: the top-level
-    // caller emits one notice per user action (see `notify_reclaimed`).
-    let Some(workspace) = workspace_snapshot else {
-        tracing::warn!(
-            workspace = %key,
-            "delete_workspace: no readable row to reclaim worktrees from",
-        );
-        return Some(Reclaimed::default());
-    };
-    // The removal runs on a detached task so a multi-GB `rm` can't stall
-    // this teardown — the poll/reconcile cycle the delete runs inside
-    // (issue #1132). Production drops the handle: dropping a tokio
-    // JoinHandle detaches the task rather than cancelling it, so the
-    // reclaim finishes in the background while this path returns. Tests
-    // join the real detached task instead, so assertions on the
-    // reclaimed worktree directory are deterministic rather than racing
-    // the background `rm` (the deferral itself is covered directly by
-    // `reclaim_measures_bytes_but_defers_the_removal`).
-    let (reclaimed, cleanup) = reclaim_workspace_worktrees(config, &workspace).await;
-    #[cfg(test)]
-    if let Some(handle) = cleanup {
-        let _ = handle.await;
-    }
-    #[cfg(not(test))]
-    drop(cleanup);
-    if reclaimed.worktrees > 0 {
-        tracing::info!(
-            workspace = %key,
-            worktrees = reclaimed.worktrees,
-            bytes = reclaimed.bytes,
-            "delete_workspace: reclaimed worktree directories",
-        );
-    }
-    Some(reclaimed)
 }
 
 /// Delete a Project: cascade through every workspace whose
@@ -1401,7 +2059,7 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
         }
     };
 
-    let mut child_keys: Vec<WorkspaceKey> = Vec::new();
+    let mut children: Vec<Workspace> = Vec::new();
     for record in records {
         let Some(json) = record.workspace_json else {
             tracing::error!(
@@ -1434,9 +2092,51 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
             return;
         };
         if ws.project_key.as_ref() == Some(project_key) {
-            child_keys.push(ws.key);
+            children.push(ws);
         }
     }
+
+    // Preflight the entire cascade before deleting its first child. The
+    // final removal path re-inspects after stopping each child's terminals,
+    // but this first pass prevents a known-dirty later workspace from
+    // turning one project action into a silent partial cascade.
+    for workspace in &children {
+        match inspect_workspace_local_risks(config, workspace).await {
+            Ok(risks) if risks.is_empty() => {}
+            Ok(risks) => {
+                let detail = risks
+                    .iter()
+                    .map(WorkspaceRemovalRisk::describe)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                let _ = config.bus.send(Event::provider_error_permanent(
+                    "store",
+                    format!(
+                        "project {project_key} was not deleted because workspace {} has local \
+                         work to preserve: {detail}",
+                        workspace.key
+                    ),
+                ));
+                return;
+            }
+            Err(error) => {
+                let _ = config.bus.send(Event::provider_error_permanent(
+                    "store",
+                    format!(
+                        "project {project_key} was not deleted because workspace {} could not be \
+                         inspected safely: {error}",
+                        workspace.key
+                    ),
+                ));
+                return;
+            }
+        }
+    }
+
+    let child_keys: Vec<WorkspaceKey> = children
+        .into_iter()
+        .map(|workspace| workspace.key)
+        .collect();
 
     tracing::info!(
         project_key = %project_key,
@@ -1445,7 +2145,10 @@ pub async fn delete_project(config: &ServerConfig, project_key: &lazybox_core::P
     );
     let mut reclaimed = Reclaimed::default();
     for key in &child_keys {
-        let Some(child) = delete_workspace(config, key).await else {
+        let Some(child) = WorkspaceLifecycle::new(config)
+            .remove(key, WorkspaceRemovalReason::ProjectCascade)
+            .await
+        else {
             tracing::warn!(
                 project_key = %project_key,
                 workspace = %key,

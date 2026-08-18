@@ -34,6 +34,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use serde_json::{Map, Value};
 
@@ -43,14 +44,28 @@ use serde_json::{Map, Value};
 /// there) never spell it differently.
 pub(crate) const SKIP_DANGEROUS_MODE_KEY: &str = "skipDangerousModePermissionPrompt";
 
+/// Claude keeps every project's trust record in one JSON file. Serialize the
+/// full read-modify-rename transaction so simultaneous autonomous spawns
+/// cannot each publish a snapshot that drops the other's worktree entry.
+static CLAUDE_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_config() -> io::Result<MutexGuard<'static, ()>> {
+    CLAUDE_CONFIG_LOCK
+        .lock()
+        .map_err(|_| io::Error::other("Claude config preparation lock was poisoned"))
+}
+
 /// Prepare `~/.claude.json` for an unattended launch in `worktree`:
-/// trust the worktree and mark onboarding complete. Best-effort: a
-/// missing `$HOME` is treated as "nothing to do" (Ok), so callers only
-/// log genuine IO/parse failures.
+/// trust the worktree and mark onboarding complete. Missing `$HOME`, malformed
+/// state, or a failed verified publish is an error: an unattended caller must
+/// fail visibly rather than launch into a dialog no human is watching.
 pub fn seed_unattended_env(worktree: &Path) -> io::Result<()> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Ok(());
-    };
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "HOME is unset; cannot persist Claude workspace trust",
+        )
+    })?;
     let config_path = PathBuf::from(home).join(".claude.json");
     seed_unattended_env_in(&config_path, worktree)
 }
@@ -64,6 +79,7 @@ pub fn seed_unattended_env(worktree: &Path) -> io::Result<()> {
 /// update). A missing config is created with a minimal structure; an
 /// unparseable one is left untouched (returns `Err`).
 fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()> {
+    let _guard = lock_config()?;
     let mut root: Value = match std::fs::read_to_string(config_path) {
         Ok(text) => serde_json::from_str(&text)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
@@ -114,18 +130,34 @@ fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()>
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let tmp = tmp_sibling(config_path)?;
     std::fs::write(&tmp, serialized)?;
-    std::fs::rename(&tmp, config_path)
+    std::fs::rename(&tmp, config_path)?;
+
+    let published: Value = serde_json::from_slice(&std::fs::read(config_path)?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let trusted = published["projects"][worktree.to_string_lossy().as_ref()]["hasTrustDialogAccepted"]
+        == Value::Bool(true);
+    let onboarded = published["hasCompletedOnboarding"] == Value::Bool(true);
+    if trusted && onboarded {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "Claude workspace trust publish did not verify",
+        ))
+    }
 }
 
 /// Persist the one-time bypass-permissions consent into
 /// `~/.claude/settings.json` so an unattended
 /// `--dangerously-skip-permissions` launch doesn't stall on the
-/// "Bypass Permissions mode" warning. Best-effort like
-/// [`seed_unattended_env`]: a missing `$HOME` is a no-op (Ok).
+/// "Bypass Permissions mode" warning. Missing `$HOME` is an error for the
+/// same reason as [`seed_unattended_env`].
 pub fn seed_skip_dangerous_mode_prompt() -> io::Result<()> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Ok(());
-    };
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "HOME is unset; cannot persist Claude bypass consent",
+        )
+    })?;
     let settings_path = PathBuf::from(home).join(".claude").join("settings.json");
     seed_skip_dangerous_mode_prompt_in(&settings_path)
 }
@@ -137,6 +169,7 @@ pub fn seed_skip_dangerous_mode_prompt() -> io::Result<()> {
 /// set. A missing file (and its `~/.claude` parent) is created; an
 /// unparseable one is left untouched (returns `Err`).
 fn seed_skip_dangerous_mode_prompt_in(settings_path: &Path) -> io::Result<()> {
+    let _guard = lock_config()?;
     let mut root: Value = match std::fs::read_to_string(settings_path) {
         // An empty (or whitespace-only) file carries no settings to
         // preserve — treat it like a missing one and seed fresh, rather
@@ -168,7 +201,17 @@ fn seed_skip_dangerous_mode_prompt_in(settings_path: &Path) -> io::Result<()> {
     }
     let tmp = tmp_sibling(settings_path)?;
     std::fs::write(&tmp, serialized)?;
-    std::fs::rename(&tmp, settings_path)
+    std::fs::rename(&tmp, settings_path)?;
+
+    let published: Value = serde_json::from_slice(&std::fs::read(settings_path)?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if published[SKIP_DANGEROUS_MODE_KEY] == Value::Bool(true) {
+        Ok(())
+    } else {
+        Err(io::Error::other(
+            "Claude bypass-permissions consent publish did not verify",
+        ))
+    }
 }
 
 /// `<config>.<pid>.<seq>.lazybox-tmp` next to `config_path`, for the
@@ -245,6 +288,33 @@ mod tests {
         );
         assert!(trusted(&config, "/tmp/other"));
         assert!(trusted(&config, "/tmp/wt-b"));
+        assert!(onboarded(&config));
+    }
+
+    #[test]
+    fn concurrent_trust_seeds_preserve_every_worktree() {
+        let dir = scratch("concurrent");
+        let config = dir.join(".claude.json");
+        let _ = std::fs::remove_file(&config);
+        let workers: Vec<_> = (0..16)
+            .map(|number| {
+                let config = config.clone();
+                std::thread::spawn(move || {
+                    let worktree = PathBuf::from(format!("/tmp/concurrent-wt-{number}"));
+                    seed_unattended_env_in(&config, &worktree).expect("seed trust");
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("seeder thread");
+        }
+
+        for number in 0..16 {
+            assert!(
+                trusted(&config, &format!("/tmp/concurrent-wt-{number}")),
+                "concurrent seed lost worktree {number}",
+            );
+        }
         assert!(onboarded(&config));
     }
 

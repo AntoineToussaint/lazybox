@@ -219,8 +219,10 @@ async fn snapshot_and_resync_via_client(
     for snapshot in &snapshots {
         client
             .send(Command::RequestTerminalResync {
-                terminal_id: snapshot.terminal_id,
-                required_seq: 0,
+                requests: vec![lazybox_ipc::TerminalResyncRequest {
+                    terminal_id: snapshot.terminal_id,
+                    required_seq: 0,
+                }],
             })
             .expect("request terminal resync");
     }

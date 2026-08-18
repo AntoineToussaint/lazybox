@@ -1708,11 +1708,20 @@ mod merge_pr_details_tests {
 /// `workspace.sessions` (and the on-disk dir) — `workspace.pr` /
 /// `gh_issues` aren't modified, so the sidebar keeps the row.
 ///
-/// Live sessions (the user has an attached claude / shell) are
-/// silently skipped so a long-running agent isn't pulled out from
-/// under itself. Counts are emitted on `Event::CleanWorktreesCompleted`
-/// so the TUI can surface "cleaned N · kept M (active)".
+/// Live sessions (the user has an attached agent / shell) and worktrees
+/// whose clean, pushed state cannot be freshly proven are skipped. Counts are
+/// emitted on `Event::CleanWorktreesCompleted` so the TUI can surface a
+/// visible summary instead of silently dropping a session on delete failure.
 pub async fn handle_clean_worktrees(config: &ServerConfig) {
+    clean_worktrees_with(config, &config.worktree_manager()).await;
+}
+
+/// Explicit-manager seam for [`handle_clean_worktrees`], keeping the complete
+/// safety path hermetic in regression tests.
+pub(crate) async fn clean_worktrees_with(
+    config: &ServerConfig,
+    mgr: &lazybox_git_ops::WorktreeManager,
+) {
     // Full-table scan on `spawn_blocking` (issue #34's convention):
     // synchronous rusqlite under a contending process's busy_timeout
     // (5s) would pin a runtime worker.
@@ -1729,6 +1738,11 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
         }
     };
 
+    // Serialize against new provisioning/adoption for the inspection through
+    // removal window. The delete helper additionally holds the per-repo lock
+    // while it re-runs every destructive safety probe.
+    let _ownership_guard = config.worktree_ownership_lock.lock().await;
+
     // Snapshot live session ids — anything in `terminal_sessions`
     // (the per-terminal owning-session map) is a session we must
     // not touch. Lock dropped before any async fs work. Recovered
@@ -1736,12 +1750,53 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
     // also honor `terminal_meta`'s workspace-key view — see
     // `live_workspace_keys`.
     let live_sessions: std::collections::HashSet<lazybox_core::SessionId> = {
-        let map = config.terminal.terminal_sessions.lock().await;
-        map.values().copied().collect()
+        config
+            .terminal
+            .session_bindings()
+            .await
+            .into_values()
+            .collect()
     };
     let live_keys = live_workspace_keys(config).await;
 
-    let mgr = config.worktree_manager();
+    let tracked = match crate::workspace::collect_tracked_sessions(config).await {
+        Ok(tracked) => tracked,
+        Err(error) => {
+            tracing::warn!(%error, "clean_worktrees: tracked-session scan failed");
+            let skipped = records
+                .iter()
+                .filter_map(|record| record.workspace_json.as_deref())
+                .filter_map(|json| serde_json::from_str::<lazybox_core::Workspace>(json).ok())
+                .map(|workspace| workspace.sessions.len())
+                .sum();
+            let _ = config.bus.send(Event::CleanWorktreesCompleted {
+                removed: 0,
+                skipped,
+            });
+            return;
+        }
+    };
+    let inspections = match mgr.inspect_worktrees(&tracked).await {
+        Ok(inspections) => inspections,
+        Err(error) => {
+            tracing::warn!(%error, "clean_worktrees: safety inspection failed");
+            let skipped = records
+                .iter()
+                .filter_map(|record| record.workspace_json.as_deref())
+                .filter_map(|json| serde_json::from_str::<lazybox_core::Workspace>(json).ok())
+                .map(|workspace| workspace.sessions.len())
+                .sum();
+            let _ = config.bus.send(Event::CleanWorktreesCompleted {
+                removed: 0,
+                skipped,
+            });
+            return;
+        }
+    };
+    let by_path: std::collections::HashMap<_, _> = inspections
+        .into_iter()
+        .map(|row| (canon(&row.path), row))
+        .collect();
     let mut removed: usize = 0;
     let mut skipped: usize = 0;
 
@@ -1753,14 +1808,6 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
             continue;
         };
         let workspace_key = workspace.key.clone();
-
-        // Resolve the bare-repo path once per workspace (every
-        // session shares the same upstream).
-        let bare_path = workspace
-            .primary_task()
-            .and_then(|t| t.repo.as_deref())
-            .and_then(|repo| repo.split_once('/'))
-            .map(|(owner, name)| mgr.bare_path(owner, name));
 
         // Walk highest-index-first so removals don't shift indices
         // out from under the loop.
@@ -1774,19 +1821,38 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
                 skipped += 1;
                 continue;
             }
+            if !session.worktree_path.exists() {
+                workspace.sessions.remove(idx);
+                removed += 1;
+                wrote = true;
+                continue;
+            }
+            let Some(row) = by_path.get(&canon(&session.worktree_path)) else {
+                tracing::warn!(
+                    workspace = %workspace_key,
+                    session = %session.id,
+                    worktree = %session.worktree_path.display(),
+                    "clean_worktrees: checkout is not inspectable — preserving session",
+                );
+                skipped += 1;
+                continue;
+            };
             tracing::info!(
                 workspace = %workspace_key,
                 session = %session.id,
                 worktree = %session.worktree_path.display(),
                 "clean_worktrees: removing",
             );
-            if let Some(bare) = bare_path.as_ref() {
-                let _ = mgr.remove_by_path(bare, &session.worktree_path).await;
-            } else {
-                // No upstream repo metadata (rare — pre-PR / scratch
-                // workspaces) → just `rm -rf` the dir, no git
-                // bookkeeping to update.
-                let _ = tokio::fs::remove_dir_all(&session.worktree_path).await;
+            if let Err(error) = mgr.delete_inspected(row, /*force=*/ false).await {
+                tracing::warn!(
+                    workspace = %workspace_key,
+                    session = %session.id,
+                    worktree = %session.worktree_path.display(),
+                    %error,
+                    "clean_worktrees: fresh safety check refused removal — preserving session",
+                );
+                skipped += 1;
+                continue;
             }
             workspace.sessions.remove(idx);
             removed += 1;
@@ -1812,49 +1878,6 @@ pub async fn handle_clean_worktrees(config: &ServerConfig) {
 /// Async since the sync-rusqlite offload: the scan + JSON decode run
 /// on `spawn_blocking` (issue #34's convention) so a contending
 /// process's 5s busy_timeout can't pin a runtime worker.
-async fn collect_tracked_sessions(config: &ServerConfig) -> Vec<lazybox_git_ops::TrackedSession> {
-    let store = config.store.clone();
-    let scan = tokio::task::spawn_blocking(move || {
-        let records = match store.list_workspaces() {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("inspect_worktrees: list_workspaces failed: {e}");
-                return Vec::new();
-            }
-        };
-        let mut out: Vec<lazybox_git_ops::TrackedSession> = Vec::with_capacity(records.len() * 2);
-        for record in records {
-            let Some(json) = record.workspace_json else {
-                continue;
-            };
-            let Ok(workspace) = serde_json::from_str::<lazybox_core::Workspace>(&json) else {
-                continue;
-            };
-            for session in workspace.sessions {
-                let is_stopped = matches!(session.state, lazybox_core::SessionRunState::Stopped);
-                // First 8 chars of the UUID — enough to identify a row
-                // in the modal without leaking the whole id into the UI.
-                let raw = session.id.to_string();
-                let session_id = raw.get(..8).unwrap_or(&raw).to_string();
-                out.push(lazybox_git_ops::TrackedSession {
-                    session_id,
-                    worktree_path: session.worktree_path,
-                    is_stopped,
-                });
-            }
-        }
-        out
-    })
-    .await;
-    match scan {
-        Ok(tracked) => tracked,
-        Err(e) => {
-            tracing::warn!("inspect_worktrees: tracked-session scan task failed: {e}");
-            Vec::new()
-        }
-    }
-}
-
 fn to_dto(row: lazybox_git_ops::WorktreeInspection) -> lazybox_ipc::WorktreeInspectionDto {
     lazybox_ipc::WorktreeInspectionDto {
         path: row.path,
@@ -1984,8 +2007,17 @@ pub(crate) async fn inspect_worktrees_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
 ) {
-    let tracked = collect_tracked_sessions(config).await;
-    let inspections = match mgr.inspect_worktrees(&tracked).await {
+    let inspections = match crate::workspace::collect_tracked_sessions(config).await {
+        Ok(tracked) => mgr.inspect_worktrees(&tracked).await,
+        Err(error) => {
+            tracing::warn!(%error, "inspect_worktrees: tracked-session scan failed");
+            let _ = config.bus.send(Event::WorktreesInspected {
+                inspections: Vec::new(),
+            });
+            return;
+        }
+    };
+    let inspections = match inspections {
         Ok(rows) => rows.into_iter().map(to_dto).collect::<Vec<_>>(),
         Err(e) => {
             tracing::warn!("inspect_worktrees failed: {e}");
@@ -2103,7 +2135,17 @@ pub(crate) async fn delete_orphaned_worktree_with(
     force: bool,
 ) {
     let _ownership_guard = config.worktree_ownership_lock.lock().await;
-    let tracked = collect_tracked_sessions(config).await;
+    let tracked = match crate::workspace::collect_tracked_sessions(config).await {
+        Ok(tracked) => tracked,
+        Err(error) => {
+            let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+                path,
+                ok: false,
+                error: Some(format!("tracked-session scan failed: {error}")),
+            });
+            return;
+        }
+    };
 
     // Re-inspect, then look up this path in the report. Cheap: one
     // walk under `worktrees/` + a few git calls — far less work than
@@ -2259,8 +2301,12 @@ pub(crate) async fn prompt_merged_pr_removal_with(
         let session_paths = workspace_worktree_paths(&workspace);
         let sessionless = session_paths.is_empty() && count_live_terminals(config, key).await == 0;
         if sessionless
-            && let Some(reclaimed) =
-                remove_merged_workspace_with(config, key, /*archive=*/ false).await
+            && let Some(reclaimed) = remove_merged_workspace_with(
+                config,
+                key,
+                crate::workspace::WorkspaceRemovalReason::ClosedAuto,
+            )
+            .await
         {
             let mut body = format!("Removed workspace for closed {label}");
             if let Some(space) = crate::workspace::reclaimed_notice_body(reclaimed) {
@@ -2295,7 +2341,9 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     let active_terminal_count = count_live_terminals(config, key).await;
     let has_local_work = workspace_local_work(config, mgr, key, &session_paths)
         .await
-        .unwrap_or(false);
+        // A failed inspection is a warning, never a clean bill of health.
+        // The destructive command performs the same fail-closed check again.
+        .unwrap_or(true);
 
     tracing::info!(
         workspace = %key,
@@ -2315,34 +2363,41 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 
 /// Handle `Command::RemoveMergedWorkspace`: the user confirmed the
 /// merged-PR removal modal. Kills the sessions, drops the row, and
-/// reclaims the now-idle worktree directories via
-/// [`crate::workspace::delete_workspace_with_archive`]. A confirmed removal
+/// reclaims the now-idle worktree directories via the internal
+/// `WorkspaceLifecycle` coordinator. A confirmed removal
 /// archives, so the next poll doesn't resurrect the row. Returns the
 /// reclaimed worktree space, or `None` if the removal was preserved.
 pub async fn remove_merged_workspace(
     config: &ServerConfig,
     key: &WorkspaceKey,
 ) -> Option<crate::workspace::Reclaimed> {
-    remove_merged_workspace_with(config, key, /*archive=*/ true).await
+    remove_merged_workspace_with(
+        config,
+        key,
+        crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+    )
+    .await
 }
 
 /// Shared removal for the confirmed and closed-issue-auto paths.
-/// `archive` controls whether the row is recorded in `KV_KEY_ARCHIVED`:
+/// `reason` controls whether the row is recorded in `KV_KEY_ARCHIVED`:
 /// a user-confirmed removal archives (stay gone), the closed-issue
 /// auto-remove (issue #552) does not (so a reopen resurfaces it). The
-/// worktree directories are reclaimed inside `delete_workspace_with_archive`
+/// worktree directories are reclaimed inside `WorkspaceLifecycle`
 /// (issue #575); this only adds the removal-prompt bookkeeping cleanup.
 pub(crate) async fn remove_merged_workspace_with(
     config: &ServerConfig,
     key: &WorkspaceKey,
-    archive: bool,
+    reason: crate::workspace::WorkspaceRemovalReason,
 ) -> Option<crate::workspace::Reclaimed> {
     // Kills backing terminals, removes the row, and reclaims each
-    // session's worktree dir; `archive` decides whether the next poll
+    // session's worktree dir; `reason` decides whether the next poll
     // may resurrect it. `None` means a prerequisite failed and the
     // lifecycle/store path already emitted a precise error — keep the
     // removal-prompt memory intact so the user can retry.
-    let reclaimed = crate::workspace::delete_workspace_with_archive(config, key, archive).await?;
+    let reclaimed = crate::workspace::WorkspaceLifecycle::new(config)
+        .remove(key, reason)
+        .await?;
 
     // The row is actually gone — now drop its reprompt bookkeeping. On a
     // failed prerequisite it must remain so the level-triggered prompt can
@@ -2392,11 +2447,26 @@ async fn workspace_local_work(
     if session_paths.is_empty() {
         return Some(false);
     }
-    let tracked = collect_tracked_sessions(config).await;
+    let tracked = match crate::workspace::collect_tracked_sessions(config).await {
+        Ok(tracked) => tracked,
+        Err(error) => {
+            tracing::warn!(workspace = %key, %error, "prompt_merged_pr_removal: tracked-session scan failed");
+            return None;
+        }
+    };
     match mgr.inspect_worktrees(&tracked).await {
-        Ok(rows) => Some(rows.iter().any(|row| {
-            session_paths.contains(&canon(&row.path))
-                && (row.has_uncommitted_changes || row.has_unpushed_commits)
+        Ok(rows) => Some(session_paths.iter().any(|path| {
+            rows.iter()
+                .find(|row| canon(&row.path) == *path)
+                .map(|row| {
+                    row.has_uncommitted_changes
+                        || row.has_unpushed_commits
+                        || row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
+                })
+                // The path exists in the workspace record but the inspector
+                // cannot account for it. Warn and let the final server gate
+                // refuse removal rather than presenting an unsafe "clean".
+                .unwrap_or_else(|| path.exists())
         })),
         Err(e) => {
             tracing::warn!(workspace = %key, "prompt_merged_pr_removal: inspect failed: {e}");
@@ -2426,8 +2496,11 @@ pub(crate) async fn cancel_pending_removal(config: &ServerConfig, key: &Workspac
 /// Count live terminals (PTY/tmux sessions) bound to a workspace key,
 /// via the authoritative `terminal_meta` map.
 pub(super) async fn count_live_terminals(config: &ServerConfig, key: &WorkspaceKey) -> usize {
-    let meta = config.terminal.terminal_meta.lock().await;
-    meta.values()
+    config
+        .terminal
+        .metadata_map()
+        .await
+        .into_values()
         .filter(|(sk, _)| sk.as_str() == key.as_str())
         .count()
 }
@@ -2442,8 +2515,11 @@ pub(super) async fn count_live_terminals(config: &ServerConfig, key: &WorkspaceK
 /// key-level set is coarser (it pins every session in the workspace)
 /// but errs on the safe side.
 async fn live_workspace_keys(config: &ServerConfig) -> std::collections::HashSet<String> {
-    let meta = config.terminal.terminal_meta.lock().await;
-    meta.values()
+    config
+        .terminal
+        .metadata_map()
+        .await
+        .into_values()
         .map(|(sk, _)| sk.as_str().to_string())
         .collect()
 }
@@ -2479,12 +2555,22 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     // terminals recovered after a daemon restart (which never
     // repopulate `terminal_sessions`) still count as live.
     let live: std::collections::HashSet<lazybox_core::SessionId> = {
-        let map = config.terminal.terminal_sessions.lock().await;
-        map.values().copied().collect()
+        config
+            .terminal
+            .session_bindings()
+            .await
+            .into_values()
+            .collect()
     };
     let live_keys = live_workspace_keys(config).await;
 
-    let tracked = collect_tracked_sessions(config).await;
+    let tracked = match crate::workspace::collect_tracked_sessions(config).await {
+        Ok(tracked) => tracked,
+        Err(error) => {
+            tracing::warn!(workspace = %key, %error, "cleanup_merged_worktrees: tracked-session scan failed");
+            return;
+        }
+    };
     let inspections = match mgr.inspect_worktrees(&tracked).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -2562,23 +2648,12 @@ pub(crate) async fn cleanup_merged_worktrees_with(
     }
 }
 
-/// Reap a workspace's worktrees ahead of a rescope delete. Once the
-/// row is gone `collect_tracked_sessions` can never find the paths
-/// again, so this is the last chance to clean the dirs up. Same
-/// safety contract as the auto-cleanup path: only worktrees the
-/// inspector flags `is_safe_to_delete` (clean tree, pushed, unlocked)
-/// AND with no live terminal are removed, never force — a dirty
-/// worktree stays on disk for manual recovery even though its
-/// workspace row is about to disappear.
-pub(super) async fn reap_safe_workspace_worktrees(
-    config: &ServerConfig,
-    workspace: &lazybox_core::Workspace,
-) {
-    reap_safe_workspace_worktrees_with(config, &config.worktree_manager(), workspace).await
-}
-
-/// Test seam for [`reap_safe_workspace_worktrees`] — explicit manager
-/// so tests can root it at a tempdir without mutating `LAZYBOX_HOME`.
+/// Test seam for the legacy rescope reaper — explicit manager so its
+/// fail-closed deletion contract remains covered without mutating
+/// `LAZYBOX_HOME`. Production teardown is now owned by
+/// `WorkspaceLifecycle`, which inspects and reclaims tracked worktrees after
+/// taking the workspace lock.
+#[cfg(test)]
 pub(crate) async fn reap_safe_workspace_worktrees_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
@@ -2591,12 +2666,22 @@ pub(crate) async fn reap_safe_workspace_worktrees_with(
     // spawn-time session ids plus the recovered-terminal workspace
     // keys from `terminal_meta`.
     let live: std::collections::HashSet<lazybox_core::SessionId> = {
-        let map = config.terminal.terminal_sessions.lock().await;
-        map.values().copied().collect()
+        config
+            .terminal
+            .session_bindings()
+            .await
+            .into_values()
+            .collect()
     };
     let live_keys = live_workspace_keys(config).await;
 
-    let tracked = collect_tracked_sessions(config).await;
+    let tracked = match crate::workspace::collect_tracked_sessions(config).await {
+        Ok(tracked) => tracked,
+        Err(error) => {
+            tracing::warn!(workspace = %workspace.key, %error, "reap_workspace_worktrees: tracked-session scan failed");
+            return;
+        }
+    };
     let inspections = match mgr.inspect_worktrees(&tracked).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -3534,6 +3619,43 @@ mod inspect_tests {
         assert!(wt.exists(), "dirty worktree must be preserved");
     }
 
+    #[tokio::test]
+    async fn clean_worktrees_preserves_dirty_checkout_and_session_record() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "clean-command-dirty", "feat").await;
+        std::fs::write(wt.join("release-wip.txt"), "must survive").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        seed_workspace(&store, wt.clone(), /*stopped=*/ true);
+        let config = fresh_config(store.clone());
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+        let mut rx = config.bus.subscribe();
+
+        clean_worktrees_with(&config, &mgr).await;
+
+        let evt = drain_until(&mut rx, |event| {
+            matches!(event, Event::CleanWorktreesCompleted { .. })
+        })
+        .await;
+        assert!(matches!(
+            evt,
+            Event::CleanWorktreesCompleted {
+                removed: 0,
+                skipped: 1,
+            }
+        ));
+        assert_eq!(
+            std::fs::read_to_string(wt.join("release-wip.txt")).unwrap(),
+            "must survive"
+        );
+        let record = store
+            .get_workspace(&WorkspaceKey::new("github:o/r#1"))
+            .unwrap()
+            .expect("workspace row survives");
+        let workspace: Workspace =
+            serde_json::from_str(record.workspace_json.as_deref().unwrap()).unwrap();
+        assert_eq!(workspace.sessions.len(), 1, "session stays recoverable");
+    }
+
     /// Force=true overrides the safety gate even when the worktree
     /// has uncommitted changes. The directory is removed and the
     /// event reports ok=true.
@@ -3956,10 +4078,14 @@ mod inspect_tests {
         let config = fresh_config(store);
         // Recovered terminal: terminal_meta only, no terminal_sessions.
         let session_key: lazybox_core::SessionKey = (&key).into();
-        config.terminal.terminal_meta.lock().await.insert(
-            lazybox_ipc::TerminalId(1),
-            (session_key, lazybox_ipc::TerminalKind::Shell),
-        );
+        config
+            .terminal
+            .insert_meta(
+                lazybox_ipc::TerminalId(1),
+                session_key,
+                lazybox_ipc::TerminalKind::Shell,
+            )
+            .await;
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
         cleanup_merged_worktrees_with(
@@ -4031,10 +4157,14 @@ mod inspect_tests {
 
         let config = fresh_config(store);
         let session_key: lazybox_core::SessionKey = (&key).into();
-        config.terminal.terminal_meta.lock().await.insert(
-            lazybox_ipc::TerminalId(2),
-            (session_key, lazybox_ipc::TerminalKind::Shell),
-        );
+        config
+            .terminal
+            .insert_meta(
+                lazybox_ipc::TerminalId(2),
+                session_key,
+                lazybox_ipc::TerminalKind::Shell,
+            )
+            .await;
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let workspace = load_workspace(&config, &key).expect("workspace");
 
@@ -4058,10 +4188,8 @@ mod inspect_tests {
         // Pretend a terminal is attached to this session.
         config
             .terminal
-            .terminal_sessions
-            .lock()
-            .await
-            .insert(lazybox_ipc::TerminalId(1), sid);
+            .associate_session(lazybox_ipc::TerminalId(1), sid)
+            .await;
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
 
         cleanup_merged_worktrees_with(
@@ -4303,10 +4431,14 @@ mod inspect_tests {
 
         let config = fresh_config(store);
         let session_key: lazybox_core::SessionKey = (&key).into();
-        config.terminal.terminal_meta.lock().await.insert(
-            lazybox_ipc::TerminalId(1),
-            (session_key, lazybox_ipc::TerminalKind::Shell),
-        );
+        config
+            .terminal
+            .insert_meta(
+                lazybox_ipc::TerminalId(1),
+                session_key,
+                lazybox_ipc::TerminalKind::Shell,
+            )
+            .await;
         let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
         let mut rx = config.bus.subscribe();
 
@@ -4749,10 +4881,19 @@ mod inspect_tests {
         let store = Arc::new(MemoryStore::new());
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
-        let config = fresh_config(store);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
         let mut rx = config.bus.subscribe();
 
-        remove_merged_workspace_with(&config, &key, /*archive=*/ true).await;
+        remove_merged_workspace_with(
+            &config,
+            &key,
+            crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+        )
+        .await;
 
         drain_until(&mut rx, |e| matches!(e, Event::WorkspaceRemoved(_))).await;
         assert!(!wt.exists(), "merged worktree should be deleted");
@@ -4795,13 +4936,16 @@ mod inspect_tests {
     /// is returned so the caller can announce the freed space.
     #[tokio::test]
     async fn delete_workspace_reclaims_worktree_dir() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "delete-reclaim", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
         let store = Arc::new(MemoryStore::new());
-        let wt = std::env::temp_dir().join(format!("lb-reclaim-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&wt);
-        std::fs::create_dir_all(&wt).unwrap();
-        std::fs::write(wt.join("payload.bin"), vec![0u8; 8192]).unwrap();
         seed_workspace(&store, wt.clone(), /*stopped=*/ true);
-        let config = fresh_config(store);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
         let key = lazybox_core::WorkspaceKey::new("github:o/r#1".to_string());
 
         let reclaimed = crate::workspace::delete_workspace(&config, &key)
@@ -4814,7 +4958,7 @@ mod inspect_tests {
         );
         assert_eq!(reclaimed.worktrees, 1, "one worktree reclaimed");
         assert!(
-            reclaimed.bytes >= 8192,
+            reclaimed.bytes > 0,
             "reclaimed byte total: {}",
             reclaimed.bytes
         );
@@ -4849,12 +4993,10 @@ mod inspect_tests {
         );
     }
 
-    /// Confirming removal force-deletes even a worktree with
-    /// uncommitted work — the modal already warned. (Contrast with
-    /// `cleanup_preserves_dirty_merged_worktree`, the silent path,
-    /// which keeps it.)
+    /// A confirmation is intent, not a stale cleanliness capability: work
+    /// added after the modal opened must still survive the server-side gate.
     #[tokio::test]
-    async fn remove_merged_force_deletes_dirty_worktree() {
+    async fn remove_merged_reinspects_and_preserves_dirty_worktree() {
         let fx = setup_fixture().await;
         let wt = add_wt(&fx, "remove-dirty", "feat").await;
         delete_remote_ref(&fx, "feat").await;
@@ -4862,14 +5004,24 @@ mod inspect_tests {
         let store = Arc::new(MemoryStore::new());
         let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
 
-        let config = fresh_config(store);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
 
-        remove_merged_workspace_with(&config, &key, /*archive=*/ true).await;
+        let removed = remove_merged_workspace_with(
+            &config,
+            &key,
+            crate::workspace::WorkspaceRemovalReason::MergedConfirmed,
+        )
+        .await;
 
-        assert!(!wt.exists(), "force-delete must remove the dirty worktree");
+        assert!(removed.is_none(), "fresh dirty state must refuse removal");
+        assert!(wt.exists(), "dirty worktree must be preserved");
         assert!(
-            load_workspace(&config, &key).is_none(),
-            "row should be gone"
+            load_workspace(&config, &key).is_some(),
+            "row must remain reachable for retry"
         );
     }
 

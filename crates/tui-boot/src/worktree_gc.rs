@@ -412,6 +412,7 @@ mod tests {
             size_bytes: size,
             last_modified: None,
             has_uncommitted_changes: false,
+            status_verified: true,
             has_unpushed_commits: false,
             is_safe_to_delete: safe,
         }

@@ -140,8 +140,10 @@ fn all_commands() -> Vec<Command> {
             rows: 40,
         },
         Command::RequestTerminalResync {
-            terminal_id: TerminalId(7),
-            required_seq: 42,
+            requests: vec![lazybox_ipc::TerminalResyncRequest {
+                terminal_id: TerminalId(7),
+                required_seq: 42,
+            }],
         },
         Command::RequestTerminalDelta {
             terminal_id: TerminalId(7),
@@ -300,6 +302,7 @@ fn all_commands() -> Vec<Command> {
             name: "audit-wire".into(),
             project_key: lazybox_core::ProjectKey::github("o", "r"),
             spawn_agent: Some("codex".into()),
+            client_request_id: Some("create-audit-wire".into()),
         },
         Command::CreateProject {
             name: "local project".into(),
@@ -1234,6 +1237,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TerminalModelChanged { .. } => "TerminalModelChanged",
         Event::ErrorInbox { .. } => "ErrorInbox",
         Event::AgentUsageLimit { .. } => "AgentUsageLimit",
+        Event::WorkspaceCreated { .. } => "WorkspaceCreated",
     }
 }
 

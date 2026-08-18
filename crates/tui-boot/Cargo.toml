@@ -63,6 +63,7 @@ semver             = { workspace = true }
 # Release build-guard check + the client-side gh credential chain live here
 # (quarantined off the UI library, #548).
 octocrab           = { workspace = true }
+reqwest            = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 tempfile           = "3"
 which              = "8"
 rpassword          = "7.5.4"

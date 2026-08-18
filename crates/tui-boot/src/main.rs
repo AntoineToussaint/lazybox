@@ -36,6 +36,7 @@
 // Boot-side modules quarantined off the thin UI library (#548): the
 // build-guard fetch (octocrab), provider detection, setup persistence,
 // the Slack CLI flows, and the test harness.
+mod account_cli;
 mod auth_cli;
 mod build_guard;
 mod device_cli;
@@ -314,6 +315,8 @@ Remote & services:
                               add --smoke for a one-shot daemon round trip)
   lazybox auth login github   log in to GitHub via OAuth device flow (no `gh`
                               CLI needed); `auth status` / `auth logout` too
+  lazybox account claim CODE  link this box to a lazybox-platform organization;
+                              `account status` shows the cached plan/entitlement
   lazybox slack init          set up the optional Slack mirror
   lazybox slack doctor        validate an existing Slack setup
   lazybox scan [ROOTS...]     list git repos/worktrees under ROOTS (or scan.roots;
@@ -405,6 +408,7 @@ async fn main() -> anyhow::Result<()> {
     }
     match args.first().map(String::as_str) {
         Some("server") => server_subcommand(&args[1..]).await,
+        Some("account") => account_cli::account_subcommand(&args[1..]).await,
         Some("serve") => serve::serve_subcommand(&args[1..]).await,
         Some("slack") => slack_subcommand(&args[1..]).await,
         Some("scan") => scan_subcommand(&args[1..]).await,

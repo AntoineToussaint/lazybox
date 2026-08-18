@@ -47,6 +47,28 @@ lazybox --connect /tmp/lazybox.sock
 You get the full inbox, and every shell (`s`) and agent (`a c`, `w w`, …)
 you spawn runs **on the box** — its terminals stream back over the tunnel.
 
+## Link a box to a hosted account
+
+Self-hosted SSH and relay use does not require a lazybox-platform account. To
+use a hosted, entitlement-enforcing relay, create a one-time claim code in the
+platform UI and run this **on the box**:
+
+```sh
+lazybox account claim ABCD1234 --name my-dev-box
+lazybox account status
+```
+
+`LAZYBOX_PLATFORM_URL` or `--platform-url` selects a non-production platform;
+otherwise the command uses `https://platform.lazybox.ai`. Claim sends only the
+one-time code, the box's Ed25519 **public** key, and the display name. Lazybox
+stores only the returned organization/device ids, plan and entitlement state
+in the owner-only `~/.lazybox/config.yaml`; the code and private key are never
+written there.
+
+`lazybox device mint` remains fail-open for local/self-hosted use, but warns
+before minting when the box is unlinked, unentitled, or its cached entitlement
+is unknown, so a hosted relay refusal is not a surprise.
+
 ### Let lazybox own the forward
 
 Rather than run the `ssh -L` yourself (and babysit it with `autossh`),

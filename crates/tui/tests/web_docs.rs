@@ -609,7 +609,13 @@ fn launch_surfaces_use_current_support_and_provider_contracts() {
     assert!(installer_compat.contains("lazybox-tui-boot-installer.sh"));
 
     let cli = read("web/src/content/docs/docs/reference/cli.md");
-    for expected in ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "Archive"] {
+    for expected in [
+        "SLACK_BOT_TOKEN",
+        "SLACK_APP_TOKEN",
+        "Archive",
+        "lazybox account claim",
+        "LAZYBOX_PLATFORM_URL",
+    ] {
         assert!(cli.contains(expected), "CLI reference missing {expected:?}");
     }
 
@@ -621,6 +627,8 @@ fn launch_surfaces_use_current_support_and_provider_contracts() {
         "`resume_args`",
         "`asking_patterns`",
         "`shell`",
+        "`organization_id`",
+        "`entitlement_active`",
     ] {
         assert!(
             config.contains(expected),

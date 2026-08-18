@@ -6814,6 +6814,7 @@ mod stale_input_tests {
                 | Id::ErrorInboxClearConfirm
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
+                | Id::ClaimedSpawnConfirm
                 | Id::EditorRemoveConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
@@ -6930,6 +6931,7 @@ mod stale_input_tests {
             Id::BroadcastText,
             Id::BroadcastConfirm,
             Id::BulkSpawnConfirm,
+            Id::ClaimedSpawnConfirm,
             Id::HandoffTarget,
             Id::HandoffText,
             Id::ConvertSessionRole,
@@ -8009,6 +8011,99 @@ mod merge_focus_follow_tests {
             std::path::PathBuf::from("/tmp/wt"),
             Utc::now(),
         )
+    }
+
+    #[test]
+    fn claimed_workspace_requires_confirmation_before_a_new_agent_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut model = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let mut claimed = workspace("owner/repo#1164", false, Duration::hours(1));
+        claimed
+            .gh_issues
+            .first_mut()
+            .unwrap()
+            .labels
+            .push(lazybox_core::Label::new("Working"));
+        let session_key = SessionKey::from(&claimed.key);
+        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(claimed)));
+        while server.rx.try_recv().is_ok() {}
+
+        model.flush_dispatched_cmds(vec![lazybox_ipc::Command::Spawn {
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: Some("claim-test".into()),
+            kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            on_main: false,
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+        }]);
+
+        assert_eq!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
+        assert!(
+            server.rx.try_recv().is_err(),
+            "the daemon must not receive the spawn before explicit confirmation"
+        );
+        assert!(model.handle_confirmed(false).is_empty());
+
+        // Re-open and accept: the exact snapshotted command is released.
+        model.flush_dispatched_cmds(vec![lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id: None,
+            client_request_id: Some("claim-test-2".into()),
+            kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            on_main: false,
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+        }]);
+        assert!(matches!(
+            model.handle_confirmed(true).as_slice(),
+            [lazybox_ipc::Command::Spawn {
+                client_request_id: Some(request_id),
+                ..
+            }] if request_id == "claim-test-2"
+        ));
+    }
+
+    #[test]
+    fn claimed_workspace_allows_read_only_agent_without_confirmation() {
+        let (client, mut server) = channel::pair();
+        let mut model = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let mut claimed = workspace("owner/repo#1164", false, Duration::hours(1));
+        claimed
+            .gh_issues
+            .first_mut()
+            .unwrap()
+            .labels
+            .push(lazybox_core::Label::new("working"));
+        let session_key = SessionKey::from(&claimed.key);
+        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(claimed)));
+        while server.rx.try_recv().is_ok() {}
+
+        model.flush_dispatched_cmds(vec![lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id: None,
+            client_request_id: Some("read-only-claim-test".into()),
+            kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
+            cwd: None,
+            initial_prompt: None,
+            on_main: false,
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::ReadOnly,
+        }]);
+
+        assert_ne!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
+        assert!(matches!(
+            server.rx.try_recv(),
+            Ok(lazybox_ipc::Command::Spawn {
+                access: lazybox_ipc::AgentRunAccess::ReadOnly,
+                client_request_id: Some(request_id),
+                ..
+            }) if request_id == "read-only-claim-test"
+        ));
     }
 
     /// `g u` on a multi-select fans out one `UpdateBranch` per selected

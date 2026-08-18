@@ -679,8 +679,16 @@ fn abbreviate_label(name: &str) -> String {
 /// cursor row, matching `cell_title`.
 fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
     const MAX_CHIPS: usize = 3;
-    let labels = match ctx.task.map(|t| t.labels.as_slice()) {
-        Some(ls) if !ls.is_empty() => ls,
+    let labels = match ctx.task.map(|task| task.labels.as_slice()) {
+        Some(labels)
+            if labels.iter().any(|label| {
+                !label
+                    .name
+                    .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+            }) =>
+        {
+            labels
+        }
         _ => return Vec::new(),
     };
     let dim = !ctx.is_cursor && ctx.is_stale_issue();
@@ -691,8 +699,13 @@ fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
             style
         }
     };
-    let total = labels.len();
-    let shown = labels.iter().take(MAX_CHIPS);
+    let visible = labels.iter().filter(|label| {
+        !label
+            .name
+            .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+    });
+    let total = visible.clone().count();
+    let shown = visible.take(MAX_CHIPS);
     // Upper bound: MAX_CHIPS chips × (space + `[` + name + `]`) +
     // one optional overflow span. Sized to the visible rendering,
     // not the input length — a PR with 50 labels still only emits
@@ -1205,7 +1218,10 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // Empty cell when there's nothing to show — `Column::max(0)`
     // collapses the column across the whole table when NO row has a
     // pill, handing the slack back to the title flex.
-    if primary.is_none() && secondary.is_none() {
+    let claimed = ctx
+        .task
+        .is_some_and(|task| task.has_label(lazybox_core::WORKING_LABEL_NAME));
+    if !claimed && primary.is_none() && secondary.is_none() {
         return Cell::empty();
     }
     // Emit only the pills that are actually present, each trimmed to
@@ -1215,7 +1231,17 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // Right-aligned by the column, so the rightmost pill sits one clean
     // gap off the duration — its block's trailing space plus the time
     // cell's leading space, nothing more.
-    let mut spans = Vec::with_capacity(2);
+    let mut spans = Vec::with_capacity(3);
+    if claimed {
+        let style = if ctx.is_cursor {
+            ctx.row_style().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(ctx.theme.warn)
+                .add_modifier(Modifier::BOLD)
+        };
+        spans.push(Span::styled(" WORK ", style));
+    }
     if let Some(p) = primary {
         spans.push(Span::styled(p.label, p.style));
     }
@@ -2239,6 +2265,33 @@ mod tests {
         let theme = theme();
         let ctx = ctx_for(&ws, &task, &theme);
         assert_eq!(cell_status(&ctx).width(), 0);
+    }
+
+    #[test]
+    fn working_label_renders_as_a_dedicated_claim_pill_not_a_generic_chip() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.review = ReviewStatus::None;
+        task.ci = CiStatus::None;
+        task.state = TaskState::Open;
+        task.labels = vec![
+            lazybox_core::Label::new("Working"),
+            lazybox_core::Label::new("bug"),
+        ];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        let status: String = cell_status(&ctx)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(status, " WORK ");
+        let labels: String = label_spans(&ctx)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(labels, " [bug]");
     }
 
     /// A lone CI signal is sized to just its own `✗` glyph (#1046) — no

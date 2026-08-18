@@ -231,6 +231,7 @@ pub(crate) struct TerminalEntry {
 /// Immutable facts captured by the atomic teardown claim.
 pub(crate) struct TerminalTeardownClaim {
     pub meta: Option<(SessionKey, TerminalKind)>,
+    pub access: AgentRunAccess,
     pub authenticating: bool,
     pub agent_state_generation: Option<u64>,
 }
@@ -836,6 +837,7 @@ impl TerminalRegistry {
         entry.finishing = true;
         Ok(Some(TerminalTeardownClaim {
             meta: entry.meta.clone(),
+            access: entry.access,
             authenticating: entry.authenticating,
             agent_state_generation: entry.agent_state_generation,
         }))

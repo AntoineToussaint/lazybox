@@ -37,6 +37,7 @@ pub use scheduler::{
     will_run_global,
 };
 
+pub(crate) use handlers::sync_working_claim;
 pub use handlers::{
     ProviderHandle, apply_pr_details, handle_add_assignees, handle_clean_worktrees,
     handle_close_issue, handle_delete_or_close, handle_delete_orphaned_worktree,

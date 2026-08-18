@@ -562,6 +562,16 @@ pub struct Task {
 }
 
 impl Task {
+    /// Whether this task carries `name`, matched case-insensitively.
+    /// Provider label names are user-controlled and GitHub preserves their
+    /// casing, while lazybox conventions such as the fleet claim label are
+    /// intentionally case-insensitive.
+    pub fn has_label(&self, name: &str) -> bool {
+        self.labels
+            .iter()
+            .any(|label| label.name.eq_ignore_ascii_case(name))
+    }
+
     /// True when this task represents a pull/merge request rather
     /// than an issue/ticket. Centralizes the URL-shape heuristic so
     /// new providers (Bitbucket, GitLab, …) extend ONE place instead
@@ -985,6 +995,16 @@ mod status_tag_tests {
             priority: None,
             state_label: None,
         }
+    }
+
+    #[test]
+    fn has_label_matches_provider_casing() {
+        let mut task = base();
+        task.labels = vec![Label::new("Working")];
+
+        assert!(task.has_label("working"));
+        assert!(task.has_label("WORKING"));
+        assert!(!task.has_label("blocked"));
     }
 
     #[test]

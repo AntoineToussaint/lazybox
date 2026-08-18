@@ -2041,6 +2041,10 @@ async fn handle_spawn_inner(
             );
         });
     }
+    if matches!(kind, TerminalKind::Agent(_)) && access != AgentRunAccess::ReadOnly {
+        crate::polling::sync_working_claim(config, WorkspaceKey::new(session_key.as_str()), true)
+            .await;
+    }
     Some(terminal_id)
 }
 
@@ -5212,7 +5216,9 @@ pub(crate) async fn teardown_exited_terminal(
     backend_key: &str,
     exit_code: Option<i32>,
 ) {
-    finish_terminal(config, terminal_id, backend_key, exit_code, true).await;
+    let ended_agent_workspace =
+        finish_terminal(config, terminal_id, backend_key, exit_code, true).await;
+    clear_claim_if_last_agent(config, ended_agent_workspace).await;
 }
 
 /// Complete the user-driven kill path through the same lifecycle owner as a
@@ -5224,7 +5230,46 @@ pub(crate) async fn detach_killed_terminal(
     terminal_id: TerminalId,
     backend_key: &str,
 ) {
-    finish_terminal(config, terminal_id, backend_key, None, false).await;
+    let ended_agent_workspace =
+        finish_terminal(config, terminal_id, backend_key, None, false).await;
+    clear_claim_if_last_agent(config, ended_agent_workspace).await;
+}
+
+pub(crate) async fn clear_claim_if_last_agent(
+    config: &ServerConfig,
+    ended_agent_workspace: Option<SessionKey>,
+) {
+    let Some(session_key) = ended_agent_workspace else {
+        return;
+    };
+    // Serializes with agent spawn registration and its claim apply. Thus an
+    // exit racing a replacement agent either clears before the replacement
+    // re-applies, or observes that replacement and leaves the claim intact.
+    let _workspace_agent = config.spawn.lock_workspace_agent(&session_key).await;
+    let has_structured_run = config
+        .agent_runs
+        .lock()
+        .await
+        .values()
+        .any(|run| run.claims_workspace && run.session_key == session_key);
+    if !workspace_has_claiming_pty_agent(config, &session_key).await && !has_structured_run {
+        crate::polling::sync_working_claim(config, WorkspaceKey::new(session_key.as_str()), false)
+            .await;
+    }
+}
+
+/// A read-only agent observes a checkout but does not claim ownership of its
+/// task. Keep it out of the claim lifecycle without changing the broader
+/// `workspace_agents` view used for singleton and prompt-delivery behavior.
+async fn workspace_has_claiming_pty_agent(config: &ServerConfig, session_key: &SessionKey) -> bool {
+    config.terminal.entries.lock().await.values().any(|entry| {
+        !entry.finishing
+            && entry.access != AgentRunAccess::ReadOnly
+            && matches!(
+                entry.meta.as_ref(),
+                Some((owner, TerminalKind::Agent(_))) if owner == session_key
+            )
+    })
 }
 
 async fn finish_terminal(
@@ -5233,7 +5278,7 @@ async fn finish_terminal(
     backend_key: &str,
     exit_code: Option<i32>,
     release_backend: bool,
-) {
+) -> Option<SessionKey> {
     // Join the same interaction boundary as writes, resizes, injections, and
     // kills before removing the live mapping. Otherwise an already-started
     // delayed write can complete after `TerminalExited` and mutate a backend
@@ -5268,7 +5313,7 @@ async fn finish_terminal(
                 .terminal
                 .forget_terminal_persistence_lock(backend_key);
             config.terminal.forget_terminal_io_lock(backend_key);
-            return;
+            return None;
         }
         Ok(None) => {
             if release_backend {
@@ -5278,7 +5323,7 @@ async fn finish_terminal(
                 .terminal
                 .forget_terminal_persistence_lock(backend_key);
             config.terminal.forget_terminal_io_lock(backend_key);
-            return;
+            return None;
         }
     };
 
@@ -5288,6 +5333,12 @@ async fn finish_terminal(
     // workspace just vanished". Announce every exit with its status and
     // owning session/kind so the log makes an abnormal exit obvious.
     let meta = claim.meta;
+    let ended_agent_workspace = match &meta {
+        Some((session_key, TerminalKind::Agent(_))) if claim.access != AgentRunAccess::ReadOnly => {
+            Some(session_key.clone())
+        }
+        _ => None,
+    };
     let (session, kind) = match &meta {
         Some((session_key, kind)) => (Some(session_key.as_str()), Some(kind)),
         None => (None, None),
@@ -5431,6 +5482,7 @@ async fn finish_terminal(
         .terminal
         .forget_terminal_persistence_lock(backend_key);
     config.terminal.forget_terminal_io_lock(backend_key);
+    ended_agent_workspace
 }
 
 /// Ingest one PTY output chunk for a terminal: append it to the rolling
@@ -8175,7 +8227,9 @@ async fn reconcile_missing_recovered_sessions(
             "persisted terminal is absent from backend inventory; committing Exited"
         );
         let exit_code = config.backend.wait_exit(backend_key).await;
-        finish_terminal(config, terminal_id, backend_key, exit_code, false).await;
+        let ended_agent_workspace =
+            finish_terminal(config, terminal_id, backend_key, exit_code, false).await;
+        clear_claim_if_last_agent(config, ended_agent_workspace).await;
     }
 }
 
@@ -9419,6 +9473,50 @@ mod tests {
                 .record_input_needed_shape(terminal_id, shape)
                 .await;
         }
+    }
+
+    #[tokio::test]
+    async fn read_only_pty_agents_do_not_own_working_claims() {
+        let (config, _) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:owner/repo#1164");
+
+        register_test_agent(
+            &config.terminal,
+            TerminalId(1),
+            "read-only-agent",
+            session_key.clone(),
+            "codex",
+            None,
+            None,
+        )
+        .await;
+        config
+            .terminal
+            .record_access(TerminalId(1), AgentRunAccess::ReadOnly)
+            .await;
+        assert!(!workspace_has_claiming_pty_agent(&config, &session_key).await);
+
+        register_test_agent(
+            &config.terminal,
+            TerminalId(2),
+            "writable-agent",
+            session_key.clone(),
+            "codex",
+            None,
+            None,
+        )
+        .await;
+        assert!(workspace_has_claiming_pty_agent(&config, &session_key).await);
+
+        config
+            .terminal
+            .claim_teardown(TerminalId(2), "writable-agent")
+            .await
+            .expect("matching backend");
+        assert!(
+            !workspace_has_claiming_pty_agent(&config, &session_key).await,
+            "a finishing writable agent cannot retain the claim"
+        );
     }
 
     /// #1148: if a Claude version ignores the deterministically seeded trust

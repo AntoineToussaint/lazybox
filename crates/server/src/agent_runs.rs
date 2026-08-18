@@ -28,6 +28,8 @@ use tokio::sync::mpsc;
 pub struct AgentRunHandle {
     pub input_tx: mpsc::Sender<AgentInputMessage>,
     pub task: tokio::task::JoinHandle<()>,
+    pub session_key: lazybox_core::SessionKey,
+    pub claims_workspace: bool,
 }
 
 /// Per-run follow-up backlog. Structured agents process turns serially; a
@@ -157,7 +159,11 @@ pub async fn handle_start_agent_run(
     let bus = config.bus.clone();
     let runs = config.agent_runs.clone();
     let spawner = config.agent_stream_spawner.clone();
-    let session_key_for_task = resolved_session_key;
+    let session_key_for_task = resolved_session_key.clone();
+    let session_key_for_cleanup = resolved_session_key.clone();
+    let config_for_cleanup = config.clone();
+    let claims_workspace = access != AgentRunAccess::ReadOnly;
+    let claims_workspace_for_cleanup = claims_workspace;
     let agent_for_event = agent.clone();
     // Gate the spawned task on a oneshot so it can't run before the outer code
     // has inserted the handle, published AgentRunStarted, and queued initial
@@ -190,13 +196,26 @@ pub async fn handle_start_agent_run(
                 exit_code,
                 error,
             });
+            if claims_workspace_for_cleanup {
+                crate::spawn_handler::clear_claim_if_last_agent(
+                    &config_for_cleanup,
+                    Some(session_key_for_cleanup),
+                )
+                .await;
+            }
         }
     });
+    let _workspace_agent = config
+        .spawn
+        .lock_workspace_agent(&resolved_session_key)
+        .await;
     config.agent_runs.lock().await.insert(
         run_id,
         AgentRunHandle {
             input_tx: input_tx.clone(),
             task,
+            session_key: resolved_session_key.clone(),
+            claims_workspace,
         },
     );
     let _ = config.bus.send(Event::AgentRunStarted {
@@ -215,6 +234,14 @@ pub async fn handle_start_agent_run(
             "agent_run:input",
             format!("initial agent input was not accepted: {error}"),
         ));
+    }
+    if claims_workspace {
+        crate::polling::sync_working_claim(
+            config,
+            lazybox_core::WorkspaceKey::new(resolved_session_key.as_str()),
+            true,
+        )
+        .await;
     }
     // Release only after the complete run-start contract is externally
     // visible and its initial input is queued. On a multi-thread runtime the
@@ -263,6 +290,8 @@ pub async fn handle_interrupt_agent_run(config: &ServerConfig, run_id: AgentRunI
     let Some(run) = config.agent_runs.lock().await.remove(&run_id) else {
         return;
     };
+    let session_key = run.session_key.clone();
+    let claims_workspace = run.claims_workspace;
     run.task.abort();
     let _ = run.task.await;
     let _ = config.bus.send(Event::AgentRunFinished {
@@ -270,6 +299,9 @@ pub async fn handle_interrupt_agent_run(config: &ServerConfig, run_id: AgentRunI
         exit_code: None,
         error: Some("interrupted".into()),
     });
+    if claims_workspace {
+        crate::spawn_handler::clear_claim_if_last_agent(config, Some(session_key)).await;
+    }
 }
 
 pub async fn handle_decide_agent_approval(

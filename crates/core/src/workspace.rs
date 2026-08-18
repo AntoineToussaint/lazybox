@@ -37,6 +37,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// GitHub-native fleet coordination label applied while a lazybox agent owns
+/// a task. Kept in core so providers, daemon, and clients cannot drift onto
+/// different spellings.
+pub const WORKING_LABEL_NAME: &str = "working";
+
 /// Stable identifier for a workspace. Human-readable so it survives
 /// renames and shows up well in logs / UIs ("fix-auth-2026-04").
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -886,6 +891,13 @@ impl Workspace {
             .as_ref()
             .or_else(|| self.gh_issues.first())
             .or_else(|| self.linear_issues.first())
+    }
+
+    /// Whether the headline task is claimed by an agent through the shared
+    /// [`WORKING_LABEL_NAME`] convention.
+    pub fn is_claimed(&self) -> bool {
+        self.primary_task()
+            .is_some_and(|task| task.has_label(WORKING_LABEL_NAME))
     }
 
     /// Number of activity items the user hasn't seen.
@@ -1860,6 +1872,17 @@ mod tests {
             priority: None,
             state_label: None,
         }
+    }
+
+    #[test]
+    fn claimed_state_follows_the_headline_task() {
+        let mut task = pr("o/r#1");
+        task.labels = vec![crate::Label::new("Working")];
+        let claimed = Workspace::from_task(task, now());
+        assert!(claimed.is_claimed());
+
+        let unclaimed = Workspace::from_task(pr("o/r#2"), now());
+        assert!(!unclaimed.is_claimed());
     }
 
     fn issue(source: &str, key: &str) -> Task {

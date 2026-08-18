@@ -719,7 +719,80 @@ impl<T: TerminalAdapter> Model<T> {
     /// send. Shared by the catalog-dispatch path and the per-pane
     /// fallback so both surface the same feedback.
     pub(super) fn flush_dispatched_cmds(&mut self, cmds: Vec<IpcCommand>) {
-        for cmd in &cmds {
+        let planned = lazybox_tui_core::dispatch::plan_dispatch(cmds.clone(), &self.sidebar);
+        let claimed_targets: std::collections::BTreeSet<String> = planned
+            .iter()
+            .filter_map(|command| match command {
+                IpcCommand::Spawn {
+                    session_key,
+                    kind: lazybox_ipc::TerminalKind::Agent(_),
+                    access,
+                    ..
+                } if *access != lazybox_ipc::AgentRunAccess::ReadOnly => self
+                    .sidebar
+                    .workspace_by_key(session_key)
+                    .filter(|workspace| workspace.is_claimed())
+                    .map(|workspace| {
+                        workspace
+                            .primary_task()
+                            .map(|task| task.title.clone())
+                            .unwrap_or_else(|| session_key.to_string())
+                    }),
+                IpcCommand::StartAgentRun {
+                    session_key,
+                    access,
+                    ..
+                } if *access != lazybox_ipc::AgentRunAccess::ReadOnly => self
+                    .sidebar
+                    .workspace_by_key(session_key)
+                    .filter(|workspace| workspace.is_claimed())
+                    .map(|workspace| {
+                        workspace
+                            .primary_task()
+                            .map(|task| task.title.clone())
+                            .unwrap_or_else(|| session_key.to_string())
+                    }),
+                _ => None,
+            })
+            .collect();
+        if !claimed_targets.is_empty() {
+            let prompt = if claimed_targets.len() == 1 {
+                format!(
+                    "{} is already marked WORK by another agent or machine. Start anyway?",
+                    claimed_targets.iter().next().expect("one claimed target")
+                )
+            } else {
+                format!(
+                    "{} selected tasks are already marked WORK by another agent or machine. Start agents anyway?",
+                    claimed_targets.len()
+                )
+            };
+            self.set_modal_flow(super::ModalFlow::ClaimedSpawnConfirm { commands: planned });
+            self.mount_modal(
+                super::Id::ClaimedSpawnConfirm,
+                crate::realm::components::confirm::Confirm::new(prompt).default_no(),
+            );
+            return;
+        }
+        self.note_spawn_feedback(&cmds);
+        for (original, rewritten) in cmds.into_iter().zip(planned) {
+            if let (
+                IpcCommand::Spawn {
+                    kind: lazybox_ipc::TerminalKind::Agent(agent_id),
+                    initial_prompt: Some(_),
+                    ..
+                },
+                IpcCommand::InjectPrompt { .. },
+            ) = (&original, &rewritten)
+            {
+                self.flash_hint(format!("→ injecting into existing {agent_id}"));
+            }
+            self.send_cmd(rewritten);
+        }
+    }
+
+    pub(super) fn note_spawn_feedback(&mut self, cmds: &[IpcCommand]) {
+        for cmd in cmds {
             if let IpcCommand::Spawn {
                 kind, session_key, ..
             } = cmd
@@ -758,21 +831,6 @@ impl<T: TerminalAdapter> Model<T> {
                     on_main: false,
                 });
             }
-        }
-        let planned = lazybox_tui_core::dispatch::plan_dispatch(cmds.clone(), &self.sidebar);
-        for (original, rewritten) in cmds.into_iter().zip(planned) {
-            if let (
-                IpcCommand::Spawn {
-                    kind: lazybox_ipc::TerminalKind::Agent(agent_id),
-                    initial_prompt: Some(_),
-                    ..
-                },
-                IpcCommand::InjectPrompt { .. },
-            ) = (&original, &rewritten)
-            {
-                self.flash_hint(format!("→ injecting into existing {agent_id}"));
-            }
-            self.send_cmd(rewritten);
         }
     }
 

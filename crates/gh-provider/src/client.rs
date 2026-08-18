@@ -4157,6 +4157,90 @@ impl GhClient {
         Ok(())
     }
 
+    /// Apply or clear lazybox's GitHub-native fleet claim on the headline
+    /// issue/PR. The repository label is created on first use, so a fresh
+    /// repository does not turn agent coordination into a silent no-op.
+    ///
+    /// Creation and removal are idempotent across machines: a racing label
+    /// creator's 422 and an already-absent label's 404 both mean the desired
+    /// state is already available for the following operation.
+    pub async fn set_working_claim(
+        &self,
+        workspace: &lazybox_core::Workspace,
+        claimed: bool,
+    ) -> Result<(), GhError> {
+        let task = workspace
+            .primary_task()
+            .ok_or_else(|| GhError::Graphql("working claim: workspace has no task".into()))?;
+        let repo = task
+            .repo
+            .as_deref()
+            .ok_or_else(|| GhError::Graphql("working claim: task has no repository".into()))?;
+        let (owner, name) = repo.split_once('/').ok_or_else(|| {
+            GhError::Graphql(format!("working claim: invalid repository `{repo}`"))
+        })?;
+        let number = task
+            .id
+            .key
+            .rsplit_once('#')
+            .and_then(|(_, number)| number.parse::<u64>().ok())
+            .ok_or_else(|| {
+                GhError::Graphql(format!(
+                    "working claim: cannot parse issue number from `{}`",
+                    task.id.key
+                ))
+            })?;
+
+        let labels = self.list_labels_for_repo(owner, name).await?;
+        let existing_name = labels
+            .iter()
+            .find(|label| {
+                label
+                    .name
+                    .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+            })
+            .map(|label| label.name.clone());
+        let handler = self.inner.issues(owner, name);
+
+        if claimed {
+            let label_name = match existing_name {
+                Some(label) => label,
+                None => {
+                    self.acquire_or_block("create working label")?;
+                    match handler
+                        .create_label(
+                            lazybox_core::WORKING_LABEL_NAME,
+                            "fbca04",
+                            "Claimed by a lazybox agent; cleared when the session ends.",
+                        )
+                        .await
+                    {
+                        Ok(label) => label.name,
+                        Err(error) if octocrab_error_status(&error) == Some(422) => {
+                            // Another box created the same repository label
+                            // between our list and create requests.
+                            lazybox_core::WORKING_LABEL_NAME.to_string()
+                        }
+                        Err(error) => return Err(GhError::Api(error)),
+                    }
+                }
+            };
+            self.acquire_or_block("add working label")?;
+            handler
+                .add_labels(number, &[label_name])
+                .await
+                .map_err(GhError::Api)?;
+        } else if let Some(label_name) = existing_name {
+            self.acquire_or_block("remove working label")?;
+            if let Err(error) = handler.remove_label(number, label_name).await
+                && octocrab_error_status(&error) != Some(404)
+            {
+                return Err(GhError::Api(error));
+            }
+        }
+        Ok(())
+    }
+
     /// Resolve the repository's default merge method for a PR — the
     /// method github.com's merge button pre-selects, and (on a repo
     /// that disallows merge commits) the only method the merge mutation
@@ -4315,6 +4399,13 @@ impl GhClient {
             return Err(mutation_error_response("deleteIssue mutation", &errors));
         }
         Ok(())
+    }
+}
+
+fn octocrab_error_status(error: &octocrab::Error) -> Option<u16> {
+    match error {
+        octocrab::Error::GitHub { source, .. } => Some(source.status_code.as_u16()),
+        _ => None,
     }
 }
 
@@ -6860,6 +6951,61 @@ mod tests {
             .add_labels("PR_kwDO", &["LA_1".to_string()])
             .await
             .expect("label mutation success must return Ok");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn working_claim_creates_missing_repo_label_then_applies_it() {
+        const CREATED: &str = r#"{
+            "id": 1,
+            "node_id": "LA_1",
+            "url": "https://api.github.test/repos/o/r/labels/working",
+            "name": "working",
+            "description": "Claimed by a lazybox agent",
+            "color": "fbca04",
+            "default": false
+        }"#;
+        const APPLIED: &str = r#"[{
+            "id": 1,
+            "node_id": "LA_1",
+            "url": "https://api.github.test/repos/o/r/labels/working",
+            "name": "working",
+            "description": "Claimed by a lazybox agent",
+            "color": "fbca04",
+            "default": false
+        }]"#;
+        const LABELS_QUERY: &str = r#"{"data":{"repository":{"labels":{"nodes":[]}}}}"#;
+        let base_uri = spawn_sequenced_response_server(vec![LABELS_QUERY, CREATED, APPLIED]).await;
+        let client = make_client(&base_uri);
+        let workspace =
+            Workspace::from_task(task_without_node_id(TaskKind::Issue), chrono::Utc::now());
+
+        client
+            .set_working_claim(&workspace, true)
+            .await
+            .expect("a fresh repository must create and apply the coordination label");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn working_claim_clear_is_idempotent_when_repo_has_no_label() {
+        const LABELS_QUERY: &str = r#"{"data":{"repository":{"labels":{"nodes":[]}}}}"#;
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri = spawn_counting_response_server(
+            "200 OK",
+            "application/json",
+            "",
+            LABELS_QUERY,
+            hits.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+        let workspace =
+            Workspace::from_task(task_without_node_id(TaskKind::Issue), chrono::Utc::now());
+
+        client
+            .set_working_claim(&workspace, false)
+            .await
+            .expect("clearing a missing claim is already success");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Reviewer mutation: `request_reviewers` first resolves the login

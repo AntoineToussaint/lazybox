@@ -341,6 +341,10 @@ pub struct ServerConfig {
     pub device_registry: Arc<lazybox_identity::DeviceRegistry>,
     /// Cross-tick provider state, caches, and wake coordination.
     pub poll: PollState,
+    /// Enable GitHub fleet-claim mutations. Production configs turn this on;
+    /// in-memory/test configs leave it off so a unit-test agent spawn can
+    /// never reach the developer's real GitHub account.
+    pub working_claims_enabled: bool,
     /// Workspace keys whose deletion began in this process (single delete,
     /// merged cleanup, or project cascade). Consulted both when a workspace
     /// row is missing and immediately after `backend.spawn`, so a provision
@@ -451,6 +455,7 @@ impl ServerConfig {
             identity_dir,
             keystore,
         ));
+        config.working_claims_enabled = true;
         Ok(config)
     }
 
@@ -507,6 +512,7 @@ impl ServerConfig {
             default_principal_id: lazybox_ipc::PrincipalId::local(),
             device_registry: Arc::new(lazybox_identity::DeviceRegistry::ephemeral()),
             poll: PollState::default(),
+            working_claims_enabled: false,
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
             workspace_creations: Arc::new(parking_lot::Mutex::new(())),

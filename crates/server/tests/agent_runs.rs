@@ -31,11 +31,15 @@ async fn structured_agent_input_backlog_is_bounded_and_retryable() {
             .expect("declared queue capacity");
     }
     let task = tokio::spawn(std::future::pending::<()>());
-    config
-        .agent_runs
-        .lock()
-        .await
-        .insert(run_id, AgentRunHandle { input_tx, task });
+    config.agent_runs.lock().await.insert(
+        run_id,
+        AgentRunHandle {
+            input_tx,
+            task,
+            session_key: "test:workspace".into(),
+            claims_workspace: true,
+        },
+    );
     let mut events = config.bus.subscribe();
 
     handle_send_agent_input(

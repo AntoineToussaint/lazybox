@@ -210,6 +210,19 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::set_labels(c, ws, names).await,
         }
     }
+    pub async fn set_working_claim(
+        &self,
+        ws: &lazybox_core::Workspace,
+        claimed: bool,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => c.set_working_claim(ws, claimed).await.map_err(Into::into),
+            Self::Linear(c) => Err(lazybox_core::ProviderError::unsupported(
+                lazybox_core::TaskProvider::name(c),
+                "set_working_claim",
+            )),
+        }
+    }
     pub async fn post_reply(
         &self,
         ws: &lazybox_core::Workspace,
@@ -1220,6 +1233,123 @@ pub async fn handle_set_labels(
 ) {
     let config = config.clone();
     detach_mutation(async move { set_labels_task(&config, workspace_key, names).await });
+}
+
+/// Mirror an agent's lifecycle into GitHub's shared `working` label.
+/// Remote success is committed locally and broadcast immediately so every
+/// attached client sees the `WORK` pill without waiting for the next poll.
+/// Any failure is a visible provider error: coordination must never fail
+/// silently while an agent continues editing the task.
+pub(crate) async fn sync_working_claim(
+    config: &ServerConfig,
+    workspace_key: WorkspaceKey,
+    claimed: bool,
+) {
+    if !config.working_claims_enabled {
+        return;
+    }
+    if !workspace_key
+        .as_str()
+        .starts_with(&format!("{}-", lazybox_gh::SOURCE))
+    {
+        return;
+    }
+    let Some(workspace) = load_workspace(config, &workspace_key) else {
+        emit_working_claim_error(
+            config,
+            &workspace_key,
+            claimed,
+            "workspace no longer exists",
+        );
+        return;
+    };
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
+        Ok(provider) => provider,
+        Err(error) => {
+            emit_working_claim_error(config, &workspace_key, claimed, &error);
+            return;
+        }
+    };
+    // A claim is part of spawn/teardown ordering, so it stays inline with the
+    // workspace-agent lock. Do not use the general ten-minute mutation retry
+    // queue here: that would freeze this client's sequential command stream
+    // and delay a racing teardown for the whole retry budget.
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        provider.set_working_claim(&workspace, claimed),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            emit_working_claim_error(
+                config,
+                &workspace_key,
+                claimed,
+                &humanize_mutation_failure("working claim", &error),
+            );
+            return;
+        }
+        Err(_) => {
+            emit_working_claim_error(
+                config,
+                &workspace_key,
+                claimed,
+                "GitHub did not respond within 20 seconds",
+            );
+            return;
+        }
+    }
+
+    let outcome = apply_and_commit(config, &workspace_key, |fresh| {
+        apply_working_label(fresh, claimed);
+    })
+    .await;
+    if outcome.is_applied() {
+        tracing::info!(workspace = %workspace_key, claimed, "synchronized working claim");
+        config.poll.wake(true);
+    }
+}
+
+fn emit_working_claim_error(
+    config: &ServerConfig,
+    workspace_key: &WorkspaceKey,
+    claimed: bool,
+    reason: &str,
+) {
+    let action = if claimed { "apply" } else { "clear" };
+    let message = format!(
+        "agent coordination failed: could not {action} `working` on {workspace_key}: {reason}"
+    );
+    tracing::warn!(workspace = %workspace_key, claimed, %reason, "working claim synchronization failed");
+    let _ = config
+        .bus
+        .send(Event::provider_error_permanent("claim", message));
+}
+
+fn apply_working_label(workspace: &mut Workspace, claimed: bool) {
+    let task = workspace
+        .pr
+        .as_mut()
+        .or_else(|| workspace.gh_issues.first_mut())
+        .or_else(|| workspace.linear_issues.first_mut());
+    let Some(task) = task else {
+        return;
+    };
+    if claimed {
+        if !task.has_label(lazybox_core::WORKING_LABEL_NAME) {
+            task.labels.push(lazybox_core::Label::with_color(
+                lazybox_core::WORKING_LABEL_NAME,
+                "fbca04",
+            ));
+        }
+    } else {
+        task.labels.retain(|label| {
+            !label
+                .name
+                .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+        });
+    }
 }
 
 async fn set_labels_task(config: &ServerConfig, workspace_key: WorkspaceKey, names: Vec<String>) {
@@ -2895,8 +3025,11 @@ pub async fn prefetch_top_pr_details(
 
 #[cfg(test)]
 mod github_target_tests {
-    use super::github_target;
-    use lazybox_core::{CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState};
+    use super::{apply_working_label, github_target};
+    use lazybox_core::{
+        CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace,
+        WorkspaceKey,
+    };
 
     fn task(repo: Option<&str>, key: &str) -> Task {
         Task {
@@ -2964,6 +3097,54 @@ mod github_target_tests {
     fn none_when_the_key_has_no_parseable_number() {
         let t = task(Some("octo/widgets"), "octo/widgets");
         assert_eq!(github_target(&t), None);
+    }
+
+    #[test]
+    fn local_claim_projection_adds_once_and_clears_case_insensitively() {
+        let mut workspace = Workspace::from_task(
+            task(Some("octo/widgets"), "octo/widgets#42"),
+            chrono::Utc::now(),
+        );
+
+        apply_working_label(&mut workspace, true);
+        apply_working_label(&mut workspace, true);
+        assert!(workspace.is_claimed());
+        assert_eq!(
+            workspace
+                .primary_task()
+                .unwrap()
+                .labels
+                .iter()
+                .filter(|label| label.name.eq_ignore_ascii_case("working"))
+                .count(),
+            1,
+        );
+
+        apply_working_label(&mut workspace, false);
+        assert!(!workspace.is_claimed());
+    }
+
+    #[tokio::test]
+    async fn missing_claim_target_is_a_visible_error() {
+        let mut config = crate::ServerConfig::in_memory();
+        config.working_claims_enabled = true;
+        let mut events = config.bus.subscribe();
+
+        super::sync_working_claim(&config, WorkspaceKey::new("github-owner-repo-1164"), true).await;
+
+        match events.recv().await.expect("claim error event") {
+            lazybox_ipc::Event::ProviderError {
+                source,
+                message,
+                kind,
+                ..
+            } => {
+                assert_eq!(source, "claim");
+                assert_eq!(kind, "permanent");
+                assert!(message.contains("workspace no longer exists"));
+            }
+            other => panic!("expected visible claim error, got {other:?}"),
+        }
     }
 }
 

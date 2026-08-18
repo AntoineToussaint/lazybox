@@ -377,6 +377,11 @@ pub enum Id {
     /// lives in `ModalFlow::BulkSpawnConfirm`; `Msg::Confirmed(true)`
     /// emits the stashed commands.
     BulkSpawnConfirm,
+    /// Guard before starting an agent on a GitHub task carrying the shared
+    /// `working` claim. The already-planned commands live in
+    /// `ModalFlow::ClaimedSpawnConfirm`; Yes bypasses this one guard and
+    /// sends them, No leaves the existing owner undisturbed.
+    ClaimedSpawnConfirm,
     /// Target picker for the agent-to-agent handoff flow (`x s`,
     /// issue #431) — pick the session the source agent's output should
     /// be injected into. Each row carries a [`ChoicePayload::Session`];
@@ -824,6 +829,11 @@ pub(crate) enum ModalFlow {
         summary: String,
         follow: Option<lazybox_core::SessionKey>,
     },
+    /// Agent spawns blocked by an upstream `working` claim. Commands are
+    /// already run through the spawn-to-inject planner, so a local live
+    /// agent never reaches this guard and confirming cannot retarget under a
+    /// concurrent sidebar refresh.
+    ClaimedSpawnConfirm { commands: Vec<IpcCommand> },
     /// Merge-conflict resolve prompt (issue #947). Workspace resolved at
     /// mount time so a cursor drift under the modal can't redirect the
     /// resolve to the wrong PR. `Msg::Confirmed(true)` runs the

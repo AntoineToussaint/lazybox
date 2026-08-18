@@ -206,6 +206,11 @@ pub fn spawning_doc() -> MarkerDoc {
 /// `lazybox_tui::components::workspace_row`'s badge cells.
 const ROW_BADGES: &[MarkerDoc] = &[
     MarkerDoc {
+        label: "WORK",
+        meaning: "This GitHub issue or PR is claimed by an agent, including agents running from another lazybox machine.",
+        when: "Shows while the task carries the shared `working` label; starting another agent asks for confirmation.",
+    },
+    MarkerDoc {
         label: "⚡",
         meaning: "ARM — this PR will auto-merge once CI goes green; lazybox's client-side merge, which only fires while lazybox is running.",
         when: "Shows once you arm merge-on-green (`g g`).",
@@ -335,6 +340,16 @@ mod tests {
             .find(|d| d.label.contains("◆O"))
             .expect("the model badge must be documented");
         assert!(doc.meaning.contains("Opus"), "names the full tier word");
+    }
+
+    #[test]
+    fn fleet_claim_badge_is_documented() {
+        let doc = row_badge_docs()
+            .iter()
+            .find(|doc| doc.label == "WORK")
+            .expect("the cross-machine working claim must be explainable");
+        assert!(doc.meaning.contains("another lazybox machine"));
+        assert!(doc.when.contains("confirmation"));
     }
 
     /// The pre-terminal "spawning" arc (#1069) is documented like the

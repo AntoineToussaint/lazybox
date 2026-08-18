@@ -1348,6 +1348,16 @@ showing keybinding search only",
                     }
                 }
             }
+            Some(Id::ClaimedSpawnConfirm) => {
+                if let Some(ModalFlow::ClaimedSpawnConfirm { commands }) = self.modal_flow.take() {
+                    if yes {
+                        self.note_spawn_feedback(&commands);
+                        cmds.extend(commands);
+                    } else {
+                        self.flash_info("agent start cancelled — existing WORK claim kept");
+                    }
+                }
+            }
             Some(Id::HelpActionConfirm) => {
                 // Action proposed by the Ask Lazybox help agent (#353).
                 // Yes → apply it; No / Esc → drop the stash, nothing

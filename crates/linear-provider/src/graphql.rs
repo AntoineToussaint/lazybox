@@ -241,6 +241,41 @@ pub struct GqlError {
     pub message: String,
 }
 
+/// Join a GraphQL `errors` array into one message, `None` when empty.
+/// Linear reports auth and validation failures here (a bad/revoked API
+/// key comes back "Authentication required, not authenticated"), so
+/// every response path funnels the array through this before declaring
+/// the reason lost.
+pub fn join_errors(errors: &[GqlError]) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+    Some(
+        errors
+            .iter()
+            .map(|e| e.message.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+/// Minimal envelope for pulling a GraphQL `errors` array out of a raw
+/// response body — Linear serves auth/validation failures as a 4xx
+/// whose body still carries the real reason here, which the typed
+/// per-query response structs never get a chance to deserialize.
+#[derive(Deserialize)]
+struct ErrorEnvelope {
+    #[serde(default)]
+    errors: Option<Vec<GqlError>>,
+}
+
+/// Extract and join a GraphQL `errors` message from a raw response
+/// body. `None` when the body isn't JSON or carries no errors.
+pub fn error_message_from_body(body: &str) -> Option<String> {
+    let envelope: ErrorEnvelope = serde_json::from_str(body).ok()?;
+    join_errors(envelope.errors.as_deref()?)
+}
+
 // ── Mapper ─────────────────────────────────────────────────────────────
 
 pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
@@ -687,6 +722,42 @@ mod tests {
         assert!(!task.needs_reply);
         assert_eq!(task.last_commenter, None);
         assert_eq!(task.unread_count, 0);
+    }
+
+    #[test]
+    fn join_errors_joins_messages_and_none_when_empty() {
+        assert_eq!(join_errors(&[]), None);
+        let errs = vec![
+            GqlError {
+                message: "first".into(),
+            },
+            GqlError {
+                message: "second".into(),
+            },
+        ];
+        assert_eq!(join_errors(&errs).as_deref(), Some("first; second"));
+    }
+
+    #[test]
+    fn error_message_from_body_extracts_graphql_errors() {
+        let body =
+            r#"{"data":null,"errors":[{"message":"Authentication required, not authenticated"}]}"#;
+        assert_eq!(
+            error_message_from_body(body).as_deref(),
+            Some("Authentication required, not authenticated")
+        );
+    }
+
+    #[test]
+    fn error_message_from_body_none_without_errors() {
+        // A clean data response, an empty errors array, and non-JSON all
+        // yield None — nothing to surface as a reason.
+        assert_eq!(error_message_from_body(r#"{"data":{"viewer":{}}}"#), None);
+        assert_eq!(error_message_from_body(r#"{"errors":[]}"#), None);
+        assert_eq!(
+            error_message_from_body("<html>502 Bad Gateway</html>"),
+            None
+        );
     }
 
     #[test]

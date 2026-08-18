@@ -1490,8 +1490,10 @@ async fn client_requested_terminal_resync_is_covered_or_explicitly_unavailable()
 
         client
             .send(Command::RequestTerminalResync {
-                terminal_id,
-                required_seq: 1,
+                requests: vec![lazybox_ipc::TerminalResyncRequest {
+                    terminal_id,
+                    required_seq: 1,
+                }],
             })
             .expect("request resync");
         let recovered = wait_for(
@@ -1509,8 +1511,10 @@ async fn client_requested_terminal_resync_is_covered_or_explicitly_unavailable()
         mock.fail_next_snapshots(&key, 1).await;
         client
             .send(Command::RequestTerminalResync {
-                terminal_id,
-                required_seq: 2,
+                requests: vec![lazybox_ipc::TerminalResyncRequest {
+                    terminal_id,
+                    required_seq: 2,
+                }],
             })
             .expect("request unavailable resync");
         wait_for(

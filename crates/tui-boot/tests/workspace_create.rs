@@ -63,6 +63,7 @@ fn fake_daemon(
                 Command::CreateWorkspace {
                     ref name,
                     ref project_key,
+                    ref client_request_id,
                     ..
                 } => {
                     let mut ws = lazybox_core::Workspace::empty(
@@ -76,6 +77,21 @@ fn fake_daemon(
                     socket::write_frame(&mut wr, &Event::WorkspaceUpserted(Box::new(ws)))
                         .await
                         .expect("send upsert");
+                    let client_request_id = client_request_id
+                        .clone()
+                        .expect("workspace create is correlated");
+                    socket::write_frame(
+                        &mut wr,
+                        &Event::WorkspaceCreated {
+                            client_request_id: client_request_id.clone(),
+                            workspace_key: lazybox_core::WorkspaceKey::new(assigned_key.clone()),
+                        },
+                    )
+                    .await
+                    .expect("send create acknowledgement");
+                    socket::write_frame(&mut wr, &Event::CommandCompleted { client_request_id })
+                        .await
+                        .expect("send create completion");
                     return cmd;
                 }
                 other => panic!("unexpected command {other:?}"),
@@ -158,6 +174,7 @@ async fn workspace_create_infers_project_from_cwd_and_reports_the_daemon_key() {
             name,
             project_key,
             spawn_agent,
+            client_request_id,
         } => {
             assert_eq!(name, "flaky-test investigation");
             assert_eq!(
@@ -165,6 +182,7 @@ async fn workspace_create_infers_project_from_cwd_and_reports_the_daemon_key() {
                 lazybox_core::ProjectKey::github("acme", "widget")
             );
             assert_eq!(spawn_agent.as_deref(), Some("claude"));
+            assert!(client_request_id.is_some());
         }
         other => panic!("expected CreateWorkspace, got {other:?}"),
     }
@@ -211,10 +229,12 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
             name,
             project_key,
             spawn_agent,
+            client_request_id,
         } => {
             assert_eq!(name, "scratch");
             assert_eq!(project_key, lazybox_core::ProjectKey::new("local-sandbox"));
             assert_eq!(spawn_agent, None);
+            assert!(client_request_id.is_some());
         }
         other => panic!("expected CreateWorkspace, got {other:?}"),
     }

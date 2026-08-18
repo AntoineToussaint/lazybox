@@ -140,6 +140,18 @@ pub const IS_RELEASE_BUILD: bool = matches!(env!("LAZYBOX_RELEASE_BUILD").as_byt
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct TerminalId(pub u64);
 
+/// One terminal whose client-side byte stream has a sequence gap and needs
+/// an authoritative replay. This is the single resync-debt shape shared by
+/// the TUI, the bincode socket, the desktop binary gateway, and the daemon.
+/// Keeping the required sequence beside the id prevents either side from
+/// maintaining a second, implicit notion of what a replay must cover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct TerminalResyncRequest {
+    pub terminal_id: TerminalId,
+    pub required_seq: u64,
+}
+
 /// Stable id for a structured agent runtime. This is intentionally
 /// separate from `TerminalId`: a run may be structured-JSON only, terminal
 /// only, or mirrored into both surfaces by higher layers.
@@ -820,14 +832,18 @@ pub enum Command {
         cols: u16,
         rows: u16,
     },
-    /// Defense-in-depth recovery request from a client that observed a
-    /// terminal sequence gap below the daemon's normal drop/resync path.
-    /// The daemon replies with `TerminalResync` only when an authoritative
-    /// replay covers `required_seq`; otherwise it replies
-    /// `TerminalResyncUnavailable` and the client retries on later output.
+    /// Defense-in-depth recovery requests from a client that observed one or
+    /// more terminal sequence gaps below the daemon's normal drop/resync
+    /// path. A snapshot can expose dozens of unavailable replays at once, so
+    /// they travel as one bounded command instead of overflowing the small
+    /// command lane with one message per terminal (#1171).
+    ///
+    /// The daemon replies to each [`TerminalResyncRequest`] with
+    /// `TerminalResync` only when an authoritative replay covers its
+    /// `required_seq`; otherwise it replies `TerminalResyncUnavailable` and
+    /// the client retries on later output.
     RequestTerminalResync {
-        terminal_id: TerminalId,
-        required_seq: u64,
+        requests: Vec<TerminalResyncRequest>,
     },
     /// Delta pull for session transfer (#1089): the terminal's output
     /// bytes since byte watermark `since_offset`, so a puller fetches
@@ -980,6 +996,14 @@ pub enum Command {
         /// The TUI sets this to the configured default agent for both
         /// the `n` key and the global "start agent" shortcut.
         spawn_agent: Option<String>,
+        /// Client-generated correlation id. The daemon echoes it in
+        /// [`Event::WorkspaceCreated`] once the allocated key is durable,
+        /// then in [`Event::CommandCompleted`] / [`Event::CommandFailed`]
+        /// when the optional agent spawn reaches its terminal outcome.
+        /// Without this id a client cannot distinguish its new workspace
+        /// from another client's concurrent create with the same name.
+        #[serde(default)]
+        client_request_id: Option<String>,
     },
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under, like a github repo but with
@@ -1166,11 +1190,11 @@ pub enum Command {
     },
     /// Admin command: walk every persisted workspace, drop sessions
     /// whose terminals aren't currently live, and remove the
-    /// corresponding worktrees from disk. Used to reclaim disk
+    /// corresponding worktrees from disk only after freshly proving each is
+    /// clean, pushed, unlocked, and no longer active. Used to reclaim disk
     /// space without losing the inbox (the PR / issue rows stay —
     /// only the working-tree directories + session records are
-    /// torn down). Live terminals are skipped so a running claude
-    /// agent isn't pulled out from under itself.
+    /// torn down). Live or unverifiable worktrees are preserved.
     ///
     /// Daemon broadcasts a `WorkspaceUpserted` for every workspace
     /// it touched so the sidebar shows the now-empty session list.
@@ -2065,10 +2089,9 @@ pub enum Event {
         body: String,
     },
     /// `Command::CleanWorktrees` finished. `removed` is the number of
-    /// worktrees actually torn down (skipping ones with live
-    /// terminals); `skipped` is the count of sessions that were left
-    /// alone because their terminal was still attached. The TUI uses
-    /// this to surface a `cleaned N worktrees · M kept (active)`
+    /// worktrees actually torn down; `skipped` is the count of sessions left
+    /// alone because they were active or their safety could not be proven.
+    /// The TUI uses this to surface a `cleaned N worktrees · M kept`
     /// footer notice.
     CleanWorktreesCompleted {
         removed: usize,
@@ -2423,6 +2446,17 @@ pub enum Event {
         session_key: SessionKey,
         terminal_id: TerminalId,
         reset_hint: String,
+    },
+    /// A [`Command::CreateWorkspace`] crossed its durable creation
+    /// boundary. Carries the daemon-allocated key (including any numeric
+    /// collision suffix) so the requesting client can reveal/focus the
+    /// exact row before a potentially slow worktree + agent spawn finishes.
+    /// The command's final spawn outcome follows separately as
+    /// [`Event::CommandCompleted`] / [`Event::CommandFailed`]. Appended last
+    /// because the bincode wire enum is ordinal-sensitive.
+    WorkspaceCreated {
+        client_request_id: String,
+        workspace_key: lazybox_core::WorkspaceKey,
     },
 }
 
@@ -3061,6 +3095,36 @@ pub struct TerminalSnapshot {
 
 use tokio::sync::{mpsc, watch};
 
+/// Single owner for every bounded client↔daemon queue and recovery reserve.
+///
+/// Cross-crate call sites use the compatibility constants below, but their
+/// values all project from this type. The compile-time assertions make the
+/// ordering contract executable: a healthy drain burst fits in the client
+/// queue, staging is no smaller than delivery, authoritative recovery owns
+/// capacity unavailable to ordinary events, and one resync command can
+/// replace an entire command queue's worth of per-terminal requests (#1171).
+pub struct FlowControl;
+
+impl FlowControl {
+    pub const DRAIN_QUANTUM: usize = 256;
+    pub const EVENT_CAPACITY: usize = Self::DRAIN_QUANTUM * 2;
+    pub const RAW_EVENT_CAPACITY: usize = Self::EVENT_CAPACITY * 2;
+    pub const COMMAND_CAPACITY: usize = 32;
+    pub const MAX_RESYNC_REQUESTS_PER_BATCH: usize = Self::DRAIN_QUANTUM;
+    /// One full client-pull resync batch plus one bus-lag Snapshot. Reserving
+    /// only a handful of slots let a valid batch disconnect itself while
+    /// trying to repair a saturated connection.
+    pub const AUTHORITATIVE_EVENT_RESERVE: usize = Self::MAX_RESYNC_REQUESTS_PER_BATCH + 1;
+}
+
+const _: () = assert!(FlowControl::EVENT_CAPACITY > FlowControl::DRAIN_QUANTUM);
+const _: () = assert!(FlowControl::RAW_EVENT_CAPACITY >= FlowControl::EVENT_CAPACITY);
+const _: () =
+    assert!(FlowControl::AUTHORITATIVE_EVENT_RESERVE > FlowControl::MAX_RESYNC_REQUESTS_PER_BATCH);
+const _: () = assert!(FlowControl::MAX_RESYNC_REQUESTS_PER_BATCH >= FlowControl::COMMAND_CAPACITY);
+
+pub const FLOW_CONTROL_DRAIN_QUANTUM: usize = FlowControl::DRAIN_QUANTUM;
+
 /// Capacity of the bounded daemon→client event channel. This is the
 /// hard memory ceiling on inbound events: the channel never holds more
 /// than this many `Event`s no matter how fast the daemon produces
@@ -3072,19 +3136,31 @@ use tokio::sync::{mpsc, watch};
 /// (`MAX_EVENTS_PER_TICK` = 256) so ordinary single-frame bursts ride
 /// through without ever tripping the drop path — overflow only kicks in
 /// when the consumer is genuinely, sustainedly behind.
-pub const EVENT_CHANNEL_CAPACITY: usize = 512;
+pub const EVENT_CHANNEL_CAPACITY: usize = FlowControl::EVENT_CAPACITY;
 
 /// Hard ceiling on each connection's daemon-side staging queue before the
 /// drop/resync forwarder. This queue exists so the serve loop never blocks on
 /// a slow client; making it bounded means a client that also stops consuming
 /// structured/lifecycle events is disconnected instead of growing daemon
 /// memory forever.
-pub const RAW_EVENT_CHANNEL_CAPACITY: usize = 1024;
+pub const RAW_EVENT_CHANNEL_CAPACITY: usize = FlowControl::RAW_EVENT_CAPACITY;
+
+/// Slots reserved exclusively for authoritative recovery events. Normal
+/// events are admitted through a semaphore capped at
+/// [`RAW_EVENT_CHANNEL_CAPACITY`], while the underlying ordered channel owns
+/// these extra slots. A lag-recovery `Snapshot` therefore cannot be rejected
+/// merely because the lossy/raw lane it heals is full (#1171).
+pub const AUTHORITATIVE_EVENT_RESERVE: usize = FlowControl::AUTHORITATIVE_EVENT_RESERVE;
 
 /// Commands buffered on either side of an IPC connection. A full queue
 /// back-pressures socket reads and makes synchronous client sends fail loudly;
 /// it never allocates an unbounded command backlog behind a wedged peer.
-pub const COMMAND_CHANNEL_CAPACITY: usize = 32;
+pub const COMMAND_CHANNEL_CAPACITY: usize = FlowControl::COMMAND_CAPACITY;
+
+/// Hard bound on one client-pull recovery command. A command can repair far
+/// more terminals than the entire command channel could carry individually,
+/// while still staying tiny relative to [`MAX_COMMAND_FRAME_BYTES`].
+pub const MAX_RESYNC_REQUESTS_PER_BATCH: usize = FlowControl::MAX_RESYNC_REQUESTS_PER_BATCH;
 
 /// Shared overload signal between [`EventSender`] and [`EventForward`].
 pub struct EventIngressHealth {
@@ -3121,13 +3197,34 @@ impl EventIngressHealth {
     }
 }
 
+/// One item in the ordered event ingress. A normal event retains a semaphore
+/// permit until the forwarder receives it; authoritative events carry none
+/// and therefore use only the channel's reserved tail capacity.
+#[doc(hidden)]
+pub struct EventIngress {
+    event: Event,
+    _normal_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl EventIngress {
+    pub fn into_event(self) -> Event {
+        self.event
+    }
+}
+
 /// Non-blocking, bounded event admission owned by one daemon connection.
 /// A full raw queue trips the connection overload signal; the forwarder then
 /// closes the client rather than silently losing a lifecycle event.
 #[derive(Clone)]
-pub enum EventSender {
+pub struct EventSender {
+    inner: EventSenderInner,
+}
+
+#[derive(Clone)]
+enum EventSenderInner {
     Bounded {
-        tx: mpsc::Sender<Event>,
+        tx: mpsc::Sender<EventIngress>,
+        normal_slots: Arc<tokio::sync::Semaphore>,
         health: Arc<EventIngressHealth>,
     },
     /// Explicit compatibility path for short-lived internal consumers that
@@ -3142,16 +3239,63 @@ impl EventSender {
     // successful admission remains the overwhelmingly hot path.
     #[allow(clippy::result_large_err)]
     pub fn send(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>> {
-        match self {
-            Self::Bounded { tx, health } => match tx.try_send(event) {
-                Ok(()) => Ok(()),
-                Err(error @ mpsc::error::TrySendError::Full(_)) => {
-                    health.trip();
-                    Err(error)
+        match &self.inner {
+            EventSenderInner::Bounded {
+                tx,
+                normal_slots,
+                health,
+            } => {
+                let permit = match normal_slots.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        health.trip();
+                        return Err(mpsc::error::TrySendError::Full(event));
+                    }
+                };
+                match tx.try_send(EventIngress {
+                    event,
+                    _normal_permit: Some(permit),
+                }) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(ingress)) => {
+                        health.trip();
+                        Err(mpsc::error::TrySendError::Full(ingress.event))
+                    }
+                    Err(mpsc::error::TrySendError::Closed(ingress)) => {
+                        Err(mpsc::error::TrySendError::Closed(ingress.event))
+                    }
                 }
-                Err(error @ mpsc::error::TrySendError::Closed(_)) => Err(error),
-            },
-            Self::Unbounded(tx) => tx
+            }
+            EventSenderInner::Unbounded(tx) => tx
+                .send(event)
+                .map_err(|error| mpsc::error::TrySendError::Closed(error.0)),
+        }
+    }
+
+    /// Admit an authoritative recovery event on the same ordered channel as
+    /// normal events without consuming a normal-lane permit. The reserved
+    /// channel tail means recovery never rides the congested capacity it is
+    /// intended to heal. Ordering remains FIFO, so pre-snapshot lifecycle
+    /// events drain before the authoritative reset.
+    #[allow(clippy::result_large_err)]
+    pub fn send_authoritative(&self, event: Event) -> Result<(), mpsc::error::TrySendError<Event>> {
+        match &self.inner {
+            EventSenderInner::Bounded { tx, health, .. } => {
+                match tx.try_send(EventIngress {
+                    event,
+                    _normal_permit: None,
+                }) {
+                    Ok(()) => Ok(()),
+                    Err(mpsc::error::TrySendError::Full(ingress)) => {
+                        health.trip();
+                        Err(mpsc::error::TrySendError::Full(ingress.event))
+                    }
+                    Err(mpsc::error::TrySendError::Closed(ingress)) => {
+                        Err(mpsc::error::TrySendError::Closed(ingress.event))
+                    }
+                }
+            }
+            EventSenderInner::Unbounded(tx) => tx
                 .send(event)
                 .map_err(|error| mpsc::error::TrySendError::Closed(error.0)),
         }
@@ -3160,20 +3304,22 @@ impl EventSender {
     /// Wrap an existing unbounded sender for a finite, non-transport bridge.
     /// Prefer [`event_forward_channel`] for every long-lived connection.
     pub fn from_unbounded(tx: mpsc::UnboundedSender<Event>) -> Self {
-        Self::Unbounded(tx)
+        Self {
+            inner: EventSenderInner::Unbounded(tx),
+        }
     }
 
     pub async fn closed(&self) {
-        match self {
-            Self::Bounded { tx, .. } => tx.closed().await,
-            Self::Unbounded(tx) => tx.closed().await,
+        match &self.inner {
+            EventSenderInner::Bounded { tx, .. } => tx.closed().await,
+            EventSenderInner::Unbounded(tx) => tx.closed().await,
         }
     }
 
     pub fn is_closed(&self) -> bool {
-        match self {
-            Self::Bounded { tx, .. } => tx.is_closed(),
-            Self::Unbounded(tx) => tx.is_closed(),
+        match &self.inner {
+            EventSenderInner::Bounded { tx, .. } => tx.is_closed(),
+            EventSenderInner::Unbounded(tx) => tx.is_closed(),
         }
     }
 }
@@ -3187,7 +3333,7 @@ impl EventSender {
 /// daemon config it needs to fetch ring replays.
 pub struct EventForward {
     /// Bounded staging stream the serve loop writes to (`Connection::tx`).
-    pub raw_rx: mpsc::Receiver<Event>,
+    pub raw_rx: mpsc::Receiver<EventIngress>,
     /// Bounded sink the client reads from (`Client::rx`, possibly via a
     /// socket). The forwarder's `try_send`/`reserve` against this is
     /// what enforces the memory ceiling.
@@ -3200,12 +3346,16 @@ pub struct EventForward {
 
 /// Wire one bounded raw event ingress to a client-facing event channel.
 pub fn event_forward_channel(client_tx: mpsc::Sender<Event>) -> (EventSender, EventForward) {
-    let (tx, raw_rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY);
+    let (tx, raw_rx) = mpsc::channel(RAW_EVENT_CHANNEL_CAPACITY + AUTHORITATIVE_EVENT_RESERVE);
     let health = Arc::new(EventIngressHealth::new());
+    let normal_slots = Arc::new(tokio::sync::Semaphore::new(RAW_EVENT_CHANNEL_CAPACITY));
     (
-        EventSender::Bounded {
-            tx,
-            health: health.clone(),
+        EventSender {
+            inner: EventSenderInner::Bounded {
+                tx,
+                normal_slots,
+                health: health.clone(),
+            },
         },
         EventForward {
             raw_rx,
@@ -3680,6 +3830,15 @@ mod transport_admission_tests {
         for index in 0..RAW_EVENT_CHANNEL_CAPACITY {
             sender.send(notice(index)).expect("within raw capacity");
         }
+        for index in 0..AUTHORITATIVE_EVENT_RESERVE {
+            sender
+                .send_authoritative(notice(usize::MAX - index))
+                .expect("a full recovery batch plus lag snapshot owns reserved capacity");
+        }
+        assert!(
+            !forward.health.is_overloaded(),
+            "using the recovery reserve is healthy, not an overload"
+        );
         assert!(matches!(
             sender.send(notice(RAW_EVENT_CHANNEL_CAPACITY)),
             Err(mpsc::error::TrySendError::Full(_))

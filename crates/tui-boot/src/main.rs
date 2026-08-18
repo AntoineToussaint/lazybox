@@ -623,10 +623,7 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     // Use a full subscribing client, not fire-and-forget: the daemon
     // allocates the final `WorkspaceKey` (which may carry a `-2` collision
     // suffix), and the caller — often an agent that wants to hand off to
-    // the new workspace next — needs it back. `CreateWorkspace` has no
-    // request/response, so we recover the key by diffing: snapshot the
-    // existing keys, create, then take the one new `WorkspaceUpserted` that
-    // matches our name + project.
+    // the new workspace next — needs the correlated durable result.
     let (mut client, _peer) = socket::connect(&socket_path).await.map_err(|e| {
         anyhow::anyhow!(
             "connect to daemon at {}: {e} (is lazybox running?)",
@@ -636,46 +633,41 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     client
         .send(lazybox_ipc::Command::Subscribe)
         .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
-    let existing = snapshot_workspace_keys(&mut client).await?;
+    await_workspace_snapshot(&mut client).await?;
+    let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
 
     client
         .send(lazybox_ipc::Command::CreateWorkspace {
             name: name.clone(),
             project_key: project_key.clone(),
             spawn_agent: agent.clone(),
+            client_request_id: Some(client_request_id.clone()),
         })
         .map_err(|e| anyhow::anyhow!("send CreateWorkspace: {e}"))?;
 
-    let created = await_created_workspace(&mut client, &existing, &name, &project_key).await;
-    match (created, &agent) {
-        (Some(key), Some(agent)) => {
-            println!("Created workspace {key} \"{name}\" in {project_key} (spawning {agent})")
+    let outcome_timeout = if agent.is_some() {
+        Duration::from_secs(10 * 60)
+    } else {
+        Duration::from_secs(10)
+    };
+    let key =
+        await_workspace_create_result(&mut client, &client_request_id, outcome_timeout).await?;
+    match &agent {
+        Some(agent) => {
+            println!("Created workspace {key} \"{name}\" in {project_key} (started {agent})")
         }
-        (Some(key), None) => println!("Created workspace {key} \"{name}\" in {project_key}"),
-        // The create was delivered but no confirming broadcast arrived in
-        // time. The workspace is very likely created; we just can't name its
-        // final key, so report honestly rather than invent one.
-        (None, Some(agent)) => {
-            println!("Requested workspace \"{name}\" in {project_key} (spawning {agent})")
-        }
-        (None, None) => println!("Requested workspace \"{name}\" in {project_key}"),
+        None => println!("Created workspace {key} \"{name}\" in {project_key}"),
     }
     Ok(())
 }
 
-/// Read the post-`Subscribe` snapshot and return the workspace keys already
-/// present — the baseline a freshly created key is diffed against. The
-/// daemon's contract is snapshot-before-live-events, so at most a few frames
-/// are consumed before it arrives.
-async fn snapshot_workspace_keys(
-    client: &mut lazybox_ipc::Client,
-) -> anyhow::Result<std::collections::HashSet<lazybox_core::WorkspaceKey>> {
+/// Wait until Subscribe has installed the live stream. The daemon's contract
+/// is snapshot-before-live-events, so no create outcome can race ahead of it.
+async fn await_workspace_snapshot(client: &mut lazybox_ipc::Client) -> anyhow::Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         match tokio::time::timeout_at(deadline, client.recv()).await {
-            Ok(Some(lazybox_ipc::Event::Snapshot { workspaces, .. })) => {
-                return Ok(workspaces.into_iter().map(|w| w.key).collect());
-            }
+            Ok(Some(lazybox_ipc::Event::Snapshot { .. })) => return Ok(()),
             Ok(Some(_)) => continue,
             Ok(None) => anyhow::bail!("daemon closed the connection before sending a snapshot"),
             Err(_) => anyhow::bail!("timed out waiting for the daemon snapshot"),
@@ -683,28 +675,45 @@ async fn snapshot_workspace_keys(
     }
 }
 
-/// Wait for the `WorkspaceUpserted` carrying the workspace we just created:
-/// the first whose key wasn't in `existing` and whose name + project match
-/// the request. Returns its final key, or `None` if no such broadcast arrives
-/// before the deadline (the create still likely succeeded — see the caller).
-async fn await_created_workspace(
+/// Wait for both halves of the correlated contract: `WorkspaceCreated`
+/// supplies the daemon-allocated key, while `CommandCompleted` confirms the
+/// optional agent reached a terminal. Any matching `CommandFailed`, dropped
+/// connection, or timeout is a non-zero CLI failure — never a vague
+/// "requested" success.
+async fn await_workspace_create_result(
     client: &mut lazybox_ipc::Client,
-    existing: &std::collections::HashSet<lazybox_core::WorkspaceKey>,
-    name: &str,
-    project_key: &lazybox_core::ProjectKey,
-) -> Option<lazybox_core::WorkspaceKey> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    client_request_id: &str,
+    timeout: Duration,
+) -> anyhow::Result<lazybox_core::WorkspaceKey> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut created_key = None;
+    let mut completed = false;
     loop {
         match tokio::time::timeout_at(deadline, client.recv()).await {
-            Ok(Some(lazybox_ipc::Event::WorkspaceUpserted(ws)))
-                if !existing.contains(&ws.key)
-                    && ws.name == name
-                    && ws.project_key.as_ref() == Some(project_key) =>
-            {
-                return Some(ws.key.clone());
+            Ok(Some(lazybox_ipc::Event::WorkspaceCreated {
+                client_request_id: id,
+                workspace_key,
+            })) if id == client_request_id => {
+                created_key = Some(workspace_key);
+                if completed {
+                    return Ok(created_key.expect("key was just stored"));
+                }
             }
+            Ok(Some(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: id,
+            })) if id == client_request_id => match created_key {
+                Some(key) => return Ok(key),
+                None => completed = true,
+            },
+            Ok(Some(lazybox_ipc::Event::CommandFailed {
+                client_request_id: id,
+                message,
+            })) if id == client_request_id => anyhow::bail!("workspace create failed: {message}"),
             Ok(Some(_)) => continue,
-            Ok(None) | Err(_) => return None,
+            Ok(None) => {
+                anyhow::bail!("daemon closed the connection before workspace creation completed")
+            }
+            Err(_) => anyhow::bail!("timed out waiting for workspace creation to complete"),
         }
     }
 }

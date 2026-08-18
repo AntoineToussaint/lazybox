@@ -100,6 +100,17 @@ use std::time::Duration;
 /// unit-testable place rather than scattered across the daemon's pump.
 pub const HOOK_STALENESS: Duration = Duration::from_secs(30);
 
+/// Causal relationship between the latest structured hook and the PTY
+/// evidence being folded. Daemon production code derives this from the
+/// terminal's ordered turn-event clock; `on_pty_reading` keeps the duration
+/// adapter for compatibility with standalone reducer callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookAuthority {
+    None,
+    HookNewer,
+    PtyNewer,
+}
+
 /// How a PTY reading was obtained — the evidence tier the hooks-primary
 /// gate (`hooks_gate_allows`) reasons about. A busy agent repaints its
 /// status ticker roughly once a second, so *how quiet* the stream was when
@@ -387,9 +398,35 @@ impl AgentStateMachine {
         since_last_hook: Option<Duration>,
         supersedes_dialog: impl FnOnce() -> bool,
     ) -> Outcome {
+        let authority = since_last_hook.map_or(HookAuthority::None, |since| {
+            if since >= HOOK_STALENESS {
+                HookAuthority::PtyNewer
+            } else {
+                HookAuthority::HookNewer
+            }
+        });
+        self.on_pty_reading_causal(current, pty, authority, supersedes_dialog)
+    }
+
+    /// Fold a PTY reading using causal producer order rather than wall-clock
+    /// hook age. A hook remains authoritative until newer PTY output exists;
+    /// timer scheduling latency can no longer flip the same frame between
+    /// "fresh" and "stale" (#1169).
+    pub fn on_pty_reading_causal(
+        &mut self,
+        current: Option<AgentState>,
+        pty: PtyReading,
+        hook_authority: HookAuthority,
+        supersedes_dialog: impl FnOnce() -> bool,
+    ) -> Outcome {
         let mut clear = pty.clear;
-        if let Some(since) = since_last_hook {
-            if !hooks_gate_allows(current, &pty, since, supersedes_dialog) {
+        if hook_authority != HookAuthority::None {
+            if !hooks_gate_allows_causal(
+                current,
+                &pty,
+                hook_authority == HookAuthority::PtyNewer,
+                supersedes_dialog,
+            ) {
                 return Outcome::Gated;
             }
             // A stale-hook terminal demoting a cached `?` to `Working`
@@ -400,7 +437,7 @@ impl AgentStateMachine {
             // it as an ambiguous byte-flow flap. Hookless / PTY-sourced
             // `?`s never reach here, so an incidental repaint still can't
             // clear them.
-            if since >= HOOK_STALENESS
+            if hook_authority == HookAuthority::PtyNewer
                 && current.is_some_and(is_blocked)
                 && pty.state == AgentState::Working
             {
@@ -575,10 +612,10 @@ impl AgentStateMachine {
 /// "stale hooks + cached `?`" is the normal shape of a real unanswered
 /// dialog, not a broken pipeline; without the evidence a full-repaint
 /// status bar would clear a real `?`.
-fn hooks_gate_allows(
+fn hooks_gate_allows_causal(
     current: Option<AgentState>,
     reading: &PtyReading,
-    since_last_hook: Duration,
+    pty_is_newer: bool,
     supersedes_dialog: impl FnOnce() -> bool,
 ) -> bool {
     // Inactivity authority — overrides even a fresh hook. See the doc above.
@@ -587,7 +624,7 @@ fn hooks_gate_allows(
     {
         return true;
     }
-    if since_last_hook >= HOOK_STALENESS {
+    if pty_is_newer {
         let demotes_blocked =
             current.is_some_and(is_blocked) && reading.state == AgentState::Working;
         return !demotes_blocked || supersedes_dialog();
@@ -596,6 +633,21 @@ fn hooks_gate_allows(
         || (reading.state == AgentState::Idle
             && reading.ready_for_prompt
             && !current.is_some_and(is_blocked))
+}
+
+#[cfg(test)]
+fn hooks_gate_allows(
+    current: Option<AgentState>,
+    reading: &PtyReading,
+    since_last_hook: Duration,
+    supersedes_dialog: impl FnOnce() -> bool,
+) -> bool {
+    hooks_gate_allows_causal(
+        current,
+        reading,
+        since_last_hook >= HOOK_STALENESS,
+        supersedes_dialog,
+    )
 }
 
 #[cfg(test)]

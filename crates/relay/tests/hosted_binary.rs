@@ -86,8 +86,13 @@ async fn environment_only_platform_config_enforces_entitlements() {
         .unwrap();
     let mut relay = RelayProcess(child);
 
+    // The full workspace test fans out several process-heavy suites at once;
+    // a one-second polling budget made an otherwise healthy relay fail on a
+    // loaded CI host. Keep checking child liveness, but give startup a real
+    // bounded deadline.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut ready = false;
-    for _ in 0..100 {
+    while tokio::time::Instant::now() < deadline {
         if TcpStream::connect(&relay_addr).await.is_ok() {
             ready = true;
             break;
@@ -95,9 +100,9 @@ async fn environment_only_platform_config_enforces_entitlements() {
         if let Some(status) = relay.0.try_wait().unwrap() {
             panic!("hosted relay exited before listening: {status}");
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(ready, "hosted relay did not start listening");
+    assert!(ready, "hosted relay did not start listening within 10s");
 
     let error = serve_box(
         relay_addr,

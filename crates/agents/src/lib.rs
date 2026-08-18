@@ -15,7 +15,7 @@ pub mod update;
 
 pub use agent::{
     Agent, AgentAuthCommands, AgentObservation, AuthFailure, CredentialIsolation, LlmProvider,
-    Registry, SpawnCtx, StructuredAgentProtocol,
+    Registry, SpawnCtx, StructuredAgentProtocol, UnattendedPromptKind, UnattendedPromptNudge,
 };
 pub use lazybox_ipc::AgentState;
 pub use pty::{
@@ -23,7 +23,7 @@ pub use pty::{
     trim_leading_blank_lines,
 };
 pub use state_machine::{
-    AgentStateMachine, HOOK_STALENESS, Liveness, Outcome, PtyReading, Reading,
+    AgentStateMachine, HOOK_STALENESS, HookAuthority, Liveness, Outcome, PtyReading, Reading,
 };
 pub use update::UpdateChannel;
 

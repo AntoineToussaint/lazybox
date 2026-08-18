@@ -1009,7 +1009,8 @@ async fn create_empty_workspace_persists_with_user_name() {
         &config,
         "fix login flow",
         lazybox_core::ProjectKey::local("test"),
-    );
+    )
+    .expect("workspace creation succeeds");
     assert_eq!(
         key.as_str(),
         "fix-login-flow",
@@ -1035,17 +1036,20 @@ async fn create_empty_workspace_disambiguates_collisions() {
         &config,
         "Refactor auth",
         lazybox_core::ProjectKey::local("test"),
-    );
+    )
+    .expect("first workspace creation succeeds");
     let k2 = workspace::create_empty_workspace(
         &config,
         "Refactor auth",
         lazybox_core::ProjectKey::local("test"),
-    );
+    )
+    .expect("second workspace creation succeeds");
     let k3 = workspace::create_empty_workspace(
         &config,
         "Refactor auth",
         lazybox_core::ProjectKey::local("test"),
-    );
+    )
+    .expect("third workspace creation succeeds");
     assert_eq!(k1.as_str(), "refactor-auth");
     assert_eq!(k2.as_str(), "refactor-auth-2");
     assert_eq!(k3.as_str(), "refactor-auth-3");
@@ -1054,7 +1058,8 @@ async fn create_empty_workspace_disambiguates_collisions() {
 async fn create_empty_workspace_falls_back_when_name_is_unsluggable() {
     let config = ServerConfig::in_memory();
     let k =
-        workspace::create_empty_workspace(&config, "🚀✨", lazybox_core::ProjectKey::local("test"));
+        workspace::create_empty_workspace(&config, "🚀✨", lazybox_core::ProjectKey::local("test"))
+            .expect("workspace creation succeeds");
     assert_eq!(
         k.as_str(),
         "workspace",
@@ -1078,7 +1083,8 @@ async fn create_empty_workspace_broadcasts_upserted() {
         &config,
         "side experiment",
         lazybox_core::ProjectKey::local("test"),
-    );
+    )
+    .expect("workspace creation succeeds");
     let evt = recv_workspace_upsert(&mut client).await;
     match evt {
         Event::WorkspaceUpserted(w) => {
@@ -1086,6 +1092,116 @@ async fn create_empty_workspace_broadcasts_upserted() {
         }
         other => panic!("expected WorkspaceUpserted, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn create_workspace_command_returns_allocated_key_and_completion() {
+    let config = ServerConfig::in_memory();
+    let (mut client, server) = channel::pair();
+    let serve_config = config.clone();
+    tokio::spawn(async move {
+        Server::new(serve_config).serve(server).await.unwrap();
+    });
+    client.send(Command::Subscribe).unwrap();
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), client.recv())
+            .await
+            .expect("snapshot timeout"),
+        Some(Event::Snapshot { .. })
+    ) {}
+
+    let request_id = "create-work-8".to_string();
+    client
+        .send(Command::CreateWorkspace {
+            name: "Work".into(),
+            project_key: lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox"),
+            spawn_agent: None,
+            client_request_id: Some(request_id.clone()),
+        })
+        .unwrap();
+
+    let mut created = None;
+    let mut completed = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while created.is_none() || !completed {
+        let event = tokio::time::timeout_at(deadline, client.recv())
+            .await
+            .expect("create outcome timeout")
+            .expect("event stream remains open");
+        match event {
+            Event::WorkspaceCreated {
+                client_request_id,
+                workspace_key,
+            } if client_request_id == request_id => created = Some(workspace_key),
+            Event::CommandCompleted { client_request_id } if client_request_id == request_id => {
+                completed = true;
+            }
+            Event::CommandFailed { message, .. } => {
+                panic!("workspace create unexpectedly failed: {message}")
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(created.expect("allocated key").as_str(), "work");
+}
+
+#[tokio::test]
+async fn create_workspace_command_reports_store_failure_without_success_ack() {
+    let store = Arc::new(FailingBatchStore::new());
+    let config = ServerConfig::with_store(store.clone());
+    let (mut client, server) = channel::pair();
+    let serve_config = config.clone();
+    tokio::spawn(async move {
+        Server::new(serve_config).serve(server).await.unwrap();
+    });
+    client.send(Command::Subscribe).unwrap();
+    while !matches!(
+        tokio::time::timeout(Duration::from_secs(2), client.recv())
+            .await
+            .expect("snapshot timeout"),
+        Some(Event::Snapshot { .. })
+    ) {}
+
+    store.fail_next_batch();
+    let request_id = "create-fails".to_string();
+    client
+        .send(Command::CreateWorkspace {
+            name: "Broken".into(),
+            project_key: lazybox_core::ProjectKey::local("test"),
+            spawn_agent: None,
+            client_request_id: Some(request_id.clone()),
+        })
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let event = tokio::time::timeout_at(deadline, client.recv())
+            .await
+            .expect("failure outcome timeout")
+            .expect("event stream remains open");
+        match event {
+            Event::CommandFailed {
+                client_request_id,
+                message,
+            } if client_request_id == request_id => {
+                assert!(message.contains("injected batch failure"));
+                break;
+            }
+            Event::WorkspaceCreated {
+                client_request_id, ..
+            }
+            | Event::CommandCompleted { client_request_id }
+                if client_request_id == request_id =>
+            {
+                panic!("failed create emitted a success acknowledgement")
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        config.store.list_workspaces().unwrap().is_empty(),
+        "failed durability must leave no workspace row",
+    );
 }
 // ── Import local checkout (linked, no-worktree workspace) ────────────
 
@@ -6869,7 +6985,8 @@ async fn empty_workspace_registers_project_with_pretty_name() {
 
     let config = ServerConfig::in_memory();
     let project_key = ProjectKey::github("AntoineToussaint", "lazybox");
-    workspace::create_empty_workspace(&config, "scratch", project_key.clone());
+    workspace::create_empty_workspace(&config, "scratch", project_key.clone())
+        .expect("workspace creation succeeds");
 
     let record = config
         .store
@@ -7108,7 +7225,8 @@ async fn create_empty_workspace_marks_local() {
         &config,
         "my sandbox",
         lazybox_core::ProjectKey::local("test"),
-    );
+    )
+    .expect("workspace creation succeeds");
     let ws: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store
@@ -7132,7 +7250,8 @@ async fn rescope_preserves_manual_workspace(/* issue #87 */) {
         &config,
         "my sandbox",
         lazybox_core::ProjectKey::local("test"),
-    );
+    )
+    .expect("workspace creation succeeds");
 
     polling::rescope(&config, &refresh_outcome("o/r#current")).await;
 
@@ -7160,7 +7279,8 @@ async fn rescope_preserves_manual_workspace_that_gained_a_pr(/* issue #87 */) {
         &config,
         "my sandbox",
         lazybox_core::ProjectKey::local("test"),
-    );
+    )
+    .expect("workspace creation succeeds");
     let mut ws: lazybox_core::Workspace = serde_json::from_str(
         &config
             .store

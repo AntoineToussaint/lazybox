@@ -352,9 +352,11 @@ fn select_engagement_snapshot(
 
 pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnapshot {
     let live_agent_workspaces: std::collections::HashSet<String> = {
-        let terminal_meta = config.terminal.terminal_meta.lock().await;
-        terminal_meta
+        let entries = config.terminal.entries.lock().await;
+        entries
             .values()
+            .filter(|entry| !entry.finishing)
+            .filter_map(|entry| entry.meta.as_ref())
             .filter(|(_, kind)| matches!(kind, lazybox_ipc::TerminalKind::Agent(_)))
             .map(|(session_key, _)| session_key.as_str().to_string())
             .collect()
@@ -713,13 +715,14 @@ mod engagement_tier_tests {
         let task = task(42, TaskRole::Reviewer);
         let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
         upsert(&config, task).await;
-        config.terminal.terminal_meta.lock().await.insert(
-            lazybox_ipc::TerminalId(1),
-            (
+        config
+            .terminal
+            .insert_meta(
+                lazybox_ipc::TerminalId(1),
                 lazybox_core::SessionKey::from(key.as_str()),
                 lazybox_ipc::TerminalKind::Agent("claude".into()),
-            ),
-        );
+            )
+            .await;
 
         let snapshot = refresh_github_engagement(&config).await;
         assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
@@ -755,7 +758,7 @@ mod engagement_tier_tests {
             .unwrap();
 
         // No terminal_meta entry — this is NOT a live agent.
-        assert!(config.terminal.terminal_meta.lock().await.is_empty());
+        assert!(config.terminal.metadata_map().await.is_empty());
 
         let snapshot = refresh_github_engagement(&config).await;
         assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
@@ -1989,13 +1992,15 @@ pub async fn rescope_with_state(
     // Per session_key → count of live terminals. Lets us both
     // detect "has active session" and report the count to the user
     // when prompting.
-    let terminal_meta = config.terminal.terminal_meta.lock().await;
+    let entries = config.terminal.entries.lock().await;
     let mut active_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
-    for (sk, _) in terminal_meta.values() {
-        *active_counts.entry(sk.as_str().to_string()).or_default() += 1;
+    for entry in entries.values().filter(|entry| !entry.finishing) {
+        if let Some((sk, _)) = entry.meta.as_ref() {
+            *active_counts.entry(sk.as_str().to_string()).or_default() += 1;
+        }
     }
-    drop(terminal_meta);
+    drop(entries);
 
     let now = chrono::Utc::now();
     for r in records {
@@ -2133,73 +2138,12 @@ pub async fn rescope_with_state(
                     workspace_key = %r.key,
                     "rescope: removing out-of-scope workspace"
                 );
-                // Serialize the final safety check and delete with every
-                // spawn/mutation. The tick's earlier snapshots may be stale:
-                // a session or terminal created since then must turn this
-                // into a preserve, never be silently reaped.
-                let _workspace_guard = config.lock_workspace(key.as_str()).await;
-                let Some(fresh_workspace) = load_workspace(config, &key) else {
-                    state.prompted_out_of_scope.remove(r.key.as_str());
-                    continue;
-                };
-                if !fresh_workspace.sessions.is_empty()
-                    || fresh_workspace.has_notes()
-                    || handlers::count_live_terminals(config, &key).await > 0
-                {
-                    tracing::info!(
-                        workspace_key = %r.key,
-                        "rescope: workspace gained a session or notes during sweep — preserving"
-                    );
-                    continue;
-                }
-                // A live worktree on disk is user work exactly like a
-                // session record is (issue #924). The session guards
-                // above key off the workspace's `sessions` vec, but a
-                // record whose session was lost (state desync, partial
-                // recovery) can still have a provisioned worktree —
-                // deleting the row here orphans it. Switching GitHub
-                // identity is one trigger: the other account's poll
-                // omits the PR, so the workspace falls out of scope
-                // with its worktree (and any tmux/agent session) intact.
-                // Session worktrees are UUID-named, so we can't derive
-                // the path from the workspace; ask git which managed
-                // worktrees are checked out on this branch (the same
-                // lookup spawn uses to reclaim an untracked worktree).
-                // Any hit → preserve as out-of-scope/inactive, adoptable,
-                // rather than reap. An inspect error yields no evidence,
-                // so it falls through to the prior delete behaviour.
-                if let Some((owner, repo)) = fresh_workspace
-                    .primary_task()
-                    .and_then(|t| t.repo.as_deref())
-                    .and_then(|r| r.split_once('/'))
-                    && config
-                        .worktree_manager()
-                        .managed_worktrees_for_branch(owner, repo, &fresh_workspace.branch)
-                        .await
-                        .is_ok_and(|worktrees| !worktrees.is_empty())
-                {
-                    tracing::info!(
-                        workspace_key = %r.key,
-                        "rescope: preserving out-of-scope workspace with a worktree still on disk"
-                    );
-                    continue;
-                }
-                // Reap the workspace's worktrees BEFORE the row goes
-                // away — once it's deleted, `collect_tracked_sessions`
-                // can never find the paths again and the dirs leak
-                // forever. Only worktrees the inspector deems safe
-                // (clean tree, pushed, no live terminal) are removed;
-                // dirty ones are left on disk for manual recovery.
-                handlers::reap_safe_workspace_worktrees(config, &fresh_workspace).await;
-                // `archive: false` — rescope is a system decision, not
-                // user intent. Archiving here would permanently block
-                // the workspace from re-creation when the upstream
-                // item comes back into scope (truncated query, scope
-                // re-add, reopened PR).
-                let _ = crate::workspace::delete_workspace_internal(
-                    config, &key, /*archive=*/ false,
-                )
-                .await;
+                // The lifecycle owns the tombstone, workspace lock, and final
+                // fresh empty-row/worktree check. Rescope does not archive, so
+                // an upstream item can reappear on a later poll.
+                let _ = crate::workspace::WorkspaceLifecycle::new(config)
+                    .remove(&key, crate::workspace::WorkspaceRemovalReason::Rescope)
+                    .await;
                 state.prompted_out_of_scope.remove(r.key.as_str());
             }
             Some(count) => {
@@ -3650,17 +3594,18 @@ async fn retire_pr_stub_sessions(
 
     let live: std::collections::HashSet<lazybox_core::SessionId> = config
         .terminal
-        .terminal_sessions
-        .lock()
+        .session_bindings()
         .await
-        .values()
-        .copied()
+        .into_values()
         .collect();
     let mgr = config.worktree_manager();
-    let bare = pr_ws
+    let repo = pr_ws
         .primary_task()
         .and_then(|task| task.repo.as_deref())
         .and_then(|repo| repo.split_once('/'))
+        .map(|(owner, name)| (owner.to_string(), name.to_string()));
+    let bare = repo
+        .as_ref()
         .map(|(owner, name)| mgr.bare_path(owner, name));
 
     let mut idx = 0;
@@ -3693,13 +3638,26 @@ async fn retire_pr_stub_sessions(
             "collapse: retiring pristine PR stub session; the absorbed checkout takes over",
         );
         if on_disk {
-            match bare.as_ref() {
-                Some(bare) => {
-                    let _ = mgr.remove_by_path(bare, &path).await;
-                }
-                None => {
-                    let _ = tokio::fs::remove_dir_all(&path).await;
-                }
+            let removed = match repo.as_ref() {
+                Some((owner, name)) => matches!(
+                    mgr.reclaim_managed_worktree_if_safe(owner, name, &pr_ws.branch, &path,)
+                        .await,
+                    Ok(lazybox_git_ops::WorktreeReclaimOutcome::Reclaimed)
+                ),
+                // A provisioning fallback can only be retired by an
+                // empty-directory removal. Unlike `remove_dir_all`, this
+                // fails harmlessly if a file appears after `dir_is_empty`.
+                None => tokio::fs::remove_dir(&path).await.is_ok(),
+            };
+            if !removed {
+                tracing::warn!(
+                    workspace = %pr_ws.key,
+                    session = %session_id.0,
+                    worktree = %path.display(),
+                    "collapse: fresh safety check refused PR stub removal — preserving session",
+                );
+                idx += 1;
+                continue;
             }
         }
         pr_ws.sessions.remove(idx);
@@ -4011,19 +3969,21 @@ pub(crate) async fn transfer_owned_worktree_session(
     // one persisted session; a shared-main terminal or an unknown/sibling
     // owner would otherwise be dragged onto the PR as collateral.
     let source_session_key: lazybox_core::SessionKey = source_key.into();
-    let terminal_meta = config.terminal.terminal_meta.lock().await.clone();
-    let terminal_sessions = config.terminal.terminal_sessions.lock().await.clone();
-    let on_main_terminals = config.terminal.on_main_terminals.lock().await.clone();
-    if terminal_meta
+    let entries = config.terminal.entries.lock().await;
+    if entries
         .iter()
-        .filter(|(_, (owner, _))| owner == &source_session_key)
-        .any(|(terminal_id, _)| {
-            on_main_terminals.contains(terminal_id)
-                || terminal_sessions.get(terminal_id) != Some(&session_id)
+        .filter(|(_, entry)| {
+            !entry.finishing
+                && entry
+                    .meta
+                    .as_ref()
+                    .is_some_and(|(owner, _)| owner == &source_session_key)
         })
+        .any(|(_, entry)| entry.on_main || entry.session_id != Some(session_id))
     {
         return Ok(None);
     }
+    drop(entries);
 
     target_ws.absorb_activity_from(&source_ws);
     target_ws.absorb_user_state_from(&source_ws);
@@ -4949,6 +4909,7 @@ mod rescope_collapse_tests {
         fn git(dir: &std::path::Path, args: &[&str]) {
             let ok = std::process::Command::new("git")
                 .current_dir(dir)
+                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
                 .args(args)
                 .status()
                 .expect("run git")
@@ -5043,7 +5004,12 @@ mod rescope_collapse_tests {
 
         let outcome = exhaustive_github_tick(vec![other_key.clone()]);
         let mut state = TickState::default();
-        rescope_with_state(&config, &outcome, &mut state).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            rescope_with_state(&config, &outcome, &mut state),
+        )
+        .await
+        .expect("rescope must not deadlock while handing removal to the lifecycle owner");
 
         assert!(
             load_workspace(&config, &ws_key).is_some(),
@@ -5577,10 +5543,14 @@ mod rescope_collapse_tests {
 
         // Live agent: a terminal is attached to the PR's session.
         let session_key: lazybox_core::SessionKey = (&pr_key).into();
-        config.terminal.terminal_meta.lock().await.insert(
-            lazybox_ipc::TerminalId(1),
-            (session_key, lazybox_ipc::TerminalKind::Shell),
-        );
+        config
+            .terminal
+            .insert_meta(
+                lazybox_ipc::TerminalId(1),
+                session_key,
+                lazybox_ipc::TerminalKind::Shell,
+            )
+            .await;
 
         let other = gh_task(
             "o/r#88",

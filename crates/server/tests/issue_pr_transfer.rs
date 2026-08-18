@@ -1016,8 +1016,14 @@ async fn collapse_retires_pristine_pr_stub_and_carries_wip_worktree() {
         let pr_task = gh_task("o/r#51", true, Some("feat"), vec![issue_task_id]);
         let mut pr = Workspace::from_task(pr_task, chrono::Utc::now());
         let pr_key = pr.key.clone();
-        let stub_dir = tempfile::TempDir::new().unwrap();
-        let stub_path = stub_dir.path().join("PR-51-t");
+        // A real provisioned stub lives under the manager-owned namespace;
+        // the fail-closed reclaimer deliberately refuses registered
+        // worktrees elsewhere because they may be user-owned checkouts.
+        let stub_path = config
+            .worktree_root_path()
+            .join("worktrees")
+            .join("PR-51-t");
+        std::fs::create_dir_all(stub_path.parent().expect("stub parent")).unwrap();
         git(
             &bare,
             &[

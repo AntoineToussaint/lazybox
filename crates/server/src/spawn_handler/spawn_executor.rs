@@ -16,6 +16,7 @@ pub(super) struct ExecutedSpawn {
     pub(super) initial_prompt: Option<String>,
     pub(super) terminal_id: TerminalId,
     pub(super) state_durability: Option<AgentStateDurability>,
+    pub(super) unattended: bool,
 }
 
 pub(super) enum SpawnExecutionOutcome {
@@ -31,6 +32,8 @@ pub(super) enum SpawnExecutionError {
     LifecyclePersistence(String),
     #[error("agent access policy persistence failed: {0}")]
     AccessPersistence(String),
+    #[error("unattended agent startup preparation failed: {0}")]
+    UnattendedPreparation(#[source] std::io::Error),
 }
 
 pub(super) async fn execute_spawn_plan(
@@ -43,7 +46,9 @@ pub(super) async fn execute_spawn_plan(
         && let TerminalKind::Agent(agent_id) = &plan.kind
         && let Some(agent) = config.agents.get(agent_id)
     {
-        agent.prepare_unattended(&plan.cwd);
+        agent
+            .prepare_unattended(&plan.cwd)
+            .map_err(SpawnExecutionError::UnattendedPreparation)?;
     }
     let agent = match &plan.kind {
         TerminalKind::Agent(id) => config.agents.get(id),
@@ -311,5 +316,6 @@ pub(super) async fn execute_spawn_plan(
         initial_prompt,
         terminal_id,
         state_durability,
+        unattended: skip_permissions,
     }))
 }

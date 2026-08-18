@@ -325,6 +325,7 @@ mod tests {
         let output = Command::new("git")
             .arg("-C")
             .arg(repo)
+            .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
             .args(args)
             .output()
             .expect("run git");

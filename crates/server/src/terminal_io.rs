@@ -10,11 +10,8 @@
 use crate::backend::BackendError;
 use crate::{ServerConfig, TerminalRegistry};
 use lazybox_ipc::{AgentState, TerminalId, TerminalInputIntent, TerminalKind};
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 /// Defense-in-depth deadline around a backend write/resize future. Raw PTY
 /// writes already bound their internal queue, but the backend trait permits
@@ -39,8 +36,6 @@ pub(crate) struct AgentTerminalActivity {
     view_epochs: Vec<ViewEpoch>,
     submission_in_flight: bool,
 }
-
-pub(crate) type AgentTerminalActivities = Arc<Mutex<HashMap<TerminalId, AgentTerminalActivity>>>;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TerminalIoFailure {
@@ -97,11 +92,12 @@ pub(crate) async fn write_locked(
     if intent == TerminalInputIntent::Submit {
         config
             .terminal
-            .agent_terminal_activities
+            .entries
             .lock()
             .await
             .entry(terminal_id)
             .or_default()
+            .activity
             .submission_in_flight = true;
     }
 
@@ -123,15 +119,13 @@ pub(crate) async fn write_locked(
     match intent {
         TerminalInputIntent::Compose => {}
         TerminalInputIntent::Submit => {
-            let mut activities = config.terminal.agent_terminal_activities.lock().await;
-            if let Some(activity) = activities.get_mut(&terminal_id) {
+            let mut entries = config.terminal.entries.lock().await;
+            if let Some(entry) = entries.get_mut(&terminal_id) {
+                let activity = &mut entry.activity;
                 if result.is_ok() {
                     activity.view_epochs.clear();
                 }
                 activity.submission_in_flight = false;
-                if activity.view_epochs.is_empty() {
-                    activities.remove(&terminal_id);
-                }
             }
         }
         TerminalInputIntent::View => {
@@ -194,8 +188,8 @@ pub(crate) async fn record_view_activity(
 ) -> u64 {
     let epoch_id = NEXT_VIEW_EPOCH.fetch_add(1, Ordering::Relaxed);
     let now = tokio::time::Instant::now();
-    let mut activities = terminals.agent_terminal_activities.lock().await;
-    let activity = activities.entry(terminal_id).or_default();
+    let mut entries = terminals.entries.lock().await;
+    let activity = &mut entries.entry(terminal_id).or_default().activity;
     activity
         .view_epochs
         .retain(|epoch| epoch.observed_output || epoch.expires_at >= now);
@@ -213,16 +207,14 @@ async fn remove_unobserved_view_epoch(
     terminal_id: TerminalId,
     epoch_id: u64,
 ) {
-    let mut activities = config.terminal.agent_terminal_activities.lock().await;
-    let Some(activity) = activities.get_mut(&terminal_id) else {
+    let mut entries = config.terminal.entries.lock().await;
+    let Some(entry) = entries.get_mut(&terminal_id) else {
         return;
     };
+    let activity = &mut entry.activity;
     activity
         .view_epochs
         .retain(|epoch| epoch.id != epoch_id || epoch.observed_output);
-    if activity.view_epochs.is_empty() && !activity.submission_in_flight {
-        activities.remove(&terminal_id);
-    }
 }
 
 pub(crate) async fn clear_view_activity(config: &ServerConfig, terminal_id: TerminalId) {
@@ -230,14 +222,24 @@ pub(crate) async fn clear_view_activity(config: &ServerConfig, terminal_id: Term
 }
 
 pub(crate) async fn clear_view_activity_in(terminals: &TerminalRegistry, terminal_id: TerminalId) {
-    let mut activities = terminals.agent_terminal_activities.lock().await;
-    let Some(activity) = activities.get_mut(&terminal_id) else {
+    let mut entries = terminals.entries.lock().await;
+    let Some(entry) = entries.get_mut(&terminal_id) else {
         return;
     };
+    let activity = &mut entry.activity;
     activity.view_epochs.clear();
-    if !activity.submission_in_flight {
-        activities.remove(&terminal_id);
-    }
+}
+
+#[cfg(test)]
+pub(crate) async fn has_activity(terminals: &TerminalRegistry, terminal_id: TerminalId) -> bool {
+    terminals
+        .entries
+        .lock()
+        .await
+        .get(&terminal_id)
+        .is_some_and(|entry| {
+            entry.activity.submission_in_flight || !entry.activity.view_epochs.is_empty()
+        })
 }
 
 /// Fold one PTY reading against view activity recorded at the I/O boundary.
@@ -252,15 +254,16 @@ pub(crate) async fn suppresses_agent_reading(
     terminal_id: TerminalId,
     output_seq: Option<u64>,
 ) -> bool {
-    let mut activities = terminals.agent_terminal_activities.lock().await;
-    let Some(activity) = activities.get_mut(&terminal_id) else {
+    let mut entries = terminals.entries.lock().await;
+    let Some(entry) = entries.get_mut(&terminal_id) else {
         return false;
     };
+    let activity = &mut entry.activity;
     if activity.submission_in_flight {
         return false;
     }
 
-    let suppress = if let Some(output_seq) = output_seq {
+    if let Some(output_seq) = output_seq {
         let now = tokio::time::Instant::now();
         activity
             .view_epochs
@@ -280,12 +283,7 @@ pub(crate) async fn suppresses_agent_reading(
             .any(|epoch| epoch.observed_output);
         activity.view_epochs.retain(|epoch| !epoch.observed_output);
         observed
-    };
-
-    if activity.view_epochs.is_empty() && !activity.submission_in_flight {
-        activities.remove(&terminal_id);
     }
-    suppress
 }
 
 /// Serialize and bound one write from a standalone producer.

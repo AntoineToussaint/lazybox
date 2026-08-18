@@ -456,12 +456,7 @@ mod tests {
                 .spawn(&[], None, &[], "bounded-lane")
                 .await
                 .expect("spawn");
-            config
-                .terminal
-                .terminals
-                .lock()
-                .await
-                .insert(terminal_id, key.clone());
+            config.terminal.bind_backend(terminal_id, key.clone()).await;
             mock.wedge_write(&key).await;
 
             let (event_tx, mut event_rx) = mpsc::unbounded_channel();

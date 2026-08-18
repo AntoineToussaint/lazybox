@@ -2263,7 +2263,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lazybox-agents"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "lazybox-ipc",
  "serde_json",
@@ -2272,7 +2272,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-auth"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "thiserror 2.0.19",
  "tokio",
@@ -2281,7 +2281,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-config"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "humantime-serde",
  "lazybox-core",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "serde",
@@ -2305,7 +2305,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-desktop"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bytes",
  "chrono",
@@ -2338,7 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-gh"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "futures",
@@ -2347,6 +2347,7 @@ dependencies = [
  "lazybox-core",
  "octocrab",
  "parking_lot",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2356,7 +2357,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-git-ops"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "lazybox-core",
  "libc",
@@ -2367,8 +2368,9 @@ dependencies = [
 
 [[package]]
 name = "lazybox-identity"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "ed25519-dalek",
  "hex",
@@ -2383,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-ipc"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64 0.23.1",
  "bincode",
@@ -2398,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-linear"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "lazybox-auth",
@@ -2413,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-server"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bytes",
  "chrono",
@@ -2436,6 +2438,7 @@ dependencies = [
  "libc",
  "parking_lot",
  "portable-pty",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -2446,7 +2449,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-slack"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "futures",
  "lazybox-auth",
@@ -2461,7 +2464,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-store"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "lazybox-core",
@@ -2474,7 +2477,7 @@ dependencies = [
 
 [[package]]
 name = "lazybox-tui-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "chrono",
  "lazybox-agents",

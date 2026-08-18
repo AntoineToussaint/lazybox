@@ -2,7 +2,8 @@
 //!
 //! A **generic remote dev-box abstraction**: start / stop / connect a box
 //! that hosts a lazybox daemon and a project's workload, provider-agnostic,
-//! with GCP and E2B implementations.
+//! with GCP and E2B implementations plus a managed-Kubernetes control-plane
+//! contract.
 //!
 //! Two axes are kept deliberately separate (see epic #885, issue #931):
 //!
@@ -41,6 +42,9 @@ pub mod gcp_compute;
 
 #[cfg(feature = "e2b")]
 pub mod e2b;
+
+#[cfg(feature = "managed")]
+pub mod managed;
 
 pub use connect::connect_box;
 pub use deployment::{Deployment, DeploymentConfig, merge_yaml};

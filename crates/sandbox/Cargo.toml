@@ -15,6 +15,10 @@ default = ["gcp"]
 # the service-account-key grant — no `gcloud` on PATH.
 gcp = ["dep:reqwest", "dep:jsonwebtoken"]
 e2b = ["dep:fs2", "dep:reqwest"]
+# Interface-first hosted Kubernetes provider. The real control-plane client
+# will supply the API implementation; the crate ships an in-memory backend
+# for lifecycle and conductor tests meanwhile (#943).
+managed = []
 
 [dependencies]
 lazybox-store = { workspace = true }

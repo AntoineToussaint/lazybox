@@ -676,6 +676,21 @@ fn release_surfaces_use_public_product_metadata_and_curated_notes() {
     ));
 }
 
+#[test]
+fn homebrew_publish_survives_skipped_optional_release_gates() {
+    let workflow = read(".github/workflows/release.yml");
+    let publish_job = workflow
+        .split_once("  publish-homebrew-formula:")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("\n  announce:").map(|(job, _)| job))
+        .expect("find Homebrew publish job");
+
+    assert!(publish_job.contains(
+        "if: ${{ always() && needs.plan.result == 'success' && needs.host.result == 'success'"
+    ));
+    assert!(publish_job.contains("!fromJson(needs.plan.outputs.val).announcement_is_prerelease"));
+}
+
 #[cfg(unix)]
 #[test]
 fn compatibility_installer_delegates_to_the_same_release() {

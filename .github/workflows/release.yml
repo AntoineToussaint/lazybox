@@ -347,7 +347,11 @@ jobs:
       PLAN: ${{ needs.plan.outputs.val }}
       GITHUB_USER: "axo bot"
       GITHUB_EMAIL: "admin+bot@axo.dev"
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    # `host` intentionally tolerates skipped optional gates (currently the
+    # desktop check). Without `always()`, GitHub's implicit `success()` sees
+    # that skipped ancestor and silently skips this job even though `host`
+    # succeeded.
+    if: ${{ always() && needs.plan.result == 'success' && needs.host.result == 'success' && (!fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases) }}
     steps:
       - uses: actions/checkout@v7
         with:

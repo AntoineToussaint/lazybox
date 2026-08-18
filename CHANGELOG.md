@@ -6,38 +6,44 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
-## [0.1.11] - 2026-08-16
+## [0.1.11] - 2026-08-17
 
-The responsiveness release. The headline: off-thread terminal rendering is now
-the default, so a chatty agent flooding the screen can no longer freeze the UI —
-the frame flush moved off the input thread, and a slow or wedged terminal makes
-the writer fall behind instead of blocking your keystrokes, the modal, or quit.
-A stale `Esc` now always dismisses a modal (you can never get stuck in one), a
-governor rate-limit backoff reads as an honest "GitHub rate-limited · ~Nm"
-instead of a spinner that looks hung, and an agent stays "working" while the
-background shells it launched are still running. Real per-provider usage
-metering for Claude *and* Codex lands in the header, the sandbox gains an
-SDK-native GCP lifecycle (no more shelling out to `gcloud`), and Linear grows
-comment threads plus assign/close. This supersedes the never-published 0.1.10,
-so it also carries everything documented under 0.1.10 below.
+The data-safe reliability release. Workspace creation now has an explicit,
+request-correlated outcome everywhere: success names the created workspace and
+failures remain visible in both the TUI and desktop instead of disappearing.
+Cleanup fails closed when local work or worktree state cannot be verified, rapid
+multi-workspace prompt fan-out is ordered and bounded, and terminal recovery
+stays coherent under catch-up bursts. This release also consolidates workspace,
+terminal, agent-turn, output, and flow-control ownership so the same bug classes
+cannot keep returning through divergent paths.
+
+This supersedes the tagged but never-published 0.1.10, so it also carries all
+changes documented under 0.1.10 below.
 
 ### Highlights
 
-- **The UI stays live under load.** Off-thread render writer is the default;
-  the blocking stdout flush no longer runs on the input thread, so heavy agent
-  output can't wedge input, the modal, or quit.
-- **You can always escape a modal.** A stale `Esc` survives the input-staleness
-  guard, even on confirm modals — a queued `Enter` still can't replay a
-  destructive action.
-- **Honest sync status.** A GitHub governor self-throttle surfaces as a real
-  rate-limit countdown, not a perpetual "syncing… still working."
-- **Agents don't falsely finish.** An agent whose model turn ended but whose
-  background shells are still running reads as *working*, not done.
-- **Real usage in the header.** Opt-in metering proxy reports per-provider token
-  usage for Claude and Codex from live traffic.
-- **SDK-native GCP sandbox** lifecycle and typed reauth; `gcloud` is no longer
-  on the start/stop/status path.
-- **Linear**: comment threads and assign/close mutations.
+- **No silent workspace creation.** Every create request is correlated to a
+  success or actionable failure, pending UI state is cleared on send failures,
+  desktop calls reject daemon failures, and concurrent creates allocate distinct
+  durable keys.
+- **Worktree deletion is fail-closed.** Cleanup is blocked by uncommitted or
+  unpushed work and by any failed store or Git-status probe; project cascades use
+  the same guarded lifecycle instead of bypassing it.
+- **The UI stays live under load.** Off-thread rendering owns terminal output,
+  daemon bursts yield to newly arrived input, and bounded flow control reserves
+  enough capacity for a complete authoritative resync.
+- **Terminal recovery is deterministic.** Replay and resync share one terminal
+  authority, rapid prompt fan-out is settle-gated per terminal, scrolling no
+  longer duplicates wrapped lines, and crash/abort paths restore a usable shell.
+- **Agent state is truthful.** Spawn feedback survives focus changes, background
+  shells keep an agent working, Claude unattended trust is seeded, and asking /
+  working / done transitions come from one turn-state authority.
+- **Operational cleanup.** Test children are reaped as process groups, routine
+  disconnects stay quiet while faults remain loud, and slow worktree reclamation
+  runs outside the sync critical path.
+- **Usage and providers.** Live Claude and Codex plan usage appears in the
+  header; the sandbox has SDK-native GCP lifecycle and typed reauth; Linear has
+  comment threads plus assign/close mutations.
 
 ### Install
 
@@ -268,7 +274,8 @@ Then run `gh auth login` if needed and launch `lazybox`.
   have explicit capacity and shutdown bounds instead of growing or hanging
   indefinitely under load.
 
-[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.7...v0.1.8

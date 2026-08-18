@@ -56,6 +56,10 @@ pub struct Config {
     /// which do not enforce lazybox-platform subscriptions.
     #[serde(default, skip_serializing_if = "RelayConfig::is_empty")]
     pub relay: RelayConfig,
+    /// This box's non-secret lazybox-platform association. Populated by
+    /// `lazybox account claim`; a missing block means the box is unlinked.
+    #[serde(default, skip_serializing_if = "AccountConfig::is_empty")]
+    pub account: AccountConfig,
     /// Remote dev-box lifecycle (#931): the GCP project/placement, the
     /// Terraform module + deployment overlay, and the socket the connect
     /// forward carries. Read by `lazybox sandbox …`. Empty by default. See
@@ -227,6 +231,39 @@ pub struct RemoteConfig {
 pub struct RelayConfig {
     #[serde(default, skip_serializing_if = "RelayEntitlementConfig::is_empty")]
     pub entitlement: RelayEntitlementConfig,
+}
+
+/// Cached, non-secret account association returned by a successful platform
+/// claim. Claim codes and private keys are never persisted here.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct AccountConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entitlement_active: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entitlement_reason: Option<String>,
+}
+
+impl AccountConfig {
+    pub fn is_empty(&self) -> bool {
+        self.platform_url.is_none()
+            && self.organization_id.is_none()
+            && self.organization_name.is_none()
+            && self.device_id.is_none()
+            && self.plan.is_none()
+            && self.entitlement_active.is_none()
+            && self.entitlement_reason.is_none()
+    }
 }
 
 impl RelayConfig {
@@ -2619,6 +2656,28 @@ mod tests {
         let serialized = serde_yaml::to_string(&config).unwrap();
         let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
         assert_eq!(reparsed.relay, config.relay);
+    }
+
+    #[test]
+    fn account_claim_cache_is_optional_non_secret_and_round_trips() {
+        let default_yaml = serde_yaml::to_string(&Config::default()).unwrap();
+        assert!(!default_yaml.contains("account:"));
+
+        let config = Config::parse(
+            "account:\n  platform_url: https://platform.example\n  \
+             organization_id: org_42\n  organization_name: Example\n  \
+             device_id: dev_7\n  plan: pro\n  entitlement_active: true\n",
+        )
+        .unwrap();
+        assert_eq!(config.account.organization_id.as_deref(), Some("org_42"));
+        assert_eq!(config.account.plan.as_deref(), Some("pro"));
+        assert_eq!(config.account.entitlement_active, Some(true));
+
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(!serialized.contains("claim_code"));
+        assert!(!serialized.contains("private_key"));
+        let reparsed: Config = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.account, config.account);
     }
 
     /// Auto-connect and the spawn hard-gate are both opt-in and independent

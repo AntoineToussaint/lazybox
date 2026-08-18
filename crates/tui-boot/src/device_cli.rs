@@ -7,6 +7,7 @@
 //! daemon restart.
 
 use anyhow::Context;
+use lazybox_config::AccountConfig;
 use lazybox_identity::{BoxIdentity, DeviceRecord, DeviceRegistry};
 
 const USAGE: &str = "usage:\n  \
@@ -62,6 +63,18 @@ fn mint(registry: &DeviceRegistry, args: &[String]) -> anyhow::Result<()> {
         .filter(|n| !n.is_empty())
         .context("device mint needs a non-empty --name")?;
 
+    match lazybox_config::Config::load() {
+        Ok(config) => {
+            if let Some(warning) = mint_account_warning(&config.account) {
+                eprintln!("warning: {warning}");
+            }
+        }
+        Err(error) => eprintln!(
+            "warning: could not verify this box's platform entitlement ({error}); \
+             the credential will be minted, but a hosted relay may refuse it"
+        ),
+    }
+
     let minted = registry.mint(&name).context("mint device credential")?;
     println!("Minted device credential for {name:?}.");
     println!("  id:        {}", minted.record.id);
@@ -70,6 +83,32 @@ fn mint(registry: &DeviceRegistry, args: &[String]) -> anyhow::Result<()> {
     println!("Pairing token (shown once — deliver it to the device):");
     println!("  {}", minted.token);
     Ok(())
+}
+
+fn mint_account_warning(account: &AccountConfig) -> Option<String> {
+    if account.organization_id.is_none() {
+        return Some(
+            "this box is not linked to a platform account; run `lazybox account claim <code>` \
+             before using the credential with a hosted relay"
+                .to_string(),
+        );
+    }
+    match account.entitlement_active {
+        Some(true) => None,
+        Some(false) => Some(format!(
+            "the linked account is not entitled{}; the credential is local-only until the plan is active",
+            account
+                .entitlement_reason
+                .as_deref()
+                .map(|reason| format!(" ({reason})"))
+                .unwrap_or_default()
+        )),
+        None => Some(
+            "the linked account's entitlement has not been confirmed; run `lazybox account status` \
+             before using the credential with a hosted relay"
+                .to_string(),
+        ),
+    }
 }
 
 fn list(registry: &DeviceRegistry) -> anyhow::Result<()> {
@@ -137,5 +176,30 @@ mod tests {
         let laptop_row = rows.iter().find(|r| r.name == "Laptop").unwrap();
         assert!(format_row(phone_row).contains("revoked"));
         assert!(format_row(laptop_row).contains("active"));
+    }
+
+    #[test]
+    fn mint_warns_for_unlinked_unentitled_and_unknown_accounts_only() {
+        let unlinked = mint_account_warning(&AccountConfig::default()).unwrap();
+        assert!(unlinked.contains("account claim"));
+
+        let mut account = AccountConfig {
+            organization_id: Some("org_1".into()),
+            entitlement_active: Some(false),
+            entitlement_reason: Some("subscription lapsed".into()),
+            ..AccountConfig::default()
+        };
+        let inactive = mint_account_warning(&account).unwrap();
+        assert!(inactive.contains("subscription lapsed"));
+
+        account.entitlement_active = None;
+        assert!(
+            mint_account_warning(&account)
+                .unwrap()
+                .contains("not been confirmed")
+        );
+
+        account.entitlement_active = Some(true);
+        assert_eq!(mint_account_warning(&account), None);
     }
 }

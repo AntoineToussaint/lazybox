@@ -196,6 +196,26 @@ The command computes a plan, prints it, and prompts before archiving anything.
 | `--older-than DUR` | Only archive channels stale for at least this long (e.g. `7d`) |
 | `--workspace KEY` | Restrict pruning to one workspace's channels |
 
+## `lazybox account`
+
+Link a box to a lazybox-platform organization with a one-time claim code:
+
+```bash
+lazybox account claim ABCD1234 --name my-dev-box
+lazybox account status
+```
+
+| Command or option | Effect |
+| --- | --- |
+| `account claim <code>` | POST the one-time code, box public key, and display name to `/v1/devices/claim`, then cache the returned non-secret organization/plan state |
+| `--platform-url <url>` | Override the platform (`LAZYBOX_PLATFORM_URL`, cached URL, then `https://platform.lazybox.ai`) |
+| `--name <name>` | Box display name; defaults to the host name |
+| `account status` | Show the linked organization, plan, and cached entitlement without requiring a platform credential |
+
+Claim codes and the box private key are never written to `config.yaml`.
+`lazybox device mint` still succeeds for local/self-hosted use when unlinked,
+but warns that a hosted relay may refuse the credential.
+
 ## Environment variables
 
 | Variable | Effect |
@@ -210,6 +230,7 @@ The command computes a plan, prints it, and prompts before archiving anything.
 | `LAZYBOX_API_TOKEN` | Bearer token for `lazybox server api` (required unless `--insecure-no-auth`) |
 | `LAZYBOX_API_ADDR` | Listen address for `lazybox server api` when no `[addr:port]` argument is given |
 | `LAZYBOX_RELAY` | Relay address for `lazybox serve` when no `--relay` is given |
+| `LAZYBOX_PLATFORM_URL` | Platform base URL used by `lazybox account claim` and hosted relay configuration |
 | `LAZYBOX_PLATFORM_API_KEY` | Platform bearer used by a configured `lazybox-relay` entitlement gate |
 
 ## Paths

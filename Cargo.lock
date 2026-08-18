@@ -2108,6 +2108,7 @@ dependencies = [
  "lazybox-tui",
  "lazybox-tui-core",
  "octocrab",
+ "reqwest",
  "rpassword",
  "semver",
  "serde_json",

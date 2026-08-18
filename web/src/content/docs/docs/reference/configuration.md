@@ -41,6 +41,7 @@ which is the canonical source of truth for defaults and field names.
 | [`conventions`](#conventions) | Commit / PR conventions injected into the agent-work brief |
 | [`shell`](#shell) | Shell command for the `s` spawn |
 | [`remote`](#remote) | Remote-access wiring: per-worktree host targeting (`remote.host`) |
+| [`account`](#account) | Cached non-secret platform organization, plan, and entitlement association |
 
 Snippet workflows are **not** part of `config.yaml` — they live in their own
 files: `~/.lazybox/snippets.yaml` (global) and
@@ -590,6 +591,31 @@ keeps running its current process, so close that terminal and open a fresh one
 to pick up the new command. Older generated configs may contain
 `command: bash`; lazybox treats that former default as automatic. Use an
 explicit path such as `/bin/bash` to select Bash intentionally.
+
+## `account`
+
+Cached, non-secret association written by `lazybox account claim`. An empty
+block means the box is unlinked; claim codes and private keys are never stored.
+
+```yaml
+account:
+  platform_url: https://platform.lazybox.ai
+  organization_id: org_42
+  organization_name: Example
+  device_id: dev_7
+  plan: pro
+  entitlement_active: true
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `platform_url` | string | _(unset)_ | Platform that accepted the claim. |
+| `organization_id` | string | _(unset)_ | Stable linked organization id. |
+| `organization_name` | string | _(unset)_ | Optional display name returned by the platform. |
+| `device_id` | string | _(unset)_ | Platform device record for this box. |
+| `plan` | string | _(unset)_ | Plan cached from the successful claim. |
+| `entitlement_active` | bool | _(unset)_ | Whether the claim response reported an active entitlement. |
+| `entitlement_reason` | string | _(unset)_ | Optional inactive/unknown explanation. |
 
 ## `remote`
 

@@ -9,9 +9,9 @@
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
     AgentRuntimeMode, AgentState, AgentUsage, Command, Event, HookEvent, HookEventKind,
-    PrincipalId, PromptSource, ProviderCredentialInput, ProviderCredentialMetadata,
-    RemovableTerminalState, SpawnFallback, TerminalId, TerminalInputIntent, TerminalKind,
-    TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
+    PrincipalId, PromptSource, ProviderCredentialInput, ProviderCredentialMetadata, ProviderQuota,
+    QuotaWindow, RemovableTerminalState, SpawnFallback, TerminalId, TerminalInputIntent,
+    TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
 };
 use tokio::io::duplex;
 
@@ -140,8 +140,10 @@ fn all_commands() -> Vec<Command> {
             rows: 40,
         },
         Command::RequestTerminalResync {
-            terminal_id: TerminalId(7),
-            required_seq: 42,
+            requests: vec![lazybox_ipc::TerminalResyncRequest {
+                terminal_id: TerminalId(7),
+                required_seq: 42,
+            }],
         },
         Command::RequestTerminalDelta {
             terminal_id: TerminalId(7),
@@ -300,6 +302,7 @@ fn all_commands() -> Vec<Command> {
             name: "audit-wire".into(),
             project_key: lazybox_core::ProjectKey::github("o", "r"),
             spawn_agent: Some("codex".into()),
+            client_request_id: Some("create-audit-wire".into()),
         },
         Command::CreateProject {
             name: "local project".into(),
@@ -801,6 +804,19 @@ fn all_events() -> Vec<Event> {
                 cost_usd_micros: Some(4321),
             },
         },
+        Event::AgentProviderQuota {
+            agent_id: "claude".into(),
+            quota: ProviderQuota {
+                five_hour: Some(QuotaWindow {
+                    utilization_bp: 4512,
+                    reset_at: Some(1_700_000_000),
+                }),
+                weekly: Some(QuotaWindow {
+                    utilization_bp: 6000,
+                    reset_at: None,
+                }),
+            },
+        },
         Event::AgentTurnFinished {
             run_id: AgentRunId(9),
             result: Some("turn complete".into()),
@@ -1197,6 +1213,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentUserQuestion { .. } => "AgentUserQuestion",
         Event::AgentUsage { .. } => "AgentUsage",
         Event::AgentSessionUsage { .. } => "AgentSessionUsage",
+        Event::AgentProviderQuota { .. } => "AgentProviderQuota",
         Event::AgentTurnFinished { .. } => "AgentTurnFinished",
         Event::AgentRunFinished { .. } => "AgentRunFinished",
         Event::ProviderCredentialUpdated { .. } => "ProviderCredentialUpdated",
@@ -1220,6 +1237,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::TerminalModelChanged { .. } => "TerminalModelChanged",
         Event::ErrorInbox { .. } => "ErrorInbox",
         Event::AgentUsageLimit { .. } => "AgentUsageLimit",
+        Event::WorkspaceCreated { .. } => "WorkspaceCreated",
     }
 }
 
@@ -1236,7 +1254,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        85,
+        86,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

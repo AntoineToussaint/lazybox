@@ -29,7 +29,9 @@
 use crate::{PaneId, PaneOutcome};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use lazybox_core::SessionKey;
-use lazybox_ipc::{Command, Event, TerminalId, TerminalInputIntent, TerminalKind};
+use lazybox_ipc::{
+    Command, Event, TerminalId, TerminalInputIntent, TerminalKind, TerminalResyncRequest,
+};
 use lazybox_tui_term::GhosttyTerminal;
 use libghostty_vt as vt;
 use ratatui::Frame;
@@ -617,7 +619,9 @@ pub struct TerminalStack {
     pending_resizes: Vec<(TerminalId, u16, u16)>,
     /// Client-observed output gaps waiting for the model to request an
     /// authoritative daemon replay. `(terminal_id, required_seq)`.
-    pending_resync_requests: Vec<(TerminalId, u64)>,
+    /// Terminal ids whose authoritative debt is ready for wire admission.
+    /// The sequence watermark itself lives only in `TerminalSlot::sync`.
+    pending_resync_requests: Vec<TerminalId>,
     /// Click targets for the tab strip, populated each render. Each
     /// entry is `(tab_idx, (start_col, end_col_exclusive), row)`.
     /// `handle_tab_click(col, row)` scans this on mouse-down to map
@@ -780,7 +784,7 @@ pub(crate) fn osc52_ranges(bytes: &[u8]) -> Vec<std::ops::Range<usize>> {
 const OSC52_CARRY_CAP: usize = 4 * 1024 * 1024;
 
 /// Forward any OSC 52 clipboard-set escape sequences in `bytes` to
-/// the host terminal's stdout, so the inner program's "copy this"
+/// the host terminal writer, so the inner program's "copy this"
 /// requests reach the user's system clipboard.
 ///
 /// We pass-through the WHOLE sequence verbatim (including the
@@ -795,9 +799,9 @@ const OSC52_CARRY_CAP: usize = 4 * 1024 * 1024;
 /// dropped. The carried head is prepended before scanning; only fully
 /// terminated sequences are written to the host.
 ///
-/// Best-effort: stdout write failures are ignored. Writing to the
-/// host while ratatui is mid-frame is safe in practice — terminals
-/// pop OSC out of the stream and don't paint it.
+/// Best-effort: writer failures are ignored. The raw escape shares the
+/// render writer's ordered lane, so it cannot splice into a ratatui frame or
+/// race the crash-restore muzzle (#1170).
 fn forward_osc52(carry: &mut Vec<u8>, bytes: &[u8]) {
     let combined: Vec<u8>;
     let scan: &[u8] = if carry.is_empty() {
@@ -810,13 +814,8 @@ fn forward_osc52(carry: &mut Vec<u8>, bytes: &[u8]) {
     };
 
     let (ranges, pending) = osc52_scan(scan);
-    if !ranges.is_empty() {
-        use std::io::Write;
-        let mut out = std::io::stdout().lock();
-        for range in ranges {
-            let _ = out.write_all(&scan[range]);
-        }
-        let _ = out.flush();
+    for range in ranges {
+        crate::realm::model::render_writer::enqueue_raw(&scan[range]);
     }
 
     // Carry any unterminated trailing sequence into the next chunk,
@@ -856,6 +855,24 @@ fn subtree_at_path<'a>(
     Some(node)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalStreamSync {
+    Coherent,
+    /// The one client-side owner of terminal recovery debt. `request` is the
+    /// exact wire shape the daemon must satisfy; `request_pending` is only an
+    /// admission latch, not a second sequence watermark.
+    Desynced {
+        request: TerminalResyncRequest,
+        request_pending: bool,
+    },
+}
+
+impl TerminalStreamSync {
+    fn is_desynced(self) -> bool {
+        matches!(self, Self::Desynced { .. })
+    }
+}
+
 struct TerminalSlot {
     session_key: SessionKey,
     kind: TerminalKind,
@@ -864,10 +881,7 @@ struct TerminalSlot {
     /// While set, live output is ignored so a torn byte stream cannot
     /// mutate the last coherent grid. Only an authoritative resync clears
     /// the debt.
-    desynced: bool,
-    /// One resync request is already queued/sent for the current gap.
-    /// An unavailable response clears it so later output can retry.
-    resync_request_pending: bool,
+    sync: TerminalStreamSync,
     /// libghostty-vt parser. Each client owns its own — the daemon
     /// streams raw bytes; this is what turns them into a cell grid.
     /// `Box`ed so moving `TerminalSlot` doesn't move the inner FFI
@@ -1384,8 +1398,42 @@ impl TerminalStack {
     }
 
     /// Drain sequence-gap recovery requests for the model's IPC client.
-    pub fn drain_pending_resync_requests(&mut self) -> Vec<(TerminalId, u64)> {
+    pub fn drain_pending_resync_requests(&mut self) -> Vec<TerminalResyncRequest> {
         std::mem::take(&mut self.pending_resync_requests)
+            .into_iter()
+            .filter_map(|terminal_id| match self.terminals.get(&terminal_id)?.sync {
+                TerminalStreamSync::Desynced {
+                    request,
+                    request_pending: true,
+                } => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Restore requests that could not enter the bounded IPC command lane.
+    /// Their per-terminal latches remain set, so retaining the typed debt here
+    /// is what makes a later daemon event retry instead of silently stranding
+    /// the terminal in `desynced` forever.
+    pub fn requeue_resync_requests(&mut self, requests: Vec<TerminalResyncRequest>) {
+        for request in requests {
+            let Some(slot) = self.terminals.get_mut(&request.terminal_id) else {
+                continue;
+            };
+            match &mut slot.sync {
+                TerminalStreamSync::Desynced {
+                    request: debt,
+                    request_pending,
+                } => {
+                    debt.required_seq = debt.required_seq.max(request.required_seq);
+                    *request_pending = true;
+                }
+                TerminalStreamSync::Coherent => continue,
+            }
+            if !self.pending_resync_requests.contains(&request.terminal_id) {
+                self.pending_resync_requests.push(request.terminal_id);
+            }
+        }
     }
 
     /// Apply a session's persisted layout. Called by the App when the
@@ -2549,17 +2597,28 @@ impl TerminalStack {
         if seq <= slot.last_seq {
             return;
         }
-        if slot.desynced {
-            if !slot.resync_request_pending {
-                slot.resync_request_pending = true;
-                self.pending_resync_requests.push((id, seq));
+        if let TerminalStreamSync::Desynced {
+            request,
+            request_pending,
+        } = &mut slot.sync
+        {
+            request.required_seq = request.required_seq.max(seq);
+            if !*request_pending {
+                *request_pending = true;
+                self.pending_resync_requests.push(id);
             }
             return;
         }
         if first_seq != slot.last_seq.saturating_add(1) || first_seq > seq {
-            slot.desynced = true;
-            slot.resync_request_pending = true;
-            self.pending_resync_requests.push((id, seq));
+            let request = TerminalResyncRequest {
+                terminal_id: id,
+                required_seq: seq,
+            };
+            slot.sync = TerminalStreamSync::Desynced {
+                request,
+                request_pending: true,
+            };
+            self.pending_resync_requests.push(id);
             slot.osc52_carry.clear();
             tracing::warn!(
                 terminal_id = ?id,
@@ -2635,10 +2694,27 @@ impl TerminalStack {
                 "terminal resync received at client reconstruction boundary"
             );
         }
-        if seq < slot.last_seq || (!slot.desynced && seq == slot.last_seq) {
-            if slot.desynced {
-                slot.resync_request_pending = false;
+        let required_seq = match slot.sync {
+            TerminalStreamSync::Coherent => slot.last_seq,
+            TerminalStreamSync::Desynced { request, .. } => request.required_seq,
+        };
+        if seq < slot.last_seq || seq < required_seq {
+            // A reply can satisfy the debt that was on the wire while newer
+            // quarantined output raises the local watermark. Re-request that
+            // newer watermark immediately; merely releasing the latch leaves
+            // the terminal frozen forever when no further output arrives.
+            if let TerminalStreamSync::Desynced {
+                request_pending, ..
+            } = &mut slot.sync
+            {
+                *request_pending = true;
+                if !self.pending_resync_requests.contains(&id) {
+                    self.pending_resync_requests.push(id);
+                }
             }
+            return;
+        }
+        if !slot.sync.is_desynced() && seq == slot.last_seq {
             return;
         }
         if !slot.vt.reset() {
@@ -2647,11 +2723,15 @@ impl TerminalStack {
             // request another replay; leaving the old request latch set
             // would deadlock recovery because no unavailable response is
             // coming to release it.
-            slot.desynced = true;
-            if !slot.resync_request_pending {
-                slot.resync_request_pending = true;
-                self.pending_resync_requests.push((id, seq));
-            }
+            let request = TerminalResyncRequest {
+                terminal_id: id,
+                required_seq: seq.max(required_seq),
+            };
+            slot.sync = TerminalStreamSync::Desynced {
+                request,
+                request_pending: true,
+            };
+            self.pending_resync_requests.push(id);
             return;
         }
         slot.vt.feed(replay);
@@ -2665,8 +2745,7 @@ impl TerminalStack {
         let tail_start = replay.len().saturating_sub(RECENT_OUTPUT_CAP);
         slot.recent.extend_from_slice(&replay[tail_start..]);
         slot.last_seq = seq;
-        slot.desynced = false;
-        slot.resync_request_pending = false;
+        slot.sync = TerminalStreamSync::Coherent;
         // The raw-stream rebuild just replaced any capture-fed deep
         // scrollback with the ring's shallow history, so the current
         // scrollback visit's fetch is spent. Release the latch: the
@@ -2788,8 +2867,7 @@ impl TerminalStack {
             session_key,
             kind,
             last_seq,
-            desynced: false,
-            resync_request_pending: false,
+            sync: TerminalStreamSync::Coherent,
             vt,
             recent: Vec::new(),
             osc52_carry: Vec::new(),
@@ -3196,10 +3274,15 @@ impl TerminalStack {
                         if let Some(state) = snap.agent_state {
                             slot.agent_state = state;
                         }
-                        slot.desynced = true;
-                        slot.resync_request_pending = true;
-                        self.pending_resync_requests
-                            .push((snap.terminal_id, slot.last_seq.max(snap.last_seq)));
+                        let request = TerminalResyncRequest {
+                            terminal_id: snap.terminal_id,
+                            required_seq: slot.last_seq.max(snap.last_seq),
+                        };
+                        slot.sync = TerminalStreamSync::Desynced {
+                            request,
+                            request_pending: true,
+                        };
+                        self.pending_resync_requests.push(snap.terminal_id);
                         self.terminals.insert(snap.terminal_id, slot);
                         continue;
                     }
@@ -3215,15 +3298,20 @@ impl TerminalStack {
                     );
                     slot.agent_state = snap.agent_state.unwrap_or(lazybox_ipc::AgentState::Idle);
                     slot.authenticating = snap.authenticating;
-                    slot.desynced = !snap.replay_available;
-                    slot.resync_request_pending = !snap.replay_available;
                     if !snap.replay_available {
                         // Total snapshot budgeting and transient backend
                         // failures omit whole replays. Ask for this one
                         // terminal immediately so a quiet pane cannot stay
                         // blank forever waiting for live output.
-                        self.pending_resync_requests
-                            .push((snap.terminal_id, snap.last_seq));
+                        let request = TerminalResyncRequest {
+                            terminal_id: snap.terminal_id,
+                            required_seq: snap.last_seq,
+                        };
+                        slot.sync = TerminalStreamSync::Desynced {
+                            request,
+                            request_pending: true,
+                        };
+                        self.pending_resync_requests.push(snap.terminal_id);
                     }
                     // Defer the daemon-ring replay instead of parsing
                     // it here: a reconnect / broadcast-lag snapshot
@@ -3398,8 +3486,20 @@ impl TerminalStack {
             }
             Event::TerminalResyncUnavailable { terminal_id } => {
                 if let Some(slot) = self.terminals.get_mut(terminal_id) {
-                    slot.desynced = true;
-                    slot.resync_request_pending = false;
+                    match &mut slot.sync {
+                        TerminalStreamSync::Desynced {
+                            request_pending, ..
+                        } => *request_pending = false,
+                        TerminalStreamSync::Coherent => {
+                            slot.sync = TerminalStreamSync::Desynced {
+                                request: TerminalResyncRequest {
+                                    terminal_id: *terminal_id,
+                                    required_seq: slot.last_seq,
+                                },
+                                request_pending: false,
+                            };
+                        }
+                    }
                 }
             }
             Event::TerminalScrollback {
@@ -6946,6 +7046,17 @@ mod resync_tests {
             first_seq: 3,
             seq: 3,
         });
+        assert_eq!(
+            stack.drain_pending_resync_requests(),
+            vec![TerminalResyncRequest {
+                terminal_id: id,
+                required_seq: 3,
+            }]
+        );
+
+        // The first request is now in flight. Output 4 raises the recovery
+        // debt but does not enqueue a duplicate request while that reply is
+        // outstanding.
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
             bytes: b"-still-torn".to_vec(),
@@ -6953,10 +7064,28 @@ mod resync_tests {
             seq: 4,
         });
         let slot = &stack.terminals[&id];
-        assert!(slot.desynced);
+        assert!(slot.sync.is_desynced());
         assert_eq!(slot.last_seq, 1);
         assert_eq!(slot.recent, b"stable");
-        assert_eq!(stack.drain_pending_resync_requests(), vec![(id, 3)]);
+        assert!(stack.drain_pending_resync_requests().is_empty());
+
+        // The in-flight reply only covers its original debt. It cannot clear
+        // the newer watermark; receiving it must immediately queue one retry
+        // through sequence 4 even if the terminal goes quiet now.
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"still-stale".to_vec(),
+            seq: 3,
+        });
+        assert_eq!(stack.terminals[&id].last_seq, 1);
+        assert_eq!(stack.terminals[&id].recent, b"stable");
+        assert_eq!(
+            stack.drain_pending_resync_requests(),
+            vec![TerminalResyncRequest {
+                terminal_id: id,
+                required_seq: 4,
+            }]
+        );
 
         stack.on_event(&Event::TerminalResync {
             terminal_id: id,
@@ -6964,7 +7093,7 @@ mod resync_tests {
             seq: 4,
         });
         let slot = &stack.terminals[&id];
-        assert!(!slot.desynced);
+        assert!(!slot.sync.is_desynced());
         assert_eq!(slot.last_seq, 4);
         assert_eq!(slot.recent, b"recovered");
 
@@ -7011,10 +7140,16 @@ mod resync_tests {
             dismissed_updates: Vec::new(),
         });
         let slot = &stack.terminals[&id];
-        assert!(slot.desynced);
+        assert!(slot.sync.is_desynced());
         assert_eq!(slot.last_seq, 1, "failed snapshot cannot lower coverage");
         assert_eq!(slot.recent, b"known-good", "screen state is preserved");
-        assert_eq!(stack.drain_pending_resync_requests(), vec![(id, 1)]);
+        assert_eq!(
+            stack.drain_pending_resync_requests(),
+            vec![TerminalResyncRequest {
+                terminal_id: id,
+                required_seq: 1,
+            }]
+        );
 
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
@@ -7054,10 +7189,16 @@ mod resync_tests {
         });
 
         let slot = &stack.terminals[&id];
-        assert!(slot.desynced);
+        assert!(slot.sync.is_desynced());
         assert_eq!(slot.last_seq, 1, "failed local reset cannot claim coverage");
         assert_eq!(slot.recent, b"stable", "last coherent grid is preserved");
-        assert_eq!(stack.drain_pending_resync_requests(), vec![(id, 4)]);
+        assert_eq!(
+            stack.drain_pending_resync_requests(),
+            vec![TerminalResyncRequest {
+                terminal_id: id,
+                required_seq: 4,
+            }]
+        );
     }
 
     #[test]
@@ -7814,6 +7955,63 @@ mod hidden_feed_tests {
 
         stack.set_active_session(Some(sk_b));
         assert_eq!(row0(&mut stack), "fresh");
+    }
+
+    /// #909 regression: a long soft-wrapped token and a sticky status row
+    /// share a scroll region, then an authoritative replay replaces the live
+    /// parser after a sequence gap. The replay must be reset-and-refeed, not
+    /// appended to the shifted grid; otherwise the wrapped tail and status
+    /// row accumulate once per redraw/resync.
+    #[test]
+    fn soft_wrap_scroll_region_redraw_and_resync_do_not_duplicate_rows() {
+        let sk = SessionKey::new("agent");
+        let id = TerminalId(1);
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        spawn(&mut stack, id, &sk);
+        stack.set_active_session(Some(sk));
+        render(&mut stack);
+
+        let long_branch = format!("branch {}WRAP-TAIL-909", "x".repeat(90));
+        let replay = format!(
+            "\x1b[2J\x1b[H\x1b[2;18r\x1b[4;1H{long_branch}\
+             \x1b[16;1H\x1b[2KSTATUS-909 running in background\
+             \x1b[16;1H\x1b[2KSTATUS-909 running in background\
+             \x1b[2;1H\x1bM\
+             \x1b[17;1H\x1b[2K\x1b[16;1H\x1b[2KSTATUS-909 running in background"
+        );
+        feed(&mut stack, id, replay.as_bytes(), 1);
+
+        let assert_once = |rows: &[String]| {
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.contains("WRAP-TAIL-909"))
+                    .count(),
+                1,
+                "soft-wrapped tail duplicated: {rows:?}",
+            );
+            assert_eq!(
+                rows.iter().filter(|row| row.contains("STATUS-909")).count(),
+                1,
+                "sticky status row duplicated: {rows:?}",
+            );
+        };
+
+        assert_once(&screen_rows(&mut stack));
+
+        // Skip seq 2. The client preserves the coherent grid until the
+        // authoritative ring replay arrives, then rebuilds from scratch.
+        feed(&mut stack, id, b"dropped successor", 3);
+        assert!(stack.terminals[&id].sync.is_desynced());
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: replay.into_bytes(),
+            seq: 3,
+        });
+        assert!(!stack.terminals[&id].sync.is_desynced());
+
+        assert_once(&screen_rows(&mut stack));
+        // A paint-only redraw must remain idempotent as well.
+        assert_once(&screen_rows(&mut stack));
     }
 }
 
@@ -9766,7 +9964,7 @@ mod agent_crash_tests {
         let auth = stack.terminals.get(&TerminalId(2)).expect("auth terminal");
         assert_eq!(auth.last_seq, 1);
         assert_eq!(auth.recent, b"provider login");
-        assert!(!auth.desynced);
+        assert!(!auth.sync.is_desynced());
     }
 
     #[test]

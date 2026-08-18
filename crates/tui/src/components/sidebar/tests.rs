@@ -2281,6 +2281,56 @@ mod search_tests {
         assert!(!row.contains("used"), "{row:?}");
     }
 
+    /// A quota-only agent (no terminal, no budget, no committed usage) still
+    /// surfaces its "can I keep working?" headroom while its window is live —
+    /// the quota fragment is the row's whole reason to exist.
+    #[test]
+    fn usage_summary_shows_a_quota_only_agent_with_a_live_window() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        // Reset far in the future so the window is unambiguously current.
+        sb.note_provider_quota(
+            "codex",
+            lazybox_ipc::ProviderQuota {
+                five_hour: Some(lazybox_ipc::QuotaWindow {
+                    utilization_bp: 4500,
+                    reset_at: Some(9_999_999_999),
+                }),
+                weekly: None,
+            },
+        );
+        let row = usage_row(&mut sb);
+        assert!(row.contains("Codex"), "{row:?}");
+        assert!(row.contains("45%"), "{row:?}");
+    }
+
+    /// Once a quota-only agent's every window has passed its reset, the
+    /// utilization is stale (the provider rolled the window over) and there
+    /// is nothing left to show — the row must disappear rather than render a
+    /// bare "Codex 0 used" carrying a pre-reset figure that no longer holds.
+    #[test]
+    fn usage_summary_drops_a_quota_only_agent_after_its_windows_reset() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        // Both resets in 1970 — unambiguously in the past for any real clock.
+        sb.note_provider_quota(
+            "codex",
+            lazybox_ipc::ProviderQuota {
+                five_hour: Some(lazybox_ipc::QuotaWindow {
+                    utilization_bp: 9000,
+                    reset_at: Some(0),
+                }),
+                weekly: Some(lazybox_ipc::QuotaWindow {
+                    utilization_bp: 6000,
+                    reset_at: Some(1),
+                }),
+            },
+        );
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.usage_row_height(area), 0);
+        let row = usage_row(&mut sb);
+        assert!(!row.contains("Codex"), "{row:?}");
+        assert!(!row.contains("used"), "{row:?}");
+    }
+
     /// Without a budget the widget degrades to a bare token total ("show
     /// what's known"), and the reset hint is folded in only while the
     /// agent is actually limited.
@@ -4016,6 +4066,34 @@ mod spawning_tests {
         assert_eq!(sb.working_spinner_frame, 5);
     }
 
+    /// Release regression #1156: the provisioning state belongs to the target
+    /// workspace, not the cursor. Navigating to another row must leave the
+    /// original row's animated spawning arc intact.
+    #[test]
+    fn spawning_arc_survives_focus_moving_to_another_workspace() {
+        let (mut sb, spawning_key) = one_workspace();
+        let mut other_task = base_task();
+        other_task.id.key = "o/r#2".into();
+        other_task.title = "Other work".into();
+        let other = Workspace::from_task(other_task, chrono::Utc::now());
+        let other_key = SessionKey::from(&other.key);
+        sb.workspaces.insert(other_key.clone(), other);
+        sb.recompute_visible();
+
+        sb.on_event(&progress(
+            &spawning_key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.focus_workspace_key(&other_key));
+
+        assert!(
+            sb.is_spawning(&spawning_key),
+            "focus changes cannot erase another workspace's provision state"
+        );
+        assert_eq!(sb.selected_session_key(), Some(&other_key));
+    }
+
     /// Acceptance render: the row shows the distinct spawning arc during
     /// provisioning, then yields to the working braille spinner once the
     /// agent goes live.
@@ -5232,5 +5310,53 @@ mod linear_team_repo_picker_tests {
             sb.github_repos_ranked_for_linear_team("OBI"),
             vec!["obin-ai/obin-platform".to_string()],
         );
+    }
+
+    #[test]
+    fn quota_window_formats_percent_and_countdown() {
+        use super::super::{format_quota_window, format_reset_countdown};
+        use lazybox_ipc::QuotaWindow;
+
+        // 4512 bp → 45%; reset 2h out → "45% · 2h".
+        let window = QuotaWindow {
+            utilization_bp: 4512,
+            reset_at: Some(7_200),
+        };
+        assert_eq!(
+            format_quota_window(Some(window), 0),
+            Some("45% · 2h".to_string())
+        );
+        // No reset → bare percentage.
+        let no_reset = QuotaWindow {
+            utilization_bp: 6000,
+            reset_at: None,
+        };
+        assert_eq!(
+            format_quota_window(Some(no_reset), 0),
+            Some("60%".to_string())
+        );
+        // Absent window → nothing.
+        assert_eq!(format_quota_window(None, 0), None);
+        // A reset already in the past means the window rolled over: the
+        // utilization is stale, so the whole window is dropped (unknown) —
+        // never reported as the pre-reset percentage.
+        let past = QuotaWindow {
+            utilization_bp: 9000,
+            reset_at: Some(100),
+        };
+        assert_eq!(format_quota_window(Some(past), 500), None);
+        // The exact-boundary tick counts as passed (reset "now" is over).
+        let at_boundary = QuotaWindow {
+            utilization_bp: 9000,
+            reset_at: Some(500),
+        };
+        assert_eq!(format_quota_window(Some(at_boundary), 500), None);
+
+        // Countdown units.
+        assert_eq!(format_reset_countdown(45, 0), Some("45s".to_string()));
+        assert_eq!(format_reset_countdown(120, 0), Some("2m".to_string()));
+        assert_eq!(format_reset_countdown(7_200, 0), Some("2h".to_string()));
+        assert_eq!(format_reset_countdown(172_800, 0), Some("2d".to_string()));
+        assert_eq!(format_reset_countdown(0, 0), None);
     }
 }

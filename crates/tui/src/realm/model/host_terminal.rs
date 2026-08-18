@@ -307,11 +307,15 @@ pub(crate) fn enable_host_terminal() {
     // raw mode is about to replace, and from this point on an abort out
     // of the vendored VT parser leaves a usable shell behind.
     fatal::arm();
-    let mut out = std::io::stdout();
+    let mut bytes = Vec::new();
     for mode in HostMode::ALL {
-        mode.enable(&mut out);
+        mode.enable(&mut bytes);
     }
-    let _ = out.flush();
+    // `Model::new` constructs the async writer before this guard, so startup
+    // escapes share the same ordered fd-1 lane as frames, OSC passthrough,
+    // mouse toggles, clipboard writes, and restore. `enqueue_raw` retains a
+    // direct fallback for a headless caller with no writer.
+    super::render_writer::enqueue_raw(&bytes);
 }
 
 /// Restore every `HostMode` (reverse of the enable order), at most
@@ -495,7 +499,12 @@ mod tests {
         if std::env::var_os("LAZYBOX_FATAL_SIGNAL_CHILD").is_none() {
             return;
         }
-        fatal::arm();
+        // Under a real PTY this is the production order: construct the
+        // off-thread fd-1 owner, then arm + enable every host mode. The
+        // adapter may fail when the parent test captures stdout with a pipe;
+        // the signal restore itself is still exercised in that fallback.
+        let _adapter = super::super::render_writer::AsyncCrosstermAdapter::new().ok();
+        enable_host_terminal();
         unsafe { libc::abort() };
     }
 
@@ -538,6 +547,58 @@ mod tests {
             String::from_utf8_lossy(&out.stderr).contains("terminal restored"),
             "abort should say what happened; stderr={:?}",
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Panic counterpart to the fatal child. A PTY smoke check can invoke
+    /// this exact helper and compare `stty -g` before/after; the ordinary test
+    /// still pins that the panic hook emits the complete reset before the
+    /// process reports failure.
+    #[cfg(unix)]
+    #[test]
+    fn panic_restore_child_helper() {
+        if std::env::var_os("LAZYBOX_PANIC_RESTORE_CHILD").is_none() {
+            return;
+        }
+        let _adapter = super::super::render_writer::AsyncCrosstermAdapter::new().ok();
+        super::super::install_panic_hook();
+        enable_host_terminal();
+        panic!("intentional lazybox panic restore probe");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panic_hook_restores_before_the_child_exits() {
+        use std::process::Command;
+
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = Command::new(exe)
+            .args([
+                "--exact",
+                "realm::model::host_terminal::tests::panic_restore_child_helper",
+                "--nocapture",
+            ])
+            .env("LAZYBOX_PANIC_RESTORE_CHILD", "1")
+            .output()
+            .expect("run child");
+
+        assert!(
+            !out.status.success(),
+            "intentional panic must fail the child"
+        );
+        let expected = signal_restore_bytes();
+        assert!(
+            out.stdout
+                .windows(expected.len())
+                .any(|window| window == expected.as_slice()),
+            "panic must emit the restore sequence; stdout={:?}",
+            String::from_utf8_lossy(&out.stdout),
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr)
+                .contains("intentional lazybox panic restore probe"),
+            "panic remains visible after restore; stderr={:?}",
+            String::from_utf8_lossy(&out.stderr),
         );
     }
 

@@ -334,6 +334,68 @@ async fn uncommitted_changes_block_safe_delete() {
     assert!(!wt.exists(), "dir removed");
 }
 
+/// Regression for the workspace-removal TOCTOU (#1166): a confirmation can
+/// only carry an old inspection. If an agent writes after that snapshot, the
+/// destructive boundary must notice the new file and leave the checkout in
+/// place.
+#[tokio::test]
+async fn stale_clean_inspection_cannot_delete_new_uncommitted_work() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "stale-dirty", "stale-dirty", "main").await;
+    let row = mgr(&fx)
+        .inspect_worktrees(&[])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.path.ends_with("stale-dirty"))
+        .expect("clean inspection row");
+    assert!(row.is_safe_to_delete, "pre-confirm snapshot is clean");
+
+    std::fs::write(wt.join("late-wip.txt"), "created after confirm").unwrap();
+
+    let error = mgr(&fx)
+        .delete_inspected(&row, false)
+        .await
+        .expect_err("fresh delete boundary must refuse late local work");
+    assert!(error.to_string().contains("uncommitted"), "got: {error}");
+    assert_eq!(
+        std::fs::read_to_string(wt.join("late-wip.txt")).unwrap(),
+        "created after confirm"
+    );
+}
+
+/// Same race, but with the exact release-blocker shape: the agent commits its
+/// work after the UI inspected the checkout and before removal. A clean status
+/// is not enough; the final boundary must also re-check unpushed commits.
+#[tokio::test]
+async fn stale_clean_inspection_cannot_delete_new_unpushed_commit() {
+    let fx = setup_fixture().await;
+    let wt = add_wt(&fx, "stale-ahead", "stale-ahead", "main").await;
+    let row = mgr(&fx)
+        .inspect_worktrees(&[])
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.path.ends_with("stale-ahead"))
+        .expect("clean inspection row");
+    assert!(row.is_safe_to_delete, "pre-confirm snapshot is clean");
+
+    std::fs::write(wt.join("late-commit.txt"), "committed after confirm").unwrap();
+    run(&wt, &["add", "."]).await;
+    run(&wt, &["commit", "-q", "-m", "late local commit"]).await;
+
+    let error = mgr(&fx)
+        .delete_inspected(&row, false)
+        .await
+        .expect_err("fresh delete boundary must refuse an unpushed commit");
+    assert!(error.to_string().contains("unpushed"), "got: {error}");
+    assert!(wt.exists(), "checkout containing the only commit survives");
+    assert_eq!(
+        run_capture(&wt, &["log", "-1", "--format=%s"]).await.trim(),
+        "late local commit"
+    );
+}
+
 /// A "ghost on disk" with a severed `.git` (its bare clone was deleted)
 /// but real files must NOT be `rm -rf`'d on a non-force delete. Its
 /// `uncommitted`/`unpushed` probes run git inside the worktree, fail on
@@ -360,6 +422,7 @@ async fn content_bearing_ghost_without_bare_is_not_rm_rfed() {
         size_bytes: 42,
         last_modified: None,
         has_uncommitted_changes: false,
+        status_verified: false,
         has_unpushed_commits: false,
         is_safe_to_delete: true,
     };
@@ -401,6 +464,7 @@ async fn empty_ghost_without_bare_is_still_cleaned() {
         size_bytes: 0,
         last_modified: None,
         has_uncommitted_changes: false,
+        status_verified: false,
         has_unpushed_commits: false,
         is_safe_to_delete: true,
     };
@@ -430,6 +494,7 @@ async fn vanished_ghost_without_bare_is_a_clean_noop() {
         size_bytes: 0,
         last_modified: None,
         has_uncommitted_changes: false,
+        status_verified: false,
         has_unpushed_commits: false,
         is_safe_to_delete: true,
     };

@@ -32,7 +32,7 @@ mod inputs;
 mod keys;
 mod modals;
 mod optimistic;
-mod render_writer;
+pub(crate) mod render_writer;
 mod terminal_leader;
 #[cfg(test)]
 mod tests;
@@ -703,6 +703,13 @@ pub(crate) struct PendingConversion {
     pub(crate) response: String,
     pub(crate) target_prompt: Option<String>,
     pub(crate) phase: ConversionPhase,
+}
+
+#[derive(Debug, Clone)]
+struct PendingWorkspaceCreate {
+    name: String,
+    spawn_agent: bool,
+    workspace_key: Option<lazybox_core::SessionKey>,
 }
 
 /// One queued workspace-removal prompt. Surfaced one at a time as a
@@ -1855,6 +1862,13 @@ pub struct Model<T: TerminalAdapter> {
     /// first-time worktree provision let the user navigate away before
     /// the terminal landed.
     spawn_follow_to: Option<lazybox_core::SessionKey>,
+    /// Client-correlated new-workspace commands waiting for their durable
+    /// key and optional spawn outcome. The daemon allocates collision
+    /// suffixes, so the TUI cannot safely infer this key from the entered
+    /// name; it must wait for `WorkspaceCreated` and then follow that exact
+    /// row. Entries remain until `CommandCompleted` / `CommandFailed`,
+    /// ensuring a failed create/spawn always gets a visible outcome.
+    pending_workspace_creates: std::collections::HashMap<String, PendingWorkspaceCreate>,
     /// The last `IpcCommand::Spawn` sent, kept so the `r` retry on a
     /// failed `WorktreeProgress` modal can re-issue it verbatim (issue
     /// #557) — provisioning failures persist no session, so a re-send
@@ -2298,6 +2312,7 @@ impl<T: TerminalAdapter> Model<T> {
             deferred_focus_project: None,
             merge_follow_from: None,
             spawn_follow_to: None,
+            pending_workspace_creates: std::collections::HashMap::new(),
             last_spawn: None,
             linear_map_spawn: None,
             deferred_focus_terminal: None,
@@ -3849,6 +3864,14 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     fn send_cmd(&self, cmd: IpcCommand) {
+        self.try_send_cmd(cmd);
+    }
+
+    /// Attempt one non-blocking command admission and surface either failure
+    /// through the normal daemon-health path. The boolean is used by recovery
+    /// batching so rejected resync debt can be requeued instead of silently
+    /// disappearing.
+    fn try_send_cmd(&self, cmd: IpcCommand) -> bool {
         if let Err(e) = self.client.send(cmd) {
             tracing::warn!("ipc send failed: {e}");
             // Don't pretend the keypress worked: flag the failure so
@@ -3863,6 +3886,9 @@ impl<T: TerminalAdapter> Model<T> {
                     self.cmd_send_failed.set(true);
                 }
             }
+            false
+        } else {
+            true
         }
     }
 
@@ -4473,9 +4499,24 @@ impl<T: TerminalAdapter> Model<T> {
     /// unit-tested in isolation: tests construct a Model, call
     /// `handle_X`, and assert on the returned `Vec<IpcCommand>`
     /// without ever needing a real IPC client.
-    fn dispatch_cmds(&self, cmds: Vec<IpcCommand>) {
+    fn dispatch_cmds(&mut self, cmds: Vec<IpcCommand>) {
         for cmd in cmds {
-            self.send_cmd(cmd);
+            let workspace_create = match &cmd {
+                IpcCommand::CreateWorkspace {
+                    client_request_id: Some(id),
+                    ..
+                } => Some(id.clone()),
+                _ => None,
+            };
+            if !self.try_send_cmd(cmd)
+                && let Some(request_id) = workspace_create
+                && let Some(pending) = self.pending_workspace_creates.remove(&request_id)
+            {
+                self.flash_error(format!(
+                    "✗ workspace {} was not created — daemon command channel is unavailable",
+                    pending.name
+                ));
+            }
         }
     }
 

@@ -61,6 +61,7 @@ function task(title: string, unread = 0, updatedAt = "2026-01-01"): Task {
     mergeable: "Unknown",
     is_behind_base: false,
     merge_blocked: false,
+    approval_policy: "Default",
     node_id: null,
     needs_reply: false,
     last_commenter: null,

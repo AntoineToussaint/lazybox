@@ -23,6 +23,31 @@ const ACTION_DROPPED_NOTE: &str =
 
 const MOUSE_CAPTURE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+impl<T: TerminalAdapter> Model<T> {
+    /// Flush all client-side terminal sequence debts through bounded batch
+    /// commands. Snapshot recovery can mark hundreds of terminals at once;
+    /// chunking by the protocol bound keeps each frame finite without
+    /// consuming one command-channel slot per terminal (#1171).
+    fn flush_pending_terminal_resyncs(&mut self) {
+        let requests = self.terminals.drain_pending_resync_requests();
+        if requests.is_empty() {
+            return;
+        }
+
+        let mut sent = 0;
+        for chunk in requests.chunks(lazybox_ipc::MAX_RESYNC_REQUESTS_PER_BATCH) {
+            if !self.try_send_cmd(IpcCommand::RequestTerminalResync {
+                requests: chunk.to_vec(),
+            }) {
+                self.terminals
+                    .requeue_resync_requests(requests[sent..].to_vec());
+                return;
+            }
+            sent += chunk.len();
+        }
+    }
+}
+
 /// Compose a readable action-failure banner (merge/close/update/delete
 /// rejected). Leads with the reason — the part that matters — and trims
 /// the `owner/repo#NNN` label to just `#NNN`, so the footer's
@@ -393,6 +418,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
             IpcEvent::AgentSessionUsage { agent_id, usage } => {
                 self.sidebar.add_agent_session_usage(agent_id, usage);
+            }
+            IpcEvent::AgentProviderQuota { agent_id, quota } => {
+                self.sidebar.note_provider_quota(agent_id, *quota);
             }
             IpcEvent::AgentTurnFinished { run_id, .. } => {
                 self.sidebar.commit_agent_turn(*run_id);
@@ -879,13 +907,7 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::TerminalOutput { terminal_id, .. } = &event {
             let visible = self.terminals.is_terminal_visible(*terminal_id);
             self.terminals.on_daemon_event(&event);
-            let resync_requests = self.terminals.drain_pending_resync_requests();
-            for (terminal_id, required_seq) in resync_requests {
-                self.send_cmd(IpcCommand::RequestTerminalResync {
-                    terminal_id,
-                    required_seq,
-                });
-            }
+            self.flush_pending_terminal_resyncs();
             if visible {
                 self.redraw = true;
             }
@@ -923,6 +945,64 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if self.handle_pr_chat_agent_event(&event) {
             return;
+        }
+        // New-workspace creation is request-correlated because the daemon,
+        // not the client, allocates the final collision-suffixed key. Reveal
+        // that exact row as soon as durability is acknowledged, then keep the
+        // request pending until the optional agent spawn explicitly completes
+        // or fails. This closes the old silent-success hole where the row and
+        // terminal existed but focus stayed on an unrelated repository.
+        match &event {
+            IpcEvent::WorkspaceCreated {
+                client_request_id,
+                workspace_key,
+            } => {
+                if let Some(pending) = self.pending_workspace_creates.get_mut(client_request_id) {
+                    let session_key: lazybox_core::SessionKey = workspace_key.into();
+                    pending.workspace_key = Some(session_key.clone());
+                    let spawn_agent = pending.spawn_agent;
+                    let name = pending.name.clone();
+                    self.sidebar.focus_workspace_key(&session_key);
+                    if spawn_agent {
+                        self.spawn_follow_to = Some(session_key);
+                        self.flash_info(format!("created {name} — starting agent…"));
+                    } else {
+                        self.flash_info(format!("created {name}"));
+                    }
+                    self.needs_pane_sync = true;
+                    self.redraw = true;
+                }
+            }
+            IpcEvent::CommandCompleted { client_request_id } => {
+                if let Some(pending) = self.pending_workspace_creates.remove(client_request_id) {
+                    let message = if pending.spawn_agent {
+                        format!("workspace {} ready", pending.name)
+                    } else {
+                        format!("workspace {} created", pending.name)
+                    };
+                    self.flash_info(message);
+                }
+            }
+            IpcEvent::CommandFailed {
+                client_request_id,
+                message,
+            } => {
+                if let Some(pending) = self.pending_workspace_creates.remove(client_request_id) {
+                    if pending.workspace_key.as_ref() == self.spawn_follow_to.as_ref() {
+                        self.spawn_follow_to = None;
+                    }
+                    let failure = if pending.workspace_key.is_some() {
+                        format!(
+                            "✗ workspace {} was created, but its agent failed to start — {message}",
+                            pending.name
+                        )
+                    } else {
+                        format!("✗ workspace {} was not created — {message}", pending.name)
+                    };
+                    self.flash_error(failure);
+                }
+            }
+            _ => {}
         }
         if let IpcEvent::WorkspaceFocusRequested { session_key } = &event {
             self.jump_to_workspace_key(session_key);
@@ -1014,6 +1094,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentUserQuestion { .. }
                 | IpcEvent::AgentUsage { .. }
                 | IpcEvent::AgentSessionUsage { .. }
+                | IpcEvent::AgentProviderQuota { .. }
                 | IpcEvent::AgentTurnFinished { .. }
                 | IpcEvent::AgentRunFinished { .. }
                 | IpcEvent::ProviderCredentialUpdated { .. }
@@ -1033,6 +1114,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalModelChanged { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. }
                 | IpcEvent::AgentUsageLimit { .. }
+                | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. } => {}
             }
         }
@@ -1719,13 +1801,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             _ => {}
         }
-        let resync_requests = self.terminals.drain_pending_resync_requests();
-        for (terminal_id, required_seq) in resync_requests {
-            self.send_cmd(IpcCommand::RequestTerminalResync {
-                terminal_id,
-                required_seq,
-            });
-        }
+        self.flush_pending_terminal_resyncs();
         if matches!(&event, IpcEvent::TerminalResyncUnavailable { .. }) {
             self.flash(
                 "terminal output paused — authoritative replay unavailable; retrying",
@@ -1853,6 +1929,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentUserQuestion { .. }
             | IpcEvent::AgentUsage { .. }
             | IpcEvent::AgentSessionUsage { .. }
+            | IpcEvent::AgentProviderQuota { .. }
             | IpcEvent::AgentTurnFinished { .. }
             | IpcEvent::AgentRunFinished { .. }
             | IpcEvent::ProviderCredentialUpdated { .. }
@@ -1872,6 +1949,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::TerminalModelChanged { .. }
             | IpcEvent::RecoveredTerminalsRequireRestart { .. }
             | IpcEvent::AgentUsageLimit { .. }
+            | IpcEvent::WorkspaceCreated { .. }
             | IpcEvent::ErrorInbox { .. } => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -2124,6 +2202,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentUserQuestion { .. }
                 | IpcEvent::AgentUsage { .. }
                 | IpcEvent::AgentSessionUsage { .. }
+                | IpcEvent::AgentProviderQuota { .. }
                 | IpcEvent::AgentTurnFinished { .. }
                 | IpcEvent::AgentRunFinished { .. }
                 | IpcEvent::ProviderCredentialUpdated { .. }
@@ -2143,6 +2222,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalModelChanged { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. }
                 | IpcEvent::AgentUsageLimit { .. }
+                | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. } => {}
             }
         }
@@ -2152,7 +2232,7 @@ impl<T: TerminalAdapter> Model<T> {
             let msg = if *skipped == 0 {
                 format!("cleaned {removed} worktree(s)")
             } else {
-                format!("cleaned {removed} worktree(s) · kept {skipped} (active)")
+                format!("cleaned {removed} worktree(s) · kept {skipped} (active or unsafe)")
             };
             self.flash_hint(msg);
         }

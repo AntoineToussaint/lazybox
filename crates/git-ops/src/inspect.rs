@@ -105,6 +105,10 @@ pub struct WorktreeInspection {
     pub last_modified: Option<SystemTime>,
     /// `git status --porcelain` reported at least one entry.
     pub has_uncommitted_changes: bool,
+    /// `git status --porcelain` completed successfully. A `false` value is
+    /// distinct from a verified-clean checkout: destructive preflights must
+    /// preserve the worktree when cleanliness could not be established.
+    pub status_verified: bool,
     /// HEAD is ahead of its upstream remote-tracking branch.
     pub has_unpushed_commits: bool,
     /// Convenience: no uncommitted changes AND no unpushed commits AND
@@ -395,6 +399,7 @@ impl WorktreeManager {
                 size_bytes: 0,
                 last_modified: None,
                 has_uncommitted_changes: false,
+                status_verified: false,
                 has_unpushed_commits: false,
                 is_safe_to_delete: true,
             });
@@ -405,19 +410,35 @@ impl WorktreeManager {
         Ok(inspections)
     }
 
-    /// Delete a worktree the inspector flagged. Refuses if the entry
-    /// is locked or has uncommitted/unpushed work, unless `force` is
-    /// set — callers (CLI confirm prompt, bulk-safe action) decide
-    /// whether to override.
-    ///
-    /// Uses `git worktree remove` first, falling back to
-    /// `git worktree prune` when the directory has already vanished
-    /// (mirrors [`WorktreeManager::remove_by_path`]'s contract).
+    /// Delete a worktree the inspector flagged. A non-force call treats the
+    /// inspection as advisory and freshly re-checks locked, dirty, and
+    /// unpushed state under the repo lock before removal. `force` remains an
+    /// explicit administrative override for the orphan-cleanup UI; workspace
+    /// lifecycle deletion never uses it.
     pub async fn delete_inspected(
         &self,
         inspection: &WorktreeInspection,
         force: bool,
     ) -> Result<(), GitError> {
+        self.delete_inspected_if(inspection, force, || true)
+            .await
+            .map(|_| ())
+    }
+
+    /// Delete an inspected worktree only if the caller's ownership guard
+    /// still holds. A non-force delete re-runs lock, status, and unpushed
+    /// probes while holding the per-repo lock, then invokes `git worktree
+    /// remove` without `--force` and without an `rm -rf` fallback. Thus a
+    /// stale inspection can inform a prompt but can never authorize deletion.
+    pub async fn delete_inspected_if<F>(
+        &self,
+        inspection: &WorktreeInspection,
+        force: bool,
+        still_removable: F,
+    ) -> Result<bool, GitError>
+    where
+        F: FnOnce() -> bool + Send,
+    {
         if !force {
             if inspection.reasons.contains(&OrphanReason::Locked) {
                 return Err(GitError::Command(format!(
@@ -454,6 +475,9 @@ impl WorktreeManager {
         // (at most a `.git`) is cleared outright; a content-bearing ghost
         // is refused rather than `rm -rf`'d blind.
         let Some(bare) = inspection.bare_path.as_ref() else {
+            if !still_removable() {
+                return Ok(false);
+            }
             if !force && directory_has_real_content(&inspection.path).await {
                 return Err(GitError::Command(format!(
                     "worktree {} has no bare clone to verify against and holds files — \
@@ -464,10 +488,69 @@ impl WorktreeManager {
             if inspection.path.exists() {
                 tokio::fs::remove_dir_all(&inspection.path).await?;
             }
-            return Ok(());
+            return Ok(true);
         };
 
-        self.remove_by_path(bare, &inspection.path).await?;
+        if force {
+            let removed = self
+                .remove_by_path_if(bare, &inspection.path, still_removable)
+                .await?;
+            if removed && let Some(branch) = inspection.branch.as_deref() {
+                delete_local_branch(self.git_runner(), bare, branch).await;
+            }
+            return Ok(removed);
+        }
+
+        // Re-run every destructive safety probe while holding the same
+        // per-repo lock as the removal. The earlier inspection is evidence
+        // for UI copy only; it is never the final delete authority.
+        let lock = crate::repo_lock(bare);
+        let _guard = lock.lock().await;
+        if !still_removable() {
+            return Ok(false);
+        }
+        if !inspection.path.exists() {
+            let _ = crate::run_git_in(self.git_runner(), bare, &["worktree", "prune"]).await;
+            return Ok(true);
+        }
+
+        let path_key = canonical_or_self(&inspection.path);
+        let entries = list_porcelain(self.git_runner(), bare).await?;
+        let Some(entry) = entries
+            .iter()
+            .find(|entry| canonical_or_self(&entry.path) == path_key)
+        else {
+            return Err(GitError::Command(format!(
+                "worktree {} is no longer registered with {}; refusing an unverifiable delete",
+                inspection.path.display(),
+                bare.display(),
+            )));
+        };
+        if entry.locked {
+            return Err(GitError::Command(format!(
+                "worktree {} is locked — refusing to delete",
+                inspection.path.display()
+            )));
+        }
+        if uncommitted(self.git_runner(), &inspection.path).await != Some(false) {
+            return Err(GitError::Command(format!(
+                "worktree {} has uncommitted or unverifiable changes — refusing to delete",
+                inspection.path.display()
+            )));
+        }
+        if unpushed(self.git_runner(), &inspection.path, Some(bare)).await {
+            return Err(GitError::Command(format!(
+                "worktree {} has unpushed or unverifiable commits — refusing to delete",
+                inspection.path.display()
+            )));
+        }
+
+        crate::run_git_in(
+            self.git_runner(),
+            bare,
+            &["worktree", "remove", &inspection.path.to_string_lossy()],
+        )
+        .await?;
 
         // `git worktree remove` only drops the working tree — the
         // `refs/heads/<branch>` ref survives. Now that the worktree is
@@ -476,7 +559,7 @@ impl WorktreeManager {
         if let Some(branch) = inspection.branch.as_deref() {
             delete_local_branch(self.git_runner(), bare, branch).await;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -868,6 +951,7 @@ async fn inspect_one(
         size_bytes,
         last_modified,
         has_uncommitted_changes,
+        status_verified: uncommitted_state.is_some(),
         has_unpushed_commits,
         is_safe_to_delete,
     }
@@ -1689,6 +1773,7 @@ mod tests {
             .expect("scripted inspection");
 
         assert_eq!(inspections.len(), 1);
+        assert!(inspections[0].status_verified);
         assert_eq!(
             inspections[0].reasons,
             vec![OrphanReason::BranchDeletedUpstream]
@@ -1745,6 +1830,7 @@ mod tests {
 
         assert_eq!(inspections.len(), 1);
         assert!(!inspections[0].has_uncommitted_changes);
+        assert!(!inspections[0].status_verified);
         assert!(!inspections[0].is_safe_to_delete);
         assert!(!worktree_is_pristine_with(git.as_ref(), &worktree, Some(&bare)).await);
     }
@@ -1754,6 +1840,7 @@ mod tests {
         fn git(repo: &Path, args: &[&str]) {
             let output = std::process::Command::new("git")
                 .current_dir(repo)
+                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
                 .args(args)
                 .output()
                 .expect("run git");
@@ -1881,6 +1968,7 @@ mod tests {
         fn git(repo: &Path, args: &[&str]) {
             let output = std::process::Command::new("git")
                 .current_dir(repo)
+                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
                 .args(args)
                 .output()
                 .expect("run git");

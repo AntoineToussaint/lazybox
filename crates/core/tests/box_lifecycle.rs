@@ -230,9 +230,37 @@ mod behavior {
     use super::{lifecycle_dir, which_bash};
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::{Command, Output, Stdio};
+    use std::process::{Child, Command, Output, Stdio};
     use std::thread::sleep;
     use std::time::Duration;
+
+    /// Own a fixture's whole process group. Killing only the shell leaves a
+    /// background CPU child reparented to pid 1, which was #1163's leak.
+    struct FixtureProcessGroup {
+        child: Child,
+        pgid: i32,
+    }
+
+    impl FixtureProcessGroup {
+        fn spawn(mut command: Command) -> Self {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+            let child = command.spawn().expect("spawn fixture process group");
+            let pgid = child.id() as i32;
+            Self { child, pgid }
+        }
+    }
+
+    impl Drop for FixtureProcessGroup {
+        fn drop(&mut self) {
+            // SAFETY: `process_group(0)` made this child the leader of a
+            // dedicated group containing only this test fixture's tree.
+            unsafe {
+                libc::killpg(self.pgid, libc::SIGKILL);
+            }
+            let _ = self.child.wait();
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -331,13 +359,19 @@ mod behavior {
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
-        // A process spinning the CPU, its argv carrying the watched token.
-        let mut agent = Command::new(&bash)
-            .args(["-c", "while :; do :; done", token])
+        // A bounded CPU spinner, its argv carrying the watched token. The
+        // deadline is a second backstop behind the process-group Drop guard:
+        // even a hard-aborted test can never leak an infinite hot loop.
+        let mut command = Command::new(&bash);
+        command
+            .args([
+                "-c",
+                "end=$((SECONDS+10)); while (( SECONDS < end )); do :; done",
+                token,
+            ])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn busy agent");
+            .stderr(Stdio::null());
+        let agent = FixtureProcessGroup::spawn(command);
 
         // Tick 1 sees a newly-observed process → active, clears the stale marker.
         fs::write(&marker, "1").expect("stale marker");
@@ -353,9 +387,8 @@ mod behavior {
         let stopped_2 = stopped.exists();
         let cleared_2 = !marker.exists();
 
-        // Kill the spinner before asserting so a failure can't leak a busy loop.
-        let _ = agent.kill();
-        let _ = agent.wait();
+        // Teardown before assertions; Drop still runs on every earlier panic.
+        drop(agent);
 
         assert!(!stopped_1, "a live agent must not be stopped");
         assert!(
@@ -391,14 +424,19 @@ mod behavior {
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
-        // Agent (argv carries the watched token) sleeps while a *child* spins
-        // the CPU — the agent accrues no CPU of its own.
-        let mut agent = Command::new(&bash)
-            .args(["-c", "( while :; do :; done ) & sleep 30", token])
+        // Agent (argv carries the watched token) waits while a bounded child
+        // spins. The shell itself accrues no CPU. A dedicated process group
+        // guarantees teardown reaches the child as well as the shell.
+        let mut command = Command::new(&bash);
+        command
+            .args([
+                "-c",
+                "( end=$((SECONDS+10)); while (( SECONDS < end )); do :; done ) & wait",
+                token,
+            ])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn blocked agent");
+            .stderr(Stdio::null());
+        let agent = FixtureProcessGroup::spawn(command);
 
         // Tick 1: newly-seen tree → active, clears the stale marker.
         fs::write(&marker, "1").expect("stale marker");
@@ -414,8 +452,7 @@ mod behavior {
         let stopped_2 = stopped.exists();
         let cleared_2 = !marker.exists();
 
-        let _ = agent.kill();
-        let _ = agent.wait();
+        drop(agent);
 
         assert!(!stopped_1, "a live agent tree must not be stopped");
         assert!(cleared_1, "a newly-seen agent tree clears the idle marker");

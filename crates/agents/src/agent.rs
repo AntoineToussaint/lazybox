@@ -115,6 +115,22 @@ pub struct AuthFailure {
 
 pub use crate::pty::PromptShape;
 
+/// A one-time startup chooser that an unattended launch may answer because
+/// its configured access policy already made that exact decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnattendedPromptKind {
+    WorkspaceTrust,
+    PermissionBypassConsent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnattendedPromptNudge {
+    pub kind: UnattendedPromptKind,
+    /// One fixed chooser keystroke. Adapters cannot reflect dynamic terminal
+    /// output back into the PTY.
+    pub response: &'static [u8],
+}
+
 /// One semantic observation produced by an agent's PTY detector.
 ///
 /// The state and prompt shape travel together so the daemon never has to
@@ -299,9 +315,18 @@ pub trait Agent: Send + Sync {
     /// for any directory it hasn't seen before — skipped only in
     /// non-interactive `-p` mode, which lazybox doesn't use — so an
     /// autonomous spawn in a freshly provisioned worktree would hang on
-    /// it. Best-effort: failures leave the spawn to proceed unchanged.
-    fn prepare_unattended(&self, worktree: &Path) {
+    /// it. A failure is fatal to the unattended spawn: proceeding would turn
+    /// a concrete setup error into a terminal that silently waits forever.
+    fn prepare_unattended(&self, worktree: &Path) -> std::io::Result<()> {
         let _ = worktree;
+        Ok(())
+    }
+
+    /// Recognize an exact, safe-to-answer startup consent screen for an
+    /// unattended launch. Runtime tool approvals and free-text questions must
+    /// return `None`.
+    fn unattended_startup_nudge(&self, _recent_output: &[u8]) -> Option<UnattendedPromptNudge> {
+        None
     }
 
     /// Per-agent state detector. Inspect recent PTY output and return
@@ -690,13 +715,8 @@ pub mod builtins {
             1
         }
 
-        fn prepare_unattended(&self, worktree: &Path) {
-            if let Err(e) = crate::claude_env::seed_unattended_env(worktree) {
-                tracing::warn!(
-                    worktree = %worktree.display(),
-                    "claude: failed to prepare unattended env (trust/onboarding): {e}",
-                );
-            }
+        fn prepare_unattended(&self, worktree: &Path) -> std::io::Result<()> {
+            crate::claude_env::seed_unattended_env(worktree)?;
             // `--dangerously-skip-permissions` paints a bypass-mode consent
             // screen on every start that the flag itself doesn't clear; the
             // per-session `--settings` file seeds the same acceptance, but
@@ -704,13 +724,11 @@ pub mod builtins {
             // persist it in user settings too. Log loudly on failure — this
             // is the difference between an autonomous spawn working and
             // hanging on a non-tool prompt.
-            if let Err(e) = crate::claude_env::seed_skip_dangerous_mode_prompt() {
-                tracing::warn!(
-                    "claude: failed to persist bypass-permissions consent \
-                     (skipDangerousModePermissionPrompt); an autonomous spawn may \
-                     hang on the bypass-mode warning: {e}",
-                );
-            }
+            crate::claude_env::seed_skip_dangerous_mode_prompt()
+        }
+
+        fn unattended_startup_nudge(&self, recent_output: &[u8]) -> Option<UnattendedPromptNudge> {
+            crate::detect::claude_unattended_startup_nudge(recent_output)
         }
 
         fn update_channel(&self) -> Option<crate::update::UpdateChannel> {

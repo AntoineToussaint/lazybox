@@ -206,7 +206,7 @@ static RAW_SINK: OnceLock<Mutex<Sender<WriterMsg>>> = OnceLock::new();
 /// to the terminal. It is queued on the same channel as frames, so it is
 /// serialized behind the current frame and never splices into a half-written
 /// one. Non-blocking.
-pub(super) fn enqueue_raw(bytes: &[u8]) {
+pub(crate) fn enqueue_raw(bytes: &[u8]) {
     if let Some(sink) = RAW_SINK.get() {
         if let Ok(tx) = sink.lock() {
             // Only claim the escape delivered if the writer actually took

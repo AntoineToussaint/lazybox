@@ -18,6 +18,7 @@
 //! through untouched and never buffers a streaming response, so the
 //! agent's own credentials and incremental output are unaffected.
 
+mod quota_parse;
 mod usage_parse;
 
 use std::convert::Infallible;
@@ -33,7 +34,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use lazybox_agents::LlmProvider;
-use lazybox_ipc::AgentUsage;
+use lazybox_ipc::{AgentUsage, ProviderQuota};
 use tokio::net::{TcpListener, TcpStream};
 
 pub use usage_parse::UsageAccumulator;
@@ -58,6 +59,11 @@ pub fn port() -> Option<u16> {
 /// Callback invoked once per upstream response that carried usage, with
 /// the agent id parsed from the request path.
 pub type UsageSink = Arc<dyn Fn(&str, AgentUsage) + Send + Sync>;
+
+/// Callback invoked when a response carried provider plan-quota (Anthropic's
+/// unified rate-limit headers), with the agent id from the request path — the
+/// "can I keep working?" signal, distinct from [`UsageSink`]'s token counts.
+pub type QuotaSink = Arc<dyn Fn(&str, ProviderQuota) + Send + Sync>;
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 type ProxyBody = BoxBody<Bytes, BoxErr>;
@@ -115,6 +121,7 @@ struct ProxyState {
     client: reqwest::Client,
     upstreams: Upstreams,
     sink: UsageSink,
+    quota_sink: QuotaSink,
 }
 
 /// Start the metering proxy when `agent.metering_proxy` is on: bind a
@@ -162,18 +169,31 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
             usage,
         });
     });
+    let quota_bus = config.bus.clone();
+    let quota_sink: QuotaSink = Arc::new(move |agent_id: &str, quota| {
+        let _ = quota_bus.send(lazybox_ipc::Event::AgentProviderQuota {
+            agent_id: agent_id.to_string(),
+            quota,
+        });
+    });
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
-    Some(tokio::spawn(serve(listener, upstreams, sink)))
+    Some(tokio::spawn(serve(listener, upstreams, sink, quota_sink)))
 }
 
 /// Serve the proxy on an already-bound loopback listener until the process
 /// exits. Errors on individual connections are logged, not fatal.
-pub async fn serve(listener: TcpListener, upstreams: Upstreams, sink: UsageSink) {
+pub async fn serve(
+    listener: TcpListener,
+    upstreams: Upstreams,
+    sink: UsageSink,
+    quota_sink: QuotaSink,
+) {
     let state = Arc::new(ProxyState {
         client: reqwest::Client::new(),
         upstreams,
         sink,
+        quota_sink,
     });
     loop {
         let (stream, _) = match listener.accept().await {
@@ -317,6 +337,19 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     };
 
     let status = upstream.status();
+
+    // Plan-quota ("can I keep working?") rides Anthropic's unified
+    // rate-limit *headers*, so it is read here — synchronously, before the
+    // body streams — and attributed to the agent whose request surfaced it.
+    // OpenAI/Codex doesn't expose it on headers, so this fires for Anthropic
+    // only; Codex quota is sourced from its session log elsewhere.
+    if provider == "anthropic" {
+        let quota = quota_parse::parse_anthropic_headers(upstream.headers());
+        if !quota.is_empty() {
+            (state.quota_sink)(&agent_id, quota);
+        }
+    }
+
     let mut builder = Response::builder().status(status);
     if let Some(headers) = builder.headers_mut() {
         *headers = forwarded_headers(upstream.headers());

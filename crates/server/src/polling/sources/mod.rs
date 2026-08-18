@@ -1094,10 +1094,15 @@ async fn has_live_agent_session(
     config: &ServerConfig,
     session_key: &lazybox_core::SessionKey,
 ) -> bool {
-    let terminal_meta = config.terminal.terminal_meta.lock().await;
-    terminal_meta.values().any(|(sk, kind)| {
-        sk.as_str() == session_key.as_str() && matches!(kind, lazybox_ipc::TerminalKind::Agent(_))
-    })
+    config
+        .terminal
+        .metadata_map()
+        .await
+        .into_values()
+        .any(|(sk, kind)| {
+            sk.as_str() == session_key.as_str()
+                && matches!(kind, lazybox_ipc::TerminalKind::Agent(_))
+        })
 }
 
 /// Record that the label-triggered auto-spawn under `key` fired, so later
@@ -2386,21 +2391,26 @@ mod auto_spawn_dedup_tests {
             "no terminals → no live session (spawn failed) → label may retry"
         );
 
-        config.terminal.terminal_meta.lock().await.insert(
-            lazybox_ipc::TerminalId(1),
-            (
+        config
+            .terminal
+            .insert_meta(
+                lazybox_ipc::TerminalId(1),
                 sk.clone(),
                 lazybox_ipc::TerminalKind::Agent("claude".into()),
-            ),
-        );
+            )
+            .await;
         assert!(has_live_agent_session(&config, &sk).await);
 
         // A shell on a different workspace doesn't count as an agent.
         let sk2 = lazybox_core::SessionKey::new("github:o/r#10");
-        config.terminal.terminal_meta.lock().await.insert(
-            lazybox_ipc::TerminalId(2),
-            (sk2.clone(), lazybox_ipc::TerminalKind::Shell),
-        );
+        config
+            .terminal
+            .insert_meta(
+                lazybox_ipc::TerminalId(2),
+                sk2.clone(),
+                lazybox_ipc::TerminalKind::Shell,
+            )
+            .await;
         assert!(!has_live_agent_session(&config, &sk2).await);
     }
 
@@ -2504,39 +2514,31 @@ mod auto_fix_dispatch_tests {
             .spawn(&[agent_id.into()], None, &[], "auto-fix-test")
             .await
             .expect("spawn mock agent");
-        config.terminal.terminal_meta.lock().await.insert(
-            terminal_id,
-            (
+        config
+            .terminal
+            .register_terminal(
+                terminal_id,
+                backend_key.clone(),
                 session_key.clone(),
                 TerminalKind::Agent(agent_id.to_string()),
-            ),
-        );
+            )
+            .await;
+        config.terminal.record_agent_state(terminal_id, state).await;
         config
             .terminal
-            .terminals
-            .lock()
-            .await
-            .insert(terminal_id, backend_key.clone());
+            .record_agent_state_generation(terminal_id, 1)
+            .await;
         config
             .terminal
-            .agent_states
-            .lock()
-            .await
-            .insert(terminal_id, state);
-        config
-            .terminal
-            .agent_state_generations
-            .lock()
-            .await
-            .insert(terminal_id, 1);
-        if on_main {
-            config
-                .terminal
-                .on_main_terminals
-                .lock()
-                .await
-                .insert(terminal_id);
-        }
+            .record_spawn_attributes(
+                terminal_id,
+                None,
+                lazybox_ipc::AgentRunAccess::Default,
+                false,
+                on_main,
+                None,
+            )
+            .await;
         (terminal_id, backend_key)
     }
 

@@ -46,7 +46,7 @@ LOCAL_ZIG_DIR := vendor/zig/$(ZIG_SLUG)
 ZIG_DIR := $(if $(wildcard $(LOCAL_ZIG_DIR)/zig),$(LOCAL_ZIG_DIR),$(CACHE_ZIG_DIR))
 PINNED_PATH := $(abspath $(ZIG_DIR)):$(PATH)
 
-.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract web-control-contract rebase-main test lint clean distclean install help
+.PHONY: all setup build release run run-perf run-fresh run-test run-connect dev dev-fresh desktop desktop-deps desktop-preview desktop-build desktop-test desktop-contract web-control-contract contracts rebase-main test lint clean distclean install install-hooks help
 
 # Side-by-side dev profile root. Picked up by `lazybox_core::paths`
 # everywhere — independent state.db, worktrees, daemon socket, tmux
@@ -147,6 +147,8 @@ desktop-contract: ## Regenerate apps/desktop/src/generated from the Rust desktop
 web-control-contract: ## Regenerate crates/server/src/api_client_contract.json from the Rust web-control DTOs (CI fails on a diff).
 	@PATH="$(PINNED_PATH)" UPDATE_WEB_CONTROL_CONTRACT=1 cargo test -p lazybox-server --test api_gateway web_control_contract_fixture_is_current -- --exact
 
+contracts: desktop-contract web-control-contract ## Regenerate every generated wire contract (desktop + web-control).
+
 rebase-main: ## Rebase the current branch onto origin/main, auto-regenerating the desktop contract on conflict.
 	@PATH="$(PINNED_PATH)" ./scripts/rebase-onto-main.sh
 
@@ -169,10 +171,11 @@ pre-commit: fmt-check ## Run the full gate by hand (fmt + clippy + rustdoc).
 	@PATH="$(PINNED_PATH)" cargo clippy --workspace --all-targets -- -D warnings
 	@PATH="$(PINNED_PATH)" RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace --quiet
 
-install-hooks: ## Activate .githooks/ with the FULL gate (fmt + clippy + rustdoc).
+install-hooks: ## Activate .githooks/ with the FULL gate (fmt + clippy + rustdoc + contract regen).
 	@git config core.hooksPath .githooks
 	@git config lazybox.precommitFull true
-	@echo "Installed .githooks/ (full gate: fmt + clippy + rustdoc)."
+	@echo "Installed .githooks/ (full gate: fmt + clippy + rustdoc + contract regen)."
+	@echo "Contracts regenerate only when a commit stages a fingerprint input (ipc/core/tui-core/api-gateway/Cargo.lock)."
 	@echo "scripts/bootstrap.sh installs the fast fmt-only variant by default."
 	@echo "Bypass any hook with \`git commit --no-verify\`."
 

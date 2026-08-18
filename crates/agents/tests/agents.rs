@@ -891,6 +891,38 @@ fn claude_not_ready_during_trust_folder_prompt() {
     assert!(!agent.detect_ready_for_prompt(trust.as_bytes()));
 }
 
+#[test]
+fn claude_unattended_nudge_accepts_only_live_startup_consent() {
+    use lazybox_agents::UnattendedPromptKind;
+
+    let agent = Claude;
+    let trust = "Do you trust the files in this folder?\n\
+                 ❯ 1. Yes, proceed\n\
+                   2. No, exit\n\
+                 Esc to cancel";
+    let nudge = agent
+        .unattended_startup_nudge(trust.as_bytes())
+        .expect("exact live trust chooser");
+    assert_eq!(nudge.kind, UnattendedPromptKind::WorkspaceTrust);
+    assert_eq!(nudge.response, b"1");
+
+    let runtime_permission = "Allow Bash this command?\n\
+                              ❯ 1. Yes\n\
+                                2. No\nEsc to cancel";
+    assert!(
+        agent
+            .unattended_startup_nudge(runtime_permission.as_bytes())
+            .is_none(),
+        "ordinary tool permissions must never be auto-approved",
+    );
+
+    let stale = format!("{trust}\n? for shortcuts");
+    assert!(
+        agent.unattended_startup_nudge(stale.as_bytes()).is_none(),
+        "a newer composer proves the trust text is scrollback",
+    );
+}
+
 /// Claude has an authoritative readiness detector, so the spawn-time
 /// injector must gate on it — never blind-write past the folder-trust
 /// prompt on a settle timer.

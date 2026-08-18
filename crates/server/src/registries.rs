@@ -6,61 +6,248 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Notify};
 
+/// Typed inputs consumed by the per-terminal turn clock. Producers no longer
+/// arbitrate hook-vs-PTY authority with unrelated wall clocks (#1169).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentTurnEvent {
+    OutputChunk {
+        backend_seq: u64,
+        meaningful_progress: bool,
+    },
+    UserAnswered,
+    HookArrived {
+        waiting_on_user: bool,
+    },
+    Tick(AgentTurnTick),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentTurnTick {
+    Quiet,
+    Watchdog,
+    Reclassify,
+}
+
+#[derive(Debug)]
+struct AgentTurn {
+    next_sequence: u64,
+    last_output: Option<u64>,
+    last_hook: Option<u64>,
+    last_hook_waiting_on_user: bool,
+    last_answer: Option<u64>,
+    last_hook_at: Option<std::time::Instant>,
+    quiet_after: Option<std::time::Duration>,
+    quiet_deadline: Option<tokio::time::Instant>,
+    watchdog_window: Option<std::time::Duration>,
+    content_stable_since: tokio::time::Instant,
+    watchdog_deadline: Option<tokio::time::Instant>,
+    deadline_batch_remaining: Option<usize>,
+    watchdog_ticks_since_hook: u8,
+    last_output_at: tokio::time::Instant,
+}
+
+impl Default for AgentTurn {
+    fn default() -> Self {
+        let now = tokio::time::Instant::now();
+        Self {
+            next_sequence: 0,
+            last_output: None,
+            last_hook: None,
+            last_hook_waiting_on_user: false,
+            last_answer: None,
+            last_hook_at: None,
+            quiet_after: None,
+            quiet_deadline: None,
+            watchdog_window: None,
+            content_stable_since: now,
+            watchdog_deadline: None,
+            deadline_batch_remaining: None,
+            watchdog_ticks_since_hook: 0,
+            last_output_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AgentTurnSchedule {
+    pub quiet_deadline: Option<tokio::time::Instant>,
+    pub watchdog_deadline: Option<tokio::time::Instant>,
+    pub watchdog_due: bool,
+    pub receiver_enabled: bool,
+    pub last_output_at: tokio::time::Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AgentTurnWatchdogFire {
+    pub window: std::time::Duration,
+    pub content_stable: std::time::Duration,
+    pub elapsed_since_output: std::time::Duration,
+}
+
+impl AgentTurn {
+    fn configure(
+        &mut self,
+        quiet_after: std::time::Duration,
+        watchdog_window: Option<std::time::Duration>,
+    ) {
+        let now = tokio::time::Instant::now();
+        self.quiet_after = Some(quiet_after);
+        self.watchdog_window = watchdog_window;
+        self.content_stable_since = now;
+        self.watchdog_deadline = watchdog_window.map(|window| now + window);
+        self.deadline_batch_remaining = None;
+        self.last_output_at = now;
+    }
+
+    fn record(&mut self, event: AgentTurnEvent) -> u64 {
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        let sequence = self.next_sequence;
+        match event {
+            AgentTurnEvent::OutputChunk {
+                backend_seq,
+                meaningful_progress,
+            } => {
+                let _ = backend_seq;
+                self.last_output = Some(sequence);
+                let now = tokio::time::Instant::now();
+                self.last_output_at = now;
+                self.quiet_deadline = self.quiet_after.map(|quiet| now + quiet);
+                if meaningful_progress {
+                    self.content_stable_since = now;
+                    self.watchdog_deadline = self.watchdog_window.map(|window| now + window);
+                    self.deadline_batch_remaining = None;
+                }
+            }
+            AgentTurnEvent::UserAnswered => self.last_answer = Some(sequence),
+            AgentTurnEvent::HookArrived { waiting_on_user } => {
+                self.last_hook = Some(sequence);
+                self.last_hook_waiting_on_user = waiting_on_user;
+                self.last_hook_at = Some(std::time::Instant::now());
+                self.watchdog_ticks_since_hook = 0;
+            }
+            AgentTurnEvent::Tick(tick) => {
+                if tick == AgentTurnTick::Watchdog && self.last_hook.is_some() {
+                    self.watchdog_ticks_since_hook =
+                        self.watchdog_ticks_since_hook.saturating_add(1);
+                }
+            }
+        }
+        sequence
+    }
+
+    fn hook_authority(&self, pty_evidence: Option<u64>) -> lazybox_agents::HookAuthority {
+        let Some(hook) = self.last_hook else {
+            return lazybox_agents::HookAuthority::None;
+        };
+        let answer_supersedes_hook = self.last_answer.is_some_and(|answer| answer > hook);
+        if self.last_hook_waiting_on_user
+            && !answer_supersedes_hook
+            && self.watchdog_ticks_since_hook < 2
+        {
+            return lazybox_agents::HookAuthority::HookNewer;
+        }
+        if pty_evidence.is_some_and(|pty| pty > hook) {
+            lazybox_agents::HookAuthority::PtyNewer
+        } else {
+            lazybox_agents::HookAuthority::HookNewer
+        }
+    }
+
+    fn prepare_schedule(&mut self, queued_chunks: usize) -> AgentTurnSchedule {
+        let now = tokio::time::Instant::now();
+        let watchdog_due = self
+            .watchdog_deadline
+            .is_some_and(|deadline| now >= deadline);
+        if watchdog_due {
+            self.deadline_batch_remaining.get_or_insert(queued_chunks);
+        } else {
+            self.deadline_batch_remaining = None;
+        }
+        AgentTurnSchedule {
+            quiet_deadline: self.quiet_deadline,
+            watchdog_deadline: self.watchdog_deadline,
+            watchdog_due,
+            receiver_enabled: !watchdog_due
+                || self
+                    .deadline_batch_remaining
+                    .is_some_and(|remaining| remaining > 0),
+            last_output_at: self.last_output_at,
+        }
+    }
+
+    fn note_received(&mut self, watchdog_due: bool) {
+        if watchdog_due && let Some(remaining) = &mut self.deadline_batch_remaining {
+            *remaining = remaining.saturating_sub(1);
+        }
+    }
+
+    fn fire_quiet(&mut self) -> std::time::Duration {
+        self.quiet_deadline = None;
+        tokio::time::Instant::now().saturating_duration_since(self.content_stable_since)
+    }
+
+    fn fire_watchdog(&mut self) -> Option<AgentTurnWatchdogFire> {
+        let now = tokio::time::Instant::now();
+        let window = self.watchdog_window?;
+        self.watchdog_deadline = Some(now + window);
+        self.deadline_batch_remaining = None;
+        Some(AgentTurnWatchdogFire {
+            window,
+            content_stable: now.saturating_duration_since(self.content_stable_since),
+            elapsed_since_output: now.saturating_duration_since(self.last_output_at),
+        })
+    }
+}
+
+/// Every mutable fact about one terminal. A terminal is inserted, observed,
+/// marked finishing, and removed under the registry's single lock; readers can
+/// no longer see a backend mapping disappear while stale metadata survives in
+/// another map (#1168).
+#[derive(Default)]
+pub(crate) struct TerminalEntry {
+    pub backend_key: Option<String>,
+    pub session_id: Option<SessionId>,
+    pub agent_state: Option<AgentState>,
+    pub agent_state_generation: Option<u64>,
+    pub meta: Option<(SessionKey, TerminalKind)>,
+    pub access: AgentRunAccess,
+    pub no_permission: bool,
+    pub on_main: bool,
+    pub model_label: Option<String>,
+    pub superseded: bool,
+    pub authenticating: bool,
+    pub outdated_agent: bool,
+    pub agent_detect_reset: bool,
+    turn: AgentTurn,
+    pub input_needed_shape: Option<lazybox_agents::PromptShape>,
+    pub reclassify_request: Option<Arc<Notify>>,
+    pub activity: terminal_io::AgentTerminalActivity,
+    /// Teardown has atomically claimed this entry. It stays present long
+    /// enough to emit Exited from its metadata/state, but live routing and
+    /// reconnect snapshots treat it as absent.
+    pub finishing: bool,
+}
+
+/// Immutable facts captured by the atomic teardown claim.
+pub(crate) struct TerminalTeardownClaim {
+    pub meta: Option<(SessionKey, TerminalKind)>,
+    pub authenticating: bool,
+    pub agent_state_generation: Option<u64>,
+}
+
 /// Per-terminal process state shared by terminal lifecycle handlers.
 #[derive(Clone, Default)]
 pub struct TerminalRegistry {
-    /// Wire terminal id to backend session key.
-    pub(crate) terminals: Arc<Mutex<HashMap<TerminalId, String>>>,
-    /// Owning durable session used to freeze one session during worktree moves.
-    pub(crate) terminal_sessions: Arc<Mutex<HashMap<TerminalId, SessionId>>>,
-    /// Last durable state broadcast for each agent terminal.
-    pub(crate) agent_states: Arc<Mutex<HashMap<TerminalId, AgentState>>>,
-    /// Process generation that prevents recovered state bleeding into a reused key.
-    pub(crate) agent_state_generations: Arc<Mutex<HashMap<TerminalId, u64>>>,
-    /// Workspace session and kind used to rebuild reconnect snapshots.
-    pub(crate) terminal_meta: Arc<Mutex<HashMap<TerminalId, (SessionKey, TerminalKind)>>>,
-    /// Host-access policy used to decide whether a singleton can be reused.
-    terminal_access: Arc<Mutex<HashMap<TerminalId, AgentRunAccess>>>,
-    /// Reconnect-visible marker for terminals with permission prompts bypassed.
-    pub(crate) no_permission_terminals: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Distinguishes shared-main agents from isolated-worktree singletons.
-    pub(crate) on_main_terminals: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Model-tier label replayed in reconnect snapshots.
-    pub(crate) terminal_models: Arc<Mutex<HashMap<TerminalId, String>>>,
-    /// Old side of an in-flight exact terminal replacement. The backend
-    /// remains registered until teardown, but reconnect snapshots hide it as
-    /// soon as the replacement becomes visible.
-    pub(crate) superseded_terminals: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Provider-owned login terminals. Kept in the terminal registry for
-    /// interactive input routing, but their output is connection-private.
-    pub(crate) authenticating_terminals: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Recovered agents that require restart for the current PTY compatibility generation.
-    pub(crate) outdated_agent_terminals: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Detection buffers to clear after an answer so stale prompt chrome cannot re-fire.
-    pub(crate) agent_detect_resets: Arc<Mutex<HashSet<TerminalId>>>,
-    /// Latest structured hook arrival, used to fall back to PTY detection when hooks go stale.
-    pub(crate) hook_driven_terminals: Arc<Mutex<HashMap<TerminalId, std::time::Instant>>>,
-    /// Distinguishes one-key chooser answers from free-text input requests.
-    pub(crate) input_needed_shapes: Arc<Mutex<HashMap<TerminalId, lazybox_agents::PromptShape>>>,
-    /// On-demand reclassify pokes: a deferred inject asks the terminal's PTY
-    /// pump to re-read the live screen so a stale `InputNeeded` releases
-    /// without waiting for a keystroke-driven transition (issue #869).
-    pub(crate) reclassify_requests: Arc<Mutex<HashMap<TerminalId, Arc<Notify>>>>,
-    /// View and submission epochs used to keep client-provoked repaint output
-    /// out of agent lifecycle detection.
-    pub(crate) agent_terminal_activities: terminal_io::AgentTerminalActivities,
-    /// Prevents a delayed prompt write from resurrecting state after teardown.
+    pub(crate) entries: Arc<Mutex<HashMap<TerminalId, TerminalEntry>>>,
+    /// Per-backend serialization primitives outlive a registry entry briefly
+    /// while teardown drains writers/persistence, so they remain keyed by the
+    /// backend session rather than stored inside the terminal entry.
     terminal_persistence_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Prevents concurrent keyboard, chat, and injection writers corrupting a PTY stream.
     terminal_io_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 pub(crate) struct TerminalRegistrationGuard {
-    terminals: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, String>>,
-    terminal_meta: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, (SessionKey, TerminalKind)>>,
-    agent_state_generations: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, u64>>,
-    superseded_terminals: tokio::sync::OwnedMutexGuard<HashSet<TerminalId>>,
-    authenticating_terminals: tokio::sync::OwnedMutexGuard<HashSet<TerminalId>>,
+    entries: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, TerminalEntry>>,
 }
 
 impl TerminalRegistrationGuard {
@@ -72,11 +259,11 @@ impl TerminalRegistrationGuard {
         kind: TerminalKind,
         generation: Option<u64>,
     ) {
-        self.terminal_meta.insert(id, (session_key, kind));
-        self.terminals.insert(id, backend_key);
-        if let Some(generation) = generation {
-            self.agent_state_generations.insert(id, generation);
-        }
+        let entry = self.entries.entry(id).or_default();
+        entry.backend_key = Some(backend_key);
+        entry.meta = Some((session_key, kind));
+        entry.agent_state_generation = generation;
+        entry.finishing = false;
     }
 
     pub(crate) fn register_replacement(
@@ -89,19 +276,20 @@ impl TerminalRegistrationGuard {
         generation: Option<u64>,
         authenticating: bool,
     ) {
-        if self.terminals.contains_key(&old_id) {
-            self.superseded_terminals.insert(old_id);
-        }
-        if authenticating {
-            self.authenticating_terminals.insert(id);
+        if let Some(old) = self.entries.get_mut(&old_id)
+            && old.backend_key.is_some()
+        {
+            old.superseded = true;
         }
         self.register(id, backend_key, session_key, kind, generation);
+        if authenticating {
+            self.entries.entry(id).or_default().authenticating = true;
+        }
     }
 }
 
 pub(crate) struct RecoveredTerminalRegistrationGuard {
     registration: TerminalRegistrationGuard,
-    agent_states: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, AgentState>>,
 }
 
 impl RecoveredTerminalRegistrationGuard {
@@ -120,14 +308,102 @@ impl RecoveredTerminalRegistrationGuard {
             kind,
             recovered_agent.map(|(generation, _)| generation),
         );
-        recovered_agent.and_then(|(_, state)| self.agent_states.insert(id, state))
+        recovered_agent.and_then(|(_, state)| {
+            self.registration
+                .entries
+                .get_mut(&id)
+                .and_then(|entry| entry.agent_state.replace(state))
+        })
     }
 }
 
 impl TerminalRegistry {
+    pub(crate) async fn metadata_map(&self) -> HashMap<TerminalId, (SessionKey, TerminalKind)> {
+        self.entries
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, entry)| !entry.finishing)
+            .filter_map(|(id, entry)| entry.meta.clone().map(|meta| (*id, meta)))
+            .collect()
+    }
+
+    pub(crate) async fn session_bindings(&self) -> HashMap<TerminalId, SessionId> {
+        self.entries
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(id, entry)| entry.session_id.map(|session| (*id, session)))
+            .collect()
+    }
+
+    pub(crate) async fn agent_state_map(&self) -> HashMap<TerminalId, AgentState> {
+        self.entries
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(id, entry)| entry.agent_state.map(|state| (*id, state)))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn insert_meta(
+        &self,
+        id: TerminalId,
+        session_key: SessionKey,
+        kind: TerminalKind,
+    ) {
+        self.entries.lock().await.entry(id).or_default().meta = Some((session_key, kind));
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn model_label_for(&self, id: TerminalId) -> Option<String> {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .and_then(|entry| entry.model_label.clone())
+    }
+
+    pub(crate) async fn input_needed_shape_for(
+        &self,
+        id: TerminalId,
+    ) -> Option<lazybox_agents::PromptShape> {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .and_then(|entry| entry.input_needed_shape)
+    }
+
+    pub(crate) async fn has_detect_reset(&self, id: TerminalId) -> bool {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|entry| entry.agent_detect_reset)
+    }
+
+    pub(crate) async fn mark_detect_reset(&self, id: TerminalId) {
+        self.entries
+            .lock()
+            .await
+            .entry(id)
+            .or_default()
+            .agent_detect_reset = true;
+    }
+
+    pub(crate) async fn take_detect_reset(&self, id: TerminalId) -> bool {
+        self.entries
+            .lock()
+            .await
+            .get_mut(&id)
+            .is_some_and(|entry| std::mem::take(&mut entry.agent_detect_reset))
+    }
+
     /// Bind a wire terminal id to a backend session for I/O routing.
     pub async fn bind_backend(&self, id: TerminalId, backend_key: String) {
-        self.terminals.lock().await.insert(id, backend_key);
+        self.entries.lock().await.entry(id).or_default().backend_key = Some(backend_key);
     }
 
     /// Register the two identities that make a terminal live.
@@ -145,68 +421,69 @@ impl TerminalRegistry {
 
     /// Remove a terminal and all of its in-memory lifecycle bookkeeping.
     pub async fn remove_terminal(&self, id: TerminalId) -> Option<String> {
-        let backend_key = self.terminals.lock().await.remove(&id);
-        self.terminal_sessions.lock().await.remove(&id);
-        self.agent_states.lock().await.remove(&id);
-        self.agent_state_generations.lock().await.remove(&id);
-        self.terminal_meta.lock().await.remove(&id);
-        self.terminal_access.lock().await.remove(&id);
-        self.no_permission_terminals.lock().await.remove(&id);
-        self.on_main_terminals.lock().await.remove(&id);
-        self.terminal_models.lock().await.remove(&id);
-        self.superseded_terminals.lock().await.remove(&id);
-        self.authenticating_terminals.lock().await.remove(&id);
-        self.outdated_agent_terminals.lock().await.remove(&id);
-        self.agent_detect_resets.lock().await.remove(&id);
-        self.hook_driven_terminals.lock().await.remove(&id);
-        self.input_needed_shapes.lock().await.remove(&id);
-        self.reclassify_requests.lock().await.remove(&id);
-        self.agent_terminal_activities.lock().await.remove(&id);
-        backend_key
+        self.entries
+            .lock()
+            .await
+            .remove(&id)
+            .and_then(|entry| entry.backend_key)
     }
 
     /// Snapshot the backend key without holding the map lock in the caller.
     pub async fn backend_key_for(&self, id: TerminalId) -> Option<String> {
-        self.terminals.lock().await.get(&id).cloned()
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .filter(|entry| !entry.finishing)
+            .and_then(|entry| entry.backend_key.clone())
     }
 
     /// Snapshot terminal metadata without holding the map lock in the caller.
     pub async fn terminal_meta_for(&self, id: TerminalId) -> Option<(SessionKey, TerminalKind)> {
-        self.terminal_meta.lock().await.get(&id).cloned()
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .filter(|entry| !entry.finishing)
+            .and_then(|entry| entry.meta.clone())
     }
 
     /// Snapshot the cached agent state without holding the map lock in the caller.
     pub async fn agent_state_for(&self, id: TerminalId) -> Option<AgentState> {
-        self.agent_states.lock().await.get(&id).copied()
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .and_then(|entry| entry.agent_state)
     }
 
     /// Snapshot the durable workspace session associated with a terminal.
     pub async fn terminal_session_for(&self, id: TerminalId) -> Option<SessionId> {
-        self.terminal_sessions.lock().await.get(&id).copied()
-    }
-
-    pub(crate) async fn access_for(&self, id: TerminalId) -> AgentRunAccess {
-        self.terminal_access
+        self.entries
             .lock()
             .await
             .get(&id)
-            .copied()
+            .and_then(|entry| entry.session_id)
+    }
+
+    pub(crate) async fn access_for(&self, id: TerminalId) -> AgentRunAccess {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .map(|entry| entry.access)
             .unwrap_or_default()
     }
 
     pub(crate) async fn record_access(&self, id: TerminalId, access: AgentRunAccess) {
         if access != AgentRunAccess::Default {
-            self.terminal_access.lock().await.insert(id, access);
+            self.entries.lock().await.entry(id).or_default().access = access;
         }
-    }
-
-    pub(crate) async fn forget_access(&self, id: TerminalId) {
-        self.terminal_access.lock().await.remove(&id);
     }
 
     /// Associate a live terminal with its durable workspace session.
     pub async fn associate_session(&self, id: TerminalId, session_id: SessionId) {
-        self.terminal_sessions.lock().await.insert(id, session_id);
+        self.entries.lock().await.entry(id).or_default().session_id = Some(session_id);
     }
 
     pub(crate) async fn record_spawn_attributes(
@@ -219,36 +496,145 @@ impl TerminalRegistry {
         model_label: Option<&str>,
     ) {
         if let Some(session_id) = owning_session {
-            self.terminal_sessions.lock().await.insert(id, session_id);
+            self.entries.lock().await.entry(id).or_default().session_id = Some(session_id);
         }
-        self.record_access(id, access).await;
-        if no_permission {
-            self.no_permission_terminals.lock().await.insert(id);
-        }
-        if on_main {
-            self.on_main_terminals.lock().await.insert(id);
-        }
-        if let Some(label) = model_label {
-            self.terminal_models.lock().await.insert(id, label.into());
-        }
+        let mut entries = self.entries.lock().await;
+        let entry = entries.entry(id).or_default();
+        entry.access = access;
+        entry.no_permission = no_permission;
+        entry.on_main = on_main;
+        entry.model_label = model_label.map(str::to_owned);
     }
 
     /// Record the last durable state emitted for an agent terminal.
     pub async fn record_agent_state(&self, id: TerminalId, state: AgentState) {
-        self.agent_states.lock().await.insert(id, state);
+        self.entries.lock().await.entry(id).or_default().agent_state = Some(state);
     }
 
     /// Record the process generation used to reject stale recovered state.
     pub async fn record_agent_state_generation(&self, id: TerminalId, generation: u64) {
-        self.agent_state_generations
+        self.entries
             .lock()
             .await
-            .insert(id, generation);
+            .entry(id)
+            .or_default()
+            .agent_state_generation = Some(generation);
     }
 
-    /// Record activity from a structured agent hook.
+    pub(crate) async fn record_turn_event(&self, id: TerminalId, event: AgentTurnEvent) -> u64 {
+        self.entries
+            .lock()
+            .await
+            .entry(id)
+            .or_default()
+            .turn
+            .record(event)
+    }
+
+    pub(crate) async fn configure_agent_turn(
+        &self,
+        id: TerminalId,
+        quiet_after: std::time::Duration,
+        watchdog_window: Option<std::time::Duration>,
+    ) {
+        self.entries
+            .lock()
+            .await
+            .entry(id)
+            .or_default()
+            .turn
+            .configure(quiet_after, watchdog_window);
+    }
+
+    pub(crate) async fn agent_turn_schedule(
+        &self,
+        id: TerminalId,
+        queued_chunks: usize,
+    ) -> AgentTurnSchedule {
+        self.entries
+            .lock()
+            .await
+            .entry(id)
+            .or_default()
+            .turn
+            .prepare_schedule(queued_chunks)
+    }
+
+    pub(crate) async fn note_agent_turn_received(&self, id: TerminalId, watchdog_due: bool) {
+        if let Some(entry) = self.entries.lock().await.get_mut(&id) {
+            entry.turn.note_received(watchdog_due);
+        }
+    }
+
+    pub(crate) async fn fire_agent_turn_quiet(&self, id: TerminalId) -> std::time::Duration {
+        self.entries
+            .lock()
+            .await
+            .entry(id)
+            .or_default()
+            .turn
+            .fire_quiet()
+    }
+
+    pub(crate) async fn fire_agent_turn_watchdog(
+        &self,
+        id: TerminalId,
+    ) -> Option<AgentTurnWatchdogFire> {
+        self.entries
+            .lock()
+            .await
+            .get_mut(&id)
+            .and_then(|entry| entry.turn.fire_watchdog())
+    }
+
+    pub(crate) async fn latest_output_turn_event(&self, id: TerminalId) -> Option<u64> {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .and_then(|entry| entry.turn.last_output)
+    }
+
+    pub(crate) async fn hook_authority_for(
+        &self,
+        id: TerminalId,
+        pty_evidence: Option<u64>,
+    ) -> lazybox_agents::HookAuthority {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .map_or(lazybox_agents::HookAuthority::None, |entry| {
+                entry.turn.hook_authority(pty_evidence)
+            })
+    }
+
+    /// Compatibility seam for integration fixtures that predate the causal
+    /// turn clock. Production hook ingest records `AgentTurnEvent::HookArrived`
+    /// directly; an intentionally stale fixture is represented by a newer PTY
+    /// event, preserving its old test meaning without using time for runtime
+    /// arbitration.
     pub async fn record_hook_activity(&self, id: TerminalId, at: std::time::Instant) {
-        self.hook_driven_terminals.lock().await.insert(id, at);
+        let mut entries = self.entries.lock().await;
+        let clock = &mut entries.entry(id).or_default().turn;
+        clock.record(AgentTurnEvent::HookArrived {
+            waiting_on_user: false,
+        });
+        clock.last_hook_at = Some(at);
+        if at.elapsed() >= lazybox_agents::HOOK_STALENESS {
+            clock.record(AgentTurnEvent::OutputChunk {
+                backend_seq: 0,
+                meaningful_progress: false,
+            });
+        }
+    }
+
+    pub async fn hook_activity_for(&self, id: TerminalId) -> Option<std::time::Instant> {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .and_then(|entry| entry.turn.last_hook_at)
     }
 
     /// Record the input shape currently presented by an agent.
@@ -257,7 +643,12 @@ impl TerminalRegistry {
         id: TerminalId,
         shape: lazybox_agents::PromptShape,
     ) {
-        self.input_needed_shapes.lock().await.insert(id, shape);
+        self.entries
+            .lock()
+            .await
+            .entry(id)
+            .or_default()
+            .input_needed_shape = Some(shape);
     }
 
     /// Register the reclassify poke channel a terminal's PTY pump listens on,
@@ -265,10 +656,12 @@ impl TerminalRegistry {
     /// a deferred inject can find it by terminal id (issue #869).
     pub(crate) async fn register_reclassify(&self, id: TerminalId) -> Arc<Notify> {
         let notify = Arc::new(Notify::new());
-        self.reclassify_requests
+        self.entries
             .lock()
             .await
-            .insert(id, notify.clone());
+            .entry(id)
+            .or_default()
+            .reclassify_request = Some(notify.clone());
         notify
     }
 
@@ -276,42 +669,66 @@ impl TerminalRegistry {
     /// no pump is registered (a recovered/shell terminal, or a unit test with
     /// no pump) — the caller falls back to its own cached-state re-check.
     pub(crate) async fn request_reclassify(&self, id: TerminalId) {
-        if let Some(notify) = self.reclassify_requests.lock().await.get(&id) {
+        if let Some(notify) = self
+            .entries
+            .lock()
+            .await
+            .get(&id)
+            .and_then(|entry| entry.reclassify_request.clone())
+        {
             notify.notify_one();
         }
     }
 
     /// Report whether any registered agent is currently working.
     pub async fn any_agent_working(&self) -> bool {
-        self.agent_states
+        self.entries
             .lock()
             .await
             .values()
-            .any(|state| matches!(state, AgentState::Working))
+            .any(|entry| !entry.finishing && matches!(entry.agent_state, Some(AgentState::Working)))
     }
 
     /// Return the number of live terminal-to-backend registrations.
     pub async fn terminal_count(&self) -> usize {
-        self.terminals.lock().await.len()
+        self.entries
+            .lock()
+            .await
+            .values()
+            .filter(|entry| !entry.finishing && entry.backend_key.is_some())
+            .count()
     }
 
     /// Snapshot the ids of all live terminal-to-backend registrations.
     pub async fn terminal_ids(&self) -> Vec<TerminalId> {
-        self.terminals.lock().await.keys().copied().collect()
+        self.entries
+            .lock()
+            .await
+            .iter()
+            .filter_map(|(id, entry)| {
+                (!entry.finishing && entry.backend_key.is_some()).then_some(*id)
+            })
+            .collect()
     }
 
     /// Report whether any terminal-to-backend registration is live.
     pub async fn is_empty(&self) -> bool {
-        self.terminals.lock().await.is_empty()
+        self.terminal_count().await == 0
     }
 
     /// Snapshot reconnect metadata without exposing the registry's lock.
     pub async fn terminal_metadata(&self) -> Vec<(TerminalId, SessionKey, TerminalKind)> {
-        self.terminal_meta
+        self.entries
             .lock()
             .await
             .iter()
-            .map(|(id, (session_key, kind))| (*id, session_key.clone(), kind.clone()))
+            .filter(|(_, entry)| !entry.finishing)
+            .filter_map(|(id, entry)| {
+                entry
+                    .meta
+                    .as_ref()
+                    .map(|(session_key, kind)| (*id, session_key.clone(), kind.clone()))
+            })
             .collect()
     }
 
@@ -321,12 +738,15 @@ impl TerminalRegistry {
     /// `agent_terminal_for` tie-break. `None` when the workspace has no
     /// running agent (only shells, or nothing at all).
     pub async fn running_agent_terminal(&self, session_key: &SessionKey) -> Option<TerminalId> {
-        self.terminal_meta
+        self.entries
             .lock()
             .await
             .iter()
-            .filter(|(_, (owner, kind))| {
-                owner == session_key && matches!(kind, TerminalKind::Agent(_))
+            .filter(|(_, entry)| !entry.finishing)
+            .filter(|(_, entry)| {
+                entry.meta.as_ref().is_some_and(|(owner, kind)| {
+                    owner == session_key && matches!(kind, TerminalKind::Agent(_))
+                })
             })
             .map(|(id, _)| *id)
             .min_by_key(|id| id.0)
@@ -337,17 +757,18 @@ impl TerminalRegistry {
         session_key: &SessionKey,
         session_id: Option<SessionId>,
     ) -> Vec<TerminalId> {
-        let terminal_sessions = self.terminal_sessions.lock().await.clone();
-        let terminal_meta = self.terminal_meta.lock().await;
-        let mut ids = terminal_meta
+        let entries = self.entries.lock().await;
+        let mut ids = entries
             .iter()
-            .filter_map(|(terminal_id, (owner, kind))| {
+            .filter_map(|(terminal_id, entry)| {
+                if entry.finishing {
+                    return None;
+                }
+                let (owner, kind) = entry.meta.as_ref()?;
                 if owner != session_key || !matches!(kind, TerminalKind::Agent(_)) {
                     return None;
                 }
-                if session_id.is_some_and(|expected| {
-                    terminal_sessions.get(terminal_id).copied() != Some(expected)
-                }) {
+                if session_id.is_some_and(|expected| entry.session_id != Some(expected)) {
                     return None;
                 }
                 Some(*terminal_id)
@@ -359,78 +780,70 @@ impl TerminalRegistry {
 
     /// Report whether a recovered agent requires a compatibility restart.
     pub async fn is_outdated_agent(&self, id: TerminalId) -> bool {
-        self.outdated_agent_terminals.lock().await.contains(&id)
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|entry| entry.outdated_agent)
     }
 
     /// Mark a recovered agent as requiring a compatibility restart.
     pub async fn mark_outdated_agent(&self, id: TerminalId) {
-        self.outdated_agent_terminals.lock().await.insert(id);
+        self.entries
+            .lock()
+            .await
+            .entry(id)
+            .or_default()
+            .outdated_agent = true;
     }
 
     /// Return the number of recovered agents requiring a compatibility restart.
     pub async fn outdated_agent_count(&self) -> usize {
-        self.outdated_agent_terminals.lock().await.len()
-    }
-
-    /// Return the latest structured hook arrival recorded for a terminal.
-    pub async fn hook_activity_for(&self, id: TerminalId) -> Option<std::time::Instant> {
-        self.hook_driven_terminals.lock().await.get(&id).copied()
+        self.entries
+            .lock()
+            .await
+            .values()
+            .filter(|entry| entry.outdated_agent)
+            .count()
     }
 
     /// Report whether teardown removed every per-terminal bookkeeping entry.
     pub async fn bookkeeping_is_empty(&self) -> bool {
-        if !self.terminals.lock().await.is_empty() {
-            return false;
+        self.entries.lock().await.is_empty()
+    }
+
+    /// Atomically make a terminal non-live while retaining the metadata needed
+    /// to emit its final lifecycle state. A second teardown sees `None`; a key
+    /// mismatch is returned without touching the entry.
+    pub(crate) async fn claim_teardown(
+        &self,
+        id: TerminalId,
+        expected_backend_key: &str,
+    ) -> Result<Option<TerminalTeardownClaim>, String> {
+        let mut entries = self.entries.lock().await;
+        let Some(entry) = entries.get_mut(&id) else {
+            return Ok(None);
+        };
+        let Some(actual) = entry.backend_key.as_deref() else {
+            return Ok(None);
+        };
+        if actual != expected_backend_key {
+            return Err(actual.to_string());
         }
-        if !self.terminal_meta.lock().await.is_empty() {
-            return false;
+        if entry.finishing {
+            return Ok(None);
         }
-        if !self.terminal_sessions.lock().await.is_empty() {
-            return false;
-        }
-        if !self.agent_state_generations.lock().await.is_empty() {
-            return false;
-        }
-        if !self.agent_states.lock().await.is_empty() {
-            return false;
-        }
-        if !self.terminal_access.lock().await.is_empty() {
-            return false;
-        }
-        if !self.no_permission_terminals.lock().await.is_empty() {
-            return false;
-        }
-        if !self.on_main_terminals.lock().await.is_empty() {
-            return false;
-        }
-        if !self.terminal_models.lock().await.is_empty() {
-            return false;
-        }
-        if !self.superseded_terminals.lock().await.is_empty() {
-            return false;
-        }
-        if !self.authenticating_terminals.lock().await.is_empty() {
-            return false;
-        }
-        if !self.outdated_agent_terminals.lock().await.is_empty() {
-            return false;
-        }
-        if !self.agent_detect_resets.lock().await.is_empty() {
-            return false;
-        }
-        if !self.hook_driven_terminals.lock().await.is_empty() {
-            return false;
-        }
-        if !self.input_needed_shapes.lock().await.is_empty() {
-            return false;
-        }
-        if !self.reclassify_requests.lock().await.is_empty() {
-            return false;
-        }
-        if !self.agent_terminal_activities.lock().await.is_empty() {
-            return false;
-        }
-        true
+        entry.finishing = true;
+        Ok(Some(TerminalTeardownClaim {
+            meta: entry.meta.clone(),
+            authenticating: entry.authenticating,
+            agent_state_generation: entry.agent_state_generation,
+        }))
+    }
+
+    /// Complete a claimed teardown with one atomic removal.
+    pub(crate) async fn finish_teardown(&self, id: TerminalId) {
+        self.entries.lock().await.remove(&id);
     }
 
     pub(crate) async fn lock_terminal_persistence(
@@ -464,26 +877,14 @@ impl TerminalRegistry {
     }
 
     pub(crate) async fn lock_registration(&self) -> TerminalRegistrationGuard {
-        let terminals = self.terminals.clone().lock_owned().await;
-        let terminal_meta = self.terminal_meta.clone().lock_owned().await;
-        let agent_state_generations = self.agent_state_generations.clone().lock_owned().await;
-        let superseded_terminals = self.superseded_terminals.clone().lock_owned().await;
-        let authenticating_terminals = self.authenticating_terminals.clone().lock_owned().await;
         TerminalRegistrationGuard {
-            terminals,
-            terminal_meta,
-            agent_state_generations,
-            superseded_terminals,
-            authenticating_terminals,
+            entries: self.entries.clone().lock_owned().await,
         }
     }
 
     pub(crate) async fn lock_recovered_registration(&self) -> RecoveredTerminalRegistrationGuard {
-        let registration = self.lock_registration().await;
-        let agent_states = self.agent_states.clone().lock_owned().await;
         RecoveredTerminalRegistrationGuard {
-            registration,
-            agent_states,
+            registration: self.lock_registration().await,
         }
     }
 }
@@ -763,8 +1164,14 @@ mod tests {
         terminals
             .record_agent_state_generation(TerminalId(1), 7)
             .await;
-        let hook_at = std::time::Instant::now();
-        terminals.record_hook_activity(TerminalId(1), hook_at).await;
+        terminals
+            .record_turn_event(
+                TerminalId(1),
+                AgentTurnEvent::HookArrived {
+                    waiting_on_user: false,
+                },
+            )
+            .await;
         terminals
             .record_input_needed_shape(TerminalId(1), lazybox_agents::PromptShape::FreeText)
             .await;
@@ -794,8 +1201,8 @@ mod tests {
         );
         assert!(terminals.any_agent_working().await);
         assert_eq!(
-            terminals.hook_activity_for(TerminalId(1)).await,
-            Some(hook_at)
+            terminals.hook_authority_for(TerminalId(1), None).await,
+            lazybox_agents::HookAuthority::HookNewer
         );
         assert!(terminals.is_outdated_agent(TerminalId(1)).await);
         assert_eq!(terminals.outdated_agent_count().await, 1);
@@ -851,6 +1258,53 @@ mod tests {
         assert!(spawns.prompt_confirmations_are_empty().await);
     }
 
+    /// #1168: registration and teardown publish one complete terminal entry.
+    /// A reconnect reader racing heavy lifecycle churn may observe the old
+    /// entry, the finishing entry, or no entry, but never a backend binding
+    /// whose metadata/state was already swept from a parallel map.
+    #[tokio::test]
+    async fn terminal_entry_is_atomic_during_registration_and_teardown_churn() {
+        let terminals = TerminalRegistry::default();
+        let reader_registry = terminals.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let reader_done = done.clone();
+        let reader = tokio::spawn(async move {
+            while !reader_done.load(Ordering::Acquire) {
+                let entries = reader_registry.entries.lock().await;
+                if let Some(entry) = entries.get(&TerminalId(1168)) {
+                    assert!(entry.backend_key.is_some(), "published entry has routing");
+                    assert!(entry.meta.is_some(), "published entry has metadata");
+                }
+                drop(entries);
+                tokio::task::yield_now().await;
+            }
+        });
+
+        for generation in 1..=1_000 {
+            {
+                let mut registration = terminals.lock_registration().await;
+                registration.register(
+                    TerminalId(1168),
+                    format!("backend-{generation}"),
+                    SessionKey::from("test:atomic-terminal"),
+                    TerminalKind::Agent("codex".into()),
+                    Some(generation),
+                );
+            }
+            let expected = format!("backend-{generation}");
+            let claim = terminals
+                .claim_teardown(TerminalId(1168), &expected)
+                .await
+                .expect("matching backend")
+                .expect("one teardown owner");
+            assert!(claim.meta.is_some());
+            terminals.finish_teardown(TerminalId(1168)).await;
+        }
+        done.store(true, Ordering::Release);
+        reader.await.expect("reader task");
+        assert!(terminals.bookkeeping_is_empty().await);
+    }
+
     #[tokio::test]
     async fn reclassify_request_pokes_a_registered_pump_and_no_ops_otherwise() {
         let registry = TerminalRegistry::default();
@@ -869,7 +1323,7 @@ mod tests {
 
         // Teardown drops the registration; a later poke is a no-op again.
         registry.remove_terminal(id).await;
-        assert!(registry.reclassify_requests.lock().await.is_empty());
+        assert!(registry.bookkeeping_is_empty().await);
         registry.request_reclassify(id).await;
     }
 

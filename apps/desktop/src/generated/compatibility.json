@@ -421,6 +421,12 @@
       }
     },
     {
+      "WorkspaceCreated": {
+        "client_request_id": "request-3",
+        "workspace_key": "workspace:first-workspace"
+      }
+    },
+    {
       "AgentState": {
         "session_key": "github:o/r#42",
         "state": "InputNeeded",
@@ -528,6 +534,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 3993433596,
-  "protocol_version": 3
+  "protocol_fingerprint": 3488403088,
+  "protocol_version": 4
 }

@@ -228,6 +228,7 @@ fn desktop_event_tag(event: &DesktopEvent) -> &'static str {
         DesktopEvent::TerminalReplaced { .. } => "TerminalReplaced",
         DesktopEvent::CommandCompleted { .. } => "CommandCompleted",
         DesktopEvent::CommandFailed { .. } => "CommandFailed",
+        DesktopEvent::WorkspaceCreated { .. } => "WorkspaceCreated",
         DesktopEvent::AgentState { .. } => "AgentState",
         DesktopEvent::SnippetDelivered { .. } => "SnippetDelivered",
         DesktopEvent::ProviderError { .. } => "ProviderError",
@@ -464,6 +465,10 @@ fn desktop_compatibility_fixture_is_current() {
             client_request_id: "request-2".into(),
             message: "agent unavailable".into(),
         },
+        DesktopEvent::WorkspaceCreated {
+            client_request_id: "request-3".into(),
+            workspace_key: lazybox_core::WorkspaceKey("workspace:first-workspace".into()),
+        },
         DesktopEvent::AgentState {
             session_key: session_key.clone(),
             terminal_id: TerminalId(7),
@@ -545,7 +550,7 @@ fn desktop_compatibility_fixture_is_current() {
         .map(desktop_event_tag)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(command_tags.len(), 31);
-    assert_eq!(event_tags.len(), 21);
+    assert_eq!(event_tags.len(), 22);
     let fixture = serde_json::json!({
         "protocol_version": api_gateway::DESKTOP_PROTOCOL_VERSION,
         "protocol_fingerprint": api_gateway::DESKTOP_PROTOCOL_FINGERPRINT,
@@ -1249,8 +1254,10 @@ fn every_terminal_command_round_trips_the_binary_codec() {
             rows: 40,
         },
         Command::RequestTerminalResync {
-            terminal_id: lazybox_ipc::TerminalId(2),
-            required_seq: 44,
+            requests: vec![lazybox_ipc::TerminalResyncRequest {
+                terminal_id: lazybox_ipc::TerminalId(2),
+                required_seq: 44,
+            }],
         },
         Command::Close {
             terminal_id: lazybox_ipc::TerminalId(2),
@@ -1268,6 +1275,24 @@ fn every_terminal_command_round_trips_the_binary_codec() {
             .expect("decode terminal command");
         assert_eq!(format!("{decoded:?}"), format!("{command:?}"));
     }
+}
+
+#[test]
+fn terminal_resync_batch_round_trips_in_one_binary_frame() {
+    let requests = (1..=lazybox_ipc::COMMAND_CHANNEL_CAPACITY + 9)
+        .map(|number| lazybox_ipc::TerminalResyncRequest {
+            terminal_id: TerminalId(number as u64),
+            required_seq: (number * 10) as u64,
+        })
+        .collect();
+    let command = Command::RequestTerminalResync { requests };
+
+    let frame = api_gateway::encode_terminal_command(&command).expect("resync batch frame");
+    let body_len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+    let decoded =
+        api_gateway::decode_terminal_command(&frame[4..4 + body_len]).expect("decode resync batch");
+
+    assert_eq!(format!("{decoded:?}"), format!("{command:?}"));
 }
 
 #[test]
@@ -1588,8 +1613,10 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
         .uri("/v1/terminal")
         .body(Full::new(Bytes::from(
             api_gateway::encode_terminal_command(&Command::RequestTerminalResync {
-                terminal_id,
-                required_seq: snapshot.seq,
+                requests: vec![lazybox_ipc::TerminalResyncRequest {
+                    terminal_id,
+                    required_seq: snapshot.seq,
+                }],
             })
             .expect("resync frame"),
         )))
@@ -2248,8 +2275,10 @@ async fn json_command_route_rejects_every_binary_terminal_command() {
             rows: 24,
         },
         Command::RequestTerminalResync {
-            terminal_id: TerminalId(1),
-            required_seq: 1,
+            requests: vec![lazybox_ipc::TerminalResyncRequest {
+                terminal_id: TerminalId(1),
+                required_seq: 1,
+            }],
         },
         Command::Close {
             terminal_id: TerminalId(1),

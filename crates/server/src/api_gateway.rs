@@ -37,7 +37,7 @@ pub type Body = UnsyncBoxBody<Bytes, Infallible>;
 /// layout, so a real wire change can't ride an unchanged version across a
 /// remote hop. Non-wire churn (a `Cargo.lock` bump, a comment) must not
 /// bump it; that is exactly the skew the advisory fingerprint tolerates.
-pub const DESKTOP_PROTOCOL_VERSION: u32 = 3;
+pub const DESKTOP_PROTOCOL_VERSION: u32 = 4;
 pub const PROTOCOL_VERSION_HEADER: &str = "x-lazybox-protocol-version";
 pub const PROTOCOL_FINGERPRINT_HEADER: &str = "x-lazybox-protocol-fingerprint";
 pub const CLIENT_REQUEST_ID_HEADER: &str = "x-lazybox-client-request-id";
@@ -82,6 +82,7 @@ pub const TERMINAL_RESIZE_COLS_OFFSET: usize = 0;
 pub const TERMINAL_RESIZE_ROWS_OFFSET: usize = size_of::<u16>();
 pub const TERMINAL_RESYNC_PAYLOAD_BYTES: usize = size_of::<u64>();
 pub const TERMINAL_RESYNC_REQUIRED_SEQ_OFFSET: usize = 0;
+pub const TERMINAL_RESYNC_ADDITIONAL_REQUEST_BYTES: usize = size_of::<u64>() * 2;
 pub const TERMINAL_WRITE_INTENT_OFFSET: usize = 0;
 pub const TERMINAL_WRITE_BYTES_OFFSET: usize = size_of::<u8>();
 pub const TERMINAL_WRITE_INTENT_COMPOSE: u8 = 0;
@@ -683,6 +684,7 @@ impl DesktopCommand {
                 name,
                 project_key,
                 spawn_agent: agent,
+                client_request_id,
             },
             DesktopCommand::FocusWorkspace { session_key } => {
                 Command::FocusWorkspace { session_key }
@@ -878,6 +880,10 @@ pub enum DesktopEvent {
     CommandFailed {
         client_request_id: String,
         message: String,
+    },
+    WorkspaceCreated {
+        client_request_id: String,
+        workspace_key: lazybox_core::WorkspaceKey,
     },
     AgentState {
         session_key: lazybox_core::SessionKey,
@@ -1116,6 +1122,13 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
         } => Some(DesktopEvent::CommandFailed {
             client_request_id,
             message,
+        }),
+        Event::WorkspaceCreated {
+            client_request_id,
+            workspace_key,
+        } => Some(DesktopEvent::WorkspaceCreated {
+            client_request_id,
+            workspace_key,
         }),
         Event::AgentState {
             session_key,
@@ -1899,12 +1912,15 @@ where
 }
 
 /// The client-supplied correlation id a one-shot command carries, if any.
-/// Only `Spawn` is correlated: the daemon stamps this id into the terminal
-/// launch outcome it emits on the bus, which is how the one-shot reply
-/// re-associates that outcome with this request.
+/// Spawn and workspace creation are correlated: the daemon stamps this id
+/// into their durable outcome events, which is how the one-shot reply
+/// re-associates those events with this request.
 fn command_request_id(command: &Command) -> Option<String> {
     match command {
         Command::Spawn {
+            client_request_id, ..
+        }
+        | Command::CreateWorkspace {
             client_request_id, ..
         } => client_request_id.clone(),
         _ => None,
@@ -1917,6 +1933,9 @@ fn event_request_id(event: &Event) -> Option<&str> {
     match event {
         Event::CommandCompleted { client_request_id }
         | Event::CommandFailed {
+            client_request_id, ..
+        }
+        | Event::WorkspaceCreated {
             client_request_id, ..
         } => Some(client_request_id),
         _ => None,
@@ -2516,14 +2535,22 @@ pub fn encode_terminal_command(command: &Command) -> Option<Vec<u8>> {
             tail.extend_from_slice(&rows.to_be_bytes());
             (TERMINAL_CLIENT_COMMAND_RESIZE, *terminal_id, tail)
         }
-        Command::RequestTerminalResync {
-            terminal_id,
-            required_seq,
-        } => (
-            TERMINAL_CLIENT_COMMAND_RESYNC,
-            *terminal_id,
-            required_seq.to_be_bytes().to_vec(),
-        ),
+        Command::RequestTerminalResync { requests }
+            if !requests.is_empty()
+                && requests.len() <= lazybox_ipc::MAX_RESYNC_REQUESTS_PER_BATCH =>
+        {
+            let first = requests[0];
+            let mut tail = Vec::with_capacity(
+                TERMINAL_RESYNC_PAYLOAD_BYTES
+                    + requests.len().saturating_sub(1) * TERMINAL_RESYNC_ADDITIONAL_REQUEST_BYTES,
+            );
+            tail.extend_from_slice(&first.required_seq.to_be_bytes());
+            for request in &requests[1..] {
+                tail.extend_from_slice(&request.terminal_id.0.to_be_bytes());
+                tail.extend_from_slice(&request.required_seq.to_be_bytes());
+            }
+            (TERMINAL_CLIENT_COMMAND_RESYNC, first.terminal_id, tail)
+        }
         Command::Close {
             terminal_id,
             client_request_id: None,
@@ -2655,15 +2682,43 @@ pub(crate) fn decode_terminal_command(body: &[u8]) -> Result<Command, &'static s
                 ),
             })
         }
-        TERMINAL_CLIENT_COMMAND_RESYNC if tail.len() == TERMINAL_RESYNC_PAYLOAD_BYTES => {
-            Ok(Command::RequestTerminalResync {
+        TERMINAL_CLIENT_COMMAND_RESYNC
+            if tail.len() >= TERMINAL_RESYNC_PAYLOAD_BYTES
+                && (tail.len() - TERMINAL_RESYNC_PAYLOAD_BYTES)
+                    .is_multiple_of(TERMINAL_RESYNC_ADDITIONAL_REQUEST_BYTES)
+                && (tail.len() - TERMINAL_RESYNC_PAYLOAD_BYTES)
+                    / TERMINAL_RESYNC_ADDITIONAL_REQUEST_BYTES
+                    < lazybox_ipc::MAX_RESYNC_REQUESTS_PER_BATCH =>
+        {
+            let mut requests = Vec::with_capacity(
+                1 + (tail.len() - TERMINAL_RESYNC_PAYLOAD_BYTES)
+                    / TERMINAL_RESYNC_ADDITIONAL_REQUEST_BYTES,
+            );
+            requests.push(lazybox_ipc::TerminalResyncRequest {
                 terminal_id,
                 required_seq: u64::from_be_bytes(
-                    tail[TERMINAL_RESYNC_REQUIRED_SEQ_OFFSET..]
+                    tail[TERMINAL_RESYNC_REQUIRED_SEQ_OFFSET..TERMINAL_RESYNC_PAYLOAD_BYTES]
                         .try_into()
                         .expect("eight-byte required sequence"),
                 ),
-            })
+            });
+            for encoded in tail[TERMINAL_RESYNC_PAYLOAD_BYTES..]
+                .chunks_exact(TERMINAL_RESYNC_ADDITIONAL_REQUEST_BYTES)
+            {
+                requests.push(lazybox_ipc::TerminalResyncRequest {
+                    terminal_id: lazybox_ipc::TerminalId(u64::from_be_bytes(
+                        encoded[..size_of::<u64>()]
+                            .try_into()
+                            .expect("eight-byte terminal id"),
+                    )),
+                    required_seq: u64::from_be_bytes(
+                        encoded[size_of::<u64>()..]
+                            .try_into()
+                            .expect("eight-byte required sequence"),
+                    ),
+                });
+            }
+            Ok(Command::RequestTerminalResync { requests })
         }
         TERMINAL_CLIENT_COMMAND_CLOSE if tail.is_empty() => Ok(Command::Close {
             terminal_id,

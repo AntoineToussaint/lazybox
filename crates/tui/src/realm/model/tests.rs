@@ -1214,14 +1214,149 @@ mod effects_tests {
                 name,
                 project_key,
                 spawn_agent,
+                client_request_id,
             } => {
                 assert_eq!(name, "my-feature");
                 assert_eq!(project_key, &pk);
                 // Default agent is "claude" unless YAML overrides it.
                 assert_eq!(spawn_agent.as_deref(), Some("claude"));
+                assert!(client_request_id.is_some());
             }
             other => panic!("expected CreateWorkspace, got {other:?}"),
         }
+    }
+
+    /// Regression for the silent new-workspace failure: the display name is
+    /// not the identity (`Work` may allocate `work-8`). The correlated daemon
+    /// acknowledgement must reveal the exact allocated row and arm the
+    /// terminal follow before the slow spawn lands.
+    #[test]
+    fn workspace_created_ack_focuses_allocated_collision_key() {
+        let mut m = build_model();
+        let project = lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox");
+        let decoy_key = lazybox_core::WorkspaceKey::new("decoy");
+        let mut decoy =
+            lazybox_core::Workspace::empty(decoy_key.clone(), "main", chrono::Utc::now());
+        decoy.project_key = Some(project.clone());
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(decoy)));
+        assert!(
+            m.sidebar
+                .focus_workspace_key(&lazybox_core::SessionKey::from(&decoy_key))
+        );
+
+        m.modal_stack.push(Id::NewWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::NewWorkspaceProject {
+            project: project.clone(),
+        });
+        let commands = m.handle_input_submitted("Work".into());
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::CreateWorkspace {
+                    client_request_id: Some(request_id),
+                    ..
+                },
+            ] => request_id.clone(),
+            other => panic!("expected one correlated CreateWorkspace, got {other:?}"),
+        };
+
+        let allocated_key = lazybox_core::WorkspaceKey::new("work-8");
+        let mut created =
+            lazybox_core::Workspace::empty(allocated_key.clone(), "main", chrono::Utc::now());
+        created.name = "Work".into();
+        created.project_key = Some(project);
+        created.local = true;
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(created)));
+        assert_eq!(
+            m.sidebar
+                .selected_workspace()
+                .map(|workspace| &workspace.key),
+            Some(&decoy_key),
+            "a generic upsert must not guess that another client's row is ours",
+        );
+
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceCreated {
+            client_request_id: request_id.clone(),
+            workspace_key: allocated_key.clone(),
+        });
+        let allocated_session = lazybox_core::SessionKey::from(&allocated_key);
+        assert_eq!(
+            m.sidebar.selected_workspace_key(),
+            Some(&allocated_session),
+            "the acknowledgement reveals the daemon-allocated row",
+        );
+        assert_eq!(
+            m.spawn_follow_to.as_ref(),
+            Some(&allocated_session),
+            "the optional agent spawn follows the newly allocated workspace",
+        );
+        assert!(m.pending_workspace_creates.contains_key(&request_id));
+
+        m.handle_daemon_event(lazybox_ipc::Event::CommandCompleted {
+            client_request_id: request_id.clone(),
+        });
+        assert!(!m.pending_workspace_creates.contains_key(&request_id));
+    }
+
+    /// A store/spawn failure carrying our create request id is a permanent,
+    /// named UI error and releases the pending request. It cannot disappear
+    /// into `/tmp/lazybox.log` only.
+    #[test]
+    fn workspace_create_failure_is_visible_and_clears_pending_request() {
+        let mut m = build_model();
+        m.modal_stack.push(Id::NewWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::NewWorkspaceProject {
+            project: lazybox_core::ProjectKey::local("project"),
+        });
+        let commands = m.handle_input_submitted("Broken".into());
+        let request_id = match commands.as_slice() {
+            [
+                IpcCommand::CreateWorkspace {
+                    client_request_id: Some(request_id),
+                    ..
+                },
+            ] => request_id.clone(),
+            other => panic!("expected one correlated CreateWorkspace, got {other:?}"),
+        };
+
+        m.handle_daemon_event(lazybox_ipc::Event::CommandFailed {
+            client_request_id: request_id.clone(),
+            message: "database is locked".into(),
+        });
+
+        assert!(!m.pending_workspace_creates.contains_key(&request_id));
+        let notice = m.status.notice.as_ref().expect("failure is surfaced");
+        assert!(notice.message.contains("Broken"));
+        assert!(notice.message.contains("not created"));
+        assert!(notice.message.contains("database is locked"));
+    }
+
+    #[test]
+    fn workspace_create_send_failure_is_visible_and_clears_pending_request() {
+        let (client, server) = channel::pair();
+        drop(server);
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let request_id = "create-disconnected".to_string();
+        m.pending_workspace_creates.insert(
+            request_id.clone(),
+            super::super::PendingWorkspaceCreate {
+                name: "Disconnected".into(),
+                spawn_agent: true,
+                workspace_key: None,
+            },
+        );
+
+        m.dispatch_cmds(vec![IpcCommand::CreateWorkspace {
+            name: "Disconnected".into(),
+            project_key: lazybox_core::ProjectKey::local("project"),
+            spawn_agent: Some("claude".into()),
+            client_request_id: Some(request_id.clone()),
+        }]);
+
+        assert!(!m.pending_workspace_creates.contains_key(&request_id));
+        let notice = m.status.notice.as_ref().expect("failure is surfaced");
+        assert!(notice.message.contains("Disconnected"));
+        assert!(notice.message.contains("not created"));
+        assert!(notice.message.contains("unavailable"));
     }
 
     /// RenameWorkspace input with a non-empty trimmed name AND a
@@ -6187,6 +6322,63 @@ mod wake_burst_liveness_tests {
             "Esc cleared the modal with the burst tail still queued — not by draining it first",
         );
     }
+
+    /// #1146: exercise the production work phase, not a hand-written subset.
+    /// A wedged render writer must defer a frame while `app.tick` remains live
+    /// enough to expire and pop a loading modal during an overflow episode.
+    #[test]
+    fn run_loop_step_skips_backpressured_paint_while_modal_times_out() {
+        use super::super::helpers::{
+            PerfMonitor, PhaseTimings, RENDER_BACKPRESSURE_CAP, RenderThrottle, StaleInputTally,
+            run_loop_step,
+        };
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        let (mut m, evt_tx, _cmd_rx) = model_with_event_sender();
+        let (loading, _never_sends) = Loading::pending("waking…");
+        m.mount_modal(Id::Setup, loading.timeout(Duration::from_millis(1)));
+        overflow_burst(&evt_tx, burst_over_one_tick());
+        m.render_pending = Some(Arc::new(AtomicUsize::new(RENDER_BACKPRESSURE_CAP + 1)));
+
+        let (_input_tx, mut input_rx) = tokio::sync::mpsc::channel(1);
+        let mut carried = Vec::new();
+        let mut stale_tally = StaleInputTally::default();
+        let mut perf = PerfMonitor::new();
+        let mut throttle = RenderThrottle::default();
+        let mut redraw_is_input = false;
+        let mut timings = PhaseTimings::default();
+        let mut saw_skip = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+
+        while m.top_modal().is_some() && std::time::Instant::now() < deadline {
+            let outcome = run_loop_step(
+                &mut m,
+                &mut carried,
+                &mut input_rx,
+                &mut stale_tally,
+                &mut perf,
+                &mut throttle,
+                &mut redraw_is_input,
+                &mut timings,
+            );
+            if outcome.skipped_for_backpressure {
+                saw_skip = true;
+                assert!(m.redraw, "a skipped paint must remain pending");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert!(saw_skip, "writer backpressure engaged the real skip path");
+        assert!(
+            m.redraw,
+            "the wedged writer never consumed the pending frame"
+        );
+        assert!(
+            m.top_modal().is_none(),
+            "the modal timed out while painting remained backpressured"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6280,9 +6472,11 @@ mod coalesce_tests {
         assert!(matches!(
             server.rx.try_recv(),
             Ok(IpcCommand::RequestTerminalResync {
+                requests,
+            }) if requests == vec![lazybox_ipc::TerminalResyncRequest {
                 terminal_id: TerminalId(1),
                 required_seq: 3,
-            })
+            }]
         ));
         assert!(
             server.rx.try_recv().is_err(),
@@ -6322,11 +6516,58 @@ mod coalesce_tests {
         assert!(matches!(
             server.rx.try_recv(),
             Ok(IpcCommand::RequestTerminalResync {
+                requests,
+            }) if requests == vec![lazybox_ipc::TerminalResyncRequest {
                 terminal_id: TerminalId(9),
                 required_seq: 17,
-            })
+            }]
         ));
         assert!(server.rx.try_recv().is_err(), "exactly one repair request");
+    }
+
+    /// #1171: a replay-budgeted reconnect snapshot can omit dozens of quiet
+    /// terminals at once. Recovery must consume one command slot for the
+    /// whole set, not overflow the 32-deep lane with one request per terminal.
+    #[test]
+    fn unavailable_snapshot_batches_a_resync_storm_into_one_command() {
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model");
+        while server.rx.try_recv().is_ok() {} // initial Subscribe
+
+        let count = lazybox_ipc::COMMAND_CHANNEL_CAPACITY + 17;
+        let terminals = (1..=count)
+            .map(|number| lazybox_ipc::TerminalSnapshot {
+                terminal_id: TerminalId(number as u64),
+                session_key: lazybox_core::SessionKey::new(format!("quiet-{number}")),
+                kind: lazybox_ipc::TerminalKind::Shell,
+                replay: Vec::new(),
+                last_seq: number as u64,
+                replay_available: false,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                prompt_history: Vec::new(),
+                composing_buffer: None,
+                agent_state: None,
+                authenticating: false,
+            })
+            .collect();
+
+        model.handle_daemon_event(Event::Snapshot {
+            workspaces: Vec::new(),
+            projects: Vec::new(),
+            terminals,
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        let command = server.rx.try_recv().expect("one batched recovery command");
+        let IpcCommand::RequestTerminalResync { requests } = command else {
+            panic!("expected resync batch, got {command:?}");
+        };
+        assert_eq!(requests.len(), count);
+        assert!(server.rx.try_recv().is_err(), "the storm used one slot");
     }
 
     /// Output for a different terminal ends the run — no cross-terminal

@@ -18,7 +18,7 @@
     },
     "type": "Event"
   },
-  "protocol_version": 3,
+  "protocol_version": 4,
   "requests": {
     "spawn_agent": {
       "payload": {
@@ -133,7 +133,7 @@
       "max_terminal_frame_bytes": 2097177,
       "max_terminal_write_bytes": 131072,
       "protocol_notice": null,
-      "protocol_version": 3,
+      "protocol_version": 4,
       "providers": [],
       "repositories": [],
       "settings": {

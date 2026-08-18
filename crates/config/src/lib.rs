@@ -310,7 +310,7 @@ impl RemoteConfig {
 ///   region: us-central1
 ///   zone: us-central1-a
 ///   terraform_dir: ./terraform/sandbox/gcp
-///   deployment: ./terraform/sandbox/deployments/obin.yaml
+///   deployment: ./.lazybox/sandbox.yaml
 ///   remote_socket: /home/me/.lazybox/run/daemon.sock
 ///   ports: [3000, 8082, 8787]
 /// ```
@@ -359,7 +359,7 @@ pub struct SandboxConfig {
     /// Local socket the forward binds; defaults to the `--connect` path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_socket: Option<PathBuf>,
-    /// Workload TCP ports the connect forward carries (obin `:3000` …).
+    /// Workload TCP ports the connect forward carries (`:3000`, etc.).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<u16>,
     /// Whether `ensure` provisions a box that builds + runs the lazybox

@@ -16,8 +16,8 @@
 //! 2. **Deployment — what's on the box.** A [`Deployment`] recipe: a
 //!    generic **default** (base toolchain + blank workspace) that a project
 //!    **overrides** via base + overlay deep-merge — the same shape a
-//!    `stack.local.yaml` overlay uses. obin's override is the box we
-//!    already built (its repo + `dev up <profile>` + SA/IAM/NAT).
+//!    `stack.local.yaml` overlay uses. Product-specific recipes stay in the
+//!    product repository; lazybox owns only the generic engine and schema.
 //!
 //! Provisioning (`ensure`/`destroy`) uses each provider's create/delete
 //! boundary. The fast lifecycle ops (`start`/`stop`/`status`/`connect`) use
@@ -51,6 +51,6 @@ pub use deployment::{Deployment, DeploymentConfig, merge_yaml};
 pub use handle::{BoxHandle, BoxStatus, PowerState};
 pub use provider::{
     CommandFuture, CommandRunner, SandboxError, SandboxProvider, SystemRunner, Tunnel,
-    validate_handle_provider,
+    validate_handle_provider, validate_spec_provider,
 };
 pub use spec::SandboxSpec;

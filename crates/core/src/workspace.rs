@@ -587,6 +587,18 @@ impl Workspace {
             .find(|t| &t.id == id)
     }
 
+    /// Mutable counterpart to [`Self::task_by_id`], using the same slot
+    /// traversal order. Provider mutation projections use this to update the
+    /// exact task that was mutated even if a workspace gained a PR and its
+    /// headline changed while the operation was in flight.
+    pub fn task_by_id_mut(&mut self, id: &TaskId) -> Option<&mut Task> {
+        self.pr
+            .iter_mut()
+            .chain(self.gh_issues.iter_mut())
+            .chain(self.linear_issues.iter_mut())
+            .find(|task| &task.id == id)
+    }
+
     /// Every linked task's id, deduplicated.
     pub fn linked_task_ids(&self) -> Vec<TaskId> {
         let mut out = Vec::new();
@@ -893,11 +905,21 @@ impl Workspace {
             .or_else(|| self.linear_issues.first())
     }
 
+    /// Mutable counterpart to [`Self::primary_task`]. Keeping the precedence
+    /// in one place prevents local projections (labels, optimistic mutation
+    /// state) from accidentally updating a different task than the row and
+    /// provider mutation target.
+    pub fn primary_task_mut(&mut self) -> Option<&mut Task> {
+        self.pr
+            .as_mut()
+            .or_else(|| self.gh_issues.first_mut())
+            .or_else(|| self.linear_issues.first_mut())
+    }
+
     /// Whether the headline task is claimed by an agent through the shared
     /// [`WORKING_LABEL_NAME`] convention.
     pub fn is_claimed(&self) -> bool {
-        self.primary_task()
-            .is_some_and(|task| task.has_label(WORKING_LABEL_NAME))
+        self.primary_task().is_some_and(Task::has_working_claim)
     }
 
     /// Number of activity items the user hasn't seen.
@@ -1883,6 +1905,26 @@ mod tests {
 
         let unclaimed = Workspace::from_task(pr("o/r#2"), now());
         assert!(!unclaimed.is_claimed());
+
+        let mut linear_task = pr("ENG-1");
+        linear_task.id.source = "linear".into();
+        linear_task.labels = vec![crate::Label::new("Working")];
+        assert!(
+            !Workspace::from_task(linear_task, now()).is_claimed(),
+            "a provider workflow label must not impersonate a fleet claim"
+        );
+    }
+
+    #[test]
+    fn mutable_headline_uses_the_same_precedence_as_the_read_only_accessor() {
+        let mut workspace = Workspace::from_task(pr("o/r#1"), now());
+        workspace.gh_issues.push(issue("github", "o/r#2"));
+        let expected = workspace.primary_task().unwrap().id.clone();
+
+        workspace.primary_task_mut().unwrap().title = "mutated".into();
+
+        assert_eq!(workspace.primary_task().unwrap().id, expected);
+        assert_eq!(workspace.primary_task().unwrap().title, "mutated");
     }
 
     fn issue(source: &str, key: &str) -> Task {
@@ -2885,6 +2927,21 @@ mod tests {
             key: "o/r#999".into(),
         };
         assert!(ws.task_by_id(&missing).is_none());
+    }
+
+    #[test]
+    fn task_by_id_mut_updates_only_the_requested_slot() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("mixed"), "mixed", now());
+        let pr = pr("o/r#1");
+        let issue = issue("github", "o/r#2");
+        let target = issue.id.clone();
+        ws.attach_task(pr);
+        ws.attach_task(issue);
+
+        ws.task_by_id_mut(&target).unwrap().title = "updated issue".into();
+
+        assert_eq!(ws.task_by_id(&target).unwrap().title, "updated issue");
+        assert_ne!(ws.primary_task().unwrap().id, target);
     }
 
     #[test]

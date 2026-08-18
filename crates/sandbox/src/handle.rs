@@ -42,11 +42,13 @@ impl std::fmt::Display for PowerState {
     }
 }
 
-/// A persisted, per-worktree pointer to a provisioned box.
+/// A persisted pointer to a provisioned box.
 ///
 /// `ensure` returns one; [`crate::persist`] round-trips it through the
 /// store so a later `start`/`stop`/`connect` addresses the same instance
-/// without re-running Terraform. `zone` and `project` are carried beyond
+/// without re-running Terraform. The CLI uses one shared box key by default
+/// and supports explicit per-worktree keys for compatibility/isolation.
+/// `zone` and `project` are carried beyond
 /// the issue's `{provider, id, region, power_state, last_active}` because
 /// the native GCP lifecycle ops (`gcloud instances start/stop/describe`)
 /// need the exact zone and project, not just the region.

@@ -2,8 +2,8 @@
 #
 # This is the recipe lazybox ships and embeds (crate `lazybox-sandbox`
 # includes it via `include_str!`). A project overrides it with a thin
-# overlay deep-merged on top (see `obin.yaml`); only the changed keys need
-# to appear in the overlay.
+# overlay deep-merged on top; only the changed keys need to appear in the
+# repo-owned overlay.
 name: default
 
 # Placement / size (the "GCP" dimension defaults; a spec may still pin

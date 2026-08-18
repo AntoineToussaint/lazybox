@@ -4166,30 +4166,52 @@ impl GhClient {
     /// state is already available for the following operation.
     pub async fn set_working_claim(
         &self,
-        workspace: &lazybox_core::Workspace,
+        task: &lazybox_core::Task,
         claimed: bool,
     ) -> Result<(), GhError> {
-        let task = workspace
-            .primary_task()
-            .ok_or_else(|| GhError::Graphql("working claim: workspace has no task".into()))?;
         let repo = task
             .repo
             .as_deref()
             .ok_or_else(|| GhError::Graphql("working claim: task has no repository".into()))?;
+        self.set_working_claim_target(&task.id, repo, claimed).await
+    }
+
+    /// Target-level fleet-claim mutation used by teardown. The owning daemon
+    /// records this immutable id/repository pair when it acquires a claim, so
+    /// it can clear the same issue even if the workspace headline later
+    /// changes to a PR or the workspace row is removed.
+    pub async fn set_working_claim_target(
+        &self,
+        task_id: &lazybox_core::TaskId,
+        repo: &str,
+        claimed: bool,
+    ) -> Result<(), GhError> {
+        if task_id.source != lazybox_core::GITHUB_SOURCE {
+            return Err(GhError::Graphql(format!(
+                "working claim: task source {:?} is not GitHub",
+                task_id.source
+            )));
+        }
         let (owner, name) = repo.split_once('/').ok_or_else(|| {
             GhError::Graphql(format!("working claim: invalid repository `{repo}`"))
         })?;
-        let number = task
-            .id
+        let (task_repo, number) = task_id
             .key
             .rsplit_once('#')
-            .and_then(|(_, number)| number.parse::<u64>().ok())
+            .and_then(|(task_repo, number)| {
+                number.parse::<u64>().ok().map(|number| (task_repo, number))
+            })
             .ok_or_else(|| {
                 GhError::Graphql(format!(
                     "working claim: cannot parse issue number from `{}`",
-                    task.id.key
+                    task_id.key
                 ))
             })?;
+        if task_repo != repo {
+            return Err(GhError::Graphql(format!(
+                "working claim: task key repository `{task_repo}` does not match `{repo}`"
+            )));
+        }
 
         let labels = self.list_labels_for_repo(owner, name).await?;
         let existing_name = labels
@@ -6976,11 +6998,10 @@ mod tests {
         const LABELS_QUERY: &str = r#"{"data":{"repository":{"labels":{"nodes":[]}}}}"#;
         let base_uri = spawn_sequenced_response_server(vec![LABELS_QUERY, CREATED, APPLIED]).await;
         let client = make_client(&base_uri);
-        let workspace =
-            Workspace::from_task(task_without_node_id(TaskKind::Issue), chrono::Utc::now());
+        let task = task_without_node_id(TaskKind::Issue);
 
         client
-            .set_working_claim(&workspace, true)
+            .set_working_claim(&task, true)
             .await
             .expect("a fresh repository must create and apply the coordination label");
     }
@@ -6998,14 +7019,43 @@ mod tests {
         )
         .await;
         let client = make_client(&base_uri);
-        let workspace =
-            Workspace::from_task(task_without_node_id(TaskKind::Issue), chrono::Utc::now());
+        let task = task_without_node_id(TaskKind::Issue);
 
         client
-            .set_working_claim(&workspace, false)
+            .set_working_claim(&task, false)
             .await
             .expect("clearing a missing claim is already success");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn working_claim_rejects_non_github_tasks_before_http() {
+        let client = make_client("http://127.0.0.1:1");
+        let mut task = task_without_node_id(TaskKind::Issue);
+        task.id.source = "linear".to_string();
+
+        let error = client
+            .set_working_claim(&task, true)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("not GitHub"), "{error}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn working_claim_rejects_mismatched_repository_identity_before_http() {
+        let client = make_client("http://127.0.0.1:1");
+        let mut task = task_without_node_id(TaskKind::Issue);
+        task.repo = Some("other/repository".to_string());
+
+        let error = client
+            .set_working_claim(&task, true)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("does not match"), "{error}");
     }
 
     /// Reviewer mutation: `request_reviewers` first resolves the login

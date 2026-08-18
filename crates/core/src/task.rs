@@ -572,6 +572,16 @@ impl Task {
             .any(|label| label.name.eq_ignore_ascii_case(name))
     }
 
+    /// Whether this is a GitHub task carrying lazybox's fleet-claim label.
+    ///
+    /// `working` is also a legitimate workflow label in other providers
+    /// (notably Linear). Centralizing the source check prevents those tasks
+    /// from being rendered as agent-owned, hidden from the ordinary label
+    /// chips, or guarded by the GitHub-only spawn confirmation.
+    pub fn has_working_claim(&self) -> bool {
+        self.id.source == crate::GITHUB_SOURCE && self.has_label(crate::WORKING_LABEL_NAME)
+    }
+
     /// True when this task represents a pull/merge request rather
     /// than an issue/ticket. Centralizes the URL-shape heuristic so
     /// new providers (Bitbucket, GitLab, …) extend ONE place instead
@@ -1005,6 +1015,21 @@ mod status_tag_tests {
         assert!(task.has_label("working"));
         assert!(task.has_label("WORKING"));
         assert!(!task.has_label("blocked"));
+    }
+
+    #[test]
+    fn working_claim_is_github_specific_even_when_other_sources_share_the_label() {
+        let mut task = base();
+        task.labels = vec![Label::new("Working")];
+        task.id.source = crate::GITHUB_SOURCE.to_string();
+        assert!(task.has_working_claim());
+
+        task.id.source = "linear".to_string();
+        assert!(task.has_label("working"));
+        assert!(
+            !task.has_working_claim(),
+            "a Linear workflow label is not a GitHub fleet claim"
+        );
     }
 
     #[test]

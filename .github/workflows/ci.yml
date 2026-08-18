@@ -136,7 +136,12 @@ jobs:
           tool: cargo-nextest
 
       - name: Test with per-test timeout enforcement
-        run: cargo nextest run --workspace --profile ci
+        run: |
+          cargo nextest run --workspace --profile ci
+          # `managed-k8s` is intentionally not wired into the product yet,
+          # so workspace feature unification does not compile it. Keep the
+          # provider contract and in-memory control plane release-gated.
+          cargo nextest run -p lazybox-sandbox --all-features --profile ci
 
   macos:
     name: test (macos-14)
@@ -169,7 +174,9 @@ jobs:
           rust-components: clippy
           shared-key: linux
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p lazybox-sandbox --all-targets --all-features -- -D warnings
 
   fmt:
     name: fmt
@@ -314,7 +321,9 @@ jobs:
         with:
           shared-key: linux
       - name: Rustdoc
-        run: cargo doc --no-deps --workspace
+        run: |
+          cargo doc --no-deps --workspace
+          cargo doc --no-deps -p lazybox-sandbox --all-features
 
   benches:
     # The workspace's two criterion benches (tui, server) type-check under the

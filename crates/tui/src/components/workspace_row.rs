@@ -682,9 +682,12 @@ fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
     let labels = match ctx.task.map(|task| task.labels.as_slice()) {
         Some(labels)
             if labels.iter().any(|label| {
-                !label
-                    .name
-                    .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+                !ctx.task.is_some_and(|task| {
+                    task.has_working_claim()
+                        && label
+                            .name
+                            .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+                })
             }) =>
         {
             labels
@@ -700,9 +703,12 @@ fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
         }
     };
     let visible = labels.iter().filter(|label| {
-        !label
-            .name
-            .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+        !ctx.task.is_some_and(|task| {
+            task.has_working_claim()
+                && label
+                    .name
+                    .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
+        })
     });
     let total = visible.clone().count();
     let shown = visible.take(MAX_CHIPS);
@@ -1218,9 +1224,7 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // Empty cell when there's nothing to show — `Column::max(0)`
     // collapses the column across the whole table when NO row has a
     // pill, handing the slack back to the title flex.
-    let claimed = ctx
-        .task
-        .is_some_and(|task| task.has_label(lazybox_core::WORKING_LABEL_NAME));
+    let claimed = ctx.workspace.is_some_and(Workspace::is_claimed);
     if !claimed && primary.is_none() && secondary.is_none() {
         return Cell::empty();
     }
@@ -2292,6 +2296,26 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(labels, " [bug]");
+    }
+
+    #[test]
+    fn non_github_working_label_remains_an_ordinary_chip() {
+        let mut task = make_task("ENG-42", "x");
+        task.id.source = "linear".to_string();
+        task.review = ReviewStatus::None;
+        task.ci = CiStatus::None;
+        task.state = TaskState::Open;
+        task.labels = vec![lazybox_core::Label::new("Working")];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        assert_eq!(cell_status(&ctx).width(), 0);
+        let labels: String = label_spans(&ctx)
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(labels, " [Working]");
     }
 
     /// A lone CI signal is sized to just its own `✗` glyph (#1046) — no

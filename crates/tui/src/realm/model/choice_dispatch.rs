@@ -688,6 +688,7 @@ mod optimistic_assignee_tests {
             kind: Some(TaskKind::Issue),
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }

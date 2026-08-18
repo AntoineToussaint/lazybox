@@ -160,15 +160,16 @@ pub fn role_rank(role: Option<lazybox_core::TaskRole>) -> u8 {
     }
 }
 
-/// One row in the rendered sidebar list. The visual model is a
-/// three-level tree:
+/// One row in the rendered sidebar list. The visual model is a grouped
+/// tree whose workspace tier may itself contain parent/child tickets:
 ///
 /// ```text
 /// owner/name              <- RepoHeader
-///   ▸ Workspace title     <- Workspace (always present)
+///   ▾ Parent ticket       <- Workspace (always present)
 ///       claude            <- Session (only when workspace has 2+)
 ///       shell             <- Session
-///   ▸ Other workspace
+///     · Child ticket      <- Workspace, indented by ticket ancestry
+///   · Other ticket
 /// ```
 ///
 /// **Sessions are only surfaced when the workspace has more than
@@ -218,6 +219,24 @@ pub enum VisibleRow {
         workspace: SessionKey,
         session_id: SessionId,
     },
+}
+
+/// Hierarchy metadata for one visible workspace row. Kept beside
+/// [`VisibleRow`] rather than changing that long-lived enum's wire shape:
+/// clients that only need selection still consume the row key, while tree-
+/// aware clients add indentation and a disclosure control from this map.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct TicketTreeMeta {
+    /// Zero-based depth within the visible parent-ticket forest.
+    pub depth: usize,
+    /// Whether this ticket has at least one visible direct child.
+    pub has_children: bool,
+    /// Whether those visible descendants are currently folded away.
+    pub collapsed: bool,
+    /// This row did not match the active filter/search itself, but is kept
+    /// as ancestor context for a matching descendant.
+    pub context_only: bool,
 }
 
 /// Free-text search over the inbox. Two flavours share this state:

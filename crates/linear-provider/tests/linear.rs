@@ -157,6 +157,7 @@ fn make_issue(
             name: Some("Creator".into()),
         }),
         team: Some(Team { key: "ENG".into() }),
+        parent: None,
         labels: Some(Labels {
             nodes: vec![Label { name: "bug".into() }],
         }),
@@ -284,6 +285,7 @@ async fn fetch_all_single_page() {
             "assignee": { "id": "me", "name": "Me" },
             "creator": { "id": "someone", "name": "Someone" },
             "team": { "key": "ENG" },
+            "parent": { "id": "parent-node", "identifier": "ENG-0" },
             "labels": { "nodes": [] }
         }
     ]);
@@ -303,6 +305,13 @@ async fn fetch_all_single_page() {
     assert_eq!(task.id.key, "ENG-1");
     assert_eq!(task.role, TaskRole::Assignee);
     assert_eq!(task.state, TaskState::InProgress);
+    assert_eq!(
+        task.parent,
+        Some(lazybox_core::TaskId {
+            source: "linear".into(),
+            key: "ENG-0".into(),
+        })
+    );
     assert_eq!(mock.requests.load(Ordering::SeqCst), 2); // viewer + issues
 
     mock.shutdown().await;

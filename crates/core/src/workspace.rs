@@ -169,7 +169,8 @@ pub enum CleanupPrompt {
 /// - 1: the `schema` field itself.
 /// - 2: `Session::worktree_branch`.
 /// - 3: `Task::reviews` (submitted reviewers + state).
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 3;
+/// - 4: `Task::parent` (provider-native ticket hierarchy).
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 4;
 
 /// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT
 /// version on save, regardless of what version the row was loaded at.
@@ -1891,6 +1892,7 @@ mod tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }

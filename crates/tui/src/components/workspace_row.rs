@@ -136,6 +136,9 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::sent_snippets` — issue #463), bounded by
     /// `SENT_SNIPPETS_MAX`. Renders a dim ` ]N ` pill; `0` renders nothing.
     pub sent_snippet_count: usize,
+    /// Visible ticket-tree placement. `None` for rows outside a hierarchy;
+    /// roots with children still carry metadata so they get a disclosure.
+    pub ticket_tree: Option<lazybox_tui_core::inbox::TicketTreeMeta>,
     /// This workspace's PR is part of a detected stack (issue #969) — its
     /// [`StackPosition`](lazybox_core::StackPosition). Renders a ` ⇗k/N `
     /// badge so a chain of stacked PRs reads as an ordered stack at a
@@ -569,7 +572,9 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // Stale issues fade (DIM) so the eye skips them — but never on the
     // cursor row, whose highlight fill must stay legible.
     let mut style = ctx.row_style();
-    if !ctx.is_cursor && ctx.is_stale_issue() {
+    if !ctx.is_cursor
+        && (ctx.is_stale_issue() || ctx.ticket_tree.is_some_and(|meta| meta.context_only))
+    {
         style = style.add_modifier(Modifier::DIM);
     }
     // Labels ride at the tail of the title cell rather than in a
@@ -579,7 +584,13 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // when the row is too narrow (see `Cell::atomic_tail`).
     let labels = label_spans(ctx);
     let tail = labels.len();
-    let mut spans = title_spans(ctx.raw_title(), ctx.highlight_query, style, ctx.theme);
+    let mut spans = ticket_tree_prefix(ctx);
+    spans.extend(title_spans(
+        ctx.raw_title(),
+        ctx.highlight_query,
+        style,
+        ctx.theme,
+    ));
     spans.extend(labels);
     Cell::new(spans).atomic_tail(tail)
 }
@@ -634,6 +645,49 @@ fn ci_match_range(hay: &str, needle: &str) -> Option<std::ops::Range<usize>> {
         && hay.is_char_boundary(end)
         && hay[start..end].to_lowercase() == needle_lower)
         .then_some(start..end)
+}
+
+/// Compact tree prefix inside the flexible title column. Depth is capped so
+/// malformed or unusually deep provider data cannot consume the entire
+/// title; deeper descendants retain an ellipsis marker and the final three
+/// indentation steps.
+fn ticket_tree_prefix(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
+    let Some(meta) = ctx.ticket_tree else {
+        return Vec::new();
+    };
+    if meta.depth == 0 && !meta.has_children {
+        return Vec::new();
+    }
+    const MAX_VISIBLE_DEPTH: usize = 4;
+    let mut spans = Vec::with_capacity(3);
+    let dim = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(ctx.theme.text_dim)
+    };
+    if meta.depth > MAX_VISIBLE_DEPTH {
+        spans.push(Span::styled("… ", dim));
+        spans.push(Span::styled(
+            "  ".repeat(MAX_VISIBLE_DEPTH.saturating_sub(1)),
+            dim,
+        ));
+    } else if meta.depth > 0 {
+        spans.push(Span::styled("  ".repeat(meta.depth), dim));
+    }
+    let glyph = if meta.has_children {
+        if meta.collapsed { "▸ " } else { "▾ " }
+    } else {
+        "· "
+    };
+    let glyph_style = if ctx.is_cursor {
+        ctx.row_style()
+    } else if meta.has_children {
+        Style::default().fg(ctx.theme.accent)
+    } else {
+        dim
+    };
+    spans.push(Span::styled(glyph, glyph_style));
+    spans
 }
 
 /// Hard cap on a single chip's text (before the `…`). A verbose
@@ -1344,6 +1398,7 @@ mod tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -1392,6 +1447,7 @@ mod tests {
             track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
+            ticket_tree: None,
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
@@ -1805,6 +1861,7 @@ mod tests {
             track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
+            ticket_tree: None,
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
@@ -1822,6 +1879,53 @@ mod tests {
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "[CI] cache post-job upload");
+    }
+
+    #[test]
+    fn ticket_tree_prefix_distinguishes_parent_child_and_folded_state() {
+        let theme = theme();
+        let task = make_task("owner/repo#1", "Parent ticket");
+        let workspace = Workspace::from_task(task.clone(), fixed_time());
+        let mut ctx = ctx_for(&workspace, &task, &theme);
+
+        ctx.ticket_tree = Some(lazybox_tui_core::inbox::TicketTreeMeta {
+            depth: 0,
+            has_children: true,
+            collapsed: false,
+            context_only: false,
+        });
+        let expanded: String = cell_title(&ctx)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(expanded.starts_with("▾ "));
+
+        ctx.ticket_tree = Some(lazybox_tui_core::inbox::TicketTreeMeta {
+            depth: 1,
+            has_children: false,
+            collapsed: false,
+            context_only: false,
+        });
+        let child: String = cell_title(&ctx)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(child.starts_with("  · "));
+
+        ctx.ticket_tree = Some(lazybox_tui_core::inbox::TicketTreeMeta {
+            depth: 0,
+            has_children: true,
+            collapsed: true,
+            context_only: false,
+        });
+        let collapsed: String = cell_title(&ctx)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(collapsed.starts_with("▸ "));
     }
 
     /// Title cell keeps a conventional-commit prefix inline rather than
@@ -2248,6 +2352,7 @@ mod tests {
             track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
+            ticket_tree: None,
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
@@ -3502,6 +3607,7 @@ mod tests {
             track_main_behind: false,
             has_notes: false,
             sent_snippet_count: 0,
+            ticket_tree: None,
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,

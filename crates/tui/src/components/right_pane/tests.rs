@@ -781,6 +781,7 @@ mod has_visible_content_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -881,6 +882,7 @@ mod summary_render_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -1008,6 +1010,7 @@ mod mark_workspace_merged_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -1106,6 +1109,7 @@ mod description_expand_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -1819,6 +1823,7 @@ mod linked_issue_modal_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -1944,6 +1949,7 @@ mod originating_issue_header_tests {
             kind: None,
             closes_issues: closes,
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -2273,6 +2279,7 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }

@@ -6184,6 +6184,7 @@ mod tests {
             changed_files: 0,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             kind: Some(kind),
             priority: None,
             state_label: None,

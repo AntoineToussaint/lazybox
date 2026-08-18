@@ -693,6 +693,11 @@ impl Sidebar {
         self.inner.toggle_repo_at_cursor()
     }
 
+    /// Toggle descendants when the cursor is on a parent ticket.
+    pub fn toggle_ticket_at_cursor(&mut self) -> bool {
+        self.inner.toggle_ticket_at_cursor()
+    }
+
     /// Pin / unpin the cursor's repo group. Same effect as the `p`
     /// key. Returns `(repo, now_pinned)` for the footer notice.
     pub fn toggle_pin_at_cursor(&mut self) -> Option<(String, bool)> {

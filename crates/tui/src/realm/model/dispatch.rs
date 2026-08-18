@@ -1925,14 +1925,18 @@ impl<T: TerminalAdapter> Model<T> {
                 self.sidebar.open_global_search();
             }
             Action::ToggleRepoGroup => {
-                // `Space` folds only the tier the cursor rests ON: a Space
-                // header collapses the whole Space (#860), a repo header
-                // collapses its group. On a workspace / session / kind row
-                // it is inert — a bare Space is the most reflexively-pressed
-                // "neutral" key, so it must never fold the group you're
-                // navigating inside (#1099). Collapse a group by moving to
-                // its header or clicking the ▾ triangle.
-                if self.sidebar.cursor_on_space_header() {
+                // `Space` folds the most local tier at the cursor. A parent
+                // ticket is the most local fold target: on a parent-ticket row
+                // it folds that ticket's visible descendants (view-local).
+                // Failing that, a Space header collapses the whole Space
+                // (#860) and a repo header collapses its group. On a plain
+                // workspace / session / kind row it is inert — a bare Space is
+                // the most reflexively-pressed "neutral" key, so it must never
+                // fold the group you're navigating inside (#1099). Collapse a
+                // group by moving to its header or clicking the ▾ triangle.
+                if self.sidebar.toggle_ticket_at_cursor() {
+                    // handled
+                } else if self.sidebar.cursor_on_space_header() {
                     self.sidebar.toggle_space_at_cursor();
                 } else if self.sidebar.cursor_on_repo_header() {
                     self.sidebar.toggle_repo_at_cursor();

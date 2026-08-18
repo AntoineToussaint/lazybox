@@ -149,6 +149,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         kind: None,
         closes_issues: vec![],
         linked_tasks: vec![],
+        parent: None,
         priority: None,
         state_label: None,
     };

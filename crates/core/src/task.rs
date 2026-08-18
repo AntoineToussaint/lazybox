@@ -542,6 +542,13 @@ pub struct Task {
     /// `closes_issues`.
     #[serde(default)]
     pub linked_tasks: Vec<TaskId>,
+    /// The provider-native parent task, when this task is nested under
+    /// another issue/ticket. Providers that do not expose hierarchy leave
+    /// this empty. The inbox uses it to build a cycle-safe, collapsible
+    /// forest within each project; a missing or out-of-scope parent makes
+    /// the task a root rather than hiding it.
+    #[serde(default)]
+    pub parent: Option<TaskId>,
     /// Authoritative PR-vs-issue discriminator, set by the provider that
     /// built this task. `None` only for legacy persisted snapshots that
     /// predate the field; [`Task::is_pr`] falls back to the URL heuristic
@@ -1002,6 +1009,7 @@ mod status_tag_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }

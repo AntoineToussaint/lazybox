@@ -81,6 +81,7 @@ fn synthetic_issue(i: usize) -> Task {
         kind: None,
         closes_issues: vec![],
         linked_tasks: vec![],
+        parent: None,
         priority: None,
         state_label: None,
     }

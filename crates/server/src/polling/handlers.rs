@@ -2363,8 +2363,8 @@ pub(crate) async fn prompt_merged_pr_removal_with(
 
 /// Handle `Command::RemoveMergedWorkspace`: the user confirmed the
 /// merged-PR removal modal. Kills the sessions, drops the row, and
-/// reclaims the now-idle worktree directories via
-/// [`crate::workspace::WorkspaceLifecycle`]. A confirmed removal
+/// reclaims the now-idle worktree directories via the internal
+/// `WorkspaceLifecycle` coordinator. A confirmed removal
 /// archives, so the next poll doesn't resurrect the row. Returns the
 /// reclaimed worktree space, or `None` if the removal was preserved.
 pub async fn remove_merged_workspace(

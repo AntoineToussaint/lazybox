@@ -21,6 +21,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use lazybox_config::{Config, SandboxConfig};
 use lazybox_sandbox::e2b::E2bProvider;
 use lazybox_sandbox::gcp::{GcpAuth, GcpProvider};
@@ -584,7 +585,7 @@ fn load_handle_or_bail(
 ) -> anyhow::Result<BoxHandle> {
     match persist::load_handle_for_provider(store, worktree, provider)? {
         Some(handle) => Ok(handle),
-        None => anyhow::bail!(missing_handle_message(store, worktree)),
+        None => anyhow::bail!(missing_handle_message(store, worktree)?),
     }
 }
 
@@ -594,19 +595,18 @@ fn load_handle_or_bail(
 /// but the default lookup can't see them — silence here is how a user
 /// ends up paying for an orphaned box, so every miss lists what IS
 /// stamped and how to address it.
-fn missing_handle_message(store: &dyn Store, worktree: &str) -> String {
-    let others: Vec<String> = persist::list_handle_keys(store)
-        .unwrap_or_default()
+fn missing_handle_message(store: &dyn Store, worktree: &str) -> Result<String, SandboxError> {
+    let others: Vec<String> = persist::list_handle_keys(store)?
         .into_iter()
         .filter(|k| k != worktree)
         .collect();
     if others.is_empty() {
-        format!(
+        Ok(format!(
             "no box stamped for {worktree:?}; run `lazybox sandbox ensure` first \
              (or pass --worktree)"
-        )
+        ))
     } else {
-        format!(
+        Ok(format!(
             "no box stamped for {worktree:?}, but existing box handle(s) found under: \
              {} — address one with `--worktree <key>` (earlier builds keyed boxes per \
              git worktree; those instances keep running and billing until slept or \
@@ -616,12 +616,26 @@ fn missing_handle_message(store: &dyn Store, worktree: &str) -> String {
                 .map(|k| format!("{k:?}"))
                 .collect::<Vec<_>>()
                 .join(", ")
-        )
+        ))
     }
 }
 
+/// Sandbox lifecycle commands are stateful and can spend or destroy cloud
+/// resources, so a malformed config must abort the command. Falling back to
+/// `Config::default()` here can silently select GCP and default paths that the
+/// operator did not ask for.
+fn require_sandbox_config(
+    loaded: Result<Config, lazybox_config::ConfigError>,
+) -> anyhow::Result<Config> {
+    loaded.context("load lazybox config for sandbox command")
+}
+
+fn load_sandbox_config() -> anyhow::Result<Config> {
+    require_sandbox_config(Config::load())
+}
+
 async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    let config = load_sandbox_config()?;
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let spec = resolve_spec(&config.sandbox, args, &worktree, &provider)?;
@@ -655,7 +669,7 @@ async fn ensure(args: &mut Vec<String>) -> anyhow::Result<()> {
 }
 
 async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    let config = load_sandbox_config()?;
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
@@ -671,7 +685,7 @@ async fn wake(args: &mut Vec<String>) -> anyhow::Result<()> {
 }
 
 async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    let config = load_sandbox_config()?;
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
@@ -687,7 +701,7 @@ async fn sleep(args: &mut Vec<String>) -> anyhow::Result<()> {
 }
 
 async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    let config = load_sandbox_config()?;
     let worktree = box_key(args);
     let provider = resolve_provider(&config.sandbox, args, &worktree)?;
     let store = open_store()?;
@@ -711,7 +725,7 @@ async fn status(args: &mut Vec<String>) -> anyhow::Result<()> {
 }
 
 async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    let config = load_sandbox_config()?;
     let worktree = box_key(args);
     let print_only = crate::take_flag(args, "--print");
     // Provisioning is opt-in for `connect`: creating cloud infrastructure
@@ -781,10 +795,10 @@ async fn connect(args: &mut Vec<String>) -> anyhow::Result<()> {
             println!("Provisioning {} box {}…", provider.id(), spec.name);
             connect_box(&provider, &spec, None, &ports).await?
         }
-        None => anyhow::bail!(
-            "{} — or rerun with --provision to create it now",
-            missing_handle_message(store.as_ref(), &worktree)
-        ),
+        None => {
+            let message = missing_handle_message(store.as_ref(), &worktree)?;
+            anyhow::bail!("{message} — or rerun with --provision to create it now")
+        }
     };
     handle.observe(PowerState::Running, chrono::Utc::now());
     persist::save_handle(store.as_ref(), &worktree, &handle)?;
@@ -873,7 +887,7 @@ async fn wait_until_reachable<P: SandboxProvider>(
 /// `lazybox-build.sh` over IAP SSH. Defaults to the client's own baked SHA
 /// (so the daemon matches this binary); `--sha` targets a specific commit.
 async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    let config = load_sandbox_config()?;
     let worktree = box_key(args);
     // `take_value` consumes the flag, so read it once. No `--sha` means rebuild
     // to this client's own commit — where a dirty build can't clear a mismatch
@@ -931,7 +945,7 @@ async fn rebuild(args: &mut Vec<String>) -> anyhow::Result<()> {
 }
 
 async fn destroy(args: &mut Vec<String>) -> anyhow::Result<()> {
-    let config = Config::load().unwrap_or_default();
+    let config = load_sandbox_config()?;
     let worktree = box_key(args);
     // Destroying a box is irreversible, so it is gated behind an explicit
     // opt-in rather than run on a bare `destroy`.
@@ -962,7 +976,7 @@ mod tests {
         // shared-key miss must surface it (that instance keeps billing)
         // instead of steering straight to a duplicate `ensure`.
         let store = lazybox_store::MemoryStore::new();
-        let plain = missing_handle_message(&store, SHARED_BOX_KEY);
+        let plain = missing_handle_message(&store, SHARED_BOX_KEY).unwrap();
         assert!(plain.contains("ensure"), "{plain}");
         assert!(!plain.contains("existing box handle"), "{plain}");
 
@@ -976,9 +990,21 @@ mod tests {
             last_active: None,
         };
         persist::save_handle(&store, "/repos/foo/wt", &legacy).unwrap();
-        let hinted = missing_handle_message(&store, SHARED_BOX_KEY);
+        let hinted = missing_handle_message(&store, SHARED_BOX_KEY).unwrap();
         assert!(hinted.contains("/repos/foo/wt"), "{hinted}");
         assert!(hinted.contains("--worktree"), "{hinted}");
+    }
+
+    #[test]
+    fn malformed_config_aborts_cloud_commands_instead_of_using_defaults() {
+        let error = require_sandbox_config(Err(lazybox_config::ConfigError::Io(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "config unreadable"),
+        )))
+        .unwrap_err();
+        let error = format!("{error:#}");
+
+        assert!(error.contains("load lazybox config"), "{error}");
+        assert!(error.contains("config unreadable"), "{error}");
     }
 
     #[test]

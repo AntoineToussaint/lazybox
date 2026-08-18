@@ -10,6 +10,7 @@ use serde_json::Value;
 const DEFAULT_PLATFORM_URL: &str = "https://platform.lazybox.ai";
 const CLAIM_PATH: &str = "/v1/devices/claim";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const ERROR_BODY_LIMIT: usize = 8 * 1024;
 const USAGE: &str = "usage:\n  \
     lazybox account claim <code> [--platform-url <url>] [--name <name>]\n  \
     lazybox account status";
@@ -51,10 +52,7 @@ async fn claim(args: &[String]) -> anyhow::Result<()> {
         .unwrap_or_else(|| "lazybox".to_string());
     let identity = BoxIdentity::load_or_generate(lazybox_core::paths::identity_dir())
         .context("load or generate box identity")?;
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .context("build platform HTTP client")?;
+    let client = platform_client()?;
     let receipt = claim_platform(
         &client,
         &platform_url,
@@ -65,8 +63,9 @@ async fn claim(args: &[String]) -> anyhow::Result<()> {
     .await?;
     let account = receipt.into_config(platform_url);
     let saved = account.clone();
-    Config::save_with(move |config| config.account = saved)
-        .context("persist platform account association")?;
+    if let Err(error) = Config::save_with(move |config| config.account = saved) {
+        anyhow::bail!(claim_persistence_failure(&account, &error));
+    }
 
     println!(
         "Claimed this box for organization {}.",
@@ -82,6 +81,17 @@ async fn claim(args: &[String]) -> anyhow::Result<()> {
     );
     println!("  entitlement: {}", entitlement_label(&account));
     Ok(())
+}
+
+fn platform_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        // A 307/308 preserves the POST body. Following one could send the
+        // one-time claim code to a different origin selected by a compromised
+        // or misconfigured endpoint, so claims require an explicit final URL.
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("build platform HTTP client")
 }
 
 fn status() -> anyhow::Result<()> {
@@ -202,7 +212,7 @@ async fn claim_platform(
     name: &str,
 ) -> anyhow::Result<ClaimReceipt> {
     let endpoint = format!("{}{CLAIM_PATH}", platform_url.trim_end_matches('/'));
-    let response = client
+    let mut response = client
         .post(&endpoint)
         .json(&serde_json::json!({
             "code": code,
@@ -214,13 +224,76 @@ async fn claim_platform(
         .with_context(|| format!("claim box through {endpoint}"))?;
     let status = response.status();
     if !status.is_success() {
-        anyhow::bail!("platform rejected the claim with HTTP {status}");
+        let detail = platform_error_detail(&mut response).await;
+        let suffix = detail
+            .as_deref()
+            .map(|detail| format!(": {detail}"))
+            .unwrap_or_default();
+        anyhow::bail!("platform rejected the claim with HTTP {status}{suffix}");
     }
     let value = response
         .json::<Value>()
         .await
         .context("parse platform claim response")?;
     ClaimReceipt::from_value(&value)
+}
+
+/// Read a bounded rejection body and extract only the platform's declared
+/// error/message field. Claim responses may come from a user-configured URL,
+/// so an unbounded `.text()` would let a bad endpoint consume arbitrary
+/// memory, while dumping an unknown JSON object could expose unrelated
+/// response fields. Plain-text errors are kept as a compact fallback.
+async fn platform_error_detail(response: &mut reqwest::Response) -> Option<String> {
+    let mut body = Vec::new();
+    while body.len() < ERROR_BODY_LIMIT {
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) | Err(_) => break,
+        };
+        let remaining = ERROR_BODY_LIMIT - body.len();
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+    }
+    platform_error_detail_from_bytes(&body)
+}
+
+fn platform_error_detail_from_bytes(body: &[u8]) -> Option<String> {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        return first_string(
+            &value,
+            &[&["error"], &["message"], &["detail"], &["error", "message"]],
+        )
+        .map(|detail| compact_error_text(&detail));
+    }
+    // A bounded read can truncate otherwise-valid JSON. Never reinterpret a
+    // JSON-looking parse failure as plain text: that could print an unrelated
+    // field (for example a token) which the declared-field filter above was
+    // specifically meant to suppress.
+    if body
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| byte == b'{' || byte == b'[')
+    {
+        return None;
+    }
+    let text = String::from_utf8_lossy(body);
+    let detail = compact_error_text(&text);
+    (!detail.is_empty()).then_some(detail)
+}
+
+fn compact_error_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A one-time claim code can be consumed even when the following local write
+/// fails. Say explicitly that the remote side succeeded and retain the
+/// non-secret association identifiers in the error so the operator can
+/// recover instead of retrying a now-invalid code blindly.
+fn claim_persistence_failure(account: &AccountConfig, error: &dyn std::fmt::Display) -> String {
+    format!(
+        "platform claim succeeded for organization {}, but lazybox could not persist the local association: {error}. The one-time claim code may now be consumed; fix the config-file error and claim again only if the platform still shows this device as unlinked",
+        organization_label(account)
+    )
 }
 
 fn value_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -439,7 +512,7 @@ mod tests {
             r#"{"device_id":"dev_7","org_id":"org_42","plan":"pro","entitled":true}"#,
         )
         .await;
-        let client = reqwest::Client::new();
+        let client = platform_client().unwrap();
         let receipt = claim_platform(&client, &url, "ABCD1234", "Ym94LWtleQ==", "dev box")
             .await
             .unwrap();
@@ -470,7 +543,7 @@ mod tests {
     async fn rejected_claim_is_an_error_and_never_looks_linked() {
         let (url, _, server) = mock_platform(StatusCode::FORBIDDEN, r#"{"error":"expired"}"#).await;
         let error = claim_platform(
-            &reqwest::Client::new(),
+            &platform_client().unwrap(),
             &url,
             "EXPIRED",
             "public-key",
@@ -481,5 +554,74 @@ mod tests {
         .to_string();
         server.await.unwrap();
         assert!(error.contains("HTTP 403"), "{error}");
+        assert!(error.contains("expired"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn claim_never_forwards_the_one_time_code_through_a_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:1/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let error = claim_platform(
+            &platform_client().unwrap(),
+            &format!("http://{address}"),
+            "ONE-TIME-CODE",
+            "public-key",
+            "box",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        server.await.unwrap();
+
+        assert!(error.contains("HTTP 307"), "{error}");
+        assert!(
+            !error.contains("127.0.0.1:1"),
+            "the redirect target should never be contacted: {error}"
+        );
+    }
+
+    #[test]
+    fn rejection_detail_is_bounded_to_declared_json_fields() {
+        assert_eq!(
+            platform_error_detail_from_bytes(
+                br#"{"error":{"message":"code expired"},"token":"must-not-print"}"#,
+            )
+            .as_deref(),
+            Some("code expired")
+        );
+        assert_eq!(
+            platform_error_detail_from_bytes(b"  service   unavailable\n").as_deref(),
+            Some("service unavailable")
+        );
+        assert_eq!(
+            platform_error_detail_from_bytes(br#"{"token":"must-not-print""#),
+            None,
+            "truncated JSON must not fall through to the plain-text path"
+        );
+    }
+
+    #[test]
+    fn post_claim_persistence_failure_never_masquerades_as_remote_rejection() {
+        let account = AccountConfig {
+            organization_id: Some("org_42".into()),
+            organization_name: Some("Example".into()),
+            ..AccountConfig::default()
+        };
+        let message = claim_persistence_failure(&account, &"disk full");
+        assert!(message.contains("platform claim succeeded"), "{message}");
+        assert!(message.contains("Example (org_42)"), "{message}");
+        assert!(message.contains("one-time claim code"), "{message}");
     }
 }

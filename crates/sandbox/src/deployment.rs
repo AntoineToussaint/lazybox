@@ -4,8 +4,8 @@ use serde_yaml::Value;
 use crate::provider::SandboxError;
 
 /// The generic **default** deployment, embedded so it always ships with
-/// the binary. A project's override (e.g. obin's) is a thin overlay on
-/// top of this via [`Deployment::resolve`].
+/// the binary. A project's repo-owned recipe is a thin overlay on top of
+/// this via [`Deployment::resolve`].
 const DEFAULT_DEPLOYMENT: &str =
     include_str!("../../../terraform/sandbox/deployments/default.yaml");
 
@@ -23,26 +23,25 @@ pub struct DeploymentConfig {
     pub disk_size_gb: u32,
     #[serde(default)]
     pub network_tags: Vec<String>,
-    /// IAM roles bound to the box's service account. obin's overlay adds
-    /// the cross-project grants (Vertex, Firestore, GCS, run.invoker).
+    /// IAM roles bound to the box's service account. A project overlay may
+    /// add the cross-project grants its workload needs.
     #[serde(default)]
     pub service_account_roles: Vec<String>,
     /// Whether to attach a Cloud NAT so a box with no external IP can still
     /// reach the internet for package installs / image pulls.
     #[serde(default = "default_true")]
     pub enable_nat: bool,
-    /// Workload TCP ports the client forwards (obin: 3000/8082/8787).
+    /// Workload TCP ports the client forwards to localhost.
     #[serde(default)]
     pub workload_ports: Vec<u16>,
     /// OS packages the startup script installs before bring-up.
     #[serde(default)]
     pub packages: Vec<String>,
     /// Repo to clone on first boot (`owner/repo` or a URL). `None` in the
-    /// default (blank workspace); obin's overlay sets its stack repo.
+    /// default (blank workspace); a project overlay sets its stack repo.
     #[serde(default)]
     pub repo: Option<String>,
-    /// Command run after clone to bring the workload up (obin:
-    /// `tools/local-dev/dev up <profile>`).
+    /// Command run after clone to bring the workload up.
     #[serde(default)]
     pub bringup: Option<String>,
 }
@@ -143,15 +142,15 @@ workload_ports: [22]
 packages: [git, curl]
 "#;
         let overlay = r#"
-name: obin
+name: product-stack
 machine_type: e2-standard-8
 workload_ports: [3000, 8082, 8787]
-repo: obin-ai/obin-platform
-bringup: tools/local-dev/dev up portal
+repo: example/product
+bringup: ./dev up
 "#;
         let d = Deployment::resolve(base, Some(overlay)).unwrap();
         // Overlay wins on overridden scalars…
-        assert_eq!(d.config.name, "obin");
+        assert_eq!(d.config.name, "product-stack");
         assert_eq!(d.config.machine_type, "e2-standard-8");
         // …sequences are replaced wholesale, not appended…
         assert_eq!(d.config.workload_ports, vec![3000, 8082, 8787]);
@@ -159,11 +158,8 @@ bringup: tools/local-dev/dev up portal
         assert_eq!(d.config.image_family, "debian-12");
         assert_eq!(d.config.packages, vec!["git", "curl"]);
         // …and overlay-only keys land.
-        assert_eq!(d.config.repo.as_deref(), Some("obin-ai/obin-platform"));
-        assert_eq!(
-            d.config.bringup.as_deref(),
-            Some("tools/local-dev/dev up portal")
-        );
+        assert_eq!(d.config.repo.as_deref(), Some("example/product"));
+        assert_eq!(d.config.bringup.as_deref(), Some("./dev up"));
     }
 
     #[test]

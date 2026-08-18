@@ -16,7 +16,7 @@ use chrono::Utc;
 
 use crate::{
     BoxHandle, BoxStatus, PowerState, SandboxError, SandboxProvider, SandboxSpec, Tunnel,
-    validate_handle_provider,
+    validate_handle_provider, validate_spec_provider,
 };
 
 /// Stable provider id persisted in [`BoxHandle`] records.
@@ -107,12 +107,7 @@ impl SandboxProvider for ManagedProvider {
     }
 
     async fn ensure(&self, spec: &SandboxSpec) -> Result<BoxHandle, SandboxError> {
-        if spec.provider != PROVIDER_ID {
-            return Err(SandboxError::Config(format!(
-                "sandbox spec belongs to provider {:?}, but provider {:?} is selected",
-                spec.provider, PROVIDER_ID
-            )));
-        }
+        validate_spec_provider(PROVIDER_ID, spec)?;
         let instance = self.api.ensure(spec).await?;
         Ok(BoxHandle {
             provider: PROVIDER_ID.to_string(),
@@ -222,14 +217,18 @@ impl ManagedSandboxApi for InMemoryManagedApi {
     fn ensure<'a>(&'a self, spec: &'a SandboxSpec) -> ManagedApiFuture<'a, ManagedInstance> {
         Box::pin(async move {
             let mut state = self.lock_state()?;
-            if let Some(existing) = state.records.values_mut().find(|row| row.name == spec.name) {
+            if let Some(existing) = state
+                .records
+                .values_mut()
+                .find(|row| row.project == spec.project && row.name == spec.name)
+            {
                 existing.replicas = 1;
                 return Ok(instance(existing));
             }
 
             state.next_id += 1;
             let id = format!("managed-{}", state.next_id);
-            let namespace = kubernetes_name(&spec.name);
+            let namespace = kubernetes_name(&spec.project, &spec.name);
             let record = ManagedSandboxSnapshot {
                 id: id.clone(),
                 name: spec.name.clone(),
@@ -332,7 +331,20 @@ fn instance(record: &ManagedSandboxSnapshot) -> ManagedInstance {
     }
 }
 
-fn kubernetes_name(name: &str) -> String {
+/// Stable DNS-1123 name for the fake control plane's namespace.
+///
+/// The project is part of both identity and the hash: two tenants may use the
+/// same user-facing sandbox name without converging onto one namespace. The
+/// visible slug is capped so appending `-agent-0` still produces a legal pod
+/// name (63 characters maximum). A deterministic suffix prevents distinct
+/// names such as `a/b` and `a-b` from colliding after normalization.
+fn kubernetes_name(project: &str, name: &str) -> String {
+    const PREFIX: &str = "lazybox-";
+    const HASH_LEN: usize = 16;
+    const POD_SUFFIX_LEN: usize = "-agent-0".len();
+    const MAX_NAMESPACE_LEN: usize = 63 - POD_SUFFIX_LEN;
+    const MAX_SLUG_LEN: usize = MAX_NAMESPACE_LEN - PREFIX.len() - 1 - HASH_LEN;
+
     let normalized = name
         .chars()
         .map(|character| {
@@ -344,12 +356,24 @@ fn kubernetes_name(name: &str) -> String {
         })
         .collect::<String>();
     let normalized = normalized.trim_matches('-');
-    let suffix = if normalized.is_empty() {
-        "sandbox"
+    let slug = if normalized.is_empty() {
+        "sandbox".to_string()
     } else {
-        normalized
+        normalized.chars().take(MAX_SLUG_LEN).collect()
     };
-    format!("lazybox-{suffix}")
+    let hash = stable_hash(&format!("{project}\0{name}"));
+    format!("{PREFIX}{slug}-{hash:016x}")
+}
+
+/// Fixed FNV-1a hash for names persisted or compared across releases. Rust's
+/// `DefaultHasher` deliberately offers no stable-output guarantee.
+fn stable_hash(value: &str) -> u64 {
+    value
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
 }
 
 #[cfg(test)]
@@ -387,8 +411,8 @@ mod tests {
 
         let handle = provider.ensure(&spec("Team One/PR 42")).await.unwrap();
         let created = api.snapshot(&handle.id).unwrap().unwrap();
-        assert_eq!(created.namespace, "lazybox-team-one-pr-42");
-        assert_eq!(created.pod, "lazybox-team-one-pr-42-agent-0");
+        assert!(created.namespace.starts_with("lazybox-team-one-pr-42-"));
+        assert_eq!(created.pod, format!("{}-agent-0", created.namespace));
         assert_eq!(created.replicas, 1);
 
         provider.stop(&handle).await.unwrap();
@@ -431,6 +455,37 @@ mod tests {
 
         assert_eq!(first.id, second.id);
         assert_eq!(api.snapshot(&first.id).unwrap().unwrap().replicas, 1);
+    }
+
+    #[tokio::test]
+    async fn tenant_identity_and_dns_names_are_scoped_and_bounded() {
+        let api = Arc::new(InMemoryManagedApi::new());
+        let provider = provider(Arc::clone(&api));
+
+        let first = provider.ensure(&spec("same/name")).await.unwrap();
+        let mut other_tenant = spec("same/name");
+        other_tenant.project = "tenant-b".to_string();
+        let second = provider.ensure(&other_tenant).await.unwrap();
+        assert_ne!(first.id, second.id, "tenant scope is part of identity");
+
+        let collision = provider.ensure(&spec("same-name")).await.unwrap();
+        let first_snapshot = api.snapshot(&first.id).unwrap().unwrap();
+        let collision_snapshot = api.snapshot(&collision.id).unwrap().unwrap();
+        assert_ne!(
+            first_snapshot.namespace, collision_snapshot.namespace,
+            "normalization must not alias distinct sandbox names"
+        );
+
+        let long = provider.ensure(&spec(&"x".repeat(200))).await.unwrap();
+        let long_snapshot = api.snapshot(&long.id).unwrap().unwrap();
+        assert!(long_snapshot.namespace.len() <= 63);
+        assert!(long_snapshot.pod.len() <= 63);
+        assert!(
+            long_snapshot
+                .namespace
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        );
     }
 
     #[tokio::test]

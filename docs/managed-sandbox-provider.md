@@ -18,3 +18,8 @@ The fake makes lifecycle, policy, and future fleet-conductor tests executable
 without pretending a production hosted service exists. A real service client
 will implement the same API once the hosted entitlement and isolation gates
 are ready; no TUI/config option is exposed until then.
+
+Because no production crate enables `managed` yet, workspace feature
+unification alone does not compile this module. CI therefore runs sandbox
+tests, Clippy, and rustdoc with `--all-features` as an explicit release gate;
+the interface-only lane cannot silently rot while it remains unwired.

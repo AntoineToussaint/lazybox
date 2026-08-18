@@ -13,11 +13,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     BoxHandle, BoxStatus, CommandRunner, PowerState, SandboxError, SandboxProvider, SandboxSpec,
-    Tunnel,
+    Tunnel, validate_handle_provider, validate_spec_provider,
 };
 
 const API_BASE: &str = "https://api.e2b.app";
-const PROVIDER: &str = "e2b";
+/// Stable provider id persisted in specs and box handles.
+pub const PROVIDER_ID: &str = "e2b";
 const SERVER_ALIVE_INTERVAL: u64 = 30;
 const SERVER_ALIVE_COUNT_MAX: u64 = 3;
 const PROBE_CONNECT_TIMEOUT: u64 = 8;
@@ -40,6 +41,10 @@ pub struct E2bProvider {
 }
 
 impl E2bProvider {
+    fn validate_handle(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        validate_handle_provider(PROVIDER_ID, handle)
+    }
+
     /// Build a provider using the `E2B_API_KEY` environment variable.
     pub fn from_env(
         template: String,
@@ -94,7 +99,7 @@ impl E2bProvider {
             .send()
             .await
             .map_err(|error| SandboxError::ApiTransport {
-                provider: PROVIDER,
+                provider: PROVIDER_ID,
                 operation,
                 detail: error.to_string(),
             })?;
@@ -103,13 +108,13 @@ impl E2bProvider {
             .bytes()
             .await
             .map_err(|error| SandboxError::ApiTransport {
-                provider: PROVIDER,
+                provider: PROVIDER_ID,
                 operation,
                 detail: error.to_string(),
             })?;
         if !expected.contains(&status) {
             return Err(SandboxError::Api {
-                provider: PROVIDER,
+                provider: PROVIDER_ID,
                 operation,
                 status: status.as_u16(),
                 detail: String::from_utf8_lossy(&bytes).trim().to_string(),
@@ -131,7 +136,7 @@ impl E2bProvider {
             .send()
             .await
             .map_err(|error| SandboxError::ApiTransport {
-                provider: PROVIDER,
+                provider: PROVIDER_ID,
                 operation,
                 detail: error.to_string(),
             })?;
@@ -140,7 +145,7 @@ impl E2bProvider {
             .bytes()
             .await
             .map_err(|error| SandboxError::ApiTransport {
-                provider: PROVIDER,
+                provider: PROVIDER_ID,
                 operation,
                 detail: error.to_string(),
             })?;
@@ -148,7 +153,7 @@ impl E2bProvider {
             return Ok(());
         }
         Err(SandboxError::Api {
-            provider: PROVIDER,
+            provider: PROVIDER_ID,
             operation,
             status: status.as_u16(),
             detail: String::from_utf8_lossy(&bytes).trim().to_string(),
@@ -171,7 +176,7 @@ impl E2bProvider {
 
     fn handle(&self, sandbox: &ListedSandbox) -> BoxHandle {
         BoxHandle {
-            provider: PROVIDER.to_string(),
+            provider: PROVIDER_ID.to_string(),
             id: sandbox.sandbox_id.clone(),
             region: "global".to_string(),
             zone: self.template.clone(),
@@ -291,7 +296,7 @@ impl E2bProvider {
 
 impl SandboxProvider for E2bProvider {
     fn id(&self) -> &str {
-        PROVIDER
+        PROVIDER_ID
     }
 
     async fn check_auth(&self) -> Result<(), SandboxError> {
@@ -305,6 +310,7 @@ impl SandboxProvider for E2bProvider {
     }
 
     async fn ensure(&self, spec: &SandboxSpec) -> Result<BoxHandle, SandboxError> {
+        validate_spec_provider(PROVIDER_ID, spec)?;
         let _lock = self.acquire_ensure_lock(&spec.name).await?;
         if let Some(existing) = self.list_named(&spec.name).await?.first() {
             let mut handle = self.handle(existing);
@@ -345,6 +351,7 @@ impl SandboxProvider for E2bProvider {
     }
 
     async fn start(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        self.validate_handle(handle)?;
         let request = self
             .request(Method::POST, &format!("/sandboxes/{}/connect", handle.id))?
             .json(&ConnectSandbox {
@@ -361,6 +368,7 @@ impl SandboxProvider for E2bProvider {
     }
 
     async fn stop(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        self.validate_handle(handle)?;
         let request = self
             .request(Method::POST, &format!("/sandboxes/{}/pause", handle.id))?
             .json(&PauseSandbox { memory: true });
@@ -369,6 +377,7 @@ impl SandboxProvider for E2bProvider {
     }
 
     async fn status(&self, handle: &BoxHandle) -> Result<BoxStatus, SandboxError> {
+        self.validate_handle(handle)?;
         let power = self.detail(&handle.id).await?.state.power();
         let reachable = if power.is_running() {
             let (program, args) = self.reachable_probe_command(handle);
@@ -380,11 +389,13 @@ impl SandboxProvider for E2bProvider {
     }
 
     async fn connect(&self, handle: &BoxHandle, ports: &[u16]) -> Result<Tunnel, SandboxError> {
+        self.validate_handle(handle)?;
         self.start(handle).await?;
         Ok(self.tunnel(handle, ports))
     }
 
     async fn destroy(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        self.validate_handle(handle)?;
         let request = self.request(Method::DELETE, &format!("/sandboxes/{}", handle.id))?;
         self.empty(request, "destroy sandbox", &[StatusCode::NO_CONTENT])
             .await
@@ -570,7 +581,7 @@ mod tests {
 
     fn spec() -> SandboxSpec {
         SandboxSpec {
-            provider: PROVIDER.to_string(),
+            provider: PROVIDER_ID.to_string(),
             name: "lazybox-sbx-test".to_string(),
             project: String::new(),
             region: "global".to_string(),
@@ -599,7 +610,7 @@ mod tests {
 
     fn handle(state: PowerState) -> BoxHandle {
         BoxHandle {
-            provider: PROVIDER.to_string(),
+            provider: PROVIDER_ID.to_string(),
             id: "sbx_123".to_string(),
             region: "global".to_string(),
             zone: "lazybox-e2b".to_string(),
@@ -615,6 +626,30 @@ mod tests {
         provider.api_key = None;
         let error = provider.api_key().unwrap_err().to_string();
         assert!(error.contains("E2B_API_KEY"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn provider_rejects_foreign_specs_and_handles_before_external_io() {
+        let provider = provider();
+        let mut wrong_spec = spec();
+        wrong_spec.provider = "gcp".to_string();
+        let error = provider.ensure(&wrong_spec).await.unwrap_err().to_string();
+        assert!(error.contains("belongs to provider \"gcp\""), "{error}");
+
+        let mut wrong_handle = handle(PowerState::Running);
+        wrong_handle.provider = "gcp".to_string();
+        for error in [
+            provider.start(&wrong_handle).await.unwrap_err(),
+            provider.stop(&wrong_handle).await.unwrap_err(),
+            provider.status(&wrong_handle).await.unwrap_err(),
+            provider.connect(&wrong_handle, &[]).await.unwrap_err(),
+            provider.destroy(&wrong_handle).await.unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains("belongs to sandbox provider"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

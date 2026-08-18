@@ -1,10 +1,9 @@
-//! The shipped deployment recipes + the GCP Terraform module are
-//! artifacts that live on disk far from anyone watching: a typo in
-//! `obin.yaml`, a key the typed `DeploymentConfig` can't parse, or a
-//! missing `.tf` file would only surface when someone tried to stamp a
-//! real box. This test keeps them honest — the default embeds and parses,
-//! obin's overlay deep-merges onto it into the values we expect, and the
-//! module carries the files `GcpProvider` shells out against.
+//! The shipped generic deployment + the GCP Terraform module are artifacts
+//! that live on disk far from anyone watching: a bad key in `default.yaml`
+//! or a missing `.tf` file would only surface when someone tried to stamp a
+//! real box. These tests keep both artifacts honest. Project-specific
+//! overlays belong in their own repositories and are intentionally not
+//! shipped here.
 
 use std::path::{Path, PathBuf};
 
@@ -28,33 +27,6 @@ fn default_deployment_embeds_and_parses() {
     assert_eq!(d.config.name, "default");
     assert!(d.config.repo.is_none());
     assert!(d.config.workload_ports.is_empty());
-}
-
-#[test]
-fn obin_overlay_deep_merges_onto_the_default() {
-    let overlay = std::fs::read_to_string(sandbox_dir().join("deployments/obin.yaml"))
-        .expect("read obin.yaml");
-    let d = Deployment::with_overlay(&overlay).expect("obin overlay merges");
-
-    // Overlay wins where it speaks…
-    assert_eq!(d.config.name, "obin");
-    assert_eq!(d.config.machine_type, "e2-standard-8");
-    assert_eq!(d.config.workload_ports, vec![3000, 8082, 8787]);
-    assert_eq!(d.config.repo.as_deref(), Some("obin-ai/obin-platform"));
-    assert!(
-        d.config
-            .service_account_roles
-            .contains(&"roles/aiplatform.user".to_string()),
-        "obin's cross-project grants survive the merge"
-    );
-
-    // …and inherits the base where it stays silent.
-    assert_eq!(d.config.image_family, "debian-12");
-    assert!(d.config.enable_nat);
-    assert!(
-        d.config.packages.contains(&"git".to_string()),
-        "base toolchain inherited"
-    );
 }
 
 #[test]

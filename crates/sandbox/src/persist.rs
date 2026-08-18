@@ -1,8 +1,9 @@
-//! Per-worktree persistence of a [`BoxHandle`].
+//! Keyed persistence of a [`BoxHandle`].
 //!
-//! A box is stamped per worktree (#931), so its handle is keyed by the
-//! worktree's identity and stored as JSON in the daemon kv table — the
-//! same piggyback shape workspaces/projects use (`box:<worktree>` → JSON).
+//! A box handle is stored under the caller's identity key in the daemon kv
+//! table — the same piggyback shape workspaces/projects use
+//! (`box:<identity>` → JSON). Current clients use one shared `sandbox` key by
+//! default; explicit/legacy per-worktree keys remain supported.
 //! Keeping this out of the `Store` trait keeps the store layer ignorant of
 //! sandbox types (store depends only on core), while the round-trip stays
 //! a two-line call for the CLI.

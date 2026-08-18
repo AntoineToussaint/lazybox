@@ -55,6 +55,7 @@ pub mod spawn_handler;
 mod spawn_plan;
 mod terminal_commands;
 mod terminal_io;
+mod working_claims;
 pub mod workspace;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
@@ -345,6 +346,10 @@ pub struct ServerConfig {
     /// in-memory/test configs leave it off so a unit-test agent spawn can
     /// never reach the developer's real GitHub account.
     pub working_claims_enabled: bool,
+    /// Provenance for upstream `working` labels. A label that predated this
+    /// daemon is external and must be preserved when the last local agent
+    /// exits; only labels successfully acquired here are auto-cleared.
+    pub(crate) working_claims: working_claims::WorkingClaimRegistry,
     /// Workspace keys whose deletion began in this process (single delete,
     /// merged cleanup, or project cascade). Consulted both when a workspace
     /// row is missing and immediately after `backend.spawn`, so a provision
@@ -513,6 +518,7 @@ impl ServerConfig {
             device_registry: Arc::new(lazybox_identity::DeviceRegistry::ephemeral()),
             poll: PollState::default(),
             working_claims_enabled: false,
+            working_claims: working_claims::WorkingClaimRegistry::default(),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
             workspace_creations: Arc::new(parking_lot::Mutex::new(())),

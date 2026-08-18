@@ -18,9 +18,9 @@ two axes (see epic #885, issue #931):
 - **`deployments/`** — **what is on the box**, pluggable. `default.yaml`
   is the generic recipe (base toolchain, blank workspace) that lazybox
   ships and embeds. A project **overrides** it with a thin overlay
-  deep-merged on top — `obin.yaml` is obin's (its stack repo, `dev up`,
-  extra cores, and cross-project SA grants). Only the changed keys need
-  to appear in the overlay.
+  deep-merged on top. The project-specific recipe belongs in that project's
+  repository (for example `.lazybox/sandbox.yaml`), never in lazybox. Only
+  the changed keys need to appear in the overlay.
 
 ## Provider module inputs
 

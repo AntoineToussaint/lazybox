@@ -7,6 +7,25 @@ use tokio::process::Command;
 
 use crate::{BoxHandle, BoxStatus, SandboxSpec};
 
+/// Reject a spec before it crosses into a different provider's API.
+///
+/// The provider id is persisted in both specs and handles. Treating it as
+/// documentation only is unsafe: a caller that wires the wrong provider can
+/// otherwise create infrastructure in an unintended account. Providers call
+/// this at the start of `ensure`, before auth, locks, or network I/O.
+pub fn validate_spec_provider(
+    expected_provider: &str,
+    spec: &SandboxSpec,
+) -> Result<(), SandboxError> {
+    if spec.provider == expected_provider {
+        return Ok(());
+    }
+    Err(SandboxError::Config(format!(
+        "sandbox spec belongs to provider {:?}, but provider {:?} is selected",
+        spec.provider, expected_provider
+    )))
+}
+
 /// Reject a handle before it crosses into a different provider's API.
 pub fn validate_handle_provider(
     expected_provider: &str,
@@ -181,10 +200,14 @@ pub trait SandboxProvider {
 
     /// Create the box if it is absent (Terraform apply), returning a handle
     /// that later lifecycle ops address. Idempotent: a second `ensure` of
-    /// the same spec converges rather than duplicating.
+    /// the same spec converges rather than duplicating. Implementations must
+    /// reject a spec whose provider differs from [`Self::id`] before doing
+    /// any external work; [`validate_spec_provider`] is the shared guard.
     async fn ensure(&self, spec: &SandboxSpec) -> Result<BoxHandle, SandboxError>;
 
-    /// Wake a stopped box (native start).
+    /// Wake a stopped box (native start). Every handle-taking method must
+    /// reject a handle owned by another provider before external work;
+    /// [`validate_handle_provider`] is the shared guard.
     async fn start(&self, handle: &BoxHandle) -> Result<(), SandboxError>;
 
     /// Put a box to sleep (native stop) — the sleep half of the idle

@@ -23,7 +23,12 @@ use chrono::Utc;
 
 use crate::gcp_compute::ComputeClient;
 use crate::provider::{CommandRunner, SandboxError, SandboxProvider, Tunnel};
-use crate::{BoxHandle, BoxStatus, PowerState, SandboxSpec};
+use crate::{
+    BoxHandle, BoxStatus, PowerState, SandboxSpec, validate_handle_provider, validate_spec_provider,
+};
+
+/// Stable provider id persisted in specs and box handles.
+pub const PROVIDER_ID: &str = "gcp";
 
 /// How the GCP provider authenticates, threaded explicitly into every
 /// `gcloud`/`terraform` call so the box lifecycle never depends on ambient
@@ -110,7 +115,7 @@ const PROBE_CONNECT_TIMEOUT: u64 = 8;
 #[derive(Debug, Clone)]
 pub struct GcpProvider {
     /// The `terraform/sandbox/gcp` module directory `ensure`/`destroy`
-    /// runs against. A project override (obin) points this at its own
+    /// runs against. A project override may point this at its own
     /// module. The module source is read-only and shared across boxes;
     /// per-box state lives in [`state_file`], not here.
     ///
@@ -145,6 +150,10 @@ pub struct GcpProvider {
 }
 
 impl GcpProvider {
+    fn validate_handle(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        validate_handle_provider(PROVIDER_ID, handle)
+    }
+
     /// `terraform -chdir=<dir> init -input=false` — prepare the module's
     /// providers/backend. Run before the first `apply`; a fresh module dir
     /// has no `.terraform/`, so `apply` alone would hard-fail with "please
@@ -389,6 +398,7 @@ impl GcpProvider {
     /// shared by `status` and the `connect` wake decision so the latter
     /// doesn't pay for a reachability round-trip it doesn't need.
     async fn power(&self, handle: &BoxHandle) -> Result<PowerState, SandboxError> {
+        self.validate_handle(handle)?;
         self.compute.power(handle).await
     }
 }
@@ -400,7 +410,7 @@ fn auth_failure_message(auth: &GcpAuth, detail: &str) -> String {
     if auth.is_ambient() {
         format!(
             "gcp credentials not configured: set `sandbox.auth.service_account_key` (headless) \
-             or run `gcloud auth login` — {detail}"
+             or run `gcloud auth application-default login` — {detail}"
         )
     } else {
         format!("gcp credentials not usable (misconfigured or expired): {detail}")
@@ -409,25 +419,27 @@ fn auth_failure_message(auth: &GcpAuth, detail: &str) -> String {
 
 impl SandboxProvider for GcpProvider {
     fn id(&self) -> &str {
-        "gcp"
+        PROVIDER_ID
     }
 
     async fn check_auth(&self) -> Result<(), SandboxError> {
-        // A configured key is validated *offline*: open it (catching a wrong
-        // path or an unreadable file — the common misconfiguration) rather
-        // than mint a token. A service-account key is a long-lived credential
-        // that doesn't expire, so a network probe on every op — including the
-        // deliberately snappy `status` — would add a token round-trip that
-        // catches almost nothing the first real op wouldn't. The scoped config
-        // dir it isolates into must exist before gcloud writes there.
+        // A configured key is validated *offline*: read and parse it (catching
+        // a wrong path, unreadable file, malformed JSON, missing credential
+        // fields, or unsupported ADC type) rather than merely checking that a
+        // file exists. A service-account key is long-lived, so a network probe
+        // on every op — including the deliberately snappy `status` — would add
+        // a token round-trip; structural validation still prevents an invalid
+        // `{}` file from passing preflight and failing minutes into Terraform.
+        // The scoped config dir must exist before gcloud writes there.
         if let Some(key) = &self.auth.service_account_key {
-            std::fs::File::open(key).map_err(|e| {
+            let json = std::fs::read_to_string(key).map_err(|e| {
                 SandboxError::Config(format!(
                     "gcp credentials: service account key {} unreadable: {e} — point \
                      `sandbox.auth.service_account_key` at a readable key file",
                     key.display()
                 ))
             })?;
+            crate::gcp_auth::parse_adc_json(&json)?;
             if let Some(dir) = &self.auth.config_dir {
                 std::fs::create_dir_all(dir).map_err(|e| {
                     SandboxError::Config(format!("create gcloud config dir {}: {e}", dir.display()))
@@ -449,12 +461,14 @@ impl SandboxProvider for GcpProvider {
     }
 
     async fn ensure(&self, spec: &SandboxSpec) -> Result<BoxHandle, SandboxError> {
+        validate_spec_provider(PROVIDER_ID, spec)?;
         // Init first: a fresh module dir has no providers, so a bare
         // `apply` would fail before touching any infrastructure.
         let (prog, args) = self.init_command();
         self.run(&prog, &args).await?;
 
-        let (prog, args) = self.terraform_command("apply", &spec.tf_vars());
+        let vars = spec.tf_vars()?;
+        let (prog, args) = self.terraform_command("apply", &vars);
         self.run(&prog, &args).await?;
 
         let (prog, args) = self.output_command();
@@ -462,7 +476,7 @@ impl SandboxProvider for GcpProvider {
         let (id, zone) = parse_tf_outputs(&outputs)?;
 
         Ok(BoxHandle {
-            provider: "gcp".to_string(),
+            provider: PROVIDER_ID.to_string(),
             id,
             region: spec.region.clone(),
             zone,
@@ -474,10 +488,12 @@ impl SandboxProvider for GcpProvider {
     }
 
     async fn start(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        self.validate_handle(handle)?;
         self.compute.start(handle).await
     }
 
     async fn stop(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        self.validate_handle(handle)?;
         self.compute.stop(handle).await
     }
 
@@ -506,6 +522,7 @@ impl SandboxProvider for GcpProvider {
     }
 
     async fn destroy(&self, handle: &BoxHandle) -> Result<(), SandboxError> {
+        self.validate_handle(handle)?;
         let (prog, args) = self.terraform_command("destroy", &Self::destroy_vars(handle));
         self.run(&prog, &args).await.map(|_| ())
     }
@@ -1136,7 +1153,11 @@ mod tests {
         // reading the file, spawning no gcloud — so the snappy `status` never
         // pays a network token mint (#1047 review finding #3).
         let key = std::env::temp_dir().join("lazybox-1047-sa-offline.json");
-        std::fs::write(&key, b"{}").expect("write fake key");
+        std::fs::write(
+            &key,
+            br#"{"type":"authorized_user","client_id":"id","client_secret":"secret","refresh_token":"refresh"}"#,
+        )
+        .expect("write structurally valid ADC credential");
         let runner = ScriptedRunner::new(vec![]);
         let mut provider = with_runner(runner.clone());
         provider.auth = GcpAuth {
@@ -1148,11 +1169,24 @@ mod tests {
         provider
             .check_auth()
             .await
-            .expect("a readable key passes preflight offline");
+            .expect("a structurally valid key passes preflight offline");
         assert!(
             runner.calls().is_empty(),
             "no token probe when a key is configured"
         );
+        std::fs::remove_file(&key).ok();
+    }
+
+    #[tokio::test]
+    async fn check_auth_rejects_a_readable_but_invalid_credential_file() {
+        let key = std::env::temp_dir().join("lazybox-invalid-adc-offline.json");
+        std::fs::write(&key, b"{}").expect("write invalid ADC fixture");
+        let mut provider = provider();
+        provider.auth.service_account_key = Some(key.clone());
+
+        let error = provider.check_auth().await.unwrap_err().to_string();
+
+        assert!(error.contains("parsing ADC credential"), "{error}");
         std::fs::remove_file(&key).ok();
     }
 
@@ -1179,7 +1213,7 @@ mod tests {
     async fn check_auth_probes_only_the_no_key_path_and_maps_failure_to_a_fix_hint() {
         // Ambient path (no offline-checkable base): the native token mint fails
         // (no login) → the actionable "configure credentials or run gcloud auth
-        // login" message, not raw transport stderr.
+        // application-default login" message, not raw transport stderr.
         let compute = ScriptedCompute::with_token(TokenStep::Fail);
         let provider = with_compute(compute.clone());
         let err = provider.check_auth().await.unwrap_err();
@@ -1249,7 +1283,14 @@ mod tests {
     #[test]
     fn auth_failure_message_depends_on_whether_creds_were_configured() {
         let ambient = auth_failure_message(&GcpAuth::default(), "boom");
-        assert!(ambient.contains("gcloud auth login"), "{ambient}");
+        assert!(
+            ambient.contains("gcloud auth application-default login"),
+            "{ambient}"
+        );
+        assert!(
+            !ambient.contains("or run `gcloud auth login`"),
+            "the provider reads ADC, not gcloud user credentials: {ambient}"
+        );
         let configured = auth_failure_message(
             &GcpAuth {
                 service_account_key: Some(PathBuf::from("/k.json")),
@@ -1258,5 +1299,29 @@ mod tests {
             "boom",
         );
         assert!(configured.contains("expired"), "{configured}");
+    }
+
+    #[tokio::test]
+    async fn provider_rejects_foreign_specs_and_handles_before_external_io() {
+        let provider = provider();
+        let mut wrong_spec = spec();
+        wrong_spec.provider = "e2b".to_string();
+        let error = provider.ensure(&wrong_spec).await.unwrap_err().to_string();
+        assert!(error.contains("belongs to provider \"e2b\""), "{error}");
+
+        let mut wrong_handle = handle();
+        wrong_handle.provider = "e2b".to_string();
+        for error in [
+            provider.start(&wrong_handle).await.unwrap_err(),
+            provider.stop(&wrong_handle).await.unwrap_err(),
+            provider.status(&wrong_handle).await.unwrap_err(),
+            provider.connect(&wrong_handle, &[]).await.unwrap_err(),
+            provider.destroy(&wrong_handle).await.unwrap_err(),
+        ] {
+            assert!(
+                error.to_string().contains("belongs to sandbox provider"),
+                "{error}"
+            );
+        }
     }
 }

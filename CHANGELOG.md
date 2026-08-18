@@ -6,6 +6,50 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-08-17
+
+The data-safe reliability release. Workspace creation now has an explicit,
+request-correlated outcome everywhere: success names the created workspace and
+failures remain visible in both the TUI and desktop instead of disappearing.
+Cleanup fails closed when local work or worktree state cannot be verified, rapid
+multi-workspace prompt fan-out is ordered and bounded, and terminal recovery
+stays coherent under catch-up bursts. This release also consolidates workspace,
+terminal, agent-turn, output, and flow-control ownership so the same bug classes
+cannot keep returning through divergent paths.
+
+This supersedes the tagged but never-published 0.1.10, so it also carries all
+changes documented under 0.1.10 below.
+
+### Highlights
+
+- **No silent workspace creation.** Every create request is correlated to a
+  success or actionable failure, pending UI state is cleared on send failures,
+  desktop calls reject daemon failures, and concurrent creates allocate distinct
+  durable keys.
+- **Worktree deletion is fail-closed.** Cleanup is blocked by uncommitted or
+  unpushed work and by any failed store or Git-status probe; project cascades use
+  the same guarded lifecycle instead of bypassing it.
+- **The UI stays live under load.** Off-thread rendering owns terminal output,
+  daemon bursts yield to newly arrived input, and bounded flow control reserves
+  enough capacity for a complete authoritative resync.
+- **Terminal recovery is deterministic.** Replay and resync share one terminal
+  authority, rapid prompt fan-out is settle-gated per terminal, scrolling no
+  longer duplicates wrapped lines, and crash/abort paths restore a usable shell.
+- **Agent state is truthful.** Spawn feedback survives focus changes, background
+  shells keep an agent working, Claude unattended trust is seeded, and asking /
+  working / done transitions come from one turn-state authority.
+- **Operational cleanup.** Test children are reaped as process groups, routine
+  disconnects stay quiet while faults remain loud, and slow worktree reclamation
+  runs outside the sync critical path.
+- **Usage and providers.** Live Claude and Codex plan usage appears in the
+  header; the sandbox has SDK-native GCP lifecycle and typed reauth; Linear has
+  comment threads plus assign/close mutations.
+
+### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/download/v0.1.11/lazybox-tui-installer.sh | sh
+
 ## [0.1.10] - 2026-08-12
 
 A reliability and responsiveness patch on top of 0.1.9. Highlights: the UI no
@@ -230,7 +274,8 @@ Then run `gh auth login` if needed and launch `lazybox`.
   have explicit capacity and shutdown bounds instead of growing or hanging
   indefinitely under load.
 
-[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.10...HEAD
+[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.7...v0.1.8

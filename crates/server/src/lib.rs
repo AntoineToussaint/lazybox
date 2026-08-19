@@ -346,10 +346,21 @@ pub struct ServerConfig {
     /// in-memory/test configs leave it off so a unit-test agent spawn can
     /// never reach the developer's real GitHub account.
     pub working_claims_enabled: bool,
-    /// Provenance for upstream `working` labels. A label that predated this
-    /// daemon is external and must be preserved when the last local agent
-    /// exits; only labels successfully acquired here are auto-cleared.
-    pub(crate) working_claims: working_claims::WorkingClaimRegistry,
+    /// Stable Ed25519 box fingerprint used to qualify upstream claims.
+    /// Production loads it from the box identity; tests use a deterministic
+    /// value and keep mutations disabled unless they opt in explicitly.
+    pub(crate) working_claim_owner_id: String,
+    /// Per-holder serialization for apply/heartbeat/release. Remote mutation
+    /// and its durable intent must stay ordered when an agent exits during
+    /// startup or a heartbeat overlaps teardown. Idle entries are pruned by
+    /// claim maintenance once their durable record is gone.
+    pub(crate) working_claim_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Debounce memory for transient claim-sync failure notices, keyed by
+    /// `workspace:action` → last report time. The 15-minute heartbeat re-hits
+    /// the same unreachable GitHub every tick; without this an offline laptop
+    /// would re-broadcast an identical retryable error 4×/hour per claim.
+    pub(crate) working_claim_error_reports:
+        Arc<parking_lot::Mutex<HashMap<String, std::time::Instant>>>,
     /// Workspace keys whose deletion began in this process (single delete,
     /// merged cleanup, or project cascade). Consulted both when a workspace
     /// row is missing and immediately after `backend.spawn`, so a provision
@@ -459,6 +470,9 @@ impl ServerConfig {
         );
         config.agents = registry_from_config(&user_config);
         let identity_dir = lazybox_core::paths::identity_dir();
+        let box_identity = lazybox_identity::BoxIdentity::load_or_generate(&identity_dir)
+            .map_err(|error| ServerError::Config(format!("box identity: {error}")))?;
+        config.working_claim_owner_id = box_identity.box_id();
         let keystore = lazybox_identity::default_keystore(&identity_dir);
         config.device_registry = Arc::new(lazybox_identity::DeviceRegistry::open(
             identity_dir,
@@ -522,7 +536,9 @@ impl ServerConfig {
             device_registry: Arc::new(lazybox_identity::DeviceRegistry::ephemeral()),
             poll: PollState::default(),
             working_claims_enabled: false,
-            working_claims: working_claims::WorkingClaimRegistry::default(),
+            working_claim_owner_id: "00000000000000000000000000000000".into(),
+            working_claim_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            working_claim_error_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
             workspace_creations: Arc::new(parking_lot::Mutex::new(())),

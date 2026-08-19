@@ -96,10 +96,13 @@ enum TerminalPersistedField {
     PtyLaunchGeneration,
     AgentStateGeneration,
     AgentResume,
+    /// Owner-qualified upstream claim provenance. Its teardown performs a
+    /// remote compare-by-identity first, so the generic local sweep skips it.
+    WorkingClaim,
 }
 
 impl TerminalPersistedField {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Metadata,
         Self::Access,
         Self::NoPermission,
@@ -109,6 +112,7 @@ impl TerminalPersistedField {
         Self::PtyLaunchGeneration,
         Self::AgentStateGeneration,
         Self::AgentResume,
+        Self::WorkingClaim,
     ];
 
     fn key(self, backend_key: &str) -> String {
@@ -122,6 +126,7 @@ impl TerminalPersistedField {
             Self::PtyLaunchGeneration => "terminal-pty-generation",
             Self::AgentStateGeneration => "terminal-agent-state-generation",
             Self::AgentResume => "terminal-agent-resume",
+            Self::WorkingClaim => "terminal-working-claim",
         };
         format!("{prefix}:{backend_key}")
     }
@@ -1452,10 +1457,21 @@ async fn handle_spawn_inner(
         kind,
         initial_prompt,
         terminal_id,
+        owning_session,
         state_durability,
         unattended,
     } = executed;
     outcome.complete();
+
+    if matches!(kind, TerminalKind::Agent(_)) && access != AgentRunAccess::ReadOnly {
+        crate::working_claims::acquire_pty(
+            config,
+            WorkspaceKey::new(session_key.as_str()),
+            &backend_key,
+            owning_session,
+        )
+        .await;
+    }
 
     // Pump backend output → bus. Also runs agent-state detection
     // on each chunk so the user sees a "needs input" badge when
@@ -2092,10 +2108,6 @@ async fn handle_spawn_inner(
                 "initial_prompt: spawn-time inject finished",
             );
         });
-    }
-    if matches!(kind, TerminalKind::Agent(_)) && access != AgentRunAccess::ReadOnly {
-        crate::polling::sync_working_claim(config, WorkspaceKey::new(session_key.as_str()), true)
-            .await;
     }
     Some(terminal_id)
 }
@@ -5270,9 +5282,12 @@ pub(crate) async fn teardown_exited_terminal(
     backend_key: &str,
     exit_code: Option<i32>,
 ) {
-    let ended_agent_workspace =
-        finish_terminal(config, terminal_id, backend_key, exit_code, true).await;
-    clear_claim_if_last_agent(config, ended_agent_workspace).await;
+    if finish_terminal(config, terminal_id, backend_key, exit_code, true)
+        .await
+        .is_some()
+    {
+        crate::working_claims::release_pty(config, backend_key).await;
+    }
 }
 
 /// Complete the user-driven kill path through the same lifecycle owner as a
@@ -5284,46 +5299,12 @@ pub(crate) async fn detach_killed_terminal(
     terminal_id: TerminalId,
     backend_key: &str,
 ) {
-    let ended_agent_workspace =
-        finish_terminal(config, terminal_id, backend_key, None, false).await;
-    clear_claim_if_last_agent(config, ended_agent_workspace).await;
-}
-
-pub(crate) async fn clear_claim_if_last_agent(
-    config: &ServerConfig,
-    ended_agent_workspace: Option<SessionKey>,
-) {
-    let Some(session_key) = ended_agent_workspace else {
-        return;
-    };
-    // Serializes with agent spawn registration and its claim apply. Thus an
-    // exit racing a replacement agent either clears before the replacement
-    // re-applies, or observes that replacement and leaves the claim intact.
-    let _workspace_agent = config.spawn.lock_workspace_agent(&session_key).await;
-    let has_structured_run = config
-        .agent_runs
-        .lock()
+    if finish_terminal(config, terminal_id, backend_key, None, false)
         .await
-        .values()
-        .any(|run| run.claims_workspace && run.session_key == session_key);
-    if !workspace_has_claiming_pty_agent(config, &session_key).await && !has_structured_run {
-        crate::polling::sync_working_claim(config, WorkspaceKey::new(session_key.as_str()), false)
-            .await;
+        .is_some()
+    {
+        crate::working_claims::release_pty(config, backend_key).await;
     }
-}
-
-/// A read-only agent observes a checkout but does not claim ownership of its
-/// task. Keep it out of the claim lifecycle without changing the broader
-/// `workspace_agents` view used for singleton and prompt-delivery behavior.
-async fn workspace_has_claiming_pty_agent(config: &ServerConfig, session_key: &SessionKey) -> bool {
-    config.terminal.entries.lock().await.values().any(|entry| {
-        !entry.finishing
-            && entry.access != AgentRunAccess::ReadOnly
-            && matches!(
-                entry.meta.as_ref(),
-                Some((owner, TerminalKind::Agent(_))) if owner == session_key
-            )
-    })
 }
 
 async fn finish_terminal(
@@ -5506,6 +5487,9 @@ async fn finish_terminal(
     config.terminal.finish_teardown(terminal_id).await;
     let agent_state_generation = claim.agent_state_generation;
     for field in TerminalPersistedField::ALL {
+        if field == TerminalPersistedField::WorkingClaim {
+            continue;
+        }
         let key = field.key(backend_key);
         if let Err(error) = config.store.delete_kv(&key) {
             tracing::warn!(?terminal_id, %key, %error, "terminal teardown: kv cleanup failed");
@@ -8087,6 +8071,16 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let on_main = resume_context
             .as_ref()
             .is_some_and(|context| context.on_main);
+        let claim_session_id = resume_context
+            .as_ref()
+            .and_then(|context| context.session_id);
+        let claiming_agent =
+            matches!(kind, TerminalKind::Agent(_)) && access != AgentRunAccess::ReadOnly;
+        let claim_workspace = WorkspaceKey::new(session_key.as_str());
+        if claiming_agent {
+            crate::working_claims::acquire_pty(config, claim_workspace, &key, claim_session_id)
+                .await;
+        }
         let _ = config.bus.send(Event::TerminalSpawned {
             terminal_id,
             session_key,
@@ -8281,9 +8275,12 @@ async fn reconcile_missing_recovered_sessions(
             "persisted terminal is absent from backend inventory; committing Exited"
         );
         let exit_code = config.backend.wait_exit(backend_key).await;
-        let ended_agent_workspace =
-            finish_terminal(config, terminal_id, backend_key, exit_code, false).await;
-        clear_claim_if_last_agent(config, ended_agent_workspace).await;
+        if finish_terminal(config, terminal_id, backend_key, exit_code, false)
+            .await
+            .is_some()
+        {
+            crate::working_claims::release_pty(config, backend_key).await;
+        }
     }
 }
 
@@ -9570,50 +9567,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn read_only_pty_agents_do_not_own_working_claims() {
-        let (config, _) = ServerConfig::in_memory_with_mock();
-        let session_key = SessionKey::new("github:owner/repo#1164");
-
-        register_test_agent(
-            &config.terminal,
-            TerminalId(1),
-            "read-only-agent",
-            session_key.clone(),
-            "codex",
-            None,
-            None,
-        )
-        .await;
-        config
-            .terminal
-            .record_access(TerminalId(1), AgentRunAccess::ReadOnly)
-            .await;
-        assert!(!workspace_has_claiming_pty_agent(&config, &session_key).await);
-
-        register_test_agent(
-            &config.terminal,
-            TerminalId(2),
-            "writable-agent",
-            session_key.clone(),
-            "codex",
-            None,
-            None,
-        )
-        .await;
-        assert!(workspace_has_claiming_pty_agent(&config, &session_key).await);
-
-        config
-            .terminal
-            .claim_teardown(TerminalId(2), "writable-agent")
-            .await
-            .expect("matching backend");
-        assert!(
-            !workspace_has_claiming_pty_agent(&config, &session_key).await,
-            "a finishing writable agent cannot retain the claim"
-        );
-    }
-
     /// #1148: if a Claude version ignores the deterministically seeded trust
     /// record, an autonomous terminal's exact trust chooser is revalidated
     /// from the live backend and answered once. This is the real backend-write
@@ -10668,9 +10621,10 @@ mod tests {
                 "terminal-pty-generation:backend".to_string(),
                 "terminal-agent-state-generation:backend".to_string(),
                 "terminal-agent-resume:backend".to_string(),
+                "terminal-working-claim:backend".to_string(),
             ]
             .into(),
-            "every persisted terminal field must live in the teardown inventory",
+            "every persisted terminal field must live in the lifecycle inventory",
         );
     }
 

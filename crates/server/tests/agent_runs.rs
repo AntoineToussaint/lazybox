@@ -37,7 +37,7 @@ async fn structured_agent_input_backlog_is_bounded_and_retryable() {
             input_tx,
             task,
             session_key: "test:workspace".into(),
-            claims_workspace: true,
+            working_claim_holder: None,
         },
     );
     let mut events = config.bus.subscribe();

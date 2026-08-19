@@ -67,6 +67,9 @@ pub enum Filter {
     /// on a currently-live PTY — a workspace with a dormant agent
     /// session still matches even when its runner badge is dark.
     WithAgent,
+    /// Primary GitHub task has at least one active local or remote fleet
+    /// claim (including a conservatively preserved legacy claim).
+    Claimed,
     /// Primary task's CI is failing or mixed.
     CiFailing,
     /// Primary task's CI is queued or running.
@@ -113,8 +116,9 @@ impl Filter {
     /// Every fixed filter, in menu order (State, Role, Kind, Priority).
     /// Value-driven axes (Label, Linear state) are enumerated separately
     /// from the candidate set — see [`FilterSet`] and `Sidebar`.
-    pub const ALL: [Filter; 24] = [
+    pub const ALL: [Filter; 25] = [
         Filter::WithAgent,
+        Filter::Claimed,
         Filter::CiFailing,
         Filter::CiRunning,
         Filter::Conflict,
@@ -143,6 +147,7 @@ impl Filter {
     pub fn axis(self) -> FilterAxis {
         match self {
             Filter::WithAgent
+            | Filter::Claimed
             | Filter::CiFailing
             | Filter::CiRunning
             | Filter::Conflict
@@ -182,6 +187,7 @@ impl Filter {
     pub fn label(self) -> &'static str {
         match self {
             Filter::WithAgent => "with-agent",
+            Filter::Claimed => "claimed",
             Filter::CiFailing => "ci-failing",
             Filter::CiRunning => "ci-running",
             Filter::Conflict => "conflict",
@@ -217,6 +223,7 @@ impl Filter {
                 .sessions
                 .iter()
                 .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. })),
+            Filter::Claimed => w.is_claimed(),
             Filter::CiFailing => {
                 task.is_some_and(|t| matches!(t.ci, CiStatus::Failure | CiStatus::Mixed))
             }
@@ -657,6 +664,33 @@ mod tests {
         ] {
             assert_eq!(f.axis(), FilterAxis::State);
         }
+    }
+
+    #[test]
+    fn claimed_filter_matches_qualified_ownership() {
+        let agents = HashMap::new();
+        let mut claimed = workspace("claimed", TaskRole::Author, CiStatus::None, TaskKind::Issue);
+        let label = lazybox_core::qualified_working_claim_label(
+            "0123456789abcdef0123456789abcdef",
+            lazybox_core::SessionId::default().0,
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .unwrap();
+        claimed
+            .primary_task_mut()
+            .unwrap()
+            .labels
+            .push(lazybox_core::Label::new(label));
+        let unclaimed = workspace("plain", TaskRole::Author, CiStatus::None, TaskKind::Issue);
+
+        assert!(Filter::Claimed.matches(&FilterCtx {
+            w: &claimed,
+            agents: &agents
+        }));
+        assert!(!Filter::Claimed.matches(&FilterCtx {
+            w: &unclaimed,
+            agents: &agents
+        }));
     }
 
     #[test]

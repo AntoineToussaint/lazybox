@@ -720,7 +720,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// fallback so both surface the same feedback.
     pub(super) fn flush_dispatched_cmds(&mut self, cmds: Vec<IpcCommand>) {
         let planned = lazybox_tui_core::dispatch::plan_dispatch(cmds.clone(), &self.sidebar);
-        let claimed_targets: std::collections::BTreeSet<String> = planned
+        let claimed_targets: std::collections::BTreeMap<String, (String, Vec<String>)> = planned
             .iter()
             .filter_map(|command| match command {
                 IpcCommand::Spawn {
@@ -733,10 +733,27 @@ impl<T: TerminalAdapter> Model<T> {
                     .workspace_by_key(session_key)
                     .filter(|workspace| workspace.is_claimed())
                     .map(|workspace| {
-                        workspace
-                            .primary_task()
-                            .map(|task| task.title.clone())
-                            .unwrap_or_else(|| session_key.to_string())
+                        let Some(task) = workspace.primary_task() else {
+                            return (
+                                session_key.to_string(),
+                                (session_key.to_string(), vec!["unknown owner".into()]),
+                            );
+                        };
+                        let mut owners = task
+                            .active_qualified_working_claims(chrono::Utc::now())
+                            .into_iter()
+                            .map(|claim| {
+                                format!(
+                                    "device {}/session {}",
+                                    &claim.device[..8],
+                                    &claim.session[..6]
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if task.has_label(lazybox_core::WORKING_LABEL_NAME) {
+                            owners.push("legacy claim (unknown owner)".into());
+                        }
+                        (session_key.to_string(), (task.title.clone(), owners))
                     }),
                 IpcCommand::StartAgentRun {
                     session_key,
@@ -747,24 +764,50 @@ impl<T: TerminalAdapter> Model<T> {
                     .workspace_by_key(session_key)
                     .filter(|workspace| workspace.is_claimed())
                     .map(|workspace| {
-                        workspace
-                            .primary_task()
-                            .map(|task| task.title.clone())
-                            .unwrap_or_else(|| session_key.to_string())
+                        let Some(task) = workspace.primary_task() else {
+                            return (
+                                session_key.to_string(),
+                                (session_key.to_string(), vec!["unknown owner".into()]),
+                            );
+                        };
+                        let mut owners = task
+                            .active_qualified_working_claims(chrono::Utc::now())
+                            .into_iter()
+                            .map(|claim| {
+                                format!(
+                                    "device {}/session {}",
+                                    &claim.device[..8],
+                                    &claim.session[..6]
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        if task.has_label(lazybox_core::WORKING_LABEL_NAME) {
+                            owners.push("legacy claim (unknown owner)".into());
+                        }
+                        (session_key.to_string(), (task.title.clone(), owners))
                     }),
                 _ => None,
             })
             .collect();
         if !claimed_targets.is_empty() {
             let prompt = if claimed_targets.len() == 1 {
+                let (title, owners) = claimed_targets.values().next().expect("one claimed target");
                 format!(
-                    "{} is already claimed (⚑) by another agent or machine. Start anyway?",
-                    claimed_targets.iter().next().expect("one claimed target")
+                    "{title} is already claimed (⚑) by {}. Start anyway?",
+                    owners.join(", ")
                 )
             } else {
+                let owners = claimed_targets
+                    .values()
+                    .flat_map(|(_, owners)| owners)
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(
-                    "{} selected tasks are already claimed (⚑) by another agent or machine. Start agents anyway?",
-                    claimed_targets.len()
+                    "{} selected tasks are already claimed (⚑) by {owners}. Start agents anyway?",
+                    claimed_targets.len(),
                 )
             };
             self.set_modal_flow(super::ModalFlow::ClaimedSpawnConfirm { commands: planned });

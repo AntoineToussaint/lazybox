@@ -4,4 +4,4 @@
  * One toggleable predicate over a workspace. Variants are grouped by
  * their [`FilterAxis`]; [`Filter::ALL`] lists them in menu order.
  */
-export type Filter = "WithAgent" | "CiFailing" | "CiRunning" | "Conflict" | "Unread" | "Asking" | "RateLimited" | "ReviewRequested" | "AutoMerge" | "Draft" | "InProgress" | "NeedsReply" | "BehindBase" | "BigDiff" | "Author" | "Reviewer" | "Assignee" | "Mentioned" | "Pr" | "Issue" | "PriorityUrgent" | "PriorityHigh" | "PriorityMedium" | "PriorityLow";
+export type Filter = "WithAgent" | "Claimed" | "CiFailing" | "CiRunning" | "Conflict" | "Unread" | "Asking" | "RateLimited" | "ReviewRequested" | "AutoMerge" | "Draft" | "InProgress" | "NeedsReply" | "BehindBase" | "BigDiff" | "Author" | "Reviewer" | "Assignee" | "Mentioned" | "Pr" | "Issue" | "PriorityUrgent" | "PriorityHigh" | "PriorityMedium" | "PriorityLow";

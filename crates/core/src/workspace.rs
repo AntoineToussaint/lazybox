@@ -917,6 +917,33 @@ impl Workspace {
             .or_else(|| self.linear_issues.first_mut())
     }
 
+    /// Every task this workspace represents — the PR plus any attached
+    /// GitHub / Linear issues. Ticket-hierarchy resolution must address a
+    /// workspace by *any* of its provider ids: once a ticket acquires a PR
+    /// the PR becomes the headline task (`primary_task`), but a child still
+    /// references the ticket's own id, so the workspace has to be findable
+    /// under that id too.
+    pub fn hierarchy_task_ids(&self) -> impl Iterator<Item = &TaskId> {
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .map(|task| &task.id)
+    }
+
+    /// The provider-native parent of this workspace's ticket, if any task it
+    /// holds declares one. A PR headline task never carries hierarchy (PRs
+    /// have no parent ticket), so this looks past it to the attached issue
+    /// that does — otherwise a ticket would drop out of the forest the moment
+    /// a PR is opened for it.
+    pub fn hierarchy_parent(&self) -> Option<&TaskId> {
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .find_map(|task| task.parent.as_ref())
+    }
+
     /// Whether the headline task is claimed by an agent through the shared
     /// [`WORKING_LABEL_NAME`] convention.
     pub fn is_claimed(&self) -> bool {

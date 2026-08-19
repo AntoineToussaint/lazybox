@@ -198,19 +198,22 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     let mut included: HashSet<SessionKey> =
         filtered.iter().map(|(key, _)| (*key).clone()).collect();
     let mut context_only: HashSet<SessionKey> = HashSet::new();
+    // Index every in-mailbox workspace by *all* its provider ids, so a parent
+    // that has since acquired a PR (headline task = the PR) is still reachable
+    // by the ticket id its children reference. Mirrors `emit_workspace_forest`.
     let by_task: HashMap<TaskId, (&SessionKey, &Workspace)> = mailbox_rows
         .iter()
-        .filter_map(|(key, workspace)| {
+        .flat_map(|(key, workspace)| {
             workspace
-                .primary_task()
-                .map(|task| (task.id.clone(), (*key, *workspace)))
+                .hierarchy_task_ids()
+                .map(move |id| (id.clone(), (*key, *workspace)))
         })
         .collect();
     for (_, matched) in filtered.clone() {
         let group = group_label(matched, input.projects, input.workspaces);
         let mut cursor = matched;
         let mut seen = HashSet::new();
-        while let Some(parent_id) = cursor.primary_task().and_then(|task| task.parent.as_ref()) {
+        while let Some(parent_id) = cursor.hierarchy_parent() {
             if !seen.insert(parent_id.clone()) {
                 break;
             }
@@ -537,10 +540,14 @@ fn emit_workspace_forest(
         return;
     }
 
+    // Address each workspace by *every* provider id it holds, not just the
+    // headline task. A ticket that has acquired a PR reports the PR as its
+    // `primary_task`, yet its children still reference the ticket id — so
+    // indexing on the headline alone would orphan the whole subtree.
     let mut task_index: HashMap<TaskId, usize> = HashMap::new();
     for (index, (_, workspace)) in rows.iter().enumerate() {
-        if let Some(task) = workspace.primary_task() {
-            task_index.insert(task.id.clone(), index);
+        for id in workspace.hierarchy_task_ids() {
+            task_index.insert(id.clone(), index);
         }
     }
 
@@ -549,26 +556,44 @@ fn emit_workspace_forest(
         .enumerate()
         .map(|(index, (_, workspace))| {
             workspace
-                .primary_task()
-                .and_then(|task| task.parent.as_ref())
+                .hierarchy_parent()
                 .and_then(|parent| task_index.get(parent).copied())
                 .filter(|parent| *parent != index)
         })
         .collect();
 
-    // Break every cycle without recursion. Iterating in sorted order makes
-    // the chosen root stable across renders.
+    // Break every cycle without recursion. Walking up from each start until we
+    // reach a real root, a node already proven to reach one, or a repeat (the
+    // cycle) — cutting only the entry node so the rest of the chain keeps its
+    // structure. `resolves` memoizes proven-safe nodes so shared ancestry is
+    // never re-walked, keeping this linear on deep chains instead of O(n²).
+    // Iterating in sorted order makes the chosen root stable across renders.
+    let mut resolves = vec![false; parents.len()];
+    let mut path: Vec<usize> = Vec::new();
     for start in 0..parents.len() {
+        path.clear();
         let mut seen = HashSet::new();
         let mut cursor = start;
-        while seen.insert(cursor) {
-            let Some(parent) = parents[cursor] else {
-                break;
-            };
-            cursor = parent;
-        }
-        if parents[cursor].is_some() {
+        let reaches_root = loop {
+            if resolves[cursor] {
+                break true;
+            }
+            if !seen.insert(cursor) {
+                break false;
+            }
+            path.push(cursor);
+            match parents[cursor] {
+                None => break true,
+                Some(parent) => cursor = parent,
+            }
+        };
+        if reaches_root {
+            for node in &path {
+                resolves[*node] = true;
+            }
+        } else {
             parents[start] = None;
+            resolves[start] = true;
         }
     }
 
@@ -598,7 +623,14 @@ fn emit_workspace_forest(
             let (key, workspace) = rows[index];
             let has_children = !children[index].is_empty();
             let task_id = workspace.primary_task().map(|task| &task.id);
-            let is_collapsed = has_children && task_id.is_some_and(|id| collapsed.contains(id));
+            let is_context = context_only.contains(key);
+            // A context-only row is present solely because a descendant matched
+            // the active search/filter. Honoring its stored collapse here would
+            // fold that match back out of view — the search would silently drop
+            // the very row it found. Never collapse an ancestor kept for
+            // context; user-driven collapse still applies to rows that matched.
+            let is_collapsed =
+                has_children && !is_context && task_id.is_some_and(|id| collapsed.contains(id));
             visible.push(VisibleRow::Workspace(key.clone()));
             ticket_tree.insert(
                 key.clone(),
@@ -606,7 +638,7 @@ fn emit_workspace_forest(
                     depth,
                     has_children,
                     collapsed: is_collapsed,
-                    context_only: context_only.contains(key),
+                    context_only: is_context,
                 },
             );
             emit_session_rows(key, workspace, visible);
@@ -869,6 +901,28 @@ mod tests {
         workspace
     }
 
+    /// A Linear ticket that the poller has merged with its linked PR: the PR
+    /// is the headline task (`primary_task`) and carries no parent, while the
+    /// ticket keeps its hierarchy on `linear_issues`. Mirrors the merge in
+    /// `server::polling` (issue tasks absorbed onto the PR workspace).
+    fn linear_ticket_with_pr(
+        workspace_key: &str,
+        identifier: &str,
+        parent: Option<&str>,
+        minutes_old: i64,
+    ) -> Workspace {
+        let mut workspace = linear_ticket(workspace_key, identifier, parent, minutes_old);
+        let mut pr = workspace.linear_issues[0].clone();
+        pr.id = TaskId {
+            source: "github".into(),
+            key: format!("owner/eng#{identifier}"),
+        };
+        pr.kind = Some(lazybox_core::TaskKind::Pr);
+        pr.parent = None;
+        workspace.pr = Some(pr);
+        workspace
+    }
+
     fn visible_workspace_keys(outcome: &ComputeOutcome) -> Vec<&str> {
         outcome
             .visible
@@ -1075,6 +1129,86 @@ mod tests {
         assert!(keys.contains(&"missing"));
         assert!(keys.contains(&"cycle-a"));
         assert!(keys.contains(&"cycle-b"));
+    }
+
+    /// A ticket that has acquired a linked PR: the PR becomes the headline
+    /// task (`primary_task`), but the ticket's `parent`/id still drive the
+    /// hierarchy. Both parent and child carry a PR here, so this only passes
+    /// when the forest addresses workspaces by every provider id they hold.
+    #[test]
+    fn tickets_with_linked_prs_keep_their_hierarchy() {
+        let mut workspaces = HashMap::new();
+        for workspace in [
+            linear_ticket_with_pr("parent", "ENG-1", None, 10),
+            linear_ticket_with_pr("child", "ENG-2", Some("ENG-1"), 1),
+        ] {
+            workspaces.insert(SessionKey::from(&workspace.key), workspace);
+        }
+        let collapsed_repos = BTreeSet::new();
+        let attention = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let outcome = compute_visible(inputs(
+            &workspaces,
+            &BTreeSet::new(),
+            &collapsed_repos,
+            &attention,
+            &agents,
+            &projects,
+        ));
+
+        assert_eq!(visible_workspace_keys(&outcome), vec!["parent", "child"]);
+        assert!(outcome.ticket_tree[&SessionKey::new("parent")].has_children);
+        assert_eq!(outcome.ticket_tree[&SessionKey::new("parent")].depth, 0);
+        assert_eq!(outcome.ticket_tree[&SessionKey::new("child")].depth, 1);
+    }
+
+    /// A collapsed ancestor must not swallow a descendant that the active
+    /// search pulled in: the match would vanish with no indication. The
+    /// ancestor is kept as context and force-expanded regardless of its
+    /// stored collapse.
+    #[test]
+    fn collapsed_ancestor_never_hides_a_search_match() {
+        let mut workspaces = HashMap::new();
+        for workspace in [
+            linear_ticket("parent", "ENG-1", None, 10),
+            linear_ticket("child", "ENG-2", Some("ENG-1"), 1),
+            linear_ticket("grandchild", "ENG-3", Some("ENG-2"), 2),
+        ] {
+            workspaces.insert(SessionKey::from(&workspace.key), workspace);
+        }
+        let collapsed_repos = BTreeSet::new();
+        let attention = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut collapsed_tickets = HashSet::new();
+        collapsed_tickets.insert(TaskId {
+            source: "linear".into(),
+            key: "ENG-1".into(),
+        });
+        let search = global_search("ENG-3");
+        let subscribed = BTreeSet::new();
+        let mut input = inputs(
+            &workspaces,
+            &subscribed,
+            &collapsed_repos,
+            &attention,
+            &agents,
+            &projects,
+        );
+        input.collapsed_tickets = &collapsed_tickets;
+        input.search = Some(&search);
+        let outcome = compute_visible(input);
+
+        let keys = visible_workspace_keys(&outcome);
+        assert!(
+            keys.contains(&"grandchild"),
+            "the search match must stay visible under a collapsed ancestor: {keys:?}"
+        );
+        assert!(
+            !outcome.ticket_tree[&SessionKey::new("parent")].collapsed,
+            "a context-only ancestor must not fold away the match it contextualizes"
+        );
     }
 
     /// Workspaces in different repos: one header each, alphabetical

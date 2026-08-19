@@ -2501,6 +2501,17 @@ async fn resolve_or_create_session(
         return Ok((path, SessionId::new(), true));
     }
 
+    // A shell (and, by extension, the editor, which piggybacks on a
+    // shell spawn to provision) is a branch-agnostic read/interactive
+    // surface: it should open in the existing worktree wherever it sits,
+    // on whatever branch it has drifted to. Only an agent operates on the
+    // branch's code and legitimately needs it checked out, so only an
+    // agent spawn gates worktree reuse on an exact-branch match. Without
+    // this a worktree that drifted onto another branch (a collision, a
+    // manual `git switch`, an agent that changed branch) can't even get a
+    // shell to inspect and fix it — the exact dead-end #1199 reports.
+    let branch_strict = matches!(kind, TerminalKind::Agent(_));
+
     if let Some(id) = session_id {
         let session = workspace.find_session(id).ok_or_else(|| {
             crate::ServerError::Workspace(format!("session {id:?} not in workspace"))
@@ -2509,7 +2520,9 @@ async fn resolve_or_create_session(
             config,
             &workspace,
             &session.worktree_path,
-            session.worktree_branch.as_deref(),
+            branch_strict
+                .then_some(session.worktree_branch.as_deref())
+                .flatten(),
             session_key,
             origin,
         )
@@ -2521,7 +2534,9 @@ async fn resolve_or_create_session(
             config,
             &workspace,
             &session.worktree_path,
-            session.worktree_branch.as_deref(),
+            branch_strict
+                .then_some(session.worktree_branch.as_deref())
+                .flatten(),
             session_key,
             origin,
         )
@@ -15335,6 +15350,127 @@ mod tests {
         .await
         .expect("healthy fast path");
         assert!(dir.join("work.txt").exists(), "fast path is a no-op");
+    }
+
+    /// A shell (and the editor, which piggybacks on a shell spawn) is
+    /// branch-agnostic: it must open in the existing worktree wherever it
+    /// sits, even after the checkout has drifted onto a different branch
+    /// than the session recorded. An agent spawn keeps the branch-strict
+    /// guard, since it operates on the branch's code (#1199).
+    #[tokio::test]
+    async fn shell_reuses_a_worktree_drifted_onto_another_branch() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let mgr = config.worktree_manager();
+        let bare = mgr.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+
+        // Provision the session's worktree on `solutions`, then drift it
+        // onto `feat/azure-env-render` (a collision, a manual switch, an
+        // agent that changed branch) so the on-disk branch no longer
+        // matches what the session recorded.
+        let wt = root.path().join("worktree");
+        mgr.checkout_new_branch_at(&wt, "acme", "core", "solutions", "main")
+            .await
+            .expect("provision worktree");
+        git(&wt, &["switch", "-q", "-c", "feat/azure-env-render"]);
+        // Uncommitted work the dirty-worktree guard would refuse to
+        // clobber — the shell must still open here.
+        std::fs::write(wt.join("wip.txt"), "unsaved\n").unwrap();
+
+        let mut task = titled_task("github", "acme/core#271", "solutions work");
+        task.repo = Some("acme/core".into());
+        let mut ws = Workspace::from_task(task, Utc::now());
+        let mut session = lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Shell,
+            wt.clone(),
+            Utc::now(),
+        );
+        session.worktree_branch = Some("solutions".into());
+        ws.add_session(session);
+        let session_key = SessionKey::new(ws.key.as_str());
+        persist_and_broadcast(&config, &ws).await.unwrap();
+
+        // Shell: reuse the drifted worktree in place, no re-checkout.
+        let (path, _id, _on_main) = resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &TerminalKind::Shell,
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("a shell opens on a worktree that drifted to another branch");
+        assert_eq!(path, wt, "the shell lands in the existing worktree");
+        assert!(wt.join("wip.txt").exists(), "uncommitted work untouched");
+        let head = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "feat/azure-env-render",
+            "the shell never switched the branch back",
+        );
+
+        // Agent: the branch-strict guard still applies — it can't silently
+        // reuse a checkout on the wrong branch.
+        let err = resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &TerminalKind::Agent("claude".into()),
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect_err("an agent must not reuse a worktree on the wrong branch");
+        assert!(
+            err.to_string().contains("spawn aborted"),
+            "the agent spawn is refused: {err}"
+        );
     }
 
     const HARD: std::time::Duration = std::time::Duration::from_secs(10);

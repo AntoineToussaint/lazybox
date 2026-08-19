@@ -1477,7 +1477,20 @@ pub fn codex_input_needed_in_current_chunk(
     let mark = last_chunk_start.min(recent_output.len());
     let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
     let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+    codex_input_needed_in_current_chunk_from(&s, s_mark, &compact, compact_mark)
+}
 
+/// [`codex_input_needed_in_current_chunk`] over an already stripped (`s`) and
+/// compacted (`compact`) window plus their chunk-boundary marks. Callers that
+/// have already paid for the ANSI strip / compaction — the per-chunk pump path
+/// runs on every repaint frame — reuse those buffers instead of scanning the
+/// 16 KiB window a second time.
+fn codex_input_needed_in_current_chunk_from(
+    s: &str,
+    s_mark: usize,
+    compact: &str,
+    compact_mark: usize,
+) -> Option<PromptShape> {
     let phrase_touched = CODEX_PROMPT_PHRASES.iter().any(|phrase| {
         let needle: String = phrase
             .chars()
@@ -1492,7 +1505,7 @@ pub fn codex_input_needed_in_current_chunk(
         return Some(PromptShape::Chooser);
     }
 
-    let arrow_touched = codex_arrow_option_pos(&compact).is_some_and(|pos| {
+    let arrow_touched = codex_arrow_option_pos(compact).is_some_and(|pos| {
         // `›` is three UTF-8 bytes, followed by one ASCII digit and one
         // ASCII delimiter (`.` or `)`).
         pos + '›'.len_utf8() + 2 > compact_mark
@@ -1504,7 +1517,7 @@ pub fn codex_input_needed_in_current_chunk(
     // Bare prompt families do not have Codex's modal chrome. Keep their
     // existing bottom-of-screen guard and additionally require the latest
     // chunk to touch the marker.
-    let prompt_zone = last_nonempty_lines(recent_tail(&s, CODEX_PROMPT_TAIL_WINDOW), 5);
+    let prompt_zone = last_nonempty_lines(recent_tail(s, CODEX_PROMPT_TAIL_WINDOW), 5);
     let bare_prompt_touched = YN_PROMPT_PATTERNS.iter().any(|pattern| {
         s.rfind(pattern)
             .is_some_and(|pos| pos + pattern.len() > s_mark && prompt_zone.contains(pattern))
@@ -1533,7 +1546,10 @@ pub fn codex_blocked_in_current_chunk(
         return Some(AgentObservation::from_state(AgentState::CreditExhausted));
     }
 
-    codex_input_needed_in_current_chunk(recent_output, last_chunk_start)
+    // Reuse the strip / compaction computed above rather than re-scanning the
+    // 16 KiB window inside `codex_input_needed_in_current_chunk` — this runs on
+    // every repaint frame of a live session.
+    codex_input_needed_in_current_chunk_from(&s, s_mark, &compact, compact_mark)
         .map(AgentObservation::input_needed)
 }
 
@@ -1561,13 +1577,21 @@ pub fn codex_credit_exhausted_hint(recent_output: &[u8]) -> Option<String> {
 pub fn codex_ready_for_prompt(recent_output: &[u8]) -> bool {
     let s = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&s);
+    codex_ready_for_prompt_from(&s, &compact)
+}
+
+/// [`codex_ready_for_prompt`] over an already stripped (`s`) and compacted
+/// (`compact`) detect window. Callers that have paid for the ANSI strip /
+/// compaction once — the per-chunk pump path runs on every repaint frame —
+/// reuse those buffers instead of scanning the 16 KiB window twice.
+fn codex_ready_for_prompt_from(s: &str, compact: &str) -> bool {
     // Compute the composer-footer offset once and feed it to BOTH the
     // readiness gate (is the composer drawn at all?) and the state decision.
     // This runs on every chunk while the spawn-time injector polls for
     // readiness, so sharing the offset avoids a second `rfind` scan for the
     // footer that `codex_state_of` would otherwise repeat internally.
-    let footer_pos = codex_footer_pos(&compact);
-    footer_pos.is_some() && codex_state_from(&s, &compact, None, footer_pos) == AgentState::Idle
+    let footer_pos = codex_footer_pos(compact);
+    footer_pos.is_some() && codex_state_from(s, compact, None, footer_pos) == AgentState::Idle
 }
 
 /// Chunk-aware companion to [`codex_ready_for_prompt`] (issue #425).
@@ -1628,7 +1652,11 @@ pub fn codex_ready_for_prompt_chunked(recent_output: &[u8], last_chunk_start: us
         return true;
     }
 
-    codex_ready_for_prompt(recent_output)
+    // Fall back to the whole-buffer positional read, reusing the strip /
+    // compaction already computed above — this runs on every repaint frame,
+    // so a second 16 KiB ANSI strip here would double the pump's per-chunk
+    // cost on a continuously-repainting session (issue #629 watchdog stress).
+    codex_ready_for_prompt_from(&s, &compact)
 }
 
 /// Byte offset of the most recent Codex *composer* arrow in `compact` — `›`

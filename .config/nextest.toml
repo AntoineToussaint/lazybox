@@ -34,6 +34,15 @@ slow-timeout = { period = "150s", terminate-after = 1 }
 filter = 'test(/^desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resync$/)'
 slow-timeout = { period = "60s", terminate-after = 1 }
 
+[[profile.default.overrides]]
+# The PTY-watchdog starvation tests drive a continuously-repainting Codex
+# session under sustained backpressure across the full 15s watchdog window
+# (issue #629). The flood is a bounded, deterministic ~1.4k frames, but the
+# real wall-clock to chew them scales with the runner's available CPU, so a
+# loaded CI box can push these bounded phases past the 10s unit bound.
+filter = 'test(/^continuously_ready_(codex_repaints_do_not_starve_the_working_watchdog|meaningful_codex_output_advances_the_watchdog_anchor)$/)'
+slow-timeout = { period = "60s", terminate-after = 1 }
+
 [profile.ci]
 # CI uses the same bound and fails on the first broken test.
 slow-timeout = { period = "10s", terminate-after = 1 }

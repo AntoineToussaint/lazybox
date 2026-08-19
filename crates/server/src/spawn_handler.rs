@@ -5608,7 +5608,18 @@ async fn note_pty_activity(
         )
         .await;
     let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
-    let composer_ready = agent.detect_ready_for_prompt_chunked(detect_window, last_chunk_start);
+    // The chunked composer-readiness probe strips + compacts the whole 16 KiB
+    // detect window on every repaint frame — far too costly to run on all of a
+    // continuously-repainting agent's output (issue #629 watchdog stress). Its
+    // sole consumer is the credit-recovery composer wait, so run the scan only
+    // while that transaction is live; the `&&` short-circuits it away on every
+    // other frame. Recording a cheap `false` outside recovery keeps the flag
+    // from carrying a stale `true` (an idle-at-composer reading from before the
+    // credit-exhausting turn) into the next recovery, which would skip the
+    // "Wait for credit" selection — recovery only ever begins from the credit
+    // chooser, where the composer is not drawn.
+    let composer_ready = terminals.credit_recovery_active(id).await
+        && agent.detect_ready_for_prompt_chunked(detect_window, last_chunk_start);
     terminals.record_composer_ready(id, composer_ready).await;
     let immediate = agent.detect_blocked_in_current_chunk(detect_window, last_chunk_start);
     let pty = if let Some(observation) = immediate {

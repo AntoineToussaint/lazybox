@@ -573,6 +573,18 @@ impl TerminalRegistry {
             .map(|recovery| recovery.evidence.clone())
     }
 
+    /// Whether a credit-recovery transaction is in flight for this terminal.
+    /// The composer-readiness probe is only consumed while recovery waits for
+    /// the composer to redraw, so the per-chunk pump path uses this to skip the
+    /// whole-window readiness scan on every other terminal's repaint traffic.
+    pub(crate) async fn credit_recovery_active(&self, id: TerminalId) -> bool {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|entry| entry.credit_recovery.is_some())
+    }
+
     pub(crate) async fn finish_credit_recovery(&self, id: TerminalId, request_id: &str) -> bool {
         let mut entries = self.entries.lock().await;
         let Some(entry) = entries.get_mut(&id) else {

@@ -385,7 +385,9 @@ impl<T: TerminalAdapter> Model<T> {
         }
 
         let label = workspace_key.to_string();
-        let modal = Textarea::new("Reply").with_header(format!("on {label}"));
+        let modal = Textarea::new("Reply")
+            .with_header(format!("on {label}"))
+            .enter_submits(super::host_terminal::keyboard_enhancement_active());
         self.set_modal_flow(ModalFlow::Reply {
             target: workspace_key,
         });
@@ -412,7 +414,8 @@ impl<T: TerminalAdapter> Model<T> {
         let modal = Textarea::new("Notes")
             .with_header(format!("local scratchpad — {label} (never synced)"))
             .with_body(existing)
-            .allow_empty();
+            .allow_empty()
+            .enter_submits(super::host_terminal::keyboard_enhancement_active());
         self.set_modal_flow(ModalFlow::Notes {
             target: workspace_key,
         });
@@ -2408,7 +2411,9 @@ impl<T: TerminalAdapter> Model<T> {
             .map(|w| w.name.clone())
             .unwrap_or_else(|| target.to_string());
         let header = format!("Handoff {} → {}", draft.source_name, target_name);
-        let mut modal = Textarea::new("Send to session").with_header(header);
+        let mut modal = Textarea::new("Send to session")
+            .with_header(header)
+            .enter_submits(super::host_terminal::keyboard_enhancement_active());
         if !draft.seed.is_empty() {
             // Trailing blank line so any note the user appends starts on
             // its own line; trimmed back off at send time if unused.

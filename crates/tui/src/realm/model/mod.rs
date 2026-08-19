@@ -3235,7 +3235,9 @@ impl<T: TerminalAdapter> Model<T> {
             "Broadcast to {n} workspace{}",
             if n == 1 { "" } else { "s" }
         );
-        let mut modal = Textarea::new(title).with_header(self.broadcast_header());
+        let mut modal = Textarea::new(title)
+            .with_header(self.broadcast_header())
+            .enter_submits(host_terminal::keyboard_enhancement_active());
         if let Some(body) = snippet_body {
             // Trailing blank line so appended custom text starts on its
             // own line; trimmed back off at send time if unused.

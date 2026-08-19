@@ -270,10 +270,14 @@ Opens a multi-line textarea targeted at the selected workspace (or the selected
 activity rows) to post a reply through the provider's comment API.
 
 ### How to use it
-Press `r`. Type your reply; `Ctrl-Enter` / `Ctrl-S` submit, `Enter` adds a
-newline, `Esc`/`Ctrl-C` cancel. Readline bindings work (Ctrl-A/E, Alt-B/F,
-Ctrl-K/U/W). From the Activity pane with rows multi-selected, the reply targets
-that thread/selection.
+Press `r`. Type your reply, then submit: on a terminal that reports the
+Kitty keyboard protocol, `Enter` submits and `Shift-Enter` adds a newline
+(the footer shows this); on one that doesn't (e.g. Terminal.app, tmux
+without `extended-keys`, plain SSH), `Enter` adds a newline and `Ctrl-Enter`
+/ `Ctrl-S` submit — so a Shift-Enter the terminal can't report never posts a
+half-written reply. `Esc`/`Ctrl-C` cancel. Readline bindings work (Ctrl-A/E,
+Alt-B/F, Ctrl-K/U/W). From the Activity pane with rows multi-selected, the
+reply targets that thread/selection.
 
 ### How it works (brief)
 `mount_reply` (`crates/tui/src/realm/model/modals.rs`) mounts a `Textarea`
@@ -284,7 +288,7 @@ message).
 ### Test checklist
 - [ ] `r` from the sidebar opens the reply textarea targeted at the workspace.
 - [ ] `r` from Activity with a row selected targets that comment thread.
-- [ ] `Ctrl-Enter`/`Ctrl-S` submits and posts via the provider.
+- [ ] On an enhanced terminal `Enter` submits and posts via the provider and `Shift-Enter` adds a newline; on a non-enhanced one `Ctrl-Enter`/`Ctrl-S` submit and `Enter` adds a newline.
 - [ ] `Esc` cancels without posting.
 - [ ] The posted comment appears on the next poll.
 

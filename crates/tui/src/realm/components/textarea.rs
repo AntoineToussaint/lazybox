@@ -1,9 +1,15 @@
 //! `Textarea` — multi-line text input with readline-style editing.
 //! tuirealm port of `tui_kit::widgets::TextareaModal`.
 //!
-//! Bindings:
-//! - `Ctrl-Enter` / `Ctrl-S` — submit (returns `Msg::TextareaSubmitted`).
-//! - `Enter` — newline.
+//! Bindings (when the host terminal reports the Kitty keyboard protocol,
+//! set via [`Textarea::enter_submits`]):
+//! - `Enter` (also `Ctrl-Enter` / `Ctrl-S`) — submit (returns `Msg::TextareaSubmitted`).
+//! - `Shift-Enter` — newline.
+//!
+//! On a terminal that can't report a modified `Enter`, submit stays on
+//! `Ctrl-Enter` / `Ctrl-S` and `Enter` inserts a newline — otherwise a
+//! Shift-Enter stripped down to a bare `Enter` would be misread as submit
+//! and post a half-written message.
 //! - `Esc` / `Ctrl-C` — cancel (returns `Msg::ModalDismissed`).
 //! - `Ctrl-A` / `Home` — line start.
 //! - `Ctrl-E` / `End` — line end.
@@ -40,6 +46,12 @@ pub struct Textarea {
     /// broadcast must carry text); the notes editor turns it on so an
     /// emptied buffer submits as a "clear the scratchpad" (issue #458).
     allow_empty: bool,
+    /// `true` when the host terminal can report Shift-Enter distinctly, so
+    /// `Enter` submits and `Shift-Enter` inserts a newline. `false` keeps
+    /// the terminal-agnostic mapping (`Enter` newline, `Ctrl-S` submit).
+    /// Off by default so any construction that forgets to probe degrades to
+    /// the mapping that can't be tricked into an accidental submit.
+    enter_submits: bool,
 }
 
 impl Textarea {
@@ -52,7 +64,17 @@ impl Textarea {
             cursor: 0,
             error: None,
             allow_empty: false,
+            enter_submits: false,
         }
+    }
+
+    /// Set whether plain `Enter` submits (and `Shift-Enter` inserts a
+    /// newline). Pass the host terminal's keyboard-enhancement support:
+    /// only a terminal that reports a modified `Enter` can carry this
+    /// mapping without risking an accidental submit.
+    pub fn enter_submits(mut self, yes: bool) -> Self {
+        self.enter_submits = yes;
+        self
     }
 
     /// Pre-fill the buffer; cursor lands at end.
@@ -295,12 +317,17 @@ impl Component for Textarea {
             body_area,
         );
 
+        let (submit_key, newline_key) = if self.enter_submits {
+            ("Enter", "Shift-Enter")
+        } else {
+            ("Ctrl-Enter", "Enter")
+        };
         let mut help_spans = vec![
-            Span::styled("Ctrl-Enter", Style::default().fg(theme.success).bold()),
+            Span::styled(submit_key, Style::default().fg(theme.success).bold()),
             Span::raw(" send  "),
             Span::styled("Esc", Style::default().fg(theme.error).bold()),
             Span::raw(" cancel  "),
-            Span::styled("Enter", Style::default().fg(theme.text_dim).bold()),
+            Span::styled(newline_key, Style::default().fg(theme.text_dim).bold()),
             Span::raw(" newline"),
         ];
         if let Some(err) = &self.error {
@@ -349,12 +376,26 @@ impl AppComponent<Msg, UserEvent> for Textarea {
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         // Cancel keys.
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
         }
-        // Submit keys (Ctrl-Enter / Ctrl-S).
-        if ctrl && matches!(key.code, Key::Enter | Key::Char('s')) {
+        // Submit vs. newline on Enter depends on whether the terminal can
+        // report Shift-Enter (see the struct field). When it can, plain
+        // Enter submits and Shift-Enter (handled here) inserts a newline;
+        // when it can't, Enter falls through to the newline arm below and
+        // submit lives only on the always-reportable Ctrl-Enter / Ctrl-S.
+        let submit = if self.enter_submits {
+            if matches!(key.code, Key::Enter) && shift {
+                self.insert_newline();
+                return None;
+            }
+            matches!(key.code, Key::Enter) || (ctrl && matches!(key.code, Key::Char('s')))
+        } else {
+            ctrl && matches!(key.code, Key::Enter | Key::Char('s'))
+        };
+        if submit {
             if self.buffer.trim().is_empty() && !self.allow_empty {
                 self.error = Some("can't submit empty input".into());
                 return None;
@@ -362,6 +403,8 @@ impl AppComponent<Msg, UserEvent> for Textarea {
             return Some(Msg::TextareaSubmitted(self.buffer.clone()));
         }
         match key.code {
+            // Reached for Enter only in the terminal-agnostic mapping
+            // (`enter_submits == false`); otherwise Enter submitted above.
             Key::Enter => {
                 self.insert_newline();
                 None
@@ -445,6 +488,78 @@ mod tests {
             code: Key::Char('s'),
             modifiers: KeyModifiers::CONTROL,
         })
+    }
+
+    fn enter() -> Event<UserEvent> {
+        Event::Keyboard(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn shift_enter() -> Event<UserEvent> {
+        Event::Keyboard(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::SHIFT,
+        })
+    }
+
+    #[test]
+    fn enter_submits_when_enhanced() {
+        let mut ta = Textarea::new("Reply")
+            .with_body("hello")
+            .enter_submits(true);
+        assert!(matches!(ta.on(&enter()), Some(Msg::TextareaSubmitted(b)) if b == "hello"));
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_without_submitting_when_enhanced() {
+        let mut ta = Textarea::new("Reply").with_body("a").enter_submits(true);
+        assert!(ta.on(&shift_enter()).is_none());
+        assert_eq!(ta.buffer, "a\n");
+    }
+
+    #[test]
+    fn empty_enter_submit_is_rejected_when_enhanced() {
+        let mut ta = Textarea::new("Reply").enter_submits(true);
+        assert!(ta.on(&enter()).is_none());
+        assert!(ta.error.is_some());
+    }
+
+    #[test]
+    fn ctrl_enter_still_submits_when_enhanced() {
+        let ctrl_enter = Event::Keyboard(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::CONTROL,
+        });
+        let mut ta = Textarea::new("Reply").with_body("hi").enter_submits(true);
+        assert!(matches!(ta.on(&ctrl_enter), Some(Msg::TextareaSubmitted(b)) if b == "hi"));
+    }
+
+    #[test]
+    fn enter_inserts_newline_without_enhancement() {
+        // Default (no enhancement): Enter must stay newline so a
+        // Shift-Enter the terminal stripped down to a bare Enter can't be
+        // misread as submit and post a half-written message.
+        let mut ta = Textarea::new("Reply").with_body("a");
+        assert!(ta.on(&enter()).is_none());
+        assert_eq!(ta.buffer, "a\n");
+    }
+
+    #[test]
+    fn stripped_shift_enter_never_submits_without_enhancement() {
+        // The terminal drops the Shift modifier, so what the user pressed
+        // as Shift-Enter arrives as a bare Enter. It must insert a newline,
+        // never submit.
+        let mut ta = Textarea::new("Reply").with_body("draft");
+        assert!(ta.on(&enter()).is_none());
+        assert_eq!(ta.buffer, "draft\n");
+    }
+
+    #[test]
+    fn ctrl_s_submits_without_enhancement() {
+        let mut ta = Textarea::new("Reply").with_body("done");
+        assert!(matches!(ta.on(&ctrl_s()), Some(Msg::TextareaSubmitted(b)) if b == "done"));
     }
 
     #[test]

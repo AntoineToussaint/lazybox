@@ -2,8 +2,8 @@
 //! tuirealm port of `tui_kit::widgets::TextareaModal`.
 //!
 //! Bindings:
-//! - `Ctrl-Enter` / `Ctrl-S` — submit (returns `Msg::TextareaSubmitted`).
-//! - `Enter` — newline.
+//! - `Enter` (also `Ctrl-Enter` / `Ctrl-S`) — submit (returns `Msg::TextareaSubmitted`).
+//! - `Shift-Enter` — newline.
 //! - `Esc` / `Ctrl-C` — cancel (returns `Msg::ModalDismissed`).
 //! - `Ctrl-A` / `Home` — line start.
 //! - `Ctrl-E` / `End` — line end.
@@ -296,11 +296,11 @@ impl Component for Textarea {
         );
 
         let mut help_spans = vec![
-            Span::styled("Ctrl-Enter", Style::default().fg(theme.success).bold()),
+            Span::styled("Enter", Style::default().fg(theme.success).bold()),
             Span::raw(" send  "),
             Span::styled("Esc", Style::default().fg(theme.error).bold()),
             Span::raw(" cancel  "),
-            Span::styled("Enter", Style::default().fg(theme.text_dim).bold()),
+            Span::styled("Shift-Enter", Style::default().fg(theme.text_dim).bold()),
             Span::raw(" newline"),
         ];
         if let Some(err) = &self.error {
@@ -349,12 +349,21 @@ impl AppComponent<Msg, UserEvent> for Textarea {
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         // Cancel keys.
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
         }
-        // Submit keys (Ctrl-Enter / Ctrl-S).
-        if ctrl && matches!(key.code, Key::Enter | Key::Char('s')) {
+        // Shift-Enter inserts a newline (chat-client convention); plain
+        // Enter submits. Distinguishing the two needs the host terminal to
+        // report the Shift modifier on Enter, which lazybox requests via
+        // the pushed keyboard-enhancement flags (see `host_terminal.rs`).
+        if matches!(key.code, Key::Enter) && shift {
+            self.insert_newline();
+            return None;
+        }
+        // Submit: Enter, plus the Ctrl-Enter / Ctrl-S aliases.
+        if matches!(key.code, Key::Enter) || (ctrl && matches!(key.code, Key::Char('s'))) {
             if self.buffer.trim().is_empty() && !self.allow_empty {
                 self.error = Some("can't submit empty input".into());
                 return None;
@@ -362,10 +371,6 @@ impl AppComponent<Msg, UserEvent> for Textarea {
             return Some(Msg::TextareaSubmitted(self.buffer.clone()));
         }
         match key.code {
-            Key::Enter => {
-                self.insert_newline();
-                None
-            }
             Key::Backspace if ctrl => {
                 self.kill_word_back();
                 None
@@ -445,6 +450,40 @@ mod tests {
             code: Key::Char('s'),
             modifiers: KeyModifiers::CONTROL,
         })
+    }
+
+    fn enter() -> Event<UserEvent> {
+        Event::Keyboard(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn shift_enter() -> Event<UserEvent> {
+        Event::Keyboard(KeyEvent {
+            code: Key::Enter,
+            modifiers: KeyModifiers::SHIFT,
+        })
+    }
+
+    #[test]
+    fn enter_submits() {
+        let mut ta = Textarea::new("Reply").with_body("hello");
+        assert!(matches!(ta.on(&enter()), Some(Msg::TextareaSubmitted(b)) if b == "hello"));
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_without_submitting() {
+        let mut ta = Textarea::new("Reply").with_body("a");
+        assert!(ta.on(&shift_enter()).is_none());
+        assert_eq!(ta.buffer, "a\n");
+    }
+
+    #[test]
+    fn empty_enter_submit_is_rejected() {
+        let mut ta = Textarea::new("Reply");
+        assert!(ta.on(&enter()).is_none());
+        assert!(ta.error.is_some());
     }
 
     #[test]

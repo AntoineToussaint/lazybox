@@ -32,7 +32,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 # `aws_lc_rs` picks the crypto backend jsonwebtoken 10 no longer defaults to
 # (else RS256 signing panics at runtime); it is the same backend octocrab
 # already builds in this workspace. `use_pem` (default) keeps `from_rsa_pem`.
-jsonwebtoken = { version = "10", features = ["aws_lc_rs"], optional = true }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"], optional = true }
 fs2 = { workspace = true, optional = true }
 
 [dev-dependencies]

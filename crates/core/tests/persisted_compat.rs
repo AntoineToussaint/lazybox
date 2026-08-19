@@ -122,6 +122,7 @@ fn maximal_pr_task() -> Task {
             source: "linear".into(),
             key: "ENG-42".into(),
         }],
+        parent: None,
         priority: None,
         state_label: None,
     }
@@ -278,8 +279,8 @@ fn pr_row_without_author_field_deserializes_as_empty() {
         .as_object_mut()
         .expect("pr object")
         .remove("author");
-    let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
-        .expect("a pre-author PR row remains readable");
+    let encoded = serde_json::to_string(&legacy).expect("serialize legacy workspace");
+    let ws = Workspace::decode_persisted(&encoded).expect("a pre-author PR row remains readable");
     assert_eq!(ws.pr.expect("pr present").author, "");
 }
 
@@ -318,6 +319,29 @@ fn v1_sessions_without_worktree_branch_deserialize() {
             .iter()
             .all(|session| session.worktree_branch.is_none())
     );
+}
+
+/// Schema v3 tasks predate provider-native parent links. Every task slot
+/// must continue to load as a root when the field is absent.
+#[test]
+fn v3_tasks_without_parent_deserialize_as_roots() {
+    let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
+    legacy["schema"] = serde_json::json!(3);
+    legacy["pr"]
+        .as_object_mut()
+        .expect("pr object")
+        .remove("parent");
+    for collection in ["gh_issues", "linear_issues"] {
+        for task in legacy[collection].as_array_mut().expect("task array") {
+            task.as_object_mut().expect("task object").remove("parent");
+        }
+    }
+
+    let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
+        .expect("v3 workspace remains readable");
+    assert!(ws.pr.as_ref().is_some_and(|task| task.parent.is_none()));
+    assert!(ws.gh_issues.iter().all(|task| task.parent.is_none()));
+    assert!(ws.linear_issues.iter().all(|task| task.parent.is_none()));
 }
 
 /// The checked-in current-schema fixture must keep deserializing, and

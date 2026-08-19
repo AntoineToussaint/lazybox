@@ -574,6 +574,7 @@ mod merge_gate_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };

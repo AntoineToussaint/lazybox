@@ -196,6 +196,7 @@ mod status_pill_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -5358,5 +5359,108 @@ mod linear_team_repo_picker_tests {
         assert_eq!(format_reset_countdown(7_200, 0), Some("2h".to_string()));
         assert_eq!(format_reset_countdown(172_800, 0), Some("2d".to_string()));
         assert_eq!(format_reset_countdown(0, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod ticket_hierarchy_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::{TaskId, TaskKind, Workspace};
+
+    fn ticket(identifier: &str, parent: Option<&str>) -> Workspace {
+        let mut task = base_task();
+        task.id = TaskId {
+            source: "linear".into(),
+            key: identifier.into(),
+        };
+        task.repo = Some("linear/ENG".into());
+        task.title = identifier.into();
+        task.kind = Some(TaskKind::Issue);
+        task.parent = parent.map(|key| TaskId {
+            source: "linear".into(),
+            key: key.into(),
+        });
+        Workspace::from_task(task, chrono::Utc::now())
+    }
+
+    #[test]
+    fn space_on_parent_ticket_toggles_only_its_descendants() {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        let parent = ticket("ENG-1", None);
+        let child = ticket("ENG-2", Some("ENG-1"));
+        let parent_key = SessionKey::from(&parent.key);
+        let child_key = SessionKey::from(&child.key);
+        sidebar.workspaces.insert(parent_key.clone(), parent);
+        sidebar.workspaces.insert(child_key.clone(), child);
+        sidebar.recompute_visible();
+
+        let parent_row = sidebar
+            .visible
+            .iter()
+            .position(|row| matches!(row, VisibleRow::Workspace(key) if key == &parent_key))
+            .expect("parent row visible");
+        sidebar.set_cursor(parent_row);
+        assert!(sidebar.toggle_ticket_at_cursor());
+        assert!(
+            sidebar
+                .visible
+                .iter()
+                .any(|row| matches!(row, VisibleRow::Workspace(key) if key == &parent_key))
+        );
+        assert!(
+            !sidebar
+                .visible
+                .iter()
+                .any(|row| matches!(row, VisibleRow::Workspace(key) if key == &child_key))
+        );
+        assert!(
+            sidebar
+                .cursor_ticket_tree()
+                .expect("cursor stays on parent")
+                .collapsed
+        );
+
+        assert!(sidebar.toggle_ticket_at_cursor());
+        assert!(
+            sidebar
+                .visible
+                .iter()
+                .any(|row| matches!(row, VisibleRow::Workspace(key) if key == &child_key))
+        );
+    }
+
+    #[test]
+    fn rendered_ticket_tree_has_disclosure_and_indented_child() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        for workspace in [ticket("ENG-1", None), ticket("ENG-2", Some("ENG-1"))] {
+            sidebar
+                .workspaces
+                .insert(SessionKey::from(&workspace.key), workspace);
+        }
+        sidebar.recompute_visible();
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| sidebar.render(Rect::new(0, 0, 80, 20), frame, true))
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+
+        assert!(
+            screen.contains("▾ ENG-1"),
+            "parent disclosure missing:\n{screen}"
+        );
+        assert!(
+            screen.contains("  · ENG-2"),
+            "child indentation missing:\n{screen}"
+        );
     }
 }

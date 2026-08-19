@@ -35,7 +35,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// an agent is busy (and never when nothing is working).
 const WORKING_SPIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 use crate::util::{truncate_ellipsis, visual_width};
-use lazybox_core::{SessionId, SessionKey, Workspace};
+use lazybox_core::{SessionId, SessionKey, TaskId, Workspace};
 use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
 use ratatui::Frame;
 use ratatui::prelude::*;
@@ -48,7 +48,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 // at the legacy `sidebar::*` paths so render/dispatch call sites keep
 // their imports.
 pub use lazybox_tui_core::inbox::{
-    Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind, role_rank,
+    Mailbox, RepoSummary, SearchState, SortMode, TicketTreeMeta, VisibleRow, WorkspaceKind,
+    role_rank,
 };
 
 /// At-a-glance attention tallies across the visible mailbox, surfaced
@@ -117,6 +118,10 @@ pub struct Sidebar {
     /// Spaces the user collapsed. Mirrors `collapsed_repos` one tier up;
     /// persisted to `ui.collapsed_spaces`.
     collapsed_spaces: BTreeSet<String>,
+    /// Parent tickets whose visible descendant rows are folded.
+    collapsed_tickets: HashSet<TaskId>,
+    /// Derived depth/disclosure metadata for each visible ticket row.
+    ticket_tree: HashMap<SessionKey, TicketTreeMeta>,
     /// Per-repo counters computed during `recompute_visible`. Keys
     /// are the same display strings used by `VisibleRow::RepoHeader`.
     repo_summaries: BTreeMap<String, RepoSummary>,
@@ -407,6 +412,8 @@ impl Sidebar {
             focused_workspaces: Vec::new(),
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
+            collapsed_tickets: HashSet::new(),
+            ticket_tree: HashMap::new(),
             repo_summaries: BTreeMap::new(),
             stacks: HashMap::new(),
             defer_recompute: false,
@@ -2496,6 +2503,36 @@ impl Sidebar {
             .map(|repo| self.collapsed_repos.contains(&repo))
     }
 
+    /// Hierarchy metadata for the ticket under the cursor, when it is a
+    /// parent or descendant in the current visible forest.
+    pub fn cursor_ticket_tree(&self) -> Option<TicketTreeMeta> {
+        let key = self.selected_session_key()?;
+        self.ticket_tree.get(key).copied()
+    }
+
+    /// Fold or unfold the visible descendants of the parent ticket under
+    /// the cursor. Returns false for leaf/non-ticket rows so callers can
+    /// fall back to the existing repo/Space collapse behavior.
+    pub fn toggle_ticket_at_cursor(&mut self) -> bool {
+        let Some(meta) = self.cursor_ticket_tree().filter(|meta| meta.has_children) else {
+            return false;
+        };
+        let Some(task_id) = self
+            .selected_workspace()
+            .and_then(|workspace| workspace.primary_task())
+            .map(|task| task.id.clone())
+        else {
+            return false;
+        };
+        if meta.collapsed {
+            self.collapsed_tickets.remove(&task_id);
+        } else {
+            self.collapsed_tickets.insert(task_id);
+        }
+        self.recompute_visible_inner(true);
+        true
+    }
+
     /// Toggle the collapsed flag for the repo at or above the
     /// cursor. Used by `Space`.
     ///
@@ -2914,6 +2951,7 @@ impl Sidebar {
                 focused_workspaces: &self.focused_workspaces,
                 spaces: &self.spaces,
                 collapsed_spaces: &self.collapsed_spaces,
+                collapsed_tickets: &self.collapsed_tickets,
                 attention: &self.attention,
                 agents: &self.agents,
                 now: self.now(),
@@ -2922,6 +2960,7 @@ impl Sidebar {
         );
         self.visible = outcome.visible;
         self.repo_summaries = outcome.summaries;
+        self.ticket_tree = outcome.ticket_tree;
         self.recompute_stacks();
         self.recompute_searched_keys();
 
@@ -3125,7 +3164,11 @@ impl Sidebar {
         // folding the group you're sitting on IS the likely next action
         // — the "show only when nothing better competes" case. Pin stays
         // dropped even here: it's the secondary action on a header.
-        if workspace.is_none() && self.cursor_repo().is_some() {
+        if self
+            .cursor_ticket_tree()
+            .is_some_and(|meta| meta.has_children)
+            || (workspace.is_none() && self.cursor_repo().is_some())
+        {
             actions.push(Action::ToggleRepoGroup);
         }
         // Focus mode (`.`) surfaces only when the selected workspace
@@ -3193,7 +3236,16 @@ impl Sidebar {
                         // state so the footer never says "collapse" over
                         // an already-collapsed group (#338).
                         Action::ToggleRepoGroup => std::borrow::Cow::Borrowed(
-                            if self.cursor_repo_collapsed() == Some(true) {
+                            if self
+                                .cursor_ticket_tree()
+                                .is_some_and(|meta| meta.has_children)
+                            {
+                                if self.cursor_ticket_tree().is_some_and(|meta| meta.collapsed) {
+                                    "expand children"
+                                } else {
+                                    "collapse children"
+                                }
+                            } else if self.cursor_repo_collapsed() == Some(true) {
                                 "expand group"
                             } else {
                                 "collapse group"

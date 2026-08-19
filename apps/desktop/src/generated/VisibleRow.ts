@@ -4,15 +4,16 @@ import type { SessionKey } from "./SessionKey";
 import type { WorkspaceKind } from "./WorkspaceKind";
 
 /**
- * One row in the rendered sidebar list. The visual model is a
- * three-level tree:
+ * One row in the rendered sidebar list. The visual model is a grouped
+ * tree whose workspace tier may itself contain parent/child tickets:
  *
  * ```text
  * owner/name              <- RepoHeader
- *   ▸ Workspace title     <- Workspace (always present)
+ *   ▾ Parent ticket       <- Workspace (always present)
  *       claude            <- Session (only when workspace has 2+)
  *       shell             <- Session
- *   ▸ Other workspace
+ *     · Child ticket      <- Workspace, indented by ticket ancestry
+ *   · Other ticket
  * ```
  *
  * **Sessions are only surfaced when the workspace has more than

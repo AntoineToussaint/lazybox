@@ -74,6 +74,7 @@ query($after: String) {{
       assignee {{ id name }}
       creator {{ id name }}
       team {{ key }}
+      parent {{ id identifier }}
       labels(first: 10) {{ nodes {{ name }} }}
       attachments(first: 20) {{ nodes {{ url }} }}
       comments(first: 20, orderBy: createdAt) {{ nodes {{ id body createdAt user {{ id name }} }} }}
@@ -165,6 +166,8 @@ pub struct Issue {
     #[serde(default)]
     pub team: Option<Team>,
     #[serde(default)]
+    pub parent: Option<ParentIssue>,
+    #[serde(default)]
     pub labels: Option<Labels>,
     /// External links attached to the issue. Linear's GitHub integration
     /// records a linked PR here as an attachment whose `url` is the PR's
@@ -193,6 +196,12 @@ pub struct Comment {
     /// GitHub mapper's author filter.
     #[serde(default)]
     pub user: Option<Person>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ParentIssue {
+    pub id: String,
+    pub identifier: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -380,6 +389,10 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         changed_files: 0,
         closes_issues: vec![],
         linked_tasks,
+        parent: issue.parent.as_ref().map(|parent| TaskId {
+            source: "linear".into(),
+            key: parent.identifier.clone(),
+        }),
         kind: Some(TaskKind::Issue),
         // Linear's numeric issue priority (0 = none → `None`).
         priority: issue.priority.and_then(lazybox_core::Priority::from_linear),
@@ -486,6 +499,15 @@ mod tests {
     }
 
     #[test]
+    fn query_requests_parent_ticket() {
+        let q = query_for(&LinearScope::default_scopes());
+        assert!(
+            q.contains("parent { id identifier }"),
+            "issue hierarchy requires the parent identity: {q}"
+        );
+    }
+
+    #[test]
     fn github_pr_url_parses_to_task_id() {
         assert_eq!(
             github_pr_id_from_url("https://github.com/obin-ai/lazybox/pull/922"),
@@ -539,6 +561,7 @@ mod tests {
             assignee: None,
             creator: None,
             team: Some(Team { key: "ENG".into() }),
+            parent: None,
             labels: None,
             attachments: Some(Attachments {
                 nodes: urls
@@ -571,6 +594,22 @@ mod tests {
     fn issue_to_task_has_no_links_without_pr_attachment() {
         let issue = issue_with_attachments(&["https://figma.com/file/xyz"]);
         assert!(issue_to_task(&issue, "viewer").linked_tasks.is_empty());
+    }
+
+    #[test]
+    fn issue_to_task_maps_linear_parent() {
+        let mut issue = issue_with_attachments(&[]);
+        issue.parent = Some(ParentIssue {
+            id: "parent-node".into(),
+            identifier: "ENG-7".into(),
+        });
+        assert_eq!(
+            issue_to_task(&issue, "viewer").parent,
+            Some(TaskId {
+                source: "linear".into(),
+                key: "ENG-7".into(),
+            })
+        );
     }
 
     #[test]

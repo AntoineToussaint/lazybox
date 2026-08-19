@@ -169,6 +169,7 @@ fn gh_task(key: &str, is_pr: bool, branch: Option<&str>, closes: Vec<TaskId>) ->
         kind: None,
         closes_issues: closes,
         linked_tasks: vec![],
+        parent: None,
         priority: None,
         state_label: None,
     }

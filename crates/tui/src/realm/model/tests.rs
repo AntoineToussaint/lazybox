@@ -7993,6 +7993,7 @@ mod merge_focus_follow_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -13281,6 +13282,7 @@ mod destructive_confirm_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
@@ -14666,6 +14668,7 @@ mod focus_mode_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
@@ -15020,6 +15023,7 @@ mod jump_to_workspace_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -17066,6 +17070,7 @@ mod merge_latch_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
@@ -18635,6 +18640,7 @@ mod pr_chat_tests {
             kind: Some(TaskKind::Pr),
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -20450,6 +20456,7 @@ mod spawn_focus_steal_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
@@ -20611,6 +20618,7 @@ mod repo_labels_failure_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -21159,6 +21167,7 @@ mod keybinding_audit_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
@@ -22270,6 +22279,7 @@ mod optimistic_mutation_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }
@@ -22588,6 +22598,7 @@ mod remote_spawn_tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }

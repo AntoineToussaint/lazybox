@@ -177,6 +177,14 @@ closes_issues: Array<TaskId>,
  */
 linked_tasks: Array<TaskId>,
 /**
+ * The provider-native parent task, when this task is nested under
+ * another issue/ticket. Providers that do not expose hierarchy leave
+ * this empty. The inbox uses it to build a cycle-safe, collapsible
+ * forest within each project; a missing or out-of-scope parent makes
+ * the task a root rather than hiding it.
+ */
+parent: TaskId | null,
+/**
  * Authoritative PR-vs-issue discriminator, set by the provider that
  * built this task. `None` only for legacy persisted snapshots that
  * predate the field; [`Task::is_pr`] falls back to the URL heuristic

@@ -1,5 +1,5 @@
 {
-  "schema": 3,
+  "schema": 4,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
@@ -151,6 +151,7 @@
         "key": "ENG-42"
       }
     ],
+    "parent": null,
     "kind": "Pr",
     "priority": null,
     "state_label": null
@@ -228,6 +229,7 @@
           "key": "ENG-42"
         }
       ],
+      "parent": null,
       "kind": "Issue",
       "priority": null,
       "state_label": null
@@ -306,6 +308,7 @@
           "key": "ENG-42"
         }
       ],
+      "parent": null,
       "kind": "Issue",
       "priority": null,
       "state_label": null

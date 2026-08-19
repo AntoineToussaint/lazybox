@@ -26,11 +26,12 @@ pub use attention::{
 };
 pub use filter::{Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet};
 pub use model::{
-    Mailbox, RepoSummary, SearchState, SortMode, VisibleRow, WorkspaceKind, role_rank,
+    Mailbox, RepoSummary, SearchState, SortMode, TicketTreeMeta, VisibleRow, WorkspaceKind,
+    role_rank,
 };
 
-use lazybox_core::{Project, ProjectKey, SessionKey, Task, Workspace};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use lazybox_core::{Project, ProjectKey, SessionKey, Task, TaskId, Workspace};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Output of `compute_visible`. Held together because the
 /// summaries are derived during the same pass that builds the
@@ -40,6 +41,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub struct ComputeOutcome {
     pub visible: Vec<VisibleRow>,
     pub summaries: BTreeMap<String, RepoSummary>,
+    /// Per-workspace ticket hierarchy for rows in `visible`.
+    pub ticket_tree: HashMap<SessionKey, TicketTreeMeta>,
 }
 
 /// Inputs to the visible-rows pass. Borrowed so the function
@@ -88,6 +91,8 @@ pub struct ComputeInputs<'a> {
     /// Space names whose repo groups the user collapsed. Mirrors
     /// `collapsed_repos` one tier up.
     pub collapsed_spaces: &'a BTreeSet<String>,
+    /// Provider task ids whose visible ticket descendants are folded.
+    pub collapsed_tickets: &'a HashSet<TaskId>,
     pub attention: &'a lazybox_config::AttentionConfig,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     pub now: chrono::DateTime<chrono::Utc>,
@@ -155,12 +160,16 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // Step 1: filter by mailbox membership. Uses the cell-tested
     // `mailbox_membership` predicate so snooze/merged/empty cases
     // can't drift from their unit tests.
-    let filtered: Vec<(&SessionKey, &Workspace)> = input
+    let mailbox_rows: Vec<(&SessionKey, &Workspace)> = input
         .workspaces
         .iter()
         .filter(|(_, w)| {
             mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox)
         })
+        .collect();
+    let mut filtered: Vec<(&SessionKey, &Workspace)> = mailbox_rows
+        .iter()
+        .copied()
         .filter(|(_, w)| {
             input.filters.accepts(&FilterCtx {
                 w,
@@ -180,6 +189,47 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 || input.search.is_some_and(|s| search_matches(&s.query, w))
         })
         .collect();
+
+    // Keep in-mailbox ancestors of matching tickets as dimmed context.
+    // This prevents a child from jumping to root whenever a search or filter
+    // excludes its parent. Parent lookup is source-agnostic and restricted to
+    // the same rendered project, so malformed cross-project links cannot
+    // pull unrelated work into a group.
+    let mut included: HashSet<SessionKey> =
+        filtered.iter().map(|(key, _)| (*key).clone()).collect();
+    let mut context_only: HashSet<SessionKey> = HashSet::new();
+    // Index every in-mailbox workspace by *all* its provider ids, so a parent
+    // that has since acquired a PR (headline task = the PR) is still reachable
+    // by the ticket id its children reference. Mirrors `emit_workspace_forest`.
+    let by_task: HashMap<TaskId, (&SessionKey, &Workspace)> = mailbox_rows
+        .iter()
+        .flat_map(|(key, workspace)| {
+            workspace
+                .hierarchy_task_ids()
+                .map(move |id| (id.clone(), (*key, *workspace)))
+        })
+        .collect();
+    for (_, matched) in filtered.clone() {
+        let group = group_label(matched, input.projects, input.workspaces);
+        let mut cursor = matched;
+        let mut seen = HashSet::new();
+        while let Some(parent_id) = cursor.hierarchy_parent() {
+            if !seen.insert(parent_id.clone()) {
+                break;
+            }
+            let Some((parent_key, parent)) = by_task.get(parent_id).copied() else {
+                break;
+            };
+            if group_label(parent, input.projects, input.workspaces) != group {
+                break;
+            }
+            if included.insert(parent_key.clone()) {
+                filtered.push((parent_key, parent));
+                context_only.insert(parent_key.clone());
+            }
+            cursor = parent;
+        }
+    }
 
     // Step 1b: lift the starred ("focused") workspaces out of the
     // filtered set. A visible starred workspace is gathered into the
@@ -300,6 +350,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // legacy flat shape byte-for-byte in that case.
     let mut visible: Vec<VisibleRow> = Vec::with_capacity(filtered.len() + ordered_repos.len() + 4);
     let mut summaries: BTreeMap<String, RepoSummary> = BTreeMap::new();
+    let mut ticket_tree: HashMap<SessionKey, TicketTreeMeta> = HashMap::new();
 
     // Step 5a: the `★ Focused` section, first and above every repo /
     // Space. Only emitted when at least one starred workspace is visible
@@ -308,20 +359,13 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // shortlist (#846).
     if !focused_rows.is_empty() {
         visible.push(VisibleRow::FocusedHeader);
-        for (k, w) in &focused_rows {
-            visible.push(VisibleRow::Workspace((*k).clone()));
-            if w.session_count() >= 2 {
-                let mut sessions: Vec<&lazybox_core::WorkspaceSession> =
-                    w.sessions.iter().collect();
-                sessions.sort_by_key(|s| s.created_at);
-                for s in sessions {
-                    visible.push(VisibleRow::Session {
-                        workspace: (*k).clone(),
-                        session_id: s.id,
-                    });
-                }
-            }
-        }
+        emit_workspace_forest(
+            &focused_rows,
+            input.collapsed_tickets,
+            &context_only,
+            &mut visible,
+            &mut ticket_tree,
+        );
     }
 
     // Step 5b: the repo groups (#860). Two shapes, chosen by whether the
@@ -338,7 +382,15 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
 
     if distinct_spaces.len() < 2 {
         for repo in &ordered_repos {
-            emit_repo_group(repo, &input, &by_repo, &mut visible, &mut summaries);
+            emit_repo_group(
+                repo,
+                &input,
+                &by_repo,
+                &mut visible,
+                &mut summaries,
+                &mut ticket_tree,
+                &context_only,
+            );
         }
     } else {
         // Space order: explicitly-configured Spaces present this pass
@@ -381,12 +433,24 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 });
             }
             for repo in repos {
-                emit_repo_group(repo, &input, &by_repo, &mut visible, &mut summaries);
+                emit_repo_group(
+                    repo,
+                    &input,
+                    &by_repo,
+                    &mut visible,
+                    &mut summaries,
+                    &mut ticket_tree,
+                    &context_only,
+                );
             }
         }
     }
 
-    ComputeOutcome { visible, summaries }
+    ComputeOutcome {
+        visible,
+        summaries,
+        ticket_tree,
+    }
 }
 
 /// Emit one repo group — its `RepoHeader`, the per-repo summary, and
@@ -399,12 +463,20 @@ fn emit_repo_group<'a>(
     by_repo: &BTreeMap<String, Vec<(&'a SessionKey, &'a Workspace)>>,
     visible: &mut Vec<VisibleRow>,
     summaries: &mut BTreeMap<String, RepoSummary>,
+    ticket_tree: &mut HashMap<SessionKey, TicketTreeMeta>,
+    context_only: &HashSet<SessionKey>,
 ) {
     visible.push(VisibleRow::RepoHeader(repo.to_string()));
     let mut summary = RepoSummary::default();
     if let Some(rows) = by_repo.get(repo) {
-        summary.active = rows.len();
-        for (_, w) in rows {
+        summary.active = rows
+            .iter()
+            .filter(|(key, _)| !context_only.contains(*key))
+            .count();
+        for (key, w) in rows {
+            if context_only.contains(*key) {
+                continue;
+            }
             if workspace_needs_attention(w, input.attention, input.agents) {
                 summary.attention += 1;
             }
@@ -415,34 +487,182 @@ fn emit_repo_group<'a>(
             // Step 3 already sorted PRs ahead of issues, so a
             // single linear pass detects the boundary cleanly.
             // In other sort modes the kind header is suppressed.
-            let split = input.sort_mode == SortMode::ByRoleSplit;
-            let mut prev_kind: Option<WorkspaceKind> = None;
-            for (k, w) in rows {
-                let cur_kind = WorkspaceKind::classify(w);
-                if split && prev_kind != Some(cur_kind) {
-                    visible.push(VisibleRow::KindHeader(cur_kind));
-                    prev_kind = Some(cur_kind);
-                }
-                visible.push(VisibleRow::Workspace((*k).clone()));
-                // Session sub-rows only when 2+ sessions —
-                // showing the single-session case would be
-                // visual noise (the workspace row itself
-                // represents that session).
-                if w.session_count() >= 2 {
-                    let mut sessions: Vec<&lazybox_core::WorkspaceSession> =
-                        w.sessions.iter().collect();
-                    sessions.sort_by_key(|s| s.created_at);
-                    for s in sessions {
-                        visible.push(VisibleRow::Session {
-                            workspace: (*k).clone(),
-                            session_id: s.id,
-                        });
+            if input.sort_mode == SortMode::ByRoleSplit {
+                for kind in [
+                    WorkspaceKind::Pr,
+                    WorkspaceKind::Issue,
+                    WorkspaceKind::Other,
+                ] {
+                    let band: Vec<_> = rows
+                        .iter()
+                        .copied()
+                        .filter(|(_, w)| WorkspaceKind::classify(w) == kind)
+                        .collect();
+                    if band.is_empty() {
+                        continue;
                     }
+                    visible.push(VisibleRow::KindHeader(kind));
+                    emit_workspace_forest(
+                        &band,
+                        input.collapsed_tickets,
+                        context_only,
+                        visible,
+                        ticket_tree,
+                    );
                 }
+            } else {
+                emit_workspace_forest(
+                    rows,
+                    input.collapsed_tickets,
+                    context_only,
+                    visible,
+                    ticket_tree,
+                );
             }
         }
     }
     summaries.insert(repo.to_string(), summary);
+}
+
+/// Emit a stable preorder forest over a pre-sorted workspace slice.
+/// Parent links are honored only when both endpoints are visible in this
+/// exact section. Missing/cross-project parents therefore degrade to roots.
+/// Cycles are broken deterministically at the first sorted member so corrupt
+/// provider data can never hide rows or recurse forever.
+fn emit_workspace_forest(
+    rows: &[(&SessionKey, &Workspace)],
+    collapsed: &HashSet<TaskId>,
+    context_only: &HashSet<SessionKey>,
+    visible: &mut Vec<VisibleRow>,
+    ticket_tree: &mut HashMap<SessionKey, TicketTreeMeta>,
+) {
+    if rows.is_empty() {
+        return;
+    }
+
+    // Address each workspace by *every* provider id it holds, not just the
+    // headline task. A ticket that has acquired a PR reports the PR as its
+    // `primary_task`, yet its children still reference the ticket id — so
+    // indexing on the headline alone would orphan the whole subtree.
+    let mut task_index: HashMap<TaskId, usize> = HashMap::new();
+    for (index, (_, workspace)) in rows.iter().enumerate() {
+        for id in workspace.hierarchy_task_ids() {
+            task_index.insert(id.clone(), index);
+        }
+    }
+
+    let mut parents: Vec<Option<usize>> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, (_, workspace))| {
+            workspace
+                .hierarchy_parent()
+                .and_then(|parent| task_index.get(parent).copied())
+                .filter(|parent| *parent != index)
+        })
+        .collect();
+
+    // Break every cycle without recursion. Walking up from each start until we
+    // reach a real root, a node already proven to reach one, or a repeat (the
+    // cycle) — cutting only the entry node so the rest of the chain keeps its
+    // structure. `resolves` memoizes proven-safe nodes so shared ancestry is
+    // never re-walked, keeping this linear on deep chains instead of O(n²).
+    // Iterating in sorted order makes the chosen root stable across renders.
+    let mut resolves = vec![false; parents.len()];
+    let mut path: Vec<usize> = Vec::new();
+    for start in 0..parents.len() {
+        path.clear();
+        let mut seen = HashSet::new();
+        let mut cursor = start;
+        let reaches_root = loop {
+            if resolves[cursor] {
+                break true;
+            }
+            if !seen.insert(cursor) {
+                break false;
+            }
+            path.push(cursor);
+            match parents[cursor] {
+                None => break true,
+                Some(parent) => cursor = parent,
+            }
+        };
+        if reaches_root {
+            for node in &path {
+                resolves[*node] = true;
+            }
+        } else {
+            parents[start] = None;
+            resolves[start] = true;
+        }
+    }
+
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); rows.len()];
+    for (child, parent) in parents.iter().enumerate() {
+        if let Some(parent) = parent {
+            children[*parent].push(child);
+        }
+    }
+
+    let roots: Vec<usize> = parents
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parent)| parent.is_none().then_some(index))
+        .collect();
+
+    let mut emitted = HashSet::new();
+    for root in roots {
+        if emitted.contains(&root) {
+            continue;
+        }
+        let mut stack = vec![(root, 0usize)];
+        while let Some((index, depth)) = stack.pop() {
+            if !emitted.insert(index) {
+                continue;
+            }
+            let (key, workspace) = rows[index];
+            let has_children = !children[index].is_empty();
+            let task_id = workspace.primary_task().map(|task| &task.id);
+            let is_context = context_only.contains(key);
+            // A context-only row is present solely because a descendant matched
+            // the active search/filter. Honoring its stored collapse here would
+            // fold that match back out of view — the search would silently drop
+            // the very row it found. Never collapse an ancestor kept for
+            // context; user-driven collapse still applies to rows that matched.
+            let is_collapsed =
+                has_children && !is_context && task_id.is_some_and(|id| collapsed.contains(id));
+            visible.push(VisibleRow::Workspace(key.clone()));
+            ticket_tree.insert(
+                key.clone(),
+                TicketTreeMeta {
+                    depth,
+                    has_children,
+                    collapsed: is_collapsed,
+                    context_only: is_context,
+                },
+            );
+            emit_session_rows(key, workspace, visible);
+            if !is_collapsed {
+                for child in children[index].iter().rev() {
+                    stack.push((*child, depth.saturating_add(1)));
+                }
+            }
+        }
+    }
+}
+
+fn emit_session_rows(key: &SessionKey, workspace: &Workspace, visible: &mut Vec<VisibleRow>) {
+    if workspace.session_count() < 2 {
+        return;
+    }
+    let mut sessions: Vec<&lazybox_core::WorkspaceSession> = workspace.sessions.iter().collect();
+    sessions.sort_by_key(|session| session.created_at);
+    for session in sessions {
+        visible.push(VisibleRow::Session {
+            workspace: key.clone(),
+            session_id: session.id,
+        });
+    }
 }
 
 fn github_task_repo(w: &Workspace, project_key: &ProjectKey) -> Option<String> {
@@ -650,12 +870,68 @@ mod tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
         let mut ws = Workspace::from_task(task, fixed_time());
         ws.key = WorkspaceKey(key_str.into());
         ws
+    }
+
+    fn linear_ticket(
+        workspace_key: &str,
+        identifier: &str,
+        parent: Option<&str>,
+        minutes_old: i64,
+    ) -> Workspace {
+        let mut workspace = workspace_with_task(workspace_key, Some("linear/ENG"), minutes_old);
+        let mut task = workspace.gh_issues.remove(0);
+        task.id = TaskId {
+            source: "linear".into(),
+            key: identifier.into(),
+        };
+        task.title = identifier.into();
+        task.kind = Some(lazybox_core::TaskKind::Issue);
+        task.parent = parent.map(|key| TaskId {
+            source: "linear".into(),
+            key: key.into(),
+        });
+        workspace.linear_issues.push(task);
+        workspace
+    }
+
+    /// A Linear ticket that the poller has merged with its linked PR: the PR
+    /// is the headline task (`primary_task`) and carries no parent, while the
+    /// ticket keeps its hierarchy on `linear_issues`. Mirrors the merge in
+    /// `server::polling` (issue tasks absorbed onto the PR workspace).
+    fn linear_ticket_with_pr(
+        workspace_key: &str,
+        identifier: &str,
+        parent: Option<&str>,
+        minutes_old: i64,
+    ) -> Workspace {
+        let mut workspace = linear_ticket(workspace_key, identifier, parent, minutes_old);
+        let mut pr = workspace.linear_issues[0].clone();
+        pr.id = TaskId {
+            source: "github".into(),
+            key: format!("owner/eng#{identifier}"),
+        };
+        pr.kind = Some(lazybox_core::TaskKind::Pr);
+        pr.parent = None;
+        workspace.pr = Some(pr);
+        workspace
+    }
+
+    fn visible_workspace_keys(outcome: &ComputeOutcome) -> Vec<&str> {
+        outcome
+            .visible
+            .iter()
+            .filter_map(|row| match row {
+                VisibleRow::Workspace(key) => Some(key.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn inputs<'a>(
@@ -669,6 +945,8 @@ mod tests {
         static NO_FILTERS: FilterSet = FilterSet::new();
         static NO_SPACES: Vec<lazybox_config::SpaceConfig> = Vec::new();
         static NO_COLLAPSED_SPACES: BTreeSet<String> = BTreeSet::new();
+        static NO_COLLAPSED_TICKETS: std::sync::LazyLock<HashSet<TaskId>> =
+            std::sync::LazyLock::new(HashSet::new);
         ComputeInputs {
             workspaces,
             mailbox: Mailbox::Inbox,
@@ -681,6 +959,7 @@ mod tests {
             focused_workspaces: &[],
             spaces: &NO_SPACES,
             collapsed_spaces: &NO_COLLAPSED_SPACES,
+            collapsed_tickets: &NO_COLLAPSED_TICKETS,
             attention,
             agents: asking,
             now: fixed_time(),
@@ -717,6 +996,219 @@ mod tests {
         assert_eq!(out.visible.len(), 2);
         assert!(matches!(out.visible[0], VisibleRow::RepoHeader(_)));
         assert!(matches!(out.visible[1], VisibleRow::Workspace(_)));
+    }
+
+    #[test]
+    fn linear_tickets_emit_parent_before_nested_descendants() {
+        let mut workspaces = HashMap::new();
+        for workspace in [
+            linear_ticket("child", "ENG-2", Some("ENG-1"), 1),
+            linear_ticket("grandchild", "ENG-3", Some("ENG-2"), 2),
+            linear_ticket("parent", "ENG-1", None, 10),
+        ] {
+            workspaces.insert(SessionKey::from(&workspace.key), workspace);
+        }
+        let collapsed_repos = BTreeSet::new();
+        let attention = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let outcome = compute_visible(inputs(
+            &workspaces,
+            &BTreeSet::new(),
+            &collapsed_repos,
+            &attention,
+            &agents,
+            &projects,
+        ));
+
+        assert_eq!(
+            visible_workspace_keys(&outcome),
+            vec!["parent", "child", "grandchild"]
+        );
+        assert_eq!(outcome.ticket_tree[&SessionKey::new("parent")].depth, 0);
+        assert!(outcome.ticket_tree[&SessionKey::new("parent")].has_children);
+        assert_eq!(outcome.ticket_tree[&SessionKey::new("child")].depth, 1);
+        assert_eq!(outcome.ticket_tree[&SessionKey::new("grandchild")].depth, 2);
+    }
+
+    #[test]
+    fn collapsed_parent_hides_all_visible_descendants() {
+        let mut workspaces = HashMap::new();
+        for workspace in [
+            linear_ticket("parent", "ENG-1", None, 10),
+            linear_ticket("child", "ENG-2", Some("ENG-1"), 1),
+            linear_ticket("grandchild", "ENG-3", Some("ENG-2"), 2),
+        ] {
+            workspaces.insert(SessionKey::from(&workspace.key), workspace);
+        }
+        let collapsed_repos = BTreeSet::new();
+        let attention = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut collapsed_tickets = HashSet::new();
+        collapsed_tickets.insert(TaskId {
+            source: "linear".into(),
+            key: "ENG-1".into(),
+        });
+        let subscribed = BTreeSet::new();
+        let mut input = inputs(
+            &workspaces,
+            &subscribed,
+            &collapsed_repos,
+            &attention,
+            &agents,
+            &projects,
+        );
+        input.collapsed_tickets = &collapsed_tickets;
+        let outcome = compute_visible(input);
+
+        assert_eq!(visible_workspace_keys(&outcome), vec!["parent"]);
+        assert!(outcome.ticket_tree[&SessionKey::new("parent")].collapsed);
+    }
+
+    #[test]
+    fn search_keeps_nonmatching_parent_as_context() {
+        let mut workspaces = HashMap::new();
+        for workspace in [
+            linear_ticket("parent", "ENG-1", None, 10),
+            linear_ticket("child", "ENG-2", Some("ENG-1"), 1),
+        ] {
+            workspaces.insert(SessionKey::from(&workspace.key), workspace);
+        }
+        let collapsed_repos = BTreeSet::new();
+        let attention = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let search = global_search("ENG-2");
+        let subscribed = BTreeSet::new();
+        let mut input = inputs(
+            &workspaces,
+            &subscribed,
+            &collapsed_repos,
+            &attention,
+            &agents,
+            &projects,
+        );
+        input.search = Some(&search);
+        let outcome = compute_visible(input);
+
+        assert_eq!(visible_workspace_keys(&outcome), vec!["parent", "child"]);
+        assert!(outcome.ticket_tree[&SessionKey::new("parent")].context_only);
+        assert!(!outcome.ticket_tree[&SessionKey::new("child")].context_only);
+        assert_eq!(
+            outcome.summaries["linear/ENG"].active, 1,
+            "ancestor context is not counted as a search match"
+        );
+    }
+
+    #[test]
+    fn missing_and_cyclic_parents_never_hide_tickets() {
+        let mut workspaces = HashMap::new();
+        for workspace in [
+            linear_ticket("missing", "ENG-1", Some("ENG-404"), 1),
+            linear_ticket("cycle-a", "ENG-2", Some("ENG-3"), 2),
+            linear_ticket("cycle-b", "ENG-3", Some("ENG-2"), 3),
+        ] {
+            workspaces.insert(SessionKey::from(&workspace.key), workspace);
+        }
+        let collapsed_repos = BTreeSet::new();
+        let attention = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let outcome = compute_visible(inputs(
+            &workspaces,
+            &BTreeSet::new(),
+            &collapsed_repos,
+            &attention,
+            &agents,
+            &projects,
+        ));
+        let keys = visible_workspace_keys(&outcome);
+
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&"missing"));
+        assert!(keys.contains(&"cycle-a"));
+        assert!(keys.contains(&"cycle-b"));
+    }
+
+    /// A ticket that has acquired a linked PR: the PR becomes the headline
+    /// task (`primary_task`), but the ticket's `parent`/id still drive the
+    /// hierarchy. Both parent and child carry a PR here, so this only passes
+    /// when the forest addresses workspaces by every provider id they hold.
+    #[test]
+    fn tickets_with_linked_prs_keep_their_hierarchy() {
+        let mut workspaces = HashMap::new();
+        for workspace in [
+            linear_ticket_with_pr("parent", "ENG-1", None, 10),
+            linear_ticket_with_pr("child", "ENG-2", Some("ENG-1"), 1),
+        ] {
+            workspaces.insert(SessionKey::from(&workspace.key), workspace);
+        }
+        let collapsed_repos = BTreeSet::new();
+        let attention = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let outcome = compute_visible(inputs(
+            &workspaces,
+            &BTreeSet::new(),
+            &collapsed_repos,
+            &attention,
+            &agents,
+            &projects,
+        ));
+
+        assert_eq!(visible_workspace_keys(&outcome), vec!["parent", "child"]);
+        assert!(outcome.ticket_tree[&SessionKey::new("parent")].has_children);
+        assert_eq!(outcome.ticket_tree[&SessionKey::new("parent")].depth, 0);
+        assert_eq!(outcome.ticket_tree[&SessionKey::new("child")].depth, 1);
+    }
+
+    /// A collapsed ancestor must not swallow a descendant that the active
+    /// search pulled in: the match would vanish with no indication. The
+    /// ancestor is kept as context and force-expanded regardless of its
+    /// stored collapse.
+    #[test]
+    fn collapsed_ancestor_never_hides_a_search_match() {
+        let mut workspaces = HashMap::new();
+        for workspace in [
+            linear_ticket("parent", "ENG-1", None, 10),
+            linear_ticket("child", "ENG-2", Some("ENG-1"), 1),
+            linear_ticket("grandchild", "ENG-3", Some("ENG-2"), 2),
+        ] {
+            workspaces.insert(SessionKey::from(&workspace.key), workspace);
+        }
+        let collapsed_repos = BTreeSet::new();
+        let attention = lazybox_config::AttentionConfig::default();
+        let agents = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut collapsed_tickets = HashSet::new();
+        collapsed_tickets.insert(TaskId {
+            source: "linear".into(),
+            key: "ENG-1".into(),
+        });
+        let search = global_search("ENG-3");
+        let subscribed = BTreeSet::new();
+        let mut input = inputs(
+            &workspaces,
+            &subscribed,
+            &collapsed_repos,
+            &attention,
+            &agents,
+            &projects,
+        );
+        input.collapsed_tickets = &collapsed_tickets;
+        input.search = Some(&search);
+        let outcome = compute_visible(input);
+
+        let keys = visible_workspace_keys(&outcome);
+        assert!(
+            keys.contains(&"grandchild"),
+            "the search match must stay visible under a collapsed ancestor: {keys:?}"
+        );
+        assert!(
+            !outcome.ticket_tree[&SessionKey::new("parent")].collapsed,
+            "a context-only ancestor must not fold away the match it contextualizes"
+        );
     }
 
     /// Workspaces in different repos: one header each, alphabetical
@@ -1710,6 +2202,7 @@ mod contract_tests {
         let cfg = Config::default();
         assert!(ComputeOutcome::decl(&cfg).contains("ComputeOutcome"));
         assert!(VisibleRow::decl(&cfg).contains("VisibleRow"));
+        assert!(TicketTreeMeta::decl(&cfg).contains("TicketTreeMeta"));
         assert!(WorkspaceKind::decl(&cfg).contains("WorkspaceKind"));
         assert!(SortMode::decl(&cfg).contains("SortMode"));
         assert!(Filter::decl(&cfg).contains("Filter"));

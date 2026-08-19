@@ -634,6 +634,7 @@ mod tests {
             kind: Some(lazybox_core::TaskKind::Pr),
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }

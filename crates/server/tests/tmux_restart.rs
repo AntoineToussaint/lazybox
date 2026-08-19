@@ -148,6 +148,7 @@ fn github_task(
         kind: None,
         closes_issues,
         linked_tasks: vec![],
+        parent: None,
         priority: None,
         state_label: None,
     }

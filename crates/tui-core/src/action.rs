@@ -1339,7 +1339,7 @@ impl ActionDef {
                 kind: ActionKind::ToggleRepoGroup,
                 default_keys: "Space",
                 label: "collapse group",
-                describe: "Collapse or expand the repo (or Space) group the cursor sits ON — fold a project's workspaces into a single header row, and unfold it again. Only acts on a header row: on a workspace row a bare Space is inert so it can't fold the group you're navigating. The collapsed set persists across restarts.",
+                describe: "Collapse or expand the most local group at the cursor: a parent ticket's descendants, a Space, or a repo. Repo and Space collapse only act on a header row — on a plain workspace row a bare Space is inert so it can't fold the group you're navigating (#1099) — while a parent-ticket row folds its descendants in place. Repo and Space collapse persist across restarts; ticket folding is view-local.",
                 section: Section::Sidebar,
             },
             ActionKind::ToggleRepoPin => &Self {
@@ -3560,6 +3560,7 @@ mod tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
@@ -3648,6 +3649,7 @@ mod tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
@@ -3729,6 +3731,7 @@ mod tests {
             kind: Some(kind),
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };
@@ -3822,6 +3825,7 @@ mod tests {
             kind: None,
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         };

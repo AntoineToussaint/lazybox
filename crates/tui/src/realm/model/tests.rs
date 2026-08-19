@@ -3518,6 +3518,104 @@ snippets:
         );
     }
 
+    #[test]
+    fn recover_credit_focused_and_bulk_target_only_credit_blocked_agents() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("codex".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent(), agent()]);
+        m.ui_defaults.credit_recovery_prompt = "Resume precisely here.".into();
+        for (i, state) in [
+            AgentState::CreditExhausted,
+            AgentState::Working,
+            AgentState::CreditExhausted,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+
+        m.terminals.set_active_session(Some(keys[0].clone()));
+        assert!(m.terminals.focus_terminal(TerminalId(1)));
+        m.focus = PaneFocus::Terminals;
+        let focused = m.dispatch_action(&Action::RecoverAgentCredit);
+        assert!(matches!(
+            focused.as_slice(),
+            [IpcCommand::RecoverAgentCredit {
+                terminal_id: TerminalId(1),
+                continuation_prompt,
+                ..
+            }] if continuation_prompt == "Resume precisely here."
+        ));
+        assert!(
+            m.dispatch_action(&Action::RecoverAgentCredit).is_empty(),
+            "a repeated focused keypress is idempotent while recovery is pending"
+        );
+
+        let bulk = m.dispatch_action(&Action::RecoverAllAgentCredit);
+        let targets: Vec<_> = bulk
+            .iter()
+            .filter_map(|command| match command {
+                IpcCommand::RecoverAgentCredit { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            vec![3],
+            "bulk skips the already-pending focused target and the working agent"
+        );
+    }
+
+    #[test]
+    fn recover_credit_command_correlation_clears_pending_and_reports_failure() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("codex".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent()]);
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::CreditExhausted,
+        });
+        m.action_key_overrides
+            .insert("recover_agent_credit".into(), "F6".into());
+        m.handle_daemon_event(IpcEvent::AgentCreditExhausted {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            hint: "add credits or switch subscription".into(),
+        });
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("press F6 to recover")),
+            "the recovery notice uses the effective remapped key"
+        );
+        let commands = m.dispatch_action(&Action::RecoverAgentCredit);
+        let IpcCommand::RecoverAgentCredit {
+            client_request_id, ..
+        } = &commands[0]
+        else {
+            panic!("expected correlated recovery command")
+        };
+        m.handle_daemon_event(IpcEvent::CommandFailed {
+            client_request_id: client_request_id.clone(),
+            message: "composer readiness timed out; retry".into(),
+        });
+        let notice = m.status.notice.as_ref().expect("failure notice");
+        assert!(notice.message.contains("composer readiness timed out"));
+        assert!(
+            !m.dispatch_action(&Action::RecoverAgentCredit).is_empty(),
+            "a failed correlated request is retryable"
+        );
+    }
+
     /// #1012: the escalating usage-limit alert rides the count of
     /// rate-limited workspaces — a sticky footer banner (naming the
     /// resume action, plus the parsed reset time) raised as agents hit

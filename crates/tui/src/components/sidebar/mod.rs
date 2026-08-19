@@ -1543,6 +1543,30 @@ impl Sidebar {
         ids
     }
 
+    pub fn credit_exhausted_terminals(&self) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (_, state))| *state == lazybox_ipc::AgentState::CreditExhausted)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    pub fn credit_exhausted_terminals_for(&self, key: &SessionKey) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (session_key, state))| {
+                session_key == key && *state == lazybox_ipc::AgentState::CreditExhausted
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
     /// Number of distinct workspaces with at least one agent terminal in
     /// `LimitReached` — the `⏳ N limited` header count and the size the
     /// escalating usage-limit alert (#1012) reports. Counts workspaces,
@@ -3229,6 +3253,17 @@ impl Sidebar {
         // equivalent.
         if !self.broadcast_selected.is_empty() {
             actions.push(Action::BroadcastToSelected);
+        }
+
+        let focused_credit_blocks = self
+            .selected_session_key()
+            .map(|key| self.credit_exhausted_terminals_for(key))
+            .unwrap_or_default();
+        if focused_credit_blocks.len() == 1 {
+            actions.push(Action::RecoverAgentCredit);
+        }
+        if self.credit_exhausted_terminals().len() > 1 {
+            actions.push(Action::RecoverAllAgentCredit);
         }
 
         // A PR behind its base can update its branch (the `g u` /

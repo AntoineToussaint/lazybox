@@ -36,8 +36,9 @@ use lazybox_core::{
     SessionId, SessionKey, SessionKind, Task, Workspace, WorkspaceKey, WorkspaceSession as Session,
 };
 use lazybox_ipc::{
-    AgentRunAccess, Event, MAX_FRAME_BYTES, PromptSource, TerminalId, TerminalInputIntent,
-    TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
+    AgentCreditRecoveryStage, AgentRunAccess, Event, MAX_FRAME_BYTES, PromptSource, TerminalId,
+    TerminalInputIntent, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
+    WorktreeStepStatus,
 };
 use lazybox_store::{StoreMutation, WorkspaceRecord};
 use spawn_executor::{ExecutedSpawn, SpawnExecutionOutcome, execute_spawn_plan};
@@ -584,6 +585,8 @@ enum StateSource {
     Hook,
     /// The PTY-exit teardown moving a dead agent to `Exited` (#357).
     Exit,
+    /// A fully confirmed provider-credit recovery leaving its blocked state.
+    Recovery,
 }
 
 /// Result of offering a direct (hook / input / exit) transition. The
@@ -728,7 +731,23 @@ async fn fold_and_broadcast_agent_state<R>(
     let session_key = live_session.clone().unwrap_or_else(|| captured.clone());
     let terminal_live = live_session.is_some();
     let previous = entry.agent_state;
-    let (result, committed) = fold(previous, terminal_live);
+    let (result, mut committed) = fold(previous, terminal_live);
+    if let Some(state) = committed
+        && previous == Some(lazybox_ipc::AgentState::CreditExhausted)
+        && !matches!(
+            state,
+            lazybox_ipc::AgentState::CreditExhausted | lazybox_ipc::AgentState::Exited { .. }
+        )
+        && source != StateSource::Recovery
+    {
+        if let Some(recovery) = entry.credit_recovery.as_mut() {
+            recovery.observed_state = Some(state);
+            if state == lazybox_ipc::AgentState::Working {
+                recovery.evidence.notify_one();
+            }
+        }
+        committed = None;
+    }
     if let Some(state) = committed {
         if !durability.persist(state).await {
             return StateFold {
@@ -787,6 +806,7 @@ async fn transition_and_broadcast_agent_state(
         StateSource::Hook => "lifecycle-hook",
         StateSource::Exit => "process-exit",
         StateSource::Pty => "pty",
+        StateSource::Recovery => "credit-recovery-confirmed",
     };
     let folded = fold_and_broadcast_agent_state(
         terminals,
@@ -5588,12 +5608,15 @@ async fn note_pty_activity(
         )
         .await;
     let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
-    let immediate_shape =
-        agent.detect_input_needed_in_current_chunk(detect_window, last_chunk_start);
-    let pty = if let Some(shape) = immediate_shape {
-        terminals.record_input_needed_shape(id, shape).await;
+    let composer_ready = agent.detect_ready_for_prompt_chunked(detect_window, last_chunk_start);
+    terminals.record_composer_ready(id, composer_ready).await;
+    let immediate = agent.detect_blocked_in_current_chunk(detect_window, last_chunk_start);
+    let pty = if let Some(observation) = immediate {
+        if let Some(shape) = observation.prompt_shape() {
+            terminals.record_input_needed_shape(id, shape).await;
+        }
         lazybox_agents::PtyReading {
-            state: lazybox_ipc::AgentState::InputNeeded,
+            state: observation.state(),
             clear: true,
             progress: false,
             liveness: lazybox_agents::Liveness::Streaming,
@@ -5770,8 +5793,9 @@ async fn classify_quiet_screen(
     // `ready_for_prompt` is only probed for an Idle reading — the
     // hooks-primary gate uses it to decide whether a quiet Idle may
     // demote a hook-set `Working`.
-    let ready_for_prompt =
-        new_state == lazybox_ipc::AgentState::Idle && agent.detect_ready_for_prompt(detect_window);
+    let ready_for_prompt = new_state == lazybox_ipc::AgentState::Idle
+        && agent.detect_ready_for_prompt_chunked(detect_window, last_chunk_start);
+    terminals.record_composer_ready(id, ready_for_prompt).await;
     // The quiet window itself is the confidence: the screen has been at
     // rest for seconds, so the classification is authoritative (`clear`)
     // and no ambiguous-exit damping holds it.
@@ -6118,6 +6142,20 @@ async fn commit_pty_reading(
             session_key,
             terminal_id: id,
             reset_hint,
+        });
+    }
+    if let lazybox_agents::Outcome::Committed(lazybox_ipc::AgentState::CreditExhausted) = outcome
+        && let Some(hint) = agent.credit_exhausted_hint(detect_window)
+    {
+        let session_key = terminals
+            .terminal_meta_for(id)
+            .await
+            .map(|(sk, _)| sk)
+            .unwrap_or_else(|| session_key.clone());
+        let _ = bus.send(Event::AgentCreditExhausted {
+            session_key,
+            terminal_id: id,
+            hint,
         });
     }
 }
@@ -6544,6 +6582,7 @@ struct SubmitConfirmation {
     events: tokio::sync::broadcast::Receiver<Event>,
     coordinator: SpawnCoordinator,
     bus: tokio::sync::broadcast::Sender<Event>,
+    recovery_signal: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 /// Register the proof-of-submission watchers for `terminal_id`. Every
@@ -6563,6 +6602,10 @@ async fn prepare_submit_confirmation(
         events: config.bus.subscribe(),
         coordinator: config.spawn.clone(),
         bus: config.bus.clone(),
+        recovery_signal: config
+            .terminal
+            .credit_recovery_signal_for(terminal_id)
+            .await,
     }
 }
 
@@ -6600,6 +6643,7 @@ async fn confirm_prompt_submission(
         let wait = deadline * (resends + 1);
         if await_submit_evidence(
             &confirm.signal,
+            confirm.recovery_signal.as_deref(),
             &mut confirm.events,
             confirm.terminal_id,
             &config.terminal,
@@ -6795,6 +6839,7 @@ async fn await_paste_settled(
 /// any resting state (`Idle`/`Done`) may simply predate the submit.
 async fn await_submit_evidence(
     signal: &tokio::sync::Notify,
+    recovery_signal: Option<&tokio::sync::Notify>,
     events: &mut tokio::sync::broadcast::Receiver<Event>,
     terminal_id: TerminalId,
     terminals: &TerminalRegistry,
@@ -6803,6 +6848,12 @@ async fn await_submit_evidence(
     let wait = async {
         tokio::select! {
             _ = signal.notified() => true,
+            _ = async {
+                match recovery_signal {
+                    Some(signal) => signal.notified().await,
+                    None => std::future::pending().await,
+                }
+            } => true,
             confirmed = async {
                 loop {
                     match events.recv().await {
@@ -6939,6 +6990,289 @@ pub async fn handle_inject_prompt(
     submit: bool,
 ) {
     handle_inject_prompt_inner(config, terminal_id, prompt, fallback_spawn, submit, None).await;
+}
+
+fn emit_credit_recovery_stage(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    client_request_id: &str,
+    stage: AgentCreditRecoveryStage,
+) {
+    let _ = config.bus.send(Event::AgentCreditRecovery {
+        terminal_id,
+        client_request_id: client_request_id.to_string(),
+        stage,
+    });
+}
+
+fn fail_credit_recovery(config: &ServerConfig, client_request_id: &str, message: String) {
+    let _ = config.bus.send(Event::CommandFailed {
+        client_request_id: client_request_id.to_string(),
+        message,
+    });
+}
+
+async fn await_credit_composer_ready(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
+    loop {
+        if config.terminal.backend_key_for(terminal_id).await.is_none() {
+            return Err(
+                "the terminal closed while waiting for the composer; reopen the agent and retry"
+                    .into(),
+            );
+        }
+        if config.terminal.composer_ready_for(terminal_id).await {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(
+                "Wait for credit was selected, but the composer did not become ready; add or switch credit, then retry"
+                    .into(),
+            );
+        }
+        config.terminal.request_reclassify(terminal_id).await;
+        let step = INJECT_RECLASSIFY_POLL.min(remaining);
+        match tokio::time::timeout(step, events.recv()).await {
+            Ok(Ok(Event::TerminalExited {
+                terminal_id: exited,
+                ..
+            })) if exited == terminal_id => {
+                return Err(
+                    "the terminal closed while waiting for the composer; reopen the agent and retry"
+                        .into(),
+                );
+            }
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                return Err("terminal events stopped while waiting for recovery; retry".into());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Run the complete provider-credit recovery transaction for one terminal.
+/// Every failure leaves `CreditExhausted` cached and clears only the in-flight
+/// reservation so the same action is safe to retry.
+pub async fn handle_recover_agent_credit(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    client_request_id: String,
+    continuation_prompt: String,
+) {
+    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+        fail_credit_recovery(
+            config,
+            &client_request_id,
+            "the blocked terminal is no longer running; reopen the agent and retry".into(),
+        );
+        return;
+    };
+    let Some((_session_key, TerminalKind::Agent(agent_id))) =
+        config.terminal.terminal_meta_for(terminal_id).await
+    else {
+        fail_credit_recovery(
+            config,
+            &client_request_id,
+            "credit recovery is available only for a running agent terminal".into(),
+        );
+        return;
+    };
+    let Some(agent) = config.agents.get(&agent_id) else {
+        fail_credit_recovery(
+            config,
+            &client_request_id,
+            format!("the `{agent_id}` agent adapter is unavailable; restart lazybox and retry"),
+        );
+        return;
+    };
+    let Some(protocol) = agent.credit_recovery_protocol() else {
+        fail_credit_recovery(
+            config,
+            &client_request_id,
+            format!(
+                "{} does not support automatic credit recovery",
+                agent.display_name()
+            ),
+        );
+        return;
+    };
+    if let Err(message) = config
+        .terminal
+        .begin_credit_recovery(terminal_id, client_request_id.clone())
+        .await
+    {
+        fail_credit_recovery(
+            config,
+            &client_request_id,
+            format!("{message}; retry when ready"),
+        );
+        return;
+    }
+
+    let result = async {
+        let events = config.bus.subscribe();
+        if !config.terminal.composer_ready_for(terminal_id).await {
+            emit_credit_recovery_stage(
+                config,
+                terminal_id,
+                &client_request_id,
+                AgentCreditRecoveryStage::SelectingWait,
+            );
+            let Some(interaction) =
+                terminal_io::acquire_live(config, terminal_id, &backend_key).await
+            else {
+                return Err(
+                    "the terminal closed before Wait for credit could be selected; reopen the agent and retry"
+                        .into(),
+                );
+            };
+            config
+                .terminal
+                .record_composer_ready(terminal_id, false)
+                .await;
+            terminal_io::write_locked(
+                config,
+                terminal_id,
+                &backend_key,
+                protocol.select_wait(),
+                TerminalInputIntent::Submit,
+            )
+            .await
+            .map_err(|error| {
+                format!("could not select Wait for credit ({error}); check the terminal and retry")
+            })?;
+            drop(interaction);
+        }
+
+        config
+            .terminal
+            .set_credit_recovery_stage(
+                terminal_id,
+                &client_request_id,
+                AgentCreditRecoveryStage::WaitingForComposer,
+            )
+            .await;
+        emit_credit_recovery_stage(
+            config,
+            terminal_id,
+            &client_request_id,
+            AgentCreditRecoveryStage::WaitingForComposer,
+        );
+        await_credit_composer_ready(config, terminal_id, events).await?;
+
+        config
+            .terminal
+            .set_credit_recovery_stage(
+                terminal_id,
+                &client_request_id,
+                AgentCreditRecoveryStage::InjectingContinuation,
+            )
+            .await;
+        emit_credit_recovery_stage(
+            config,
+            terminal_id,
+            &client_request_id,
+            AgentCreditRecoveryStage::InjectingContinuation,
+        );
+        let Some(interaction) =
+            terminal_io::acquire_live(config, terminal_id, &backend_key).await
+        else {
+            return Err(
+                "the terminal closed before the continuation could be sent; reopen the agent and retry"
+                    .into(),
+            );
+        };
+        match write_prompt_sequence(
+            config,
+            terminal_id,
+            &backend_key,
+            agent.encode_prompt(&continuation_prompt, lazybox_agents::PromptIntent::Submit),
+            true,
+            interaction,
+        )
+        .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(
+                "the continuation was pasted but its submission was not confirmed; inspect the composer, submit it if parked, then retry"
+                    .into(),
+            ),
+            Err(error) => Err(format!(
+                "the continuation could not be delivered ({error}); check the terminal and retry"
+            )),
+        }
+    }
+    .await;
+
+    if let Err(message) = result {
+        config
+            .terminal
+            .finish_credit_recovery(terminal_id, &client_request_id)
+            .await;
+        fail_credit_recovery(config, &client_request_id, message);
+        return;
+    }
+
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
+        config
+            .terminal
+            .finish_credit_recovery(terminal_id, &client_request_id)
+            .await;
+        fail_credit_recovery(
+            config,
+            &client_request_id,
+            "the terminal closed after submission confirmation; reopen the agent to verify its work"
+                .into(),
+        );
+        return;
+    };
+    let Some(durability) = agent_state_durability(config, terminal_id, &backend_key).await else {
+        config
+            .terminal
+            .finish_credit_recovery(terminal_id, &client_request_id)
+            .await;
+        fail_credit_recovery(
+            config,
+            &client_request_id,
+            "recovery was submitted but its agent state could not be persisted; restart lazybox and retry"
+                .into(),
+        );
+        return;
+    };
+    let transition = transition_and_broadcast_agent_state(
+        &config.terminal,
+        &config.bus,
+        &durability,
+        terminal_id,
+        &session_key,
+        StateSource::Recovery,
+        |current| {
+            (current == Some(lazybox_ipc::AgentState::CreditExhausted))
+                .then_some(lazybox_ipc::AgentState::Working)
+        },
+    )
+    .await;
+    config
+        .terminal
+        .finish_credit_recovery(terminal_id, &client_request_id)
+        .await;
+    if !transition.committed {
+        fail_credit_recovery(
+            config,
+            &client_request_id,
+            "the continuation was confirmed, but the blocked state could not be cleared; retry after checking the terminal"
+                .into(),
+        );
+        return;
+    }
+    let _ = config
+        .bus
+        .send(Event::CommandCompleted { client_request_id });
 }
 
 #[derive(Clone)]
@@ -11241,6 +11575,340 @@ mod tests {
         })
         .await
         .expect("injection reservation released after terminal exit");
+    }
+
+    #[tokio::test]
+    async fn credit_recovery_selects_wait_gates_on_readiness_and_confirms_submission() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "credit-recovery")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(1179);
+        let session_key = SessionKey::new("credit-recovery");
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            session_key,
+            "codex",
+            Some(lazybox_ipc::AgentState::CreditExhausted),
+            None,
+        )
+        .await;
+        config.terminal.record_composer_ready(id, false).await;
+        let mut events = config.bus.subscribe();
+
+        let task = {
+            let config = config.clone();
+            tokio::spawn(async move {
+                handle_recover_agent_credit(
+                    &config,
+                    id,
+                    "recover-1179".into(),
+                    "Continue the work you were doing.".into(),
+                )
+                .await;
+            })
+        };
+        wait_for_write_count(&mock, &backend_key, 1).await;
+        assert_eq!(mock.writes_for(&backend_key).await, vec![b"\r".to_vec()]);
+
+        handle_recover_agent_credit(&config, id, "duplicate-1179".into(), "duplicate".into()).await;
+        assert_eq!(
+            mock.writes_for(&backend_key).await,
+            vec![b"\r".to_vec()],
+            "a repeated recovery may not select the chooser twice"
+        );
+
+        config.terminal.record_composer_ready(id, true).await;
+        let _ = config.bus.send(Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"composer ready".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+        wait_for_write_count(&mock, &backend_key, 2).await;
+        let _ = config.bus.send(Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"Continue the work you were doing.".to_vec(),
+            first_seq: 2,
+            seq: 2,
+        });
+        wait_for_write_count(&mock, &backend_key, 3).await;
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::CreditExhausted),
+            "the blocked state remains visible until submit evidence arrives"
+        );
+        loop {
+            if let Some(signal) = config
+                .spawn
+                .prompt_submit_signals
+                .lock()
+                .await
+                .get(&id)
+                .cloned()
+            {
+                signal.notify_one();
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        task.await.expect("credit recovery task");
+
+        let writes = mock.writes_for(&backend_key).await;
+        assert_eq!(writes[0], b"\r");
+        assert!(writes[1].starts_with(b"\x1b[200~"));
+        assert!(writes[1].ends_with(b"\x1b[201~"));
+        assert_eq!(writes[2], b"\r");
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::Working)
+        );
+
+        let mut stages = Vec::new();
+        let mut completed = false;
+        let mut duplicate_failed = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::AgentCreditRecovery {
+                    client_request_id,
+                    stage,
+                    ..
+                } if client_request_id == "recover-1179" => stages.push(stage),
+                Event::CommandCompleted { client_request_id }
+                    if client_request_id == "recover-1179" =>
+                {
+                    completed = true;
+                }
+                Event::CommandFailed {
+                    client_request_id, ..
+                } if client_request_id == "duplicate-1179" => {
+                    duplicate_failed = true;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            stages,
+            vec![
+                AgentCreditRecoveryStage::SelectingWait,
+                AgentCreditRecoveryStage::WaitingForComposer,
+                AgentCreditRecoveryStage::InjectingContinuation,
+            ]
+        );
+        assert!(completed);
+        assert!(duplicate_failed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn credit_recovery_readiness_timeout_is_correlated_and_retryable() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "credit-timeout")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(1180);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("credit-timeout"),
+            "codex",
+            Some(lazybox_ipc::AgentState::CreditExhausted),
+            None,
+        )
+        .await;
+        let mut events = config.bus.subscribe();
+
+        handle_recover_agent_credit(
+            &config,
+            id,
+            "timeout-1179".into(),
+            "Continue the work you were doing.".into(),
+        )
+        .await;
+
+        assert_eq!(mock.writes_for(&backend_key).await, vec![b"\r".to_vec()]);
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::CreditExhausted)
+        );
+        let durability = agent_state_durability(&config, id, &backend_key)
+            .await
+            .expect("registered test terminal has durable state");
+        let ordinary_transition = transition_and_broadcast_agent_state(
+            &config.terminal,
+            &config.bus,
+            &durability,
+            id,
+            &SessionKey::new("credit-timeout"),
+            StateSource::Pty,
+            |_| Some(lazybox_ipc::AgentState::Idle),
+        )
+        .await;
+        assert!(
+            !ordinary_transition.committed,
+            "a failed transaction stays visibly blocked after its composer appears"
+        );
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::CreditExhausted)
+        );
+        assert!(
+            config
+                .terminal
+                .begin_credit_recovery(id, "retry".into())
+                .await
+                .is_ok(),
+            "a failed recovery releases its in-flight reservation"
+        );
+        config.terminal.finish_credit_recovery(id, "retry").await;
+        let mut correlated_failure = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(
+                event,
+                Event::CommandFailed { client_request_id, message }
+                    if client_request_id == "timeout-1179" && message.contains("did not become ready")
+            ) {
+                correlated_failure = true;
+            }
+        }
+        assert!(correlated_failure);
+    }
+
+    #[tokio::test]
+    async fn credit_recovery_lost_terminal_reports_correlated_failure() {
+        let config = ServerConfig::in_memory();
+        let mut events = config.bus.subscribe();
+        handle_recover_agent_credit(
+            &config,
+            TerminalId(999_1179),
+            "lost-1179".into(),
+            "Continue the work you were doing.".into(),
+        )
+        .await;
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::CommandFailed { client_request_id, message })
+                if client_request_id == "lost-1179" && message.contains("no longer running")
+        ));
+    }
+
+    #[tokio::test]
+    async fn credit_recovery_wait_selection_failure_is_visible_and_retryable() {
+        let config = ServerConfig::in_memory();
+        let id = TerminalId(1181);
+        register_test_agent(
+            &config.terminal,
+            id,
+            "missing-credit-backend",
+            SessionKey::new("credit-select-failure"),
+            "codex",
+            Some(lazybox_ipc::AgentState::CreditExhausted),
+            None,
+        )
+        .await;
+        let mut events = config.bus.subscribe();
+        handle_recover_agent_credit(
+            &config,
+            id,
+            "select-failure-1179".into(),
+            "Continue the work you were doing.".into(),
+        )
+        .await;
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::CreditExhausted)
+        );
+        let mut failure = None;
+        while let Ok(event) = events.try_recv() {
+            if let Event::CommandFailed {
+                client_request_id,
+                message,
+            } = event
+                && client_request_id == "select-failure-1179"
+            {
+                failure = Some(message);
+            }
+        }
+        assert!(failure.is_some_and(|message| message.contains("select Wait for credit")));
+        assert!(
+            config
+                .terminal
+                .begin_credit_recovery(id, "retry-select".into())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn credit_recovery_injection_failure_never_reports_success() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "credit-inject-failure")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(1182);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("credit-inject-failure"),
+            "codex",
+            Some(lazybox_ipc::AgentState::CreditExhausted),
+            None,
+        )
+        .await;
+        let mut events = config.bus.subscribe();
+        let task = {
+            let config = config.clone();
+            tokio::spawn(async move {
+                handle_recover_agent_credit(
+                    &config,
+                    id,
+                    "inject-failure-1179".into(),
+                    "Continue the work you were doing.".into(),
+                )
+                .await;
+            })
+        };
+        wait_for_write_count(&mock, &backend_key, 1).await;
+        mock.wedge_write(&backend_key).await;
+        config.terminal.record_composer_ready(id, true).await;
+        let _ = config.bus.send(Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"composer ready".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+        task.await.expect("failed injection task");
+
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::CreditExhausted)
+        );
+        let mut failed = false;
+        let mut completed = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::CommandFailed {
+                    client_request_id, ..
+                } if client_request_id == "inject-failure-1179" => failed = true,
+                Event::CommandCompleted { client_request_id }
+                    if client_request_id == "inject-failure-1179" =>
+                {
+                    completed = true
+                }
+                _ => {}
+            }
+        }
+        assert!(failed);
+        assert!(
+            !completed,
+            "a failed injection cannot report recovery success"
+        );
     }
 
     /// A free-text `InputNeeded` prompt (the agent asking an open question)

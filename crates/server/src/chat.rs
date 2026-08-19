@@ -1078,6 +1078,7 @@ fn format_terminal_status(
     let state_label = match agent_states.get(&tid).copied() {
         Some(AgentState::InputNeeded) => "⏸ needs input",
         Some(AgentState::LimitReached) => "⏳ rate-limited",
+        Some(AgentState::CreditExhausted) => "¢ out of credit",
         Some(AgentState::Working) => "▶ working",
         Some(AgentState::Done) => "✓ done",
         Some(AgentState::Idle) => "· idle",
@@ -1100,6 +1101,7 @@ fn agent_icon(tid: TerminalId, agent_states: &HashMap<TerminalId, AgentState>) -
     match agent_states.get(&tid).copied() {
         Some(AgentState::InputNeeded) => "⏸",
         Some(AgentState::LimitReached) => "⏳",
+        Some(AgentState::CreditExhausted) => "¢",
         Some(AgentState::Working) => "▶",
         Some(AgentState::Done) => "✓",
         Some(AgentState::Exited { .. }) => "✗",

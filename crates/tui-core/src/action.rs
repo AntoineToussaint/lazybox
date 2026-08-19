@@ -372,6 +372,11 @@ pub enum Action {
     /// `Shift-B` broadcast delivery. The bulk companion to re-authing with
     /// another account — no visiting each terminal.
     ResumeRateLimited,
+    /// Recover the focused agent from a provider credit chooser and continue
+    /// its interrupted turn.
+    RecoverAgentCredit,
+    /// Recover every agent currently blocked on a supported credit chooser.
+    RecoverAllAgentCredit,
     /// Toggle focus mode — maximize the focused workspace's terminal
     /// to near-fullscreen behind a slim event header, hiding the
     /// sidebar and activity pane (`.` from the sidebar, `]]f` from
@@ -545,6 +550,8 @@ pub enum ActionKind {
     JumpToFailingCi,
     JumpToLimited,
     ResumeRateLimited,
+    RecoverAgentCredit,
+    RecoverAllAgentCredit,
     ToggleFocusMode,
     StartAgent,
     ConnectBox,
@@ -591,6 +598,8 @@ impl ActionKind {
         Self::StartAgent,
         Self::ConnectBox,
         Self::ResumeRateLimited,
+        Self::RecoverAgentCredit,
+        Self::RecoverAllAgentCredit,
         Self::ToggleActivityPane,
         Self::ToggleMouseCapture,
         Self::ResizeSplitter,
@@ -802,6 +811,8 @@ impl Action {
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::JumpToLimited => ActionKind::JumpToLimited,
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
+            Action::RecoverAgentCredit => ActionKind::RecoverAgentCredit,
+            Action::RecoverAllAgentCredit => ActionKind::RecoverAllAgentCredit,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
             Action::StartAgent => ActionKind::StartAgent,
             Action::ConnectBox => ActionKind::ConnectBox,
@@ -980,6 +991,20 @@ impl ActionDef {
                 default_keys: "Shift-K",
                 label: "resume rate-limited",
                 describe: "Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent. Use after switching Claude account / API key externally so you don't visit each terminal.",
+                section: Section::Global,
+            },
+            ActionKind::RecoverAgentCredit => &Self {
+                kind: ActionKind::RecoverAgentCredit,
+                default_keys: "Ctrl-k",
+                label: "recover credit",
+                describe: "Select the provider's Wait for credit option for the focused blocked agent, wait for its composer, and submit the configured continuation prompt.",
+                section: Section::Global,
+            },
+            ActionKind::RecoverAllAgentCredit => &Self {
+                kind: ActionKind::RecoverAllAgentCredit,
+                default_keys: "Ctrl-Shift-K",
+                label: "recover all credit",
+                describe: "Run the full credit recovery transaction for every agent currently blocked on a supported credit chooser.",
                 section: Section::Global,
             },
             ActionKind::ToggleFocusMode => &Self {
@@ -2050,6 +2075,8 @@ impl ActionKind {
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::JumpToLimited => "jump_to_limited",
             ActionKind::ResumeRateLimited => "resume_rate_limited",
+            ActionKind::RecoverAgentCredit => "recover_agent_credit",
+            ActionKind::RecoverAllAgentCredit => "recover_all_agent_credit",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
             ActionKind::StartAgent => "start_agent",
             ActionKind::ConnectBox => "connect_box",
@@ -2955,6 +2982,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToFailingCi
         | ActionKind::JumpToLimited
         | ActionKind::ResumeRateLimited
+        | ActionKind::RecoverAgentCredit
+        | ActionKind::RecoverAllAgentCredit
         | ActionKind::ConnectBox
         | ActionKind::ToggleActivityPane
         | ActionKind::ToggleFocusMode

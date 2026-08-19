@@ -996,6 +996,9 @@ pub struct UiSection {
     /// detects + surfaces the block unless you opt in.
     #[serde(default)]
     pub auto_wait_on_limit: bool,
+    /// Prompt submitted after a credit chooser has cleared and the provider
+    /// composer is ready.
+    pub credit_recovery_prompt: String,
     /// Show each running agent's model + reasoning effort next to its
     /// sidebar badge (`C Opus`, `X gpt-5.5 · xhigh`) and on its
     /// terminal tab (where it rides the `◆` tier badge). The value is the
@@ -1067,6 +1070,7 @@ impl Default for UiSection {
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
             auto_wait_on_limit: false,
+            credit_recovery_prompt: default_credit_recovery_prompt(),
             show_agent_model: true,
             usage_limit_alerts: true,
             usage_summary: true,
@@ -1117,6 +1121,7 @@ pub struct UiDefaults {
     /// Escalate a footer alert as agents hit their usage limit. See
     /// [`UiSection::usage_limit_alerts`].
     pub usage_limit_alerts: bool,
+    pub credit_recovery_prompt: String,
     /// Show the always-visible per-provider usage summary. See
     /// [`UiSection::usage_summary`].
     pub usage_summary: bool,
@@ -1151,6 +1156,7 @@ impl Default for UiDefaults {
             keep_awake: false,
             show_agent_model: true,
             usage_limit_alerts: true,
+            credit_recovery_prompt: default_credit_recovery_prompt(),
             usage_summary: true,
             usage_budgets: std::collections::BTreeMap::new(),
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
@@ -1165,6 +1171,11 @@ impl UiSection {
     /// each field.
     pub fn resolved(&self) -> UiDefaults {
         let d = UiDefaults::default();
+        let credit_recovery_prompt = if self.credit_recovery_prompt.trim().is_empty() {
+            d.credit_recovery_prompt.clone()
+        } else {
+            self.credit_recovery_prompt.clone()
+        };
         UiDefaults {
             auto_mark_delay: self.auto_mark_delay.unwrap_or(d.auto_mark_delay),
             quit_double_tap_window: self
@@ -1191,6 +1202,7 @@ impl UiSection {
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
             usage_limit_alerts: self.usage_limit_alerts,
+            credit_recovery_prompt,
             usage_summary: self.usage_summary,
             usage_budgets: self.usage_budgets.clone(),
             // Sourced from the `terminal` section (see
@@ -1199,6 +1211,10 @@ impl UiSection {
             scrollback_lines: d.scrollback_lines,
         }
     }
+}
+
+fn default_credit_recovery_prompt() -> String {
+    "Continue the work you were doing.".to_string()
 }
 
 /// Worktree-layout configuration — mount points, mostly. The daemon
@@ -4091,6 +4107,29 @@ auto_fix:
         assert_eq!(r.short_snooze, d.short_snooze);
         assert_eq!(r.long_snooze, d.long_snooze);
         assert_eq!(r.log_path, d.log_path);
+        assert_eq!(
+            r.credit_recovery_prompt,
+            "Continue the work you were doing."
+        );
+    }
+
+    #[test]
+    fn credit_recovery_prompt_is_configurable_and_blank_uses_default() {
+        let configured: Config = serde_yaml::from_str(
+            "ui:\n  credit_recovery_prompt: Resume from the interrupted step.\n",
+        )
+        .expect("credit recovery config parses");
+        assert_eq!(
+            configured.resolved_ui().credit_recovery_prompt,
+            "Resume from the interrupted step."
+        );
+
+        let blank: Config =
+            serde_yaml::from_str("ui:\n  credit_recovery_prompt: '   '\n").expect("blank parses");
+        assert_eq!(
+            blank.resolved_ui().credit_recovery_prompt,
+            "Continue the work you were doing."
+        );
     }
 
     #[test]

@@ -120,6 +120,17 @@ impl Sidebar {
         self.inner.displays_agent_state(session_key, state)
     }
 
+    pub fn credit_exhausted_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.credit_exhausted_terminals()
+    }
+
+    pub fn credit_exhausted_terminals_for(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.credit_exhausted_terminals_for(key)
+    }
+
     /// Drain footer-notice strings the inner sidebar queued in
     /// response to AgentState transitions. Returns one short string
     /// per Active→Asking edge, suitable for `Notice` rendering. The

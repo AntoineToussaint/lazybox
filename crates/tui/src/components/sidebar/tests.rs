@@ -4297,6 +4297,46 @@ mod done_alert_tests {
         );
     }
 
+    #[test]
+    fn credit_recovery_footer_uses_remapped_focused_and_bulk_actions() {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("recover_agent_credit".to_string(), "F6".to_string());
+        overrides.insert(
+            "recover_all_agent_credit".to_string(),
+            "Shift-F6".to_string(),
+        );
+        let catalog = lazybox_tui_core::action::ActionDef::catalog(&[], &overrides);
+        let (mut sb, key) = sidebar_with_one_workspace();
+        assert!(sb.focus_workspace_key(&key));
+        sb.on_event(&agent_state(&key, AgentState::CreditExhausted));
+
+        let focused = sb.contextual_bindings(&catalog, false);
+        assert!(
+            focused
+                .iter()
+                .any(|binding| binding.keys == "F6" && binding.label == "recover credit"),
+            "focused credit recovery appears with its remapped key: {focused:?}",
+        );
+        assert!(
+            !focused
+                .iter()
+                .any(|binding| binding.label == "recover all credit"),
+            "one blocked terminal does not advertise bulk recovery: {focused:?}",
+        );
+
+        sb.on_event(&Event::AgentState {
+            session_key: SessionKey::new("another-credit-block"),
+            terminal_id: TerminalId(2),
+            state: AgentState::CreditExhausted,
+        });
+        let bulk = sb.contextual_bindings(&catalog, false);
+        assert!(
+            bulk.iter()
+                .any(|binding| binding.keys == "Shift-F6" && binding.label == "recover all credit"),
+            "multiple blocks advertise the remapped bulk recovery: {bulk:?}",
+        );
+    }
+
     /// The editor action launches locally against a server-side worktree
     /// path, so a remote (`--connect`) client omits it from the sidebar
     /// footer hints while a local client keeps it. See #742.

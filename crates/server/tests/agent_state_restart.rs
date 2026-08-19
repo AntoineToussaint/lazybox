@@ -82,7 +82,10 @@ async fn seed_persisted_state(
             )
             .await;
         }
-        AgentState::Idle | AgentState::Exited { .. } | AgentState::LimitReached => {
+        AgentState::Idle
+        | AgentState::Exited { .. }
+        | AgentState::LimitReached
+        | AgentState::CreditExhausted => {
             panic!("test helper only seeds hook-driven live-turn states")
         }
     }

@@ -1,6 +1,6 @@
 //! The `Agent` trait and built-in implementations.
 
-use crate::pty::{EncodedPrompt, PromptIntent, PtyProtocol};
+use crate::pty::{CreditRecoveryProtocol, EncodedPrompt, PromptIntent, PtyProtocol};
 use lazybox_ipc::{AgentRunAccess, AgentState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -231,6 +231,18 @@ pub trait Agent: Send + Sync {
         PtyProtocol::default()
     }
 
+    /// Provider-owned chooser interaction for credit recovery. Agents that
+    /// do not expose a supported credit chooser leave this unavailable.
+    fn credit_recovery_protocol(&self) -> Option<CreditRecoveryProtocol> {
+        None
+    }
+
+    /// Provider guidance carried by a detected credit chooser.
+    fn credit_exhausted_hint(&self, recent_output: &[u8]) -> Option<String> {
+        let _ = recent_output;
+        None
+    }
+
     /// Encode a complete prompt interaction atomically. Most adapters should
     /// inherit this and declare [`Agent::pty_protocol`]; an unusual CLI may
     /// override this single method without having to coordinate independent
@@ -417,6 +429,17 @@ pub trait Agent: Send + Sync {
     ) -> Option<PromptShape> {
         let _ = (recent_output, last_chunk_start);
         None
+    }
+
+    /// Typed current-chunk observation for blocking screens. The default
+    /// preserves adapters that only distinguish ordinary input prompts.
+    fn detect_blocked_in_current_chunk(
+        &self,
+        recent_output: &[u8],
+        last_chunk_start: usize,
+    ) -> Option<AgentObservation> {
+        self.detect_input_needed_in_current_chunk(recent_output, last_chunk_start)
+            .map(AgentObservation::input_needed)
     }
 
     /// Whether a `Working` PTY reading carries enough on-screen evidence
@@ -872,6 +895,12 @@ pub mod builtins {
         fn pty_protocol(&self) -> PtyProtocol {
             PtyProtocol::GUARDED_COMPOSER
         }
+        fn credit_recovery_protocol(&self) -> Option<CreditRecoveryProtocol> {
+            Some(CreditRecoveryProtocol::new(b"\r"))
+        }
+        fn credit_exhausted_hint(&self, recent_output: &[u8]) -> Option<String> {
+            detect::codex_credit_exhausted_hint(recent_output)
+        }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["codex".into()];
             if ctx.access == AgentRunAccess::ReadOnly {
@@ -1015,6 +1044,14 @@ pub mod builtins {
             last_chunk_start: usize,
         ) -> Option<PromptShape> {
             detect::codex_input_needed_in_current_chunk(recent_output, last_chunk_start)
+        }
+
+        fn detect_blocked_in_current_chunk(
+            &self,
+            recent_output: &[u8],
+            last_chunk_start: usize,
+        ) -> Option<AgentObservation> {
+            detect::codex_blocked_in_current_chunk(recent_output, last_chunk_start)
         }
 
         /// Whether Codex's composer is drawn and no approval / trust

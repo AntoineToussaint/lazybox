@@ -18,6 +18,7 @@
 //! finished-turn idle screen that must evict a now-stale `esc to interrupt`.
 
 use lazybox_agents::detect::{
+    codex_blocked_in_current_chunk, codex_credit_exhausted_hint,
     codex_input_needed_in_current_chunk, codex_model_effort, codex_ready_for_prompt,
     codex_ready_for_prompt_chunked, codex_state, codex_state_chunked,
 };
@@ -110,7 +111,68 @@ const FIXTURES: &[ByteFixture] = &[
         expected: AgentState::Idle,
         ready: true,
     },
+    ByteFixture {
+        name: "codex_credit_exhausted",
+        bytes: include_bytes!("fixtures/codex_credit_exhausted.bin"),
+        expected: AgentState::CreditExhausted,
+        ready: false,
+    },
+    ByteFixture {
+        name: "codex_credit_exhausted_fragmented",
+        bytes: include_bytes!("fixtures/codex_credit_exhausted_fragmented.bin"),
+        expected: AgentState::CreditExhausted,
+        ready: false,
+    },
+    ByteFixture {
+        name: "codex_credit_exhausted_stale",
+        bytes: include_bytes!("fixtures/codex_credit_exhausted_stale.bin"),
+        expected: AgentState::Idle,
+        ready: true,
+    },
+    ByteFixture {
+        name: "codex_credit_exhausted_near_miss",
+        bytes: include_bytes!("fixtures/codex_credit_exhausted_near_miss.bin"),
+        expected: AgentState::Idle,
+        ready: true,
+    },
 ];
+
+#[test]
+fn codex_credit_screen_surfaces_when_ansi_fragment_completes() {
+    let bytes = include_bytes!("fixtures/codex_credit_exhausted_fragmented.bin");
+    let wait_fragment = bytes
+        .windows(b"credit".len())
+        .rposition(|window| window == b"credit")
+        .expect("fixture contains the Wait option");
+    assert_eq!(
+        codex_blocked_in_current_chunk(bytes, wait_fragment),
+        Some(lazybox_agents::AgentObservation::from_state(
+            AgentState::CreditExhausted,
+        )),
+    );
+    assert_eq!(
+        codex_credit_exhausted_hint(bytes).as_deref(),
+        Some("add credits or switch subscription")
+    );
+    assert!(
+        codex_credit_exhausted_hint(include_bytes!(
+            "fixtures/codex_credit_exhausted_near_miss.bin"
+        ))
+        .is_none()
+    );
+
+    let stale = include_bytes!("fixtures/codex_credit_exhausted_stale.bin");
+    let prose = include_bytes!("fixtures/codex_credit_exhausted_near_miss.bin");
+    let mut combined = stale.to_vec();
+    combined.extend_from_slice(prose);
+    assert_ne!(
+        codex_blocked_in_current_chunk(&combined, stale.len()),
+        Some(lazybox_agents::AgentObservation::from_state(
+            AgentState::CreditExhausted,
+        )),
+        "a stale Wait option cannot pair with newer prose",
+    );
+}
 
 #[test]
 fn codex_detector_matches_real_byte_corpus() {

@@ -747,6 +747,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn credit_recovery_actions_show_remapped_keys_in_help() {
+        use lazybox_tui_core::action::ActionDef;
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("recover_agent_credit".into(), "F6".into());
+        overrides.insert("recover_all_agent_credit".into(), "Shift-F6".into());
+        let catalog = ActionDef::catalog(&[], &overrides);
+        let rows = all_help_rows(&Help::from_catalog(&catalog, ']'));
+        assert!(
+            rows.iter()
+                .any(|(keys, label)| keys == "F6" && label == "recover credit")
+        );
+        assert!(
+            rows.iter()
+                .any(|(keys, label)| { keys == "Shift-F6" && label == "recover all credit" })
+        );
+    }
+
     /// The single source of truth in the render: no binding appears in
     /// both a leader-group block and the flat per-section grid, and the
     /// flat grid carries no *leader* chord (a `<leader> <key>` menu). A

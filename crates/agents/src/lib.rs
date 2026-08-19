@@ -19,8 +19,8 @@ pub use agent::{
 };
 pub use lazybox_ipc::AgentState;
 pub use pty::{
-    EncodedPrompt, PromptFraming, PromptIntent, PromptShape, PtyProtocol, ReadinessPolicy,
-    trim_leading_blank_lines,
+    CreditRecoveryProtocol, EncodedPrompt, PromptFraming, PromptIntent, PromptShape, PtyProtocol,
+    ReadinessPolicy, trim_leading_blank_lines,
 };
 pub use state_machine::{
     AgentStateMachine, HOOK_STALENESS, HookAuthority, Liveness, Outcome, PtyReading, Reading,

@@ -2573,6 +2573,8 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
         ActionKind::JumpToLimited => Action::JumpToLimited,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,
+        ActionKind::RecoverAgentCredit => Action::RecoverAgentCredit,
+        ActionKind::RecoverAllAgentCredit => Action::RecoverAllAgentCredit,
         ActionKind::StartAgent => Action::StartAgent,
         ActionKind::ConnectBox => Action::ConnectBox,
         ActionKind::ToggleActivityPane => Action::ToggleActivityPane,

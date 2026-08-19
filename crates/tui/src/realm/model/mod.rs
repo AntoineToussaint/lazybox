@@ -1906,6 +1906,10 @@ pub struct Model<T: TerminalAdapter> {
     /// row. Entries remain until `CommandCompleted` / `CommandFailed`,
     /// ensuring a failed create/spawn always gets a visible outcome.
     pending_workspace_creates: std::collections::HashMap<String, PendingWorkspaceCreate>,
+    /// Correlated provider-credit recoveries currently owned by this client.
+    /// Values are terminal ids so repeat keypresses cannot enqueue a second
+    /// chooser interaction for the same agent.
+    pending_credit_recoveries: std::collections::HashMap<String, lazybox_ipc::TerminalId>,
     /// The last `IpcCommand::Spawn` sent, kept so the `r` retry on a
     /// failed `WorktreeProgress` modal can re-issue it verbatim (issue
     /// #557) — provisioning failures persist no session, so a re-send
@@ -2350,6 +2354,7 @@ impl<T: TerminalAdapter> Model<T> {
             merge_follow_from: None,
             spawn_follow_to: None,
             pending_workspace_creates: std::collections::HashMap::new(),
+            pending_credit_recoveries: std::collections::HashMap::new(),
             last_spawn: None,
             linear_map_spawn: None,
             deferred_focus_terminal: None,

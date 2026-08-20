@@ -4429,15 +4429,30 @@ impl<T: TerminalAdapter> Model<T> {
         let sticky = NoticeSeverity::is_sticky;
         let msg = msg.into();
         // De-dupe an identical repeated notice (a retried merge that
-        // fails the same way, a re-emitted error): just refresh the
-        // fade timer instead of stacking a second copy in the messages
-        // log (#588). Keeps the workspace tag intact.
+        // fails the same way, a re-emitted error): bump the visible
+        // `×N` counter but DON'T reset the fade clock — refreshing
+        // `set_at` here meant a condition re-emitting every poll sweep
+        // kept its timer pinned at zero and owned the footer forever
+        // (#1245). The clock runs from the first appearance; the log
+        // collapses the repeat into its entry's count.
         if let Some(existing) = self.status.notice.as_mut()
             && existing.message == msg
             && existing.severity == severity
         {
-            existing.set_at = std::time::Instant::now();
+            existing.repeats = existing.repeats.saturating_add(1);
+            if severity != NoticeSeverity::Hint {
+                self.status.messages.record(&msg, severity);
+            }
             self.redraw = true;
+            return;
+        }
+        // An error the user already acknowledged (Esc, or a completed
+        // on-screen fade) re-firing with the same text stays out of
+        // the footer for a while — it still lands in the messages log,
+        // so nothing is lost but the re-shout (#1245). Info/Hint are
+        // never suppressed.
+        if self.status.error_acknowledged(&msg, severity) {
+            self.status.messages.record(&msg, severity);
             return;
         }
         // Severity-aware replacement: a lower-severity flash must not

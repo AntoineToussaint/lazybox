@@ -76,6 +76,13 @@ pub struct Notice {
     /// PR/issue action (merge/close/update failed). Lets a superseding
     /// success for the same workspace self-clear a stale error (#588).
     pub workspace: Option<String>,
+    /// How many times this exact notice has fired while on screen. An
+    /// identical re-fire (a poll sweep re-emitting the same error)
+    /// bumps this instead of resetting `set_at` — the fade clock runs
+    /// from the FIRST appearance, so a repeating condition renders as
+    /// an honest `… ×N` and still fades on schedule instead of owning
+    /// the footer forever (#1245).
+    pub repeats: u32,
 }
 
 impl Notice {
@@ -85,6 +92,7 @@ impl Notice {
             severity,
             set_at: std::time::Instant::now(),
             workspace: None,
+            repeats: 1,
         }
     }
 
@@ -219,8 +227,16 @@ pub fn render(
         // after its fixed prefix), so cutting from the end would
         // delete exactly what the message exists to deliver.
         let chrome = pill("").width();
+        // A repeating condition renders its count — `merge failed ×4`
+        // reads as "still happening", where a frozen-looking pill read
+        // as "the footer is broken" (#1245).
+        let text = if n.repeats > 1 {
+            format!("{} ×{}", n.message, n.repeats)
+        } else {
+            n.message.clone()
+        };
         let message =
-            crate::util::truncate_ellipsis_middle(&n.message, right_cap.saturating_sub(chrome));
+            crate::util::truncate_ellipsis_middle(&text, right_cap.saturating_sub(chrome));
         Some(pill(&message))
     } else if let Some((spinner, label)) = polling_status {
         // Two-tone render: bright accent for the spinner glyph

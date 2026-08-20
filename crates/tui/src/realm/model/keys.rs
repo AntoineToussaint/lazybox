@@ -277,6 +277,9 @@ impl<T: TerminalAdapter> Model<T> {
             // dismissed until its reason changes or the condition clears
             // (#832). No-op for plain system banners.
             self.status.remember_dismissed_action_error();
+            // And ANY error severity: an identical re-fire of an Esc'd
+            // error stays out of the footer for a while (#1245).
+            self.status.remember_acknowledged_error();
             self.status.notice = None;
             self.sync_error_source = None;
             self.redraw = true;

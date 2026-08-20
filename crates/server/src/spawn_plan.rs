@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 pub struct SpawnOptions {
     pub cwd: Option<String>,
     pub initial_prompt: Option<String>,
+    /// Identity of the snippet whose body rides `initial_prompt`
+    /// (#1215) — recorded into the recent-snippets MRU / sent history
+    /// once the prompt is actually delivered, same as an inject.
+    pub initial_snippet: Option<lazybox_ipc::SnippetRef>,
     pub autonomous: bool,
     pub on_main: bool,
     pub model_alias: Option<String>,

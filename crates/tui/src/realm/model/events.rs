@@ -378,6 +378,7 @@ impl<T: TerminalAdapter> Model<T> {
             kind: lazybox_ipc::TerminalKind::Agent(conversion.draft.agent.clone()),
             cwd: None,
             initial_prompt: Some(prompt),
+            initial_snippet: None,
             on_main: false,
             model_alias: None,
             access: match conversion.role {

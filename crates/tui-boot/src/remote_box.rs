@@ -789,6 +789,7 @@ mod tests {
             kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
             cwd: None,
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
             model_alias: None,
             access: Default::default(),

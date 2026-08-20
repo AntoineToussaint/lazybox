@@ -605,6 +605,18 @@ pub struct SpawnFallback {
     pub access: AgentRunAccess,
 }
 
+/// Identity of a snippet whose body rides a spawn's `initial_prompt`
+/// (#1215) — the broadcast / `]]s` fallback that STARTS a session.
+/// Carrying it lets the daemon record the same MRU / sent-snippet
+/// history a live-terminal delivery records, so "Recent" doesn't
+/// depend on which transport happened to deliver the snippet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct SnippetRef {
+    pub key: String,
+    pub category: String,
+}
+
 /// One row of `Event::WorktreesInspected`. Mirrors
 /// `lazybox_git_ops::WorktreeInspection` as a wire-friendly value type
 /// (no `SystemTime`, no library-specific enum). `reasons` carries the
@@ -763,6 +775,12 @@ pub enum Command {
         /// default model.
         #[serde(default)]
         model_alias: Option<String>,
+        /// Set when `initial_prompt` is a snippet's body (#1215): the
+        /// snippet's identity, so the daemon records the MRU /
+        /// sent-snippet history the inject path records — usage is
+        /// tracked at the selection boundary, not per transport.
+        #[serde(default)]
+        initial_snippet: Option<Box<SnippetRef>>,
         /// Host access policy for the spawned agent. Shell and log
         /// terminals ignore this field.
         #[serde(default)]

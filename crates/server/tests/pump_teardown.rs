@@ -94,6 +94,7 @@ async fn spawn_shell(client: &mut lazybox_ipc::Client) -> lazybox_ipc::TerminalI
             // Production workspace-less spawns are intentionally denied.
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         })
         .unwrap();
@@ -121,6 +122,7 @@ async fn spawn_agent(client: &mut lazybox_ipc::Client, agent: &str) -> lazybox_i
             kind: TerminalKind::Agent(agent.into()),
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         })
         .unwrap();

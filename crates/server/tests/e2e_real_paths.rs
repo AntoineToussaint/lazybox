@@ -274,6 +274,7 @@ fn send_spawn(
             kind,
             cwd: None,
             initial_prompt: initial_prompt.map(Into::into),
+            initial_snippet: None,
             on_main: false,
         })
         .unwrap();
@@ -376,6 +377,7 @@ async fn e2e_spawn_provisions_a_real_worktree_and_collapse_carries_it_to_the_pr(
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -1517,6 +1519,7 @@ async fn e2e_serve_loop_restart_recovers_session_with_deep_scrollback() {
                 kind: TerminalKind::Shell,
                 cwd: Some(cwd.path().to_string_lossy().into_owned()),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -1671,6 +1674,7 @@ async fn live_agent_boots_to_ready(agent: &str, socket: &str) {
             kind: TerminalKind::Agent(agent.into()),
             cwd: Some(cwd.path().to_string_lossy().into_owned()),
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         })
         .unwrap();
@@ -1941,6 +1945,7 @@ async fn e2e_live_scroll_fetch_serves_deep_history_without_restart() {
                 kind: TerminalKind::Shell,
                 cwd: Some(cwd.path().to_string_lossy().into_owned()),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();

@@ -91,6 +91,7 @@ fn bulk_spawn_command(
     session_key: lazybox_core::SessionKey,
     kind: lazybox_ipc::TerminalKind,
     initial_prompt: Option<String>,
+    initial_snippet: Option<lazybox_ipc::SnippetRef>,
     model_alias: Option<String>,
 ) -> IpcCommand {
     IpcCommand::Spawn {
@@ -100,6 +101,7 @@ fn bulk_spawn_command(
         kind,
         cwd: None,
         initial_prompt,
+        initial_snippet: initial_snippet.map(Box::new),
         on_main: false,
         model_alias,
         access: lazybox_ipc::AgentRunAccess::Default,
@@ -780,6 +782,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
+                        initial_snippet: None,
                         on_main: true,
                     }],
                     Action::SpawnShellOnMain => vec![IpcCommand::Spawn {
@@ -791,6 +794,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
+                        initial_snippet: None,
                         on_main: true,
                     }],
                     // A future destructive action that hasn't grown a
@@ -1048,6 +1052,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
+                        initial_snippet: None,
                         on_main: false,
                     });
                 }
@@ -1066,6 +1071,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
+                        initial_snippet: None,
                         on_main: false,
                     });
                 }
@@ -1142,6 +1148,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
+                        initial_snippet: None,
                         on_main: false,
                     };
                     self.send_to_remote(&remote, spawn);
@@ -1170,6 +1177,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
                         cwd: None,
                         initial_prompt: None,
+                        initial_snippet: None,
                         on_main: true,
                     });
                 }
@@ -1185,6 +1193,7 @@ impl<T: TerminalAdapter> Model<T> {
                         kind: lazybox_ipc::TerminalKind::Shell,
                         cwd: None,
                         initial_prompt: None,
+                        initial_snippet: None,
                         on_main: true,
                     });
                 }
@@ -1236,6 +1245,7 @@ impl<T: TerminalAdapter> Model<T> {
                         ),
                         cwd: None,
                         initial_prompt: None,
+                        initial_snippet: None,
                         on_main: false,
                         model_alias: Some(alias.clone()),
                         access: lazybox_ipc::AgentRunAccess::Default,
@@ -2389,16 +2399,20 @@ impl<T: TerminalAdapter> Model<T> {
         let model_alias = model_alias.map(str::to_string);
         // A session-less but spawnable target seeds the default agent with
         // the delivered body (#836) — shared by the snippet and free-text
-        // ops so both auto-start identically.
-        let seed_spawn = |body: &str| ApplyOutcome::Spawn {
-            step: super::BulkAgentStep::Spawn(bulk_spawn_command(
-                key.clone(),
-                lazybox_ipc::TerminalKind::Agent(default_agent.clone()),
-                Some(body.to_string()),
-                None,
-            )),
-            follow: key.clone(),
-        };
+        // ops so both auto-start identically. A snippet seed carries its
+        // identity so the daemon records the same MRU / sent history the
+        // live-terminal delivery records (#1215).
+        let seed_spawn =
+            |body: &str, snippet: Option<lazybox_ipc::SnippetRef>| ApplyOutcome::Spawn {
+                step: super::BulkAgentStep::Spawn(bulk_spawn_command(
+                    key.clone(),
+                    lazybox_ipc::TerminalKind::Agent(default_agent.clone()),
+                    Some(body.to_string()),
+                    snippet,
+                    None,
+                )),
+                follow: key.clone(),
+            };
         match op {
             // Plain spawns always start a fresh session — a repo-less,
             // project-less row (a Slack DM, scratch) has nothing to
@@ -2426,7 +2440,7 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     _ => unreachable!(),
                 };
-                let cmd = bulk_spawn_command(key.clone(), kind, None, model_alias);
+                let cmd = bulk_spawn_command(key.clone(), kind, None, None, model_alias);
                 let step = match remote_target {
                     Some(remote) => super::BulkAgentStep::SpawnRemote {
                         remote,
@@ -2484,6 +2498,7 @@ impl<T: TerminalAdapter> Model<T> {
                                 (&workspace_key).into(),
                                 lazybox_ipc::TerminalKind::Agent(agent_id),
                                 body,
+                                None,
                                 model_alias,
                             )),
                             follow: (&workspace_key).into(),
@@ -2509,7 +2524,13 @@ impl<T: TerminalAdapter> Model<T> {
                         body: body.clone(),
                     })
                 }
-                None if spawnable => seed_spawn(body),
+                None if spawnable => seed_spawn(
+                    body,
+                    Some(lazybox_ipc::SnippetRef {
+                        key: snippet_key.clone(),
+                        category: category.clone(),
+                    }),
+                ),
                 None => ApplyOutcome::Skip(name),
             },
             // Free-text delivery: a live agent gets the settle-gated inject,
@@ -2523,7 +2544,7 @@ impl<T: TerminalAdapter> Model<T> {
                     terminal_id,
                     body: body.clone(),
                 }),
-                None if spawnable => seed_spawn(body),
+                None if spawnable => seed_spawn(body, None),
                 None => ApplyOutcome::Skip(name),
             },
         }
@@ -2672,6 +2693,7 @@ impl<T: TerminalAdapter> Model<T> {
                     kind: lazybox_ipc::TerminalKind::Agent(agent_id),
                     cwd: None,
                     initial_prompt: prompt,
+                    initial_snippet: None,
                     on_main: false,
                     model_alias,
                     access: lazybox_ipc::AgentRunAccess::Default,

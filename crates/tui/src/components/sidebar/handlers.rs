@@ -111,6 +111,7 @@ impl Sidebar {
                         kind: TerminalKind::Agent(agent_id),
                         cwd: None,
                         initial_prompt: prompt,
+                        initial_snippet: None,
                         on_main: false,
                     });
                 }
@@ -137,6 +138,7 @@ impl Sidebar {
                             kind: TerminalKind::Shell,
                             cwd: None,
                             initial_prompt: None,
+                            initial_snippet: None,
                             on_main: false,
                         });
                     }

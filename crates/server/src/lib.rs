@@ -1513,6 +1513,7 @@ pub async fn dispatch_command(
             kind,
             cwd,
             initial_prompt,
+            initial_snippet,
             on_main,
             model_alias,
             access,
@@ -1532,6 +1533,7 @@ pub async fn dispatch_command(
                 spawn_handler::SpawnOptions {
                     cwd,
                     initial_prompt,
+                    initial_snippet: initial_snippet.map(|snippet| *snippet),
                     autonomous,
                     on_main,
                     model_alias,

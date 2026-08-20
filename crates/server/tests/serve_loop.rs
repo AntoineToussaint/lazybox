@@ -355,6 +355,7 @@ async fn graceful_stop_drains_in_flight_mutation_before_exit() {
             kind: TerminalKind::Shell,
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         })
         .expect("spawn");
@@ -411,6 +412,7 @@ async fn graceful_stop_abandons_mutation_past_the_drain_bound() {
             kind: TerminalKind::Shell,
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         })
         .expect("spawn");
@@ -662,6 +664,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             kind: TerminalKind::Shell,
             cwd: Some(cwd.clone()),
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         },
         Command::Write {
@@ -928,6 +931,7 @@ async fn a_stalled_handler_does_not_block_poll_forwarding() {
             kind: TerminalKind::Shell,
             cwd: Some(std::env::temp_dir().to_string_lossy().into_owned()),
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         })
         .unwrap();

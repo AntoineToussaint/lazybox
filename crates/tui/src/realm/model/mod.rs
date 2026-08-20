@@ -4662,6 +4662,7 @@ impl<T: TerminalAdapter> Model<T> {
                     kind: lazybox_ipc::TerminalKind::Shell,
                     cwd: None,
                     initial_prompt: None,
+                    initial_snippet: None,
                     on_main: false,
                 });
                 self.flash_info(format!(
@@ -4874,6 +4875,7 @@ impl<T: TerminalAdapter> Model<T> {
             kind: lazybox_ipc::TerminalKind::Shell,
             cwd: None,
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         });
         self.flash_info(format!(

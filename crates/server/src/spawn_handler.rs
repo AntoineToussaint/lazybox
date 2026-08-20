@@ -16491,8 +16491,42 @@ mod tests {
             "the shell never switched the branch back",
         );
 
-        // Agent: the branch-strict guard still applies — it can't silently
-        // reuse a checkout on the wrong branch.
+        // Agent: an untracked-only drift is lossless to undo, so the spawn
+        // switches the checkout back to the session branch instead of
+        // dead-ending behind the mismatch prompt (advise-never-forbid).
+        let (path, _id, _on_main) = resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &TerminalKind::Agent("claude".into()),
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("an agent spawn auto-switches a clean drifted worktree back");
+        assert_eq!(path, wt, "the agent lands in the existing worktree");
+        let head = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "solutions",
+            "the checkout is back on the session branch",
+        );
+        assert!(
+            wt.join("wip.txt").exists(),
+            "untracked work rides along with the switch"
+        );
+
+        // Drift again, but this time with uncommitted TRACKED changes —
+        // real work is at stake, so the agent keeps the explicit prompt.
+        git(&wt, &["switch", "-q", "-c", "feat/azure-env-render-2"]);
+        std::fs::write(wt.join("tracked.txt"), "v1\n").unwrap();
+        git(&wt, &["add", "tracked.txt"]);
+        git(&wt, &["commit", "-q", "-m", "tracked file"]);
+        std::fs::write(wt.join("tracked.txt"), "v2 uncommitted\n").unwrap();
         let err = resolve_or_create_session(
             &config,
             &session_key,
@@ -16502,10 +16536,20 @@ mod tests {
             lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await
-        .expect_err("an agent must not reuse a worktree on the wrong branch");
+        .expect_err("an agent must not clobber uncommitted tracked work");
         assert!(
             err.to_string().contains("spawn aborted"),
-            "the agent spawn is refused: {err}"
+            "the dirty-drift agent spawn is refused: {err}"
+        );
+        let head = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "feat/azure-env-render-2",
+            "the refused spawn leaves the dirty checkout untouched",
         );
     }
 

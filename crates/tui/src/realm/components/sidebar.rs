@@ -429,6 +429,11 @@ impl Sidebar {
         self.inner.broadcast_selected_count()
     }
 
+    /// See `Sidebar::visible_broadcast_selected_count`.
+    pub fn visible_broadcast_selected_count(&self) -> usize {
+        self.inner.visible_broadcast_selected_count()
+    }
+
     /// See `Sidebar::clear_broadcast_selection`.
     pub fn clear_broadcast_selection(&mut self) -> bool {
         self.inner.clear_broadcast_selection()

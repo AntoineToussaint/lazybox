@@ -252,6 +252,29 @@ impl<T: TerminalAdapter> Model<T> {
             self.hint_no_permission_focus();
             return;
         }
+        // ── Esc chain: clear the multi-select (#1243) ───────────────
+        // Esc resolves through an explicit ordered chain: leader /
+        // `]]` cancels (above) → THIS clear-selection step → dismiss
+        // notice (below) → the panes' own Esc arms (committed-search
+        // clear). The selection is created and consumed from any pane,
+        // so it must be clearable from any pane too: this step runs
+        // wherever catalog keys resolve — Sidebar, Right, or an empty
+        // terminal pane — while a live terminal keeps forwarding Esc to
+        // the PTY (`resolve_focus_for_keys` is None there; `]]q` exits
+        // first). The gate is the visible-only count, the same number
+        // the header and `resolve_targets` read (#786) — hidden marks
+        // are pruned on recompute, so a selection the user can't see
+        // can never swallow an Esc.
+        if key.code == Key::Esc
+            && key.modifiers.is_empty()
+            && self.resolve_focus_for_keys().is_some()
+            && self.sidebar.visible_broadcast_selected_count() > 0
+        {
+            self.q_latch.disarm();
+            self.sidebar.clear_broadcast_selection();
+            self.redraw = true;
+            return;
+        }
         // ── Dismiss the current footer notice (#309) ────────────────
         // One key clears whatever notice is up, regardless of severity —
         // the merge false-error (#305) that sat red with no way to swat
@@ -261,16 +284,15 @@ impl<T: TerminalAdapter> Model<T> {
         //
         // The key is the catalog's `DismissNotice` binding (default
         // Esc, remappable). Sequenced here — after the leader / terminal
-        // `]]` cancels above — so it never pre-empts a leader disarm.
-        // It deliberately yields Esc to two owners: a live terminal
-        // (`resolve_focus_for_keys` is None there, so Esc reaches the
-        // PTY) and a sidebar multi-select (Esc drops the `v` selection
-        // first). Gated on a notice actually being up, so with a quiet
-        // footer the key keeps its normal pane meaning.
+        // `]]` cancels and the clear-selection step above — so it never
+        // pre-empts a leader disarm and a live multi-select drops
+        // before the notice does. It still yields Esc to a live
+        // terminal (`resolve_focus_for_keys` is None there, so Esc
+        // reaches the PTY). Gated on a notice actually being up, so
+        // with a quiet footer the key keeps its normal pane meaning.
         if self.status.notice.is_some()
             && self.resolve_focus_for_keys().is_some()
             && self.matches_dismiss_notice(&key)
-            && !(self.focus == PaneFocus::Sidebar && self.sidebar.broadcast_selected_count() > 0)
         {
             // Esc acknowledges an action-error toast: record it so the
             // same failure re-firing on the next poll/attempt stays

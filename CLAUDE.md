@@ -216,7 +216,10 @@ automatically), `Shift-T` tour, `Shift-D` sync status, `Shift-M`
 messages log (a scrollable, `c`-clearable history of recent footer
 notices; #309), `Esc` dismiss the current footer notice regardless of
 severity — severity only drives auto-fade, never dismissability, and
-`Esc` yields first to a live terminal and to a sidebar multi-select,
+`Esc` resolves through a fixed chain: it yields first to a live
+terminal (the PTY owns it), then clears a live `v` multi-select (from
+the sidebar or the activity pane alike), then dismisses the notice,
+then falls to the pane (committed-search clear),
 `` ` ``
 open the fuzzy jump-to-workspace picker (all repos; from inside an
 agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
@@ -307,14 +310,16 @@ primary path, not a special broadcast mode (#932, mechanism from
 agent / shell on each selected workspace — heavy spawns gate behind
 one "start N agents?" confirm and inject into any workspace already
 running an agent; `g m` merge, `g u` update-branch, `z` snooze,
-`x x` archive, `m` mark-read, `g s` sync, and `g g` arm-auto-merge
-apply per target, running the eligible ones and summarizing what was
+`x x` archive, `m` mark-read, `g s` sync, `g g` arm-auto-merge,
+`g d` delete-or-close, and `x c` close-issue apply per target,
+running the eligible ones and summarizing what was
 skipped and why. Destructive bulk actions confirm with the count + an
 affected list + the eligible/skipped split (e.g. "Merge 3 of 5
-selected PRs?"), snapshotting the selection at mount so a poll under
+selected PRs?", "Close 3 PRs without merging and delete 1 issue?"),
+snapshotting the selection at mount so a poll under
 the modal can't redirect them. Inherently single-target actions stay
-focused-only: open editor (`e`), rename (`x R`), view diff, close
-issue (`x c`) / delete-or-close (`g d`), open-in-browser (`g o`),
+focused-only: open editor (`e`), rename (`x R`), view diff,
+open-in-browser (`g o`),
 reviewers/assignees/labels, the policies menu (`g p`), notes, pin
 (`p`), move-to-Space (`x m`), and the on-main spawns (`b …`). The
 shared `resolve_targets` helper (selection-or-focused) means a new

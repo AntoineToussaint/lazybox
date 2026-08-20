@@ -200,12 +200,19 @@ fn bulk_agent_confirm_prompt(plan: &BulkAgentPlan, remote: Option<&str>) -> Stri
 /// (see [`Model::resolve_confirm_targets`]) — so this is also the exact
 /// set [`bulk_confirm_prompt`] and [`bulk_confirmed_verb`] must render
 /// copy for. Adding an action here without adding its copy there falls
-/// through to a neutral prompt, never a wrong one.
+/// through to a neutral prompt, never a wrong one. Delete-or-close and
+/// close-issue were wrongly held out of this set — with rows marked,
+/// `g d` silently acted on ONE (#1243); selection-first (#932) means a
+/// marked set is the target unless the action is truly single-target.
 pub(super) fn is_bulk_destructive(action: &lazybox_tui_core::action::Action) -> bool {
     use lazybox_tui_core::action::Action;
     matches!(
         action,
-        Action::Archive | Action::MergePr | Action::LongSnooze
+        Action::Archive
+            | Action::MergePr
+            | Action::LongSnooze
+            | Action::DeleteOrClose
+            | Action::CloseIssue
     )
 }
 
@@ -218,6 +225,8 @@ fn bulk_confirmed_verb(action: &lazybox_tui_core::action::Action) -> &'static st
         Action::Archive => "archived",
         Action::MergePr => "merged",
         Action::LongSnooze => "snoozed",
+        Action::DeleteOrClose => "closed/deleted",
+        Action::CloseIssue => "closed",
         _ => "applied to",
     }
 }
@@ -232,6 +241,16 @@ fn truncate_affected_list(names: &[String]) -> String {
     } else {
         let head = names[..SHOWN].join(", ");
         format!("{head}, +{} more", names.len() - SHOWN)
+    }
+}
+
+/// Uppercase the first letter of composed confirm copy — the verb list
+/// is built lowercase so it can be joined mid-sentence.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -395,15 +414,15 @@ impl<T: TerminalAdapter> Model<T> {
         if ActionDef::for_action(action).is_destructive() {
             // Resolve the concrete target set NOW, while the selection
             // is what the user acted on. A `v` multi-selection targets
-            // every marked row *only for the bulk-appropriate destructive
-            // actions* (archive / merge / long-snooze); the inherently
-            // single-target ones (close-issue, delete-or-close, on-main
-            // spawn) stay on the focused row even under a selection, so
-            // pressing `x c` with rows marked closes the focused issue,
-            // not the whole set (#899). The confirm fires against this
-            // stash — see `ModalFlow::ActionConfirm` — never the live
-            // selection, so a cursor drift under the modal can't redirect
-            // it.
+            // every marked row for the bulk-appropriate destructive
+            // actions (archive / merge / long-snooze / delete-or-close /
+            // close-issue — the latter two joined the set in #1243:
+            // `g d` with rows marked used to silently act on ONE); only
+            // the inherently single-target on-main spawns stay on the
+            // focused row even under a selection. The confirm fires
+            // against this stash — see `ModalFlow::ActionConfirm` —
+            // never the live selection, so a cursor drift under the
+            // modal can't redirect it.
             let targets = self.resolve_confirm_targets(action);
             if targets.is_empty() {
                 // Nothing focused to act on. The catalog's
@@ -434,7 +453,7 @@ impl<T: TerminalAdapter> Model<T> {
             let custom_prompt = if targets.len() > 1 {
                 Some(self.bulk_confirm_prompt(action, &targets))
             } else {
-                self.action_confirm_override(action)
+                self.action_confirm_override(action, targets.first())
             };
             self.mount_action_confirm(action.clone(), targets, custom_prompt);
             return Vec::new();
@@ -488,10 +507,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// is bulk-appropriate** ([`is_bulk_destructive`]), else the single
     /// focused row / project header. Sidebar (visible) order (#899).
     /// Gating on `is_bulk_destructive` keeps the inherently single-target
-    /// destructive actions (close-issue, delete-or-close, on-main spawn)
-    /// focused-only even under a selection — a bulk set would otherwise
-    /// reach them with the generic archive prompt and fire them across
-    /// the whole selection.
+    /// destructive actions (the on-main spawns) focused-only even under
+    /// a selection — a bulk set would otherwise reach them with the
+    /// generic archive prompt and fire them across the whole selection.
     fn resolve_confirm_targets(
         &self,
         action: &lazybox_tui_core::action::Action,
@@ -530,7 +548,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// count + a truncated list of what will be affected, and (where an
     /// eligibility gate applies, e.g. merge) the "N will run, M skipped"
     /// split so a bulk destructive action isn't a blind "Y" (#899).
-    fn bulk_confirm_prompt(
+    pub(super) fn bulk_confirm_prompt(
         &self,
         action: &lazybox_tui_core::action::Action,
         targets: &[ActionConfirmTarget],
@@ -579,6 +597,85 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::Archive => {
                 format!("Archive {n} workspaces? Any running sessions are killed. {list}")
+            }
+            // Mixed set: an open PR is closed, an open issue deleted —
+            // name both verbs with their counts so the split is explicit
+            // ("Close 3 PRs and delete 1 issue? 1 skipped …"). Same
+            // eligibility predicate the single-target path re-checks at
+            // Yes-time, so prompt and outcome can't disagree.
+            Action::DeleteOrClose => {
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                let mut close_prs = 0usize;
+                let mut delete_issues = 0usize;
+                for t in targets {
+                    if let ActionConfirmTarget::Workspace(k) = t
+                        && let Some(ws) = self.sidebar.workspace_by_key(k)
+                        && lazybox_tui_core::action::availability(
+                            lazybox_tui_core::action::ActionKind::DeleteOrClose,
+                            Some(ws),
+                        )
+                    {
+                        if ws.pr.is_some() {
+                            close_prs += 1;
+                        } else {
+                            delete_issues += 1;
+                        }
+                    }
+                }
+                let skipped = n - close_prs - delete_issues;
+                if close_prs + delete_issues == 0 {
+                    format!(
+                        "None of the {n} selected are open to close or delete — nothing will happen. {list}"
+                    )
+                } else {
+                    let mut verbs: Vec<String> = Vec::new();
+                    if close_prs > 0 {
+                        verbs.push(format!(
+                            "close {close_prs} PR{} without merging",
+                            plural(close_prs)
+                        ));
+                    }
+                    if delete_issues > 0 {
+                        verbs.push(format!(
+                            "delete {delete_issues} issue{}",
+                            plural(delete_issues)
+                        ));
+                    }
+                    let mut prompt = capitalize_first(&verbs.join(" and "));
+                    prompt.push('?');
+                    if skipped > 0 {
+                        prompt.push_str(&format!(" {skipped} will be skipped (no longer open)."));
+                    }
+                    format!("{prompt} {list}")
+                }
+            }
+            Action::CloseIssue => {
+                let ready = targets
+                    .iter()
+                    .filter(|t| match t {
+                        ActionConfirmTarget::Workspace(k) => {
+                            self.sidebar.workspace_by_key(k).is_some_and(|ws| {
+                                lazybox_tui_core::action::availability(
+                                    lazybox_tui_core::action::ActionKind::CloseIssue,
+                                    Some(ws),
+                                )
+                            })
+                        }
+                        ActionConfirmTarget::Project(_) => false,
+                    })
+                    .count();
+                let skipped = n - ready;
+                if ready == 0 {
+                    format!(
+                        "None of the {n} selected have an open issue to close — nothing will happen. {list}"
+                    )
+                } else if skipped == 0 {
+                    format!("Close {ready} issues as not-planned? {list}")
+                } else {
+                    format!(
+                        "Close {ready} of {n} selected issues as not-planned? {skipped} will be skipped (no open issue). {list}"
+                    )
+                }
             }
             // Only the `is_bulk_destructive` actions reach a bulk confirm;
             // a neutral fallback keeps a future mis-wiring from lying
@@ -931,20 +1028,27 @@ impl<T: TerminalAdapter> Model<T> {
     /// `ActionConfirm` Yes-handler must not exist. Keeping it
     /// `pub(crate)` so the type system makes that hard to break.
     /// Pick a tailored confirm-modal prompt for the destructive
-    /// `action` at its current focus context. Returns `None` to fall
-    /// back to the static `ActionDef::confirm_prompt`.
+    /// `action` against its single resolved `target`. Returns `None` to
+    /// fall back to the static `ActionDef::confirm_prompt`.
     ///
-    /// Today the only override is `Archive` against a project
-    /// header — the workspace-focused phrasing ("Archive the focused
-    /// workspace?") is wrong for "delete this project and N
-    /// workspaces under it." Adding more overrides here is the right
-    /// growth path — keeps catalog defaults declarative and the
-    /// context-sensitive copy out of the dispatch.
+    /// The copy names the *stashed* target, not the cursor row: a
+    /// one-row `v` selection can differ from the row the cursor sits on,
+    /// and the prompt must describe what Yes will actually destroy
+    /// (#1243). `None` (no stash) falls back to the cursor.
+    ///
+    /// Keeps catalog defaults declarative and the context-sensitive
+    /// copy (project archive, delete/close naming its exact issue/PR)
+    /// out of the dispatch.
     pub(super) fn action_confirm_override(
         &self,
         action: &lazybox_tui_core::action::Action,
+        target: Option<&ActionConfirmTarget>,
     ) -> Option<String> {
         use lazybox_tui_core::action::Action;
+        let target_ws_key = match target {
+            Some(ActionConfirmTarget::Workspace(k)) => Some(k),
+            _ => None,
+        };
         // Stack-aware merge (issue #969): merging a PR that is stacked on
         // a still-open parent lands it out of order — GitHub then
         // retargets the parent's other children onto the grandparent/main,
@@ -952,7 +1056,7 @@ impl<T: TerminalAdapter> Model<T> {
         // merge instead of letting the user discover it after. The bottom
         // of a stack (no open parent) merges with the default prompt.
         if matches!(action, Action::MergePr) {
-            let sk = self.sidebar.selected_workspace_key()?;
+            let sk = target_ws_key.or_else(|| self.sidebar.selected_workspace_key())?;
             if let Some(stack) = self.sidebar.stack_info(sk)
                 && let Some(parent) = stack.parent.as_ref().and_then(|p| p.number())
             {
@@ -975,7 +1079,7 @@ impl<T: TerminalAdapter> Model<T> {
         // the issue/PR the confirmed keypress destroys — so the modal
         // never asks about an ambiguous "this".
         if matches!(action, Action::DeleteOrClose) {
-            let sk = self.sidebar.selected_workspace_key()?;
+            let sk = target_ws_key.or_else(|| self.sidebar.selected_workspace_key())?;
             let ws = self.sidebar.workspace_by_key(sk)?;
             return Some(match ws.pr.as_ref() {
                 Some(pr) => format!(
@@ -997,12 +1101,17 @@ impl<T: TerminalAdapter> Model<T> {
         if !matches!(action, Action::Archive) {
             return None;
         }
-        // Workspace focus → use the default prompt.
-        if self.sidebar.selected_workspace_key().is_some() {
+        // Workspace target → use the default prompt.
+        if target_ws_key.is_some()
+            || (target.is_none() && self.sidebar.selected_workspace_key().is_some())
+        {
             return None;
         }
-        // Project header focus → custom phrasing.
-        let project_key = self.sidebar.focused_project_key()?;
+        // Project target / header focus → custom phrasing.
+        let project_key = match target {
+            Some(ActionConfirmTarget::Project(k)) => k.clone(),
+            _ => self.sidebar.focused_project_key()?,
+        };
         let project_label = self
             .sidebar
             .project_label_for(&project_key)
@@ -2049,8 +2158,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // Toggle the cursor row's selection mark. The notice
                 // names the running count and reminds that normal
                 // actions now fan out over the whole selection (#932).
+                // Visible-only count — the same number the header shows
+                // and `resolve_targets` acts on (#786, #1243).
                 if let Some(now_selected) = self.sidebar.toggle_broadcast_select() {
-                    let n = self.sidebar.broadcast_selected_count();
+                    let n = self.sidebar.visible_broadcast_selected_count();
                     let verb = if now_selected {
                         "selected"
                     } else {

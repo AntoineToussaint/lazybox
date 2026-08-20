@@ -27,6 +27,7 @@
           "client_request_id": "web-1",
           "cwd": null,
           "initial_prompt": null,
+          "initial_snippet": null,
           "kind": {
             "Agent": "claude"
           },
@@ -45,6 +46,7 @@
           "client_request_id": "web-2",
           "cwd": null,
           "initial_prompt": null,
+          "initial_snippet": null,
           "kind": "Shell",
           "model_alias": null,
           "on_main": false,

@@ -2766,7 +2766,21 @@ pub(super) async fn sources_for_with_engagement(
 ) -> Vec<Box<dyn TaskSource>> {
     let mut sources: Vec<Box<dyn TaskSource>> = Vec::new();
 
-    if setup.enabled_providers.contains(lazybox_gh::SOURCE) {
+    // Per-source backoff (#1218): a source parked on its own
+    // retry-after deadline is skipped — cheaply, before credential
+    // resolution — while every OTHER source keeps its cadence. This is
+    // what lets Linear and the REST notifications heartbeat keep
+    // running while GitHub's GraphQL bucket waits out a reset.
+    let github_parked = state.source_parked(lazybox_gh::SOURCE);
+    if let Some(remaining) = github_parked {
+        tracing::info!(
+            source = lazybox_gh::SOURCE,
+            remaining_secs = remaining.as_secs(),
+            "poll skipped: source parked on its retry-after deadline"
+        );
+    }
+
+    if github_parked.is_none() && setup.enabled_providers.contains(lazybox_gh::SOURCE) {
         match lazybox_gh::credential_chain()
             .resolve(lazybox_gh::SOURCE)
             .await
@@ -2914,7 +2928,15 @@ pub(super) async fn sources_for_with_engagement(
         }
     }
 
-    if setup.enabled_providers.contains("linear") {
+    let linear_parked = state.source_parked("linear");
+    if let Some(remaining) = linear_parked {
+        tracing::info!(
+            source = "linear",
+            remaining_secs = remaining.as_secs(),
+            "poll skipped: source parked on its retry-after deadline"
+        );
+    }
+    if linear_parked.is_none() && setup.enabled_providers.contains("linear") {
         // Linear runs on its own cadence, decoupled from the shared
         // (GitHub-hot) tick loop: skip the sweep entirely — no credential
         // resolution, no GraphQL, no upsert — until the schedule is due.

@@ -993,6 +993,14 @@ pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) -> Tic
 #[derive(Default)]
 pub struct TickState {
     last_error: std::collections::HashMap<String, String>,
+    /// Per-source backoff deadlines (#1218). A retry-after hint parks
+    /// ONLY the source that produced it — `sources_for_with_engagement`
+    /// skips building that source until the deadline — while every
+    /// other source (Linear on a GitHub hint, the REST notifications
+    /// heartbeat on a GraphQL hint) keeps its normal cadence. The
+    /// driver-level sleep is clamped to a small multiple of the tick
+    /// interval; this map carries the full deadline.
+    pub(crate) source_backoff_until: std::collections::HashMap<String, std::time::Instant>,
     /// Workspace keys we've already broadcast `WorkspaceOutOfScope`
     /// for. Without this, every 60s tick would re-prompt the user
     /// about the same workspace (they said "no" once, that's
@@ -1154,6 +1162,34 @@ impl TickState {
     /// reset its retryable-exhaustion streak. Called when the source
     /// recovers — a successful fetch or a rate-limit wait replacing the
     /// error state.
+    /// Park `source` until `secs` from now (#1218). Saturating max —
+    /// a longer existing deadline is never shortened.
+    pub(crate) fn park_source(&mut self, source: &str, secs: u64) {
+        let until =
+            std::time::Instant::now() + std::time::Duration::from_secs(secs.min(60 * 60 * 24));
+        let entry = self
+            .source_backoff_until
+            .entry(source.to_string())
+            .or_insert(until);
+        if until > *entry {
+            *entry = until;
+        }
+    }
+
+    /// Whether `source` is parked on a retry-after deadline right now.
+    /// Expired entries are dropped on read.
+    pub(crate) fn source_parked(&mut self, source: &str) -> Option<std::time::Duration> {
+        let now = std::time::Instant::now();
+        match self.source_backoff_until.get(source) {
+            Some(until) if *until > now => Some(*until - now),
+            Some(_) => {
+                self.source_backoff_until.remove(source);
+                None
+            }
+            None => None,
+        }
+    }
+
     fn clear_error(&mut self, source_key: &str) {
         self.last_error.remove(source_key);
         self.retryable_streak.remove(source_key);
@@ -1306,15 +1342,29 @@ fn github_self_throttle_wait(
         return None;
     }
     let remote = snapshot.remote.as_ref();
-    let reset_at = remote
+    // A self-throttle is lazybox's OWN pacing decision, and its honest
+    // wait is the error's own retry hint — the tick interval, after
+    // which the governor re-credits and re-plans. This used to prefer
+    // the GraphQL WINDOW RESET (up to ~1h out): a 60s "come back next
+    // tick" was promoted into the logged "backing off 3295s" that
+    // blacked out all polling for ~55 minutes and let PR state go
+    // stale enough to break `g m` (#1203/#1218). The window reset is
+    // only the right wait when the REMOTE budget is genuinely at the
+    // floor — a GitHub-imposed condition, not a self-imposed one.
+    let remote_exhausted =
+        remote.is_some_and(|limit| limit.remaining <= lazybox_gh::rate_budget::LOW_THRESHOLD);
+    let hint = error
+        .retry_after_secs()
+        .map(|secs| now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64))
+        .filter(|reset| *reset > now);
+    let window = remote
         .map(|limit| limit.reset_at)
-        .filter(|reset| *reset > now)
-        .or_else(|| {
-            error
-                .retry_after_secs()
-                .map(|secs| now + chrono::Duration::seconds(secs.min(i64::MAX as u64) as i64))
-        })
-        .filter(|reset| *reset > now)?;
+        .filter(|reset| *reset > now);
+    let reset_at = if remote_exhausted {
+        window.or(hint)
+    } else {
+        hint.or(window)
+    }?;
     Some(GithubRateLimitWait {
         remaining: remote.map_or(0, |limit| limit.remaining),
         limit: remote.map_or(0, |limit| limit.limit),
@@ -1429,7 +1479,94 @@ mod rate_limit_wait_tests {
         assert_eq!(
             wait.reset_at,
             now + chrono::Duration::minutes(15),
-            "the countdown uses the observed GraphQL reset window"
+            "hint (900s) and window (15m) agree here — see the next test \
+             for the case where they diverge"
+        );
+    }
+
+    /// #1218 regression: a self-throttle with a healthy remote budget
+    /// must wait its OWN retry hint (the tick interval), never the
+    /// GraphQL window reset. The old preference promoted a 60s "come
+    /// back next tick" into the logged "backing off 3295s" — a
+    /// ~55-minute self-imposed blackout of all polling.
+    #[test]
+    fn self_throttle_with_healthy_budget_waits_its_own_hint_not_the_window() {
+        let now = Utc::now();
+        // Window resets 55 minutes out; the governor's hint is 60s.
+        let snap = snapshot(2201, 5000, now + chrono::Duration::seconds(3295));
+        let err = lazybox_core::ProviderError::self_throttle(
+            lazybox_gh::SOURCE,
+            "GitHub graphql tick allowance exhausted",
+            60,
+        );
+        let wait = github_self_throttle_wait(&err, &snap, now).expect("self-throttle → wait");
+        assert_eq!(
+            wait.retry_after_secs(now),
+            60,
+            "self-imposed pacing waits the tick interval, not the window reset"
+        );
+    }
+
+    /// Only a genuinely exhausted REMOTE budget (at/below LOW_THRESHOLD)
+    /// justifies sleeping to the window reset — that's GitHub-imposed.
+    #[test]
+    fn self_throttle_with_exhausted_budget_waits_for_the_window() {
+        let now = Utc::now();
+        let snap = snapshot(42, 5000, now + chrono::Duration::seconds(3295));
+        let err = lazybox_core::ProviderError::self_throttle(
+            lazybox_gh::SOURCE,
+            "GitHub graphql reserve protected",
+            60,
+        );
+        let wait = github_self_throttle_wait(&err, &snap, now).expect("self-throttle → wait");
+        assert_eq!(
+            wait.retry_after_secs(now),
+            3295,
+            "an exhausted remote budget is GitHub-imposed — the window is honest"
+        );
+    }
+
+    /// #1218: a retry hint parks only its own source, expires on
+    /// schedule, and a longer deadline is never shortened.
+    #[test]
+    fn park_source_isolates_and_expires() {
+        let mut state = TickState::default();
+        assert!(state.source_parked(lazybox_gh::SOURCE).is_none());
+        state.park_source(lazybox_gh::SOURCE, 60);
+        assert!(state.source_parked(lazybox_gh::SOURCE).is_some());
+        assert!(
+            state.source_parked("linear").is_none(),
+            "a GitHub hint must never park Linear"
+        );
+        // A shorter follow-up hint must not shorten the deadline.
+        state.park_source(lazybox_gh::SOURCE, 1);
+        assert!(
+            state
+                .source_parked(lazybox_gh::SOURCE)
+                .is_some_and(|d| d.as_secs() > 30),
+            "a longer existing deadline survives a shorter hint"
+        );
+        // A zero-length park is immediately expired and dropped.
+        state.park_source("linear", 0);
+        assert!(state.source_parked("linear").is_none());
+    }
+
+    /// #1218: the driver-level sleep is clamped — one source's hint
+    /// slows the loop briefly but can never stop the world for a full
+    /// rate window.
+    #[test]
+    fn driver_backoff_is_clamped() {
+        let d = next_tick_delay_with_hot(
+            std::time::Duration::from_secs(60),
+            Some(3295),
+            false,
+            std::time::Duration::from_secs(5),
+            0,
+        );
+        assert_eq!(
+            d,
+            std::time::Duration::from_secs(120),
+            "the loop sleeps at most the cap; the parked source carries the full deadline"
         );
     }
 
@@ -1533,6 +1670,7 @@ pub async fn tick_with_state(
                 if let Some(secs) = source.retry_after_secs() {
                     max_retry_after_secs =
                         Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
+                    state.park_source(source.name(), secs);
                 }
                 let count = tasks.len();
                 tracing::info!(
@@ -1785,6 +1923,7 @@ pub async fn tick_with_state(
                 if let Some(secs) = e.retry_after_secs() {
                     max_retry_after_secs =
                         Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
+                    state.park_source(source.name(), secs);
                 }
                 let now = Utc::now();
                 let rate_limit_wait = if source.name() == lazybox_gh::SOURCE {
@@ -1806,6 +1945,7 @@ pub async fn tick_with_state(
                     let secs = wait.retry_after_secs(now);
                     max_retry_after_secs =
                         Some(max_retry_after_secs.map_or(secs, |existing| existing.max(secs)));
+                    state.park_source(source.name(), secs);
                     state.clear_error(source.name());
                     let _ = config.bus.send(wait.event());
                 } else {
@@ -2529,8 +2669,16 @@ pub fn next_tick_delay_with_hot(
     } else {
         engagement_interval
     };
+    // The DRIVER-level sleep is clamped (#1218): a retry hint parks
+    // only its own source (`TickState::source_backoff_until`), so the
+    // loop itself never has to sleep out a full GraphQL window — that
+    // global sleep is what froze Linear, the REST notifications
+    // heartbeat, and the hot path for 55 minutes on one GitHub hint.
+    // The clamp still slows empty ticks (the parked source builds
+    // nothing), it just never stops the world.
+    const DRIVER_BACKOFF_CAP: Duration = Duration::from_secs(120);
     match retry_after_secs {
-        Some(secs) => base.max(Duration::from_secs(secs)),
+        Some(secs) => base.max(Duration::from_secs(secs).min(DRIVER_BACKOFF_CAP)),
         None => base,
     }
 }

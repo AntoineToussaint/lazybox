@@ -1606,13 +1606,27 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
         return;
     };
 
+    // Interactive priority (#1218): `g s` is user-initiated — it must
+    // not queue behind the background budget, and a refusal must be
+    // VISIBLE, not a swallowed log line: before this, a `g s` during a
+    // backoff silently did nothing and the row read as "sync broken".
+    let surface = |what: &str, owner: &str, repo: &str, number: u64, e: &dyn std::fmt::Display| {
+        tracing::warn!("sync_workspace {owner}/{repo}#{number} ({what}): {e}");
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "github",
+            format!("sync {owner}/{repo}#{number}: {e}"),
+        ));
+    };
     if let Some(pr) = workspace.pr.as_ref()
         && let Some((owner, repo, number)) = github_target(pr)
     {
-        match client.fetch_single_pr(&owner, &repo, number).await {
+        match client
+            .fetch_single_pr_interactive(&owner, &repo, number)
+            .await
+        {
             Ok(Some(task)) => super::upsert(config, task).await,
             Ok(None) => {}
-            Err(e) => tracing::warn!("sync_workspace {owner}/{repo}#{number} (pr): {e}"),
+            Err(e) => surface("pr", &owner, &repo, number, &e),
         }
     }
 
@@ -1620,10 +1634,13 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
         let Some((owner, repo, number)) = github_target(issue) else {
             continue;
         };
-        match client.fetch_single_issue(&owner, &repo, number).await {
+        match client
+            .fetch_single_issue_interactive(&owner, &repo, number)
+            .await
+        {
             Ok(Some(task)) => super::upsert(config, task).await,
             Ok(None) => {}
-            Err(e) => tracing::warn!("sync_workspace {owner}/{repo}#{number} (issue): {e}"),
+            Err(e) => surface("issue", &owner, &repo, number, &e),
         }
     }
 

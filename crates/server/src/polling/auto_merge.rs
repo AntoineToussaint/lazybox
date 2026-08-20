@@ -288,7 +288,11 @@ impl MergeBackend for lazybox_gh::GhClient {
         repo: &str,
         number: u64,
     ) -> Result<Option<(Task, Option<String>)>, String> {
-        self.fetch_single_pr_with_head(owner, repo, number)
+        // Interactive priority (#1218): this is the pre-merge green
+        // probe — a few points that decide whether an armed merge can
+        // fire. At background priority the governor refused it under
+        // pressure and the merge deferred indefinitely.
+        self.fetch_single_pr_with_head_interactive(owner, repo, number)
             .await
             .map_err(|e| e.to_string())
     }

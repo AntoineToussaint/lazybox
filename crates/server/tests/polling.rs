@@ -4956,13 +4956,16 @@ async fn unknown_mergeable_fast_repoll_is_capped_per_task() {
 /// and hammering the throttled token.
 #[test]
 fn retry_after_beats_unknown_mergeable_fast_probe() {
+    // #1218: retry hints still beat the fast probe, but the DRIVER
+    // sleep is clamped at 120s — the parked source carries the full
+    // deadline; the loop itself never stops the world.
     let d = polling::next_tick_delay(
         Duration::from_secs(60),
         Some(300),
         true,
         Duration::from_secs(5),
     );
-    assert_eq!(d, Duration::from_secs(300));
+    assert_eq!(d, Duration::from_secs(120));
 }
 
 #[test]
@@ -5004,6 +5007,8 @@ fn governor_uses_the_same_cadence_as_hot_scheduling() {
 
 #[test]
 fn rate_limit_backoff_beats_the_hot_cadence() {
+    // #1218: still beats the 15s hot cadence, clamped at the 120s
+    // driver cap — the affected source is parked for the full hint.
     let d = polling::next_tick_delay_with_hot(
         Duration::from_secs(60),
         Some(300),
@@ -5011,7 +5016,7 @@ fn rate_limit_backoff_beats_the_hot_cadence() {
         Duration::from_secs(5),
         polling::HOT_SET_MAX,
     );
-    assert_eq!(d, Duration::from_secs(300));
+    assert_eq!(d, Duration::from_secs(120));
 }
 
 #[test]

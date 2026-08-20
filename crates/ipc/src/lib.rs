@@ -2891,13 +2891,24 @@ impl WorktreeRecovery {
         {
             return Self::Disk;
         }
-        // Network transients that a retry can clear on its own.
+        // Network transients that a retry can clear on its own — plus
+        // lazybox's own transfer timeout ("`git fetch …` exceeded 300s
+        // wall-clock", git-ops' bounded runners) and git's lock
+        // contention (`index.lock`, "cannot lock ref": a concurrent
+        // fetch/status holding the lock releases it on its own). These
+        // used to dead-end as Unknown on the most common cold-clone
+        // failure (#1253 F5). Checked after Disk so a filesystem-class
+        // lock message ("index.lock: Permission denied") keeps its
+        // precise class.
         if message.contains("could not read from remote")
             || message.contains("Could not resolve host")
             || message.contains("Connection refused")
             || message.contains("Connection reset")
             || message.contains("Temporary failure in name resolution")
             || message.contains("timed out")
+            || message.contains("wall-clock")
+            || message.contains("index.lock")
+            || message.contains("cannot lock ref")
         {
             return Self::Transient;
         }
@@ -3751,6 +3762,25 @@ mod worktree_recovery_tests {
             ),
             (
                 "fatal: could not read from remote repository",
+                WorktreeRecovery::Transient,
+                WorktreeStep::Fetch,
+            ),
+            // #1253 F5 — lazybox's own transfer timeout and git's lock
+            // contention are retryable, not Unknown dead-ends.
+            (
+                "`git fetch --no-prune --progress --filter=blob:none origin \
+                 +refs/heads/*:refs/heads/*` exceeded 300s wall-clock",
+                WorktreeRecovery::Transient,
+                WorktreeStep::Fetch,
+            ),
+            (
+                "fatal: Unable to create '/repo/.git/index.lock': File exists.",
+                WorktreeRecovery::Transient,
+                WorktreeStep::Fetch,
+            ),
+            (
+                "error: cannot lock ref 'refs/remotes/origin/main': is at abc123 \
+                 but expected def456",
                 WorktreeRecovery::Transient,
                 WorktreeStep::Fetch,
             ),

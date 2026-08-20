@@ -61,22 +61,16 @@ async fn setup_fixture() -> Fixture {
         ],
     )
     .await;
-    // Standard remote-tracking refspec — a bare clone defaults to
-    // `+refs/heads/*:refs/heads/*` (storing upstream branches as if
-    // they were local), which breaks `@{u}` lookups from worktrees.
-    // Lazybox's bare clones use the standard refspec because the
-    // production checkout path explicitly fetches into
-    // `refs/remotes/origin/*`; the inspector tests do the same so
-    // they match the real shape.
-    run(
-        &bare,
-        &[
-            "config",
-            "remote.origin.fetch",
-            "+refs/heads/*:refs/remotes/origin/*",
-        ],
-    )
-    .await;
+    // Deliberately NO `remote.origin.fetch` refspec: `git clone --bare`
+    // writes none, and neither did lazybox's `ensure_bare_clone` before
+    // #1253 — so this is the exact shape every legacy bare clone still
+    // has on disk until a provision passes it through the one-time
+    // repair in `bare_repo_health`. `@{u}` can never resolve here
+    // (git maps `branch.<x>.merge` through the missing refspec), which
+    // is precisely why the inspector must classify pushed work via the
+    // branch's own `refs/remotes/origin/<branch>` ref instead. The
+    // new-clone shape (refspec present, `@{u}` resolving) is covered
+    // end-to-end in `tests/bare_clone.rs`.
 
     Fixture {
         base,
@@ -151,22 +145,16 @@ async fn add_wt(fx: &Fixture, name: &str, branch: &str, upstream_branch: &str) -
         run(&fx.upstream_path, &["branch", upstream_branch]).await;
     }
     // Populate `refs/remotes/origin/<branch>` in the bare. Mirrors
-    // the production fetch in `WorktreeManager::checkout_at`.
-    // `--refmap=` restricts the update to exactly this explicit
-    // refspec: without it, git ≥2.55 also applies the fixture's
-    // configured `+refs/heads/*:refs/remotes/origin/*` opportunistically
-    // (mirroring `main` into `refs/remotes/origin/main` as a side
-    // effect), and that stale side-effect ref later collides with the
-    // explicit `origin/main` fetch ("cannot lock ref … unable to
-    // resolve reference"). Production bare clones keep the default
-    // heads:heads refmap, so they never hit this — the fixture must
-    // opt out explicitly.
+    // the production fetch in `WorktreeManager::checkout_at`
+    // (`fetch_origin_ref`), which maintains the branch's own
+    // remote-tracking ref explicitly on every provision — that per-
+    // branch ref, not a configured wildcard refspec, is what this
+    // legacy-shaped fixture relies on.
     run(
         &fx.bare,
         &[
             "fetch",
             "-q",
-            "--refmap=",
             "origin",
             &format!("+{upstream_branch}:refs/remotes/origin/{branch}"),
         ],
@@ -189,9 +177,10 @@ async fn add_wt(fx: &Fixture, name: &str, branch: &str, upstream_branch: &str) -
     )
     .await;
     // Production `checkout_at` records tracking config when the
-    // worktree branches off a remote-tracking ref (so `@{u}` resolves
-    // and the inspector can tell once-pushed branches from
-    // never-pushed local ones). Mirror it here.
+    // worktree branches off a remote-tracking ref. Note that in this
+    // legacy clone shape (no `remote.origin.fetch`) the config is NOT
+    // enough for `@{u}` to resolve — the inspector must fall back to
+    // the branch's own remote-tracking ref (#1253). Mirror it here.
     run(
         &fx.bare,
         &["config", &format!("branch.{branch}.remote"), "origin"],
@@ -753,21 +742,12 @@ async fn merged_and_deleted_upstream_branch_is_still_safe() {
     // Upstream merges the PR and auto-deletes the branch.
     run(&fx.upstream_path, &["merge", "-q", "feature"]).await;
     run(&fx.upstream_path, &["branch", "-D", "feature"]).await;
-    // The bare clone's next prune-style fetch reflects both.
-    // `--refmap=` keeps the update to exactly the explicit refspec:
-    // git ≥2.55 otherwise also applies the fixture's configured
-    // `+refs/heads/*:refs/remotes/origin/*` opportunistically and
-    // rejects the duplicate `refs/remotes/origin/main` update in one
-    // transaction ("cannot lock ref … unable to resolve reference").
+    // The bare clone's next prune-style fetch reflects both. (This
+    // legacy-shaped fixture has no configured refspec, so the explicit
+    // command-line refspec is the only update the fetch performs.)
     run(
         &fx.bare,
-        &[
-            "fetch",
-            "-q",
-            "--refmap=",
-            "origin",
-            "+main:refs/remotes/origin/main",
-        ],
+        &["fetch", "-q", "origin", "+main:refs/remotes/origin/main"],
     )
     .await;
     run(
@@ -879,14 +859,14 @@ async fn reclaim_managed_holder_removes_only_safe_sessionless_checkout() {
 async fn pristine_worktree_detection() {
     let fx = setup_fixture().await;
     let wt = add_wt(&fx, "stub", "main", "main").await;
-    assert!(lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare)).await);
+    assert!(lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare), Some("main")).await);
 
     std::fs::write(wt.join("wip.txt"), "wip").unwrap();
-    assert!(!lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare)).await);
+    assert!(!lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare), Some("main")).await);
 
     run(&wt, &["add", "."]).await;
     run(&wt, &["commit", "-q", "-m", "local only"]).await;
-    assert!(!lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare)).await);
+    assert!(!lazybox_git_ops::worktree_is_pristine(&wt, Some(&fx.bare), Some("main")).await);
 }
 
 /// A [`GitRunner`] that records every command it is asked to run, then

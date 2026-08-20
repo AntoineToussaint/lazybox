@@ -94,12 +94,16 @@ fn setup_with_partial(owner: &str, repo: &str) -> (TempDir, TempDir, PathBuf, Pa
         base.path(),
         &["init", "--quiet", "--bare", &partial.to_string_lossy()],
     );
+    // `config remote.origin.url`, NOT `remote add`: `remote add` also
+    // writes a remote-tracking refspec, which a pre-#1253 interrupted
+    // lazybox attempt never had. Staying refspec-free here keeps these
+    // tests honest — the refspec asserted below must come from
+    // `ensure_bare_clone` itself, not from fixture setup.
     git(
         &partial,
         &[
-            "remote",
-            "add",
-            "origin",
+            "config",
+            "remote.origin.url",
             &upstream.path().to_string_lossy(),
         ],
     );
@@ -318,6 +322,181 @@ async fn failed_resume_keeps_partial_when_origin_matches() {
         partial.join("resume-marker").exists(),
         "matching-origin partial survives its failed fetch for the next retry"
     );
+}
+
+/// #1253 F1 journey: in a bare clone built by `ensure_bare_clone`
+/// itself (not `git clone --bare` + a hand-added refspec), a worktree
+/// provisioned by `checkout_at` must have a working `@{u}` — git
+/// resolves it by mapping `branch.<x>.merge` through
+/// `remote.origin.fetch`, so the clone must carry the standard
+/// remote-tracking refspec.
+#[tokio::test]
+async fn upstream_resolves_in_a_production_shaped_bare_clone() {
+    let (upstream, base, bare, _partial) = setup_with_partial("acme", "tracked");
+    git(upstream.path(), &["branch", "feature/y"]);
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let wt = wm
+        .checkout_at(
+            &base.path().join("worktrees").join("sess-y"),
+            "acme",
+            "tracked",
+            "feature/y",
+            None,
+        )
+        .await
+        .expect("provision through ensure_bare_clone + checkout_at");
+
+    // The clone carries the standard remote-tracking refspec …
+    assert_eq!(
+        git_out(&bare, &["config", "--get", "remote.origin.fetch"]),
+        "+refs/heads/*:refs/remotes/origin/*"
+    );
+    // … so the upstream actually resolves from the worktree.
+    let out = git_cmd(&wt.path, &["rev-list", "--count", "@{u}..HEAD"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "`@{{u}}..HEAD` must resolve in a managed worktree: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "0");
+
+    drop(upstream);
+}
+
+/// #1253 F2 journey: provision from an issue (new local branch), commit,
+/// push the branch — the worktree must now count as pushed and be
+/// deletable, instead of being compared against the DEFAULT branch and
+/// stranding forever as "unpushed".
+#[tokio::test]
+async fn pushed_branch_worktree_is_deletable() {
+    let (upstream, base, _bare, _partial) = setup_with_partial("acme", "pushed");
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let wt_path = base.path().join("worktrees").join("issue-7");
+    let wt = wm
+        .checkout_new_branch_at(&wt_path, "acme", "pushed", "lazybox/issue-7", "trunk")
+        .await
+        .expect("issue-style provision");
+
+    git(&wt.path, &["config", "user.email", "t@example.com"]);
+    git(&wt.path, &["config", "user.name", "Tester"]);
+    std::fs::write(wt.path.join("fix.txt"), "the fix\n").unwrap();
+    git(&wt.path, &["add", "fix.txt"]);
+    git(&wt.path, &["commit", "-q", "-m", "fix"]);
+    // Plain push, no `-u`. Two traps at once: the branch's auto-set
+    // upstream is the BASE branch (`worktree add -B … origin/trunk`
+    // shape), so `@{u}..HEAD` counts the whole feature as "unpushed" —
+    // the inspector must instead consult the branch's own
+    // `refs/remotes/origin/lazybox/issue-7`, which this push updated
+    // through the configured refspec.
+    git(&wt.path, &["push", "-q", "origin", "lazybox/issue-7"]);
+
+    let report = wm.inspect_worktrees(&[]).await.expect("inspection");
+    let row = report
+        .iter()
+        .find(|r| r.path.ends_with("issue-7"))
+        .expect("inspection row for the worktree");
+    assert!(
+        !row.has_unpushed_commits,
+        "fully-pushed branch must not classify as unpushed: {row:?}"
+    );
+    assert!(
+        row.is_safe_to_delete,
+        "pushed + untracked must be reapable: {row:?}"
+    );
+    wm.delete_inspected(row, false)
+        .await
+        .expect("pushed branch deletes rather than refuses");
+    assert!(!wt_path.exists(), "worktree removed");
+
+    drop(upstream);
+}
+
+/// #1253 F2 guard: the same journey WITHOUT the push must still refuse
+/// — conservatism about genuinely local commits stays.
+#[tokio::test]
+async fn unpushed_commit_still_refuses() {
+    let (upstream, base, _bare, _partial) = setup_with_partial("acme", "unpushed");
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    let wt_path = base.path().join("worktrees").join("issue-8");
+    let wt = wm
+        .checkout_new_branch_at(&wt_path, "acme", "unpushed", "lazybox/issue-8", "trunk")
+        .await
+        .expect("issue-style provision");
+
+    git(&wt.path, &["config", "user.email", "t@example.com"]);
+    git(&wt.path, &["config", "user.name", "Tester"]);
+    std::fs::write(wt.path.join("fix.txt"), "the fix\n").unwrap();
+    git(&wt.path, &["add", "fix.txt"]);
+    git(&wt.path, &["commit", "-q", "-m", "fix"]);
+
+    let report = wm.inspect_worktrees(&[]).await.expect("inspection");
+    let row = report
+        .iter()
+        .find(|r| r.path.ends_with("issue-8"))
+        .expect("inspection row for the worktree");
+    assert!(row.has_unpushed_commits, "local-only commit detected");
+    assert!(!row.is_safe_to_delete);
+    let err = wm
+        .delete_inspected(row, false)
+        .await
+        .expect_err("unpushed work must refuse deletion");
+    assert!(err.to_string().contains("unpushed"), "got: {err}");
+    assert!(wt_path.exists(), "worktree preserved");
+
+    drop(upstream);
+}
+
+/// #1253 one-time repair + F9: a legacy bare clone (`git clone --bare`
+/// — no `remote.origin.fetch`, exactly what pre-fix installs have on
+/// disk) is normalized the first time a provision passes
+/// `bare_repo_health`, and an upstream default-branch rename repoints
+/// the clone's HEAD on the next pass.
+#[tokio::test]
+async fn legacy_bare_clone_is_repaired_and_head_follows_rename() {
+    let upstream = TempDir::new().unwrap();
+    git(upstream.path(), &["init", "-b", "trunk", "-q"]);
+    git(upstream.path(), &["config", "user.email", "t@example.com"]);
+    git(upstream.path(), &["config", "user.name", "Tester"]);
+    std::fs::write(upstream.path().join("f.txt"), "hello\n").unwrap();
+    git(upstream.path(), &["add", "f.txt"]);
+    git(upstream.path(), &["commit", "-m", "first", "-q"]);
+
+    let base = TempDir::new().unwrap();
+    let bare = base.path().join("repos").join("acme").join("legacy.git");
+    std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+    git(
+        base.path(),
+        &[
+            "clone",
+            "--bare",
+            "-q",
+            &upstream.path().to_string_lossy(),
+            &bare.to_string_lossy(),
+        ],
+    );
+
+    let wm = WorktreeManager::new(base.path().to_path_buf());
+    // Any provision runs the health gate on the existing clone.
+    assert_eq!(wm.default_branch("acme", "legacy").await.unwrap(), "trunk");
+    assert_eq!(
+        git_out(&bare, &["config", "--get", "remote.origin.fetch"]),
+        "+refs/heads/*:refs/remotes/origin/*",
+        "health gate wrote the missing refspec back"
+    );
+
+    // Upstream renames its default branch.
+    git(upstream.path(), &["branch", "-m", "trunk", "main"]);
+    assert_eq!(
+        wm.default_branch("acme", "legacy").await.unwrap(),
+        "main",
+        "origin/HEAD follows the upstream rename"
+    );
+    assert_eq!(git_out(&bare, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+
+    drop(upstream);
 }
 
 /// A resumed fetch that fails against an *adopted* origin different

@@ -26,7 +26,7 @@
 
 mod spawn_executor;
 
-use crate::registries::{AgentTurnEvent, AgentTurnTick};
+use crate::registries::{AgentTurnEvent, AgentTurnTick, PtyChunkContext, TerminalEntry};
 pub use crate::spawn_plan::SpawnOptions;
 use crate::spawn_plan::{SpawnPlanInput, build_spawn_plan};
 use crate::{ServerConfig, SpawnCoordinator, TerminalRegistry, client_kv, terminal_io};
@@ -670,11 +670,22 @@ async fn agent_state_durability(
 ) -> Option<AgentStateDurability> {
     let generation = config
         .terminal
-        .entries
-        .lock()
+        .lock_entries()
         .await
         .get(&terminal_id)
         .and_then(|entry| entry.agent_state_generation);
+    agent_state_durability_from(config, terminal_id, backend_key, generation)
+}
+
+/// [`agent_state_durability`] over a generation the caller already read —
+/// the write path carries it in its one-lock [`crate::registries::WriteContext`]
+/// snapshot (#1256 P0-3) instead of re-acquiring the registry.
+fn agent_state_durability_from(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    generation: Option<u64>,
+) -> Option<AgentStateDurability> {
     let Some(generation) = generation else {
         tracing::error!(
             ?terminal_id,
@@ -698,12 +709,28 @@ struct StateFold<R> {
 
 /// The single state-ownership boundary for an agent terminal.
 ///
-/// It folds one candidate under the terminal entry lock, persists the committed
-/// state, updates the cache, and broadcasts before releasing either lock.
-/// Durable order, cache order, and bus order are therefore identical: a
+/// It folds one candidate under the terminal entry lock, persists the
+/// committed state, then re-acquires that lock to update the cache and
+/// broadcast. Durable order, cache order, and bus order are identical: a
 /// concurrent late hook can never be delivered after a committed `Exited`,
 /// and an issue→PR rebadge cannot race between live-key resolution and the
 /// event send (#161/#167/#357).
+///
+/// **Lock shape (#1256, P0-1):** the global registry mutex is pinched only
+/// briefly at fold and at commit — never held across the SQLite persist,
+/// which used to queue every other terminal's keystrokes and snapshots
+/// behind blocking-pool wait + transaction on every state edge. The
+/// ordering invariant is carried instead by a per-terminal
+/// `state_transition` lock held across the whole fold → persist → commit →
+/// broadcast transaction, so two rapid transitions on ONE terminal still
+/// serialize exactly as before while the rest of the fleet flows. The
+/// commit re-checks the entry's PTY generation against the persist's: a
+/// terminal replaced mid-persist keeps its newer state — the stale persist
+/// wrote an inert, generation-keyed row and clobbers nothing.
+///
+/// `prep` runs on the entry under the fold acquisition before the fold —
+/// the per-chunk observation mutations (composer readiness, prompt shape)
+/// ride the same lock hold instead of taking their own (#1256, P0-2).
 ///
 /// `fold` returns its caller-specific result and the state to commit. Both
 /// the direct-transition wrapper and PTY-reading path route through here;
@@ -721,47 +748,97 @@ async fn fold_and_broadcast_agent_state<R>(
     // direct path drove it (`lifecycle-hook`, `user-answered-flip`,
     // `process-exit`). `source` says who; `reason` says why.
     reason: &'static str,
+    prep: impl FnOnce(&mut TerminalEntry),
     fold: impl FnOnce(Option<lazybox_ipc::AgentState>, bool) -> (R, Option<lazybox_ipc::AgentState>),
 ) -> StateFold<R> {
-    let mut entries = terminals.entries.lock().await;
-    let entry = entries.entry(id).or_default();
-    let live_session = (!entry.finishing)
-        .then(|| entry.meta.as_ref().map(|(sk, _)| sk.clone()))
-        .flatten();
-    let session_key = live_session.clone().unwrap_or_else(|| captured.clone());
-    let terminal_live = live_session.is_some();
-    let previous = entry.agent_state;
-    let (result, mut committed) = fold(previous, terminal_live);
-    // While a correlated recovery transaction is in flight, hold the
-    // committed pill at `CreditExhausted` so partial progress (the Wait
-    // selection repainting the screen) cannot masquerade as a recovery —
-    // the transaction's own `Recovery`-sourced commit is the exit. The
-    // hold applies **only** while `credit_recovery` is live: with no
-    // transaction, a user answering the chooser directly in the PTY, or
-    // the provider auto-resuming on its own, transitions out normally
-    // (advise, never forbid — the daemon transaction must not be the
-    // only legal exit).
-    if let Some(state) = committed
-        && previous == Some(lazybox_ipc::AgentState::CreditExhausted)
-        && !matches!(
-            state,
-            lazybox_ipc::AgentState::CreditExhausted | lazybox_ipc::AgentState::Exited { .. }
-        )
-        && source != StateSource::Recovery
-        && let Some(recovery) = entry.credit_recovery.as_mut()
-    {
-        if state == lazybox_ipc::AgentState::Working {
-            recovery.evidence.notify_one();
+    // Per-terminal transition order. Acquired before the registry mutex and
+    // held across the persist; see `lock_state_transitions` for the lock
+    // hierarchy (io/persistence → state transition → entries).
+    let _order = terminals.lock_state_transitions(id).await;
+    let (result, committed, previous) = {
+        let mut entries = terminals.lock_entries().await;
+        let entry = entries.entry(id).or_default();
+        prep(entry);
+        let live_session = (!entry.finishing)
+            .then(|| entry.meta.as_ref().map(|(sk, _)| sk.clone()))
+            .flatten();
+        let terminal_live = live_session.is_some();
+        let previous = entry.agent_state;
+        let (result, mut committed) = fold(previous, terminal_live);
+        // While a correlated recovery transaction is in flight, hold the
+        // committed pill at `CreditExhausted` so partial progress (the Wait
+        // selection repainting the screen) cannot masquerade as a recovery —
+        // the transaction's own `Recovery`-sourced commit is the exit. The
+        // hold applies **only** while `credit_recovery` is live: with no
+        // transaction, a user answering the chooser directly in the PTY, or
+        // the provider auto-resuming on its own, transitions out normally
+        // (advise, never forbid — the daemon transaction must not be the
+        // only legal exit).
+        if let Some(state) = committed
+            && previous == Some(lazybox_ipc::AgentState::CreditExhausted)
+            && !matches!(
+                state,
+                lazybox_ipc::AgentState::CreditExhausted | lazybox_ipc::AgentState::Exited { .. }
+            )
+            && source != StateSource::Recovery
+            && let Some(recovery) = entry.credit_recovery.as_mut()
+        {
+            if state == lazybox_ipc::AgentState::Working {
+                recovery.evidence.notify_one();
+            }
+            committed = None;
         }
-        committed = None;
+        (result, committed, previous)
+    };
+    let Some(state) = committed else {
+        return StateFold {
+            result,
+            committed: false,
+        };
+    };
+    // Persist with no registry lock held: only this terminal's own
+    // transitions (serialized above) wait on the store.
+    if !durability.persist(state).await {
+        return StateFold {
+            result,
+            committed: false,
+        };
     }
-    if let Some(state) = committed {
-        if !durability.persist(state).await {
+    // Commit + broadcast under a brief re-acquisition. The session key is
+    // re-resolved HERE so a rebadge that landed during the persist window
+    // broadcasts under the live key (#167), and the generation check keeps
+    // a persist raced by a terminal replacement from clobbering the newer
+    // terminal's state.
+    {
+        let mut entries = terminals.lock_entries().await;
+        let Some(entry) = entries.get_mut(&id) else {
+            // Torn down while persisting: the persisted row is
+            // generation-keyed and inert, and the reading must not be
+            // delivered after teardown's `Exited`.
+            return StateFold {
+                result,
+                committed: false,
+            };
+        };
+        if entry
+            .agent_state_generation
+            .is_some_and(|generation| generation != durability.generation)
+        {
+            tracing::debug!(
+                terminal_id = ?id,
+                persisted_generation = durability.generation,
+                live_generation = ?entry.agent_state_generation,
+                "agent state transition: stale persist generation — not committing",
+            );
             return StateFold {
                 result,
                 committed: false,
             };
         }
+        let session_key = (!entry.finishing)
+            .then(|| entry.meta.as_ref().map(|(sk, _)| sk.clone()))
+            .flatten()
+            .unwrap_or_else(|| captured.clone());
         entry.agent_state = Some(state);
         tracing::info!(
             terminal_id = ?id,
@@ -777,17 +854,13 @@ async fn fold_and_broadcast_agent_state<R>(
             terminal_id: id,
             state,
         });
-        if state == lazybox_ipc::AgentState::Done {
-            durability.poll.wake(false);
-        }
-        return StateFold {
-            result,
-            committed: true,
-        };
+    }
+    if state == lazybox_ipc::AgentState::Done {
+        durability.poll.wake(false);
     }
     StateFold {
         result,
-        committed: false,
+        committed: true,
     }
 }
 
@@ -823,6 +896,7 @@ async fn transition_and_broadcast_agent_state(
         captured,
         source,
         reason,
+        |_| {},
         |previous, terminal_live| {
             let candidate = candidate_for(previous);
             // `Exit` is allowed to use the captured key during teardown;
@@ -957,12 +1031,13 @@ fn spawn_target_worktree_path(
     workspace: &Workspace,
     session_id: Option<SessionId>,
     on_main: bool,
+    root: &std::path::Path,
 ) -> Option<PathBuf> {
     if workspace.is_linked() {
         return None;
     }
     if on_main {
-        return main_worktree_path(workspace);
+        return main_worktree_path_under(workspace, root);
     }
     if let Some(id) = session_id {
         return workspace.find_session(id).map(|s| s.worktree_path.clone());
@@ -970,7 +1045,7 @@ fn spawn_target_worktree_path(
     if let Some(session) = workspace.default_session() {
         return Some(session.worktree_path.clone());
     }
-    Some(worktree_path_for_session(workspace, 0))
+    Some(worktree_path_for_session_under(workspace, 0, root))
 }
 
 /// Move the checkout blocking a stuck spawn aside so its branch is freed
@@ -1000,7 +1075,12 @@ async fn preserve_stuck_worktree(
     };
     let preserve_path = match preserve_holder {
         Some(holder) => PathBuf::from(holder),
-        None => match spawn_target_worktree_path(&workspace, session_id, on_main) {
+        None => match spawn_target_worktree_path(
+            &workspace,
+            session_id,
+            on_main,
+            config.worktree_root_path(),
+        ) {
             Some(path) => path,
             // Linked / unresolvable target: never move the user's real
             // checkout — leave the spawn to surface its own error.
@@ -1750,17 +1830,24 @@ async fn handle_spawn_inner(
                 let Some(chunk) = chunk else {
                     break;
                 };
-                terminal_registry
-                    .note_agent_turn_received(id_for_pump, turn_schedule.watchdog_due)
-                    .await;
                 // `subscribe` subscribes before snapshotting, so a live
                 // chunk already covered by the replay (seq within the
                 // snapshot's high-water mark) must be dropped to avoid
-                // re-feeding the detector and re-emitting bytes.
+                // re-feeding the detector and re-emitting bytes. Batch
+                // accounting still counts it as received; the normal path
+                // folds that accounting into its one-lock chunk context
+                // (#1256 P0-2) while these early-exit branches note it
+                // standalone.
                 if chunk.seq <= last_seq {
+                    terminal_registry
+                        .note_agent_turn_received(id_for_pump, turn_schedule.watchdog_due)
+                        .await;
                     continue;
                 }
                 if chunk.seq > last_seq.saturating_add(1) {
+                    terminal_registry
+                        .note_agent_turn_received(id_for_pump, turn_schedule.watchdog_due)
+                        .await;
                     // A chunk was dropped between the backend's reader
                     // and this pump (bounded bridge overflow or broadcast
                     // lag). The byte stream now has a hole — forwarding
@@ -1841,41 +1928,54 @@ async fn handle_spawn_inner(
                     continue;
                 }
                 last_seq = chunk.seq;
-                // The user just answered an InputNeeded prompt (Enter while
-                // the `?` pill was up). Drop the accumulated detection
-                // buffer so the just-answered prompt's markers can't
-                // re-fire InputNeeded on this fresh chunk. See the
-                // `agent_detect_resets` field doc for why this is safe — a
-                // prompt that's genuinely still up gets re-rendered and
-                // re-detected from the post-answer output.
-                //
-                // Only agent terminals are ever inserted into the set (the
-                // optimistic flip in `handle_write` gates on InputNeeded,
-                // which shells never reach), so skip the per-chunk lock
-                // entirely for shells. Bind the `remove` result before the
-                // `if` so the MutexGuard drops at the `;` rather than being
-                // held across the body — the temporary-lifetime footgun the
-                // `TERMINAL_MAP_LOCK_ORDER` note warns about (harmless today
-                // with no await in the body, a latent deadlock the moment
-                // one is added).
-                if agent_for_pump.is_some() {
-                    let answered = terminal_registry
-                        .entries
-                        .lock()
-                        .await
-                        .get_mut(&id_for_pump)
-                        .is_some_and(|entry| std::mem::take(&mut entry.agent_detect_reset));
-                    if answered {
-                        state_buf.clear();
-                        tracing::debug!(
-                            terminal_id = ?id_for_pump,
-                            "user answered prompt; clearing agent-state detection buffer",
-                        );
-                    }
-                }
                 let progress = agent_for_pump.is_some()
                     && watchdog_notes_progress(&mut watchdog_fp, &chunk.bytes);
-                note_pty_activity(
+                // One registry acquisition for the chunk's whole context
+                // (#1256 P0-2): batch-receipt accounting, the just-answered
+                // detection reset, the turn-clock record, the
+                // credit-recovery flag, view-epoch suppression, and hook
+                // authority. This plus the state fold's own commit
+                // acquisition is the per-chunk lock budget — the path used
+                // to join the global FIFO queue ~7-8 times per chunk.
+                //
+                // The reset take: the user just answered an InputNeeded
+                // prompt (Enter while the `?` pill was up). Drop the
+                // accumulated detection buffer so the just-answered
+                // prompt's markers can't re-fire InputNeeded on this fresh
+                // chunk. See the `agent_detect_reset` field doc for why
+                // this is safe — a prompt that's genuinely still up gets
+                // re-rendered and re-detected from the post-answer output.
+                // Only agent terminals ever latch the reset (the optimistic
+                // flip in `handle_write` gates on InputNeeded, which shells
+                // never reach), so shells skip the chunk context entirely.
+                let chunk_context = match agent_for_pump.as_ref() {
+                    Some(_) => Some(
+                        terminal_registry
+                            .begin_pty_chunk(
+                                id_for_pump,
+                                chunk.seq,
+                                progress,
+                                Some(turn_schedule.watchdog_due),
+                                true,
+                            )
+                            .await,
+                    ),
+                    None => {
+                        terminal_registry
+                            .note_agent_turn_received(id_for_pump, turn_schedule.watchdog_due)
+                            .await;
+                        None
+                    }
+                };
+                if chunk_context.is_some_and(|context| context.answered_reset) {
+                    state_buf.clear();
+                    tracing::debug!(
+                        terminal_id = ?id_for_pump,
+                        "user answered prompt; clearing agent-state detection buffer",
+                    );
+                }
+                note_pty_activity_with(
+                    chunk_context,
                     agent_for_pump.as_ref(),
                     &mut state_buf,
                     &chunk.bytes,
@@ -2526,7 +2626,8 @@ async fn resolve_or_create_session(
     // is enough for `terminal_sessions`. Repo-less / standalone
     // workspaces have no scope and no meaningful "main", so they fall
     // through to normal isolated provisioning.
-    if on_main && let Some(path) = main_worktree_path(&workspace) {
+    if on_main && let Some(path) = main_worktree_path_under(&workspace, config.worktree_root_path())
+    {
         // A failed main-checkout provision FAILS THE SPAWN. The old
         // fallback (`mkdir` an empty dir and carry on) fabricated a
         // directory that masqueraded as the shared main checkout —
@@ -2604,7 +2705,7 @@ async fn resolve_or_create_session(
     // pre-PR. `Session.id` stays a UUID for stable internal identity;
     // only the path is human-friendly.
     let kind_for_session = session_kind_from_terminal(kind);
-    let path = worktree_path_for_session(&workspace, 0);
+    let path = worktree_path_for_session_under(&workspace, 0, config.worktree_root_path());
     let ownership_guard = config.worktree_ownership_lock.lock().await;
     if let Some((adopted_path, session_id)) = recover_untracked_pr_worktree_locked(
         config,
@@ -3063,7 +3164,7 @@ async fn managed_worktree_has_live_main_owner(config: &ServerConfig, candidate: 
         return true;
     }
 
-    let entries = config.terminal.entries.lock().await;
+    let entries = config.terminal.lock_entries().await;
     entries.values().any(|entry| {
         if !entry.on_main || entry.finishing {
             return false;
@@ -4289,7 +4390,7 @@ struct WorkspaceAgent {
 }
 
 async fn workspace_agents(config: &ServerConfig, session_key: &SessionKey) -> Vec<WorkspaceAgent> {
-    let entries = config.terminal.entries.lock().await;
+    let entries = config.terminal.lock_entries().await;
     let mut agents: Vec<_> = entries
         .iter()
         .filter_map(|(terminal_id, entry)| {
@@ -4681,7 +4782,7 @@ async fn live_singleton(
     target: &str,
     on_main: bool,
 ) -> Option<TerminalId> {
-    let entries = config.terminal.entries.lock().await;
+    let entries = config.terminal.lock_entries().await;
     entries.iter().find_map(|(id, entry)| {
         (!entry.finishing
             && entry.backend_key.is_some()
@@ -4934,9 +5035,15 @@ pub fn worktree_path_for_session_under(
 /// repo's resolved default (`main` or `master`), which the folder name
 /// doesn't try to track.
 pub fn main_worktree_path(workspace: &Workspace) -> Option<PathBuf> {
+    main_worktree_path_under(workspace, &worktree_root())
+}
+
+/// Explicit-root form of [`main_worktree_path`] — spawn provisioning
+/// passes the config's root so test configs stay hermetic (#1237).
+pub fn main_worktree_path_under(workspace: &Workspace, root: &std::path::Path) -> Option<PathBuf> {
     workspace
         .worktree_scope()
-        .map(|scope| worktree_root().join(scope).join("_main"))
+        .map(|scope| root.join(scope).join("_main"))
 }
 
 /// Whether the workspace behind `session_key` is a linked (no-worktree)
@@ -5667,6 +5774,45 @@ async fn note_pty_activity(
     session_key: &SessionKey,
     state_machine: &mut lazybox_agents::AgentStateMachine,
 ) {
+    note_pty_activity_with(
+        None,
+        agent,
+        buf,
+        bytes,
+        output_seq,
+        progress,
+        terminals,
+        bus,
+        durability,
+        id,
+        session_key,
+        state_machine,
+    )
+    .await;
+}
+
+/// [`note_pty_activity`] with the pump's pre-fetched per-chunk registry
+/// context (#1256 P0-2). The production output pumps gather batch
+/// accounting, the answer reset, the turn event, the recovery flag,
+/// suppression, and hook authority in ONE `begin_pty_chunk` acquisition and
+/// pass it here; the wrapper above fetches an equivalent context for the
+/// callers that don't sit on the per-chunk hot path (initial replay,
+/// post-gap resync, tests).
+#[allow(clippy::too_many_arguments)]
+async fn note_pty_activity_with(
+    context: Option<PtyChunkContext>,
+    agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
+    buf: &mut Vec<u8>,
+    bytes: &[u8],
+    output_seq: u64,
+    progress: bool,
+    terminals: &TerminalRegistry,
+    bus: &tokio::sync::broadcast::Sender<Event>,
+    durability: Option<&AgentStateDurability>,
+    id: TerminalId,
+    session_key: &SessionKey,
+    state_machine: &mut lazybox_agents::AgentStateMachine,
+) {
     const STATE_BUF_CAP: usize = 32 * 1024;
     let Some(agent) = agent else {
         return;
@@ -5691,15 +5837,14 @@ async fn note_pty_activity(
         buf.drain(..drop);
     }
     let detect_window = detect_window(buf);
-    let turn_event = terminals
-        .record_turn_event(
-            id,
-            AgentTurnEvent::OutputChunk {
-                backend_seq: output_seq,
-                meaningful_progress: progress,
-            },
-        )
-        .await;
+    let context = match context {
+        Some(context) => context,
+        None => {
+            terminals
+                .begin_pty_chunk(id, output_seq, progress, None, false)
+                .await
+        }
+    };
     let last_chunk_start = detect_window.len().saturating_sub(bytes.len());
     // The chunked composer-readiness probe strips + compacts the whole 16 KiB
     // detect window on every repaint frame — far too costly to run on all of a
@@ -5711,29 +5856,31 @@ async fn note_pty_activity(
     // credit-exhausting turn) into the next recovery, which would skip the
     // "Wait for credit" selection — recovery only ever begins from the credit
     // chooser, where the composer is not drawn.
-    let composer_ready = terminals.credit_recovery_active(id).await
+    let composer_ready = context.credit_recovery_active
         && agent.detect_ready_for_prompt_chunked(detect_window, last_chunk_start);
-    terminals.record_composer_ready(id, composer_ready).await;
     let immediate = agent.detect_blocked_in_current_chunk(detect_window, last_chunk_start);
-    let pty = if let Some(observation) = immediate {
-        if let Some(shape) = observation.prompt_shape() {
-            terminals.record_input_needed_shape(id, shape).await;
-        }
-        lazybox_agents::PtyReading {
-            state: observation.state(),
-            clear: true,
-            progress: false,
-            liveness: lazybox_agents::Liveness::Streaming,
-            ready_for_prompt: false,
-        }
+    let (pty, shape) = if let Some(observation) = immediate {
+        (
+            lazybox_agents::PtyReading {
+                state: observation.state(),
+                clear: true,
+                progress: false,
+                liveness: lazybox_agents::Liveness::Streaming,
+                ready_for_prompt: false,
+            },
+            observation.prompt_shape(),
+        )
     } else {
-        lazybox_agents::PtyReading {
-            state: lazybox_ipc::AgentState::Working,
-            clear: false,
-            progress,
-            liveness: lazybox_agents::Liveness::Streaming,
-            ready_for_prompt: false,
-        }
+        (
+            lazybox_agents::PtyReading {
+                state: lazybox_ipc::AgentState::Working,
+                clear: false,
+                progress,
+                liveness: lazybox_agents::Liveness::Streaming,
+                ready_for_prompt: false,
+            },
+            None,
+        )
     };
     commit_pty_reading(
         agent,
@@ -5746,7 +5893,13 @@ async fn note_pty_activity(
         session_key,
         state_machine,
         Some(output_seq),
-        Some(turn_event),
+        Some(context.turn_event),
+        Some(PtyChunkCommit {
+            suppresses_reading: context.suppresses_reading,
+            hook_authority: context.hook_authority,
+            composer_ready,
+            shape,
+        }),
     )
     .await;
 }
@@ -5840,6 +5993,7 @@ async fn classify_quiet_screen(
             state_machine,
             None,
             pty_turn_evidence,
+            None,
         )
         .await;
         return;
@@ -5922,6 +6076,7 @@ async fn classify_quiet_screen(
         state_machine,
         None,
         pty_turn_evidence,
+        None,
     )
     .await;
 }
@@ -6046,6 +6201,7 @@ async fn watchdog_reverify_parked_turn(
         state_machine,
         None,
         terminals.latest_output_turn_event(id).await,
+        None,
     )
     .await;
 }
@@ -6082,7 +6238,7 @@ async fn detect_and_broadcast_model(
         return;
     };
     let session_key = {
-        let mut entries = terminals.entries.lock().await;
+        let mut entries = terminals.lock_entries().await;
         let entry = entries.entry(id).or_default();
         if entry.model_label.as_ref() == Some(&model_label) {
             return;
@@ -6102,6 +6258,19 @@ async fn detect_and_broadcast_model(
     });
 }
 
+/// Per-chunk observations carried into [`commit_pty_reading`] when the
+/// caller already gathered its registry context in the single
+/// `begin_pty_chunk` acquisition (#1256 P0-2). The composer-readiness flag
+/// and prompt shape are applied under the fold's own lock hold (or one
+/// brief acquisition on the suppressed path) instead of taking two more.
+#[derive(Clone, Copy)]
+struct PtyChunkCommit {
+    suppresses_reading: bool,
+    hook_authority: lazybox_agents::HookAuthority,
+    composer_ready: bool,
+    shape: Option<lazybox_agents::PromptShape>,
+}
+
 async fn commit_pty_reading(
     agent: &std::sync::Arc<dyn lazybox_agents::Agent>,
     detect_window: &[u8],
@@ -6118,10 +6287,25 @@ async fn commit_pty_reading(
     state_machine: &mut lazybox_agents::AgentStateMachine,
     output_seq: Option<u64>,
     pty_turn_evidence: Option<u64>,
+    // `Some` on the per-chunk path: suppression and hook authority were
+    // already evaluated in `begin_pty_chunk`'s acquisition, and the chunk's
+    // detector observations ride the fold's lock hold. `None` on the
+    // settle/watchdog paths, which keep their own (low-frequency) reads.
+    chunk: Option<PtyChunkCommit>,
 ) {
-    if terminal_io::suppresses_agent_reading(terminals, id, output_seq).await
-        && pty.state != lazybox_ipc::AgentState::InputNeeded
-    {
+    let suppressed = match chunk {
+        Some(chunk) => chunk.suppresses_reading,
+        None => terminal_io::suppresses_agent_reading(terminals, id, output_seq).await,
+    };
+    if suppressed && pty.state != lazybox_ipc::AgentState::InputNeeded {
+        if let Some(chunk) = chunk {
+            // The fold below never runs, so the chunk's observations are
+            // recorded in their own single acquisition — exactly what the
+            // pre-#1256 separate `record_*` calls did on this path.
+            terminals
+                .record_chunk_observation(id, chunk.composer_ready, chunk.shape)
+                .await;
+        }
         tracing::debug!(
             terminal_id = ?id,
             liveness = ?pty.liveness,
@@ -6136,13 +6320,17 @@ async fn commit_pty_reading(
     // long ago this terminal last spoke a lifecycle hook — a hook-driven
     // terminal is in the map, a pure screen-scraped one never is.
     //
-    // Read outside the `states` lock the fold takes below, so a hook
-    // ingesting in that window can leave this age one frame stale. Safe:
-    // hook freshness is a soft signal (it only shifts a reading between
-    // "gated" and "folded", never fabricates a state), the transition
-    // table re-validates whatever folds, and the very next chunk re-reads
-    // a fresh age — the same read-then-decide shape the pre-gate pump had.
-    let hook_authority = terminals.hook_authority_for(id, pty_turn_evidence).await;
+    // Read outside the `states` lock the fold takes below (or carried from
+    // the chunk context), so a hook ingesting in that window can leave this
+    // age one frame stale. Safe: hook freshness is a soft signal (it only
+    // shifts a reading between "gated" and "folded", never fabricates a
+    // state), the transition table re-validates whatever folds, and the
+    // very next chunk re-reads a fresh age — the same read-then-decide
+    // shape the pre-gate pump had.
+    let hook_authority = match chunk {
+        Some(chunk) => chunk.hook_authority,
+        None => terminals.hook_authority_for(id, pty_turn_evidence).await,
+    };
     // The liveness tier that produced this reading is the PTY path's "why"
     // (#538): a byte-silent quiet-timer settle, a content-stable watchdog
     // force, or ordinary streaming (a live dialog surfacing, or a byte-flow
@@ -6168,6 +6356,19 @@ async fn commit_pty_reading(
         session_key,
         StateSource::Pty,
         reason,
+        |entry| {
+            // The chunk path's detector observations, applied under the
+            // fold acquisition it already takes (#1256 P0-2). Recorded
+            // regardless of the fold's outcome, exactly as the standalone
+            // `record_composer_ready` / `record_input_needed_shape` calls
+            // were before it.
+            if let Some(chunk) = chunk {
+                entry.composer_ready = chunk.composer_ready;
+                if let Some(shape) = chunk.shape {
+                    entry.input_needed_shape = Some(shape);
+                }
+            }
+        },
         |current, terminal_live| {
             if !terminal_live {
                 return ((lazybox_agents::Outcome::Rejected, current), None);
@@ -6362,19 +6563,21 @@ pub(crate) async fn handle_write_batch(
     let answered_chooser = writes
         .iter()
         .any(|bytes| bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b));
-    // One global-lock acquisition for the whole admission context
-    // (#1237) — this used to be three separate FIFO queue joins per
-    // keystroke.
-    let Some((key, current_state, current_shape)) =
-        config.terminal.write_context_for(terminal_id).await
-    else {
+    // One global-lock acquisition for the whole admission context (#1237,
+    // #1256 P0-3) — the snapshot now also carries the metadata, prompt
+    // shape, and durability generation the submit tail used to re-acquire
+    // the registry three more times for. The advisory checks below run on
+    // this pre-write snapshot; the authoritative compare-and-set happens
+    // under the state fold's own lock.
+    let Some(context) = config.terminal.write_context_for(terminal_id).await else {
         tracing::trace!("write to unknown terminal {terminal_id:?}");
         return false;
     };
+    let key = context.backend_key;
     let chooser_submission = intent == TerminalInputIntent::Compose
-        && current_state == Some(lazybox_ipc::AgentState::InputNeeded)
+        && context.agent_state == Some(lazybox_ipc::AgentState::InputNeeded)
         && answered_chooser
-        && current_shape == Some(lazybox_agents::PromptShape::Chooser);
+        && context.input_needed_shape == Some(lazybox_agents::PromptShape::Chooser);
     let submitted = intent == TerminalInputIntent::Submit || chooser_submission;
     let effective_intent = if submitted {
         TerminalInputIntent::Submit
@@ -6410,8 +6613,17 @@ pub(crate) async fn handle_write_batch(
     }
     // Explicit Submit may start the first turn, resume an idle composer, or
     // start a new turn from Done. A bare chooser answer is narrower: it only
-    // submits while the same chooser is still live. Revalidate atomically at
-    // the state transition because the terminal can resolve during the write.
+    // submits while the same chooser is still live. The check here is the
+    // advisory early-out on the pre-write snapshot; the same predicate is
+    // revalidated atomically inside the state fold below, because the
+    // terminal can resolve during the write.
+    //
+    // A bare chooser keystroke only ANSWERS chooser/permission-shaped
+    // prompts (`chooser_submission` above already required the snapshot's
+    // recorded `PromptShape::Chooser`). For a free-text elicitation, a lone
+    // digit / y / n is just typing into the field — flipping the pill on it
+    // cleared a real "agent is waiting on you". Enter is exempt: it submits
+    // the elicitation answer, so the flip is correct.
     let flippable = |state: Option<lazybox_ipc::AgentState>| {
         if chooser_submission {
             state == Some(lazybox_ipc::AgentState::InputNeeded)
@@ -6422,38 +6634,15 @@ pub(crate) async fn handle_write_batch(
             )
         }
     };
-    if !flippable(config.terminal.agent_state_for(terminal_id).await) {
+    if !flippable(context.agent_state) {
         return true;
     }
-    // A bare chooser keystroke only ANSWERS chooser/permission-shaped
-    // prompts. For a free-text elicitation, a lone digit / y / n is
-    // just typing into the field — flipping the pill on it cleared a
-    // real "agent is waiting on you". Enter is exempt: it submits the
-    // elicitation answer, so the flip is correct. The shape is recorded
-    // at detection time by the agent observation (including its current-
-    // chunk fast path) and by `handle_ingest_hook` (permission → chooser,
-    // elicit → free text);
-    // with no recorded shape we conservatively don't flip on a bare key.
-    if chooser_submission {
-        let shape = config.terminal.input_needed_shape_for(terminal_id).await;
-        if shape != Some(lazybox_agents::PromptShape::Chooser) {
-            tracing::debug!(
-                ?terminal_id,
-                ?shape,
-                "bare chooser keystroke on a non-chooser prompt — keeping InputNeeded",
-            );
-            return true;
-        }
-    }
-    let session_key = config
-        .terminal
-        .terminal_meta_for(terminal_id)
-        .await
-        .map(|(sk, _)| sk);
-    let Some(session_key) = session_key else {
+    let Some(session_key) = context.meta.map(|(sk, _)| sk) else {
         return true;
     };
-    let Some(durability) = agent_state_durability(config, terminal_id, &key).await else {
+    let Some(durability) =
+        agent_state_durability_from(config, terminal_id, &key, context.agent_state_generation)
+    else {
         return true;
     };
     // Atomic compare-and-set under the state lock keeps the flip behind the
@@ -6471,18 +6660,15 @@ pub(crate) async fn handle_write_batch(
     if !transition.committed {
         return true;
     }
-    config
-        .terminal
-        .record_turn_event(terminal_id, AgentTurnEvent::UserAnswered)
-        .await;
-    // Tell the output pump to drop its detection buffer on the next
-    // chunk. Without this the just-answered prompt's markers linger in
-    // the rolling window and re-fire InputNeeded on the very next
-    // chunk — reverting this optimistic flip and pinning the `?` pill
-    // back on until ~16 KiB of fresh output finally evicts the stale
+    // One acquisition for the flip's tail (#1256 P0-3): the `UserAnswered`
+    // turn event plus the detection-buffer reset the output pump consumes
+    // on its next chunk. Without the reset the just-answered prompt's
+    // markers linger in the rolling window and re-fire InputNeeded on the
+    // very next chunk — reverting this optimistic flip and pinning the `?`
+    // pill back on until ~16 KiB of fresh output finally evicts the stale
     // prompt. (The regression behind issue #101: "the ? won't go away
     // after I answer.")
-    config.terminal.mark_detect_reset(terminal_id).await;
+    config.terminal.note_user_answered(terminal_id).await;
     drop(interaction);
     true
 }
@@ -7867,7 +8053,7 @@ pub async fn handle_ingest_hook(
     let terminal_id = match backend_key.as_deref() {
         Some(key) => {
             let resolved = {
-                let entries = config.terminal.entries.lock().await;
+                let entries = config.terminal.lock_entries().await;
                 entries.iter().find_map(|(id, entry)| {
                     (!entry.finishing && entry.backend_key.as_deref() == Some(key)).then_some(*id)
                 })
@@ -8117,14 +8303,18 @@ async fn pump_recovered_session(
                 let Some(chunk) = chunk else {
                     break;
                 };
-                config
-                    .terminal
-                    .note_agent_turn_received(terminal_id, turn_schedule.watchdog_due)
-                    .await;
                 if chunk.seq <= last_seq {
+                    config
+                        .terminal
+                        .note_agent_turn_received(terminal_id, turn_schedule.watchdog_due)
+                        .await;
                     continue;
                 }
                 if chunk.seq > last_seq.saturating_add(1) {
+                    config
+                        .terminal
+                        .note_agent_turn_received(terminal_id, turn_schedule.watchdog_due)
+                        .await;
                     let Some(snapshot) =
                         resync_replay_after_gap(&*config.backend, backend_key, chunk.seq, last_seq)
                             .await
@@ -8180,12 +8370,38 @@ async fn pump_recovered_session(
                     continue;
                 }
                 last_seq = chunk.seq;
-                if agent.is_some() && config.terminal.take_detect_reset(terminal_id).await {
-                    state_buf.clear();
-                }
                 let progress =
                     agent.is_some() && watchdog_notes_progress(&mut watchdog_fp, &chunk.bytes);
-                note_pty_activity(
+                // Mirror the primary pump's one-lock chunk context (#1256
+                // P0-2): receipt accounting, the answer reset, the turn
+                // record, recovery flag, suppression, and hook authority in
+                // a single acquisition.
+                let chunk_context = match agent.as_ref() {
+                    Some(_) => Some(
+                        config
+                            .terminal
+                            .begin_pty_chunk(
+                                terminal_id,
+                                chunk.seq,
+                                progress,
+                                Some(turn_schedule.watchdog_due),
+                                true,
+                            )
+                            .await,
+                    ),
+                    None => {
+                        config
+                            .terminal
+                            .note_agent_turn_received(terminal_id, turn_schedule.watchdog_due)
+                            .await;
+                        None
+                    }
+                };
+                if chunk_context.is_some_and(|context| context.answered_reset) {
+                    state_buf.clear();
+                }
+                note_pty_activity_with(
+                    chunk_context,
                     agent.as_ref(),
                     &mut state_buf,
                     &chunk.bytes,
@@ -8511,8 +8727,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
         if no_permission {
             config
                 .terminal
-                .entries
-                .lock()
+                .lock_entries()
                 .await
                 .entry(terminal_id)
                 .or_default()
@@ -9371,7 +9586,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
         bool,
         Option<String>,
     )> = {
-        let entries = config.terminal.entries.lock().await;
+        let entries = config.terminal.lock_entries().await;
         entries
             .iter()
             .filter_map(|(id, entry)| {
@@ -9554,7 +9769,7 @@ pub async fn agent_runtime_snapshot(config: &ServerConfig) -> Vec<AgentTerminalR
         bool,
         Option<String>,
     )> = {
-        let entries = config.terminal.entries.lock().await;
+        let entries = config.terminal.lock_entries().await;
         entries
             .iter()
             .filter_map(|(id, entry)| {
@@ -9776,7 +9991,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
 
     // Snapshot live (session_key, kind) pairs so we can dedupe.
     let mut live: std::collections::HashSet<(String, String)> = {
-        let entries = config.terminal.entries.lock().await;
+        let entries = config.terminal.lock_entries().await;
         entries
             .values()
             .filter(|entry| !entry.finishing)
@@ -10386,6 +10601,404 @@ mod tests {
             generation: id.0,
             poll: crate::PollState::default(),
         }
+    }
+
+    /// A store whose FIRST `apply_batch` parks on a condvar until the test
+    /// releases it — a deterministic stand-in for a slow SQLite persist,
+    /// signalling `entered` when the persist is in flight.
+    struct HoldFirstBatchStore {
+        inner: lazybox_store::MemoryStore,
+        holding: std::sync::atomic::AtomicBool,
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+
+    impl HoldFirstBatchStore {
+        fn new() -> Self {
+            Self {
+                inner: lazybox_store::MemoryStore::new(),
+                holding: std::sync::atomic::AtomicBool::new(true),
+                entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+                release: std::sync::Arc::new((
+                    std::sync::Mutex::new(false),
+                    std::sync::Condvar::new(),
+                )),
+            }
+        }
+
+        fn release_persist(&self) {
+            let (lock, condvar) = &*self.release;
+            *lock.lock().expect("release lock") = true;
+            condvar.notify_all();
+        }
+    }
+
+    impl lazybox_store::Store for HoldFirstBatchStore {
+        fn apply_batch(
+            &self,
+            mutations: &[lazybox_store::StoreMutation],
+        ) -> Result<(), lazybox_store::StoreError> {
+            if self
+                .holding
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.entered.notify_one();
+                let (lock, condvar) = &*self.release;
+                let guard = lock.lock().expect("release lock");
+                let (_guard, timeout) = condvar
+                    .wait_timeout_while(guard, Duration::from_secs(10), |released| !*released)
+                    .expect("release wait");
+                assert!(!timeout.timed_out(), "the held persist must be released");
+            }
+            self.inner.apply_batch(mutations)
+        }
+
+        fn get_kv(&self, key: &str) -> Result<Option<String>, lazybox_store::StoreError> {
+            self.inner.get_kv(key)
+        }
+
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), lazybox_store::StoreError> {
+            self.inner.set_kv(key, value)
+        }
+
+        fn delete_kv(&self, key: &str) -> Result<(), lazybox_store::StoreError> {
+            self.inner.delete_kv(key)
+        }
+    }
+
+    /// #1256 P0-1 regression. While one transition's SQLite persist is in
+    /// flight, the global registry mutex must stay available (it used to be
+    /// held across the persist, queueing every terminal's keystrokes behind
+    /// it), a second transition racing in on the SAME terminal must queue
+    /// behind the per-terminal transition order instead of overtaking the
+    /// persist, and the newer state must win in broadcast order, cache, and
+    /// the persisted row alike (#161/#167/#357 ordering invariant).
+    #[tokio::test]
+    async fn rapid_state_transitions_serialize_without_blocking_the_registry() {
+        let terminals = TerminalRegistry::default();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(64);
+        let id = TerminalId(1256);
+        let bystander = TerminalId(1257);
+        let session_key = SessionKey::from("github:o/r#1256");
+        terminals
+            .register_terminal(
+                id,
+                "backend-1256".to_string(),
+                session_key.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        terminals.record_agent_state_generation(id, 1).await;
+        terminals
+            .register_terminal(
+                bystander,
+                "backend-1257".to_string(),
+                SessionKey::from("github:o/r#1257"),
+                TerminalKind::Shell,
+            )
+            .await;
+        let store = std::sync::Arc::new(HoldFirstBatchStore::new());
+        let durability = AgentStateDurability {
+            store: store.clone(),
+            backend_key: "backend-1256".to_string(),
+            generation: 1,
+            poll: crate::PollState::default(),
+        };
+
+        let first = {
+            let terminals = terminals.clone();
+            let bus = bus.clone();
+            let durability = durability.clone();
+            let session_key = session_key.clone();
+            tokio::spawn(async move {
+                transition_and_broadcast_agent_state(
+                    &terminals,
+                    &bus,
+                    &durability,
+                    id,
+                    &session_key,
+                    StateSource::Hook,
+                    |_| Some(lazybox_ipc::AgentState::Working),
+                )
+                .await
+            })
+        };
+        store.entered.notified().await;
+
+        // The persist is in flight and the registry must be free: this read
+        // used to queue behind the store write for its whole duration.
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            terminals.backend_key_for(bystander),
+        )
+        .await
+        .expect("registry reads must not queue behind an in-flight persist");
+
+        // A racing transition on the SAME terminal queues on the
+        // per-terminal order — it cannot fold, persist, or broadcast until
+        // the first transition completes.
+        let second = {
+            let terminals = terminals.clone();
+            let bus = bus.clone();
+            let durability = durability.clone();
+            let session_key = session_key.clone();
+            tokio::spawn(async move {
+                transition_and_broadcast_agent_state(
+                    &terminals,
+                    &bus,
+                    &durability,
+                    id,
+                    &session_key,
+                    StateSource::Hook,
+                    |_| Some(lazybox_ipc::AgentState::Done),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !second.is_finished(),
+            "a same-terminal transition must serialize behind the in-flight persist",
+        );
+
+        store.release_persist();
+        let first = first.await.expect("first transition task");
+        let second = second.await.expect("second transition task");
+        assert!(first.committed, "Working must commit");
+        assert!(second.committed, "Done must commit after it");
+
+        let mut states = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Event::AgentState {
+                terminal_id, state, ..
+            } = event
+                && terminal_id == id
+            {
+                states.push(state);
+            }
+        }
+        assert_eq!(
+            states,
+            vec![
+                lazybox_ipc::AgentState::Working,
+                lazybox_ipc::AgentState::Done
+            ],
+            "broadcast order must match transition order",
+        );
+        assert_eq!(
+            terminals.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::Done),
+            "the newer state wins in the cache",
+        );
+        let row = lazybox_store::Store::get_kv(&*store, &agent_state_key("backend-1256", 1))
+            .expect("kv read")
+            .expect("persisted state row");
+        assert_eq!(
+            row,
+            serde_json::to_string(&lazybox_ipc::AgentState::Done).expect("encode"),
+            "the newer state wins in the persisted row",
+        );
+    }
+
+    /// #1256 P0-1: the commit re-checks the persist's PTY generation, so a
+    /// transition whose persist was raced by a terminal replacement (new
+    /// generation, its own recovered state) drops instead of clobbering the
+    /// newer terminal's cache — and broadcasts nothing.
+    #[tokio::test]
+    async fn stale_generation_persist_cannot_clobber_newer_state() {
+        let terminals = TerminalRegistry::default();
+        let (bus, mut rx) = tokio::sync::broadcast::channel(64);
+        let id = TerminalId(1258);
+        let session_key = SessionKey::from("github:o/r#1258");
+        terminals
+            .register_terminal(
+                id,
+                "backend-1258".to_string(),
+                session_key.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        terminals.record_agent_state_generation(id, 1).await;
+        let store = std::sync::Arc::new(HoldFirstBatchStore::new());
+        let durability = AgentStateDurability {
+            store: store.clone(),
+            backend_key: "backend-1258".to_string(),
+            generation: 1,
+            poll: crate::PollState::default(),
+        };
+
+        let stale = {
+            let terminals = terminals.clone();
+            let bus = bus.clone();
+            let durability = durability.clone();
+            let session_key = session_key.clone();
+            tokio::spawn(async move {
+                transition_and_broadcast_agent_state(
+                    &terminals,
+                    &bus,
+                    &durability,
+                    id,
+                    &session_key,
+                    StateSource::Hook,
+                    |_| Some(lazybox_ipc::AgentState::Working),
+                )
+                .await
+            })
+        };
+        store.entered.notified().await;
+
+        // The terminal is replaced mid-persist: a newer process generation
+        // arrives with its own recovered state.
+        terminals.record_agent_state_generation(id, 2).await;
+        terminals
+            .record_agent_state(id, lazybox_ipc::AgentState::Idle)
+            .await;
+
+        store.release_persist();
+        let stale = stale.await.expect("transition task");
+        assert!(
+            !stale.committed,
+            "a stale-generation persist must not commit",
+        );
+        assert_eq!(
+            terminals.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::Idle),
+            "the replacement's state survives",
+        );
+        while let Ok(event) = rx.try_recv() {
+            if let Event::AgentState { terminal_id, .. } = event {
+                assert_ne!(
+                    terminal_id, id,
+                    "a dropped stale transition must not broadcast",
+                );
+            }
+        }
+    }
+
+    /// #1256 perf guard: one compose keystroke stays within its registry
+    /// lock budget — the one-acquisition `write_context_for` snapshot plus
+    /// `acquire_live`'s lock-free fast path (at most one fallback read).
+    #[tokio::test]
+    async fn keystroke_write_path_stays_within_its_registry_lock_budget() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "budget-keystroke")
+            .await
+            .expect("spawn");
+        let terminal_id = TerminalId(1259);
+        register_test_agent(
+            &config.terminal,
+            terminal_id,
+            &backend_key,
+            SessionKey::new("budget-keystroke"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Idle),
+            None,
+        )
+        .await;
+
+        let before = config
+            .terminal
+            .lock_acquisitions
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            handle_write_batch(
+                &config,
+                terminal_id,
+                &[b"a".to_vec()],
+                TerminalInputIntent::Compose,
+            )
+            .await
+        );
+        let taken = config
+            .terminal
+            .lock_acquisitions
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - before;
+        assert!(
+            taken <= 2,
+            "a compose keystroke took {taken} registry acquisitions (budget: 2)",
+        );
+    }
+
+    /// #1256 perf guard: a steady-state output chunk (byte-flow Working
+    /// over Working — the 50-agent fleet's dominant traffic) stays within
+    /// its registry lock budget: the `begin_pty_chunk` context plus the
+    /// state fold's single acquisition. A chunk that commits a transition
+    /// takes one more for the post-persist commit.
+    #[tokio::test]
+    async fn pump_chunk_path_stays_within_its_registry_lock_budget() {
+        let agent = lazybox_agents::registry()
+            .get("claude")
+            .expect("claude agent is a built-in");
+        let terminals = TerminalRegistry::default();
+        let (bus, _rx) = tokio::sync::broadcast::channel(64);
+        let id = TerminalId(1260);
+        let session_key = SessionKey::from("github:o/r#1260");
+        terminals
+            .register_terminal(
+                id,
+                "backend-1260".to_string(),
+                session_key.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        let durability = test_agent_state_durability(id);
+        let mut state_machine = lazybox_agents::AgentStateMachine::new();
+        state_machine.mark_booted();
+        let mut buf = Vec::new();
+
+        // Warm-up chunk: may commit the initial Working transition.
+        let context = terminals
+            .begin_pty_chunk(id, 1, true, Some(false), true)
+            .await;
+        note_pty_activity_with(
+            Some(context),
+            Some(&agent),
+            &mut buf,
+            b"esbuild something\r\n",
+            1,
+            true,
+            &terminals,
+            &bus,
+            Some(&durability),
+            id,
+            &session_key,
+            &mut state_machine,
+        )
+        .await;
+
+        // Steady-state chunk, driven exactly as the production pump drives
+        // it: one chunk-context acquisition + the fold's one acquisition.
+        let before = terminals
+            .lock_acquisitions
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let context = terminals
+            .begin_pty_chunk(id, 2, false, Some(false), true)
+            .await;
+        note_pty_activity_with(
+            Some(context),
+            Some(&agent),
+            &mut buf,
+            b"more of the same output\r\n",
+            2,
+            false,
+            &terminals,
+            &bus,
+            Some(&durability),
+            id,
+            &session_key,
+            &mut state_machine,
+        )
+        .await;
+        let taken = terminals
+            .lock_acquisitions
+            .load(std::sync::atomic::Ordering::Relaxed)
+            - before;
+        assert!(
+            taken <= 2,
+            "a steady-state output chunk took {taken} registry acquisitions (budget: 2)",
+        );
     }
 
     #[tokio::test]
@@ -13526,8 +14139,7 @@ mod tests {
             .await;
         config
             .terminal
-            .entries
-            .lock()
+            .lock_entries()
             .await
             .get_mut(&authenticating)
             .expect("registered terminal")
@@ -16478,8 +17090,42 @@ mod tests {
             "the shell never switched the branch back",
         );
 
-        // Agent: the branch-strict guard still applies — it can't silently
-        // reuse a checkout on the wrong branch.
+        // Agent: an untracked-only drift is lossless to undo, so the spawn
+        // switches the checkout back to the session branch instead of
+        // dead-ending behind the mismatch prompt (advise-never-forbid).
+        let (path, _id, _on_main) = resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &TerminalKind::Agent("claude".into()),
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("an agent spawn auto-switches a clean drifted worktree back");
+        assert_eq!(path, wt, "the agent lands in the existing worktree");
+        let head = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "solutions",
+            "the checkout is back on the session branch",
+        );
+        assert!(
+            wt.join("wip.txt").exists(),
+            "untracked work rides along with the switch"
+        );
+
+        // Drift again, but this time with uncommitted TRACKED changes —
+        // real work is at stake, so the agent keeps the explicit prompt.
+        git(&wt, &["switch", "-q", "-c", "feat/azure-env-render-2"]);
+        std::fs::write(wt.join("tracked.txt"), "v1\n").unwrap();
+        git(&wt, &["add", "tracked.txt"]);
+        git(&wt, &["commit", "-q", "-m", "tracked file"]);
+        std::fs::write(wt.join("tracked.txt"), "v2 uncommitted\n").unwrap();
         let err = resolve_or_create_session(
             &config,
             &session_key,
@@ -16489,10 +17135,20 @@ mod tests {
             lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await
-        .expect_err("an agent must not reuse a worktree on the wrong branch");
+        .expect_err("an agent must not clobber uncommitted tracked work");
         assert!(
             err.to_string().contains("spawn aborted"),
-            "the agent spawn is refused: {err}"
+            "the dirty-drift agent spawn is refused: {err}"
+        );
+        let head = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "feat/azure-env-render-2",
+            "the refused spawn leaves the dirty checkout untouched",
         );
     }
 

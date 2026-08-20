@@ -527,7 +527,7 @@ fn all_events() -> Vec<Event> {
             agents: vec!["claude".into(), "codex".into()],
             default_agent: Some("codex".into()),
         },
-        Event::WorkspaceUpserted(Box::new(sample_workspace())),
+        Event::WorkspaceUpserted(std::sync::Arc::new(sample_workspace())),
         Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(key.as_str())),
         Event::ProjectUpserted(Box::new(sample_project())),
         Event::ProjectRemoved(lazybox_core::ProjectKey::github("o", "r")),

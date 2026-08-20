@@ -2154,32 +2154,36 @@ impl Config {
     where
         F: FnOnce(&mut Self) + Send + 'static,
     {
-        type Job = Box<dyn FnOnce() + Send>;
-        static TX: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
-        let tx = TX.get_or_init(|| {
-            let (tx, rx) = std::sync::mpsc::channel::<Job>();
-            let spawned = std::thread::Builder::new()
-                .name("lazybox-config-persist".into())
-                .spawn(move || {
-                    while let Ok(job) = rx.recv() {
-                        job();
-                    }
-                });
-            if let Err(e) = spawned {
-                tracing::warn!("config persist worker failed to spawn: {e}");
-            }
-            tx
-        });
-        let job: Job = Box::new(move || {
+        let job: PersistJob = Box::new(move || {
             if let Err(e) = Self::save_with(f) {
                 tracing::warn!("async config save failed: {e}");
             }
         });
-        if let Err(std::sync::mpsc::SendError(job)) = tx.send(job) {
+        if let Err(std::sync::mpsc::SendError(job)) = persist_tx().send(job) {
             // Worker gone (spawn failed / panicked): degrade to the
             // synchronous path rather than dropping the save.
             job();
         }
+    }
+
+    /// Wait (bounded) for every queued [`save_with_async`] mutation to
+    /// reach disk. The QUIT PATH must call this (#1211): the worker is
+    /// a detached thread, so returning from `main` with saves still
+    /// queued silently lost the last few keystroke-persisted changes —
+    /// a collapse/pin/Space assignment made just before `q q` came back
+    /// undone on the next launch, reading as "sidebar organization not
+    /// preserved on restart". Returns `false` when the flush timed out
+    /// (saves may be lost) — callers log, they don't block longer.
+    pub fn flush_pending_saves(timeout: std::time::Duration) -> bool {
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let job: PersistJob = Box::new(move || {
+            let _ = done_tx.send(());
+        });
+        if persist_tx().send(job).is_err() {
+            // Worker gone: every prior save already ran synchronously.
+            return true;
+        }
+        done_rx.recv_timeout(timeout).is_ok()
     }
 
     /// `save_with` against an explicit path. Split out so tests can
@@ -2204,6 +2208,29 @@ impl Config {
     pub fn default_path() -> PathBuf {
         lazybox_core::paths::config_yaml()
     }
+}
+
+type PersistJob = Box<dyn FnOnce() + Send>;
+
+/// The ordered background config-persist lane behind
+/// [`Config::save_with_async`] / [`Config::flush_pending_saves`].
+fn persist_tx() -> &'static std::sync::mpsc::Sender<PersistJob> {
+    static TX: std::sync::OnceLock<std::sync::mpsc::Sender<PersistJob>> =
+        std::sync::OnceLock::new();
+    TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<PersistJob>();
+        let spawned = std::thread::Builder::new()
+            .name("lazybox-config-persist".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    job();
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("config persist worker failed to spawn: {e}");
+        }
+        tx
+    })
 }
 
 struct ConfigCacheEntry {
@@ -3597,6 +3624,50 @@ repos:
         assert_eq!(cfg.agent.live_agent_cap(), Some(7));
         let cfg: Config = serde_yaml::from_str("agent:\n  max_live_agents: 0\n").expect("parse");
         assert_eq!(cfg.agent.live_agent_cap(), None, "0 = no advisory");
+    }
+
+    /// #1211 regression: keystroke-persisted config rides the async
+    /// worker, and the QUIT PATH must be able to flush it — a queued
+    /// save must be on disk once `flush_pending_saves` returns, so a
+    /// collapse/pin made just before `q q` survives the restart.
+    #[test]
+    fn async_saves_flush_to_disk_before_quit() {
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
+                    None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
+                }
+            }
+        }
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-config-flush-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir temp");
+        let _dir_guard = TempDir(dir.clone());
+        let _env_guard = EnvGuard(std::env::var_os("LAZYBOX_HOME"));
+        unsafe { std::env::set_var("LAZYBOX_HOME", &dir) };
+        Config::invalidate_cache();
+
+        Config::save_with_async(|c| {
+            c.ui.collapsed_repos.insert("owner/repo".into());
+        });
+        assert!(
+            Config::flush_pending_saves(std::time::Duration::from_secs(5)),
+            "flush must complete within the bound"
+        );
+        let reloaded = Config::load_from(&Config::default_path()).expect("reload");
+        assert!(
+            reloaded.ui.collapsed_repos.contains("owner/repo"),
+            "the queued save reached disk before flush returned"
+        );
+        Config::invalidate_cache();
     }
 
     /// Autonomous sessions launch in no-permission mode by default,

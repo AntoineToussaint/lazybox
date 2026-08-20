@@ -1656,15 +1656,15 @@ pub struct AgentSection {
     /// `Working`); raise it to be less eager to call a turn finished.
     #[serde(default)]
     pub quiet_classify_secs: Option<u64>,
-    /// Ceiling on concurrently live agent terminals across all
-    /// workspaces. Agent CLIs are heavyweight (~110 MB RSS each,
+    /// ADVISORY ceiling on concurrently live agent terminals across
+    /// all workspaces. Agent CLIs are heavyweight (~110 MB RSS each,
     /// measured) and the tmux backend deliberately never reaps —
     /// sessions accumulate across restarts until the machine runs out
     /// of memory (a measured 48 live Claude CLIs = 5.5 GB was the
-    /// 2026-08-19 pressure incident). At the cap, a new agent spawn is
-    /// refused with a notice naming this knob; shells, resumes of
-    /// existing sessions, and restart recovery are never blocked.
-    /// Unset → 32; `0` → no cap.
+    /// 2026-08-19 pressure incident). Over the cap, spawns and startup
+    /// recovery WARN (a transient footer notice naming `]]x`) but are
+    /// never refused — lazybox advises, it does not forbid.
+    /// Unset → 32; `0` → no warnings.
     #[serde(default)]
     pub max_live_agents: Option<usize>,
 }
@@ -3589,7 +3589,7 @@ repos:
         let cfg: Config = serde_yaml::from_str("agent:\n  max_live_agents: 7\n").expect("parse");
         assert_eq!(cfg.agent.live_agent_cap(), Some(7));
         let cfg: Config = serde_yaml::from_str("agent:\n  max_live_agents: 0\n").expect("parse");
-        assert_eq!(cfg.agent.live_agent_cap(), None, "0 = uncapped");
+        assert_eq!(cfg.agent.live_agent_cap(), None, "0 = no advisory");
     }
 
     /// Autonomous sessions launch in no-permission mode by default,

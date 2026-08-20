@@ -1457,6 +1457,33 @@ impl<T: TerminalAdapter> Model<T> {
             SyncStatus::new(summary, recent, chrono::Utc::now())
                 .with_governor(self.status.github_governor.clone()),
         );
+        // Ask the daemon for its resource posture (2026-08-19 audit);
+        // the reply (`Event::ResourcePosture`) repaints the open window
+        // via [`Model::update_sync_status_posture`]. Until it lands the
+        // section shows "measuring…".
+        self.send_cmd(lazybox_ipc::Command::GetResourcePosture);
+    }
+
+    /// Repaint the open sync-status window with the daemon's resource
+    /// posture reply. Dropped when the window isn't the top modal —
+    /// the user closed it before the reply landed.
+    pub(super) fn update_sync_status_posture(&mut self, posture: lazybox_ipc::ResourcePosture) {
+        use crate::realm::components::sync_status::SyncStatus;
+
+        if self.modal_stack.last() != Some(&Id::SyncStatus) {
+            return;
+        }
+        let summary = self.status.sync.latest_per_source();
+        let recent: Vec<_> = self.status.sync.recent().cloned().collect();
+        self.mount_modal(
+            Id::SyncStatus,
+            SyncStatus::new(summary, recent, chrono::Utc::now())
+                .with_governor(self.status.github_governor.clone())
+                .with_posture(
+                    posture,
+                    crate::realm::model::helpers::frame_budget_overruns(),
+                ),
+        );
     }
 
     /// Build + mount the scrollable full-description reader (#448) for a

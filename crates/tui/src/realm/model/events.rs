@@ -1115,7 +1115,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. }
                 | IpcEvent::AgentUsageLimit { .. }
                 | IpcEvent::WorkspaceCreated { .. }
-                | IpcEvent::ErrorInbox { .. } => {}
+                | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::ResourcePosture(..) => {}
             }
         }
         // The reset countdown parsed from a usage-limit banner (#1012):
@@ -1690,6 +1691,14 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Resource-posture reply (2026-08-19 audit) — repaint the open
+        // Shift-D window. Dropped by `update_sync_status_posture` when
+        // the window is already closed.
+        if let IpcEvent::ResourcePosture(posture) = &event {
+            self.update_sync_status_posture(posture.clone());
+            self.redraw = true;
+            return;
+        }
         // Durable Error Inbox snapshot (#831) — repaint the open inbox.
         // A snapshot that lands while the inbox is closed is dropped by
         // `update_error_inbox`.
@@ -1950,7 +1959,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::RecoveredTerminalsRequireRestart { .. }
             | IpcEvent::AgentUsageLimit { .. }
             | IpcEvent::WorkspaceCreated { .. }
-            | IpcEvent::ErrorInbox { .. } => {}
+            | IpcEvent::ErrorInbox { .. }
+            | IpcEvent::ResourcePosture(..) => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -2223,7 +2233,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. }
                 | IpcEvent::AgentUsageLimit { .. }
                 | IpcEvent::WorkspaceCreated { .. }
-                | IpcEvent::ErrorInbox { .. } => {}
+                | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::ResourcePosture(..) => {}
             }
         }
         // CleanWorktrees finished — replace the "cleaning…" notice

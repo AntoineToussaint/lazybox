@@ -130,6 +130,13 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 _ => PickFlow::Plain,
             },
+            Id::MoveToSpacePicker => match &self.modal_flow {
+                Some(ModalFlow::MoveToSpacePick { source, entries }) => PickFlow::MoveToSpace {
+                    source: Some(source.clone()),
+                    entries: entries.clone(),
+                },
+                _ => PickFlow::Plain,
+            },
             Id::RequestReviewers => PickFlow::Reviewers {
                 workspace_key: match &self.modal_flow {
                     Some(ModalFlow::ReviewRequest { workspace }) => Some(workspace.clone()),
@@ -236,6 +243,7 @@ impl<T: TerminalAdapter> Model<T> {
             | Id::AddAssignees
             | Id::ImportCheckoutList
             | Id::LinearTeamRepo
+            | Id::MoveToSpacePicker
             | Id::InspectList => {
                 self.modal_flow = None;
             }
@@ -468,6 +476,22 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_new_workspace_input(project_key);
             }
             PickOutcome::MountNewProject => self.mount_new_project_input(),
+            PickOutcome::AssignSpace { source, space } => {
+                let resolved = self
+                    .sidebar
+                    .assign_source_to_space(&source, space.as_deref().unwrap_or(""));
+                if let Some(name) = space {
+                    // Remembered as the picker's preselection so filing
+                    // the next repo into the same Space is one confirm
+                    // (#1206). Unassign deliberately leaves it alone.
+                    lazybox_config::Config::save_with_async(move |c| c.ui.last_space = Some(name));
+                }
+                self.flash_info(format!("{source} → {resolved}"));
+                self.redraw = true;
+            }
+            PickOutcome::MountMoveToSpaceInput { source } => {
+                self.mount_move_to_space_input(source);
+            }
             PickOutcome::MapLinearTeam { team, repo } => {
                 let (team_key, repo_slug) = (team.clone(), repo.clone());
                 match lazybox_config::Config::save_with(move |config| {

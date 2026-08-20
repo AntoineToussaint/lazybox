@@ -157,8 +157,36 @@ pub enum PickFlow {
     Settings {
         action_count: usize,
     },
+    /// Move-to-Space picker (`x m`, #1206). Each row is an index into
+    /// `entries` so the assign / unassign / new-Space rows resolve
+    /// without string sentinels.
+    MoveToSpace {
+        source: Option<String>,
+        entries: Vec<SpacePickEntry>,
+    },
     Runner,
     Plain,
+}
+
+/// Which move-to-Space row starts highlighted (#1206): the last-used
+/// Space when it still exists, else the source's current Space, else
+/// the first row — so filing many repos into one Space is Enter each.
+pub fn space_preselect_index(spaces: &[String], last: Option<&str>, current: &str) -> usize {
+    last.and_then(|l| spaces.iter().position(|s| s == l))
+        .or_else(|| spaces.iter().position(|s| s == current))
+        .unwrap_or(0)
+}
+
+/// One row of the move-to-Space picker (#1206), in rendered order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpacePickEntry {
+    /// A hand-created Space (a `ui.spaces` entry) to file the source
+    /// into.
+    Assign(String),
+    /// Blank assignment — back to the owner auto-seed / `Ungrouped`.
+    Unassign,
+    /// Drop to the free-text input for a brand-new Space name.
+    NewSpace,
 }
 
 /// Side-effect-free result of resolving one picker.
@@ -219,6 +247,18 @@ pub enum PickOutcome<F> {
     },
     MountNewWorkspace(ProjectKey),
     MountNewProject,
+    /// Move-to-Space pick (#1206): assign `source` to the named Space,
+    /// or unassign it (`None` → owner auto-seed). The renderer mutates
+    /// its sidebar + persists `ui.spaces` / `ui.last_space`.
+    AssignSpace {
+        source: String,
+        space: Option<String>,
+    },
+    /// "＋ New Space…" pick (#1206): drop to the free-text
+    /// move-to-Space input for `source`.
+    MountMoveToSpaceInput {
+        source: String,
+    },
     /// Persist `providers.linear.teams.<team> = repo` and re-provision the
     /// stuck Linear spawn (#1041).
     MapLinearTeam {
@@ -451,6 +491,23 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 repo: repo.to_string(),
             })
             .unwrap_or(PickOutcome::NoOp),
+        PickFlow::MoveToSpace { source, entries } => {
+            match (source, picks.first().and_then(P::as_index)) {
+                (Some(source), Some(idx)) => match entries.get(idx) {
+                    Some(SpacePickEntry::Assign(name)) => PickOutcome::AssignSpace {
+                        source,
+                        space: Some(name.clone()),
+                    },
+                    Some(SpacePickEntry::Unassign) => PickOutcome::AssignSpace {
+                        source,
+                        space: None,
+                    },
+                    Some(SpacePickEntry::NewSpace) => PickOutcome::MountMoveToSpaceInput { source },
+                    None => PickOutcome::NoOp,
+                },
+                _ => PickOutcome::NoOp,
+            }
+        }
         PickFlow::Reviewers { workspace_key } => {
             let logins = text_values(picks);
             match (workspace_key, logins.is_empty()) {
@@ -1073,6 +1130,55 @@ mod tests {
                 PickFlow::Filters,
             ),
             PickOutcome::SetFilters(filters) if filters == [2, 7]
+        ));
+    }
+
+    /// #1206: last-used wins, current Space is the fallback, and a
+    /// vanished last-used degrades instead of misfiling.
+    #[test]
+    fn space_preselect_prefers_last_then_current_then_first() {
+        let spaces = vec!["Work".to_string(), "Later".to_string()];
+        assert_eq!(space_preselect_index(&spaces, Some("Later"), "Work"), 1);
+        assert_eq!(space_preselect_index(&spaces, None, "Later"), 1);
+        assert_eq!(space_preselect_index(&spaces, Some("Gone"), "Work"), 0);
+        assert_eq!(space_preselect_index(&spaces, None, "obin-ai"), 0);
+    }
+
+    /// #1206: the move-to-Space picker resolves assign / unassign /
+    /// new-Space by entries index, and degrades to `NoOp` (never a wrong
+    /// assignment) on a stale index or a lost source stash.
+    #[test]
+    fn move_to_space_pick_resolves_assign_unassign_and_new() {
+        let entries = vec![
+            SpacePickEntry::Assign("Work".into()),
+            SpacePickEntry::Assign("Later".into()),
+            SpacePickEntry::Unassign,
+            SpacePickEntry::NewSpace,
+        ];
+        let flow = |source: Option<&str>| PickFlow::MoveToSpace {
+            source: source.map(str::to_string),
+            entries: entries.clone(),
+        };
+        assert!(matches!(
+            resolve_pick(&[Payload::Index(1)], flow(Some("obin-ai/lazybox"))),
+            PickOutcome::AssignSpace { source, space: Some(space) }
+                if source == "obin-ai/lazybox" && space == "Later"
+        ));
+        assert!(matches!(
+            resolve_pick(&[Payload::Index(2)], flow(Some("obin-ai/lazybox"))),
+            PickOutcome::AssignSpace { space: None, .. }
+        ));
+        assert!(matches!(
+            resolve_pick(&[Payload::Index(3)], flow(Some("obin-ai/lazybox"))),
+            PickOutcome::MountMoveToSpaceInput { source } if source == "obin-ai/lazybox"
+        ));
+        assert!(matches!(
+            resolve_pick(&[Payload::Index(9)], flow(Some("obin-ai/lazybox"))),
+            PickOutcome::NoOp
+        ));
+        assert!(matches!(
+            resolve_pick(&[Payload::Index(0)], flow(None)),
+            PickOutcome::NoOp
         ));
     }
 

@@ -121,6 +121,14 @@ pub enum Id {
     /// mutates `ui.spaces` in place (no daemon command). The source
     /// label lives in the `ModalFlow::MoveToSpace` flow.
     MoveToSpace,
+    /// Choice picker for assigning the cursor's source group to a
+    /// hand-created Space (#1206) — the `x m` front door when any
+    /// exist. Rows carry [`ChoicePayload::Index`] into the
+    /// `PickFlow::MoveToSpace` entries (Spaces in display order, then
+    /// unassign, then "＋ New Space…" which drops to
+    /// [`Id::MoveToSpace`]). Preselects `ui.last_space`. The source
+    /// label lives in the `ModalFlow::MoveToSpace` flow.
+    MoveToSpacePicker,
     /// Single-line input prompt for naming a brand-new local
     /// Project. Submit → `Command::CreateProject { name }`.
     NewProject,
@@ -541,6 +549,7 @@ impl Id {
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
+                | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
                 | Id::WorkAgentPicker
@@ -879,6 +888,13 @@ pub(crate) enum ModalFlow {
     /// being assigned. Consumed by `handle_input_submitted` →
     /// `Sidebar::assign_source_to_space`.
     MoveToSpace { source: String },
+    /// Move-to-Space picker (#1206): the source plus the entry list the
+    /// picker rows index into, snapshotted at mount so a sidebar
+    /// recompute under the modal can't shift what Enter picks.
+    MoveToSpacePick {
+        source: String,
+        entries: Vec<lazybox_tui_core::choice::SpacePickEntry>,
+    },
     /// Startup update modal: the available target whose dismissal is
     /// persisted on Esc.
     UpdateTarget { target: String },

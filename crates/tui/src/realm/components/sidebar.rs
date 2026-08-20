@@ -733,6 +733,18 @@ impl Sidebar {
         self.inner.space_of_source(source)
     }
 
+    /// The hand-created Spaces in display order — the move-to-Space
+    /// picker's rows (#1206).
+    pub fn hand_created_spaces(&self) -> Vec<String> {
+        self.inner.hand_created_spaces()
+    }
+
+    /// The auto-seed fallback Space for `source` — names the picker's
+    /// unassign row (#1206).
+    pub fn auto_space_of_source(&self, source: &str) -> String {
+        self.inner.auto_space_of_source(source)
+    }
+
     /// Assign a source group to a Space (#860), persisting to
     /// `ui.spaces`. Returns the resolved Space name for a footer notice.
     pub fn assign_source_to_space(&mut self, source: &str, space: &str) -> String {

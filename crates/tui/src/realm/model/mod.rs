@@ -129,6 +129,12 @@ pub enum Id {
     /// [`Id::MoveToSpace`]). Preselects `ui.last_space`. The source
     /// label lives in the `ModalFlow::MoveToSpace` flow.
     MoveToSpacePicker,
+    /// Single-line input renaming the Space header under the cursor
+    /// (#1211), prefilled with its current name. Submit rewrites
+    /// `ui.spaces` (merging into an existing Space of the new name) and
+    /// carries the collapse flag. The old name lives in
+    /// `ModalFlow::RenameSpace`.
+    RenameSpace,
     /// Right-click menu on a sidebar Space / repo header (#1211). Rows
     /// carry `ChoicePayload::Index` into the action list stashed in
     /// `ModalFlow::HeaderContext`; the pick dispatches that action
@@ -901,6 +907,8 @@ pub(crate) enum ModalFlow {
         source: String,
         entries: Vec<lazybox_tui_core::choice::SpacePickEntry>,
     },
+    /// Rename-Space input (#1211), carrying the Space's current name.
+    RenameSpace { space: String },
     /// Header right-click menu (#1211): the actions list the picker
     /// rows index into, snapshotted at mount.
     HeaderContext {

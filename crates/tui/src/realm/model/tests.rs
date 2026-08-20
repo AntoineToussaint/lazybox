@@ -6883,6 +6883,7 @@ mod stale_input_tests {
                 // Drop — text/config inputs and multi-step flow steps.
                 Id::NewWorkspace
                 | Id::RenameWorkspace
+                | Id::RenameSpace
                 | Id::MoveToSpace
                 | Id::NewProject
                 | Id::NewWorkspaceRepo
@@ -6935,6 +6936,7 @@ mod stale_input_tests {
             Id::Notes,
             Id::NewWorkspace,
             Id::RenameWorkspace,
+            Id::RenameSpace,
             Id::MoveToSpace,
             Id::MoveToSpacePicker,
             Id::HeaderContext,
@@ -7813,6 +7815,108 @@ mod modal_input_responsiveness_tests {
             priority: None,
             state_label: None,
         }
+    }
+
+    /// #1211 journey on a temp `LAZYBOX_HOME`: `x R` on a Space header
+    /// renames the Space in place — repos regroup under the new name,
+    /// the collapse flag follows, `ui.spaces` persists — while `x R`
+    /// on a workspace row still mounts the workspace rename.
+    #[test]
+    fn rename_space_from_its_header_renames_and_persists() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-rename-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let seed = [
+            ("github:acme/a#1", "acme", "a"),
+            ("github:obin-ai/c#3", "obin-ai", "c"),
+        ];
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: seed
+                .iter()
+                .map(|(k, owner, repo)| {
+                    let mut w = lazybox_core::Workspace::empty(
+                        WorkspaceKey::new(*k),
+                        "main",
+                        chrono::Utc::now(),
+                    );
+                    w.project_key = Some(lazybox_core::ProjectKey::github(owner, repo));
+                    w.pr = Some(repo_task(k, &format!("{owner}/{repo}")));
+                    w
+                })
+                .collect(),
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        // On a workspace row, `x R` still renames the workspace.
+        assert!(
+            m.sidebar
+                .focus_workspace_key(&lazybox_core::SessionKey::from(&WorkspaceKey::new(
+                    "github:acme/a#1"
+                )))
+        );
+        m.dispatch_action(&Action::RenameWorkspace);
+        assert_eq!(m.top_modal(), Some(&Id::RenameWorkspace));
+        m.pop_modal();
+        m.modal_flow = None;
+
+        // On the Space header, the same chord renames the Space.
+        assert!(m.sidebar.focus_header_row("acme"));
+        m.dispatch_action(&Action::RenameWorkspace);
+        assert_eq!(m.top_modal(), Some(&Id::RenameSpace));
+        let _ = m.handle_input_submitted("Clients".into());
+
+        let headers = m.sidebar.__test_header_rows();
+        assert!(
+            headers
+                .iter()
+                .any(|(is_repo, n)| !is_repo && n == "Clients"),
+            "space renamed on screen: {headers:?}",
+        );
+        assert!(
+            !headers.iter().any(|(is_repo, n)| !is_repo && n == "acme"),
+            "old space header gone: {headers:?}",
+        );
+        assert!(
+            headers.iter().any(|(is_repo, n)| *is_repo && n == "acme/a"),
+            "repo regrouped under the new Space: {headers:?}",
+        );
+
+        // Persisted: `ui.spaces` carries the claim under the new name.
+        let cfg_path = home.join("config.yaml");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let ok = lazybox_config::Config::load_from(&cfg_path)
+                .map(|c| {
+                    c.ui.spaces
+                        .iter()
+                        .any(|s| s.name == "Clients" && s.sources.iter().any(|x| x == "acme/a"))
+                })
+                .unwrap_or(false);
+            if ok {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "renamed Space never persisted",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// #1211 journey on a temp `LAZYBOX_HOME`: a repo moves within its

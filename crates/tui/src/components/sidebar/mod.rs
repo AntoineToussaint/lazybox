@@ -2728,6 +2728,50 @@ impl Sidebar {
         Some(moved)
     }
 
+    /// Rename the Space at/above the cursor (#1211): its claimed +
+    /// currently-rendered sources move to the new name (merging into an
+    /// existing Space of that name), the collapse flag follows, and
+    /// both persist. Returns the resolved `(old, new)` for the notice;
+    /// `None` when the name is blank/unchanged.
+    pub fn rename_space(&mut self, old: &str, new: &str) -> Option<(String, String)> {
+        let rendered: Vec<String> = self
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::RepoHeader(n) => Some(n.clone()),
+                _ => None,
+            })
+            .filter(|r| self.space_of_source(r) == old)
+            .collect();
+        if !lazybox_tui_core::inbox::rename_space(&mut self.spaces, old, new, &rendered) {
+            return None;
+        }
+        let new = new.trim().to_string();
+        if self.collapsed_spaces.remove(old) {
+            self.collapsed_spaces.insert(new.clone());
+        }
+        self.recompute_visible();
+        let spaces_snapshot = self.spaces.clone();
+        let collapsed_snapshot = self.collapsed_spaces.clone();
+        let (old_for_cfg, new_for_cfg) = (old.to_string(), new.clone());
+        lazybox_config::Config::save_with_async(move |c| {
+            c.ui.spaces = spaces_snapshot;
+            c.ui.collapsed_spaces = collapsed_snapshot;
+            // The picker preselection follows the rename (#1206).
+            if c.ui.last_space.as_deref() == Some(old_for_cfg.as_str()) {
+                c.ui.last_space = Some(new_for_cfg);
+            }
+        });
+        if let Some(idx) = self
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::SpaceHeader(n) if n == &new))
+        {
+            self.set_cursor(idx);
+        }
+        Some((old.to_string(), new))
+    }
+
     /// The Space a source label currently resolves to (explicit
     /// assignment, else owner auto-seed) — used to prefill the
     /// move-to-Space prompt.

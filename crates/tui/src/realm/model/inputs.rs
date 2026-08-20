@@ -420,6 +420,25 @@ impl<T: TerminalAdapter> Model<T> {
                     _ => {}
                 }
             }
+            Some(Id::RenameSpace) => {
+                let new = text.trim().to_string();
+                let old = match self.modal_flow.take() {
+                    Some(ModalFlow::RenameSpace { space }) => Some(space),
+                    _ => None,
+                };
+                if let Some(old) = old {
+                    match self.sidebar.rename_space(&old, &new) {
+                        Some((old, new)) => {
+                            self.flash_info(format!("Space {old} → {new}"));
+                            self.redraw = true;
+                        }
+                        // Blank / unchanged: advise, never error.
+                        None => self.flash_hint("Space name unchanged"),
+                    }
+                } else {
+                    tracing::warn!("rename-space submit without a stashed name — dropped");
+                }
+            }
             Some(Id::RenameWorkspace) => {
                 let name = text.trim().to_string();
                 let target = match self.modal_flow.take() {

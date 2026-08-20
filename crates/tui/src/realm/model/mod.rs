@@ -2535,6 +2535,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// actions; see the `remote` field. See #742.
     pub fn with_remote(mut self) -> Self {
         self.remote = true;
+        // An attach client's daemon snapshot describes another machine's
+        // workspaces; local stars absent from it are not stale, so the
+        // snapshot-time prune must never fire here (#1244).
+        self.sidebar.set_snapshot_prune(false);
         self
     }
 
@@ -2851,6 +2855,115 @@ impl<T: TerminalAdapter> Model<T> {
             .map(editor_entry_to_user)
             .collect();
         self.setup.editors = crate::editors::discover_at_startup(user);
+    }
+
+    /// Apply the client-owned `~/.lazybox/config.yaml` state — theme,
+    /// sidebar view state (stars / pins / collapse / Spaces), auto-fix
+    /// display, the per-agent spawn catalog + model tiers, keymap
+    /// preset + overrides, tour/tips flags, and split percentages. ONE
+    /// entry point shared by every boot path (#1244): the daemon owns
+    /// none of this, so the attach/remote client must apply it exactly
+    /// like the embedded binary — a path that skips it boots with
+    /// unseeded lists, renders no stars, and its first persisted toggle
+    /// starts from empty. Path-specific wiring (notification arming,
+    /// wizard seeding, editor/open-with discovery) stays with the boot
+    /// paths.
+    pub fn apply_client_config(&mut self, user_config: &lazybox_config::Config) {
+        // Apply the persisted theme before the first render so the UI
+        // boots in the user's palette. An unknown name (theme renamed /
+        // removed since they picked it) leaves the default active.
+        if let Some(name) = user_config.ui.theme.as_deref()
+            && !crate::theme::set_by_name(name)
+        {
+            tracing::warn!("ui.theme = {name:?} not found; using the default theme");
+        }
+        let ui_defaults = user_config.resolved_ui();
+        self.apply_sidebar_config(
+            user_config.attention.clone(),
+            user_config.ui.collapsed_repos.clone(),
+            user_config.ui.pinned_repos.clone(),
+            user_config
+                .ui
+                .focused_workspaces
+                .iter()
+                .map(|s| lazybox_core::SessionKey::from(s.as_str()))
+                .collect(),
+            user_config.ui.spaces.clone(),
+            user_config.ui.collapsed_spaces.clone(),
+            user_config.setup.default_agent.clone(),
+            &user_config.display,
+            &ui_defaults,
+            user_config.conventions.clone(),
+        );
+        self.apply_auto_fix_config(
+            user_config.auto_fix.enabled,
+            user_config.auto_fix.opt_out_labels.clone(),
+        );
+        // Generate the per-agent SpawnAgent catalog rows (#102 P2):
+        // exactly the agents the wizard enabled. An unconfigured user
+        // (empty `setup.agents`) falls back to the built-in trio so the
+        // zero-config `a c` / `a x` / `a u` chords still work out of
+        // the box.
+        // Using the enabled set (rather than unioning it with the
+        // built-ins) avoids binding both `cursor` and `cursor-agent` to
+        // `u`. Per-agent key remaps live in `ui.action_keys` under
+        // `spawn_agent.<id>`.
+        let agents: Vec<String> = if user_config.setup.agents.is_empty() {
+            ["claude", "codex", "cursor"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        } else {
+            user_config.setup.agents.iter().cloned().collect()
+        };
+        self.set_agents(agents.clone());
+        // Keymap = the selected in-tree preset (#102 P4) as a base
+        // layer, with the user's explicit `ui.action_keys` on top so
+        // individual tweaks win over the preset.
+        let mut overrides = user_config
+            .ui
+            .keymap_preset
+            .as_deref()
+            .and_then(lazybox_tui_core::action::keymap_preset)
+            .unwrap_or_default();
+        // An unknown preset name silently fell back to the default
+        // keymap; collect the warning now (surfaced with the rest of
+        // the keymap validation once the catalog is built).
+        let keymap_warnings: Vec<String> = user_config
+            .ui
+            .keymap_preset
+            .as_deref()
+            .and_then(lazybox_tui_core::action::unknown_preset_warning)
+            .into_iter()
+            .collect();
+        overrides.extend(user_config.ui.action_keys.clone());
+        self.apply_action_key_overrides(overrides);
+        // Per-agent model tiers (`agents.<id>.models`, with built-in
+        // presets for known agents) — drives the `w S` / `a S` chords.
+        let agent_models = agents
+            .iter()
+            .map(|id| (id.clone(), user_config.agent_models(id)))
+            .collect();
+        self.set_agent_models(agent_models);
+        // Startup keymap validation (#4 of the keybinding audit):
+        // unknown action_keys names, overrides that can't take effect,
+        // and override-induced chord collisions surface as a footer
+        // warning + messages-log details instead of failing silently.
+        self.surface_keymap_warnings(keymap_warnings);
+        // Arm the feature tour for anyone who hasn't seen it; the boot
+        // path decides when (if ever) to mount it.
+        self.set_auto_tour(!user_config.ui.tour_seen);
+        // Seed progressive feature tips (#115): the opt-out flag plus
+        // the ids already shown so they never repeat.
+        self.set_tips(user_config.ui.show_tips, user_config.ui.tips_seen.clone());
+        self.set_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
+    }
+
+    /// Test-only: read access to the sidebar pane, so the boot-path
+    /// config tests can assert what `apply_client_config` seeded.
+    #[doc(hidden)]
+    pub fn __test_sidebar(&self) -> &Sidebar {
+        &self.sidebar
     }
 
     /// Apply `~/.lazybox/config.yaml::attention` +
@@ -4684,8 +4797,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// from `~/.lazybox/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
     pub fn with_splits(mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) -> Self {
-        self.layout.apply_persisted(sidebar_pct, right_top_pct);
+        self.set_splits(sidebar_pct, right_top_pct);
         self
+    }
+
+    /// In-place form of [`Self::with_splits`], used by the shared
+    /// `apply_client_config` boot wiring (#1244).
+    pub fn set_splits(&mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) {
+        self.layout.apply_persisted(sidebar_pct, right_top_pct);
     }
 
     /// True when an editor launch must be declined because this client

@@ -55,12 +55,22 @@ pub(crate) enum TerminalIoFailure {
 /// Acquire exclusive access to one live backend session. Liveness is checked
 /// after the wait: teardown may remove or rebadge the terminal while another
 /// producer owns the interaction lock.
+///
+/// The liveness re-check prefers the lock-free `live_backend_key` view
+/// (#1237/#1256): a `parking_lot` read instead of joining the global
+/// registry mutex's FIFO queue behind the output pumps. Per that view's
+/// contract, drift can only cost a slow-path lookup or a momentarily stale
+/// admit — never a wrong reject — so a fast-path miss falls back to the
+/// authoritative mutex before refusing.
 pub(crate) async fn acquire_live(
     config: &ServerConfig,
     terminal_id: TerminalId,
     backend_key: &str,
 ) -> Option<tokio::sync::OwnedMutexGuard<()>> {
     let guard = config.terminal.lock_terminal_io(backend_key).await;
+    if config.terminal.live_backend_key(terminal_id).as_deref() == Some(backend_key) {
+        return Some(guard);
+    }
     if config
         .terminal
         .backend_key_for(terminal_id)
@@ -92,8 +102,7 @@ pub(crate) async fn write_locked(
     if intent == TerminalInputIntent::Submit {
         config
             .terminal
-            .entries
-            .lock()
+            .lock_entries()
             .await
             .entry(terminal_id)
             .or_default()
@@ -119,7 +128,7 @@ pub(crate) async fn write_locked(
     match intent {
         TerminalInputIntent::Compose => {}
         TerminalInputIntent::Submit => {
-            let mut entries = config.terminal.entries.lock().await;
+            let mut entries = config.terminal.lock_entries().await;
             if let Some(entry) = entries.get_mut(&terminal_id) {
                 let activity = &mut entry.activity;
                 if result.is_ok() {
@@ -188,7 +197,7 @@ pub(crate) async fn record_view_activity(
 ) -> u64 {
     let epoch_id = NEXT_VIEW_EPOCH.fetch_add(1, Ordering::Relaxed);
     let now = tokio::time::Instant::now();
-    let mut entries = terminals.entries.lock().await;
+    let mut entries = terminals.lock_entries().await;
     let activity = &mut entries.entry(terminal_id).or_default().activity;
     activity
         .view_epochs
@@ -207,7 +216,7 @@ async fn remove_unobserved_view_epoch(
     terminal_id: TerminalId,
     epoch_id: u64,
 ) {
-    let mut entries = config.terminal.entries.lock().await;
+    let mut entries = config.terminal.lock_entries().await;
     let Some(entry) = entries.get_mut(&terminal_id) else {
         return;
     };
@@ -222,7 +231,7 @@ pub(crate) async fn clear_view_activity(config: &ServerConfig, terminal_id: Term
 }
 
 pub(crate) async fn clear_view_activity_in(terminals: &TerminalRegistry, terminal_id: TerminalId) {
-    let mut entries = terminals.entries.lock().await;
+    let mut entries = terminals.lock_entries().await;
     let Some(entry) = entries.get_mut(&terminal_id) else {
         return;
     };
@@ -233,8 +242,7 @@ pub(crate) async fn clear_view_activity_in(terminals: &TerminalRegistry, termina
 #[cfg(test)]
 pub(crate) async fn has_activity(terminals: &TerminalRegistry, terminal_id: TerminalId) -> bool {
     terminals
-        .entries
-        .lock()
+        .lock_entries()
         .await
         .get(&terminal_id)
         .is_some_and(|entry| {
@@ -254,11 +262,22 @@ pub(crate) async fn suppresses_agent_reading(
     terminal_id: TerminalId,
     output_seq: Option<u64>,
 ) -> bool {
-    let mut entries = terminals.entries.lock().await;
+    let mut entries = terminals.lock_entries().await;
     let Some(entry) = entries.get_mut(&terminal_id) else {
         return false;
     };
-    let activity = &mut entry.activity;
+    activity_suppresses_reading(&mut entry.activity, output_seq)
+}
+
+/// Lock-free core of [`suppresses_agent_reading`], operating on an entry's
+/// activity the caller already holds under the registry guard. The pump's
+/// single-acquisition chunk context (#1256) evaluates it inside
+/// `TerminalRegistry::begin_pty_chunk` instead of re-queueing on the global
+/// mutex per chunk.
+pub(crate) fn activity_suppresses_reading(
+    activity: &mut AgentTerminalActivity,
+    output_seq: Option<u64>,
+) -> bool {
     if activity.submission_in_flight {
         return false;
     }

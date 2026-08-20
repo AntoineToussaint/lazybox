@@ -834,7 +834,13 @@ impl RateBudget {
         }
 
         self.refill_at(mono_now);
-        if self.available < 1.0 {
+        // The local token bucket is SELF-imposed pacing, so it never
+        // refuses a user-pressed action: an interactive request draws
+        // into deficit (available goes negative) and the refill repays
+        // it by delaying the next scheduled admits — the exact priority
+        // inversion we want. Only scheduled traffic waits here (#1249;
+        // mirrors the secondary-circuit interactive pass above).
+        if self.available < 1.0 && priority != RequestPriority::Interactive {
             let needed = 1.0 - self.available;
             let wait_secs = if self.refill_per_sec > 0.0 {
                 (needed / self.refill_per_sec).ceil() as u64
@@ -1568,10 +1574,44 @@ mod tests {
         let mut budget = RateBudget::new(2, 60.0);
         assert!(budget.try_acquire_at(now).is_ok());
         assert!(budget.try_acquire_at(now).is_ok());
+        // The local bucket paces SCHEDULED traffic; an empty bucket
+        // refuses the sweep, not the user (#1249).
         assert!(matches!(
-            budget.try_acquire_at(now),
+            budget.admit_at(
+                ApiResource::Graphql,
+                "merged-sweep",
+                RequestPriority::Recent,
+                1,
+                Utc::now(),
+                now,
+            ),
             Err(AcquireError::LocalBudgetExhausted { .. })
         ));
+    }
+
+    #[test]
+    fn interactive_draws_into_deficit_instead_of_being_refused() {
+        // #1249: the local bucket is self-imposed pacing — a user-pressed
+        // merge/reply is admitted even when empty, going into deficit that
+        // the refill repays by delaying the next scheduled admits.
+        let now = Instant::now();
+        let mut budget = RateBudget::new(1, 0.001);
+        assert!(budget.try_acquire_at(now).is_ok());
+        // Bucket empty: interactive still passes, twice.
+        assert!(budget.try_acquire_at(now).is_ok());
+        assert!(budget.try_acquire_at(now).is_ok());
+        // The deficit is real: scheduled traffic now waits it out.
+        let err = budget
+            .admit_at(
+                ApiResource::Graphql,
+                "merged-sweep",
+                RequestPriority::Recent,
+                1,
+                Utc::now(),
+                now,
+            )
+            .expect_err("scheduled traffic repays the deficit");
+        assert!(matches!(err, AcquireError::LocalBudgetExhausted { .. }));
     }
 
     #[test]
@@ -1605,7 +1645,11 @@ mod tests {
     fn refill_is_proportional_and_clamped() {
         let now = Instant::now();
         let mut budget = RateBudget::new(30, 30.0);
-        while budget.try_acquire_at(now).is_ok() {}
+        // Drain exactly the capacity — an is_ok() drain loop no longer
+        // terminates, since interactive admits draw into deficit (#1249).
+        for _ in 0..30 {
+            budget.try_acquire_at(now).expect("capacity drain");
+        }
         budget.refill_at(now + Duration::from_secs(10));
         assert!((budget.available - 5.0).abs() < 1e-6);
         budget.refill_at(now + Duration::from_secs(3600));

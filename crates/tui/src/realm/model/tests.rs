@@ -10699,12 +10699,14 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// When every stashed target regresses before Yes, nothing acts and
-    /// the marks survive so the user can retry — the no-op-survives rule
-    /// `bulk_dispatch` already follows, now honored on the confirmed
-    /// destructive path too (review follow-up).
+    /// When every stashed target regresses before Yes, nothing acts.
+    /// The regressed rows also leave the Inbox projection, and marks on
+    /// hidden rows are pruned (#1243) — so no stale, invisible selection
+    /// lingers to swallow the next Esc or redirect a later bulk action.
+    /// (The no-op-survives rule in `dispatch_action_confirmed_bulk`
+    /// still holds for targets that stay visible.)
     #[test]
-    fn bulk_merge_keeps_selection_when_all_targets_regress() {
+    fn bulk_merge_prunes_hidden_marks_when_all_targets_regress() {
         use lazybox_tui_core::action::Action;
         let mut m = build_model();
         let a = workspace("owner/repo#1", true, Duration::hours(1));
@@ -10731,8 +10733,8 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "the selection survives a no-op bulk merge",
+            0,
+            "the regressed rows left the projection, so their marks are pruned",
         );
     }
 
@@ -11018,21 +11020,20 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// #899 regression: an inherently single-target destructive action
-    /// (`x c` close-issue) must stay focused-only even under a `v`
-    /// selection — before the fix it swept the whole set behind the
-    /// generic "Archive N workspaces?" prompt and closed every marked
-    /// issue.
+    /// #1243: `x c` close-issue fans out over a live `v` selection.
+    /// The #899-era "inherently single-target" carve-out made it act on
+    /// ONE of N marked rows behind a plausible-looking single confirm —
+    /// the whole set is stashed now, and Yes closes every open issue.
     #[test]
-    fn close_issue_under_selection_stays_focused_only() {
+    fn close_issue_fans_out_over_selection() {
         use lazybox_tui_core::action::Action;
         let mut m = build_model();
         let a = workspace("owner/repo#1", false, Duration::hours(1));
-        let focus_key = SessionKey::from(&a.key);
-        seed_and_select(
-            &mut m,
-            vec![a, workspace("owner/repo#2", false, Duration::hours(2))],
-        );
+        let b = workspace("owner/repo#2", false, Duration::hours(2));
+        let a_key = a.key.clone();
+        let b_key = b.key.clone();
+        let focus_key = SessionKey::from(&a_key);
+        seed_and_select(&mut m, vec![a, b]);
         assert_eq!(m.sidebar.broadcast_selected_count(), 2);
         assert!(m.sidebar.focus_workspace_key(&focus_key));
 
@@ -11042,13 +11043,251 @@ mod merge_focus_follow_tests {
             Some(ModalFlow::ActionConfirm {
                 action: Action::CloseIssue,
                 targets,
-            }) => assert_eq!(
-                targets.as_slice(),
-                [ActionConfirmTarget::Workspace(focus_key.clone())],
-                "close-issue targets the focused row only, never the selection",
-            ),
-            other => panic!("expected a single-target close-issue confirm, got {other:?}"),
+            }) => assert_eq!(targets.len(), 2, "the whole selection is stashed"),
+            other => panic!("expected a bulk close-issue confirm, got {other:?}"),
         }
+
+        let cmds = m.handle_confirmed(true);
+        let mut closed: Vec<String> = cmds
+            .iter()
+            .map(|c| match c {
+                IpcCommand::CloseIssue { workspace_key } => workspace_key.as_str().to_string(),
+                other => panic!("expected CloseIssue, got {other:?}"),
+            })
+            .collect();
+        closed.sort();
+        let mut expected = vec![a_key.as_str().to_string(), b_key.as_str().to_string()];
+        expected.sort();
+        assert_eq!(closed, expected, "every marked open issue is closed");
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
+    /// #1243 journey, end-to-end through the KEYBOARD: three rows marked
+    /// with the `v` key, then `g d` — the confirm stashes all three and
+    /// Yes issues one `DeleteOrClose` per marked PR. On main this acted
+    /// on ONE row while the confirm read like a single-target prompt.
+    #[test]
+    fn bulk_delete_or_close_via_keys_fans_out_over_selection() {
+        use lazybox_tui_core::action::Action;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let rows = vec![
+            workspace("owner/repo#1", true, Duration::hours(1)),
+            workspace("owner/repo#2", true, Duration::hours(2)),
+            workspace("owner/repo#3", true, Duration::hours(3)),
+        ];
+        let mut expected: Vec<String> = rows.iter().map(|w| w.key.as_str().to_string()).collect();
+        let keys: Vec<SessionKey> = rows.iter().map(|w| SessionKey::from(&w.key)).collect();
+        for ws in rows {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+
+        // Mark every row via the `v` KEY — the real dispatch path, not
+        // the toggle method.
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.dispatch_key(KeyEvent::new(Key::Char('v'), KeyModifiers::NONE));
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 3);
+
+        // `g d` through the leader path.
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        assert!(m.leader_pending().is_some(), "g arms the github leader");
+        m.dispatch_key(KeyEvent::new(Key::Char('d'), KeyModifiers::NONE));
+
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        let stashed = match &m.modal_flow {
+            Some(ModalFlow::ActionConfirm {
+                action: Action::DeleteOrClose,
+                targets,
+            }) => {
+                assert_eq!(targets.len(), 3, "the whole selection is stashed");
+                targets.clone()
+            }
+            other => panic!("expected a bulk delete-or-close confirm, got {other:?}"),
+        };
+        // The confirm copy names the count — never a single-target
+        // prompt over a multi-row stash.
+        let prompt = m.bulk_confirm_prompt(&Action::DeleteOrClose, &stashed);
+        assert!(
+            prompt.contains("Close 3 PRs without merging?"),
+            "confirm must name all three: {prompt}",
+        );
+
+        let cmds = m.handle_confirmed(true);
+        let mut closed: Vec<String> = cmds
+            .iter()
+            .map(|c| match c {
+                IpcCommand::DeleteOrClose { workspace_key } => workspace_key.as_str().to_string(),
+                other => panic!("expected DeleteOrClose, got {other:?}"),
+            })
+            .collect();
+        closed.sort();
+        expected.sort();
+        assert_eq!(closed, expected, "all three marked PRs are closed");
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
+    /// #1243: the bulk `g d` confirm renders the mixed close/delete
+    /// split — PRs are closed, issues deleted, and ineligible targets
+    /// counted as skipped — so Yes is never a blind guess.
+    #[test]
+    fn bulk_delete_or_close_prompt_names_the_split() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let pr_a = workspace("owner/repo#1", true, Duration::hours(1));
+        let pr_b = workspace("owner/repo#2", true, Duration::hours(2));
+        let issue = workspace("owner/repo#3", false, Duration::hours(3));
+        let mut merged = workspace("owner/repo#4", true, Duration::hours(4));
+        merged.pr.as_mut().expect("pr row").state = lazybox_core::TaskState::Merged;
+        let targets: Vec<ActionConfirmTarget> = [&pr_a, &pr_b, &issue, &merged]
+            .iter()
+            .map(|w| ActionConfirmTarget::Workspace(SessionKey::from(&w.key)))
+            .collect();
+        for ws in [pr_a, pr_b, issue, merged] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+
+        let prompt = m.bulk_confirm_prompt(&Action::DeleteOrClose, &targets);
+        assert!(
+            prompt.contains("Close 2 PRs without merging and delete 1 issue?"),
+            "split copy: {prompt}",
+        );
+        assert!(
+            prompt.contains("1 will be skipped (no longer open)."),
+            "skipped split: {prompt}",
+        );
+    }
+
+    /// #1243: the `v` KEY toggles — a second press on the same row
+    /// un-selects it. The key had zero integration coverage; every
+    /// prior test called the toggle method directly.
+    #[test]
+    fn v_key_toggles_selection_on_and_off() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        let ws = workspace("owner/repo#1", true, Duration::hours(1));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+
+        m.dispatch_key(KeyEvent::new(Key::Char('v'), KeyModifiers::NONE));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 1, "v selects");
+        m.dispatch_key(KeyEvent::new(Key::Char('v'), KeyModifiers::NONE));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0, "v un-selects");
+    }
+
+    /// #1243, the "I can't even un-select" repro: a selection made in
+    /// the sidebar must be clearable from Right-pane focus. The Esc
+    /// chain is ordered leader-cancel → clear selection → dismiss
+    /// notice → pane-native, so with a notice up the FIRST Esc clears
+    /// the selection and the second clears the notice — deterministic
+    /// from either pane.
+    #[test]
+    fn esc_clears_selection_from_right_pane_focus() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        let ws = workspace("owner/repo#1", true, Duration::hours(1));
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&key));
+        assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
+
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+        m.flash_error("boom");
+
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "first Esc clears the selection even from Right focus",
+        );
+        assert!(
+            m.status.notice.is_some(),
+            "the notice survives the first Esc"
+        );
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(m.status.notice.is_none(), "second Esc clears the notice");
+    }
+
+    /// #1243 count coherence: a filter that hides marked rows prunes
+    /// their marks, so the header count, the `v` notice count, and the
+    /// set `resolve_targets` fans out over are all the same number.
+    #[test]
+    fn selection_counts_agree_after_filter_hides_marks() {
+        let mut m = build_model();
+        let issue_a = workspace("owner/repo#1", false, Duration::hours(1));
+        let issue_b = workspace("owner/repo#2", false, Duration::hours(2));
+        let pr = workspace("owner/repo#3", true, Duration::hours(3));
+        let pr_key = SessionKey::from(&pr.key);
+        seed_and_select(&mut m, vec![issue_a, issue_b, pr]);
+        assert_eq!(m.sidebar.broadcast_selected_count(), 3);
+
+        // A PR-only filter hides the two marked issues.
+        m.sidebar
+            .set_filters([crate::components::sidebar::Filter::Pr]);
+
+        assert_eq!(m.sidebar.visible_broadcast_selected_count(), 1);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "hidden marks are pruned, not hoarded",
+        );
+        assert_eq!(
+            m.resolve_targets(),
+            vec![pr_key],
+            "the fan-out set matches what the header counts",
+        );
+    }
+
+    /// #1243: a Shift-↓ over-sweep shrinks on Shift-↑ — reversing
+    /// direction back toward the sweep's anchor deselects the row the
+    /// cursor leaves, spreadsheet-style (#932's intent), instead of the
+    /// old additive-only grab.
+    #[test]
+    fn shift_down_over_sweep_then_shift_up_shrinks() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        for ws in [
+            workspace("owner/repo#1", true, Duration::hours(1)),
+            workspace("owner/repo#2", true, Duration::hours(2)),
+            workspace("owner/repo#3", true, Duration::hours(3)),
+        ] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+
+        m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::SHIFT));
+        m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::SHIFT));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 3, "swept all three");
+        let overshoot = m
+            .sidebar
+            .selected_workspace_key()
+            .expect("cursor on the last swept row")
+            .clone();
+
+        m.dispatch_key(KeyEvent::new(Key::Up, KeyModifiers::SHIFT));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "reversing over the sweep deselects the departed row",
+        );
+        assert!(
+            !m.sidebar.selected_broadcast_keys().contains(&overshoot),
+            "the over-swept row is the one dropped",
+        );
+
+        m.dispatch_key(KeyEvent::new(Key::Up, KeyModifiers::SHIFT));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "shrinking continues down to the anchor, which stays marked",
+        );
     }
 
     /// #899 regression: on-main spawn (`b c`) is inherently single-target
@@ -11178,7 +11417,7 @@ mod merge_focus_follow_tests {
 
         assert!(m.sidebar.focus_workspace_key(&child_key));
         let prompt = m
-            .action_confirm_override(&Action::MergePr)
+            .action_confirm_override(&Action::MergePr, None)
             .expect("a stacked child gets a stack-aware confirm prompt");
         assert!(
             prompt.contains("stacked on #1") && prompt.contains("out of order"),
@@ -11188,7 +11427,7 @@ mod merge_focus_follow_tests {
         // The bottom PR (based on main) merges with the default prompt.
         assert!(m.sidebar.focus_workspace_key(&parent_key));
         assert!(
-            m.action_confirm_override(&Action::MergePr).is_none(),
+            m.action_confirm_override(&Action::MergePr, None).is_none(),
             "the bottom of the stack keeps the default merge confirm",
         );
     }

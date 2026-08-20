@@ -77,6 +77,33 @@ pub(crate) struct AgentTurnSchedule {
     pub last_output_at: tokio::time::Instant,
 }
 
+/// Owned snapshot of everything the per-chunk PTY state path needs from the
+/// registry, gathered in ONE lock acquisition (#1256 P0-2 — the pump used to
+/// join the global FIFO queue ~7-8 times per output chunk). Mirrors the
+/// keystroke path's `write_context_for` shape: read/mutate once up front,
+/// operate on the owned context, and let the state fold apply the remaining
+/// mutations in its own single commit acquisition.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PtyChunkContext {
+    /// Turn-clock sequence of the `OutputChunk` event recorded for this
+    /// chunk — the PTY evidence `commit_pty_reading` folds against hooks.
+    pub turn_event: u64,
+    /// Whether a credit-recovery transaction is live: gates the expensive
+    /// composer-readiness scan exactly as `credit_recovery_active` did.
+    pub credit_recovery_active: bool,
+    /// Whether client view activity suppresses this chunk's lifecycle
+    /// reading (evaluated with the chunk's backend sequence, consuming
+    /// view epochs the same way `suppresses_agent_reading` does).
+    pub suppresses_reading: bool,
+    /// Hook-vs-PTY arbitration computed against `turn_event`. Like the old
+    /// pre-fold read this may be one frame stale by commit time — hook
+    /// freshness is a soft signal and the transition table re-validates.
+    pub hook_authority: lazybox_agents::HookAuthority,
+    /// The just-answered-prompt detection reset was latched; the caller
+    /// clears its rolling detection buffer (#101).
+    pub answered_reset: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AgentTurnWatchdogFire {
     pub window: std::time::Duration,
@@ -257,6 +284,20 @@ pub(crate) struct CreditRecoveryRuntime {
     pub evidence: Arc<Notify>,
 }
 
+/// Owned snapshot of a keystroke/submit's registry context, read in one
+/// lock acquisition by [`TerminalRegistry::write_context_for`] (#1237,
+/// #1256). The advisory post-write checks in `handle_write_batch` run on
+/// this pre-write snapshot; the authoritative compare-and-set still happens
+/// under the state fold's own lock, so a terminal that resolves during the
+/// write can never be flipped incorrectly.
+pub struct WriteContext {
+    pub backend_key: String,
+    pub agent_state: Option<AgentState>,
+    pub input_needed_shape: Option<lazybox_agents::PromptShape>,
+    pub meta: Option<(SessionKey, TerminalKind)>,
+    pub agent_state_generation: Option<u64>,
+}
+
 /// Immutable facts captured by the atomic teardown claim.
 pub(crate) struct TerminalTeardownClaim {
     pub meta: Option<(SessionKey, TerminalKind)>,
@@ -283,6 +324,19 @@ pub struct TerminalRegistry {
     /// backend session rather than stored inside the terminal entry.
     terminal_persistence_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     terminal_io_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Per-terminal agent-state transition order (#1256). One guard spans a
+    /// whole fold → persist → commit → broadcast transaction, so transitions
+    /// for a single terminal remain strictly ordered while the global
+    /// `entries` mutex is only pinched briefly at fold and commit — never
+    /// held across the SQLite persist. Lock order: a holder of this lock may
+    /// acquire `entries`; never the reverse.
+    state_transition_locks: Arc<parking_lot::Mutex<HashMap<TerminalId, Arc<Mutex<()>>>>>,
+    /// Registry-lock acquisition counter backing the perf-guard tests
+    /// (#1256): the per-chunk pump path and the keystroke write path carry
+    /// an explicit lock budget. Counts acquisitions made through
+    /// [`Self::lock_entries`] / [`Self::lock_registration`].
+    #[cfg(test)]
+    pub(crate) lock_acquisitions: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub(crate) struct TerminalRegistrationGuard {
@@ -361,9 +415,21 @@ impl RecoveredTerminalRegistrationGuard {
 }
 
 impl TerminalRegistry {
+    /// The one place the global `entries` mutex is acquired by registry
+    /// methods and the terminal hot paths. Centralized so the perf-guard
+    /// tests can count acquisitions (#1256) — the pump's per-chunk path and
+    /// the keystroke write path each carry an explicit budget.
+    pub(crate) async fn lock_entries(
+        &self,
+    ) -> tokio::sync::MutexGuard<'_, HashMap<TerminalId, TerminalEntry>> {
+        #[cfg(test)]
+        self.lock_acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.entries.lock().await
+    }
+
     pub(crate) async fn metadata_map(&self) -> HashMap<TerminalId, (SessionKey, TerminalKind)> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .iter()
             .filter(|(_, entry)| !entry.finishing)
@@ -372,8 +438,7 @@ impl TerminalRegistry {
     }
 
     pub(crate) async fn session_bindings(&self) -> HashMap<TerminalId, SessionId> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .iter()
             .filter_map(|(id, entry)| entry.session_id.map(|session| (*id, session)))
@@ -381,8 +446,7 @@ impl TerminalRegistry {
     }
 
     pub(crate) async fn agent_state_map(&self) -> HashMap<TerminalId, AgentState> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .iter()
             .filter_map(|(id, entry)| entry.agent_state.map(|state| (*id, state)))
@@ -395,8 +459,7 @@ impl TerminalRegistry {
     /// Shells never count. Read by the spawn-time population cap
     /// (`agent.max_live_agents`, 2026-08-19 audit M1).
     pub(crate) async fn live_agent_count(&self) -> usize {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .values()
             .filter(|entry| !entry.finishing)
@@ -416,13 +479,12 @@ impl TerminalRegistry {
         session_key: SessionKey,
         kind: TerminalKind,
     ) {
-        self.entries.lock().await.entry(id).or_default().meta = Some((session_key, kind));
+        self.lock_entries().await.entry(id).or_default().meta = Some((session_key, kind));
     }
 
     #[cfg(test)]
     pub(crate) async fn model_label_for(&self, id: TerminalId) -> Option<String> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .and_then(|entry| entry.model_label.clone())
@@ -432,33 +494,34 @@ impl TerminalRegistry {
         &self,
         id: TerminalId,
     ) -> Option<lazybox_agents::PromptShape> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .and_then(|entry| entry.input_needed_shape)
     }
 
     pub(crate) async fn has_detect_reset(&self, id: TerminalId) -> bool {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .is_some_and(|entry| entry.agent_detect_reset)
     }
 
+    /// Production paths latch the reset through `note_user_answered` and
+    /// consume it through `begin_pty_chunk`'s one-lock chunk context
+    /// (#1256); these standalone forms remain the test harness's seam.
+    #[cfg(test)]
     pub(crate) async fn mark_detect_reset(&self, id: TerminalId) {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
             .agent_detect_reset = true;
     }
 
+    #[cfg(test)]
     pub(crate) async fn take_detect_reset(&self, id: TerminalId) -> bool {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get_mut(&id)
             .is_some_and(|entry| std::mem::take(&mut entry.agent_detect_reset))
@@ -466,7 +529,7 @@ impl TerminalRegistry {
 
     /// Bind a wire terminal id to a backend session for I/O routing.
     pub async fn bind_backend(&self, id: TerminalId, backend_key: String) {
-        self.entries.lock().await.entry(id).or_default().backend_key = Some(backend_key);
+        self.lock_entries().await.entry(id).or_default().backend_key = Some(backend_key);
     }
 
     /// Register the two identities that make a terminal live.
@@ -485,8 +548,8 @@ impl TerminalRegistry {
     /// Remove a terminal and all of its in-memory lifecycle bookkeeping.
     pub async fn remove_terminal(&self, id: TerminalId) -> Option<String> {
         self.live_backend_keys.write().remove(&id);
-        self.entries
-            .lock()
+        self.forget_state_transition_lock(id);
+        self.lock_entries()
             .await
             .remove(&id)
             .and_then(|entry| entry.backend_key)
@@ -503,29 +566,24 @@ impl TerminalRegistry {
     }
 
     /// One-lock read of the keystroke write path's admission context
-    /// (#1237): `(backend_key, agent_state, input_needed_shape)`. The
-    /// write path used to take the global lock three separate times per
-    /// keystroke — each a FIFO queue join behind ~25k/s of pump traffic.
-    pub async fn write_context_for(
-        &self,
-        id: TerminalId,
-    ) -> Option<(
-        String,
-        Option<AgentState>,
-        Option<lazybox_agents::PromptShape>,
-    )> {
-        let entries = self.entries.lock().await;
+    /// (#1237, extended for #1256 P0-3). The write path used to take the
+    /// global lock three separate times per keystroke for admission — and
+    /// then three more times per submit for the metadata, prompt shape,
+    /// and durability generation this snapshot now carries.
+    pub async fn write_context_for(&self, id: TerminalId) -> Option<WriteContext> {
+        let entries = self.lock_entries().await;
         let entry = entries.get(&id).filter(|entry| !entry.finishing)?;
-        Some((
-            entry.backend_key.clone()?,
-            entry.agent_state,
-            entry.input_needed_shape,
-        ))
+        Some(WriteContext {
+            backend_key: entry.backend_key.clone()?,
+            agent_state: entry.agent_state,
+            input_needed_shape: entry.input_needed_shape,
+            meta: entry.meta.clone(),
+            agent_state_generation: entry.agent_state_generation,
+        })
     }
 
     pub async fn backend_key_for(&self, id: TerminalId) -> Option<String> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .filter(|entry| !entry.finishing)
@@ -534,8 +592,7 @@ impl TerminalRegistry {
 
     /// Snapshot terminal metadata without holding the map lock in the caller.
     pub async fn terminal_meta_for(&self, id: TerminalId) -> Option<(SessionKey, TerminalKind)> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .filter(|entry| !entry.finishing)
@@ -544,22 +601,20 @@ impl TerminalRegistry {
 
     /// Snapshot the cached agent state without holding the map lock in the caller.
     pub async fn agent_state_for(&self, id: TerminalId) -> Option<AgentState> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .and_then(|entry| entry.agent_state)
     }
 
     pub(crate) async fn record_composer_ready(&self, id: TerminalId, ready: bool) {
-        if let Some(entry) = self.entries.lock().await.get_mut(&id) {
+        if let Some(entry) = self.lock_entries().await.get_mut(&id) {
             entry.composer_ready = ready;
         }
     }
 
     pub(crate) async fn composer_ready_for(&self, id: TerminalId) -> bool {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .is_some_and(|entry| entry.composer_ready)
@@ -570,7 +625,7 @@ impl TerminalRegistry {
         id: TerminalId,
         request_id: String,
     ) -> Result<(), &'static str> {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.lock_entries().await;
         let Some(entry) = entries.get_mut(&id).filter(|entry| !entry.finishing) else {
             return Err("the terminal is no longer running");
         };
@@ -594,7 +649,7 @@ impl TerminalRegistry {
         request_id: &str,
         stage: AgentCreditRecoveryStage,
     ) -> bool {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.lock_entries().await;
         let Some(recovery) = entries
             .get_mut(&id)
             .and_then(|entry| entry.credit_recovery.as_mut())
@@ -607,28 +662,15 @@ impl TerminalRegistry {
     }
 
     pub(crate) async fn credit_recovery_signal_for(&self, id: TerminalId) -> Option<Arc<Notify>> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .and_then(|entry| entry.credit_recovery.as_ref())
             .map(|recovery| recovery.evidence.clone())
     }
 
-    /// Whether a credit-recovery transaction is in flight for this terminal.
-    /// The composer-readiness probe is only consumed while recovery waits for
-    /// the composer to redraw, so the per-chunk pump path uses this to skip the
-    /// whole-window readiness scan on every other terminal's repaint traffic.
-    pub(crate) async fn credit_recovery_active(&self, id: TerminalId) -> bool {
-        self.entries
-            .lock()
-            .await
-            .get(&id)
-            .is_some_and(|entry| entry.credit_recovery.is_some())
-    }
-
     pub(crate) async fn finish_credit_recovery(&self, id: TerminalId, request_id: &str) -> bool {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.lock_entries().await;
         let Some(entry) = entries.get_mut(&id) else {
             return false;
         };
@@ -645,16 +687,14 @@ impl TerminalRegistry {
 
     /// Snapshot the durable workspace session associated with a terminal.
     pub async fn terminal_session_for(&self, id: TerminalId) -> Option<SessionId> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .and_then(|entry| entry.session_id)
     }
 
     pub(crate) async fn access_for(&self, id: TerminalId) -> AgentRunAccess {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .map(|entry| entry.access)
@@ -663,13 +703,13 @@ impl TerminalRegistry {
 
     pub(crate) async fn record_access(&self, id: TerminalId, access: AgentRunAccess) {
         if access != AgentRunAccess::Default {
-            self.entries.lock().await.entry(id).or_default().access = access;
+            self.lock_entries().await.entry(id).or_default().access = access;
         }
     }
 
     /// Associate a live terminal with its durable workspace session.
     pub async fn associate_session(&self, id: TerminalId, session_id: SessionId) {
-        self.entries.lock().await.entry(id).or_default().session_id = Some(session_id);
+        self.lock_entries().await.entry(id).or_default().session_id = Some(session_id);
     }
 
     pub(crate) async fn record_spawn_attributes(
@@ -682,9 +722,9 @@ impl TerminalRegistry {
         model_label: Option<&str>,
     ) {
         if let Some(session_id) = owning_session {
-            self.entries.lock().await.entry(id).or_default().session_id = Some(session_id);
+            self.lock_entries().await.entry(id).or_default().session_id = Some(session_id);
         }
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.lock_entries().await;
         let entry = entries.entry(id).or_default();
         entry.access = access;
         entry.no_permission = no_permission;
@@ -694,13 +734,12 @@ impl TerminalRegistry {
 
     /// Record the last durable state emitted for an agent terminal.
     pub async fn record_agent_state(&self, id: TerminalId, state: AgentState) {
-        self.entries.lock().await.entry(id).or_default().agent_state = Some(state);
+        self.lock_entries().await.entry(id).or_default().agent_state = Some(state);
     }
 
     /// Record the process generation used to reject stale recovered state.
     pub async fn record_agent_state_generation(&self, id: TerminalId, generation: u64) {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
@@ -708,8 +747,7 @@ impl TerminalRegistry {
     }
 
     pub(crate) async fn record_turn_event(&self, id: TerminalId, event: AgentTurnEvent) -> u64 {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
@@ -723,8 +761,7 @@ impl TerminalRegistry {
         quiet_after: std::time::Duration,
         watchdog_window: Option<std::time::Duration>,
     ) {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
@@ -737,8 +774,7 @@ impl TerminalRegistry {
         id: TerminalId,
         queued_chunks: usize,
     ) -> AgentTurnSchedule {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
@@ -747,14 +783,81 @@ impl TerminalRegistry {
     }
 
     pub(crate) async fn note_agent_turn_received(&self, id: TerminalId, watchdog_due: bool) {
-        if let Some(entry) = self.entries.lock().await.get_mut(&id) {
+        if let Some(entry) = self.lock_entries().await.get_mut(&id) {
             entry.turn.note_received(watchdog_due);
         }
     }
 
+    /// One-lock ingest of a PTY output chunk's registry side (#1256 P0-2).
+    /// Performs, in the exact order the pump's separate calls used to:
+    /// batch-receipt accounting (`note_agent_turn_received`, when
+    /// `note_received` carries the schedule's `watchdog_due`), the
+    /// just-answered detection-reset take, the `OutputChunk` turn-clock
+    /// record, the credit-recovery read, the view-epoch suppression fold,
+    /// and hook-authority arbitration — then hands the caller an owned
+    /// [`PtyChunkContext`] to run the (lock-free) detectors against.
+    pub(crate) async fn begin_pty_chunk(
+        &self,
+        id: TerminalId,
+        backend_seq: u64,
+        meaningful_progress: bool,
+        note_received: Option<bool>,
+        take_detect_reset: bool,
+    ) -> PtyChunkContext {
+        let mut entries = self.lock_entries().await;
+        let entry = entries.entry(id).or_default();
+        if let Some(watchdog_due) = note_received {
+            entry.turn.note_received(watchdog_due);
+        }
+        let answered_reset = take_detect_reset && std::mem::take(&mut entry.agent_detect_reset);
+        let turn_event = entry.turn.record(AgentTurnEvent::OutputChunk {
+            backend_seq,
+            meaningful_progress,
+        });
+        let credit_recovery_active = entry.credit_recovery.is_some();
+        let suppresses_reading =
+            terminal_io::activity_suppresses_reading(&mut entry.activity, Some(backend_seq));
+        let hook_authority = entry.turn.hook_authority(Some(turn_event));
+        PtyChunkContext {
+            turn_event,
+            credit_recovery_active,
+            suppresses_reading,
+            hook_authority,
+            answered_reset,
+        }
+    }
+
+    /// Record the per-chunk detector observations (composer readiness and,
+    /// when an immediate modal matched, the prompt shape) in one
+    /// acquisition. Used by the suppressed-reading path, where the state
+    /// fold — which otherwise applies these in its own commit acquisition —
+    /// never runs.
+    pub(crate) async fn record_chunk_observation(
+        &self,
+        id: TerminalId,
+        composer_ready: bool,
+        shape: Option<lazybox_agents::PromptShape>,
+    ) {
+        let mut entries = self.lock_entries().await;
+        let entry = entries.entry(id).or_default();
+        entry.composer_ready = composer_ready;
+        if let Some(shape) = shape {
+            entry.input_needed_shape = Some(shape);
+        }
+    }
+
+    /// One-lock tail of a committed submit flip (#1256 P0-3): record the
+    /// `UserAnswered` turn event and latch the detection-buffer reset the
+    /// output pump consumes on its next chunk (#101).
+    pub(crate) async fn note_user_answered(&self, id: TerminalId) {
+        let mut entries = self.lock_entries().await;
+        let entry = entries.entry(id).or_default();
+        entry.turn.record(AgentTurnEvent::UserAnswered);
+        entry.agent_detect_reset = true;
+    }
+
     pub(crate) async fn fire_agent_turn_quiet(&self, id: TerminalId) -> std::time::Duration {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
@@ -766,16 +869,14 @@ impl TerminalRegistry {
         &self,
         id: TerminalId,
     ) -> Option<AgentTurnWatchdogFire> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get_mut(&id)
             .and_then(|entry| entry.turn.fire_watchdog())
     }
 
     pub(crate) async fn latest_output_turn_event(&self, id: TerminalId) -> Option<u64> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .and_then(|entry| entry.turn.last_output)
@@ -786,8 +887,7 @@ impl TerminalRegistry {
         id: TerminalId,
         pty_evidence: Option<u64>,
     ) -> lazybox_agents::HookAuthority {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .map_or(lazybox_agents::HookAuthority::None, |entry| {
@@ -801,7 +901,7 @@ impl TerminalRegistry {
     /// event, preserving its old test meaning without using time for runtime
     /// arbitration.
     pub async fn record_hook_activity(&self, id: TerminalId, at: std::time::Instant) {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.lock_entries().await;
         let clock = &mut entries.entry(id).or_default().turn;
         clock.record(AgentTurnEvent::HookArrived {
             waiting_on_user: false,
@@ -816,8 +916,7 @@ impl TerminalRegistry {
     }
 
     pub async fn hook_activity_for(&self, id: TerminalId) -> Option<std::time::Instant> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .and_then(|entry| entry.turn.last_hook_at)
@@ -829,8 +928,7 @@ impl TerminalRegistry {
         id: TerminalId,
         shape: lazybox_agents::PromptShape,
     ) {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
@@ -842,8 +940,7 @@ impl TerminalRegistry {
     /// a deferred inject can find it by terminal id (issue #869).
     pub(crate) async fn register_reclassify(&self, id: TerminalId) -> Arc<Notify> {
         let notify = Arc::new(Notify::new());
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
@@ -868,8 +965,7 @@ impl TerminalRegistry {
 
     /// Report whether any registered agent is currently working.
     pub async fn any_agent_working(&self) -> bool {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .values()
             .any(|entry| !entry.finishing && matches!(entry.agent_state, Some(AgentState::Working)))
@@ -877,8 +973,7 @@ impl TerminalRegistry {
 
     /// Return the number of live terminal-to-backend registrations.
     pub async fn terminal_count(&self) -> usize {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .values()
             .filter(|entry| !entry.finishing && entry.backend_key.is_some())
@@ -887,8 +982,7 @@ impl TerminalRegistry {
 
     /// Snapshot the ids of all live terminal-to-backend registrations.
     pub async fn terminal_ids(&self) -> Vec<TerminalId> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .iter()
             .filter_map(|(id, entry)| {
@@ -904,8 +998,7 @@ impl TerminalRegistry {
 
     /// Snapshot reconnect metadata without exposing the registry's lock.
     pub async fn terminal_metadata(&self) -> Vec<(TerminalId, SessionKey, TerminalKind)> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .iter()
             .filter(|(_, entry)| !entry.finishing)
@@ -924,8 +1017,7 @@ impl TerminalRegistry {
     /// `agent_terminal_for` tie-break. `None` when the workspace has no
     /// running agent (only shells, or nothing at all).
     pub async fn running_agent_terminal(&self, session_key: &SessionKey) -> Option<TerminalId> {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .iter()
             .filter(|(_, entry)| !entry.finishing)
@@ -943,7 +1035,7 @@ impl TerminalRegistry {
         session_key: &SessionKey,
         session_id: Option<SessionId>,
     ) -> Vec<TerminalId> {
-        let entries = self.entries.lock().await;
+        let entries = self.lock_entries().await;
         let mut ids = entries
             .iter()
             .filter_map(|(terminal_id, entry)| {
@@ -966,8 +1058,7 @@ impl TerminalRegistry {
 
     /// Report whether a recovered agent requires a compatibility restart.
     pub async fn is_outdated_agent(&self, id: TerminalId) -> bool {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .get(&id)
             .is_some_and(|entry| entry.outdated_agent)
@@ -975,8 +1066,7 @@ impl TerminalRegistry {
 
     /// Mark a recovered agent as requiring a compatibility restart.
     pub async fn mark_outdated_agent(&self, id: TerminalId) {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .entry(id)
             .or_default()
@@ -985,8 +1075,7 @@ impl TerminalRegistry {
 
     /// Return the number of recovered agents requiring a compatibility restart.
     pub async fn outdated_agent_count(&self) -> usize {
-        self.entries
-            .lock()
+        self.lock_entries()
             .await
             .values()
             .filter(|entry| entry.outdated_agent)
@@ -995,7 +1084,7 @@ impl TerminalRegistry {
 
     /// Report whether teardown removed every per-terminal bookkeeping entry.
     pub async fn bookkeeping_is_empty(&self) -> bool {
-        self.entries.lock().await.is_empty()
+        self.lock_entries().await.is_empty()
     }
 
     /// Atomically make a terminal non-live while retaining the metadata needed
@@ -1006,7 +1095,7 @@ impl TerminalRegistry {
         id: TerminalId,
         expected_backend_key: &str,
     ) -> Result<Option<TerminalTeardownClaim>, String> {
-        let mut entries = self.entries.lock().await;
+        let mut entries = self.lock_entries().await;
         let Some(entry) = entries.get_mut(&id) else {
             return Ok(None);
         };
@@ -1032,7 +1121,8 @@ impl TerminalRegistry {
     /// Complete a claimed teardown with one atomic removal.
     pub(crate) async fn finish_teardown(&self, id: TerminalId) {
         self.live_backend_keys.write().remove(&id);
-        self.entries.lock().await.remove(&id);
+        self.forget_state_transition_lock(id);
+        self.lock_entries().await.remove(&id);
     }
 
     pub(crate) async fn lock_terminal_persistence(
@@ -1065,7 +1155,34 @@ impl TerminalRegistry {
         self.terminal_io_locks.lock().remove(backend_key);
     }
 
+    /// Serialize agent-state transitions for one terminal (#1256). Held
+    /// across a whole fold → persist → commit → broadcast transaction in
+    /// `fold_and_broadcast_agent_state`, so two rapid transitions on the
+    /// same terminal cannot reorder around the SQLite persist while the
+    /// global `entries` mutex stays free for every other terminal.
+    ///
+    /// Lock order: `terminal_io` / `terminal_persistence` locks may be held
+    /// when acquiring this lock; a holder of this lock may acquire
+    /// `entries`; never the reverse of either.
+    pub(crate) async fn lock_state_transitions(
+        &self,
+        id: TerminalId,
+    ) -> tokio::sync::OwnedMutexGuard<()> {
+        let entry = {
+            let mut locks = self.state_transition_locks.lock();
+            locks.entry(id).or_default().clone()
+        };
+        entry.lock_owned().await
+    }
+
+    fn forget_state_transition_lock(&self, id: TerminalId) {
+        self.state_transition_locks.lock().remove(&id);
+    }
+
     pub(crate) async fn lock_registration(&self) -> TerminalRegistrationGuard {
+        #[cfg(test)]
+        self.lock_acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         TerminalRegistrationGuard {
             entries: self.entries.clone().lock_owned().await,
             live_backend_keys: self.live_backend_keys.clone(),
@@ -1382,10 +1499,25 @@ mod tests {
             .record_input_needed_shape(id, lazybox_agents::PromptShape::Chooser)
             .await;
 
-        let (key, state, shape) = registry.write_context_for(id).await.expect("live terminal");
-        assert_eq!(key, registry.backend_key_for(id).await.unwrap());
-        assert_eq!(state, registry.agent_state_for(id).await);
-        assert_eq!(shape, registry.input_needed_shape_for(id).await);
+        let context = registry.write_context_for(id).await.expect("live terminal");
+        assert_eq!(
+            context.backend_key,
+            registry.backend_key_for(id).await.unwrap()
+        );
+        assert_eq!(context.agent_state, registry.agent_state_for(id).await);
+        assert_eq!(
+            context.input_needed_shape,
+            registry.input_needed_shape_for(id).await
+        );
+        let (meta_key, meta_kind) = context.meta.expect("registered terminal has metadata");
+        let (expected_key, expected_kind) =
+            registry.terminal_meta_for(id).await.expect("live metadata");
+        assert_eq!(meta_key, expected_key);
+        assert!(matches!(
+            (&meta_kind, &expected_kind),
+            (TerminalKind::Agent(a), TerminalKind::Agent(b)) if a == b
+        ));
+        assert_eq!(context.agent_state_generation, None);
     }
 
     #[tokio::test]

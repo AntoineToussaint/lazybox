@@ -219,6 +219,11 @@ impl Sidebar {
                     let key: SessionKey = (&w.key).into();
                     self.workspaces.insert(key, w.clone());
                 }
+                // The workspace map is now the daemon's authoritative full
+                // set, so any focus key without a match is stale — drop it
+                // before it re-persists and accumulates (#1202/#1205;
+                // reinstated by #1244 after the #1213 merge dropped it).
+                self.prune_focused_workspaces();
                 self.agents.clear();
                 self.spawning.clear();
                 self.agent_terminal_states.clear();

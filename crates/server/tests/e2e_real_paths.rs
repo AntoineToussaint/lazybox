@@ -513,7 +513,11 @@ async fn e2e_sessionless_branch_holder_is_reclaimed_at_the_current_workspace_pat
             chrono::Utc::now(),
         );
         let workspace_key = workspace.key.clone();
-        let intended = lazybox_server::spawn_handler::worktree_path_for_session(&workspace, 0);
+        let intended = lazybox_server::spawn_handler::worktree_path_for_session_under(
+            &workspace,
+            0,
+            config.worktree_root_path(),
+        );
         assert_ne!(
             leaked, intended,
             "fixture must reproduce a branch/workspace-path mismatch"
@@ -598,7 +602,11 @@ async fn e2e_clean_companion_pr_checkout_is_adopted_in_place() {
             chrono::Utc::now(),
         );
         let workspace_key = workspace.key.clone();
-        let derived = lazybox_server::spawn_handler::worktree_path_for_session(&workspace, 0);
+        let derived = lazybox_server::spawn_handler::worktree_path_for_session_under(
+            &workspace,
+            0,
+            config.worktree_root_path(),
+        );
         save_workspace(&config, &workspace);
 
         let (mut client, _daemon) = subscribed(config.clone()).await;
@@ -693,7 +701,11 @@ async fn e2e_stopped_session_does_not_make_a_clean_holder_live() {
             chrono::Utc::now(),
         );
         let target_key = target.key.clone();
-        let intended = lazybox_server::spawn_handler::worktree_path_for_session(&target, 0);
+        let intended = lazybox_server::spawn_handler::worktree_path_for_session_under(
+            &target,
+            0,
+            config.worktree_root_path(),
+        );
         save_workspace(&config, &target);
 
         let (mut client, _daemon) = subscribed(config.clone()).await;
@@ -741,7 +753,11 @@ async fn e2e_shell_opens_on_a_drifted_worktree_without_switching() {
             chrono::Utc::now(),
         );
         let workspace_key = workspace.key.clone();
-        let intended = lazybox_server::spawn_handler::worktree_path_for_session(&workspace, 0);
+        let intended = lazybox_server::spawn_handler::worktree_path_for_session_under(
+            &workspace,
+            0,
+            config.worktree_root_path(),
+        );
         std::fs::create_dir_all(intended.parent().unwrap()).unwrap();
         git(
             &bare,
@@ -912,8 +928,11 @@ repos:
             chrono::Utc::now(),
         );
         let companion_key = companion_pr.key.clone();
-        let derived_pr_path =
-            lazybox_server::spawn_handler::worktree_path_for_session(&companion_pr, 0);
+        let derived_pr_path = lazybox_server::spawn_handler::worktree_path_for_session_under(
+            &companion_pr,
+            0,
+            config.worktree_root_path(),
+        );
         save_workspace(&config, &companion_pr);
 
         let agent_key = spawn_and_capture(

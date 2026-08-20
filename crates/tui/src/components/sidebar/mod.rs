@@ -118,6 +118,21 @@ pub struct Sidebar {
     /// Spaces the user collapsed. Mirrors `collapsed_repos` one tier up;
     /// persisted to `ui.collapsed_spaces`.
     collapsed_spaces: BTreeSet<String>,
+    /// Set once `apply_config` has seeded the persisted view state
+    /// (stars, pins, collapse, Spaces). Until then the in-memory lists
+    /// are empty by construction, not by user intent, so anything that
+    /// interprets "not in the list" as "user removed it" — the
+    /// snapshot-time stale-star prune in particular — must not run
+    /// (#1244). Persisting user *toggles* stays allowed pre-seed: they
+    /// write targeted add/remove edits, never the whole list.
+    config_seeded: bool,
+    /// Whether the first daemon Snapshot may prune persisted stars that
+    /// match none of its workspaces (#1202/#1205). True for the embedded
+    /// client, whose daemon snapshot is the same store the config was
+    /// written against; disabled by `Model::with_remote`, where the
+    /// snapshot describes *another machine's* workspace set and a local
+    /// star that doesn't appear there is not stale (#1244).
+    snapshot_prune: bool,
     /// Parent tickets whose visible descendant rows are folded.
     collapsed_tickets: HashSet<TaskId>,
     /// Derived depth/disclosure metadata for each visible ticket row.
@@ -424,6 +439,8 @@ impl Sidebar {
             focused_workspaces: Vec::new(),
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
+            config_seeded: false,
+            snapshot_prune: true,
             collapsed_tickets: HashSet::new(),
             ticket_tree: HashMap::new(),
             repo_summaries: BTreeMap::new(),
@@ -1026,6 +1043,17 @@ impl Sidebar {
         }
         self.set_show_inactive_in_inbox(display.show_inactive_in_inbox);
         self.ascii_glyphs = display.ascii_glyphs;
+        // The persisted lists are now user intent, not empty defaults —
+        // seed-gated behavior (the snapshot-time star prune) may run.
+        self.config_seeded = true;
+    }
+
+    /// Disable the snapshot-time stale-star prune. Called (via the realm
+    /// wrapper) by `Model::with_remote`: an attach client's daemon
+    /// snapshot describes another machine's workspaces, so a local star
+    /// absent from it is not evidence of staleness (#1244).
+    pub fn set_snapshot_prune(&mut self, enabled: bool) {
+        self.snapshot_prune = enabled;
     }
 
     // ── Observability helpers (for tests + for AppRoot / RightPane) ────
@@ -2605,11 +2633,18 @@ impl Sidebar {
             self.collapsed_repos.insert(repo.clone());
         }
         self.recompute_visible();
-        // Persist the new set to ~/.lazybox/config.yaml::ui.collapsed_repos
-        // so the layout survives restart. Best-effort; an I/O
-        // error here just means next launch starts expanded.
-        let snapshot = self.collapsed_repos.clone();
-        lazybox_config::Config::save_with_async(|c| c.ui.collapsed_repos = snapshot);
+        // Persist to ~/.lazybox/config.yaml::ui.collapsed_repos so the
+        // layout survives restart — as a targeted add/remove on the
+        // on-disk set, because the in-memory copy may be stale or
+        // unseeded and must not clobber another writer's flags (#1244).
+        // Best-effort; an I/O error here just means next launch starts
+        // expanded.
+        let op = if was_collapsed {
+            lazybox_config::UiListOp::Remove(repo.clone())
+        } else {
+            lazybox_config::UiListOp::Add(repo.clone())
+        };
+        lazybox_config::Config::mutate_ui_list(|c| &mut c.ui.collapsed_repos, op);
         // Always park the cursor on the toggled header so
         // collapse + immediately re-expand works (Space twice in a
         // row toggles the same repo).
@@ -2632,14 +2667,21 @@ impl Sidebar {
         let Some(space) = self.cursor_space() else {
             return false;
         };
-        if self.collapsed_spaces.contains(&space) {
+        let was_collapsed = self.collapsed_spaces.contains(&space);
+        if was_collapsed {
             self.collapsed_spaces.remove(&space);
         } else {
             self.collapsed_spaces.insert(space.clone());
         }
         self.recompute_visible();
-        let snapshot = self.collapsed_spaces.clone();
-        lazybox_config::Config::save_with_async(|c| c.ui.collapsed_spaces = snapshot);
+        // Targeted add/remove on the on-disk set, like the repo-tier
+        // toggle above (#1244).
+        let op = if was_collapsed {
+            lazybox_config::UiListOp::Remove(space.clone())
+        } else {
+            lazybox_config::UiListOp::Add(space.clone())
+        };
+        lazybox_config::Config::mutate_ui_list(|c| &mut c.ui.collapsed_spaces, op);
         if let Some(idx) = self
             .visible
             .iter()
@@ -2707,54 +2749,73 @@ impl Sidebar {
         &mut self,
         dir: lazybox_tui_core::inbox::MoveDir,
     ) -> Option<(&'static str, String)> {
-        let moved: (&'static str, String) =
-            if let Some(VisibleRow::SpaceHeader(space)) = self.visible.get(self.cursor) {
-                let space = space.clone();
-                let rendered: Vec<String> = self
-                    .visible
-                    .iter()
-                    .filter_map(|r| match r {
-                        VisibleRow::SpaceHeader(n) => Some(n.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                if !lazybox_tui_core::inbox::move_space(&mut self.spaces, &rendered, &space, dir) {
-                    return None;
-                }
-                ("Space", space)
-            } else {
-                let repo = self.cursor_repo()?;
-                let space = self.space_of_source(&repo);
-                // The repo's on-screen siblings: every rendered repo
-                // header resolving to the same Space (covers both the
-                // tiered and the flat single-Space shape).
-                let rendered: Vec<String> = self
-                    .visible
-                    .iter()
-                    .filter_map(|r| match r {
-                        VisibleRow::RepoHeader(n) => Some(n.clone()),
-                        _ => None,
-                    })
-                    .filter(|r| self.space_of_source(r) == space)
-                    .collect();
-                if rendered.len() < 2 {
-                    return None;
-                }
-                if !lazybox_tui_core::inbox::move_source_in_space(
-                    &mut self.spaces,
+        let moved: (&'static str, String) = if let Some(VisibleRow::SpaceHeader(space)) =
+            self.visible.get(self.cursor)
+        {
+            let space = space.clone();
+            let rendered: Vec<String> = self
+                .visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::SpaceHeader(n) => Some(n.clone()),
+                    _ => None,
+                })
+                .collect();
+            if !lazybox_tui_core::inbox::move_space(&mut self.spaces, &rendered, &space, dir) {
+                return None;
+            }
+            // Persist by replaying the same pure mover against the
+            // freshly loaded on-disk list (#1244): the operation is a
+            // function of the captured render order, so a stale or
+            // unseeded in-memory snapshot never clobbers Spaces
+            // another writer created.
+            let space_cfg = space.clone();
+            lazybox_config::Config::save_with_async(move |c| {
+                lazybox_tui_core::inbox::move_space(&mut c.ui.spaces, &rendered, &space_cfg, dir);
+            });
+            ("Space", space)
+        } else {
+            let repo = self.cursor_repo()?;
+            let space = self.space_of_source(&repo);
+            // The repo's on-screen siblings: every rendered repo
+            // header resolving to the same Space (covers both the
+            // tiered and the flat single-Space shape).
+            let rendered: Vec<String> = self
+                .visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::RepoHeader(n) => Some(n.clone()),
+                    _ => None,
+                })
+                .filter(|r| self.space_of_source(r) == space)
+                .collect();
+            if rendered.len() < 2 {
+                return None;
+            }
+            if !lazybox_tui_core::inbox::move_source_in_space(
+                &mut self.spaces,
+                &space,
+                &rendered,
+                &repo,
+                dir,
+            ) {
+                return None;
+            }
+            // Same replay-the-operation persistence as the Space
+            // branch above (#1244).
+            let repo_cfg = repo.clone();
+            lazybox_config::Config::save_with_async(move |c| {
+                lazybox_tui_core::inbox::move_source_in_space(
+                    &mut c.ui.spaces,
                     &space,
                     &rendered,
-                    &repo,
+                    &repo_cfg,
                     dir,
-                ) {
-                    return None;
-                }
-                ("repo", repo)
-            };
+                );
+            });
+            ("repo", repo)
+        };
         self.recompute_visible();
-        // Persist the whole Space list — both movers rewrite it.
-        let snapshot = self.spaces.clone();
-        lazybox_config::Config::save_with_async(|c| c.ui.spaces = snapshot);
         // A moved *header* cursor re-parks on the moved header (its row
         // index changed with the group); a workspace-row cursor is
         // preserved by identity in `recompute_visible` already.
@@ -2796,12 +2857,21 @@ impl Sidebar {
             self.collapsed_spaces.insert(new.clone());
         }
         self.recompute_visible();
-        let spaces_snapshot = self.spaces.clone();
-        let collapsed_snapshot = self.collapsed_spaces.clone();
+        // Persist by replaying the rename against the freshly loaded
+        // on-disk config (#1244): the collapse flag and picker
+        // preselection follow as targeted edits, so nothing outside this
+        // Space's entries is rewritten.
         let (old_for_cfg, new_for_cfg) = (old.to_string(), new.clone());
         lazybox_config::Config::save_with_async(move |c| {
-            c.ui.spaces = spaces_snapshot;
-            c.ui.collapsed_spaces = collapsed_snapshot;
+            lazybox_tui_core::inbox::rename_space(
+                &mut c.ui.spaces,
+                &old_for_cfg,
+                &new_for_cfg,
+                &rendered,
+            );
+            if c.ui.collapsed_spaces.remove(&old_for_cfg) {
+                c.ui.collapsed_spaces.insert(new_for_cfg.clone());
+            }
             // The picker preselection follows the rename (#1206).
             if c.ui.last_space.as_deref() == Some(old_for_cfg.as_str()) {
                 c.ui.last_space = Some(new_for_cfg);
@@ -2850,8 +2920,13 @@ impl Sidebar {
     pub fn assign_source_to_space(&mut self, source: &str, space: &str) -> String {
         lazybox_tui_core::inbox::assign_source(&mut self.spaces, source, space);
         self.recompute_visible();
-        let snapshot = self.spaces.clone();
-        lazybox_config::Config::save_with_async(|c| c.ui.spaces = snapshot);
+        // Persist by replaying the assignment against the freshly loaded
+        // on-disk list (#1244): only this source moves; Spaces another
+        // writer created stay put.
+        let (source_cfg, space_cfg) = (source.to_string(), space.to_string());
+        lazybox_config::Config::save_with_async(move |c| {
+            lazybox_tui_core::inbox::assign_source(&mut c.ui.spaces, &source_cfg, &space_cfg);
+        });
         self.space_of_source(source)
     }
 
@@ -2880,10 +2955,16 @@ impl Sidebar {
         };
         self.recompute_visible();
         // Persist to ~/.lazybox/config.yaml::ui.pinned_repos so the
-        // order survives restart. Best-effort; a write error just means
-        // the pins reset next launch.
-        let snapshot = self.pinned_repos.clone();
-        lazybox_config::Config::save_with_async(|c| c.ui.pinned_repos = snapshot);
+        // order survives restart — as a targeted add/remove on the
+        // on-disk list, never a whole-list overwrite from a possibly
+        // stale or unseeded snapshot (#1244). Best-effort; a write error
+        // just means the pins reset next launch.
+        let op = if now_pinned {
+            lazybox_config::UiListOp::Add(repo.clone())
+        } else {
+            lazybox_config::UiListOp::Remove(repo.clone())
+        };
+        lazybox_config::Config::mutate_ui_list(|c| &mut c.ui.pinned_repos, op);
         Some((repo, now_pinned))
     }
 
@@ -2910,13 +2991,14 @@ impl Sidebar {
         let now_focused = if let Some(idx) = self.focused_workspaces.iter().position(|k| *k == key)
         {
             self.focused_workspaces.remove(idx);
+            Self::persist_focus_edit(lazybox_config::UiListOp::Remove(key.as_str().to_string()));
             false
         } else {
+            Self::persist_focus_edit(lazybox_config::UiListOp::Add(key.as_str().to_string()));
             self.focused_workspaces.push(key);
             true
         };
         self.recompute_visible();
-        self.persist_focused_workspaces();
         Some((label, now_focused))
     }
 
@@ -2927,25 +3009,60 @@ impl Sidebar {
     /// churn constantly. No-op (and no write) when the key wasn't
     /// starred. Driven only by the authoritative `WorkspaceRemoved`
     /// event, never the optimistic `take_workspace`, so a rolled-back
-    /// archive keeps the star.
+    /// archive keeps the star. The config write is a targeted remove of
+    /// exactly this key, so it can only ever fire for a star this client
+    /// actually tracked — an unseeded list has nothing to forget and an
+    /// unseeded writer can no longer erase the rest of the set (#1244).
     pub fn forget_focused_workspace(&mut self, key: &SessionKey) {
         if let Some(idx) = self.focused_workspaces.iter().position(|k| k == key) {
             self.focused_workspaces.remove(idx);
-            self.persist_focused_workspaces();
+            Self::persist_focus_edit(lazybox_config::UiListOp::Remove(key.as_str().to_string()));
         }
     }
 
-    /// Persist the current focus set to
-    /// `~/.lazybox/config.yaml::ui.focused_workspaces` so the shortlist
-    /// survives restart. Best-effort; a write error just means the focus
-    /// set resets next launch.
-    fn persist_focused_workspaces(&self) {
-        let snapshot: Vec<String> = self
+    /// Drop focus keys that don't match any tracked workspace, persisting
+    /// each removal as a targeted edit. Called once the daemon `Snapshot`
+    /// has repopulated the authoritative workspace map (its `workspaces`
+    /// field is the store's full contents, every mailbox), so a key with
+    /// no match is genuinely stale — an archived/deleted workspace missed
+    /// by the per-removal `forget_focused_workspace`, or a placeholder
+    /// that leaked into the hand-editable config (#1202/#1205, reinstated
+    /// after #1213 silently dropped it). Without this the set only ever
+    /// grows: the persisted string round-trips fine for a real key, but a
+    /// bogus one never matches a row and so never gets unstarred by the
+    /// user either. Gated twice (#1244): never before `apply_config`
+    /// seeded the list (pre-seed, "unknown" means "not loaded yet"), and
+    /// never on a remote attach client, whose snapshot describes another
+    /// machine's workspaces (`snapshot_prune`).
+    fn prune_focused_workspaces(&mut self) {
+        if !self.config_seeded || !self.snapshot_prune {
+            return;
+        }
+        let workspaces = &self.workspaces;
+        let stale: Vec<SessionKey> = self
             .focused_workspaces
             .iter()
-            .map(|k| k.as_str().to_string())
+            .filter(|k| !workspaces.contains_key(*k))
+            .cloned()
             .collect();
-        lazybox_config::Config::save_with_async(|c| c.ui.focused_workspaces = snapshot);
+        if stale.is_empty() {
+            return;
+        }
+        self.focused_workspaces
+            .retain(|k| workspaces.contains_key(k));
+        for key in stale {
+            Self::persist_focus_edit(lazybox_config::UiListOp::Remove(key.as_str().to_string()));
+        }
+    }
+
+    /// Persist one star/unstar to
+    /// `~/.lazybox/config.yaml::ui.focused_workspaces` as a targeted
+    /// edit on the on-disk list, so the shortlist survives restart and a
+    /// stale or unseeded in-memory set can never overwrite stars another
+    /// process persisted (#1244). Best-effort; a write error just means
+    /// this toggle resets next launch.
+    fn persist_focus_edit(op: lazybox_config::UiListOp) {
+        lazybox_config::Config::mutate_ui_list(|c| &mut c.ui.focused_workspaces, op);
     }
 
     /// True when the workspace is currently starred (used by the row

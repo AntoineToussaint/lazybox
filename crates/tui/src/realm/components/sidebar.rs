@@ -523,6 +523,25 @@ impl Sidebar {
         );
     }
 
+    /// See `Sidebar::set_snapshot_prune` — disabled by
+    /// `Model::with_remote` so an attach client never prunes local stars
+    /// against another machine's workspace set (#1244).
+    pub fn set_snapshot_prune(&mut self, enabled: bool) {
+        self.inner.set_snapshot_prune(enabled);
+    }
+
+    /// See `Sidebar::is_focused`. Observability passthrough (the row's
+    /// `★` marker) used by the boot-path config tests.
+    pub fn is_focused(&self, key: &lazybox_core::SessionKey) -> bool {
+        self.inner.is_focused(key)
+    }
+
+    /// See `Sidebar::is_repo_pinned`. Observability passthrough (the
+    /// header's pin marker) used by the boot-path config tests.
+    pub fn is_repo_pinned(&self, name: &str) -> bool {
+        self.inner.is_repo_pinned(name)
+    }
+
     /// Replace the set of subscribed-repo names that should show up
     /// as headers even before polling finds anything under them.
     /// See `Sidebar::apply_projects`.

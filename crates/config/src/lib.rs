@@ -2216,8 +2216,16 @@ impl Config {
     where
         F: FnOnce(&mut Self) + Send + 'static,
     {
+        // The destination must be resolved at enqueue time, not in the
+        // worker: `default_path()` reads `LAZYBOX_HOME`, which is only
+        // guaranteed to be the caller's home *now*. The worker thread
+        // outlives any caller-scoped override (tests sandbox their home
+        // to a temp dir), so a lazily-resolved path could land a queued
+        // save in whatever home happened to be current when the worker
+        // got to it — including the real one (#1244).
+        let path = Self::default_path();
         let job: PersistJob = Box::new(move || {
-            if let Err(e) = Self::save_with(f) {
+            if let Err(e) = Self::save_with_at(&path, f) {
                 tracing::warn!("async config save failed: {e}");
             }
         });
@@ -2226,6 +2234,27 @@ impl Config {
             // synchronous path rather than dropping the save.
             job();
         }
+    }
+
+    /// Persist one membership edit into a `ui.*` list as a
+    /// read-modify-write OPERATION on the freshly loaded on-disk value —
+    /// never a blind assignment of an in-memory snapshot (#1244). The
+    /// distinction matters whenever the caller's copy of the list can be
+    /// stale or unseeded: a second lazybox process, or an attach client
+    /// that booted before its config was applied, would otherwise
+    /// overwrite every entry another writer persisted with whatever it
+    /// happens to hold. Applied through [`Self::save_with_async`], so the
+    /// edit runs under the same `SAVE_LOCK` load-mutate-write cycle and
+    /// ordered worker as every other config save.
+    pub fn mutate_ui_list<L, F>(field: F, op: UiListOp)
+    where
+        L: UiKeyList + ?Sized,
+        F: FnOnce(&mut Self) -> &mut L + Send + 'static,
+    {
+        Self::save_with_async(move |c| match op {
+            UiListOp::Add(key) => field(c).add_key(key),
+            UiListOp::Remove(key) => field(c).remove_key(&key),
+        });
     }
 
     /// Wait (bounded) for every queued [`Self::save_with_async`] mutation to
@@ -2269,6 +2298,48 @@ impl Config {
 
     pub fn default_path() -> PathBuf {
         lazybox_core::paths::config_yaml()
+    }
+}
+
+/// One targeted edit to a membership-style `ui.*` list, applied by
+/// [`Config::mutate_ui_list`] to the on-disk value at save time. Both
+/// variants are idempotent, so replaying an edit (or racing another
+/// process's) converges instead of clobbering.
+#[derive(Debug, Clone)]
+pub enum UiListOp {
+    /// Ensure the key is present. Ordered lists append — pin/star order
+    /// is display order, so a fresh entry goes last; sets just insert.
+    Add(String),
+    /// Ensure the key is absent.
+    Remove(String),
+}
+
+/// Collection-shape adapter for [`Config::mutate_ui_list`]: the `ui.*`
+/// lists are a mix of ordered `Vec<String>` (pin/star order is display
+/// order) and `BTreeSet<String>` (collapse flags), but a targeted edit
+/// treats both as a keyed membership list.
+pub trait UiKeyList {
+    fn add_key(&mut self, key: String);
+    fn remove_key(&mut self, key: &str);
+}
+
+impl UiKeyList for Vec<String> {
+    fn add_key(&mut self, key: String) {
+        if !self.contains(&key) {
+            self.push(key);
+        }
+    }
+    fn remove_key(&mut self, key: &str) {
+        self.retain(|k| k != key);
+    }
+}
+
+impl UiKeyList for std::collections::BTreeSet<String> {
+    fn add_key(&mut self, key: String) {
+        self.insert(key);
+    }
+    fn remove_key(&mut self, key: &str) {
+        self.remove(key);
     }
 }
 
@@ -3675,6 +3746,7 @@ repos:
             }
         }
 
+        let _serial = env_home_lock();
         let dir =
             std::env::temp_dir().join(format!("lazybox-config-cache-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir temp");
@@ -3737,6 +3809,7 @@ repos:
                 }
             }
         }
+        let _serial = env_home_lock();
         let dir =
             std::env::temp_dir().join(format!("lazybox-config-flush-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir temp");
@@ -3757,6 +3830,147 @@ repos:
             reloaded.ui.collapsed_repos.contains("owner/repo"),
             "the queued save reached disk before flush returned"
         );
+        Config::invalidate_cache();
+    }
+
+    /// Serializes the tests that scope `LAZYBOX_HOME`: the env var is
+    /// process-global, so two sandboxed tests interleaving their
+    /// set/remove would write into each other's temp homes.
+    fn env_home_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// #1244 P0 regression: `save_with_async` must resolve the config
+    /// path at ENQUEUE time. The persist worker is a detached thread
+    /// that outlives any caller-scoped `LAZYBOX_HOME`, so a lazily
+    /// resolved path let a queued save land in whatever home happened
+    /// to be current when the worker ran the job — a test's save could
+    /// hit the real `~/.lazybox`, and vice versa.
+    #[test]
+    fn async_save_captures_home_at_enqueue() {
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
+                    None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
+                }
+            }
+        }
+        let _serial = env_home_lock();
+        let base = std::env::temp_dir().join(format!(
+            "lazybox-config-enqueue-test-{}",
+            std::process::id()
+        ));
+        let (home_a, home_b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&home_a).expect("mkdir a");
+        std::fs::create_dir_all(&home_b).expect("mkdir b");
+        let _dir_guard = TempDir(base);
+        let _env_guard = EnvGuard(std::env::var_os("LAZYBOX_HOME"));
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home_a) };
+        Config::invalidate_cache();
+
+        let path_a = Config::default_path();
+        // Enqueue against home A, then immediately retarget the process
+        // home to B — the enqueued save must still land in A.
+        Config::save_with_async(|c| {
+            c.ui.pinned_repos.push("owner/enqueue-time".into());
+        });
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home_b) };
+        assert!(
+            Config::flush_pending_saves(std::time::Duration::from_secs(5)),
+            "flush must complete within the bound"
+        );
+        let reloaded = Config::load_from(&path_a).expect("reload from home A");
+        assert!(
+            reloaded
+                .ui
+                .pinned_repos
+                .iter()
+                .any(|r| r == "owner/enqueue-time"),
+            "the save landed in the home that was current at enqueue time"
+        );
+        assert!(
+            !home_b.join(".lazybox").exists() && !home_b.join("config.yaml").exists(),
+            "nothing was written into the home that became current later"
+        );
+        Config::invalidate_cache();
+    }
+
+    /// #1244: `mutate_ui_list` is a read-modify-write OPERATION on the
+    /// on-disk value — it touches only its own key, so a writer holding
+    /// a stale (or never-seeded) in-memory copy of the list cannot
+    /// erase entries another process persisted.
+    #[test]
+    fn mutate_ui_list_edits_only_its_key() {
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
+                    None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
+                }
+            }
+        }
+        let _serial = env_home_lock();
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-config-uilist-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir temp");
+        let _dir_guard = TempDir(dir.clone());
+        let _env_guard = EnvGuard(std::env::var_os("LAZYBOX_HOME"));
+        unsafe { std::env::set_var("LAZYBOX_HOME", &dir) };
+        Config::invalidate_cache();
+
+        // Another session's persisted state, unknown to this writer.
+        Config::save_with(|c| {
+            c.ui.focused_workspaces = vec!["their-star-1".into(), "their-star-2".into()];
+            c.ui.collapsed_repos.insert("owner/their-collapse".into());
+        })
+        .expect("seed");
+
+        // Ordered `Vec` list: append-if-absent, targeted remove.
+        Config::mutate_ui_list(
+            |c| &mut c.ui.focused_workspaces,
+            UiListOp::Add("my-star".into()),
+        );
+        Config::mutate_ui_list(
+            |c| &mut c.ui.focused_workspaces,
+            UiListOp::Remove("their-star-1".into()),
+        );
+        // `BTreeSet` list through the same helper.
+        Config::mutate_ui_list(
+            |c| &mut c.ui.collapsed_repos,
+            UiListOp::Add("owner/my-collapse".into()),
+        );
+        assert!(
+            Config::flush_pending_saves(std::time::Duration::from_secs(5)),
+            "flush must complete within the bound"
+        );
+
+        let reloaded = Config::load_from(&Config::default_path()).expect("reload");
+        assert_eq!(
+            reloaded.ui.focused_workspaces,
+            vec!["their-star-2".to_string(), "my-star".to_string()],
+            "the other writer's surviving star is untouched; the add appended"
+        );
+        assert!(
+            reloaded.ui.collapsed_repos.contains("owner/their-collapse"),
+            "set-typed lists keep foreign entries too"
+        );
+        assert!(reloaded.ui.collapsed_repos.contains("owner/my-collapse"));
         Config::invalidate_cache();
     }
 

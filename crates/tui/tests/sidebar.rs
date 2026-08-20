@@ -2254,12 +2254,7 @@ fn pinned_repo_config_floats_group_to_top() {
 /// config path so the persistence side effect writes to a temp dir.
 #[test]
 fn toggle_pin_at_cursor_reorders_and_reports() {
-    let home = tempfile::tempdir().expect("tempdir");
-    // SAFETY: single-threaded test-time env mutation, scoped to a temp
-    // dir so the persistence write can't touch the real config.
-    unsafe {
-        std::env::set_var("LAZYBOX_HOME", home.path());
-    }
+    let _home = ConfigHome::sandbox();
 
     let mut s = Sidebar::new(PaneId::new(1));
     while s.sort_mode() != lazybox_tui::components::sidebar::SortMode::Recent {
@@ -2322,10 +2317,6 @@ fn toggle_pin_at_cursor_reorders_and_reports() {
         })
         .collect();
     assert_eq!(headers, ["owner/alpha", "owner/beta"]);
-
-    unsafe {
-        std::env::remove_var("LAZYBOX_HOME");
-    }
 }
 
 /// `*` on a workspace stars it, reports `(label, true)`, and lifts the
@@ -2335,12 +2326,7 @@ fn toggle_pin_at_cursor_reorders_and_reports() {
 /// the persistence write hits a temp dir.
 #[test]
 fn toggle_focus_at_cursor_lifts_row_and_reports() {
-    let home = tempfile::tempdir().expect("tempdir");
-    // SAFETY: single-threaded test-time env mutation, scoped to a temp
-    // dir so the persistence write can't touch the real config.
-    unsafe {
-        std::env::set_var("LAZYBOX_HOME", home.path());
-    }
+    let _home = ConfigHome::sandbox();
 
     let mut s = Sidebar::new(PaneId::new(1));
     while s.sort_mode() != lazybox_tui::components::sidebar::SortMode::Recent {
@@ -2392,28 +2378,18 @@ fn toggle_focus_at_cursor_lifts_row_and_reports() {
             .any(|r| matches!(r, VisibleRow::FocusedHeader)),
         "focused section gone once nothing is starred",
     );
-
-    unsafe {
-        std::env::remove_var("LAZYBOX_HOME");
-    }
 }
 
 /// Archiving / deleting a starred workspace drops its key from the
-/// focus set — otherwise `ui.focused_workspaces` (which is persisted
-/// verbatim from this set) accumulates keys for workspaces that no
-/// longer exist (#846 review). Asserts the in-memory set rather than the
-/// on-disk file: `LAZYBOX_HOME` is process-global, so reading it back
-/// races the other config-writing tests; the in-memory set is exactly
-/// what gets persisted, so it's the deterministic witness. Still
-/// sandboxes the write so `forget_focused_workspace`'s save can't touch
-/// the real config.
+/// focus set — otherwise `ui.focused_workspaces` accumulates keys for
+/// workspaces that no longer exist (#846 review). Asserts the in-memory
+/// set; the on-disk side of the same journey is covered by
+/// `workspace_removal_forgets_only_the_removed_star` (#1244). Sandboxes
+/// the write so `forget_focused_workspace`'s save can't touch the real
+/// config.
 #[test]
 fn workspace_removal_prunes_persisted_focus() {
-    let home = tempfile::tempdir().expect("tempdir");
-    // SAFETY: single-threaded test-time env mutation, scoped to a temp dir.
-    unsafe {
-        std::env::set_var("LAZYBOX_HOME", home.path());
-    }
+    let _home = ConfigHome::sandbox();
 
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
@@ -2439,10 +2415,6 @@ fn workspace_removal_prunes_persisted_focus() {
         !s.is_focused(&key),
         "the stale key was pruned from the focus set on removal",
     );
-
-    unsafe {
-        std::env::remove_var("LAZYBOX_HOME");
-    }
 }
 
 /// A duplicate key in the persisted `ui.focused_workspaces` (a
@@ -2478,19 +2450,12 @@ fn apply_config_dedups_focused_workspaces() {
     assert!(s.is_focused(&key));
 
     // A single unstar fully clears it — proving no duplicate survives.
-    let home = tempfile::tempdir().expect("tempdir");
-    // SAFETY: single-threaded test-time env mutation, scoped to a temp dir.
-    unsafe {
-        std::env::set_var("LAZYBOX_HOME", home.path());
-    }
+    let _home = ConfigHome::sandbox();
     s.toggle_focus_at_cursor();
     assert!(
         !s.is_focused(&key),
         "one unstar removes the only entry — the dup didn't survive load",
     );
-    unsafe {
-        std::env::remove_var("LAZYBOX_HOME");
-    }
 }
 
 /// The `★ Focused` header honors `display.ascii_glyphs`: a plain `*` on a
@@ -2498,11 +2463,7 @@ fn apply_config_dedups_focused_workspaces() {
 #[test]
 fn focused_header_honors_ascii_glyphs() {
     use std::collections::BTreeSet;
-    let home = tempfile::tempdir().expect("tempdir");
-    // SAFETY: single-threaded test-time env mutation, scoped to a temp dir.
-    unsafe {
-        std::env::set_var("LAZYBOX_HOME", home.path());
-    }
+    let _home = ConfigHome::sandbox();
     let mut s = Sidebar::new(PaneId::new(1));
     let ascii = lazybox_config::DisplayConfig {
         ascii_glyphs: true,
@@ -2540,8 +2501,317 @@ fn focused_header_honors_ascii_glyphs() {
         !rendered.contains('★'),
         "no unicode star under ascii_glyphs: {rendered:?}",
     );
+}
 
-    unsafe {
-        std::env::remove_var("LAZYBOX_HOME");
+// ── #1244: config persistence journeys ─────────────────────────────────
+//
+// Star/pin state lives in `~/.lazybox/config.yaml::ui.*` and must
+// survive a restart, an attach client that boots unseeded, and a
+// concurrent writer. These tests drive the real persistence round trip
+// against a sandboxed home: toggle → flush → reload the YAML → seed a
+// fresh sidebar exactly like the boot path does.
+
+/// Sandbox `LAZYBOX_HOME` into a temp dir for tests that write AND read
+/// the config file back. Holds a process-wide lock for the guard's
+/// lifetime: the env var is global, so disk-reading persistence tests
+/// must not interleave with each other (or with any other test's
+/// config flush).
+struct ConfigHome {
+    _serial: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+}
+
+impl ConfigHome {
+    fn sandbox() -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let serial = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let prev = std::env::var_os("LAZYBOX_HOME");
+        // SAFETY: serialized test-time env mutation, scoped to a temp dir.
+        unsafe { std::env::set_var("LAZYBOX_HOME", dir.path()) };
+        lazybox_config::Config::invalidate_cache();
+        Self {
+            _serial: serial,
+            _dir: dir,
+            prev,
+        }
     }
+
+    /// Flush the async persist queue, then load the YAML back — the
+    /// same file the next launch would read.
+    fn reload(&self) -> lazybox_config::Config {
+        assert!(
+            lazybox_config::Config::flush_pending_saves(std::time::Duration::from_secs(5)),
+            "pending config saves must flush within the bound"
+        );
+        lazybox_config::Config::load_from(&lazybox_config::Config::default_path())
+            .expect("reload persisted config")
+    }
+}
+
+impl Drop for ConfigHome {
+    fn drop(&mut self) {
+        // SAFETY: still serialized by `_serial` (fields drop after this).
+        match self.prev.take() {
+            Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
+            None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
+        }
+        lazybox_config::Config::invalidate_cache();
+    }
+}
+
+fn snapshot_of(workspaces: Vec<Workspace>) -> Event {
+    Event::Snapshot {
+        workspaces,
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    }
+}
+
+/// Seed a sidebar from persisted `ui.*` state the way the boot path
+/// does (`Model::apply_client_config` → `Sidebar::apply_config`).
+fn apply_persisted(s: &mut Sidebar, focused: Vec<SessionKey>, pinned: Vec<String>) {
+    s.apply_config(
+        lazybox_config::AttentionConfig::default(),
+        std::collections::BTreeSet::new(),
+        pinned,
+        focused,
+        Vec::new(),
+        std::collections::BTreeSet::new(),
+        None,
+        &lazybox_config::DisplayConfig::default(),
+    );
+}
+
+/// Journey 1a (#1244): default config → star two workspaces → flush →
+/// reload the YAML from the sandboxed home → seed a FRESH sidebar from
+/// it → the stars AND their order survive the restart.
+#[test]
+fn star_round_trips_through_restart_with_order() {
+    let home = ConfigHome::sandbox();
+    let now = Utc::now();
+    let w1 = make_workspace("owner/rt", "rt#1", now);
+    let w2 = make_workspace("owner/rt", "rt#2", now - Duration::minutes(1));
+    let (k1, k2) = (ws_key(&w1), ws_key(&w2));
+
+    let mut first = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut first, Vec::new(), Vec::new());
+    first.on_event(&snapshot_of(vec![w1.clone(), w2.clone()]));
+    // Star in reverse row order so persisted order ≠ row order.
+    assert!(first.focus_workspace_key(&k2));
+    first.toggle_focus_at_cursor();
+    assert!(first.focus_workspace_key(&k1));
+    first.toggle_focus_at_cursor();
+
+    let cfg = home.reload();
+    assert_eq!(
+        cfg.ui.focused_workspaces,
+        vec![k2.as_str().to_string(), k1.as_str().to_string()],
+        "both stars persisted, in the order they were starred"
+    );
+
+    // "Restart": parse the persisted strings exactly like the binary.
+    let persisted: Vec<SessionKey> = cfg
+        .ui
+        .focused_workspaces
+        .iter()
+        .map(|s| SessionKey::from(s.as_str()))
+        .collect();
+    let mut second = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut second, persisted, Vec::new());
+    second.on_event(&snapshot_of(vec![w1, w2]));
+    assert!(second.is_focused(&k1), "star on rt#1 survives restart");
+    assert!(second.is_focused(&k2), "star on rt#2 survives restart");
+}
+
+/// Journey 1b (#1244): the same round trip for repo pins.
+#[test]
+fn pin_round_trips_through_restart() {
+    let home = ConfigHome::sandbox();
+    let now = Utc::now();
+    let w = make_workspace("owner/pinned-repo", "pinned#1", now);
+
+    let mut first = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut first, Vec::new(), Vec::new());
+    first.on_event(&snapshot_of(vec![w.clone()]));
+    let pinned = first.toggle_pin_at_cursor();
+    assert_eq!(
+        pinned,
+        Some(("owner/pinned-repo".to_string(), true)),
+        "the cursor's repo group pins"
+    );
+
+    let cfg = home.reload();
+    assert_eq!(cfg.ui.pinned_repos, vec!["owner/pinned-repo".to_string()]);
+
+    let mut second = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut second, Vec::new(), cfg.ui.pinned_repos.clone());
+    second.on_event(&snapshot_of(vec![w]));
+    assert!(
+        second.is_repo_pinned("owner/pinned-repo"),
+        "the pin survives restart"
+    );
+}
+
+/// Journey 2 (#1244, Break A/B — fails on main): a sidebar that never
+/// had `apply_config` called (the historical attach-client boot) stars
+/// ONE workspace. The on-disk list must still contain the stars an
+/// earlier session persisted plus the new one: persistence is a
+/// targeted add on the on-disk value, never an overwrite from the
+/// unseeded in-memory list.
+#[test]
+fn unseeded_star_toggle_keeps_previously_persisted_stars() {
+    let home = ConfigHome::sandbox();
+    lazybox_config::Config::save_with(|c| {
+        c.ui.focused_workspaces = vec!["earlier-star-1".into(), "earlier-star-2".into()];
+    })
+    .expect("seed an earlier session's stars");
+
+    let now = Utc::now();
+    let w = make_workspace("owner/unseeded", "unseeded#1", now);
+    let key = ws_key(&w);
+    // No apply_config: this client booted without applying its config.
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.on_event(&snapshot_of(vec![w]));
+    assert!(s.focus_workspace_key(&key));
+    s.toggle_focus_at_cursor();
+    assert!(s.is_focused(&key), "starred in this session");
+
+    let cfg = home.reload();
+    for survivor in ["earlier-star-1", "earlier-star-2"] {
+        assert!(
+            cfg.ui.focused_workspaces.iter().any(|k| k == survivor),
+            "the earlier session's star {survivor:?} survived the unseeded writer: {:?}",
+            cfg.ui.focused_workspaces
+        );
+    }
+    assert!(
+        cfg.ui.focused_workspaces.iter().any(|k| k == key.as_str()),
+        "the new star was appended"
+    );
+}
+
+/// Journey 4a (#1202/#1205, reinstated by #1244): a stale key in the
+/// persisted focus set — a placeholder that leaked into the
+/// hand-editable config, or a workspace the per-removal prune missed —
+/// matches no workspace in the authoritative Snapshot, so it is pruned
+/// from memory AND from the config, while the real star stays put.
+#[test]
+fn snapshot_prunes_stale_focus_keys_from_config() {
+    let home = ConfigHome::sandbox();
+    let now = Utc::now();
+    let w = make_workspace("owner/prune", "prune#1", now);
+    let real = ws_key(&w);
+    let placeholder = SessionKey::from("github-owner-repo-1");
+    lazybox_config::Config::save_with(|c| {
+        c.ui.focused_workspaces = vec![placeholder.as_str().to_string(), real.as_str().to_string()];
+    })
+    .expect("seed the stale + real stars");
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut s, vec![placeholder.clone(), real.clone()], Vec::new());
+    s.on_event(&snapshot_of(vec![w]));
+
+    assert!(s.is_focused(&real), "the real workspace stays starred");
+    assert!(
+        !s.is_focused(&placeholder),
+        "the placeholder key was pruned by the Snapshot"
+    );
+    let cfg = home.reload();
+    assert_eq!(
+        cfg.ui.focused_workspaces,
+        vec![real.as_str().to_string()],
+        "the prune persisted as a targeted removal of just the stale key"
+    );
+}
+
+/// Journey 4b (#1244 guard): before `apply_config` has seeded the
+/// list, "not in the focus set" means "not loaded yet" — an unseeded
+/// client receiving a Snapshot must never prune (i.e. erase) the stars
+/// an earlier session persisted.
+#[test]
+fn unseeded_snapshot_never_prunes_persisted_stars() {
+    let home = ConfigHome::sandbox();
+    lazybox_config::Config::save_with(|c| {
+        c.ui.focused_workspaces = vec!["persisted-star".into()];
+    })
+    .expect("seed an earlier session's star");
+
+    let now = Utc::now();
+    let unrelated = make_workspace("owner/other", "other#1", now);
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.on_event(&snapshot_of(vec![unrelated]));
+
+    let cfg = home.reload();
+    assert_eq!(
+        cfg.ui.focused_workspaces,
+        vec!["persisted-star".to_string()],
+        "no prune fired from the unseeded list"
+    );
+}
+
+/// Journey 4c (#1244): a remote attach client's Snapshot describes
+/// another machine's workspaces — a local star absent from it is not
+/// stale. With `set_snapshot_prune(false)` (what `Model::with_remote`
+/// arms) the star survives in memory and on disk.
+#[test]
+fn remote_snapshot_keeps_local_stars() {
+    let home = ConfigHome::sandbox();
+    let local_star = SessionKey::from("local-only-workspace");
+    lazybox_config::Config::save_with(|c| {
+        c.ui.focused_workspaces = vec![local_star.as_str().to_string()];
+    })
+    .expect("seed the local star");
+
+    let now = Utc::now();
+    let remote_ws = make_workspace("owner/remote", "remote#1", now);
+    let mut s = Sidebar::new(PaneId::new(1));
+    s.set_snapshot_prune(false);
+    apply_persisted(&mut s, vec![local_star.clone()], Vec::new());
+    s.on_event(&snapshot_of(vec![remote_ws]));
+
+    assert!(
+        s.is_focused(&local_star),
+        "the local star is untouched by the remote snapshot"
+    );
+    let cfg = home.reload();
+    assert_eq!(
+        cfg.ui.focused_workspaces,
+        vec![local_star.as_str().to_string()],
+        "nothing was pruned from the config"
+    );
+}
+
+/// Journey 4d (#1244): the authoritative `WorkspaceRemoved` still
+/// forgets exactly the removed workspace's star — a targeted removal
+/// that leaves every other star in the config alone.
+#[test]
+fn workspace_removal_forgets_only_the_removed_star() {
+    let home = ConfigHome::sandbox();
+    let now = Utc::now();
+    let gone = make_workspace("owner/forget", "forget#1", now);
+    let kept = make_workspace("owner/forget", "forget#2", now - Duration::minutes(1));
+    let (gone_key, kept_key) = (ws_key(&gone), ws_key(&kept));
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut s, Vec::new(), Vec::new());
+    s.on_event(&snapshot_of(vec![gone.clone(), kept.clone()]));
+    assert!(s.focus_workspace_key(&gone_key));
+    s.toggle_focus_at_cursor();
+    assert!(s.focus_workspace_key(&kept_key));
+    s.toggle_focus_at_cursor();
+
+    s.on_event(&Event::WorkspaceRemoved(gone.key.clone()));
+    assert!(!s.is_focused(&gone_key), "the removed star is forgotten");
+    assert!(s.is_focused(&kept_key), "the other star stays");
+
+    let cfg = home.reload();
+    assert_eq!(
+        cfg.ui.focused_workspaces,
+        vec![kept_key.as_str().to_string()],
+        "only the removed workspace's key left the config"
+    );
 }

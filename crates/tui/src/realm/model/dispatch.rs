@@ -101,7 +101,7 @@ fn bulk_spawn_command(
         kind,
         cwd: None,
         initial_prompt,
-        initial_snippet,
+        initial_snippet: initial_snippet.map(Box::new),
         on_main: false,
         model_alias,
         access: lazybox_ipc::AgentRunAccess::Default,

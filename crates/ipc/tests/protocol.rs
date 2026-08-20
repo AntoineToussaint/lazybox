@@ -120,10 +120,10 @@ fn all_commands() -> Vec<Command> {
             },
             cwd: None,
             initial_prompt: Some("fix the failing CI".into()),
-            initial_snippet: Some(lazybox_ipc::SnippetRef {
+            initial_snippet: Some(Box::new(lazybox_ipc::SnippetRef {
                 key: "rev".into(),
                 category: "review".into(),
-            }),
+            })),
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,

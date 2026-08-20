@@ -780,7 +780,7 @@ pub enum Command {
         /// sent-snippet history the inject path records — usage is
         /// tracked at the selection boundary, not per transport.
         #[serde(default)]
-        initial_snippet: Option<SnippetRef>,
+        initial_snippet: Option<Box<SnippetRef>>,
         /// Host access policy for the spawned agent. Shell and log
         /// terminals ignore this field.
         #[serde(default)]

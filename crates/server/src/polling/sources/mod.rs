@@ -888,17 +888,21 @@ impl GhSource {
                 .fetch_hot_tasks(&node_ids)
                 .await
                 .map_err(lazybox_core::ProviderError::from)?;
-            for ((request, _), task) in batched.into_iter().zip(results) {
-                if let Some(task) = task {
-                    tasks.push(task);
-                } else {
-                    tracing::debug!(
-                        hot = true,
-                        "targeted: {}/{}#{} not visible — skipping",
-                        request.target.owner,
-                        request.target.repo,
-                        request.target.number,
-                    );
+            for ((request, _), outcome) in batched.into_iter().zip(results) {
+                match outcome {
+                    lazybox_gh::HotFetch::Fresh(task) => tasks.push(*task),
+                    // The freshness probe matched the last tick byte for
+                    // byte — nothing to upsert or broadcast (#1218).
+                    lazybox_gh::HotFetch::Unchanged => {}
+                    lazybox_gh::HotFetch::Missing => {
+                        tracing::debug!(
+                            hot = true,
+                            "targeted: {}/{}#{} not visible — skipping",
+                            request.target.owner,
+                            request.target.repo,
+                            request.target.number,
+                        );
+                    }
                 }
             }
         }

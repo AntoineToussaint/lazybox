@@ -2100,6 +2100,82 @@ pub fn hot_tasks_body(node_ids: &[String]) -> serde_json::Value {
     })
 }
 
+/// Lean freshness probe for the hot set (#1218). Everything the full
+/// [`HOT_TASKS_QUERY`] answers that can change *without* bumping
+/// `updatedAt` is here (CI rollup, mergeability, review decision,
+/// merge-queue/auto-merge state, head oid); everything else IS covered
+/// by `updatedAt` (comments, labels, reviews, edits, assignment). A
+/// hot target whose probe node is byte-identical to the last one seen
+/// therefore cannot have changed in any way lazybox renders — the
+/// ~700-node full query is only spent on nodes whose probe moved.
+/// ~10 nodes/PR vs ~700: the difference between ~84k GraphQL points/hr
+/// and staying inside the 5k budget at a 15s hot cadence.
+const HOT_FRESHNESS_QUERY: &str = r#"
+query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    __typename
+    ... on PullRequest {
+      id
+      updatedAt
+      headRefOid
+      state
+      isDraft
+      mergeable
+      mergeStateStatus
+      reviewDecision
+      isInMergeQueue
+      autoMergeRequest { enabledAt }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+            }
+          }
+        }
+      }
+    }
+    ... on Issue {
+      id
+      updatedAt
+      state
+      stateReason
+    }
+  }
+  rateLimit {
+    cost
+    limit
+    remaining
+    resetAt
+    used
+  }
+}
+"#;
+
+pub fn hot_freshness_body(node_ids: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "query": HOT_FRESHNESS_QUERY,
+        "variables": { "ids": node_ids },
+    })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlHotFreshnessResponse {
+    pub data: Option<GqlHotFreshnessData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+/// Probe nodes stay untyped on purpose: the fingerprint is the
+/// serialized node itself, so adding a field to the query above
+/// automatically widens change detection — no struct to keep in sync.
+#[derive(Deserialize, Debug)]
+pub struct GqlHotFreshnessData {
+    pub nodes: Vec<Option<serde_json::Value>>,
+    #[serde(rename = "rateLimit")]
+    pub rate_limit: Option<GqlRateLimit>,
+}
+
 #[derive(Deserialize, Debug)]
 pub struct GqlHotTasksResponse {
     pub data: Option<GqlHotTasksData>,
@@ -3670,6 +3746,39 @@ mod tests {
         let query = body["query"].as_str().unwrap();
         assert!(query.contains("headRefOid"));
         assert!(query.contains("reviewThreads(first: 50)"));
+    }
+
+    /// The lean probe must cover exactly the fields that can change
+    /// without bumping `updatedAt` — and must NOT drag in the expensive
+    /// connections that make the full query ~700 nodes/PR (#1218).
+    #[test]
+    fn hot_freshness_body_is_lean_but_covers_silent_changes() {
+        let ids = vec!["PR_one".to_string()];
+        let body = hot_freshness_body(&ids);
+        assert_eq!(body["variables"]["ids"], serde_json::json!(ids));
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("nodes(ids: $ids)"));
+        for silent_field in [
+            "updatedAt",
+            "headRefOid",
+            "mergeable",
+            "mergeStateStatus",
+            "reviewDecision",
+            "isInMergeQueue",
+            "autoMergeRequest",
+            "statusCheckRollup",
+        ] {
+            assert!(
+                query.contains(silent_field),
+                "probe must cover {silent_field}"
+            );
+        }
+        for heavy_connection in ["reviewThreads", "contexts(", "comments(", "labels("] {
+            assert!(
+                !query.contains(heavy_connection),
+                "probe must not fetch {heavy_connection}",
+            );
+        }
     }
 
     #[test]

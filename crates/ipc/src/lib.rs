@@ -1468,6 +1468,12 @@ pub enum Command {
     DeleteError {
         dedupe_key: String,
     },
+    /// Request the daemon's resource posture (live agents vs cap, fleet
+    /// size, log/db footprint, bus-loss counters) for the Shift-D
+    /// sync-status screen. The daemon replies with
+    /// [`Event::ResourcePosture`]. Appended last (bincode is
+    /// ordinal-sensitive).
+    GetResourcePosture,
 }
 
 impl Command {
@@ -1677,10 +1683,16 @@ pub enum Event {
         default_agent: Option<String>,
     },
     /// A workspace was created or updated.
-    /// Boxed because Workspace is several KB once activity is
-    /// populated; keeping the `Event` enum slim avoids worst-case
-    /// async-channel overhead.
-    WorkspaceUpserted(Box<lazybox_core::Workspace>),
+    /// `Arc`, not `Box` (2026-08-19 audit, M6): the daemon's broadcast
+    /// ring retains up to 1024 events until overwritten, and every
+    /// subscriber's `recv()` clones the event — with a boxed payload
+    /// that was a deep copy of a workspace that measures ~500 KB
+    /// serialized once activity is populated, multiplied by ring
+    /// retention × subscriber count. An `Arc` keeps the enum slim,
+    /// makes ring slots and fan-out clones pointer-sized, and
+    /// serializes identically to the boxed form on the wire
+    /// (serde's `rc` feature writes the inner value).
+    WorkspaceUpserted(std::sync::Arc<lazybox_core::Workspace>),
     WorkspaceRemoved(lazybox_core::WorkspaceKey),
     /// A project (top-level container — github repo, linear team,
     /// or local) was registered or updated. Sidebar headers render
@@ -2458,6 +2470,41 @@ pub enum Event {
         client_request_id: String,
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Reply to [`Command::GetResourcePosture`]: the daemon's resource
+    /// posture, so the ratchets the 2026-08-19 audit identified (agent
+    /// fleet, log growth, bus loss) are visible in Shift-D before they
+    /// become an incident. Appended last (bincode is
+    /// ordinal-sensitive).
+    ResourcePosture(ResourcePosture),
+}
+
+/// Daemon resource posture for the Shift-D sync-status screen.
+/// Everything is a plain counter/byte figure so the wire shape stays
+/// stable as sources evolve; `None` means "could not be measured", not
+/// zero.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ResourcePosture {
+    /// Agent terminals whose process is still alive (shells excluded).
+    pub live_agents: u64,
+    /// Effective `agent.max_live_agents` ceiling; `None` = uncapped.
+    pub agent_cap: Option<u64>,
+    /// All registered terminals (agents + shells).
+    pub terminals: u64,
+    /// Size of the daemon log file, when it could be measured.
+    pub log_bytes: Option<u64>,
+    /// Size of `state.db`, when it could be measured.
+    pub state_db_bytes: Option<u64>,
+    /// Bus events subscribers missed (broadcast ring overwrites).
+    pub bus_lagged_events: u64,
+    /// Recovery snapshots sent for those lags.
+    pub bus_lag_recoveries: u64,
+    /// Terminal output chunks dropped by bounded channels.
+    pub terminal_output_dropped: u64,
+    /// Terminal grid rebuilds those drops forced.
+    pub terminal_resyncs: u64,
+    /// Inline serve-loop commands that overran their budget.
+    pub inline_budget_violations: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

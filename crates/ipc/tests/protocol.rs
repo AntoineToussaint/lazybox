@@ -471,6 +471,7 @@ fn all_commands() -> Vec<Command> {
         Command::DeleteError {
             dedupe_key: "github|merge|rate limited".into(),
         },
+        Command::GetResourcePosture,
         Command::Shutdown,
     ]
 }
@@ -527,7 +528,7 @@ fn all_events() -> Vec<Event> {
             agents: vec!["claude".into(), "codex".into()],
             default_agent: Some("codex".into()),
         },
-        Event::WorkspaceUpserted(Box::new(sample_workspace())),
+        Event::WorkspaceUpserted(std::sync::Arc::new(sample_workspace())),
         Event::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(key.as_str())),
         Event::ProjectUpserted(Box::new(sample_project())),
         Event::ProjectRemoved(lazybox_core::ProjectKey::github("o", "r")),
@@ -1058,6 +1059,18 @@ fn all_events() -> Vec<Event> {
             terminal_id: TerminalId(14),
             reset_hint: "3pm".into(),
         },
+        Event::ResourcePosture(lazybox_ipc::ResourcePosture {
+            live_agents: 12,
+            agent_cap: Some(32),
+            terminals: 19,
+            log_bytes: Some(4_096),
+            state_db_bytes: None,
+            bus_lagged_events: 3,
+            bus_lag_recoveries: 1,
+            terminal_output_dropped: 0,
+            terminal_resyncs: 0,
+            inline_budget_violations: 2,
+        }),
     ]
 }
 
@@ -1143,6 +1156,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ListErrors => "ListErrors",
         Command::ClearErrors => "ClearErrors",
         Command::DeleteError { .. } => "DeleteError",
+        Command::GetResourcePosture => "GetResourcePosture",
     }
 }
 
@@ -1239,6 +1253,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::ErrorInbox { .. } => "ErrorInbox",
         Event::AgentUsageLimit { .. } => "AgentUsageLimit",
         Event::WorkspaceCreated { .. } => "WorkspaceCreated",
+        Event::ResourcePosture(_) => "ResourcePosture",
     }
 }
 
@@ -1250,12 +1265,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        77,
+        78,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        86,
+        87,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

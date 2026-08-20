@@ -37,6 +37,11 @@ pub(crate) struct SyncStatus {
     /// Every retained attempt, most-recent-first.
     recent: Vec<SyncEntry>,
     governor: Option<String>,
+    /// Daemon resource posture (2026-08-19 audit) + the client's own
+    /// frame-budget overrun tally. `None` until the daemon's
+    /// [`lazybox_ipc::Event::ResourcePosture`] reply lands — the
+    /// section renders a "measuring…" placeholder meanwhile.
+    posture: Option<(lazybox_ipc::ResourcePosture, u64)>,
     /// Reference instant for relative-time rendering, captured at
     /// mount so ages stay stable while the window is open.
     now: DateTime<Utc>,
@@ -54,6 +59,7 @@ impl SyncStatus {
             summary,
             recent,
             governor: None,
+            posture: None,
             now,
             scroll: 0,
             body_height: 0,
@@ -65,10 +71,113 @@ impl SyncStatus {
         self
     }
 
+    /// Attach the daemon's resource posture plus the client-side
+    /// frame-budget overrun tally (the daemon can't see the client's
+    /// run loop).
+    pub(crate) fn with_posture(
+        mut self,
+        posture: lazybox_ipc::ResourcePosture,
+        client_frame_overruns: u64,
+    ) -> Self {
+        self.posture = Some((posture, client_frame_overruns));
+        self
+    }
+
+    /// `12.3 MB` / `842 KB` / `97 B` for the posture byte figures.
+    fn human_bytes(bytes: u64) -> String {
+        const KB: u64 = 1024;
+        const MB: u64 = KB * 1024;
+        const GB: u64 = MB * 1024;
+        match bytes {
+            b if b >= GB => format!("{:.1} GB", b as f64 / GB as f64),
+            b if b >= MB => format!("{:.1} MB", b as f64 / MB as f64),
+            b if b >= KB => format!("{} KB", b / KB),
+            b => format!("{b} B"),
+        }
+    }
+
+    /// The "Resource posture" section (2026-08-19 audit): the ratchets
+    /// that caused the incident — agent fleet, log growth, bus loss,
+    /// frozen frames — as at-a-glance figures, warn-toned when a
+    /// figure deserves attention.
+    fn posture_lines(&self, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        lines.push(Line::from(Span::styled(
+            "Resource posture",
+            theme.section_heading(),
+        )));
+        let Some((p, client_overruns)) = &self.posture else {
+            lines.push(Line::from(Span::styled(
+                "  measuring…",
+                Style::default().fg(theme.text_dim),
+            )));
+            lines.push(Line::raw(""));
+            return lines;
+        };
+        let dim = Style::default().fg(theme.text_dim);
+        let warn = Style::default().fg(theme.warn).add_modifier(Modifier::BOLD);
+
+        let agents_text = match p.agent_cap {
+            Some(cap) => format!("  agents alive      {} / {} cap", p.live_agents, cap),
+            None => format!("  agents alive      {} (uncapped)", p.live_agents),
+        };
+        let agents_hot = p.agent_cap.is_some_and(|cap| p.live_agents >= cap);
+        lines.push(Line::from(Span::styled(
+            agents_text,
+            if agents_hot { warn } else { dim },
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  terminals         {}", p.terminals),
+            dim,
+        )));
+        let fmt_opt = |v: Option<u64>| v.map_or("unknown".to_string(), Self::human_bytes);
+        lines.push(Line::from(Span::styled(
+            format!("  log file          {}", fmt_opt(p.log_bytes)),
+            dim,
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  state.db          {}", fmt_opt(p.state_db_bytes)),
+            dim,
+        )));
+        let bus_hot = p.bus_lagged_events > 0;
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  bus events missed {} ({} recovery snapshots)",
+                p.bus_lagged_events, p.bus_lag_recoveries
+            ),
+            if bus_hot { warn } else { dim },
+        )));
+        if p.terminal_output_dropped > 0 || p.terminal_resyncs > 0 {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "  output dropped    {} ({} grid resyncs)",
+                    p.terminal_output_dropped, p.terminal_resyncs
+                ),
+                warn,
+            )));
+        }
+        if p.inline_budget_violations > 0 {
+            lines.push(Line::from(Span::styled(
+                format!("  daemon slow cmds  {}", p.inline_budget_violations),
+                warn,
+            )));
+        }
+        let frames_hot = *client_overruns > 0;
+        lines.push(Line::from(Span::styled(
+            format!(
+                "  frozen frames     {} (UI iterations over budget)",
+                client_overruns
+            ),
+            if frames_hot { warn } else { dim },
+        )));
+        lines.push(Line::raw(""));
+        lines
+    }
+
     /// The scrollable body, as styled lines. Re-derived each render so
     /// theme + width changes are picked up.
     fn body_lines(&self, theme: &crate::theme::Theme) -> Vec<Line<'static>> {
-        let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut lines: Vec<Line<'static>> = self.posture_lines(theme);
 
         if self.summary.is_empty() {
             if self.governor.is_none() {
@@ -378,6 +487,48 @@ mod tests {
         assert!(out.contains("auth: bad credentials"), "{out}");
         assert!(out.contains("4 tasks"), "{out}");
         assert!(out.contains("12 tasks"), "{out}");
+    }
+
+    /// The resource-posture section (2026-08-19 audit): renders its
+    /// figures at the top, warn-flags the ratchets that need eyes
+    /// (fleet at/over cap, bus loss, frozen frames), and shows
+    /// "measuring…" until the daemon reply lands.
+    #[test]
+    fn renders_resource_posture_with_ratchet_flags() {
+        let n = now();
+        let mut waiting = SyncStatus::new(vec![ok("github", 4, 5, n)], Vec::new(), n);
+        let out = render(&mut waiting, 90, 20);
+        assert!(out.contains("Resource posture"), "{out}");
+        assert!(out.contains("measuring…"), "{out}");
+
+        let mut comp = SyncStatus::new(vec![ok("github", 4, 5, n)], Vec::new(), n).with_posture(
+            lazybox_ipc::ResourcePosture {
+                live_agents: 47,
+                agent_cap: Some(32),
+                terminals: 60,
+                log_bytes: Some(138 * 1024 * 1024),
+                state_db_bytes: Some(4 * 1024 * 1024),
+                bus_lagged_events: 12,
+                bus_lag_recoveries: 2,
+                terminal_output_dropped: 0,
+                terminal_resyncs: 0,
+                inline_budget_violations: 0,
+            },
+            7,
+        );
+        let out = render(&mut comp, 90, 24);
+        assert!(out.contains("agents alive      47 / 32 cap"), "{out}");
+        assert!(out.contains("terminals         60"), "{out}");
+        assert!(out.contains("138.0 MB"), "{out}");
+        assert!(
+            out.contains("bus events missed 12 (2 recovery snapshots)"),
+            "{out}"
+        );
+        assert!(out.contains("frozen frames     7"), "{out}");
+        assert!(
+            out.find("Resource posture") < out.find("Last sync per source"),
+            "posture leads the body: {out}"
+        );
     }
 
     #[test]

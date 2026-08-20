@@ -991,6 +991,7 @@ impl Server {
                         lazybox_ipc::Command::ListErrors => "ListErrors",
                         lazybox_ipc::Command::ClearErrors => "ClearErrors",
                         lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
+                        lazybox_ipc::Command::GetResourcePosture => "GetResourcePosture",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` fires on every keystroke — at info it floods
@@ -2018,10 +2019,47 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::DeleteError { dedupe_key } => {
             error_inbox::handle_delete(config, dedupe_key).await;
         }
+        lazybox_ipc::Command::GetResourcePosture => {
+            broadcast_resource_posture(config).await;
+        }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")
         }
     }
+}
+
+/// Gather + broadcast the daemon's resource posture (2026-08-19 audit:
+/// the guardrail that makes the ratchets — agent fleet, log growth,
+/// bus loss — visible in Shift-D before they become an incident).
+/// Broadcast on the bus like the Error Inbox reply: every attached
+/// client's open sync-status screen refreshes.
+pub async fn broadcast_resource_posture(config: &ServerConfig) {
+    let live_agents = config.terminal.live_agent_count().await as u64;
+    let terminals = config.terminal.metadata_map().await.len() as u64;
+    let user_config = lazybox_config::Config::load().unwrap_or_default();
+    let agent_cap = user_config.agent.live_agent_cap().map(|c| c as u64);
+    let log_path = user_config.ui.resolved().log_path;
+    let (log_bytes, state_db_bytes) = tokio::task::spawn_blocking(move || {
+        let log = std::fs::metadata(&log_path).map(|m| m.len()).ok();
+        let db = std::fs::metadata(state_db_path()).map(|m| m.len()).ok();
+        (log, db)
+    })
+    .await
+    .unwrap_or((None, None));
+    let metrics = config.event_metrics.snapshot();
+    let posture = lazybox_ipc::ResourcePosture {
+        live_agents,
+        agent_cap,
+        terminals,
+        log_bytes,
+        state_db_bytes,
+        bus_lagged_events: metrics.bus_lagged_events,
+        bus_lag_recoveries: metrics.bus_lag_recoveries,
+        terminal_output_dropped: metrics.terminal_output_dropped,
+        terminal_resyncs: metrics.terminal_resyncs,
+        inline_budget_violations: metrics.inline_budget_violations,
+    };
+    let _ = config.bus.send(Event::ResourcePosture(posture));
 }
 
 /// Build a `PersistedSetup` from the YAML's `setup:` section so the

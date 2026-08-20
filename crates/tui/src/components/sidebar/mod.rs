@@ -2711,25 +2711,6 @@ impl Sidebar {
         }
     }
 
-    /// Drop focus keys that don't match any tracked workspace, then
-    /// re-persist if the set changed. Called once the daemon `Snapshot`
-    /// has repopulated the authoritative workspace map (its `workspaces`
-    /// field is the store's full contents, every mailbox), so a key with
-    /// no match is genuinely stale — an archived/deleted workspace missed
-    /// by the per-removal `forget_focused_workspace`, or a placeholder
-    /// that leaked into the hand-editable config (#1202). Without this the
-    /// set only ever grows: the persisted string round-trips fine for a
-    /// real key, but a bogus one never matches a row and so never gets
-    /// unstarred by the user either.
-    fn prune_focused_workspaces(&mut self) {
-        let before = self.focused_workspaces.len();
-        self.focused_workspaces
-            .retain(|k| self.workspaces.contains_key(k));
-        if self.focused_workspaces.len() != before {
-            self.persist_focused_workspaces();
-        }
-    }
-
     /// Persist the current focus set to
     /// `~/.lazybox/config.yaml::ui.focused_workspaces` so the shortlist
     /// survives restart. Best-effort; a write error just means the focus

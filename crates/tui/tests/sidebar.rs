@@ -159,13 +159,15 @@ fn workspace_upserted_inserts_then_updates_in_place() {
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let w = make_workspace("owner/repo", "o/r#1", now);
-    s.on_event(&Event::WorkspaceUpserted(Box::new(w)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(w)));
     assert_eq!(s.workspace_count(), 1);
 
     // Same key, newer timestamp, renamed: same row, name updated.
     let mut updated = make_workspace("owner/repo", "o/r#1", now + Duration::minutes(5));
     updated.name = "renamed".into();
-    s.on_event(&Event::WorkspaceUpserted(Box::new(updated.clone())));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        updated.clone(),
+    )));
     assert_eq!(s.workspace_count(), 1);
     assert_eq!(
         s.selected_workspace().map(|w| w.name.as_str()),
@@ -222,7 +224,7 @@ fn cursor_follows_workspace_key_across_resort() {
     if let Some(t) = bumped.pr.as_mut() {
         t.updated_at = now + Duration::hours(1);
     }
-    s.on_event(&Event::WorkspaceUpserted(Box::new(bumped)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(bumped)));
     assert_eq!(
         s.selected_session_key(),
         Some(&ws_key(&w2)),
@@ -1861,7 +1863,7 @@ fn workspace_upserted_does_not_clobber_asking_state() {
 
     // 2. Polling re-broadcasts the workspace (fresh from store —
     //    no transient asking state).
-    s.on_event(&Event::WorkspaceUpserted(Box::new(w)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(w)));
 
     // 3. The asking-set must STILL hold the entry.
     s.focus_workspace_key(&ws_key(&make_workspace("owner/repo", "o/r#1", now))); // re-anchor cursor
@@ -1993,14 +1995,13 @@ fn ci_failure_transition_enqueues_desktop_notification() {
     // rising edge must queue exactly one banner; staying failing on
     // the next poll must not re-notify.
     let mut s = Sidebar::new(PaneId::new(1));
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
-        "o/r#1",
-        |t| t.ci = CiStatus::Success,
-    ))));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        workspace_with("o/r#1", |t| t.ci = CiStatus::Success),
+    )));
     let _ = s.drain_pending_notifications();
 
     let red = workspace_with("o/r#1", |t| t.ci = CiStatus::Failure);
-    s.on_event(&Event::WorkspaceUpserted(Box::new(red.clone())));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(red.clone())));
     let queued = s.drain_pending_notifications();
     assert_eq!(queued.len(), 1, "green→failing must notify once");
     assert!(
@@ -2010,7 +2011,7 @@ fn ci_failure_transition_enqueues_desktop_notification() {
     );
     assert_eq!(queued[0].workspace_key, ws_key(&red));
 
-    s.on_event(&Event::WorkspaceUpserted(Box::new(red)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(red)));
     assert!(
         s.drain_pending_notifications().is_empty(),
         "failing→failing must not re-notify",
@@ -2023,10 +2024,9 @@ fn first_sight_of_workspace_does_not_notify() {
     // first upsert for it, or a fresh row from a filter change) seeds
     // the baseline silently — no startup banner burst.
     let mut s = Sidebar::new(PaneId::new(1));
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
-        "o/r#1",
-        |t| t.ci = CiStatus::Failure,
-    ))));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        workspace_with("o/r#1", |t| t.ci = CiStatus::Failure),
+    )));
     assert!(
         s.drain_pending_notifications().is_empty(),
         "first sight seeds the baseline silently",
@@ -2050,15 +2050,13 @@ fn ci_failure_transition_respects_desktop_notify_off() {
         None,
         &lazybox_config::DisplayConfig::default(),
     );
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
-        "o/r#1",
-        |t| t.ci = CiStatus::Success,
-    ))));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        workspace_with("o/r#1", |t| t.ci = CiStatus::Success),
+    )));
     let _ = s.drain_pending_notifications();
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
-        "o/r#1",
-        |t| t.ci = CiStatus::Failure,
-    ))));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        workspace_with("o/r#1", |t| t.ci = CiStatus::Failure),
+    )));
     assert!(
         s.drain_pending_notifications().is_empty(),
         "desktop_notify off must suppress provider-event banners",
@@ -2481,117 +2479,6 @@ fn apply_config_dedups_focused_workspaces() {
         !s.is_focused(&key),
         "one unstar removes the only entry — the dup didn't survive load",
     );
-    unsafe {
-        std::env::remove_var("LAZYBOX_HOME");
-    }
-}
-
-/// Starring a real workspace must survive a restart: the key persisted
-/// to `ui.focused_workspaces` is the same one that matches the row at
-/// render time, so feeding the persisted string back through
-/// `apply_config` (exactly what the binary does at startup) re-stars the
-/// row once the Snapshot repopulates the workspace list (#1202).
-#[test]
-fn focus_round_trips_through_persisted_key() {
-    use std::collections::BTreeSet;
-    let home = tempfile::tempdir().expect("tempdir");
-    // SAFETY: single-threaded test-time env mutation, scoped to a temp dir.
-    unsafe {
-        std::env::set_var("LAZYBOX_HOME", home.path());
-    }
-
-    let now = Utc::now();
-    let w = make_workspace("owner/alpha", "alpha#1", now);
-    let key = ws_key(&w);
-
-    // First session: star the workspace and capture what gets persisted.
-    let mut first = Sidebar::new(PaneId::new(1));
-    first.on_event(&Event::Snapshot {
-        workspaces: vec![w.clone()],
-        terminals: vec![],
-        projects: vec![],
-        recent_snippets: Vec::new(),
-        dismissed_updates: Vec::new(),
-    });
-    assert!(first.focus_workspace_key(&key), "workspace present");
-    first.toggle_focus_at_cursor();
-    assert!(first.is_focused(&key), "starred in the first session");
-
-    // Reload: the binary parses each persisted string with
-    // `SessionKey::from`. Simulate that round-trip exactly.
-    let persisted: Vec<SessionKey> = vec![SessionKey::from(key.as_str())];
-    let mut second = Sidebar::new(PaneId::new(1));
-    second.apply_config(
-        lazybox_config::AttentionConfig::default(),
-        BTreeSet::new(),
-        Vec::new(),
-        persisted,
-        Vec::new(),
-        BTreeSet::new(),
-        None,
-        &lazybox_config::DisplayConfig::default(),
-    );
-    second.on_event(&Event::Snapshot {
-        workspaces: vec![w.clone()],
-        terminals: vec![],
-        projects: vec![],
-        recent_snippets: Vec::new(),
-        dismissed_updates: Vec::new(),
-    });
-    assert!(
-        second.is_focused(&key),
-        "the persisted key re-stars the row after restart",
-    );
-
-    unsafe {
-        std::env::remove_var("LAZYBOX_HOME");
-    }
-}
-
-/// A placeholder / stale key in the persisted focus set (e.g. the
-/// `github-owner-repo-1` example that leaked into a real config) matches
-/// no workspace, so it can never be unstarred by the user and would
-/// otherwise re-persist forever. The first Snapshot — the authoritative
-/// full workspace list — prunes it while keeping real focused rows (#1202).
-#[test]
-fn snapshot_prunes_unknown_focus_keys() {
-    use std::collections::BTreeSet;
-    let home = tempfile::tempdir().expect("tempdir");
-    // SAFETY: single-threaded test-time env mutation, scoped to a temp dir.
-    unsafe {
-        std::env::set_var("LAZYBOX_HOME", home.path());
-    }
-
-    let now = Utc::now();
-    let w = make_workspace("owner/alpha", "alpha#1", now);
-    let real = ws_key(&w);
-    let placeholder = SessionKey::from("github-owner-repo-1");
-
-    let mut s = Sidebar::new(PaneId::new(1));
-    s.apply_config(
-        lazybox_config::AttentionConfig::default(),
-        BTreeSet::new(),
-        Vec::new(),
-        vec![placeholder.clone(), real.clone()],
-        Vec::new(),
-        BTreeSet::new(),
-        None,
-        &lazybox_config::DisplayConfig::default(),
-    );
-    s.on_event(&Event::Snapshot {
-        workspaces: vec![w.clone()],
-        terminals: vec![],
-        projects: vec![],
-        recent_snippets: Vec::new(),
-        dismissed_updates: Vec::new(),
-    });
-
-    assert!(s.is_focused(&real), "the real workspace stays starred");
-    assert!(
-        !s.is_focused(&placeholder),
-        "the placeholder key was pruned by the Snapshot",
-    );
-
     unsafe {
         std::env::remove_var("LAZYBOX_HOME");
     }

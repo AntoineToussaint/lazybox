@@ -748,7 +748,7 @@ fn publish_workspace_batch(config: &ServerConfig, committed: CommittedWorkspaceB
     for workspace in committed.workspace_events {
         let _ = config
             .bus
-            .send(Event::WorkspaceUpserted(Box::new(workspace)));
+            .send(Event::WorkspaceUpserted(std::sync::Arc::new(workspace)));
     }
 }
 

@@ -2908,7 +2908,9 @@ mod search_tests {
         sb.begin_recompute_batch();
         let workspace = issue_ws("991", "Batched upsert");
         let key = SessionKey::from(&workspace.key);
-        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        sb.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
         // The batch deferred the rebuild, so the list is still empty here…
         assert!(
             sb.visible_rows().is_empty(),
@@ -4674,7 +4676,7 @@ mod rebadge_attention_tests {
             PathBuf::from("/tmp/transferred-pr"),
             chrono::Utc::now(),
         ));
-        sb.on_event(&Event::WorkspaceUpserted(Box::new(workspace)));
+        sb.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(workspace)));
 
         // Jump numbers now ride only focused (starred) workspaces, so star
         // the PR row to make its `]]1` badge render alongside the agents.

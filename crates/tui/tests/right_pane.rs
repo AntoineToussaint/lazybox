@@ -451,7 +451,7 @@ fn workspace_upserted_for_current_updates_state() {
     ws.activity
         .push(activity("bob", "new one", ActivityKind::Comment));
     ws.sort_activity();
-    rp.on_event(&Event::WorkspaceUpserted(Box::new(ws)));
+    rp.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(ws)));
     // Activity grew 3 → 4 (newest-first, so the new item lands at
     // index 0). `ActivityFeed::adjust_for_length_change` shifts
     // every existing index up by the delta — the user was reading
@@ -473,7 +473,7 @@ fn workspace_upserted_shrinks_clamps_cursor() {
     assert_eq!(rp.comment_cursor(), 4);
 
     let smaller = workspace_with_n_activities("o/r#1", 2);
-    rp.on_event(&Event::WorkspaceUpserted(Box::new(smaller)));
+    rp.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(smaller)));
     assert_eq!(rp.comment_cursor(), 1);
 }
 
@@ -481,7 +481,7 @@ fn workspace_upserted_shrinks_clamps_cursor() {
 fn workspace_upserted_for_different_workspace_is_ignored() {
     let mut rp = RightPane::new(PaneId::new(1));
     rp.set_workspace(Some(workspace_with_n_activities("o/r#1", 3)));
-    rp.on_event(&Event::WorkspaceUpserted(Box::new(
+    rp.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
         workspace_with_n_activities("o/r#99", 10),
     )));
     assert_eq!(

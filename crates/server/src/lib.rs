@@ -49,6 +49,7 @@ pub mod proxy;
 pub mod pty;
 pub mod registries;
 mod resource_limits;
+pub mod session_reaper;
 pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;

@@ -1700,6 +1700,17 @@ pub struct AgentSection {
     /// MCP reach.
     #[serde(default)]
     pub strict_mcp: Option<bool>,
+    /// How long after a workspace's PR/issue merges or closes its
+    /// persistent sessions may keep running before the daemon reaps
+    /// them (#1198). Sessions are persistent *intent* ("there should be
+    /// a claude here") — but once the work is over, an idle agent is a
+    /// ~110 MB memory ratchet that survives restarts (a measured week
+    /// of use reached tens of GB across never-reaped sessions). Reaped
+    /// sessions stop being restored at startup too; `w w` respawns one
+    /// fresh in a keystroke, prompt history persists either way.
+    /// Unset → 48h. `0s` disables reaping entirely.
+    #[serde(with = "duration_human_opt", default)]
+    pub reap_closed_after: Option<Duration>,
 }
 
 impl Default for AgentSection {
@@ -1714,12 +1725,19 @@ impl Default for AgentSection {
             quiet_classify_secs: None,
             max_live_agents: None,
             strict_mcp: None,
+            reap_closed_after: None,
         }
     }
 }
 
 /// Default for [`AgentSection::max_live_agents`] when unset.
 pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;
+
+/// Default for [`AgentSection::reap_closed_after`] when unset: two days
+/// of grace after a PR/issue closes before its sessions are reaped —
+/// long enough to hand off or recall an agent's context, short enough
+/// to stop the fleet ratchet (#1198).
+pub const DEFAULT_REAP_CLOSED_AFTER: Duration = Duration::from_secs(48 * 3600);
 
 impl AgentSection {
     /// Effective live-agent ceiling: unset → [`DEFAULT_MAX_LIVE_AGENTS`],
@@ -1736,6 +1754,17 @@ impl AgentSection {
     /// Unset → `false` (inherit the user's MCP servers).
     pub fn strict_mcp(&self) -> bool {
         self.strict_mcp.unwrap_or(false)
+    }
+
+    /// Effective closed-workspace session-reap grace: unset →
+    /// [`DEFAULT_REAP_CLOSED_AFTER`], explicit `0s` → `None` (never
+    /// reap).
+    pub fn reap_closed_after(&self) -> Option<Duration> {
+        match self.reap_closed_after {
+            Some(d) if d.is_zero() => None,
+            Some(d) => Some(d),
+            None => Some(DEFAULT_REAP_CLOSED_AFTER),
+        }
     }
 
     /// The configured global LLM-gateway base URL, normalized: surrounding
@@ -2816,6 +2845,23 @@ mod tests {
         assert!(on.agent.strict_mcp());
         let off = Config::parse("agent:\n  strict_mcp: false\n").unwrap();
         assert!(!off.agent.strict_mcp());
+    }
+
+    /// #1198: unset → 48h default, explicit `0s` opts out entirely, an
+    /// explicit duration wins, and the human form parses from YAML.
+    #[test]
+    fn reap_closed_after_defaults_and_opt_out() {
+        let unset = AgentSection::default();
+        assert_eq!(unset.reap_closed_after(), Some(DEFAULT_REAP_CLOSED_AFTER));
+
+        let off = Config::parse("agent:\n  reap_closed_after: 0s\n").unwrap();
+        assert_eq!(off.agent.reap_closed_after(), None);
+
+        let week = Config::parse("agent:\n  reap_closed_after: 7d\n").unwrap();
+        assert_eq!(
+            week.agent.reap_closed_after(),
+            Some(Duration::from_secs(7 * 24 * 3600)),
+        );
     }
 
     #[test]

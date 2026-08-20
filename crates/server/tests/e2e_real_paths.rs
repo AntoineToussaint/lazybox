@@ -713,7 +713,7 @@ async fn e2e_stopped_session_does_not_make_a_clean_holder_live() {
 }
 
 #[tokio::test]
-async fn e2e_persisted_worktree_on_the_wrong_branch_fails_without_switching() {
+async fn e2e_shell_opens_on_a_drifted_worktree_without_switching() {
     let _home = IsolatedConfigHome::new();
     timeout(TEST_DEADLINE, async {
         let root = tempfile::TempDir::new().unwrap();
@@ -766,24 +766,26 @@ async fn e2e_persisted_worktree_on_the_wrong_branch_fails_without_switching() {
 
         let (mut client, _daemon) = subscribed(config.clone()).await;
         send_spawn(&mut client, &workspace_key, TerminalKind::Shell, None);
-        let failure = wait_for(
+        // #1199: a shell is a branch-agnostic surface — the drifted
+        // worktree is reused AS-IS instead of refusing with
+        // BranchMismatch (the old behavior locked the user out of the
+        // exact tool needed to inspect and fix the drift).
+        let spawned = wait_for(
             &mut client,
-            |event| {
-                matches!(
-                    event,
-                    Event::WorktreeProgress {
-                        status: lazybox_ipc::WorktreeStepStatus::Failed(message),
-                        ..
-                    } if lazybox_ipc::WorktreeRecovery::classify(message)
-                        == lazybox_ipc::WorktreeRecovery::BranchMismatch
-                )
-            },
+            |event| matches!(event, Event::TerminalSpawned { .. }),
             Duration::from_secs(30),
         )
         .await;
 
-        assert!(failure.is_some(), "the mismatch must be surfaced");
-        assert!(mock.list().await.unwrap().is_empty());
+        assert!(
+            spawned.is_some(),
+            "the shell must open on the drifted worktree"
+        );
+        assert!(
+            !mock.list().await.unwrap().is_empty(),
+            "a backend session backs the shell",
+        );
+        // The worktree is untouched: same branch, local work preserved.
         assert_eq!(git(&intended, &["branch", "--show-current"]), "actual");
         assert_eq!(
             std::fs::read_to_string(intended.join("local-marker")).unwrap(),

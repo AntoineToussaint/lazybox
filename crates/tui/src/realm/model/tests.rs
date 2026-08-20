@@ -282,7 +282,7 @@ mod effects_tests {
         let mut model = build_model();
         let workspace_key = WorkspaceKey::new("github:o/r#1");
         let session_key: SessionKey = (&workspace_key).into();
-        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
             Workspace::empty(workspace_key.clone(), "review", chrono::Utc::now()),
         )));
         model.handle_daemon_event(lazybox_ipc::Event::TerminalSpawned {
@@ -342,7 +342,7 @@ mod effects_tests {
         let mut model = build_model();
         let workspace_key = WorkspaceKey::new("github:o/r#1");
         let session_key: SessionKey = (&workspace_key).into();
-        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
             Workspace::empty(workspace_key.clone(), "review", chrono::Utc::now()),
         )));
         for terminal_id in [8, 7] {
@@ -408,7 +408,9 @@ mod effects_tests {
         );
         let session_id = session.id;
         workspace.sessions.push(session);
-        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
         assert!(model.sidebar.focus_session_id(session_id));
 
         let commands = model.dispatch_action(&Action::ViewDiff);
@@ -466,7 +468,9 @@ mod effects_tests {
         );
         let newer_id = newer.id;
         workspace.sessions.extend([older, newer]);
-        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
         let session_key: SessionKey = (&workspace_key).into();
         assert!(model.sidebar.focus_workspace_key(&session_key));
 
@@ -491,7 +495,9 @@ mod effects_tests {
         let mut workspace =
             Workspace::empty(workspace_key.clone(), "linked review", chrono::Utc::now());
         workspace.linked_checkout = Some("/tmp/linked-review".into());
-        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(workspace)));
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
         let session_key: SessionKey = (&workspace_key).into();
         assert!(model.sidebar.focus_workspace_key(&session_key));
 
@@ -1238,7 +1244,9 @@ mod effects_tests {
         let mut decoy =
             lazybox_core::Workspace::empty(decoy_key.clone(), "main", chrono::Utc::now());
         decoy.project_key = Some(project.clone());
-        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(decoy)));
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            decoy,
+        )));
         assert!(
             m.sidebar
                 .focus_workspace_key(&lazybox_core::SessionKey::from(&decoy_key))
@@ -1265,7 +1273,9 @@ mod effects_tests {
         created.name = "Work".into();
         created.project_key = Some(project);
         created.local = true;
-        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(created)));
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            created,
+        )));
         assert_eq!(
             m.sidebar
                 .selected_workspace()
@@ -4167,7 +4177,7 @@ snippets:
                 },
             )]);
             let key = SessionKey::new("github:o/r#742");
-            model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(Box::new(
+            model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
                 lazybox_core::Workspace::empty(
                     WorkspaceKey::new(key.as_str()),
                     "main",
@@ -4210,7 +4220,7 @@ snippets:
         let (client, server) = channel::pair();
         let mut model = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         let key = SessionKey::new("github:o/r#649");
-        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(
+        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
             lazybox_core::Workspace::empty(
                 WorkspaceKey::new(key.as_str()),
                 "main",
@@ -5699,7 +5709,7 @@ mod input_starvation_tests {
                 Utc::now(),
             );
             evt_tx
-                .try_send(Event::WorkspaceUpserted(Box::new(ws)))
+                .try_send(Event::WorkspaceUpserted(std::sync::Arc::new(ws)))
                 .expect("bounded channel must have room for the burst");
         }
 
@@ -5742,11 +5752,9 @@ mod input_starvation_tests {
         let sk: SessionKey = (&key).into();
 
         evt_tx
-            .try_send(Event::WorkspaceUpserted(Box::new(Workspace::empty(
-                key,
-                "main",
-                Utc::now(),
-            ))))
+            .try_send(Event::WorkspaceUpserted(std::sync::Arc::new(
+                Workspace::empty(key, "main", Utc::now()),
+            )))
             .expect("room for the upsert");
         evt_tx
             .try_send(Event::WorkspaceFocusRequested {
@@ -5796,7 +5804,7 @@ mod input_starvation_tests {
                 "main",
                 Utc::now(),
             );
-            tx.try_send(Event::WorkspaceUpserted(Box::new(ws)))
+            tx.try_send(Event::WorkspaceUpserted(std::sync::Arc::new(ws)))
                 .expect("room for the upsert");
         }
     }
@@ -6111,7 +6119,7 @@ mod wake_burst_liveness_tests {
                 "main",
                 Utc::now(),
             );
-            tx.try_send(Event::WorkspaceUpserted(Box::new(ws)))
+            tx.try_send(Event::WorkspaceUpserted(std::sync::Arc::new(ws)))
                 .expect("bounded channel must have room for the burst");
         }
     }
@@ -8066,7 +8074,7 @@ mod merge_focus_follow_tests {
             .labels
             .push(lazybox_core::Label::new("Working"));
         let session_key = SessionKey::from(&claimed.key);
-        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(claimed)));
+        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(claimed)));
         while server.rx.try_recv().is_ok() {}
 
         model.flush_dispatched_cmds(vec![lazybox_ipc::Command::Spawn {
@@ -8121,7 +8129,7 @@ mod merge_focus_follow_tests {
             .labels
             .push(lazybox_core::Label::new("working"));
         let session_key = SessionKey::from(&claimed.key);
-        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(claimed)));
+        model.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(claimed)));
         while server.rx.try_recv().is_ok() {}
 
         model.flush_dispatched_cmds(vec![lazybox_ipc::Command::Spawn {
@@ -8167,7 +8175,7 @@ mod merge_focus_follow_tests {
         let key_b = behind_b.key.clone();
 
         for ws in [behind_a, up_to_date.clone(), behind_b] {
-            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         }
 
         // Mark all three rows.
@@ -8205,7 +8213,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let up_to_date = workspace("owner/repo#2", true, Duration::hours(2));
         let key = up_to_date.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(up_to_date)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(up_to_date)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
         m.sidebar.toggle_broadcast_select();
 
@@ -8234,7 +8242,7 @@ mod merge_focus_follow_tests {
         let mut c = workspace("owner/repo#3", true, Duration::hours(3));
         c.pr.as_mut().unwrap().is_behind_base = true;
         for ws in [a, b, c] {
-            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         }
 
         m.focus = PaneFocus::Sidebar;
@@ -8277,9 +8285,11 @@ mod merge_focus_follow_tests {
         let pr_key = pr.key.clone();
         let decoy_key = decoy.key.clone();
 
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(decoy)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue.clone())));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr.clone())));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(decoy)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+            issue.clone(),
+        )));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr.clone())));
         assert!(
             m.sidebar.focus_workspace_key(&SessionKey::from(&issue_key)),
             "issue workspace row should be focusable",
@@ -8288,7 +8298,7 @@ mod merge_focus_follow_tests {
         // Daemon-side merge event sequence: PR upsert (now holding the
         // moved session) → issue removal → merge notice.
         pr.add_session(agent_session(&pr_key));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         m.handle_daemon_event(IpcEvent::WorkspaceRemoved(issue_key.clone()));
         m.handle_daemon_event(IpcEvent::WorkspaceMerged {
             issue_workspace_key: issue_key,
@@ -8321,9 +8331,11 @@ mod merge_focus_follow_tests {
         let pr_key = pr.key.clone();
         let other_key = other.key.clone();
 
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue.clone())));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr.clone())));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(other)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+            issue.clone(),
+        )));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr.clone())));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(other)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&other_key)));
 
         m.handle_daemon_event(IpcEvent::WorkspaceRemoved(issue_key.clone()));
@@ -8351,7 +8363,7 @@ mod merge_focus_follow_tests {
         let mut ws = workspace("owner/repo#1", true, Duration::hours(1));
         ws.auto_merge_on_green = true;
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         m.mount_policy_picker(ws_key.clone());
@@ -8384,7 +8396,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = workspace("owner/repo#1", true, Duration::hours(1));
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
         assert!(
             !m.sidebar
@@ -8418,7 +8430,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = workspace("owner/repo#7", true, Duration::hours(1));
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         m.mount_policy_picker(ws_key.clone());
@@ -8449,7 +8461,7 @@ mod merge_focus_follow_tests {
         m.auto_fix_enabled = true;
         let ws = workspace("owner/repo#7", true, Duration::hours(1));
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         let cmds = m.dispatch_action(&Action::ToggleAutoFix);
@@ -8484,7 +8496,7 @@ mod merge_focus_follow_tests {
             lazybox_core::PolicyArm::Arm,
         );
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         let cmds = m.dispatch_action(&Action::ToggleAutoFix);
@@ -8506,7 +8518,7 @@ mod merge_focus_follow_tests {
         m.auto_fix_enabled = true;
         let ws = workspace("owner/repo#9", true, Duration::hours(1));
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         m.dispatch_key(KeyEvent::new(Key::Char('A'), KeyModifiers::SHIFT));
@@ -8529,7 +8541,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = workspace("owner/repo#8", true, Duration::hours(1));
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         m.mount_policy_picker(ws_key);
@@ -8575,7 +8587,7 @@ mod merge_focus_follow_tests {
         t.body = Some(format!("# Heading\n\n{}", "word ".repeat(400)));
         let ws = Workspace::from_task(t, Utc::now());
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
         m.sync_panes();
 
@@ -8595,7 +8607,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = workspace("owner/repo#2", false, Duration::hours(1));
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
         m.sync_panes();
 
@@ -8613,7 +8625,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = workspace("owner/repo#3", true, Duration::hours(1));
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
@@ -8668,7 +8680,7 @@ mod merge_focus_follow_tests {
         // Seed the rows, park the cursor on the issue, and settle the
         // focus baseline so the burst is measured from "viewing the issue".
         for ws in [decoy, issue.clone(), pr.clone()] {
-            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         }
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&issue_key)));
         m.sync_panes();
@@ -8724,7 +8736,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = workspace("owner/repo#1", true, Duration::minutes(1));
         let sk: SessionKey = (&ws.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         // The unchecked dispatch (what the confirm's Yes runs) builds the
@@ -8782,8 +8794,8 @@ mod merge_focus_follow_tests {
         let decoy_key = decoy.key.clone();
         let issue_sk: SessionKey = (&issue_key).into();
 
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(decoy)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(issue)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(decoy)));
 
         // Dispatch Work (`w w`) on the issue → arms the follow target + emits Spawn.
         assert!(m.sidebar.focus_workspace_key(&issue_sk));
@@ -8841,7 +8853,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let issue = workspace("owner/repo#1", false, Duration::hours(1));
         let issue_sk: SessionKey = (&issue.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(issue)));
         assert!(m.sidebar.focus_workspace_key(&issue_sk));
 
         let work_alias = m
@@ -8888,7 +8900,7 @@ mod merge_focus_follow_tests {
 
         let issue = workspace("owner/repo#1", false, Duration::hours(1));
         let issue_sk: SessionKey = (&issue.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(issue)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(issue)));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(3),
@@ -8961,7 +8973,7 @@ mod merge_focus_follow_tests {
             Utc::now(),
         );
         let bare_sk: SessionKey = (&bare.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(bare)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(bare)));
         assert!(m.sidebar.focus_workspace_key(&bare_sk));
 
         let cmds = m.dispatch_action(&Action::Work);
@@ -8990,7 +9002,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
 
         // Only a Codex agent is running on this workspace.
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
@@ -9027,7 +9039,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         for (tid, agent) in [(3, "codex"), (4, "claude")] {
             m.handle_daemon_event(IpcEvent::TerminalSpawned {
                 model_label: None,
@@ -9097,7 +9109,7 @@ mod merge_focus_follow_tests {
 
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         for (tid, agent) in [(3, "codex"), (4, "claude")] {
             m.handle_daemon_event(IpcEvent::TerminalSpawned {
                 model_label: None,
@@ -9145,7 +9157,7 @@ mod merge_focus_follow_tests {
 
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         for terminal_id in [TerminalId(3), TerminalId(4)] {
             m.handle_daemon_event(IpcEvent::TerminalSpawned {
                 model_label: None,
@@ -9192,7 +9204,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         for (tid, agent) in [(3, "codex"), (4, "cursor")] {
             m.handle_daemon_event(IpcEvent::TerminalSpawned {
                 model_label: None,
@@ -9228,7 +9240,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         for (tid, agent) in [(3, "codex"), (4, "claude")] {
             m.handle_daemon_event(IpcEvent::TerminalSpawned {
                 model_label: None,
@@ -9280,7 +9292,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::Work);
@@ -9318,7 +9330,7 @@ mod merge_focus_follow_tests {
 
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(5),
@@ -9371,7 +9383,7 @@ mod merge_focus_follow_tests {
         .expect("model init");
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(8),
@@ -9424,7 +9436,7 @@ mod merge_focus_follow_tests {
         .expect("model init");
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
         // Terminal pane focused with NO terminals — the empty-state
         // hint's scope.
@@ -9455,7 +9467,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
         m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
@@ -9501,7 +9513,7 @@ mod merge_focus_follow_tests {
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
         m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
@@ -9530,7 +9542,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
         m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
@@ -9564,7 +9576,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
@@ -9589,7 +9601,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let pr = workspace("owner/repo#1", true, Duration::hours(1));
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         m.dispatch_key(KeyEvent::new(Key::Char('w'), KeyModifiers::NONE));
@@ -9620,7 +9632,7 @@ mod merge_focus_follow_tests {
     ) -> Vec<SessionKey> {
         let keys: Vec<SessionKey> = rows.iter().map(|w| SessionKey::from(&w.key)).collect();
         for ws in rows {
-            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         }
         for key in &keys {
             assert!(m.sidebar.focus_workspace_key(key));
@@ -9639,8 +9651,8 @@ mod merge_focus_follow_tests {
         let key_a = SessionKey::from(&a.key);
         let key_b = SessionKey::from(&b.key);
 
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(a)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(b)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(a)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(b)));
 
         // Empty selection, cursor on b → just b.
         assert!(m.sidebar.focus_workspace_key(&key_b));
@@ -9772,8 +9784,8 @@ mod merge_focus_follow_tests {
         let a = workspace("owner/repo#1", true, Duration::hours(1));
         let b = workspace("owner/repo#2", true, Duration::hours(2));
         let key_b = SessionKey::from(&b.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(a)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(b)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(a)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(b)));
         assert!(m.sidebar.focus_workspace_key(&key_b));
 
         let cmds = m.dispatch_action(&Action::SyncWorkspace);
@@ -9915,8 +9927,8 @@ mod merge_focus_follow_tests {
         assert!(m.dispatch_action(&Action::MergePr).is_empty());
 
         // Both stashed PRs regress under the modal.
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(a_red)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(b_red)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(a_red)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(b_red)));
 
         let cmds = m.handle_confirmed(true);
         assert!(
@@ -10004,7 +10016,7 @@ mod merge_focus_follow_tests {
         // A row already running an agent → inject target.
         let live = workspace("owner/repo#1", true, Duration::hours(1));
         let live_sk: SessionKey = (&live.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(live)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(live)));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(7),
@@ -10019,8 +10031,8 @@ mod merge_focus_follow_tests {
         let fresh_b = workspace("owner/repo#3", true, Duration::hours(3));
         let fresh_a_sk: SessionKey = (&fresh_a.key).into();
         let fresh_b_sk: SessionKey = (&fresh_b.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(fresh_a)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(fresh_b)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(fresh_a)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(fresh_b)));
 
         for key in [&live_sk, &fresh_a_sk, &fresh_b_sk] {
             assert!(m.sidebar.focus_workspace_key(key));
@@ -10097,7 +10109,7 @@ mod merge_focus_follow_tests {
         for (i, tid) in [(1u64, 11u64), (2, 12), (3, 13)] {
             let ws = workspace(&format!("owner/repo#{i}"), true, Duration::hours(i as i64));
             let key: SessionKey = (&ws.key).into();
-            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
             m.handle_daemon_event(IpcEvent::TerminalSpawned {
                 model_label: None,
                 terminal_id: TerminalId(tid),
@@ -10291,7 +10303,7 @@ mod merge_focus_follow_tests {
         // A row with a live agent (will be an inject target) …
         let live = workspace("owner/repo#1", true, Duration::hours(1));
         let live_sk: SessionKey = (&live.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(live)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(live)));
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
             model_label: None,
             terminal_id: TerminalId(7),
@@ -10304,7 +10316,7 @@ mod merge_focus_follow_tests {
         // forces the confirm gate.
         let fresh = workspace("owner/repo#2", true, Duration::hours(2));
         let fresh_sk: SessionKey = (&fresh.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(fresh)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(fresh)));
 
         for key in [&live_sk, &fresh_sk] {
             assert!(m.sidebar.focus_workspace_key(key));
@@ -10367,8 +10379,8 @@ mod merge_focus_follow_tests {
         let child = stacked_pr("owner/repo#2", "feat-b", "feat-a");
         let parent_key = SessionKey::from(&parent.key);
         let child_key = SessionKey::from(&child.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(parent)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(child)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(parent)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(child)));
 
         assert!(m.sidebar.focus_workspace_key(&child_key));
         let prompt = m
@@ -10398,7 +10410,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = conflicting_pr("owner/repo#1");
         let sk: SessionKey = (&ws.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::MergePr);
@@ -10424,7 +10436,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = conflicting_pr("owner/repo#1");
         let key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
 
         m.handle_daemon_event(IpcEvent::PrMergeFailed {
             workspace_key: key,
@@ -10455,7 +10467,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = conflicting_pr("owner/repo#1");
         let key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
 
         // The user has the snippet picker open (a retaining modal).
         m.modal_stack.push(Id::SnippetPicker);
@@ -10492,7 +10504,7 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let ws = workspace("owner/repo#1", true, Duration::hours(1));
         let key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
 
         m.handle_daemon_event(IpcEvent::PrMergeFailed {
             workspace_key: key,
@@ -10523,7 +10535,7 @@ mod merge_focus_follow_tests {
         let ws = conflicting_pr("owner/repo#1");
         let key = ws.key.clone();
         let sk: SessionKey = (&key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
 
         m.handle_daemon_event(IpcEvent::PrMergeFailed {
             workspace_key: key.clone(),
@@ -13028,7 +13040,7 @@ mod destructive_confirm_tests {
     fn seed(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &str) -> WorkspaceKey {
         let ws = Workspace::empty(WorkspaceKey::new(key), "main", Utc::now());
         let k = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         k
     }
 
@@ -13103,7 +13115,7 @@ mod destructive_confirm_tests {
         let ws = open_issue_workspace("github:o/r#7");
         let wk = ws.key.clone();
         let sk = SessionKey::from(&wk);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk), "issue row focusable");
 
         let cmds = m.dispatch_action(&Action::CloseIssue);
@@ -13129,7 +13141,7 @@ mod destructive_confirm_tests {
         let ws = open_issue_workspace("github:o/r#7");
         let wk = ws.key.clone();
         let sk = SessionKey::from(&wk);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let _ = m.dispatch_action(&Action::CloseIssue);
@@ -13140,7 +13152,7 @@ mod destructive_confirm_tests {
         if let Some(issue) = closed.gh_issues.first_mut() {
             issue.state = lazybox_core::TaskState::Closed;
         }
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(closed)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(closed)));
 
         let cmds = m.handle_confirmed(true);
         assert!(
@@ -13158,7 +13170,7 @@ mod destructive_confirm_tests {
         let ws = open_issue_workspace("github:o/r#7");
         let wk = ws.key.clone();
         let sk = SessionKey::from(&wk);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk), "issue row focusable");
 
         let cmds = m.dispatch_action(&Action::DeleteOrClose);
@@ -13183,7 +13195,7 @@ mod destructive_confirm_tests {
         let pr = merge_ready_pr_without_approval("github:owner/repo#1");
         let wk = pr.key.clone();
         let sk = SessionKey::from(&wk);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
 
         let cmds = m.dispatch_action(&Action::DeleteOrClose);
@@ -13205,7 +13217,7 @@ mod destructive_confirm_tests {
         let mut m = build_model();
         let pr = merge_ready_pr_without_approval("github:owner/repo#1");
         let sk = SessionKey::from(&pr.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let _ = m.dispatch_action(&Action::DeleteOrClose);
@@ -13216,7 +13228,7 @@ mod destructive_confirm_tests {
         if let Some(pr) = merged.pr.as_mut() {
             pr.state = lazybox_core::TaskState::Merged;
         }
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(merged)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(merged)));
 
         let cmds = m.handle_confirmed(true);
         assert!(
@@ -13247,7 +13259,7 @@ mod destructive_confirm_tests {
         let pr = merge_ready_pr_without_approval("github:owner/repo#1");
         let wk = pr.key.clone();
         let sk = SessionKey::from(&wk);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
 
         let cmds = m.dispatch_action(&Action::MergePr);
@@ -13273,7 +13285,7 @@ mod destructive_confirm_tests {
         let pr = merge_ready_pr_without_approval("github:owner/repo#1");
         let wk = pr.key.clone();
         let sk = SessionKey::from(&wk);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
 
         let cmds = m.dispatch_action(&Action::SyncWorkspace);
@@ -13624,7 +13636,9 @@ mod collapse_into_pr_tests {
         let mut moved = issue_ws.sessions[0].clone();
         moved.workspace_key = pr_key.clone();
         pr_with_session.add_session(moved);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr_with_session)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+            pr_with_session,
+        )));
         m.handle_daemon_event(IpcEvent::WorkspaceRemoved(issue_key.clone()));
         m.handle_daemon_event(IpcEvent::WorkspaceMerged {
             issue_workspace_key: issue_key.clone(),
@@ -13716,7 +13730,9 @@ mod collapse_into_pr_tests {
         let mut moved = issue_ws.sessions[0].clone();
         moved.workspace_key = pr_key.clone();
         pr_with_session.add_session(moved);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr_with_session)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+            pr_with_session,
+        )));
         m.handle_daemon_event(IpcEvent::WorkspaceRemoved(issue_key.clone()));
         m.handle_daemon_event(IpcEvent::WorkspaceMerged {
             issue_workspace_key: issue_key.clone(),
@@ -14768,7 +14784,7 @@ mod focus_mode_tests {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         spawn_terminal(&mut m, &key);
         m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
@@ -14818,7 +14834,7 @@ mod focus_mode_tests {
         // Focus a GitHub workspace → github + generic show, linear drops.
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         spawn_terminal(&mut m, &key);
         assert_eq!(m.active_workspace_sources(), vec!["github".to_string()]);
         let scoped = keys(&m);
@@ -14836,7 +14852,7 @@ mod focus_mode_tests {
         linear.id.source = "linear".into();
         cross.linear_issues.push(linear);
         let cross_key = SessionKey::from(&cross.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(cross)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(cross)));
         spawn_terminal(&mut m, &cross_key);
         assert_eq!(
             m.active_workspace_sources(),
@@ -14859,7 +14875,7 @@ mod focus_mode_tests {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         spawn_terminal(&mut m, &key);
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
@@ -14884,7 +14900,7 @@ mod focus_mode_tests {
         let mut m = build_model();
         let ws = workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         spawn_terminal(&mut m, &key);
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
@@ -14933,8 +14949,8 @@ mod focus_mode_tests {
         let ws2 = workspace_with_agent("owner/repo#2");
         let key1 = SessionKey::from(&ws1.key);
         let key2 = SessionKey::from(&ws2.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws1)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws2)));
 
         // Only focused workspaces are numbered now — star both so they
         // enter the roster.
@@ -14975,8 +14991,8 @@ mod focus_mode_tests {
         let ws1 = workspace_with_agent("owner/repo#1");
         let ws2 = workspace_with_agent("owner/repo#2");
         let key1 = SessionKey::from(&ws1.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws1)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws2)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws1)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws2)));
 
         // Nothing starred → nothing numbered.
         assert!(
@@ -15008,7 +15024,7 @@ mod focus_mode_tests {
             thread_id: None,
         });
         ws.seen_count = 0;
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         let summary = m.sidebar.attention_summary();
         assert_eq!(summary.unread, 1, "the unseen comment counts as unread");
     }
@@ -15083,8 +15099,8 @@ mod jump_to_workspace_tests {
         let b = Workspace::from_task(task("owner/repo#2", Duration::hours(1)), Utc::now());
         let ak = SessionKey::from(&a.key);
         let bk = SessionKey::from(&b.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(a)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(b)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(a)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(b)));
         (ak, bk)
     }
 
@@ -15152,7 +15168,7 @@ mod jump_to_workspace_tests {
         let (ak, bk) = seed_two(&mut m);
         let mut hidden = Workspace::from_task(task("owner/repo#2", Duration::hours(1)), Utc::now());
         hidden.snoozed_until = Some(Utc::now() + Duration::hours(1));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(hidden)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(hidden)));
         assert!(
             !m.sidebar.focus_workspace_key(&bk),
             "target starts outside the Inbox"
@@ -16678,7 +16694,7 @@ mod worktree_progress_recovery_tests {
             Utc::now(),
         );
         holder.add_session(session);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(holder)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(holder)));
 
         // The stuck workspace's failed modal names that holder path.
         let stuck_key = WorkspaceKey::new("github:acme/widget#42");
@@ -17193,7 +17209,7 @@ mod merge_latch_tests {
         assert!(m.merge_confirmed.contains(&key), "PrMerged latches the key");
 
         // Interim poll still Open → patched, latch held.
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr_ws(
             TaskState::Open,
         ))));
         assert!(
@@ -17202,7 +17218,7 @@ mod merge_latch_tests {
         );
 
         // Confirming poll reports Merged → released.
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr_ws(
             TaskState::Merged,
         ))));
         assert!(
@@ -17260,8 +17276,8 @@ mod merge_latch_tests {
         let x_key = x.key.clone();
         let x_sk = SessionKey::from(&x.key);
         let y_sk = SessionKey::from(&y.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(x)));
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(y)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(x)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(y)));
 
         // Merge X (the freshly-merged row stays in the Inbox during the
         // grace window, so it's still selectable).
@@ -19086,7 +19102,7 @@ mod dismiss_and_messages_tests {
         let mut m = build_model();
         let ws = Workspace::empty(WorkspaceKey::new("local:scratch"), "main", Utc::now());
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
         assert_eq!(m.sidebar.toggle_broadcast_select(), Some(true));
         assert_eq!(m.sidebar.broadcast_selected_count(), 1);
@@ -20517,7 +20533,7 @@ mod spawn_focus_steal_tests {
     fn global_search_dispatch_opens_unscoped_search() {
         let mut m = build_model();
         let ws = pr_workspace("owner/repo#1");
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         m.dispatch_action(&lazybox_tui_core::action::Action::OpenGlobalSearch);
         assert!(m.sidebar.search_editing());
         let s = m.sidebar.search().expect("search state present");
@@ -20536,7 +20552,7 @@ mod spawn_focus_steal_tests {
         let mut m = build_model();
         let ws = pr_workspace("owner/repo#1");
         let k: SessionKey = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&k));
         m.dispatch_action(&lazybox_tui_core::action::Action::OpenSearch);
         assert!(m.sidebar.search_editing(), "search opens in editing mode");
@@ -20560,7 +20576,7 @@ mod spawn_focus_steal_tests {
         let mut m = build_model();
         let ws = pr_workspace("owner/repo#1");
         let key: SessionKey = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&key));
         m.status.note_spawning(
             "claude",
@@ -20689,7 +20705,7 @@ mod repo_labels_failure_tests {
             Utc::now(),
         );
         let wk = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
 
         m.awaiting_repo_labels = Some(wk);
         m.handle_daemon_event(repo_labels_error("network down"));
@@ -20935,7 +20951,7 @@ mod focus_mode_terminal_exit_tests {
         let mut m = build_model();
         let ws = workspace("github:owner/repo#1");
         let key: SessionKey = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&key));
         m.sync_panes();
 
@@ -20969,7 +20985,7 @@ mod focus_mode_terminal_exit_tests {
         let mut m = build_model();
         let ws = workspace("github:owner/repo#1");
         let key: SessionKey = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&key));
         m.sync_panes();
 
@@ -21016,7 +21032,7 @@ mod focus_mode_terminal_exit_tests {
         let ws = workspace("github:owner/repo#1");
         let key: SessionKey = SessionKey::from(&ws.key);
         let other = SessionKey::from("github:owner/repo#2");
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&key));
         m.sync_panes();
 
@@ -21124,7 +21140,7 @@ mod keybinding_audit_tests {
         let (mut m, _conn) = build_model();
         let pr = pr_workspace("owner/repo#1", 0);
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         press(&mut m, Key::Char('r'));
@@ -21149,7 +21165,7 @@ mod keybinding_audit_tests {
         let mut m = m.with_remote_clients(clients, Some("box".to_string()));
         let pr = pr_workspace("owner/repo#1", 0);
         let sk: SessionKey = (&pr.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(pr)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         press(&mut m, Key::Char('r'));
@@ -21244,7 +21260,7 @@ mod keybinding_audit_tests {
         let (mut m, server) = build_model();
         let ws = pr_workspace("github:o/r#1", 3);
         let sk = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk), "PR row focusable");
         m.sync_panes();
         m.focus = PaneFocus::Right;
@@ -21375,7 +21391,7 @@ mod keybinding_audit_tests {
         let (mut m, _server) = build_model();
         let ws = pr_workspace("github:o/r#42", 0);
         let sk = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::MergePr);
@@ -21404,7 +21420,7 @@ mod keybinding_audit_tests {
         issue.url = "https://github.com/o/r/issues/7".into();
         ws.attach_task(issue);
         let sk = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::CloseIssue);
@@ -21429,7 +21445,7 @@ mod keybinding_audit_tests {
         let (mut m, _server) = build_model();
         let ws = pr_workspace("github:o/r#42", 0);
         let sk = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::DeleteOrClose);
@@ -21457,7 +21473,7 @@ mod keybinding_audit_tests {
         issue.url = "https://github.com/o/r/issues/7".into();
         ws.attach_task(issue);
         let sk = SessionKey::from(&ws.key);
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::DeleteOrClose);
@@ -22335,7 +22351,7 @@ mod optimistic_mutation_tests {
     fn seed_pr_workspace(m: &mut TestModel, key: &str) -> WorkspaceKey {
         let ws = Workspace::from_task(pr_task(key), Utc::now());
         let ws_key = ws.key.clone();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         ws_key
     }
 
@@ -22476,7 +22492,7 @@ mod optimistic_mutation_tests {
         // The daemon's fresh copy reconciles the stash.
         let mut updated = Workspace::from_task(pr_task("github:owner/repo#3"), Utc::now());
         updated.pr.as_mut().unwrap().reviewers = vec!["alice".into(), "bob".into()];
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(updated)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(updated)));
         assert!(m.pending_mutations.is_empty());
         assert_eq!(
             reviewers_of(&m, &sk),
@@ -22682,7 +22698,7 @@ mod remote_spawn_tests {
     ) -> SessionKey {
         let ws = workspace(key, age);
         let sk: SessionKey = (&ws.key).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
         sk
     }
@@ -22717,7 +22733,7 @@ mod remote_spawn_tests {
 
         // The local daemon's next upsert carries `remote: None` — the
         // pre-latch behavior wiped the glyph here within one poll.
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(workspace(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(workspace(
             "owner/repo#1",
             Duration::hours(1),
         ))));
@@ -22772,7 +22788,7 @@ mod remote_spawn_tests {
         let ws = workspace("owner/repo#1", Duration::hours(1));
         let wkey = ws.key.clone();
         let sk: SessionKey = (&wkey).into();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(ws)));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         assert!(m.sidebar.focus_workspace_key(&sk));
         m.mark_remote_latched(sk.clone(), "box".to_string());
         assert!(m.remote_marks.contains_key(&sk));
@@ -23391,7 +23407,7 @@ mod focus_indicator_and_burst_guard_tests {
     fn footer_names_the_agent_when_terminal_focused() {
         let mut m = build_model();
         let session = SessionKey::from("github:o/r#1");
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(empty_ws(
             "github:o/r#1",
         ))));
         m.terminals.set_active_session(Some(session.clone()));
@@ -23417,7 +23433,7 @@ mod focus_indicator_and_burst_guard_tests {
     #[test]
     fn footer_reads_navigating_when_sidebar_focused() {
         let mut m = build_model();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(empty_ws(
             "github:o/r#1",
         ))));
         m.set_focus(PaneFocus::Sidebar);
@@ -23435,7 +23451,7 @@ mod focus_indicator_and_burst_guard_tests {
     #[test]
     fn a_single_sidebar_shortcut_is_not_suppressed() {
         let mut m = build_model();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(empty_ws(
             "github:o/r#1",
         ))));
         m.set_focus(PaneFocus::Sidebar);
@@ -23453,7 +23469,7 @@ mod focus_indicator_and_burst_guard_tests {
     #[test]
     fn a_sidebar_burst_is_suppressed_and_warns() {
         let mut m = build_model();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(empty_ws(
             "github:o/r#1",
         ))));
         m.set_focus(PaneFocus::Sidebar);
@@ -23482,7 +23498,7 @@ mod focus_indicator_and_burst_guard_tests {
     #[test]
     fn repeating_one_sidebar_key_is_never_suppressed() {
         let mut m = build_model();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(empty_ws(
             "github:o/r#1",
         ))));
         m.set_focus(PaneFocus::Sidebar);
@@ -23501,7 +23517,7 @@ mod focus_indicator_and_burst_guard_tests {
     #[test]
     fn focus_into_terminal_survives_a_burst() {
         let mut m = build_model();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(empty_ws(
             "github:o/r#1",
         ))));
         m.set_focus(PaneFocus::Sidebar);
@@ -23527,7 +23543,7 @@ mod focus_indicator_and_burst_guard_tests {
     #[test]
     fn focus_change_resets_the_burst_so_the_next_shortcut_fires() {
         let mut m = build_model();
-        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(Box::new(empty_ws(
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(empty_ws(
             "github:o/r#1",
         ))));
         m.set_focus(PaneFocus::Sidebar);

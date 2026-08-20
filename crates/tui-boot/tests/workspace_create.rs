@@ -74,9 +74,12 @@ fn fake_daemon(
                     ws.name = name.clone();
                     ws.project_key = Some(project_key.clone());
                     ws.local = true;
-                    socket::write_frame(&mut wr, &Event::WorkspaceUpserted(Box::new(ws)))
-                        .await
-                        .expect("send upsert");
+                    socket::write_frame(
+                        &mut wr,
+                        &Event::WorkspaceUpserted(std::sync::Arc::new(ws)),
+                    )
+                    .await
+                    .expect("send upsert");
                     let client_request_id = client_request_id
                         .clone()
                         .expect("workspace create is correlated");

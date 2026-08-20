@@ -1017,6 +1017,12 @@ impl<T: TerminalAdapter> Model<T> {
         if !self.merge_confirmed.is_empty() || !self.remote_marks.is_empty() {
             match &mut event {
                 IpcEvent::WorkspaceUpserted(ws) => {
+                    // The payload rides an `Arc` on the bus (M6):
+                    // copy-on-write to patch it. When this client is
+                    // the last holder (the common in-process case by
+                    // dispatch time) this is a plain in-place borrow,
+                    // not a clone.
+                    let ws = std::sync::Arc::make_mut(ws);
                     self.apply_merge_latch(ws);
                     self.apply_remote_latch(ws);
                 }

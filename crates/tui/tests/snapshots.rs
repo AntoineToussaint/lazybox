@@ -175,7 +175,7 @@ fn sidebar_multiple_agent_badges_shows_counts() {
         fixed_time(),
     );
     workspace.add_session(session.clone());
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(workspace)));
     s.on_event(&Event::SessionCreated(Box::new(session)));
     for (terminal_id, agent) in [(1, "claude"), (2, "claude"), (3, "codex")] {
         s.on_event(&Event::TerminalSpawned {
@@ -251,7 +251,7 @@ fn sidebar_dense_agent_rows_compacts_model_and_keeps_titles() {
             fixed_time(),
         );
         ws.add_session(session.clone());
-        s.on_event(&Event::WorkspaceUpserted(Box::new(ws.clone())));
+        s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(ws.clone())));
         s.on_event(&Event::SessionCreated(Box::new(session)));
         s.on_event(&Event::TerminalSpawned {
             terminal_id: TerminalId(terminal_id),

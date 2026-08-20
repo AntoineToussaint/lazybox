@@ -535,7 +535,9 @@ mod scroll_does_not_rebuild_tests {
             diff_hunk: None,
             thread_id: None,
         });
-        pane.on_event(&lazybox_ipc::Event::WorkspaceUpserted(Box::new(grown)));
+        pane.on_event(&lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            grown,
+        )));
         assert_ne!(
             pane.activity_rev(),
             rev,

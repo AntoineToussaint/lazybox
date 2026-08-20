@@ -18,10 +18,13 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 struct FakeStreamAgent;
 
 #[tokio::test]
-async fn structured_agent_input_backlog_is_bounded_and_retryable() {
+async fn full_agent_input_backlog_queues_and_delivers_instead_of_refusing() {
+    // #1249: a typed reply must never be destroyed by backpressure. With
+    // the queue at capacity the send WAITS for the run to drain and the
+    // message arrives, in order, after the backlog.
     let config = ServerConfig::in_memory();
     let run_id = AgentRunId(991);
-    let (input_tx, _input_rx) = tokio::sync::mpsc::channel(AGENT_INPUT_CHANNEL_CAPACITY);
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel(AGENT_INPUT_CHANNEL_CAPACITY);
     for index in 0..AGENT_INPUT_CHANNEL_CAPACITY {
         input_tx
             .try_send(AgentInputMessage {
@@ -40,32 +43,85 @@ async fn structured_agent_input_backlog_is_bounded_and_retryable() {
             working_claim_holder: None,
         },
     );
+
+    let config_for_send = config.clone();
+    let send = tokio::spawn(async move {
+        handle_send_agent_input(
+            &config_for_send,
+            run_id,
+            AgentInputMessage {
+                text: Some("must-not-be-dropped".into()),
+                json: None,
+            },
+        )
+        .await;
+    });
+
+    // The run drains its backlog; the queued send completes and the
+    // user's message is the last thing the agent receives.
+    let mut last = None;
+    for _ in 0..=AGENT_INPUT_CHANNEL_CAPACITY {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), input_rx.recv())
+            .await
+            .expect("drain does not stall")
+            .expect("channel open");
+        last = msg.text;
+    }
+    assert_eq!(
+        last.as_deref(),
+        Some("must-not-be-dropped"),
+        "the over-capacity message is delivered after the backlog, not dropped",
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(5), send)
+        .await
+        .expect("queued send completes once a slot frees")
+        .expect("send task");
+
+    handle_interrupt_agent_run(&config, run_id).await;
+    assert!(config.agent_runs.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn input_to_an_ended_run_says_so_instead_of_vanishing() {
+    let config = ServerConfig::in_memory();
+    let run_id = AgentRunId(992);
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(1);
+    drop(input_rx);
+    let task = tokio::spawn(std::future::pending::<()>());
+    config.agent_runs.lock().await.insert(
+        run_id,
+        AgentRunHandle {
+            input_tx,
+            task,
+            session_key: "test:workspace".into(),
+            working_claim_holder: None,
+        },
+    );
     let mut events = config.bus.subscribe();
 
     handle_send_agent_input(
         &config,
         run_id,
         AgentInputMessage {
-            text: Some("must-not-grow-memory".into()),
+            text: Some("late reply".into()),
             json: None,
         },
     )
     .await;
 
     assert!(matches!(
-        events.try_recv().expect("overload event"),
+        events.try_recv().expect("ended-run event"),
         Event::ProviderError {
             source,
             kind,
             message,
             ..
-        } if source == "agent_run:input"
-            && kind == "retryable"
-            && message.contains("queue is full")
-            && message.contains("retry")
+        } if source == "agent_run"
+            && kind == "permanent"
+            && message.contains("has ended")
+            && message.contains("resend")
     ));
     handle_interrupt_agent_run(&config, run_id).await;
-    assert!(config.agent_runs.lock().await.is_empty());
 }
 
 impl Agent for FakeStreamAgent {

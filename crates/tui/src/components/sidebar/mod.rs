@@ -372,9 +372,17 @@ pub struct Sidebar {
     /// Shift-↑/↓). While non-empty, every bulk-appropriate workspace
     /// action targets this whole set instead of the cursor row (#932) —
     /// broadcast (`Shift-B`) is only one such consumer. Keys, not row
-    /// indices, so the marks survive re-sorts and j/k navigation; pruned
-    /// when a workspace is removed and cleared by Esc or a successful send.
+    /// indices, so the marks survive re-sorts and j/k navigation. Marked
+    /// ⇒ visible is an invariant: `recompute_visible` prunes marks on
+    /// rows the projection hides (filter / mailbox / search / removal,
+    /// #1243), and Esc or a successful send clears the set.
     broadcast_selected: std::collections::HashSet<SessionKey>,
+    /// Live Shift-↑/↓ sweep state: `(anchor, cursor-at-last-extend)`.
+    /// The anchor is the row the sweep started on; comparing the current
+    /// cursor against the stored last-extend position is what detects an
+    /// uninterrupted run of Shift-arrows — any other cursor move restarts
+    /// the sweep. `None` between sweeps and after `v` / Esc (#1243).
+    sweep: Option<(SessionKey, Option<SessionKey>)>,
     /// Mirror of `ui.keep_awake` as loaded at startup. When set, the
     /// header paints a small "awake" badge while any agent is
     /// `Working` — the same condition under which the daemon holds
@@ -471,6 +479,7 @@ impl Sidebar {
             search: None,
             searched_keys: std::collections::HashSet::new(),
             broadcast_selected: std::collections::HashSet::new(),
+            sweep: None,
             keep_awake: false,
             show_agent_model: true,
             usage: lazybox_tui_core::usage::UsageTracker::default(),
@@ -1056,6 +1065,9 @@ impl Sidebar {
     /// so the caller can surface a footer notice, or `None` when the
     /// cursor isn't on a workspace / session row.
     pub fn toggle_broadcast_select(&mut self) -> Option<bool> {
+        // An explicit `v` toggle restarts any Shift-arrow sweep — the
+        // next extend re-anchors on the (possibly re-marked) cursor row.
+        self.sweep = None;
         let key = self.selected_session_key()?.clone();
         if self.broadcast_selected.insert(key.clone()) {
             Some(true)
@@ -1068,19 +1080,63 @@ impl Sidebar {
     /// Extend the multi-select by one row in `dir` (−1 up, +1 down),
     /// spreadsheet-style: mark the workspace under the cursor, step the
     /// cursor one visible row, and mark whatever workspace it lands on.
-    /// Additive — it never deselects, so it composes with `v` toggles
-    /// (and Esc to clear), and a sustained press sweeps a contiguous
-    /// range. Returns the count that's currently visible-and-selected,
-    /// for the footer notice (#932).
+    /// Directional (#932, #1243): the sweep is anchored on the row it
+    /// started from, and reversing direction back toward that anchor
+    /// deselects the row the cursor leaves — an over-sweep can shrink.
+    /// Moving away from the anchor grows as before, so it still composes
+    /// with `v` toggles (and Esc to clear). Returns the count that's
+    /// currently visible-and-selected, for the footer notice.
     pub fn extend_selection(&mut self, dir: isize) -> usize {
-        if let Some(key) = self.selected_session_key().cloned() {
-            self.broadcast_selected.insert(key);
+        let cur = self.selected_session_key().cloned();
+        let cur_idx = self.cursor;
+        // The anchor survives only an *uninterrupted* run of
+        // Shift-arrows: any other cursor move (j/k, a click, a jump)
+        // leaves the cursor somewhere the last extend didn't, which
+        // restarts the sweep at the current row.
+        let continuing = self.sweep.as_ref().is_some_and(|(_, last)| *last == cur);
+        let anchor = if continuing {
+            self.sweep.as_ref().map(|(a, _)| a.clone())
+        } else {
+            cur.clone()
+        };
+        let anchor_idx = self
+            .workspace_visible_index(anchor.as_ref())
+            .unwrap_or(cur_idx);
+        if let Some(key) = &cur {
+            self.broadcast_selected.insert(key.clone());
         }
         self.move_cursor_by(dir);
-        if let Some(key) = self.selected_session_key().cloned() {
-            self.broadcast_selected.insert(key);
+        let landed_idx = self.cursor;
+        let landed = self.selected_session_key().cloned();
+        // Moving back toward the anchor shrinks: the departed row is
+        // unmarked (the anchor itself always stays). Anywhere else grows.
+        let toward_anchor = landed_idx == anchor_idx
+            || (landed_idx > anchor_idx.min(cur_idx) && landed_idx < anchor_idx.max(cur_idx));
+        if toward_anchor {
+            if let Some(key) = &cur
+                && anchor.as_ref() != Some(key)
+            {
+                self.broadcast_selected.remove(key);
+            }
+        } else if let Some(key) = &landed {
+            self.broadcast_selected.insert(key.clone());
         }
+        // A sweep that hasn't crossed a workspace row yet anchors on the
+        // first one it reaches.
+        self.sweep = anchor.or_else(|| landed.clone()).map(|a| (a, landed));
         self.visible_broadcast_selected_count()
+    }
+
+    /// Visible index of a workspace's row (its `Workspace` row, or the
+    /// first `Session` sub-row when the workspace row itself isn't in
+    /// the list). `None` for `None` keys and hidden workspaces.
+    fn workspace_visible_index(&self, key: Option<&SessionKey>) -> Option<usize> {
+        let key = key?;
+        self.visible.iter().position(|row| match row {
+            VisibleRow::Workspace(k) => k == key,
+            VisibleRow::Session { workspace, .. } => workspace == key,
+            _ => false,
+        })
     }
 
     /// Shift-click range extend: mark every workspace row between the
@@ -1162,6 +1218,7 @@ impl Sidebar {
     /// Returns whether anything was cleared (so Esc can fall through
     /// when there was no selection).
     pub fn clear_broadcast_selection(&mut self) -> bool {
+        self.sweep = None;
         let had = !self.broadcast_selected.is_empty();
         self.broadcast_selected.clear();
         had
@@ -3191,6 +3248,24 @@ impl Sidebar {
         self.ticket_tree = outcome.ticket_tree;
         self.recompute_stacks();
         self.recompute_searched_keys();
+        // Prune multi-select marks the new projection hid (#1243): a
+        // hidden mark can't be seen or un-marked, yet it used to linger
+        // in the set and silently re-join the target pool when the
+        // filter / mailbox / search changed again. Pruning here keeps
+        // one invariant everywhere — marked ⇒ visible — so the header
+        // count, the Esc gate, and `resolve_targets` can never disagree.
+        if !self.broadcast_selected.is_empty() {
+            let shown: std::collections::HashSet<&SessionKey> = self
+                .visible
+                .iter()
+                .filter_map(|row| match row {
+                    VisibleRow::Workspace(k) => Some(k),
+                    VisibleRow::Session { workspace, .. } => Some(workspace),
+                    _ => None,
+                })
+                .collect();
+            self.broadcast_selected.retain(|k| shown.contains(k));
+        }
 
         // Preserve cursor on a repo header across reorderings — j/k
         // can land on headers (collapse target), and snapshots

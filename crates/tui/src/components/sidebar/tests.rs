@@ -3386,11 +3386,12 @@ mod broadcast_select_tests {
         (0..12).any(|y| (0..width).any(|x| buf[(x, y)].symbol() == "✓"))
     }
 
-    /// Issue #786: the header count reflects only the *visible* marks —
-    /// it stays in lockstep with the on-screen `✓` gutter and with what a
-    /// broadcast targets. Marks on rows a filter later hides don't inflate
-    /// the count (they'd otherwise claim rows that aren't there and won't
-    /// broadcast).
+    /// Issue #786 / #1243: the header count reflects only the *visible*
+    /// marks, and marks a filter hides are PRUNED outright — a hidden
+    /// mark can't be seen or un-marked, and used to linger in the set
+    /// and re-join the target pool when the filter changed again. After
+    /// any recompute, marked ⇒ visible, so total and visible counts
+    /// agree everywhere.
     #[test]
     fn header_count_tracks_visible_marks_not_hidden_ones() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
@@ -3408,16 +3409,12 @@ mod broadcast_select_tests {
         );
         assert!(screen_has_check(&mut sb, 60), "gutter marks visible");
 
-        // Hide every issue behind a PR-only filter. The marks persist in
-        // the set, but nothing is visible — the header must not claim a
-        // stale count and no gutter `✓` should paint.
+        // Hide every issue behind a PR-only filter: the hidden marks are
+        // pruned, so the header shows no stale count, no gutter `✓`
+        // paints, and clearing the filter does NOT resurrect the marks.
         sb.set_filters([Filter::Pr]);
-        assert_eq!(sb.broadcast_selected_count(), 2, "set retains the marks");
-        assert_eq!(
-            sb.visible_broadcast_selected_count(),
-            0,
-            "none of the marked rows are visible",
-        );
+        assert_eq!(sb.broadcast_selected_count(), 0, "hidden marks pruned");
+        assert_eq!(sb.visible_broadcast_selected_count(), 0);
         assert!(
             !header_row(&mut sb, 60).contains("selected"),
             "no stale count when the marked rows are hidden",
@@ -3425,6 +3422,12 @@ mod broadcast_select_tests {
         assert!(
             !screen_has_check(&mut sb, 60),
             "no gutter marks when the marked rows are hidden",
+        );
+        sb.set_filters([]);
+        assert_eq!(
+            sb.broadcast_selected_count(),
+            0,
+            "clearing the filter must not resurrect pruned marks",
         );
     }
 

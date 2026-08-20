@@ -482,7 +482,9 @@ impl AgentModels {
                     ModelTier {
                         alias: "L".into(),
                         label: "Opus".into(),
-                        short: Some("O".into()),
+                        // "Op", not "O": a lone capital O reads as the
+                        // digit zero in most monospace fonts ("◆0??").
+                        short: Some("Op".into()),
                         args: vec!["--model".into(), "claude-opus-4-8".into()],
                     },
                 ],

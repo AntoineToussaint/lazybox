@@ -961,7 +961,18 @@ fn model_short(ctx: &WorkspaceRowCtx<'_>, letter: char, name: &str) -> String {
     if let Some(short) = ctx.model_shorts.get(&(letter, name.to_string())) {
         return short.clone();
     }
-    name.chars().next().map(String::from).unwrap_or_default()
+    // Digit-lookalike guard: a lone O/o/I/l after the ◆ reads as 0/1 in
+    // monospace fonts. Widen those to two characters so the badge stays
+    // legible; everything else keeps the single-glyph form (#1068).
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first @ ('O' | 'o' | 'I' | 'l')) => match chars.next() {
+            Some(second) => format!("{first}{second}"),
+            None => first.to_string(),
+        },
+        Some(first) => first.to_string(),
+        None => String::new(),
+    }
 }
 
 /// Abbreviate a reasoning-effort token to a compact form. Covers every
@@ -1260,17 +1271,6 @@ fn cell_track_main(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
-/// First four characters of an owner id segment — device and session ids are
-/// lowercase hex, but truncate on a char boundary anyway so a malformed label
-/// can never panic the renderer.
-fn owner_prefix(segment: &str) -> &str {
-    let end = segment
-        .char_indices()
-        .nth(4)
-        .map_or(segment.len(), |(idx, _)| idx);
-    &segment[..end]
-}
-
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // CI/review pills only exist for a workspace with an upstream task.
     // The passive badges (`⎇ local` / `✎` / `]N` / `ARM` / `FIX` / `⤓main`) that
@@ -1303,23 +1303,20 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 .fg(ctx.theme.warn)
                 .add_modifier(Modifier::BOLD)
         };
-        // Owner provenance rides the claim glyph (#1180 on the #1181 ⚑
-        // presentation): one active qualified owner shows `⚑ dev/sess`,
-        // several show `⚑×N`, and a claim with no active qualified owner
-        // (legacy `working` label, or expired-but-preserved leases) stays
-        // the bare glyph.
+        // The row keeps the claim glyph QUIET: `⚑` for the ordinary
+        // single-owner claim (raw device/session hex told a human
+        // nothing at a glance — "what is 6eb7/64ce?"), `⚑×N` only when
+        // several owners genuinely hold it. Full owner provenance
+        // (device/session) still surfaces where there is room and
+        // context: the claimed-spawn confirm names each owner, and the
+        // labels carry it for debugging.
         let active = ctx
             .task
             .map(|task| task.active_qualified_working_claims(chrono::Utc::now()))
             .unwrap_or_default();
         let glyph = crate::components::sidebar::CLAIM_GLYPH;
-        let label = match active.as_slice() {
-            [owner] => format!(
-                " {glyph} {}/{} ",
-                owner_prefix(&owner.device),
-                owner_prefix(&owner.session)
-            ),
-            owners if !owners.is_empty() => format!(" {glyph}×{} ", owners.len()),
+        let label = match active.len() {
+            n if n > 1 => format!(" {glyph}×{n} "),
             _ => format!(" {glyph} "),
         };
         spans.push(Span::styled(label, style));
@@ -2158,8 +2155,8 @@ mod tests {
         let cell = cell_badge_agent(&ctx);
         let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(
-            text, " C ◆O ",
-            "the model rides after the pill as a compact ◆ badge"
+            text, " C ◆Op ",
+            "the model rides after the pill as a compact ◆ badge (Op, not O — a lone O reads as zero)"
         );
     }
 
@@ -2445,8 +2442,11 @@ mod tests {
         assert_eq!(labels, " [bug]");
     }
 
+    /// A single qualified owner renders the QUIET glyph — raw
+    /// device/session hex on the row read as line noise ("what is
+    /// 6eb7/64ce?"); owner detail lives in the claimed-spawn confirm.
     #[test]
-    fn qualified_working_claim_pill_identifies_device_and_session() {
+    fn qualified_working_claim_pill_stays_quiet_for_one_owner() {
         let mut task = make_task("owner/repo#1", "x");
         task.review = ReviewStatus::None;
         task.ci = CiStatus::None;
@@ -2470,7 +2470,8 @@ mod tests {
             .collect();
         assert_eq!(
             status,
-            format!(" {} 0123/1234 ", crate::components::sidebar::CLAIM_GLYPH)
+            format!(" {} ", crate::components::sidebar::CLAIM_GLYPH),
+            "one owner is the ordinary case — bare glyph, no hex",
         );
         assert!(label_spans(&ctx).is_empty());
     }

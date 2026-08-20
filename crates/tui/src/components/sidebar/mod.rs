@@ -2615,6 +2615,21 @@ impl Sidebar {
         lazybox_tui_core::inbox::space_of(source, &self.spaces)
     }
 
+    /// The hand-created Spaces, in display order. Exactly the
+    /// `ui.spaces` entries — auto-seeded owner Spaces never appear in
+    /// config, so this is the list the move-to-Space picker offers
+    /// (#1206).
+    pub fn hand_created_spaces(&self) -> Vec<String> {
+        self.spaces.iter().map(|s| s.name.clone()).collect()
+    }
+
+    /// What `source` falls back to when unassigned — the owner
+    /// auto-seed (`owner/repo` → `owner`) or the ungrouped bucket.
+    /// Names the "unassign" row in the move-to-Space picker.
+    pub fn auto_space_of_source(&self, source: &str) -> String {
+        lazybox_tui_core::inbox::space_of(source, &[])
+    }
+
     /// Assign a source group (repo / Linear label) to a Space,
     /// persisting to `ui.spaces` (#860). A blank `space` unassigns the
     /// source (it falls back to owner auto-seed / `Ungrouped`); a name

@@ -489,6 +489,72 @@ impl<T: TerminalAdapter> Model<T> {
     /// stashed on the `ModalFlow::MoveToSpace` flow; the input is
     /// prefilled with the source's current Space so a bare Enter is a
     /// no-op and clearing it unassigns.
+    /// Mount the move-to-Space picker (`x m`, #1206): the hand-created
+    /// Spaces in display order (current one marked), an unassign row
+    /// naming the auto-seed fallback, and a "＋ New Space…" row that
+    /// drops to the free-text input. Preselects `ui.last_space` when it
+    /// still exists, else the source's current Space, so filing many
+    /// repos into one Space is `x m` + Enter each. With no hand-created
+    /// Spaces yet there is nothing to pick — straight to the input.
+    pub(super) fn mount_move_to_space_picker(&mut self, source: String) {
+        use crate::realm::components::choice::Choice;
+        use lazybox_tui_core::choice::SpacePickEntry;
+
+        if matches!(
+            self.modal_stack.last(),
+            Some(Id::MoveToSpacePicker | Id::MoveToSpace)
+        ) {
+            return;
+        }
+
+        let spaces = self.sidebar.hand_created_spaces();
+        if spaces.is_empty() {
+            self.mount_move_to_space_input(source);
+            return;
+        }
+
+        let current = self.sidebar.space_of_source(&source);
+        let auto = self.sidebar.auto_space_of_source(&source);
+        let last = lazybox_config::Config::load()
+            .unwrap_or_default()
+            .ui
+            .last_space;
+
+        let mut rows: Vec<(String, SpacePickEntry)> = spaces
+            .iter()
+            .map(|name| {
+                let label = if *name == current {
+                    format!("{name} · current")
+                } else {
+                    name.clone()
+                };
+                (label, SpacePickEntry::Assign(name.clone()))
+            })
+            .collect();
+        rows.push((
+            format!("Unassign — back to {auto}"),
+            SpacePickEntry::Unassign,
+        ));
+        rows.push(("＋ New Space…".to_string(), SpacePickEntry::NewSpace));
+
+        let preselect =
+            lazybox_tui_core::choice::space_preselect_index(&spaces, last.as_deref(), &current);
+
+        self.set_modal_flow(ModalFlow::MoveToSpacePick {
+            source: source.clone(),
+            entries: rows.iter().map(|(_, e)| e.clone()).collect(),
+        });
+
+        // No `payload_for`: rows report their positional
+        // `ChoicePayload::Index`, which is exactly the entries index the
+        // flow snapshot resolves against.
+        let modal = Choice::single(format!("Move {source} to which Space?"), rows)
+            .title("Move to Space")
+            .label(|(l, _): &(String, SpacePickEntry)| l.clone())
+            .select_index(preselect);
+        self.mount_modal(Id::MoveToSpacePicker, modal);
+    }
+
     pub(super) fn mount_move_to_space_input(&mut self, source: String) {
         use crate::realm::components::input::Input;
 

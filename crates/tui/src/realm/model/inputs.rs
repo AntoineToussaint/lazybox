@@ -452,6 +452,14 @@ impl<T: TerminalAdapter> Model<T> {
                 };
                 if let Some(source) = source {
                     let resolved = self.sidebar.assign_source_to_space(&source, &space);
+                    if !space.is_empty() {
+                        // A typed name (usually a brand-new Space) becomes
+                        // the picker's next preselection (#1206).
+                        let last = space.clone();
+                        lazybox_config::Config::save_with_async(move |c| {
+                            c.ui.last_space = Some(last)
+                        });
+                    }
                     self.flash_info(format!("{source} → {resolved}"));
                     self.redraw = true;
                 } else {

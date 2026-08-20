@@ -1291,7 +1291,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // reachable whether the cursor is on the header or a
                 // workspace under it.
                 if let Some(source) = self.sidebar.cursor_repo() {
-                    self.mount_move_to_space_input(source);
+                    // Picker over hand-created Spaces (#1206); falls
+                    // back to the free-text input when none exist yet.
+                    self.mount_move_to_space_picker(source);
                 } else {
                     self.flash_info("select a repo group first".to_string());
                 }

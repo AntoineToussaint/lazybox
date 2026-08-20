@@ -854,6 +854,12 @@ pub struct UiSection {
     /// `collapsed_repos` one tier up (#860).
     #[serde(default)]
     pub collapsed_spaces: std::collections::BTreeSet<String>,
+    /// The Space most recently assigned via move-to-Space (`x m`) —
+    /// preselected in the picker so filing many repos into the same
+    /// Space is one confirm per repo (#1206). May name a Space that no
+    /// longer exists; readers must validate against `spaces`.
+    #[serde(default)]
+    pub last_space: Option<String>,
     /// Sidebar column width as a percentage of total. None = use
     /// the default (40%).
     pub sidebar_pct: Option<u16>,
@@ -1038,6 +1044,7 @@ impl Default for UiSection {
             focused_workspaces: Vec::new(),
             spaces: Vec::new(),
             collapsed_spaces: std::collections::BTreeSet::new(),
+            last_space: None,
             keymap_preset: None,
             theme: None,
             sidebar_pct: None,

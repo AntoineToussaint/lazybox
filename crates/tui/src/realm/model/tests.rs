@@ -6847,6 +6847,7 @@ mod stale_input_tests {
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
+                | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
                 | Id::WorkAgentPicker => true,
@@ -6932,6 +6933,7 @@ mod stale_input_tests {
             Id::NewWorkspace,
             Id::RenameWorkspace,
             Id::MoveToSpace,
+            Id::MoveToSpacePicker,
             Id::NewProject,
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
@@ -7681,6 +7683,79 @@ mod modal_input_responsiveness_tests {
             Some("L"),
             "mirrored into the in-memory menu",
         );
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// #1206 journey on a temp `LAZYBOX_HOME`: `x m` with no
+    /// hand-created Spaces drops straight to the free-text input; once
+    /// Spaces exist it mounts the picker, a pick files the source and
+    /// persists it as `ui.last_space` (the next preselection), unassign
+    /// returns the source to its owner auto-seed, and "＋ New Space…"
+    /// drops to the input carrying the same source.
+    #[test]
+    fn move_to_space_picker_files_remembers_and_falls_back() {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-space-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+
+        // No hand-created Spaces yet → nothing to pick, free text.
+        m.mount_move_to_space_picker("obin-ai/lazybox".into());
+        assert_eq!(m.top_modal(), Some(&Id::MoveToSpace), "fallback to input");
+        m.pop_modal();
+        m.modal_flow = None;
+
+        m.sidebar.assign_source_to_space("other/repo", "Work");
+        m.sidebar.assign_source_to_space("x/y", "Later");
+
+        m.mount_move_to_space_picker("obin-ai/lazybox".into());
+        assert_eq!(m.top_modal(), Some(&Id::MoveToSpacePicker));
+        // Rows: [Work, Later, Unassign, ＋ New Space…] — pick "Later".
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
+        assert!(cmds.is_empty(), "space assignment is local, no daemon cmd");
+        assert_eq!(m.sidebar.space_of_source("obin-ai/lazybox"), "Later");
+        assert!(m.modal_flow.is_none());
+
+        // The pick lands on disk as the next preselection. The persist
+        // worker is async but ordered; converge instead of sleeping a
+        // fixed guess.
+        let cfg_path = home.join("config.yaml");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let last = lazybox_config::Config::load_from(&cfg_path)
+                .ok()
+                .and_then(|c| c.ui.last_space);
+            if last.as_deref() == Some("Later") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ui.last_space never persisted, got {last:?}",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Unassign → owner auto-seed.
+        m.mount_move_to_space_picker("obin-ai/lazybox".into());
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Index(2)]);
+        assert_eq!(m.sidebar.space_of_source("obin-ai/lazybox"), "obin-ai");
+
+        // "＋ New Space…" → the free-text input, same source stashed.
+        m.mount_move_to_space_picker("obin-ai/lazybox".into());
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Index(3)]);
+        assert_eq!(m.top_modal(), Some(&Id::MoveToSpace));
+        assert!(matches!(
+            m.modal_flow,
+            Some(super::super::ModalFlow::MoveToSpace { ref source })
+                if source == "obin-ai/lazybox"
+        ));
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);

@@ -2710,7 +2710,8 @@ pub(crate) fn decode_terminal_command(body: &[u8]) -> Result<Command, &'static s
                 ),
             });
             for encoded in tail[TERMINAL_RESYNC_PAYLOAD_BYTES..]
-                .chunks_exact(TERMINAL_RESYNC_ADDITIONAL_REQUEST_BYTES)
+                .as_chunks::<TERMINAL_RESYNC_ADDITIONAL_REQUEST_BYTES>()
+                .0
             {
                 requests.push(lazybox_ipc::TerminalResyncRequest {
                     terminal_id: lazybox_ipc::TerminalId(u64::from_be_bytes(

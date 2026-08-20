@@ -135,6 +135,10 @@ pub(crate) struct MessageEntry {
     pub message: String,
     pub severity: NoticeSeverity,
     pub at: DateTime<Utc>,
+    /// Consecutive identical re-fires collapsed into this entry. A
+    /// poll sweep re-emitting one error every 15s reads as `✗ … ×12 ·
+    /// 3m ago`, not as 12 rows drowning the rest of the log (#1245).
+    pub count: u32,
 }
 
 /// Durable, bounded history of footer notices. The footer is the
@@ -148,13 +152,24 @@ pub(crate) struct MessageLog {
 }
 
 impl MessageLog {
-    /// Append a notice, stamped now. Oldest entries roll off the front
-    /// once the ring is full.
+    /// Append a notice, stamped now. A repeat of the newest entry
+    /// (same text + severity) collapses into it — count bumped,
+    /// timestamp refreshed — instead of stacking duplicate rows.
+    /// Oldest entries roll off the front once the ring is full.
     pub fn record(&mut self, message: &str, severity: NoticeSeverity) {
+        if let Some(last) = self.entries.back_mut()
+            && last.message == message
+            && last.severity == severity
+        {
+            last.count = last.count.saturating_add(1);
+            last.at = Utc::now();
+            return;
+        }
         self.entries.push_back(MessageEntry {
             message: message.to_string(),
             severity,
             at: Utc::now(),
+            count: 1,
         });
         while self.entries.len() > MESSAGE_LOG_CAP {
             self.entries.pop_front();
@@ -194,6 +209,12 @@ const HINT_FADE: Duration = Duration::from_secs(3);
 /// `Esc` (#588). `Esc` still dismisses immediately. Untagged Permanent
 /// system banners ignore this and never auto-fade.
 const PERMANENT_FADE: Duration = Duration::from_secs(45);
+/// How long an acknowledged error message (Esc'd or fully faded)
+/// suppresses identical re-fires from the footer. Long enough to stop
+/// a 15s poll sweep from re-shouting a known condition; short enough
+/// that a genuinely persistent problem resurfaces within the session.
+/// The messages log records every re-fire either way (#1245).
+const ACK_SUPPRESS: Duration = Duration::from_secs(10 * 60);
 /// Heartbeat interval for the polling-modal spinner. Cheap, keeps
 /// the spinner glyph advancing at ~12 fps.
 const POLLING_TICK_INTERVAL: Duration = Duration::from_millis(80);
@@ -431,6 +452,17 @@ pub(crate) struct StatusCtx {
     /// stops firing — which fails *open* (the banner re-shows), never
     /// silently muting a live error.
     dismissed_action_errors: HashMap<String, String>,
+    /// Error notices (Retryable / Auth / Permanent) the user has
+    /// acknowledged — Esc'd, or let run their full on-screen fade —
+    /// keyed by exact message → when. While an entry is fresh
+    /// ([`ACK_SUPPRESS`]), an identical re-fire stays out of the
+    /// footer (it still lands in the messages log), so a condition
+    /// that re-emits on every poll sweep can't re-shout an already
+    /// acknowledged error forever (#1245). Info/Hint never suppress —
+    /// "Spawning shell…" must show on every spawn. Matching is on the
+    /// exact text, so any variation fails *open* (the banner shows),
+    /// never silently muting a new error.
+    acknowledged_errors: HashMap<String, Instant>,
     /// Durable state of the connection to the remote box (#1066). Unlike
     /// the transient `notice`, this persists so the user can consult "am I
     /// connected to my box right now?" at any time. `NotConfigured` (the
@@ -456,6 +488,7 @@ impl StatusCtx {
             sync: SyncLog::default(),
             messages: MessageLog::default(),
             dismissed_action_errors: HashMap::new(),
+            acknowledged_errors: HashMap::new(),
             remote_conn: RemoteConnState::NotConfigured,
             remote_spinner_idx: 0,
         }
@@ -512,11 +545,46 @@ impl StatusCtx {
             == Some(message)
     }
 
+    /// Remember the currently-displayed notice as acknowledged when it
+    /// carries an error severity (Retryable / Auth / Permanent), so an
+    /// identical re-fire stays out of the footer for a while (#1245).
+    /// Called from the Esc dismissal and from a completed on-screen
+    /// fade — both count as "I've had the chance to see this".
+    pub fn remember_acknowledged_error(&mut self) {
+        if let Some(n) = self.notice.as_ref()
+            && matches!(
+                n.severity,
+                NoticeSeverity::Retryable | NoticeSeverity::Auth | NoticeSeverity::Permanent
+            )
+        {
+            self.acknowledged_errors
+                .insert(n.message.clone(), Instant::now());
+        }
+    }
+
+    /// Whether this exact error message was acknowledged recently
+    /// enough ([`ACK_SUPPRESS`]) that a re-fire should skip the footer.
+    /// Never true for Info/Hint. The messages log records the re-fire
+    /// regardless, so nothing is lost — only the re-shout.
+    pub fn error_acknowledged(&self, message: &str, severity: NoticeSeverity) -> bool {
+        matches!(
+            severity,
+            NoticeSeverity::Retryable | NoticeSeverity::Auth | NoticeSeverity::Permanent
+        ) && self
+            .acknowledged_errors
+            .get(message)
+            .is_some_and(|at| at.elapsed() < ACK_SUPPRESS)
+    }
+
     /// Forget a workspace's dismissed action error — its reason changed
     /// or a success resolved it, so the next failure surfaces afresh
-    /// (#832).
+    /// (#832). The general acknowledged-message entry goes with it: a
+    /// recurrence after the condition cleared is new information, not a
+    /// re-fire of a known one (#1245).
     pub fn forget_dismissed_action_error(&mut self, workspace: &str) {
-        self.dismissed_action_errors.remove(workspace);
+        if let Some(msg) = self.dismissed_action_errors.remove(workspace) {
+            self.acknowledged_errors.remove(&msg);
+        }
     }
 
     /// Light up the animated spawn indicator. `label` is the agent /
@@ -722,6 +790,9 @@ impl StatusCtx {
             if is_action {
                 self.remember_dismissed_action_error();
             }
+            // Any error severity that ran its full on-screen time was
+            // seen; identical re-fires stay quiet for a while (#1245).
+            self.remember_acknowledged_error();
             self.notice = None;
             return true;
         }
@@ -813,7 +884,26 @@ mod tests {
             severity,
             set_at: Instant::now() - age,
             workspace: None,
+            repeats: 1,
         }
+    }
+
+    #[test]
+    fn message_log_collapses_consecutive_identical_refires() {
+        let mut log = MessageLog::default();
+        log.record("⚠ sync failed: boom", NoticeSeverity::Retryable);
+        log.record("⚠ sync failed: boom", NoticeSeverity::Retryable);
+        log.record("⚠ sync failed: boom", NoticeSeverity::Retryable);
+        log.record("· something else", NoticeSeverity::Info);
+        log.record("⚠ sync failed: boom", NoticeSeverity::Retryable);
+
+        let entries: Vec<_> = log.recent().collect();
+        assert_eq!(entries.len(), 3, "3 rows, not 5");
+        assert_eq!(entries[2].count, 3, "the first burst collapsed to ×3");
+        assert_eq!(
+            entries[0].count, 1,
+            "a re-fire after an interleaved message starts a new row",
+        );
     }
 
     #[test]

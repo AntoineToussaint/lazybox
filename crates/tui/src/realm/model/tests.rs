@@ -20549,6 +20549,103 @@ mod notice_severity_slot_tests {
     }
 
     #[test]
+    fn refired_error_keeps_its_fade_clock_and_shows_a_repeat_count() {
+        // #1245: a condition re-emitting the same error every poll
+        // sweep used to reset `set_at` on each re-fire, pinning the
+        // fade timer at zero — the footer alert never disappeared.
+        let mut m = build_model();
+        m.flash("⚠ sync failed: boom", NoticeSeverity::Retryable);
+        let first_set_at = m.status.notice.as_ref().unwrap().set_at;
+        m.flash("⚠ sync failed: boom", NoticeSeverity::Retryable);
+        m.flash("⚠ sync failed: boom", NoticeSeverity::Retryable);
+
+        let n = m.status.notice.as_ref().expect("notice present");
+        assert_eq!(n.repeats, 3, "each identical re-fire counts");
+        assert_eq!(
+            n.set_at, first_set_at,
+            "the fade clock runs from the FIRST appearance — re-fires must not reset it",
+        );
+
+        // Age it past the retryable fade: the tick clears it even
+        // though the condition kept re-firing the whole time.
+        m.status.notice.as_mut().unwrap().set_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(6);
+        assert!(m.status.tick_notice(), "an aged repeating notice fades");
+        assert!(m.status.notice.is_none());
+    }
+
+    #[test]
+    fn acknowledged_error_refire_stays_quiet_but_lands_in_the_log() {
+        let mut m = build_model();
+        m.flash("⚠ sync failed: boom", NoticeSeverity::Retryable);
+        m.status.notice.as_mut().unwrap().set_at =
+            std::time::Instant::now() - std::time::Duration::from_secs(6);
+        assert!(m.status.tick_notice(), "fade elapses = acknowledged");
+
+        // The same condition re-fires on the next sweep: quiet footer,
+        // but the log keeps an honest collapsed count.
+        m.flash("⚠ sync failed: boom", NoticeSeverity::Retryable);
+        assert!(
+            m.status.notice.is_none(),
+            "an acknowledged error re-fire must not re-shout in the footer",
+        );
+        let entry = m
+            .status
+            .messages
+            .recent()
+            .find(|e| e.message.contains("sync failed"))
+            .expect("re-fire recorded in the messages log");
+        assert!(
+            entry.count >= 2,
+            "the log collapses re-fires: {}",
+            entry.count
+        );
+
+        // A DIFFERENT error is new information — it shows (fail open).
+        m.flash("⚠ sync failed: other reason", NoticeSeverity::Retryable);
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("other reason")),
+            "a different message must never be suppressed",
+        );
+    }
+
+    #[test]
+    fn escaped_error_refire_stays_quiet() {
+        // The Esc arm records the acknowledgment; an identical re-fire
+        // then stays out of the footer (#1245).
+        let mut m = build_model();
+        m.flash_error("✗ merge failed — boom");
+        m.status.remember_acknowledged_error();
+        m.status.notice = None;
+
+        m.flash_error("✗ merge failed — boom");
+        assert!(
+            m.status.notice.is_none(),
+            "an Esc'd error re-firing identically must stay dismissed",
+        );
+    }
+
+    #[test]
+    fn info_refires_are_never_suppressed() {
+        let mut m = build_model();
+        m.flash_info("Spawning shell…");
+        m.status.remember_acknowledged_error();
+        m.status.notice = None;
+
+        m.flash_info("Spawning shell…");
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("Spawning")),
+            "Info notices must show on every legitimate re-trigger",
+        );
+    }
+
+    #[test]
     fn suppressed_hint_lands_in_messages_log() {
         let mut m = build_model();
         m.flash_error("✗ spawn failed — boom");

@@ -79,11 +79,23 @@ impl Messages {
             NoticeSeverity::Info | NoticeSeverity::Hint => ("· ", theme.text_dim),
         };
         let ago = time_ago_at(&e.at, self.now);
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(glyph, Style::default().fg(color)),
             Span::styled(e.message.clone(), Style::default().fg(theme.text_strong)),
-            Span::styled(format!("  ·  {ago}"), Style::default().fg(theme.text_dim)),
-        ])
+        ];
+        // Collapsed re-fires carry their count — one honest `×12` row
+        // instead of twelve identical ones drowning the log (#1245).
+        if e.count > 1 {
+            spans.push(Span::styled(
+                format!(" ×{}", e.count),
+                Style::default().fg(color),
+            ));
+        }
+        spans.push(Span::styled(
+            format!("  ·  {ago}"),
+            Style::default().fg(theme.text_dim),
+        ));
+        Line::from(spans)
     }
 }
 
@@ -178,6 +190,7 @@ mod tests {
             message: message.into(),
             severity,
             at: now() - chrono::Duration::seconds(secs_ago),
+            count: 1,
         }
     }
 

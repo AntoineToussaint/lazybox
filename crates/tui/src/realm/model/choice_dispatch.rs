@@ -137,6 +137,12 @@ impl<T: TerminalAdapter> Model<T> {
                 },
                 _ => PickFlow::Plain,
             },
+            Id::HeaderContext => match &self.modal_flow {
+                Some(ModalFlow::HeaderContext { actions }) => PickFlow::HeaderContext {
+                    actions: actions.clone(),
+                },
+                _ => PickFlow::Plain,
+            },
             Id::RequestReviewers => PickFlow::Reviewers {
                 workspace_key: match &self.modal_flow {
                     Some(ModalFlow::ReviewRequest { workspace }) => Some(workspace.clone()),
@@ -235,6 +241,7 @@ impl<T: TerminalAdapter> Model<T> {
         match top {
             Id::PromptHistoryPicker
             | Id::SidebarContext
+            | Id::HeaderContext
             | Id::AdoptTarget
             | Id::RequestReviewers
             | Id::PolicyPicker
@@ -427,6 +434,12 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     self.flash_info("workspace is gone — action dropped");
                 }
+                self.redraw = true;
+            }
+            PickOutcome::DispatchCursorAction { action } => {
+                // The right-click already parked the cursor on the
+                // header; the action reads the cursor row directly.
+                cmds.extend(self.dispatch_action(&action));
                 self.redraw = true;
             }
             PickOutcome::MountHandoffComposer { target } => {

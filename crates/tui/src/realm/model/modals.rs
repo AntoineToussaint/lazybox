@@ -2400,6 +2400,41 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SidebarContext, modal);
     }
 
+    /// Right-click on a sidebar Space / repo header (#1211): a small
+    /// menu of the group actions that make sense there — the four
+    /// reorder moves for both tiers, plus pin and move-to-Space for a
+    /// repo header. Labels come from the catalog (label + effective
+    /// chord) so remaps flow through.
+    pub(super) fn mount_header_context_menu(&mut self, is_repo: bool, name: &str) {
+        use crate::realm::components::choice::Choice;
+        use lazybox_tui_core::action::{Action, ActionDef};
+
+        let mut actions: Vec<Action> = vec![
+            Action::MoveGroupUp,
+            Action::MoveGroupDown,
+            Action::MoveGroupTop,
+            Action::MoveGroupBottom,
+        ];
+        if is_repo {
+            actions.push(Action::ToggleRepoPin);
+            actions.push(Action::MoveToSpace);
+        }
+
+        let labels: Vec<String> = actions
+            .iter()
+            .map(|a| {
+                let def = ActionDef::for_action(a);
+                format!("{}  ({})", def.label, def.default_keys)
+            })
+            .collect();
+
+        self.set_modal_flow(ModalFlow::HeaderContext { actions });
+        let modal = Choice::single(name.to_string(), labels)
+            .title(if is_repo { "Repo group" } else { "Space" })
+            .label(|s: &String| s.clone());
+        self.mount_modal(Id::HeaderContext, modal);
+    }
+
     pub(super) fn mount_adopt_picker(&mut self, source_key: lazybox_core::WorkspaceKey) {
         use crate::realm::components::choice::Choice;
 

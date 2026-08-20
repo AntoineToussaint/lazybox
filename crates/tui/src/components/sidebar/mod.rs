@@ -2608,6 +2608,123 @@ impl Sidebar {
         self.collapsed_spaces.contains(name)
     }
 
+    /// Test-only: park the cursor on the named Space / repo header —
+    /// the keyboard path a mouse click takes via `click_to_select`.
+    #[doc(hidden)]
+    pub fn focus_header_row(&mut self, name: &str) -> bool {
+        if let Some(idx) = self.visible.iter().position(|r| match r {
+            VisibleRow::SpaceHeader(n) | VisibleRow::RepoHeader(n) => n == name,
+            _ => false,
+        }) {
+            self.set_cursor(idx);
+            return true;
+        }
+        false
+    }
+
+    /// Test-only: the rendered header rows in order — `(is_repo, name)`.
+    #[doc(hidden)]
+    pub fn __test_header_rows(&self) -> Vec<(bool, String)> {
+        self.visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::RepoHeader(n) => Some((true, n.clone())),
+                VisibleRow::SpaceHeader(n) => Some((false, n.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The exact header row under the cursor, if any — `(is_repo,
+    /// name)`. Distinguishes the right-click header menu (#1211) from
+    /// the workspace context menu; the at-or-above helpers
+    /// (`cursor_repo`, `cursor_space`) deliberately don't.
+    pub fn cursor_header(&self) -> Option<(bool, String)> {
+        match self.visible.get(self.cursor) {
+            Some(VisibleRow::RepoHeader(n)) => Some((true, n.clone())),
+            Some(VisibleRow::SpaceHeader(n)) => Some((false, n.clone())),
+            _ => None,
+        }
+    }
+
+    /// Reorder the group at the cursor (#1211): a cursor sitting
+    /// exactly on a Space header moves that Space within the Space
+    /// tier; anywhere inside a repo group (its header, a workspace, a
+    /// session row) moves that repo within its Space. Both rewrite the
+    /// rendered order into `ui.spaces` via the pure tui-core movers and
+    /// persist. Returns `(what, name)` for the footer notice, `None`
+    /// when there is nothing movable under the cursor (e.g. a lone
+    /// group — advise-level no-op, never an error).
+    pub fn move_group_at_cursor(
+        &mut self,
+        dir: lazybox_tui_core::inbox::MoveDir,
+    ) -> Option<(&'static str, String)> {
+        let moved: (&'static str, String) =
+            if let Some(VisibleRow::SpaceHeader(space)) = self.visible.get(self.cursor) {
+                let space = space.clone();
+                let rendered: Vec<String> = self
+                    .visible
+                    .iter()
+                    .filter_map(|r| match r {
+                        VisibleRow::SpaceHeader(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                if !lazybox_tui_core::inbox::move_space(&mut self.spaces, &rendered, &space, dir) {
+                    return None;
+                }
+                ("Space", space)
+            } else {
+                let repo = self.cursor_repo()?;
+                let space = self.space_of_source(&repo);
+                // The repo's on-screen siblings: every rendered repo
+                // header resolving to the same Space (covers both the
+                // tiered and the flat single-Space shape).
+                let rendered: Vec<String> = self
+                    .visible
+                    .iter()
+                    .filter_map(|r| match r {
+                        VisibleRow::RepoHeader(n) => Some(n.clone()),
+                        _ => None,
+                    })
+                    .filter(|r| self.space_of_source(r) == space)
+                    .collect();
+                if rendered.len() < 2 {
+                    return None;
+                }
+                if !lazybox_tui_core::inbox::move_source_in_space(
+                    &mut self.spaces,
+                    &space,
+                    &rendered,
+                    &repo,
+                    dir,
+                ) {
+                    return None;
+                }
+                ("repo", repo)
+            };
+        self.recompute_visible();
+        // Persist the whole Space list — both movers rewrite it.
+        let snapshot = self.spaces.clone();
+        lazybox_config::Config::save_with_async(|c| c.ui.spaces = snapshot);
+        // A moved *header* cursor re-parks on the moved header (its row
+        // index changed with the group); a workspace-row cursor is
+        // preserved by identity in `recompute_visible` already.
+        if let Some(VisibleRow::SpaceHeader(_) | VisibleRow::RepoHeader(_)) =
+            self.visible.get(self.cursor)
+        {
+            let (kind, name) = &moved;
+            if let Some(idx) = self.visible.iter().position(|r| match r {
+                VisibleRow::SpaceHeader(n) => *kind == "Space" && n == name,
+                VisibleRow::RepoHeader(n) => *kind == "repo" && n == name,
+                _ => false,
+            }) {
+                self.set_cursor(idx);
+            }
+        }
+        Some(moved)
+    }
+
     /// The Space a source label currently resolves to (explicit
     /// assignment, else owner auto-seed) — used to prefill the
     /// move-to-Space prompt.

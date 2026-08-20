@@ -745,6 +745,34 @@ impl Sidebar {
         self.inner.auto_space_of_source(source)
     }
 
+    /// The exact header row under the cursor (`(is_repo, name)`) —
+    /// routes right-click to the header menu (#1211).
+    pub fn cursor_header(&self) -> Option<(bool, String)> {
+        self.inner.cursor_header()
+    }
+
+    /// Test-only: park the cursor on a header row by name.
+    #[doc(hidden)]
+    pub fn focus_header_row(&mut self, name: &str) -> bool {
+        self.inner.focus_header_row(name)
+    }
+
+    /// Test-only: rendered header rows in order — `(is_repo, name)`.
+    #[doc(hidden)]
+    pub fn __test_header_rows(&self) -> Vec<(bool, String)> {
+        self.inner.__test_header_rows()
+    }
+
+    /// Reorder the group at the cursor (#1211) — Space within the
+    /// Space tier, repo within its Space. Returns `(what, name)` for
+    /// the footer notice.
+    pub fn move_group_at_cursor(
+        &mut self,
+        dir: lazybox_tui_core::inbox::MoveDir,
+    ) -> Option<(&'static str, String)> {
+        self.inner.move_group_at_cursor(dir)
+    }
+
     /// Assign a source group to a Space (#860), persisting to
     /// `ui.spaces`. Returns the resolved Space name for a footer notice.
     pub fn assign_source_to_space(&mut self, source: &str, space: &str) -> String {

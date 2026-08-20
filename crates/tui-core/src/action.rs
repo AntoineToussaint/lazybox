@@ -246,6 +246,17 @@ pub enum Action {
     /// algorithmic order. Acts on the list, not a single workspace, so
     /// it lives in the Sidebar section. The pin set persists.
     ToggleRepoPin,
+    /// Move the group at the cursor up one slot (#1211): a Space
+    /// header moves within the Space tier, a repo (its header or any
+    /// row inside it) moves within its Space. The rendered order is
+    /// rewritten into `ui.spaces`, so the arrangement persists.
+    MoveGroupUp,
+    /// [`Self::MoveGroupUp`], one slot down.
+    MoveGroupDown,
+    /// [`Self::MoveGroupUp`], straight to the top of its tier.
+    MoveGroupTop,
+    /// [`Self::MoveGroupUp`], straight to the bottom of its tier.
+    MoveGroupBottom,
     /// Star / unstar the cursor's workspace, lifting it into (or out
     /// of) the synthetic `★ Focused` section at the top of the sidebar.
     /// The manual, per-workspace counterpart to [`Self::ToggleRepoPin`]:
@@ -496,6 +507,10 @@ pub enum ActionKind {
     OpenGlobalSearch,
     ToggleRepoGroup,
     ToggleRepoPin,
+    MoveGroupUp,
+    MoveGroupDown,
+    MoveGroupTop,
+    MoveGroupBottom,
     ToggleFocusWorkspace,
     SelectWorkspace,
     BroadcastToSelected,
@@ -634,6 +649,10 @@ impl ActionKind {
         Self::OpenGlobalSearch,
         Self::ToggleRepoGroup,
         Self::ToggleRepoPin,
+        Self::MoveGroupUp,
+        Self::MoveGroupDown,
+        Self::MoveGroupTop,
+        Self::MoveGroupBottom,
         Self::ToggleFocusWorkspace,
         Self::FocusPaneRight,
         Self::SelectWorkspace,
@@ -747,6 +766,10 @@ impl Action {
             Action::OpenGlobalSearch => ActionKind::OpenGlobalSearch,
             Action::ToggleRepoGroup => ActionKind::ToggleRepoGroup,
             Action::ToggleRepoPin => ActionKind::ToggleRepoPin,
+            Action::MoveGroupUp => ActionKind::MoveGroupUp,
+            Action::MoveGroupDown => ActionKind::MoveGroupDown,
+            Action::MoveGroupTop => ActionKind::MoveGroupTop,
+            Action::MoveGroupBottom => ActionKind::MoveGroupBottom,
             Action::ToggleFocusWorkspace => ActionKind::ToggleFocusWorkspace,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
@@ -1347,6 +1370,34 @@ impl ActionDef {
                 default_keys: "p",
                 label: "pin group",
                 describe: "Pin or unpin the cursor's repo group to the top of the sidebar. Pinned repos render first, in the order you pinned them; everything else keeps its usual order. The pin set persists across restarts.",
+                section: Section::Sidebar,
+            },
+            ActionKind::MoveGroupUp => &Self {
+                kind: ActionKind::MoveGroupUp,
+                default_keys: "x u",
+                label: "move up",
+                describe: "Move the group at the cursor up one slot: a Space header reorders within the Space tier; a repo (from its header or any row inside it) reorders within its Space. The new order is written into ui.spaces and persists.",
+                section: Section::Sidebar,
+            },
+            ActionKind::MoveGroupDown => &Self {
+                kind: ActionKind::MoveGroupDown,
+                default_keys: "x d",
+                label: "move down",
+                describe: "Move the group at the cursor down one slot within its tier (Space among Spaces, repo within its Space). Persists via ui.spaces.",
+                section: Section::Sidebar,
+            },
+            ActionKind::MoveGroupTop => &Self {
+                kind: ActionKind::MoveGroupTop,
+                default_keys: "x t",
+                label: "move to top",
+                describe: "Move the group at the cursor straight to the top of its tier (Space among Spaces, repo within its Space). Persists via ui.spaces.",
+                section: Section::Sidebar,
+            },
+            ActionKind::MoveGroupBottom => &Self {
+                kind: ActionKind::MoveGroupBottom,
+                default_keys: "x b",
+                label: "move to bottom",
+                describe: "Move the group at the cursor straight to the bottom of its tier (Space among Spaces, repo within its Space). Persists via ui.spaces.",
                 section: Section::Sidebar,
             },
             ActionKind::ToggleFocusWorkspace => &Self {
@@ -1962,6 +2013,10 @@ impl ActionKind {
             ActionKind::OpenGlobalSearch => "open_global_search",
             ActionKind::ToggleRepoGroup => "toggle_repo_group",
             ActionKind::ToggleRepoPin => "toggle_repo_pin",
+            ActionKind::MoveGroupUp => "move_group_up",
+            ActionKind::MoveGroupDown => "move_group_down",
+            ActionKind::MoveGroupTop => "move_group_top",
+            ActionKind::MoveGroupBottom => "move_group_bottom",
             ActionKind::ToggleFocusWorkspace => "toggle_focus_workspace",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
@@ -2210,6 +2265,10 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::SendToSession
         | ActionKind::ConvertSession
         | ActionKind::OpenWith
+        | ActionKind::MoveGroupUp
+        | ActionKind::MoveGroupDown
+        | ActionKind::MoveGroupTop
+        | ActionKind::MoveGroupBottom
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -2845,6 +2904,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenGlobalSearch
         | ActionKind::ToggleRepoGroup
         | ActionKind::ToggleRepoPin
+        | ActionKind::MoveGroupUp
+        | ActionKind::MoveGroupDown
+        | ActionKind::MoveGroupTop
+        | ActionKind::MoveGroupBottom
         // Acts on the repo group at/above the cursor (a header row has
         // no workspace, so `has_ws` would wrongly hide it there); the
         // dispatcher no-ops with a notice when the cursor isn't in a

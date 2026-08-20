@@ -164,6 +164,12 @@ pub enum PickFlow {
         source: Option<String>,
         entries: Vec<SpacePickEntry>,
     },
+    /// Right-click menu on a sidebar Space / repo header (#1211). Each
+    /// row is an index into `actions`; the pick dispatches that action
+    /// against the cursor (already parked on the clicked header).
+    HeaderContext {
+        actions: Vec<Action>,
+    },
     Runner,
     Plain,
 }
@@ -258,6 +264,11 @@ pub enum PickOutcome<F> {
     /// move-to-Space input for `source`.
     MountMoveToSpaceInput {
         source: String,
+    },
+    /// Header-menu pick (#1211): dispatch `action` against the sidebar
+    /// cursor (no workspace key — the action reads the cursor row).
+    DispatchCursorAction {
+        action: Action,
     },
     /// Persist `providers.linear.teams.<team> = repo` and re-provision the
     /// stuck Linear spawn (#1041).
@@ -508,6 +519,12 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 _ => PickOutcome::NoOp,
             }
         }
+        PickFlow::HeaderContext { actions } => picks
+            .first()
+            .and_then(P::as_index)
+            .and_then(|idx| actions.get(idx).cloned())
+            .map(|action| PickOutcome::DispatchCursorAction { action })
+            .unwrap_or(PickOutcome::NoOp),
         PickFlow::Reviewers { workspace_key } => {
             let logins = text_values(picks);
             match (workspace_key, logins.is_empty()) {

@@ -1951,6 +1951,27 @@ impl<T: TerminalAdapter> Model<T> {
                     self.redraw = true;
                 }
             }
+            Action::MoveGroupUp
+            | Action::MoveGroupDown
+            | Action::MoveGroupTop
+            | Action::MoveGroupBottom => {
+                use lazybox_tui_core::inbox::MoveDir;
+                let dir = match action {
+                    Action::MoveGroupUp => MoveDir::Up,
+                    Action::MoveGroupDown => MoveDir::Down,
+                    Action::MoveGroupTop => MoveDir::Top,
+                    _ => MoveDir::Bottom,
+                };
+                match self.sidebar.move_group_at_cursor(dir) {
+                    Some((what, name)) => {
+                        self.flash_info(format!("moved {what} {name} {}", dir.label()));
+                        self.redraw = true;
+                    }
+                    // Advise, never error: a lone group has nowhere to
+                    // go; an empty sidebar has nothing to move.
+                    None => self.flash_info("nothing to reorder here".to_string()),
+                }
+            }
             Action::ToggleFocusWorkspace => {
                 if let Some((label, focused)) = self.sidebar.toggle_focus_at_cursor() {
                     let verb = if focused { "focused" } else { "unfocused" };

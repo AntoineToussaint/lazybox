@@ -923,6 +923,14 @@ fn spawn_terminal_restore_on_signal(drain: Option<DaemonDrain>) {
             let _ = tokio::time::timeout(Duration::from_secs(2), drain.done.wait_for(|done| *done))
                 .await;
         }
+        // Keystroke-persisted config (star/pin/collapse/splitter) rides
+        // an ordered background worker; `exit` below skips every
+        // destructor and the quit-path flush, so a toggle made just
+        // before the kill would be silently lost (#1244). Bounded like
+        // the drain above — a kill must still exit promptly.
+        if !lazybox_config::Config::flush_pending_saves(Duration::from_secs(2)) {
+            tracing::warn!("signal exit: pending config saves did not flush within the bound");
+        }
         // 128 + SIGTERM(15); a conventional signal-exit status.
         std::process::exit(143);
     });
@@ -1149,22 +1157,25 @@ async fn run_realm_client(
     preselect: Option<lazybox_tui::realm::model::Preselect>,
 ) -> anyhow::Result<()> {
     spawn_terminal_restore_on_signal(None);
-    // The remote path skips the full config application (the daemon
-    // owns most of it), but notifications fire client-side — arm them
-    // here too or remote sessions would stay silent.
-    let attention = config
-        .as_ref()
-        .map(|c| c.attention.clone())
-        .unwrap_or_default();
+    // The attach client owns the same client-side config the embedded
+    // path does — ui.* view state (stars, pins, collapse, Spaces,
+    // theme, keymap, splits) is per-client, never the daemon's (#1244).
+    // Skipping the apply here used to boot an unseeded sidebar whose
+    // first star-toggle persisted an empty list over everything the
+    // embedded sessions had saved. A failed load degrades to defaults;
+    // the targeted config edits keep even that case non-destructive.
+    let user_config = config.unwrap_or_default();
+    let attention = user_config.attention.clone();
     lazybox_tui::platform::set_notification_click_context(
         notify_socket,
         attention.terminal_bundle_id,
     );
     lazybox_tui::platform::set_notifier_backend(map_notifier_backend(attention.notifier));
-    tokio::task::spawn_blocking(move || {
+    let realm_result = tokio::task::spawn_blocking(move || {
         let snippets =
             lazybox_config::Snippets::load_for_launch_dir(std::env::current_dir().ok().as_deref());
         let mut model = lazybox_tui::realm::Model::new(client, snippets)?.with_remote();
+        model.apply_client_config(&user_config);
         model.note_daemon_build(&daemon.build);
         if let Some(update) = available_update {
             model.show_update_if_new(update);
@@ -1175,7 +1186,14 @@ async fn run_realm_client(
         lazybox_tui::realm::model::run_loop_with_model(model)
     })
     .await
-    .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
+    .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"));
+    // Keystroke-persisted config (star/pin/collapse/splitter) rides an
+    // ordered background worker; flush it at attach-client teardown just
+    // like the embedded quit path does (#1211, #1244).
+    if !lazybox_config::Config::flush_pending_saves(Duration::from_secs(2)) {
+        tracing::warn!("quit: pending config saves did not flush within the bound");
+    }
+    realm_result?
 }
 
 /// `lazybox --connect-relay <box-id> --relay <addr> --box-key <hex>` —
@@ -1538,14 +1556,6 @@ async fn run_embedded_realm(
             tracing::warn!("config.yaml load: {e}; using defaults");
             lazybox_config::Config::default()
         });
-        // Apply the persisted theme before the first render so the UI
-        // boots in the user's palette. An unknown name (theme renamed /
-        // removed since they picked it) leaves the default active.
-        if let Some(name) = user_config.ui.theme.as_deref()
-            && !lazybox_tui::theme::set_by_name(name)
-        {
-            tracing::warn!("ui.theme = {name:?} not found; using the default theme");
-        }
         // Arm desktop notifications with the configured backend. Until
         // this call `notify_user` is a logged no-op — arming is the
         // binary's opt-in so library tests never spawn real banners.
@@ -1556,87 +1566,10 @@ async fn run_embedded_realm(
         lazybox_tui::platform::set_notifier_backend(map_notifier_backend(
             user_config.attention.notifier,
         ));
-        let ui_defaults = user_config.resolved_ui();
-        model.apply_sidebar_config(
-            user_config.attention.clone(),
-            user_config.ui.collapsed_repos.clone(),
-            user_config.ui.pinned_repos.clone(),
-            user_config
-                .ui
-                .focused_workspaces
-                .iter()
-                .map(|s| lazybox_core::SessionKey::from(s.as_str()))
-                .collect(),
-            user_config.ui.spaces.clone(),
-            user_config.ui.collapsed_spaces.clone(),
-            user_config.setup.default_agent.clone(),
-            &user_config.display,
-            &ui_defaults,
-            user_config.conventions.clone(),
-        );
-        model.apply_auto_fix_config(
-            user_config.auto_fix.enabled,
-            user_config.auto_fix.opt_out_labels.clone(),
-        );
-        // Generate the per-agent SpawnAgent catalog rows (#102 P2):
-        // exactly the agents the wizard enabled. An unconfigured user
-        // (empty `setup.agents`) falls back to the built-in trio so the
-        // zero-config `a c` / `a x` / `a u` chords still work out of
-        // the box.
-        // Using the enabled set (rather than unioning it with the
-        // built-ins) avoids binding both `cursor` and `cursor-agent` to
-        // `u`. Per-agent key remaps live in `ui.action_keys` under
-        // `spawn_agent.<id>`.
-        let agents: Vec<String> = if user_config.setup.agents.is_empty() {
-            ["claude", "codex", "cursor"]
-                .iter()
-                .map(|s| s.to_string())
-                .collect()
-        } else {
-            user_config.setup.agents.iter().cloned().collect()
-        };
-        model.set_agents(agents.clone());
-        // Keymap = the selected in-tree preset (#102 P4) as a base
-        // layer, with the user's explicit `ui.action_keys` on top so
-        // individual tweaks win over the preset.
-        let mut overrides = user_config
-            .ui
-            .keymap_preset
-            .as_deref()
-            .and_then(lazybox_tui_core::action::keymap_preset)
-            .unwrap_or_default();
-        // An unknown preset name silently fell back to the default
-        // keymap; collect the warning now (the model surfaces it with
-        // the rest of the keymap validation once the catalog is built).
-        let keymap_warnings: Vec<String> = user_config
-            .ui
-            .keymap_preset
-            .as_deref()
-            .and_then(lazybox_tui_core::action::unknown_preset_warning)
-            .into_iter()
-            .collect();
-        overrides.extend(user_config.ui.action_keys.clone());
-        model.apply_action_key_overrides(overrides);
-        // Per-agent model tiers (`agents.<id>.models`, with built-in
-        // presets for known agents) — drives the `w S` / `a S` chords.
-        let agent_models = agents
-            .iter()
-            .map(|id| (id.clone(), user_config.agent_models(id)))
-            .collect();
-        model.set_agent_models(agent_models);
-        // Startup keymap validation (#4 of the keybinding audit):
-        // unknown action_keys names, overrides that can't take effect,
-        // and override-induced chord collisions surface as a footer
-        // warning + messages-log details instead of failing silently.
-        model.surface_keymap_warnings(keymap_warnings);
-        // Arm the feature tour for anyone who hasn't seen it. It
-        // launches on wizard Finish for first-run users, or at startup
-        // (just below) for returning ones.
-        model.set_auto_tour(!user_config.ui.tour_seen);
-        // Seed progressive feature tips (#115): the opt-out flag plus
-        // the ids already shown so they never repeat.
-        model.set_tips(user_config.ui.show_tips, user_config.ui.tips_seen.clone());
-        model = model.with_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
+        // Theme, sidebar view state, agents, keymap, tips, splits — the
+        // shared client-config apply, one entry point with the attach
+        // path (#1244).
+        model.apply_client_config(&user_config);
         if let Some((report, sources)) = wizard_seed {
             model.start_setup_wizard(report, sources);
         } else {

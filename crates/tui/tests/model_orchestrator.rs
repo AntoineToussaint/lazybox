@@ -2301,3 +2301,69 @@ fn failed_step_keeps_the_checklist_up_past_terminal_spawned() {
         "a failed step holds the modal so the error is read, not silently dismissed",
     );
 }
+
+/// #1244 Break A: `apply_client_config` — the ONE config-apply entry
+/// point shared by the embedded and attach boot paths — seeds the
+/// sidebar's persisted view state. Stars and pins from `ui.*` are live
+/// after the first Snapshot; before the fix the attach path skipped the
+/// apply entirely and booted unseeded.
+#[test]
+fn apply_client_config_seeds_stars_and_pins() {
+    let mut m = build_model();
+    let w = Workspace::empty(WorkspaceKey::new("github:o/r#1"), "main", Utc::now());
+    let skey: SessionKey = (&w.key).into();
+
+    let mut cfg = lazybox_config::Config::default();
+    cfg.ui.focused_workspaces = vec![skey.as_str().to_string()];
+    cfg.ui.pinned_repos = vec!["o/r".into()];
+    m.apply_client_config(&cfg);
+
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![w],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(
+        m.__test_sidebar().is_focused(&skey),
+        "the persisted star re-applies at boot"
+    );
+    assert!(
+        m.__test_sidebar().is_repo_pinned("o/r"),
+        "the persisted pin re-applies at boot"
+    );
+}
+
+/// #1244: the attach/remote client applies the same client-owned config
+/// but must never prune local stars against the remote daemon's
+/// workspace set — those workspaces live on another machine, so a star
+/// absent from the box's Snapshot is not stale.
+#[test]
+fn remote_client_applies_config_and_keeps_local_stars() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40))
+        .expect("model init")
+        .with_remote();
+    let local_star = SessionKey::from("local-only-star");
+    let mut cfg = lazybox_config::Config::default();
+    cfg.ui.focused_workspaces = vec![local_star.as_str().to_string()];
+    m.apply_client_config(&cfg);
+
+    // The box's snapshot carries none of the laptop's workspaces.
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![Workspace::empty(
+            WorkspaceKey::new("github:box/only#9"),
+            "main",
+            Utc::now(),
+        )],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(
+        m.__test_sidebar().is_focused(&local_star),
+        "the remote snapshot must not prune the laptop's star"
+    );
+}

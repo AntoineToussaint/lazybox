@@ -1711,6 +1711,17 @@ pub struct AgentSection {
     /// Unset → 48h. `0s` disables reaping entirely.
     #[serde(with = "duration_human_opt", default)]
     pub reap_closed_after: Option<Duration>,
+    /// Scheduling niceness for spawned agent processes (and their
+    /// children — builds, sub-agents). A 50-agent fleet at default
+    /// priority drives the run queue to 10-20× the core count and
+    /// STARVES the interactive stack: typing waits on a run queue the
+    /// fleet filled (observed: load 166 on 10 cores, lazybox itself at
+    /// 4% CPU). Niced agents yield under contention and run full speed
+    /// on an idle machine — throughput shading, never refusal, exactly
+    /// the liveness-over-throughput contract. Unset → 10; `0` disables
+    /// (agents at normal priority). Clamped to 0..=20.
+    #[serde(default)]
+    pub nice: Option<i32>,
 }
 
 impl Default for AgentSection {
@@ -1726,6 +1737,7 @@ impl Default for AgentSection {
             max_live_agents: None,
             strict_mcp: None,
             reap_closed_after: None,
+            nice: None,
         }
     }
 }
@@ -1754,6 +1766,12 @@ impl AgentSection {
     /// Unset → `false` (inherit the user's MCP servers).
     pub fn strict_mcp(&self) -> bool {
         self.strict_mcp.unwrap_or(false)
+    }
+
+    /// Effective spawn niceness: unset → 10, clamped to 0..=20; 0
+    /// disables the `nice` wrap entirely.
+    pub fn spawn_nice(&self) -> i32 {
+        self.nice.unwrap_or(10).clamp(0, 20)
     }
 
     /// Effective closed-workspace session-reap grace: unset →

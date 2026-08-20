@@ -589,7 +589,20 @@ fn first_string_field(value: &Value, keys: &[&str]) -> Option<String> {
 }
 
 fn spawn_agent_command(config: &AgentStreamConfig) -> Result<(Child, ChildStdin, ChildStdout)> {
-    let argv = config.argv();
+    let mut argv = config.argv();
+    // Same fleet-priority shading the PTY spawn path applies
+    // (`agent.nice`): structured runs burn the same CPU and must not
+    // starve the interactive stack either.
+    let nice = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .agent
+        .spawn_nice();
+    if nice > 0 {
+        argv.splice(
+            0..0,
+            ["nice".to_string(), "-n".to_string(), nice.to_string()],
+        );
+    }
     let (program, args) = argv
         .split_first()
         .ctx("structured-agent argv must contain a program")?;

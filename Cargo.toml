@@ -122,7 +122,7 @@ lazybox-agents    = { path = "crates/agents" }
 tokio              = { version = "1", features = ["full"] }
 futures            = "0.3"
 fs2                = "0.4"
-serde              = { version = "1", features = ["derive"] }
+serde              = { version = "1", features = ["derive", "rc"] }
 serde_json         = "1"
 serde_yaml         = "0.9"
 semver             = "1"

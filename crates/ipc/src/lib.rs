@@ -1683,10 +1683,16 @@ pub enum Event {
         default_agent: Option<String>,
     },
     /// A workspace was created or updated.
-    /// Boxed because Workspace is several KB once activity is
-    /// populated; keeping the `Event` enum slim avoids worst-case
-    /// async-channel overhead.
-    WorkspaceUpserted(Box<lazybox_core::Workspace>),
+    /// `Arc`, not `Box` (2026-08-19 audit, M6): the daemon's broadcast
+    /// ring retains up to 1024 events until overwritten, and every
+    /// subscriber's `recv()` clones the event — with a boxed payload
+    /// that was a deep copy of a workspace that measures ~500 KB
+    /// serialized once activity is populated, multiplied by ring
+    /// retention × subscriber count. An `Arc` keeps the enum slim,
+    /// makes ring slots and fan-out clones pointer-sized, and
+    /// serializes identically to the boxed form on the wire
+    /// (serde's `rc` feature writes the inner value).
+    WorkspaceUpserted(std::sync::Arc<lazybox_core::Workspace>),
     WorkspaceRemoved(lazybox_core::WorkspaceKey),
     /// A project (top-level container — github repo, linear team,
     /// or local) was registered or updated. Sidebar headers render

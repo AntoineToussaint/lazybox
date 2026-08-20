@@ -4943,7 +4943,9 @@ async fn persist_and_broadcast(
         .map_err(|e| ServerError::Store(e.to_string()))?;
     let _ = config
         .bus
-        .send(Event::WorkspaceUpserted(Box::new(workspace.clone())));
+        .send(Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace.clone(),
+        )));
     Ok(())
 }
 

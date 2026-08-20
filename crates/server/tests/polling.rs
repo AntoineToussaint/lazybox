@@ -2111,6 +2111,89 @@ async fn rescope_preserves_sessionless_workspaces_with_notes() {
         "a workspace with user notes must survive rescope; got: {after:?}"
     );
 }
+/// D3 regression (2026-08-19 audit): a workspace that decodes fine but
+/// carries NO primary task skips the per-source authority guard (there
+/// is no source to check against) — the sessions guard must still
+/// preserve it when it holds recoverable work, and only a true husk
+/// (no task, no sessions, no notes, not local, no project) is reaped.
+#[tokio::test]
+async fn rescope_preserves_taskless_workspaces_with_sessions() {
+    use lazybox_core::{WorkspaceKey, WorkspaceSession};
+    let config = ServerConfig::in_memory();
+    polling::upsert(&config, make_task("o/r#current")).await;
+
+    // A taskless row WITH a session: task stripped, but recoverable
+    // work remains.
+    let mut with_session =
+        lazybox_core::Workspace::from_task(make_task("o/r#stripped"), Utc::now());
+    with_session.pr = None;
+    with_session.gh_issues.clear();
+    with_session.linear_issues.clear();
+    with_session.project_key = None;
+    with_session.local = false;
+    with_session.add_session(WorkspaceSession::new(
+        with_session.key.clone(),
+        lazybox_core::SessionKind::Shell,
+        std::path::PathBuf::from("/tmp/lazybox-test-worktree"),
+        Utc::now(),
+    ));
+    let with_session_key = with_session.key.as_str().to_string();
+
+    // A true husk: same shape, nothing user-valuable.
+    let mut husk = lazybox_core::Workspace::from_task(make_task("o/r#husk"), Utc::now());
+    husk.pr = None;
+    husk.gh_issues.clear();
+    husk.linear_issues.clear();
+    husk.project_key = None;
+    husk.local = false;
+    let husk_key = husk.key.as_str().to_string();
+
+    for ws in [&with_session, &husk] {
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(ws).unwrap()),
+            })
+            .unwrap();
+    }
+
+    // An authoritative, scoped tick that lists neither row — the
+    // per-source guard is active (non-empty source_scopes) but cannot
+    // vouch for taskless rows.
+    let outcome = polling::TickOutcome {
+        polled: vec![WorkspaceKey::new(lazybox_core::workspace_key_for(
+            &make_task("o/r#current"),
+        ))],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::from([(
+            "github".to_string(),
+            polling::PolledScope::Exhaustive,
+        )]),
+        all_full: true,
+    };
+    polling::rescope(&config, &outcome).await;
+
+    let after: Vec<String> = config
+        .store
+        .list_workspaces()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert!(
+        after.iter().any(|k| k == &with_session_key),
+        "a taskless workspace with recoverable sessions must survive rescope; got: {after:?}"
+    );
+    assert!(
+        !after.iter().any(|k| k == &husk_key),
+        "a true husk (no task, sessions, or notes) is legitimately reaped; got: {after:?}"
+    );
+}
+
 #[tokio::test]
 async fn rescope_keeps_workspaces_with_active_sessions_and_emits_prompt() {
     use lazybox_core::{SessionKey, WorkspaceKey};

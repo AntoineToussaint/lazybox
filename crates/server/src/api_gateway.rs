@@ -1061,7 +1061,12 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
                 .collect(),
             recent_snippets,
         }),
-        Event::WorkspaceUpserted(workspace) => Some(DesktopEvent::WorkspaceUpserted(workspace)),
+        // The bus payload is an `Arc` (M6); the desktop wire event keeps
+        // its own `Box` so the JSON/TS contract is untouched. The clone
+        // is per-desktop-client, only when this opt-in gateway runs.
+        Event::WorkspaceUpserted(workspace) => Some(DesktopEvent::WorkspaceUpserted(Box::new(
+            std::sync::Arc::unwrap_or_clone(workspace),
+        ))),
         Event::WorkspaceRemoved(key) => Some(DesktopEvent::WorkspaceRemoved(key)),
         Event::TerminalSpawned {
             terminal_id,

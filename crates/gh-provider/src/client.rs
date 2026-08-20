@@ -2654,7 +2654,7 @@ impl GhClient {
     /// probe first (~10 nodes/PR), then the full-detail query only for
     /// nodes whose probe moved since the last tick. `nodes(ids:)`
     /// preserves input order, so the returned vector has one slot per
-    /// requested id. Both tiers are chunked at [`HOT_BATCH_MAX_IDS`] —
+    /// requested id. Both tiers are chunked at `HOT_BATCH_MAX_IDS` —
     /// GraphQL errors a `nodes(ids:)` list past 100 outright, which
     /// used to fail the whole hot refresh once 100+ workspaces held
     /// sessions.

@@ -603,6 +603,7 @@ fn aggregate_agent_state(
         // A usage-limit block outranks even `InputNeeded`: it's the most
         // urgent "you must act (externally) before this agent moves" state
         // across a workspace's terminals (#847).
+        lazybox_ipc::AgentState::CreditExhausted => 7,
         lazybox_ipc::AgentState::LimitReached => 6,
         lazybox_ipc::AgentState::InputNeeded => 5,
         lazybox_ipc::AgentState::Working => 4,

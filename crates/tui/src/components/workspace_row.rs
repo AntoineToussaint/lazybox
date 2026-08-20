@@ -50,6 +50,8 @@ pub struct WorkspaceRowCtx<'a> {
     /// the shared state slot. Highest precedence: it's the most urgent
     /// "act (externally) before this moves" signal.
     pub limit_reached: bool,
+    /// Any agent in this workspace is waiting on a provider credit chooser.
+    pub credit_exhausted: bool,
     /// Any agent in this workspace is in `AgentState::Working`
     /// (streaming / running a tool). Renders the animated spinner in
     /// the same slot the `?` pill uses.
@@ -484,6 +486,8 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     agent finished its turn and is waiting to be looked at (#80).
 ///   - `LimitReached`→ ` ⏳ ` (warn, bold) — a static glyph: the agent
 ///     hit its provider usage limit and is waiting to be resumed (#847).
+///   - `CreditExhausted` → ` ¢ ` (warn, bold) — the provider credit
+///     recovery transaction has not completed yet.
 ///   - `Spawning`    → ` <arc> ` (dim) — an animated glyph: the workspace
 ///     is provisioning (clone / worktree / launch) and the agent is
 ///     *coming*, before any terminal reports state (#1069). A distinct
@@ -493,11 +497,11 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
 /// Reserved width either way so the kind/title to the right don't
-/// jitter as a row moves between states. Precedence limit-reached >
-/// asking > working > done > spawning > exited. `spawning` yields to
+/// jitter as a row moves between states. Precedence credit-exhausted >
+/// limit-reached > asking > working > done > spawning > exited. `spawning` yields to
 /// every *live* signal and outranks only the terminal `exited` marker.
 /// That split is exact, not defensive: a terminal's `Working` / `Done` /
-/// `InputNeeded` / `LimitReached` entry is dropped when it exits (only
+/// `InputNeeded` / `LimitReached` / `CreditExhausted` entry is dropped when it exits (only
 /// `Exited` is retained — the sidebar's `TerminalExited` handler), so any
 /// of those present while `spawning` is set belongs to a genuinely live
 /// *sibling* terminal (a second session running alongside this spawn) and
@@ -506,7 +510,9 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// on a cold re-provision `spawning > exited` shows the "coming up" arc
 /// instead of stranding a stale ✗ over an agent that is restarting.
 fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let (glyph, fg) = if ctx.limit_reached {
+    let (glyph, fg) = if ctx.credit_exhausted {
+        ("¢", ctx.theme.warn)
+    } else if ctx.limit_reached {
         ("⏳", ctx.theme.warn)
     } else if ctx.asking {
         ("?", ctx.theme.warn)
@@ -1447,6 +1453,7 @@ mod tests {
             max_pr_num_width: 4,
             asking: false,
             limit_reached: false,
+            credit_exhausted: false,
             working: false,
             done: false,
             exited: false,
@@ -1632,6 +1639,18 @@ mod tests {
         let cell = cell_state(&ctx);
         assert_eq!(cell.width(), 3);
         assert_eq!(cell_text(&cell), " ? ");
+    }
+
+    #[test]
+    fn cell_state_three_cells_when_credit_exhausted() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.credit_exhausted = true;
+        let cell = cell_state(&ctx);
+        assert_eq!(cell.width(), 3);
+        assert_eq!(cell_text(&cell), " ¢ ");
     }
 
     /// State slot: working → 3 cells with the current spinner glyph.
@@ -1861,6 +1880,7 @@ mod tests {
             max_pr_num_width: 2,
             asking: false,
             limit_reached: false,
+            credit_exhausted: false,
             working: false,
             done: false,
             exited: false,
@@ -2352,6 +2372,7 @@ mod tests {
             max_pr_num_width: 3,
             asking: false,
             limit_reached: false,
+            credit_exhausted: false,
             working: false,
             done: false,
             exited: false,
@@ -3680,6 +3701,7 @@ mod tests {
             max_pr_num_width: 4,
             asking: false,
             limit_reached: false,
+            credit_exhausted: false,
             working: false,
             done: false,
             exited: false,

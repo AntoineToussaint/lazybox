@@ -39,7 +39,7 @@ async fn seed_persisted_state(
         .set_kv(&format!("terminal:{backend_key}"), &metadata)
         .expect("persist terminal metadata");
 
-    let config = ServerConfig::with_store_and_backend(store, backend.as_backend());
+    let config = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
     let terminal_id = TerminalId(10_000 + ordinal);
     config
         .terminal
@@ -81,6 +81,26 @@ async fn seed_persisted_state(
                 hook(HookEventKind::Notification, Some("permission_prompt")),
             )
             .await;
+        }
+        AgentState::CreditExhausted => {
+            // Provider-credit exhaustion is PTY-detected (Codex chooser),
+            // not hook-driven. Persist it exactly as
+            // `AgentStateDurability::persist` writes it — the generation
+            // row plus the per-generation state row — so restart hydration
+            // reads the production shape.
+            store
+                .set_kv(
+                    &format!("terminal-agent-state-generation:{backend_key}"),
+                    &terminal_id.0.to_string(),
+                )
+                .expect("persist agent state generation");
+            store
+                .set_kv(
+                    &format!("terminal-agent-state:{backend_key}:{}", terminal_id.0),
+                    &serde_json::to_string(&state).expect("serialize agent state"),
+                )
+                .expect("persist agent state");
+            return (backend_key, session_key);
         }
         AgentState::Idle | AgentState::Exited { .. } | AgentState::LimitReached => {
             panic!("test helper only seeds hook-driven live-turn states")
@@ -211,6 +231,73 @@ async fn sqlite_restart_hydrates_working_done_and_input_needed_before_snapshot()
             ));
         }
     }
+}
+
+/// A `CreditExhausted` block survives a daemon restart (hydrated into the
+/// cache and the initial snapshot), and — advise, never forbid — nothing
+/// about the restart pins it there: no recovery transaction outlives a
+/// restart, so the agent resuming on its own resumes the pill through the
+/// ordinary transition paths.
+#[tokio::test]
+async fn sqlite_restart_hydrates_credit_exhausted_and_lets_it_resume() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let backend = MockBackend::new();
+    let db = temp.path().join("state-credit.db");
+    let (backend_key, session_key) =
+        seed_persisted_state(&db, &backend, AgentState::CreditExhausted, 4).await;
+
+    let restarted = ServerConfig::with_store_and_backend(
+        Arc::new(SqliteStore::open(&db).expect("reopen sqlite store")),
+        backend.as_backend(),
+    );
+    recover_sessions(&restarted).await;
+    let terminal_id = restarted
+        .terminal
+        .terminal_ids()
+        .await
+        .into_iter()
+        .next()
+        .expect("recovered terminal");
+    assert_eq!(
+        restarted.terminal.agent_state_for(terminal_id).await,
+        Some(AgentState::CreditExhausted),
+        "CreditExhausted must hydrate into the daemon cache"
+    );
+    let snapshots = snapshot_terminals(&restarted).await;
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].session_key, session_key);
+    assert_eq!(
+        snapshots[0].agent_state,
+        Some(AgentState::CreditExhausted),
+        "CreditExhausted must be present in the initial terminal snapshot"
+    );
+
+    let mut events = restarted.bus.subscribe();
+    handle_ingest_hook(
+        &restarted,
+        terminal_id,
+        Some(backend_key.clone()),
+        hook(HookEventKind::PreToolUse, None),
+    )
+    .await;
+    let transition = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await
+        .expect("state event deadline")
+        .expect("state event");
+    assert!(
+        matches!(
+            transition,
+            Event::AgentState {
+                state: AgentState::Working,
+                ..
+            }
+        ),
+        "a hydrated CreditExhausted must not veto the agent's own resume"
+    );
+    assert_eq!(
+        restarted.terminal.agent_state_for(terminal_id).await,
+        Some(AgentState::Working),
+    );
 }
 
 #[tokio::test]

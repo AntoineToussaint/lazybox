@@ -6,7 +6,8 @@
 //! command order, so bytes and draft revisions could be silently reordered.
 //!
 //! Two routers solve both constraints:
-//! - I/O (`Write` / `Resize` / `Close` / `InjectPrompt` / `DeliverSnippet`)
+//! - I/O (`Write` / `Resize` / `Close` / `InjectPrompt` / `DeliverSnippet` /
+//!   `RecoverAgentCredit`)
 //!   gets one FIFO worker
 //!   per terminal. Adjacent writes are concatenated and resize storms collapse
 //!   to the latest size. Injection registers its readiness waiter only after
@@ -64,6 +65,7 @@ pub(crate) async fn run_io_router(
             | Command::Close { terminal_id, .. }
             | Command::InjectPrompt { terminal_id, .. }
             | Command::DeliverSnippet { terminal_id, .. }
+            | Command::RecoverAgentCredit { terminal_id, .. }
             | Command::ResumeAgent { terminal_id }
             | Command::ReauthenticateAgent { terminal_id, .. }
             | Command::CancelAgentReauthentication { terminal_id } => *terminal_id,
@@ -81,6 +83,7 @@ pub(crate) async fn run_io_router(
         ) || matches!(
             &command,
             Command::DeliverSnippet { .. }
+                | Command::RecoverAgentCredit { .. }
                 | Command::ResumeAgent { .. }
                 | Command::ReauthenticateAgent { .. }
                 | Command::CancelAgentReauthentication { .. }
@@ -261,6 +264,19 @@ async fn run_io_lane(
                 )
                 .await;
             }
+            Command::RecoverAgentCredit {
+                client_request_id,
+                continuation_prompt,
+                ..
+            } => {
+                spawn_handler::handle_recover_agent_credit(
+                    &config,
+                    terminal_id,
+                    client_request_id,
+                    continuation_prompt,
+                )
+                .await;
+            }
             Command::ResumeAgent { .. } => {
                 crate::agent_auth::resume_agent(&config, terminal_id).await;
             }
@@ -423,12 +439,24 @@ async fn run_persistence_lane(
 }
 
 pub(crate) fn reject_command(event_tx: &EventSender, command: &Command, reason: &str) {
+    if let Command::RecoverAgentCredit {
+        client_request_id, ..
+    } = command
+    {
+        let _ = event_tx.send(Event::CommandFailed {
+            client_request_id: client_request_id.clone(),
+            message: format!("{reason}; wait for the terminal to catch up and retry"),
+        });
+        return;
+    }
+
     let name = match command {
         Command::Write { .. } => "Write",
         Command::Resize { .. } => "Resize",
         Command::Close { .. } => "Close",
         Command::InjectPrompt { .. } => "InjectPrompt",
         Command::DeliverSnippet { .. } => "DeliverSnippet",
+        Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
         Command::ResumeAgent { .. } => "ResumeAgent",
         Command::ReauthenticateAgent { .. } => "ReauthenticateAgent",
         Command::CancelAgentReauthentication { .. } => "CancelAgentReauthentication",
@@ -446,6 +474,31 @@ pub(crate) fn reject_command(event_tx: &EventSender, command: &Command, reason: 
 mod tests {
     use super::*;
     use crate::backend::SessionBackend;
+
+    #[test]
+    fn rejected_credit_recovery_keeps_request_correlation() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let event_tx = EventSender::from_unbounded(event_tx);
+        reject_command(
+            &event_tx,
+            &Command::RecoverAgentCredit {
+                terminal_id: TerminalId(880),
+                client_request_id: "recover-880".into(),
+                continuation_prompt: "Continue the work you were doing.".into(),
+            },
+            "terminal I/O lane is full",
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(Event::CommandFailed {
+                client_request_id,
+                message,
+            }) if client_request_id == "recover-880"
+                && message.contains("lane is full")
+                && message.contains("retry")
+        ));
+    }
 
     #[tokio::test]
     async fn wedged_terminal_lane_rejects_overload_instead_of_growing() {

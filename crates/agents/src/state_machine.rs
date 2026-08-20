@@ -256,7 +256,10 @@ pub(crate) fn transition_allowed(from: AgentState, to: AgentState) -> bool {
 /// through. Grouping them here keeps every "blocked, sticky" rule in one
 /// predicate rather than duplicated per variant.
 pub(crate) fn is_blocked(state: AgentState) -> bool {
-    matches!(state, AgentState::InputNeeded | AgentState::LimitReached)
+    matches!(
+        state,
+        AgentState::InputNeeded | AgentState::LimitReached | AgentState::CreditExhausted
+    )
 }
 
 /// The result of folding a [`Reading`] into the machine via
@@ -1071,6 +1074,23 @@ mod tests {
         assert_eq!(
             m.on_pty_reading(Some(Working), limit, Some(FRESH), || false),
             Outcome::Committed(AgentState::LimitReached),
+        );
+    }
+
+    #[test]
+    fn credit_exhaustion_is_blocked_and_requires_clear_evidence_to_leave() {
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(Working), clear(AgentState::CreditExhausted)),
+            Outcome::Committed(AgentState::CreditExhausted),
+        );
+        assert_eq!(
+            m.on_reading(Some(AgentState::CreditExhausted), ambiguous(Working)),
+            Outcome::Damped,
+        );
+        assert_eq!(
+            m.on_reading(Some(AgentState::CreditExhausted), clear(Working)),
+            Outcome::Committed(Working),
         );
     }
 

@@ -1543,6 +1543,30 @@ impl Sidebar {
         ids
     }
 
+    pub fn credit_exhausted_terminals(&self) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (_, state))| *state == lazybox_ipc::AgentState::CreditExhausted)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    pub fn credit_exhausted_terminals_for(&self, key: &SessionKey) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (session_key, state))| {
+                session_key == key && *state == lazybox_ipc::AgentState::CreditExhausted
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
     /// Number of distinct workspaces with at least one agent terminal in
     /// `LimitReached` — the `⏳ N limited` header count and the size the
     /// escalating usage-limit alert (#1012) reports. Counts workspaces,
@@ -2728,6 +2752,50 @@ impl Sidebar {
         Some(moved)
     }
 
+    /// Rename the Space at/above the cursor (#1211): its claimed +
+    /// currently-rendered sources move to the new name (merging into an
+    /// existing Space of that name), the collapse flag follows, and
+    /// both persist. Returns the resolved `(old, new)` for the notice;
+    /// `None` when the name is blank/unchanged.
+    pub fn rename_space(&mut self, old: &str, new: &str) -> Option<(String, String)> {
+        let rendered: Vec<String> = self
+            .visible
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::RepoHeader(n) => Some(n.clone()),
+                _ => None,
+            })
+            .filter(|r| self.space_of_source(r) == old)
+            .collect();
+        if !lazybox_tui_core::inbox::rename_space(&mut self.spaces, old, new, &rendered) {
+            return None;
+        }
+        let new = new.trim().to_string();
+        if self.collapsed_spaces.remove(old) {
+            self.collapsed_spaces.insert(new.clone());
+        }
+        self.recompute_visible();
+        let spaces_snapshot = self.spaces.clone();
+        let collapsed_snapshot = self.collapsed_spaces.clone();
+        let (old_for_cfg, new_for_cfg) = (old.to_string(), new.clone());
+        lazybox_config::Config::save_with_async(move |c| {
+            c.ui.spaces = spaces_snapshot;
+            c.ui.collapsed_spaces = collapsed_snapshot;
+            // The picker preselection follows the rename (#1206).
+            if c.ui.last_space.as_deref() == Some(old_for_cfg.as_str()) {
+                c.ui.last_space = Some(new_for_cfg);
+            }
+        });
+        if let Some(idx) = self
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::SpaceHeader(n) if n == &new))
+        {
+            self.set_cursor(idx);
+        }
+        Some((old.to_string(), new))
+    }
+
     /// The Space a source label currently resolves to (explicit
     /// assignment, else owner auto-seed) — used to prefill the
     /// move-to-Space prompt.
@@ -3220,7 +3288,16 @@ impl Sidebar {
         };
 
         let workspace = self.selected_workspace();
-        let is_ready = self.merge_target_for_cursor().is_some();
+        // Footer PRIORITY heuristic only: cached readiness decides
+        // whether merge or work/fix-CI is the better hint for this row.
+        // `g m` availability itself is structural (#1203) — an open PR
+        // always merges on request, with the cached state as a send
+        // advisory — so a "not ready" cache here hides nothing, it just
+        // promotes the likelier next action.
+        let is_ready = self.merge_target_for_cursor().is_some()
+            && workspace
+                .and_then(|w| w.pr.as_ref())
+                .is_some_and(|pr| lazybox_tui_core::intent::merge_block_reason(pr).is_none());
         let mut actions: Vec<Action> = Vec::with_capacity(6);
 
         // A live multi-select means every normal Workspace action now
@@ -3229,6 +3306,17 @@ impl Sidebar {
         // equivalent.
         if !self.broadcast_selected.is_empty() {
             actions.push(Action::BroadcastToSelected);
+        }
+
+        let focused_credit_blocks = self
+            .selected_session_key()
+            .map(|key| self.credit_exhausted_terminals_for(key))
+            .unwrap_or_default();
+        if focused_credit_blocks.len() == 1 {
+            actions.push(Action::RecoverAgentCredit);
+        }
+        if self.credit_exhausted_terminals().len() > 1 {
+            actions.push(Action::RecoverAllAgentCredit);
         }
 
         // A PR behind its base can update its branch (the `g u` /

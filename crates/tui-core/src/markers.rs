@@ -183,6 +183,11 @@ fn agent_state_doc(state: &AgentState) -> MarkerDoc {
             "The agent hit its provider usage/rate limit and is paused until you resume it.",
             "Shows while the agent is parked on a usage-limit prompt.",
         ),
+        AgentState::CreditExhausted => doc(
+            "¢ CreditExhausted",
+            "The provider account is out of credit and the agent is waiting for recovery.",
+            "Shows until Wait for credit and the continuation prompt both succeed.",
+        ),
     }
 }
 

@@ -937,6 +937,7 @@ impl Server {
                             "RequestTerminalDelta"
                         }
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
+                        lazybox_ipc::Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
                         lazybox_ipc::Command::ActivateWorkspace { .. } => "ActivateWorkspace",
@@ -1290,6 +1291,7 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         | Command::Close { .. }
         | Command::InjectPrompt { .. }
         | Command::DeliverSnippet { .. }
+        | Command::RecoverAgentCredit { .. }
         | Command::ResumeAgent { .. }
         | Command::ReauthenticateAgent { .. }
         | Command::CancelAgentReauthentication { .. } => CommandLane::TerminalIo,
@@ -1591,6 +1593,19 @@ pub async fn dispatch_command(
                 category,
                 body,
                 submit,
+            )
+            .await;
+        }
+        lazybox_ipc::Command::RecoverAgentCredit {
+            terminal_id,
+            client_request_id,
+            continuation_prompt,
+        } => {
+            spawn_handler::handle_recover_agent_credit(
+                config,
+                terminal_id,
+                client_request_id,
+                continuation_prompt,
             )
             .await;
         }

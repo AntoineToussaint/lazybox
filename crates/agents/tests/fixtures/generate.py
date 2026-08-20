@@ -342,3 +342,45 @@ write("permission_bash_amend_footer.bin", [
     cup(15, 33), "·".encode("utf-8"), cup(15, 35), b"ctrl+e", cup(15, 42), b"to", cup(15, 45), b"explain",
     RESET,
 ])
+
+# ── Codex credit exhaustion chooser ──────────────────────────────────────
+write("codex_credit_exhausted.bin", [
+    HIDE_CUR,
+    cup(18, 1), CLEAR_LINE,
+    sgr(1, 33), b"Your workspace is out of credits.", RESET, b"\r\n",
+    cup(19, 1), b"Add credits to continue.\r\n\r\n",
+    cup(22, 3), sgr(7), "› 1. Wait for credit".encode("utf-8"), RESET, b"\r\n",
+    cup(23, 5), b"2. Exit\r\n",
+    cup(25, 1), sgr(2), b"Press enter to confirm or esc to cancel", RESET,
+    SHOW_CUR,
+])
+
+# The same screen with every meaningful phrase split by cursor moves and SGR
+# runs, matching Codex's diff renderer rather than a contiguous string.
+write("codex_credit_exhausted_fragmented.bin", [
+    HIDE_CUR,
+    cup(18, 1), CLEAR_LINE,
+    sgr(1, 33), b"Your", cup(18, 6), b"workspace", cup(18, 16), b"is",
+    cup(18, 19), b"out", cup(18, 23), b"of", cup(18, 26), b"credits.", RESET,
+    cup(22, 3), sgr(7), "›".encode("utf-8"), cup(22, 5), b"1.",
+    cup(22, 8), b"Wait", cup(22, 13), b"for", cup(22, 17), b"credit", RESET,
+    cup(25, 1), sgr(2), b"Press enter to confirm or esc to cancel", RESET,
+    SHOW_CUR,
+])
+
+# An answered chooser remains in scrollback after Codex has repainted the
+# composer. The newer footer must evict the stale block.
+write("codex_credit_exhausted_stale.bin", [
+    cup(8, 1), b"Your workspace is out of credits.\r\n",
+    cup(10, 3), "› 1. Wait for credit".encode("utf-8"), b"\r\n",
+    cup(20, 1), CLEAR_LINE, "› Continue coding".encode("utf-8"), b"\r\n",
+    cup(22, 1), sgr(2), "gpt-5.5 xhigh · /repo".encode("utf-8"), RESET,
+])
+
+# Transcript prose may repeat the provider copy. Without the chooser option
+# it is not a live credit block.
+write("codex_credit_exhausted_near_miss.bin", [
+    cup(15, 1), b"The logs say: Your workspace is out of credits.\r\n",
+    cup(20, 1), CLEAR_LINE, "› Summarize the logs".encode("utf-8"), b"\r\n",
+    cup(22, 1), sgr(2), "gpt-5.5 xhigh · /repo".encode("utf-8"), RESET,
+])

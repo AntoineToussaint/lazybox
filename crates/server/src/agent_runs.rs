@@ -109,6 +109,8 @@ pub async fn handle_start_agent_run(
         // JSONL protocol, so they don't need the interactive PTY
         // path's hook-command settings injection.
         hook_settings_path: None,
+        // Not skip-permissions, so the strict-MCP gate never applies.
+        strict_mcp: false,
     };
     let argv = agent_impl.spawn(&spawn_ctx);
     let Some((program, extra_args)) = argv.split_first() else {

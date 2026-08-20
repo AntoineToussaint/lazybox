@@ -1,6 +1,6 @@
 use crate::{polling, terminal_io};
 use lazybox_core::{SessionId, SessionKey};
-use lazybox_ipc::{AgentRunAccess, AgentState, TerminalId, TerminalKind};
+use lazybox_ipc::{AgentCreditRecoveryStage, AgentRunAccess, AgentState, TerminalId, TerminalKind};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -241,12 +241,20 @@ pub(crate) struct TerminalEntry {
     pub agent_detect_reset: bool,
     turn: AgentTurn,
     pub input_needed_shape: Option<lazybox_agents::PromptShape>,
+    pub composer_ready: bool,
+    pub credit_recovery: Option<CreditRecoveryRuntime>,
     pub reclassify_request: Option<Arc<Notify>>,
     pub activity: terminal_io::AgentTerminalActivity,
     /// Teardown has atomically claimed this entry. It stays present long
     /// enough to emit Exited from its metadata/state, but live routing and
     /// reconnect snapshots treat it as absent.
     pub finishing: bool,
+}
+
+pub(crate) struct CreditRecoveryRuntime {
+    pub request_id: String,
+    pub stage: AgentCreditRecoveryStage,
+    pub evidence: Arc<Notify>,
 }
 
 /// Immutable facts captured by the atomic teardown claim.
@@ -497,6 +505,98 @@ impl TerminalRegistry {
             .await
             .get(&id)
             .and_then(|entry| entry.agent_state)
+    }
+
+    pub(crate) async fn record_composer_ready(&self, id: TerminalId, ready: bool) {
+        if let Some(entry) = self.entries.lock().await.get_mut(&id) {
+            entry.composer_ready = ready;
+        }
+    }
+
+    pub(crate) async fn composer_ready_for(&self, id: TerminalId) -> bool {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|entry| entry.composer_ready)
+    }
+
+    pub(crate) async fn begin_credit_recovery(
+        &self,
+        id: TerminalId,
+        request_id: String,
+    ) -> Result<(), &'static str> {
+        let mut entries = self.entries.lock().await;
+        let Some(entry) = entries.get_mut(&id).filter(|entry| !entry.finishing) else {
+            return Err("the terminal is no longer running");
+        };
+        if entry.agent_state != Some(AgentState::CreditExhausted) {
+            return Err("the agent is not blocked on a credit chooser");
+        }
+        if entry.credit_recovery.is_some() {
+            return Err("credit recovery is already in progress for this agent");
+        }
+        entry.credit_recovery = Some(CreditRecoveryRuntime {
+            request_id,
+            stage: AgentCreditRecoveryStage::SelectingWait,
+            evidence: Arc::new(Notify::new()),
+        });
+        Ok(())
+    }
+
+    pub(crate) async fn set_credit_recovery_stage(
+        &self,
+        id: TerminalId,
+        request_id: &str,
+        stage: AgentCreditRecoveryStage,
+    ) -> bool {
+        let mut entries = self.entries.lock().await;
+        let Some(recovery) = entries
+            .get_mut(&id)
+            .and_then(|entry| entry.credit_recovery.as_mut())
+            .filter(|recovery| recovery.request_id == request_id)
+        else {
+            return false;
+        };
+        recovery.stage = stage;
+        true
+    }
+
+    pub(crate) async fn credit_recovery_signal_for(&self, id: TerminalId) -> Option<Arc<Notify>> {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .and_then(|entry| entry.credit_recovery.as_ref())
+            .map(|recovery| recovery.evidence.clone())
+    }
+
+    /// Whether a credit-recovery transaction is in flight for this terminal.
+    /// The composer-readiness probe is only consumed while recovery waits for
+    /// the composer to redraw, so the per-chunk pump path uses this to skip the
+    /// whole-window readiness scan on every other terminal's repaint traffic.
+    pub(crate) async fn credit_recovery_active(&self, id: TerminalId) -> bool {
+        self.entries
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|entry| entry.credit_recovery.is_some())
+    }
+
+    pub(crate) async fn finish_credit_recovery(&self, id: TerminalId, request_id: &str) -> bool {
+        let mut entries = self.entries.lock().await;
+        let Some(entry) = entries.get_mut(&id) else {
+            return false;
+        };
+        if entry
+            .credit_recovery
+            .as_ref()
+            .is_none_or(|recovery| recovery.request_id != request_id)
+        {
+            return false;
+        }
+        entry.credit_recovery = None;
+        true
     }
 
     /// Snapshot the durable workspace session associated with a terminal.

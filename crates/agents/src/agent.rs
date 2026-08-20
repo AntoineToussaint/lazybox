@@ -1,6 +1,6 @@
 //! The `Agent` trait and built-in implementations.
 
-use crate::pty::{EncodedPrompt, PromptIntent, PtyProtocol};
+use crate::pty::{CreditRecoveryProtocol, EncodedPrompt, PromptIntent, PtyProtocol};
 use lazybox_ipc::{AgentRunAccess, AgentState};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,6 +33,11 @@ pub struct SpawnCtx {
     /// configured (non-Claude agent, or generation failed) — those fall
     /// back to PTY-based state detection.
     pub hook_settings_path: Option<PathBuf>,
+    /// Pass `--strict-mcp-config` on unattended launches, cutting the
+    /// agent off from the user's ambient MCP servers (#1183). Off by
+    /// default (`agent.strict_mcp`); read-only launches are strict
+    /// regardless.
+    pub strict_mcp: bool,
 }
 
 /// The upstream LLM API an agent speaks to. Used to pick the base-URL
@@ -231,6 +236,18 @@ pub trait Agent: Send + Sync {
         PtyProtocol::default()
     }
 
+    /// Provider-owned chooser interaction for credit recovery. Agents that
+    /// do not expose a supported credit chooser leave this unavailable.
+    fn credit_recovery_protocol(&self) -> Option<CreditRecoveryProtocol> {
+        None
+    }
+
+    /// Provider guidance carried by a detected credit chooser.
+    fn credit_exhausted_hint(&self, recent_output: &[u8]) -> Option<String> {
+        let _ = recent_output;
+        None
+    }
+
     /// Encode a complete prompt interaction atomically. Most adapters should
     /// inherit this and declare [`Agent::pty_protocol`]; an unusual CLI may
     /// override this single method without having to coordinate independent
@@ -417,6 +434,17 @@ pub trait Agent: Send + Sync {
     ) -> Option<PromptShape> {
         let _ = (recent_output, last_chunk_start);
         None
+    }
+
+    /// Typed current-chunk observation for blocking screens. The default
+    /// preserves adapters that only distinguish ordinary input prompts.
+    fn detect_blocked_in_current_chunk(
+        &self,
+        recent_output: &[u8],
+        last_chunk_start: usize,
+    ) -> Option<AgentObservation> {
+        self.detect_input_needed_in_current_chunk(recent_output, last_chunk_start)
+            .map(AgentObservation::input_needed)
     }
 
     /// Whether a `Working` PTY reading carries enough on-screen evidence
@@ -610,7 +638,14 @@ pub mod builtins {
     fn push_unattended_flags(argv: &mut Vec<String>, ctx: &SpawnCtx) {
         if ctx.skip_permissions {
             argv.push("--dangerously-skip-permissions".into());
-            argv.push("--strict-mcp-config".into());
+            // #1183: strict MCP is opt-in now. Always-on it silently
+            // disabled every user MCP server on autonomous spawns
+            // ("works outside lazybox, not inside"). The #256 auth-gate
+            // concern it addressed is opt-back-in via
+            // `agent.strict_mcp: true`.
+            if ctx.strict_mcp {
+                argv.push("--strict-mcp-config".into());
+            }
         }
     }
 
@@ -872,6 +907,12 @@ pub mod builtins {
         fn pty_protocol(&self) -> PtyProtocol {
             PtyProtocol::GUARDED_COMPOSER
         }
+        fn credit_recovery_protocol(&self) -> Option<CreditRecoveryProtocol> {
+            Some(CreditRecoveryProtocol::new(b"\r"))
+        }
+        fn credit_exhausted_hint(&self, recent_output: &[u8]) -> Option<String> {
+            detect::codex_credit_exhausted_hint(recent_output)
+        }
         fn spawn(&self, ctx: &SpawnCtx) -> Vec<String> {
             let mut argv = vec!["codex".into()];
             if ctx.access == AgentRunAccess::ReadOnly {
@@ -1015,6 +1056,14 @@ pub mod builtins {
             last_chunk_start: usize,
         ) -> Option<PromptShape> {
             detect::codex_input_needed_in_current_chunk(recent_output, last_chunk_start)
+        }
+
+        fn detect_blocked_in_current_chunk(
+            &self,
+            recent_output: &[u8],
+            last_chunk_start: usize,
+        ) -> Option<AgentObservation> {
+            detect::codex_blocked_in_current_chunk(recent_output, last_chunk_start)
         }
 
         /// Whether Codex's composer is drawn and no approval / trust
@@ -1237,12 +1286,26 @@ mod tests {
         };
         assert_eq!(claude.spawn(&off), vec!["claude".to_string()]);
 
+        // #1183: skip-permissions no longer implies strict MCP — the
+        // user's ambient MCP servers stay available by default.
         let on = SpawnCtx {
             skip_permissions: true,
             ..Default::default()
         };
         assert_eq!(
             claude.spawn(&on),
+            vec!["claude".to_string(), SKIP_FLAG.to_string()],
+            "unattended spawns inherit the user's MCP setup by default",
+        );
+
+        // Opting back in (`agent.strict_mcp: true`) restores the flag.
+        let strict = SpawnCtx {
+            skip_permissions: true,
+            strict_mcp: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            claude.spawn(&strict),
             vec![
                 "claude".to_string(),
                 SKIP_FLAG.to_string(),
@@ -1270,6 +1333,21 @@ mod tests {
         };
         assert_eq!(
             claude.resume(&on),
+            vec![
+                "claude".to_string(),
+                "--continue".to_string(),
+                SKIP_FLAG.to_string(),
+            ],
+            "resume inherits the user's MCP setup by default (#1183)",
+        );
+
+        let strict = SpawnCtx {
+            skip_permissions: true,
+            strict_mcp: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            claude.resume(&strict),
             vec![
                 "claude".to_string(),
                 "--continue".to_string(),

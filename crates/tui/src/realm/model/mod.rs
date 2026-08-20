@@ -129,6 +129,12 @@ pub enum Id {
     /// [`Id::MoveToSpace`]). Preselects `ui.last_space`. The source
     /// label lives in the `ModalFlow::MoveToSpace` flow.
     MoveToSpacePicker,
+    /// Single-line input renaming the Space header under the cursor
+    /// (#1211), prefilled with its current name. Submit rewrites
+    /// `ui.spaces` (merging into an existing Space of the new name) and
+    /// carries the collapse flag. The old name lives in
+    /// `ModalFlow::RenameSpace`.
+    RenameSpace,
     /// Right-click menu on a sidebar Space / repo header (#1211). Rows
     /// carry `ChoicePayload::Index` into the action list stashed in
     /// `ModalFlow::HeaderContext`; the pick dispatches that action
@@ -901,6 +907,8 @@ pub(crate) enum ModalFlow {
         source: String,
         entries: Vec<lazybox_tui_core::choice::SpacePickEntry>,
     },
+    /// Rename-Space input (#1211), carrying the Space's current name.
+    RenameSpace { space: String },
     /// Header right-click menu (#1211): the actions list the picker
     /// rows index into, snapshotted at mount.
     HeaderContext {
@@ -1906,6 +1914,10 @@ pub struct Model<T: TerminalAdapter> {
     /// row. Entries remain until `CommandCompleted` / `CommandFailed`,
     /// ensuring a failed create/spawn always gets a visible outcome.
     pending_workspace_creates: std::collections::HashMap<String, PendingWorkspaceCreate>,
+    /// Correlated provider-credit recoveries currently owned by this client.
+    /// Values are terminal ids so repeat keypresses cannot enqueue a second
+    /// chooser interaction for the same agent.
+    pending_credit_recoveries: std::collections::HashMap<String, lazybox_ipc::TerminalId>,
     /// The last `IpcCommand::Spawn` sent, kept so the `r` retry on a
     /// failed `WorktreeProgress` modal can re-issue it verbatim (issue
     /// #557) — provisioning failures persist no session, so a re-send
@@ -2350,6 +2362,7 @@ impl<T: TerminalAdapter> Model<T> {
             merge_follow_from: None,
             spawn_follow_to: None,
             pending_workspace_creates: std::collections::HashMap::new(),
+            pending_credit_recoveries: std::collections::HashMap::new(),
             last_spawn: None,
             linear_map_spawn: None,
             deferred_focus_terminal: None,

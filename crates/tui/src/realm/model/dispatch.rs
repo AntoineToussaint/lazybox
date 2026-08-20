@@ -701,20 +701,26 @@ impl<T: TerminalAdapter> Model<T> {
                         self.execute_dispatch_intent(intent, workspace.as_ref())
                     }
                     Action::MergePr => {
-                        // Re-check merge preconditions against the
-                        // STASHED workspace — state may have moved
-                        // (new failing CI, fresh conflict) while the
-                        // modal was up.
+                        // Structural re-check against the STASHED
+                        // workspace (the PR may have merged/closed
+                        // while the modal was up). Cached soft state
+                        // never refuses (#1203) — GitHub is the
+                        // authority at merge time; a cached block
+                        // becomes an ADVISORY on the send, and a real
+                        // rejection comes back as `PrMergeFailed` with
+                        // GitHub's reason.
                         let intent = crate::intent::resolve_merge(workspace.as_ref());
                         if matches!(intent, crate::intent::Intent::MergePr { .. }) {
+                            if let Some(reason) =
+                                crate::intent::merge_send_advisory(workspace.as_ref())
+                            {
+                                self.flash_info(format!(
+                                    "cached state says {reason} — asking GitHub anyway"
+                                ));
+                            }
                             self.execute_dispatch_intent(intent, workspace.as_ref())
                         } else {
-                            let reason = workspace
-                                .as_ref()
-                                .and_then(|w| w.pr.as_ref())
-                                .and_then(crate::intent::merge_block_reason)
-                                .unwrap_or("the PR is no longer merge-ready");
-                            self.flash_info(format!("can't merge: {reason}"));
+                            self.flash_info("can't merge: the PR isn't open");
                             Vec::new()
                         }
                     }
@@ -1277,10 +1283,14 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::RenameWorkspace => {
-                // Rename targets the focused workspace's display label
-                // (any workspace, even session-less). Section::Workspace,
-                // so this fires from both Sidebar and Right focus.
-                if let Some(ws) = self.sidebar.selected_workspace() {
+                // A cursor parked on a Space header renames the Space
+                // (#1211); anywhere else, rename targets the focused
+                // workspace's display label (any workspace, even
+                // session-less). Section::Workspace, so this fires from
+                // both Sidebar and Right focus.
+                if let Some((false, space)) = self.sidebar.cursor_header() {
+                    self.mount_rename_space_input(space);
+                } else if let Some(ws) = self.sidebar.selected_workspace() {
                     let session_key: lazybox_core::SessionKey = (&ws.key).into();
                     self.mount_rename_workspace_input(session_key);
                 }
@@ -1676,6 +1686,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::ResumeRateLimited => {
                 cmds.extend(self.resume_rate_limited_agents());
+            }
+            Action::RecoverAgentCredit => {
+                cmds.extend(self.recover_agent_credit(false));
+            }
+            Action::RecoverAllAgentCredit => {
+                cmds.extend(self.recover_agent_credit(true));
             }
             Action::ToggleActivityPane => {
                 if let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone()) {

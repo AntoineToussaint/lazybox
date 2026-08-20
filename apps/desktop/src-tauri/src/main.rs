@@ -311,6 +311,9 @@ impl InboxModel {
             // tier only when a caller supplies ≥2 distinct Spaces (#860).
             spaces: &[],
             collapsed_spaces: &collapsed_spaces,
+            // No ticket-collapse UI on the desktop yet; an empty set keeps
+            // every ticket's children expanded (#1189).
+            collapsed_tickets: &std::collections::HashSet::new(),
             attention: &self.attention,
             agents: &self.agents,
             now,

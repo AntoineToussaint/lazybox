@@ -723,10 +723,7 @@ mod tests {
         if prog != "gcloud" || args.first().map(String::as_str) != Some("compute") {
             return None;
         }
-        match args.get(1).map(String::as_str) {
-            Some("ssh") => Some("ssh"),
-            other => other,
-        }
+        args.get(1).map(String::as_str)
     }
 
     fn spec() -> SandboxSpec {

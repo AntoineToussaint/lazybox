@@ -1369,6 +1369,23 @@ async fn run_embedded_realm(
         }
     };
 
+    // With the TUI owning the daemon, also publish a loopback JSON API
+    // gateway (ephemeral port + bearer, discovery under
+    // ~/.lazybox/run/gateway.json) so a desktop launched NOW attaches
+    // to this instance instead of refusing to start. Advisory: a bind
+    // failure only costs desktop attach, never the TUI itself.
+    let published_gateway = if embedded_socket.is_some() {
+        match lazybox_server::local_gateway::publish_local_gateway(config.clone()).await {
+            Ok(gateway) => Some(gateway),
+            Err(error) => {
+                tracing::warn!("publish local gateway for desktop attach: {error}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Two paths into the polling loop:
     //   1. Persisted setup exists → kick polling immediately.
     //   2. No persisted setup → run detection, hand the wizard to
@@ -1643,6 +1660,15 @@ async fn run_embedded_realm(
     // in-process serve drain below.
     if let Some((shutdown, _)) = &embedded_socket {
         shutdown.notify_one();
+    }
+    // Unpublish the attach gateway first — a desktop probing during
+    // quit must not latch onto a daemon that is draining. Bounded so a
+    // wedged gateway task can't hold the quit hostage; discovery
+    // removal is re-run unconditionally (idempotent) in case the
+    // bounded drain expired before the task removed it.
+    if let Some(gateway) = published_gateway {
+        let _ = tokio::time::timeout(Duration::from_secs(3), gateway.shutdown()).await;
+        lazybox_server::local_gateway::remove_discovery();
     }
     // `q q` teardown: `Model::shutdown` sent `Command::Shutdown` (and
     // dropping the Model closed the command channel as a backstop), so

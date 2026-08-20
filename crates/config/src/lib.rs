@@ -2166,7 +2166,7 @@ impl Config {
         }
     }
 
-    /// Wait (bounded) for every queued [`save_with_async`] mutation to
+    /// Wait (bounded) for every queued [`Self::save_with_async`] mutation to
     /// reach disk. The QUIT PATH must call this (#1211): the worker is
     /// a detached thread, so returning from `main` with saves still
     /// queued silently lost the last few keystroke-persisted changes —

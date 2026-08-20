@@ -1058,7 +1058,8 @@ async fn ref_exists(git: &dyn GitRunner, bare: &Path, ref_name: &str) -> bool {
 /// True when the worktree holds nothing that exists only locally — no
 /// uncommitted changes and no unpushed commits. `bare` and `branch`
 /// feed the upstream fallbacks of the unpushed-commit probe (`branch`
-/// unlocks the branch-own-remote-ref tier — see [`unpushed`]); when
+/// unlocks the branch-own-remote-ref tier of the private `unpushed`
+/// helper); when
 /// nothing resolves an upstream-less checkout is conservatively
 /// reported non-pristine.
 pub async fn worktree_is_pristine(

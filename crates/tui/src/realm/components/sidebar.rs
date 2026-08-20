@@ -396,6 +396,14 @@ impl Sidebar {
         self.inner.selected_workspace()
     }
 
+    /// See `Sidebar::agent_terminal_for` (#1204).
+    pub fn agent_terminal_for(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> Option<(lazybox_ipc::TerminalId, String)> {
+        self.inner.agent_terminal_for(key)
+    }
+
     /// See `Sidebar::toggle_broadcast_select`.
     pub fn toggle_broadcast_select(&mut self) -> Option<bool> {
         self.inner.toggle_broadcast_select()

@@ -11818,6 +11818,51 @@ mod input_priority_tests {
     /// every dispatch, which re-binds the terminals to the sidebar's
     /// selected workspace — without a matching row it would clear the
     /// terminal out from under the second buffered key.
+    /// #1204: `a r` resets the focused workspace's running agent by
+    /// injecting the agent's own clear-context command through the
+    /// settle-gated prompt path — confirm-gated, submitted, and
+    /// resolved per agent. Without a running agent it advises (a
+    /// hint), never errors.
+    #[test]
+    fn reset_agent_context_injects_the_agents_clear_command() {
+        use lazybox_tui_core::action::Action;
+        let (mut m, mut server) = model_with_focused_agent();
+        drain_startup(&mut server);
+        m.focus = PaneFocus::Sidebar;
+
+        // Confirm-gated.
+        assert!(m.dispatch_action(&Action::ResetAgentContext).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&super::super::Id::ActionConfirm));
+        let cmds = m.handle_confirmed(true);
+        assert_eq!(cmds.len(), 1, "one inject for the running claude agent");
+        match &cmds[0] {
+            Command::InjectPrompt {
+                terminal_id,
+                prompt,
+                submit,
+                ..
+            } => {
+                assert_eq!(*terminal_id, TID);
+                assert_eq!(prompt, "/clear", "claude resets via /clear");
+                assert!(*submit, "the clear command is submitted, not just pasted");
+            }
+            other => panic!("expected InjectPrompt, got {other:?}"),
+        }
+
+        // The agent exits; reset now advises instead of firing.
+        m.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TID,
+            exit_code: Some(0),
+            last_output: None,
+        });
+        assert!(m.dispatch_action(&Action::ResetAgentContext).is_empty());
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.is_empty(),
+            "no running agent → a hint, never a blind inject"
+        );
+    }
+
     fn model_with_focused_agent() -> (
         Model<tuirealm::terminal::TestTerminalAdapter>,
         lazybox_ipc::Connection,

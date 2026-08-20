@@ -2506,6 +2506,7 @@ pub(super) fn action_from_kind(
         ActionKind::ManagePolicies => Action::ManagePolicies,
         ActionKind::Archive => Action::Archive,
         ActionKind::CloseIssue => Action::CloseIssue,
+        ActionKind::ResetAgentContext => Action::ResetAgentContext,
         ActionKind::ToggleSnooze => Action::ToggleSnooze,
         ActionKind::LongSnooze => Action::LongSnooze,
         ActionKind::Refresh => Action::Refresh,

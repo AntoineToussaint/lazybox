@@ -169,6 +169,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | Chord | Action |
 | --- | --- |
 | `a K` | recover all credit |
+| `a r` | reset agent *(confirmed first)* |
 | `a c` | spawn claude |
 | `a x` | spawn codex |
 | `a u` | spawn cursor |

@@ -251,6 +251,17 @@ pub trait Agent: Send + Sync {
         self.pty_protocol().encode_prompt(prompt, intent)
     }
 
+    /// The agent's in-composer "clear conversation context" command
+    /// (`/clear` for Claude Code, `/new` for Codex), or `None` when
+    /// the CLI has no such command. Drives the reset-agent action
+    /// (#1204): the command is injected + submitted through the same
+    /// settle-gated path snippets use, so the session, worktree, PTY
+    /// and prompt history all survive — only the agent's conversation
+    /// resets.
+    fn clear_context_command(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Command + args to spawn a fresh session.
     fn spawn(&self, ctx: &SpawnCtx) -> Vec<String>;
 
@@ -671,6 +682,9 @@ pub mod builtins {
         fn id(&self) -> &'static str {
             "claude"
         }
+        fn clear_context_command(&self) -> Option<&'static str> {
+            Some("/clear")
+        }
         fn display_name(&self) -> &'static str {
             "Claude Code"
         }
@@ -879,6 +893,11 @@ pub mod builtins {
     impl Agent for Codex {
         fn id(&self) -> &'static str {
             "codex"
+        }
+        fn clear_context_command(&self) -> Option<&'static str> {
+            // Codex's composer command for starting a fresh conversation
+            // in place.
+            Some("/new")
         }
         fn display_name(&self) -> &'static str {
             "Codex"

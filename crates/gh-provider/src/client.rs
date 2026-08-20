@@ -912,6 +912,24 @@ pub fn credential_fingerprint(token: &str) -> String {
     format!("{:016x}", h.finish())
 }
 
+/// Per-slot outcome of [`GhClient::fetch_hot_tasks`] (#1218).
+#[derive(Debug)]
+pub enum HotFetch {
+    /// The node's freshness probe moved since the last tick — full
+    /// detail was re-fetched.
+    Fresh(Box<Task>),
+    /// Probe byte-identical to the last one seen: nothing lazybox
+    /// renders changed. The caller keeps its cached task and skips the
+    /// upsert/broadcast entirely.
+    Unchanged,
+    /// Node not visible (deleted / transferred / scope change).
+    Missing,
+}
+
+/// GraphQL `nodes(ids:)` hard-errors past 100 ids — both hot tiers
+/// chunk at this bound (#1218).
+const HOT_BATCH_MAX_IDS: usize = 100;
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
@@ -949,6 +967,14 @@ pub struct GhClient {
     /// timer. Shared across clones so `with_filters` doesn't reset the
     /// 304-conditional or trigger a redundant full sweep.
     notifications_state: SharedNotificationsState,
+    /// Last-seen hot-set freshness fingerprints keyed by node id
+    /// (#1218): the serialized lean-probe node from the previous hot
+    /// tick. A byte-identical probe means nothing lazybox renders can
+    /// have changed, so the expensive full-detail fetch is skipped.
+    /// Shared across clones (one hot set per credential); pruned to the
+    /// requested id set each batch and cleared by `force_full_sweep` so
+    /// an explicit refresh always re-fetches.
+    hot_freshness: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 /// Per-branch cost breakdown for one branch of a PR fetch, emitted
@@ -1037,6 +1063,9 @@ impl GhClient {
             request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
+            hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -1064,6 +1093,9 @@ impl GhClient {
             request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
+            hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -2238,6 +2270,10 @@ impl GhClient {
     /// `mark_full_sweep_done` clears it once the sweep completes.
     pub fn force_full_sweep(&self) {
         self.notifications_state.lock().force_full_sweep = true;
+        // An explicit refresh must observe everything anew — drop the
+        // hot-freshness fingerprints so the next hot batch re-fetches
+        // full detail for the whole set (#1218).
+        self.hot_freshness.lock().clear();
     }
 
     pub fn manual_refresh_pending(&self) -> bool {
@@ -2608,65 +2644,172 @@ impl GhClient {
         }
     }
 
-    /// Fetch the bounded hot set in one GraphQL request. `nodes(ids:)`
+    /// Fetch the bounded hot set, two-tier (#1218): a lean freshness
+    /// probe first (~10 nodes/PR), then the full-detail query only for
+    /// nodes whose probe moved since the last tick. `nodes(ids:)`
     /// preserves input order, so the returned vector has one slot per
-    /// requested node; `None` means that node is no longer visible.
-    pub async fn fetch_hot_tasks(&self, node_ids: &[String]) -> Result<Vec<Option<Task>>, GhError> {
+    /// requested id. Both tiers are chunked at [`HOT_BATCH_MAX_IDS`] —
+    /// GraphQL errors a `nodes(ids:)` list past 100 outright, which
+    /// used to fail the whole hot refresh once 100+ workspaces held
+    /// sessions.
+    pub async fn fetch_hot_tasks(&self, node_ids: &[String]) -> Result<Vec<HotFetch>, GhError> {
         if node_ids.is_empty() {
             return Ok(Vec::new());
         }
 
         let started = std::time::Instant::now();
         let mut metrics = BranchMetrics::new("hot-targets");
-        self.acquire_or_block("hot-target batch query")?;
-        let body = graphql::hot_tasks_body(node_ids);
-        let (response, bytes): (graphql::GqlHotTasksResponse, usize) = self
-            .post_graphql_with_retry_measured("hot-target batch query", &body)
-            .await?;
-        metrics.requests = 1;
-        metrics.resp_bytes = bytes;
 
-        let errors = response.errors.unwrap_or_default();
-        if errors.iter().any(|error| !error.is_not_visible()) {
-            let joined = errors
-                .iter()
-                .map(|error| error.full())
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(GhError::Graphql(joined));
-        }
+        // Tier 1 (#1218): the lean freshness probe, chunked so >100 ids
+        // can't error the whole query. `None` slot = node not visible.
+        let mut fingerprints: Vec<Option<String>> = Vec::with_capacity(node_ids.len());
+        for chunk in node_ids.chunks(HOT_BATCH_MAX_IDS) {
+            self.acquire_or_block("hot-target batch query")?;
+            let body = graphql::hot_freshness_body(chunk);
+            let (response, bytes): (graphql::GqlHotFreshnessResponse, usize) = self
+                .post_graphql_with_retry_measured("hot-target batch query", &body)
+                .await?;
+            metrics.requests += 1;
+            metrics.resp_bytes += bytes;
 
-        let Some(data) = response.data else {
-            if errors.is_empty() {
-                return Err(GhError::Graphql("hot-target batch returned no data".into()));
+            let errors = response.errors.unwrap_or_default();
+            if errors.iter().any(|error| !error.is_not_visible()) {
+                let joined = errors
+                    .iter()
+                    .map(|error| error.full())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(GhError::Graphql(joined));
             }
-            return Ok(vec![None; node_ids.len()]);
-        };
-        if data.nodes.len() != node_ids.len() {
-            return Err(GhError::Graphql(format!(
-                "hot-target batch returned {} node slots for {} ids",
-                data.nodes.len(),
-                node_ids.len()
-            )));
-        }
-        if let Some(rate_limit) = &data.rate_limit {
-            metrics.graphql_cost = rate_limit.cost.unwrap_or(0);
+            let Some(data) = response.data else {
+                if errors.is_empty() {
+                    return Err(GhError::Graphql("hot-target probe returned no data".into()));
+                }
+                fingerprints.extend(std::iter::repeat_with(|| None).take(chunk.len()));
+                continue;
+            };
+            if data.nodes.len() != chunk.len() {
+                return Err(GhError::Graphql(format!(
+                    "hot-target probe returned {} node slots for {} ids",
+                    data.nodes.len(),
+                    chunk.len()
+                )));
+            }
+            if let Some(rate_limit) = &data.rate_limit {
+                metrics.graphql_cost += rate_limit.cost.unwrap_or(0);
+            }
+            fingerprints.extend(
+                data.nodes
+                    .into_iter()
+                    .map(|node| node.map(|n| n.to_string())),
+            );
         }
 
-        let tasks = data
-            .nodes
-            .into_iter()
-            .map(|node| {
-                node.map(|node| match node {
-                    graphql::GqlHotTask::PullRequest(pr) => graphql::pr_to_task(&pr, &self.user),
-                    graphql::GqlHotTask::Issue(issue) => graphql::issue_to_task(&issue, &self.user),
+        // Which nodes actually moved since the last probe. The cache is
+        // only *written* after a successful full fetch below, so a
+        // failed detail fetch is retried next tick rather than lost.
+        let need_full: Vec<usize> = {
+            let cache = self.hot_freshness.lock();
+            fingerprints
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, fingerprint)| match fingerprint {
+                    Some(fp) if cache.get(&node_ids[idx]) != Some(fp) => Some(idx),
+                    _ => None,
                 })
+                .collect()
+        };
+
+        let mut out: Vec<HotFetch> = fingerprints
+            .iter()
+            .map(|fingerprint| match fingerprint {
+                None => HotFetch::Missing,
+                Some(_) => HotFetch::Unchanged,
             })
-            .collect::<Vec<_>>();
-        metrics.prs = tasks.iter().flatten().filter(|task| task.is_pr()).count();
+            .collect();
+
+        // Tier 2: full detail, only for the movers, chunked like the probe.
+        for chunk in need_full.chunks(HOT_BATCH_MAX_IDS) {
+            let ids: Vec<String> = chunk.iter().map(|&idx| node_ids[idx].clone()).collect();
+            self.acquire_or_block("hot-target batch query")?;
+            let body = graphql::hot_tasks_body(&ids);
+            let (response, bytes): (graphql::GqlHotTasksResponse, usize) = self
+                .post_graphql_with_retry_measured("hot-target batch query", &body)
+                .await?;
+            metrics.requests += 1;
+            metrics.resp_bytes += bytes;
+
+            let errors = response.errors.unwrap_or_default();
+            if errors.iter().any(|error| !error.is_not_visible()) {
+                let joined = errors
+                    .iter()
+                    .map(|error| error.full())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                return Err(GhError::Graphql(joined));
+            }
+            let Some(data) = response.data else {
+                if errors.is_empty() {
+                    return Err(GhError::Graphql("hot-target batch returned no data".into()));
+                }
+                for &idx in chunk {
+                    out[idx] = HotFetch::Missing;
+                }
+                continue;
+            };
+            if data.nodes.len() != ids.len() {
+                return Err(GhError::Graphql(format!(
+                    "hot-target batch returned {} node slots for {} ids",
+                    data.nodes.len(),
+                    ids.len()
+                )));
+            }
+            if let Some(rate_limit) = &data.rate_limit {
+                metrics.graphql_cost += rate_limit.cost.unwrap_or(0);
+            }
+
+            let mut cache = self.hot_freshness.lock();
+            for (&idx, node) in chunk.iter().zip(data.nodes) {
+                match node {
+                    Some(node) => {
+                        let task = match node {
+                            graphql::GqlHotTask::PullRequest(pr) => {
+                                graphql::pr_to_task(&pr, &self.user)
+                            }
+                            graphql::GqlHotTask::Issue(issue) => {
+                                graphql::issue_to_task(&issue, &self.user)
+                            }
+                        };
+                        if let Some(fingerprint) = &fingerprints[idx] {
+                            cache.insert(node_ids[idx].clone(), fingerprint.clone());
+                        }
+                        out[idx] = HotFetch::Fresh(Box::new(task));
+                    }
+                    None => out[idx] = HotFetch::Missing,
+                }
+            }
+        }
+
+        // Prune fingerprints for ids that left the hot set so the cache
+        // tracks the live set instead of growing forever.
+        {
+            let requested: std::collections::HashSet<&String> = node_ids.iter().collect();
+            self.hot_freshness
+                .lock()
+                .retain(|id, _| requested.contains(id));
+        }
+
+        metrics.prs = out
+            .iter()
+            .filter_map(|slot| match slot {
+                HotFetch::Fresh(task) => Some(task),
+                _ => None,
+            })
+            .filter(|task| task.is_pr())
+            .count();
         metrics.elapsed_ms = started.elapsed().as_millis();
         metrics.emit();
-        Ok(tasks)
+        Ok(out)
     }
 
     /// Targeted deep-fetch: pull one PR by `(owner, repo, number)` via
@@ -6341,6 +6484,9 @@ mod tests {
             request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
+            hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -6429,8 +6575,29 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hot_tasks_are_fetched_in_one_ordered_batch() {
-        const BODY: &str = r#"{
+    async fn hot_tasks_probe_gates_the_full_fetch() {
+        // Lean freshness probe: one visible issue, one gone.
+        const LEAN: &str = r#"{
+          "data": {
+            "nodes": [
+              {"__typename": "Issue", "id": "I_one", "updatedAt": "2026-07-25T10:00:00Z", "state": "OPEN", "stateReason": null},
+              null
+            ],
+            "rateLimit": {"cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-07-25T11:00:00Z"}
+          }
+        }"#;
+        // Same probe with a bumped updatedAt — the node "moved".
+        const LEAN_CHANGED: &str = r#"{
+          "data": {
+            "nodes": [
+              {"__typename": "Issue", "id": "I_one", "updatedAt": "2026-07-25T10:30:00Z", "state": "OPEN", "stateReason": null},
+              null
+            ],
+            "rateLimit": {"cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-07-25T11:00:00Z"}
+          }
+        }"#;
+        // Full detail for the single mover.
+        const FULL_ONE: &str = r#"{
           "data": {
             "nodes": [
               {
@@ -6448,35 +6615,72 @@ mod tests {
                 "assignees": {"nodes": []},
                 "comments": {"nodes": []},
                 "repository": {"nameWithOwner": "acme/widget"}
-              },
-              null
+              }
             ],
-            "rateLimit": {
-              "cost": 2,
-              "limit": 5000,
-              "remaining": 4998,
-              "resetAt": "2026-07-25T11:00:00Z"
-            }
+            "rateLimit": {"cost": 2, "limit": 5000, "remaining": 4998, "resetAt": "2026-07-25T11:00:00Z"}
           }
         }"#;
-        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let base_uri =
-            spawn_counting_response_server("200 OK", "application/json", "", BODY, hits.clone())
-                .await;
+        let base_uri = spawn_sequenced_response_server(vec![
+            LEAN,         // call 1: probe (first sight → mover)
+            FULL_ONE,     //         full detail for I_one
+            LEAN,         // call 2: probe unchanged → NO full request
+            LEAN_CHANGED, // call 3: probe moved
+            FULL_ONE,     //         full detail again
+            LEAN,         // call 4 (after force_full_sweep): probe
+            FULL_ONE,     //         cache cleared → full again
+        ])
+        .await;
         let client = make_client(&base_uri);
+        let ids: Vec<String> = vec!["I_one".into(), "I_gone".into()];
 
-        let tasks = client
-            .fetch_hot_tasks(&["I_one".into(), "I_gone".into()])
-            .await
-            .expect("hot batch");
+        // First sight: probe + full, ordered slots.
+        let out = client.fetch_hot_tasks(&ids).await.expect("hot batch");
+        assert_eq!(out.len(), 2);
+        match &out[0] {
+            HotFetch::Fresh(task) => {
+                assert_eq!(task.id.key, "acme/widget#7");
+                assert_eq!(task.node_id.as_deref(), Some("I_one"));
+                assert!(!task.is_pr());
+            }
+            other => panic!("expected Fresh, got {other:?}"),
+        }
+        assert!(matches!(out[1], HotFetch::Missing));
 
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(tasks.len(), 2);
-        let task = tasks[0].as_ref().expect("visible issue");
-        assert_eq!(task.id.key, "acme/widget#7");
-        assert_eq!(task.node_id.as_deref(), Some("I_one"));
-        assert!(!task.is_pr());
-        assert!(tasks[1].is_none());
+        // Unchanged probe: the ~700-node full query is NOT spent.
+        let out = client.fetch_hot_tasks(&ids).await.expect("unchanged tick");
+        assert!(matches!(out[0], HotFetch::Unchanged));
+        assert!(matches!(out[1], HotFetch::Missing));
+
+        // Moved probe: full detail is fetched again.
+        let out = client.fetch_hot_tasks(&ids).await.expect("changed tick");
+        assert!(matches!(out[0], HotFetch::Fresh(_)));
+
+        // Shift-R semantics: an explicit refresh drops the fingerprints,
+        // so even a byte-identical probe re-fetches full detail.
+        client.force_full_sweep();
+        let out = client.fetch_hot_tasks(&ids).await.expect("forced tick");
+        assert!(matches!(out[0], HotFetch::Fresh(_)));
+    }
+
+    /// GraphQL rejects `nodes(ids:)` past 100 outright — a 150-id hot
+    /// set must be probed in two chunks instead of erroring the whole
+    /// refresh (#1218).
+    #[tokio::test(flavor = "current_thread")]
+    async fn hot_probe_chunks_batches_past_the_graphql_id_cap() {
+        fn lean_nulls(count: usize) -> &'static str {
+            let nodes = vec!["null"; count].join(",");
+            let body = format!(
+                r#"{{"data": {{"nodes": [{nodes}], "rateLimit": {{"cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-07-25T11:00:00Z"}}}}}}"#,
+            );
+            Box::leak(body.into_boxed_str())
+        }
+        let base_uri = spawn_sequenced_response_server(vec![lean_nulls(100), lean_nulls(50)]).await;
+        let client = make_client(&base_uri);
+        let ids: Vec<String> = (0..150).map(|i| format!("I_{i}")).collect();
+
+        let out = client.fetch_hot_tasks(&ids).await.expect("chunked probe");
+        assert_eq!(out.len(), 150);
+        assert!(out.iter().all(|slot| matches!(slot, HotFetch::Missing)));
     }
 
     #[tokio::test(flavor = "current_thread")]

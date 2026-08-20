@@ -10,7 +10,9 @@ mod notifications;
 pub mod oauth;
 pub mod rate_budget;
 
-pub use client::{BackgroundSweepForecast, GhClient, SelectedFetchOutcome, credential_fingerprint};
+pub use client::{
+    BackgroundSweepForecast, GhClient, HotFetch, SelectedFetchOutcome, credential_fingerprint,
+};
 pub use graphql::PrDetails;
 pub use mentions::{LazyboxMention, MentionSource, parse_label_directive, scan_issue};
 pub use notifications::{

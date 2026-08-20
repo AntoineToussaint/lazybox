@@ -585,6 +585,10 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(
     // single drain, but only the final selection needs projecting onto
     // the right pane + terminal stack (see `Model::dispatch_daemon_event`).
     model.flush_pane_sync();
+    // Per-batch resync flush (#1237): pairs with the per-event flush
+    // removed from the TerminalOutput short-circuit, so the
+    // MAX_RESYNC_REQUESTS_PER_BATCH chunking actually engages.
+    model.flush_pending_terminal_resyncs();
     model.event_backlog.observe_resyncs(resyncs);
     // Whatever is still queued after this drain is the backlog the
     // consumer hasn't caught up on — feed it to the monitor.

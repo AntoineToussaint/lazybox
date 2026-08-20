@@ -617,6 +617,14 @@ pub(crate) struct RenderedClickTarget {
 pub struct TerminalStack {
     id: PaneId,
     terminals: HashMap<TerminalId, TerminalSlot>,
+    /// Bumped whenever the visible-set inputs change (slot
+    /// membership / kinds / active session) — invalidates
+    /// `visible_cache` (#1237): `visible_terminals` used to rebuild
+    /// and sort the whole slot map twice per output event.
+    slots_rev: std::cell::Cell<u64>,
+    /// `(slots_rev, ordered visible ids)` memo for
+    /// [`Self::visible_terminals`].
+    visible_cache: std::cell::RefCell<Option<(u64, Vec<TerminalId>)>>,
     /// Which session's terminals are currently visible. `None` =>
     /// render an empty-state message.
     active_session: Option<SessionKey>,
@@ -1411,6 +1419,8 @@ impl TerminalStack {
         Self {
             id,
             terminals: HashMap::new(),
+            slots_rev: std::cell::Cell::new(0),
+            visible_cache: std::cell::RefCell::new(None),
             active_session: None,
             active_tab_idx: 0,
             collapsed: true,
@@ -1658,6 +1668,10 @@ impl TerminalStack {
         ) {
             self.last_focused.insert(prev, focused);
         }
+        // AFTER the swap — an invalidate placed before it let the
+        // focus capture above re-cache the OLD session's (possibly
+        // empty) visible set against the new revision.
+        self.invalidate_visible();
         self.active_tab_idx = self
             .active_session
             .as_ref()
@@ -1683,6 +1697,34 @@ impl TerminalStack {
     /// agents first (far left), then shells / log tails, ties broken
     /// by u64 id so tab positions are deterministic.
     pub fn visible_terminals(&self) -> Vec<TerminalId> {
+        // Memoized on `slots_rev` (#1237): this runs (at least) twice
+        // per TerminalOutput event, and rebuilding + sorting the whole
+        // global slot map per event was O(fleet) work on the UI thread.
+        if let Some((rev, ids)) = self.visible_cache.borrow().as_ref()
+            && *rev == self.slots_rev.get()
+        {
+            return ids.clone();
+        }
+        let ids = self.visible_terminals_uncached();
+        *self.visible_cache.borrow_mut() = Some((self.slots_rev.get(), ids.clone()));
+        ids
+    }
+
+    /// Test-only slot insertion that keeps the visible-set memo honest —
+    /// production inserts route through event handlers that invalidate.
+    #[cfg(test)]
+    fn insert_slot_for_test(&mut self, id: TerminalId, slot: TerminalSlot) {
+        self.invalidate_visible();
+        self.terminals.insert(id, slot);
+    }
+
+    /// Mark the visible-set inputs changed — every slot-membership /
+    /// kind / active-session mutation routes through this (#1237).
+    fn invalidate_visible(&self) {
+        self.slots_rev.set(self.slots_rev.get().wrapping_add(1));
+    }
+
+    fn visible_terminals_uncached(&self) -> Vec<TerminalId> {
         let Some(sk) = &self.active_session else {
             return vec![];
         };
@@ -3373,6 +3415,7 @@ impl TerminalStack {
                             request_pending: true,
                         };
                         self.pending_resync_requests.push(snap.terminal_id);
+                        self.invalidate_visible();
                         self.terminals.insert(snap.terminal_id, slot);
                         continue;
                     }
@@ -3426,6 +3469,7 @@ impl TerminalStack {
                     if snap.replay_available {
                         slot.pending_feed = snap.replay.clone();
                     }
+                    self.invalidate_visible();
                     self.terminals.insert(snap.terminal_id, slot);
                 }
                 self.clamp_active_tab();
@@ -3460,6 +3504,7 @@ impl TerminalStack {
                     Vec::new(),
                     String::new(),
                 );
+                self.invalidate_visible();
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
                 // expand so the user actually sees it. We bypass the
@@ -3767,6 +3812,7 @@ impl TerminalStack {
                     self.last_focused.insert(to.clone(), id);
                 }
                 if self.active_session.as_ref() == Some(from) {
+                    self.invalidate_visible();
                     self.active_session = Some(to.clone());
                 }
             }
@@ -4237,6 +4283,7 @@ impl TerminalStack {
         {
             self.zoomed = false;
         }
+        self.invalidate_visible();
         self.terminals.remove(&terminal_id);
         // Prune the tile tree so the removal surfaces visually: a
         // single-leaf split collapses to a Leaf root; an n-way split
@@ -4307,6 +4354,7 @@ impl TerminalStack {
             .get(&old_terminal_id)
             .and_then(|slot| slot.auth_recovery_id)
             .unwrap_or(old_terminal_id);
+        self.invalidate_visible();
         let old = self.terminals.remove(&old_terminal_id);
         let (prompt_history, composing, inherited_model_label) = old.map_or_else(
             || (Vec::new(), String::new(), None),
@@ -4324,6 +4372,7 @@ impl TerminalStack {
         );
         slot.authenticating = authenticating;
         slot.auth_recovery_id = authenticating.then_some(old_recovery_id);
+        self.invalidate_visible();
         self.terminals.insert(terminal_id, slot);
 
         if let lazybox_core::SessionLayout::Splits { tree, focused } = &mut self.layout
@@ -4447,6 +4496,7 @@ impl TerminalStack {
                             client_request_id: None,
                         });
                     } else {
+                        self.invalidate_visible();
                         self.terminals.remove(&tid);
                     }
                 } else {
@@ -5906,7 +5956,7 @@ mod ctrl_w_tests {
             Vec::new(),
             String::new(),
         );
-        stack.terminals.insert(TerminalId(1), slot);
+        stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
     }
@@ -6010,7 +6060,7 @@ mod write_chunking_tests {
             Vec::new(),
             String::new(),
         );
-        stack.terminals.insert(TerminalId(1), slot);
+        stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
 
         let mut cmds = Vec::new();
@@ -6242,7 +6292,7 @@ mod selection_offset_tests {
             payload.push_str("\r\n");
         }
         slot.vt.feed(payload.as_bytes());
-        stack.terminals.insert(TerminalId(1), slot);
+        stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
     }
@@ -6312,7 +6362,7 @@ mod selection_offset_tests {
             Vec::new(),
             String::new(),
         );
-        stack.terminals.insert(TerminalId(5), live);
+        stack.insert_slot_for_test(TerminalId(5), live);
         assert_eq!(stack.agent_terminal_for(&sk), Some(TerminalId(5)));
     }
 
@@ -6999,7 +7049,7 @@ mod selection_offset_tests {
         slot.vt.ensure_size(20, 10);
         slot.vt
             .feed(b"https://example.com/a/very/long/path/that/wraps/around\r\n");
-        stack.terminals.insert(TerminalId(1), slot);
+        stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
 
         let rect = Rect::new(0, 0, 80, 30);
@@ -7039,7 +7089,7 @@ mod selection_offset_tests {
         slot.vt
             .feed(b"https://b.example.com/a/long/wrapping/path\r\n");
         slot.vt.feed(b"no link on this line\r\n");
-        stack.terminals.insert(TerminalId(1), slot);
+        stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
 
         assert_eq!(
@@ -8339,7 +8389,7 @@ mod footer_scroll_independence {
         // Mirror Claude Code's persistent bottom chrome.
         payload.push_str("? for shortcuts");
         slot.vt.feed(payload.as_bytes());
-        stack.terminals.insert(TerminalId(1), slot);
+        stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
     }
@@ -8529,7 +8579,7 @@ mod footer_scroll_independence {
             Vec::new(),
             String::new(),
         );
-        stack.terminals.insert(TerminalId(1), slot);
+        stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
 
         let rows = render_rows(&mut stack);
@@ -8556,7 +8606,7 @@ mod footer_scroll_independence {
             Vec::new(),
             String::new(),
         );
-        stack.terminals.insert(TerminalId(1), slot);
+        stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk.clone()));
 
         stack.on_event(&Event::TerminalModelChanged {

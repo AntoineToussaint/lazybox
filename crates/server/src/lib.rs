@@ -43,6 +43,7 @@ pub mod error_inbox;
 pub mod event_forward;
 pub mod keep_awake;
 pub mod lifecycle;
+pub mod local_gateway;
 pub mod metrics;
 pub mod polling;
 pub mod proxy;

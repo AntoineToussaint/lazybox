@@ -2403,6 +2403,9 @@ impl LocalServices {
         // services before stopping the runtime they call into.
         if let Some(shutdown) = self.gateway_shutdown.take() {
             let _ = shutdown.send(true);
+            // This process owned the published gateway — unpublish so a
+            // late-launching front-end can't attach to a draining daemon.
+            lazybox_server::local_gateway::remove_discovery();
         }
         if let Some(shutdown) = self.socket_shutdown.take() {
             shutdown.notify_one();
@@ -2438,8 +2441,26 @@ async fn start_local_gateway(
             .to_string()
     })?;
     if let ServerStatus::Running { pid } = lifecycle::status() {
+        // A daemon already runs — usually the TUI's embedded one.
+        // Attach to its published loopback gateway instead of refusing
+        // to start; both front-ends then drive the same daemon.
+        if let Some(discovery) = lazybox_server::local_gateway::read_discovery() {
+            tracing::info!(
+                pid,
+                url = %discovery.url,
+                "lazybox desktop attaching to the running daemon's published gateway"
+            );
+            return Ok(LocalServices {
+                gateway: gateway_client(discovery.url, discovery.token)?,
+                client_runtime: None,
+                gateway_task: None,
+                gateway_shutdown: None,
+                socket_task: None,
+                socket_shutdown: None,
+            });
+        }
         return Err(format!(
-            "lazybox daemon is already owned by process {pid}; stop it before starting the embedded desktop daemon"
+            "lazybox daemon is already running (pid {pid}) but publishes no attach gateway —              it predates desktop attach. Restart it (the TUI, or `lazybox server stop`) and              relaunch the desktop."
         ));
     }
     let config = ServerConfig::from_user_config()
@@ -2473,6 +2494,16 @@ async fn start_local_gateway(
             .and_then(Result::err)
             .unwrap_or(error);
         return Err(format!("bind embedded daemon socket: {detail}"));
+    }
+
+    // Publish discovery so a SECOND front-end (another desktop, tooling)
+    // can attach to this owner the same way the desktop attaches to a
+    // running TUI. Advisory — a write failure costs attach, not boot.
+    if let Err(error) = lazybox_server::local_gateway::publish_discovery(
+        &format!("http://{address}"),
+        &bearer_token,
+    ) {
+        tracing::warn!("publish desktop gateway discovery: {error}");
     }
 
     let client_runtime = ClientRuntime::start(

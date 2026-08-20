@@ -238,13 +238,36 @@ jobs:
         if: needs.changes.outputs.contracts == 'true' && needs.changes.outputs.rust != 'true'
         run: cargo nextest run -p lazybox-tui --profile ci --test web_docs --test keymap_docs
 
+  # Lightweight, PR-gating compile check for the desktop shell (#1207).
+  # The desktop lives in its OWN Cargo workspace, so the root `cargo
+  # build/clippy` never touches it — any change to a shared type
+  # (`ComputeInputs`, IPC DTOs, the inbox builder) broke it silently, at
+  # least twice. This job is deliberately minimal (no npm, no
+  # playwright, no bundling — the disabled `desktop` MVP job below keeps
+  # those) so it stays fast enough to gate merges.
+  desktop-check:
+    name: desktop shell compiles (macos-14)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/rust-build-env
+        with:
+          cache-workspaces: |
+            .
+            apps/desktop/src-tauri
+      - name: Compile the desktop shell against shared crates
+        run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml --all-targets --locked
+
   desktop:
     name: desktop MVP (macos-14)
     needs: changes
     # Desktop CI is temporarily disabled: the generated desktop
     # contracts have drifted and the shell isn't a release blocker right
     # now. Re-enable by dropping `false &&` once the desktop app is being
-    # actively maintained again.
+    # actively maintained again. The lightweight `desktop-check` job
+    # above still gates PRs on the shell COMPILING (#1207).
     if: false && needs.changes.outputs.desktop == 'true'
     runs-on: macos-14
     steps:

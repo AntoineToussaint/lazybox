@@ -781,6 +781,12 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
         }
         let key = mock.list().await.unwrap().into_iter().next().unwrap();
         let argv = mock.argv_for(&key).await.unwrap();
+        // Agent argv is fleet-shaded behind `nice -n <prio>` (agent.nice);
+        // the program is whatever follows the wrapper.
+        let argv = match argv.first().map(String::as_str) {
+            Some("nice") => argv[3..].to_vec(),
+            _ => argv,
+        };
         assert_eq!(argv.first().map(String::as_str), Some("claude"));
         assert!(
             !argv.iter().any(|a| a == "--dangerously-skip-permissions"),

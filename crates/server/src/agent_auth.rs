@@ -1197,10 +1197,20 @@ mod tests {
     }
 
     async fn wait_for_argv(mock: &crate::backend::MockBackend, expected: &[&str]) -> Vec<String> {
+        // Agent spawns are wrapped in `nice -n <N>` (fleet-priority
+        // shading); strip the wrapper so assertions compare the agent's
+        // own argv.
+        fn strip_nice(argv: &[String]) -> &[String] {
+            match argv {
+                [first, flag, _n, rest @ ..] if first == "nice" && flag == "-n" => rest,
+                other => other,
+            }
+        }
         for _ in 0..10_000 {
             let all = mock.all_argv().await;
             if let Some(argv) = all.into_iter().find(|argv| {
-                argv.iter()
+                strip_nice(argv)
+                    .iter()
                     .map(String::as_str)
                     .take(expected.len())
                     .eq(expected.iter().copied())

@@ -6279,14 +6279,20 @@ mod live_collapse_e2e {
         timeout(TEST_DEADLINE, async {
             let mut live = spawn_live_agent_on_issue("codex").await;
 
-            // Sanity: the backend really runs codex, not claude.
+            // Sanity: the backend really runs codex, not claude. Agent
+            // argv is wrapped in `nice -n <N>` (fleet-priority shading,
+            // #1237) — skip the wrapper before checking the program.
             let argv = live
                 .mock
                 .argv_for(&live.backend_key)
                 .await
                 .expect("spawned session must have argv");
+            let program = match argv.as_slice() {
+                [first, _flag, _n, rest @ ..] if first == "nice" => rest.first(),
+                other => other.first(),
+            };
             assert_eq!(
-                argv.first().map(String::as_str),
+                program.map(String::as_str),
                 Some("codex"),
                 "the live agent under test must be codex (hookless)",
             );
@@ -6826,11 +6832,11 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
     // otherwise the first-run workspace-trust dialog eats the injected
     // fix prompt and any later Edit/Bash approval deadlocks the run.
     let argvs = mock.all_argv().await;
+    // Agent argv rides under the `nice -n <N>` wrapper (#1237); the
+    // program just has to appear with the skip flag.
     assert!(
-        argvs
-            .iter()
-            .any(|a| a.first().map(String::as_str) == Some("claude")
-                && a.iter().any(|s| s == "--dangerously-skip-permissions")),
+        argvs.iter().any(|a| a.iter().any(|s| s == "claude")
+            && a.iter().any(|s| s == "--dangerously-skip-permissions")),
         "auto-fix spawn must pass --dangerously-skip-permissions; got {argvs:?}"
     );
 }

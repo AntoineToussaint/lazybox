@@ -157,6 +157,25 @@ pub(crate) fn build_spawn_plan(
         provider_session_id.as_deref(),
         access,
     )?;
+    // Deprioritize agent processes (`agent.nice`, default 10) so a big
+    // fleet's CPU burn can't starve the interactive stack: a 50-agent
+    // fleet at normal priority ran the load average to 17× the core
+    // count while lazybox itself sat at 4% CPU — every keystroke's
+    // round trip waited in the run queue the fleet filled. `nice`
+    // shades throughput under contention only; on an idle machine the
+    // agents run at full speed. Shells stay at normal priority — they
+    // ARE the interactive surface.
+    let argv = match &kind {
+        TerminalKind::Agent(_) if cfg.agent.spawn_nice() > 0 => {
+            let mut wrapped = Vec::with_capacity(argv.len() + 3);
+            wrapped.push("nice".to_string());
+            wrapped.push("-n".to_string());
+            wrapped.push(cfg.agent.spawn_nice().to_string());
+            wrapped.extend(argv);
+            wrapped
+        }
+        _ => argv,
+    };
     let uses_argv_hooks = agent
         .as_deref()
         .zip(hook_command.as_deref())
@@ -481,7 +500,12 @@ mod tests {
         assert_eq!(
             plan.argv,
             // #1183: MCP inherited by default — no --strict-mcp-config.
+            // Fleet-priority shading: agent argv runs under `nice`
+            // (default 10) so 50 busy agents can't starve the UI.
             vec![
+                "nice",
+                "-n",
+                "10",
                 "claude",
                 "--dangerously-skip-permissions",
                 "--settings",

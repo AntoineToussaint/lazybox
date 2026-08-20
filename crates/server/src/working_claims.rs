@@ -482,11 +482,30 @@ async fn maintain_once(config: &ServerConfig, now: DateTime<Utc>) {
 /// spawned in this process. A held lock keeps an `Arc` clone alive, so
 /// `strong_count > 1` protects in-flight acquire/heartbeat/release cycles.
 fn prune_idle_locks(config: &ServerConfig) {
+    // Two passes so no SQLite query ever runs inside the lock-map
+    // guard (#1237): snapshot the idle candidates, query the store
+    // unguarded, then retain against the verdicts. A lock acquired
+    // between the passes bumps its strong count and survives the
+    // retain regardless of the (stale) store verdict.
+    let idle_keys: Vec<String> = {
+        let locks = config.working_claim_locks.lock();
+        locks
+            .iter()
+            .filter(|(_, lock)| std::sync::Arc::strong_count(lock) == 1)
+            .map(|(key, _)| key.clone())
+            .collect()
+    };
+    if idle_keys.is_empty() {
+        return;
+    }
+    let mut removable: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for key in idle_keys {
+        if matches!(config.store.get_kv(&key), Ok(None)) {
+            removable.insert(key);
+        }
+    }
     let mut locks = config.working_claim_locks.lock();
-    locks.retain(|key, lock| {
-        std::sync::Arc::strong_count(lock) > 1
-            || matches!(config.store.get_kv(key), Ok(Some(_)) | Err(_))
-    });
+    locks.retain(|key, lock| std::sync::Arc::strong_count(lock) > 1 || !removable.contains(key));
 }
 
 async fn heartbeat_holder(config: &ServerConfig, holder: &ClaimHolder, now: DateTime<Utc>) {
@@ -504,7 +523,8 @@ async fn heartbeat_holder(config: &ServerConfig, holder: &ClaimHolder, now: Date
 }
 
 async fn cleanup_expired(config: &ServerConfig, now: DateTime<Utc>) {
-    let records = match config.store.list_workspaces() {
+    let records = match crate::store_blocking(&config.store, |store| store.list_workspaces()).await
+    {
         Ok(records) => records,
         Err(error) => {
             tracing::warn!(%error, "working claim TTL cleanup could not list workspaces");

@@ -44,6 +44,23 @@ pub mod event_forward;
 pub mod keep_awake;
 pub mod lifecycle;
 pub mod local_gateway;
+
+/// Run one store operation on the blocking pool (#1237). The single
+/// SQLite connection mutex must never be held from a tokio worker: a
+/// poll sweep's full-table scan used to pin the worker AND the
+/// connection, while every other store user (agent-state persists,
+/// draft writes — the keystroke path's tail) queued behind it.
+pub(crate) async fn store_blocking<T: Send + 'static>(
+    store: &std::sync::Arc<dyn lazybox_store::Store>,
+    op: impl FnOnce(&dyn lazybox_store::Store) -> T + Send + 'static,
+) -> T {
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || op(&*store)).await {
+        Ok(value) => value,
+        Err(join_error) => std::panic::resume_unwind(join_error.into_panic()),
+    }
+}
+
 pub mod metrics;
 pub mod polling;
 pub mod proxy;
@@ -889,6 +906,12 @@ impl Server {
         loop {
             while mutations.try_join_next().is_some() {}
             tokio::select! {
+                // Biased: under a saturated bus (50 streaming agents)
+                // an unbiased select forwards events on ~half the
+                // iterations before looking at commands — keystrokes
+                // deserve strict priority, and the arm order below is
+                // exactly the latency order (#1237).
+                biased;
                 _ = conn.tx.closed() => {
                     tracing::warn!("client event forwarder closed — ending connection");
                     break;
@@ -1013,9 +1036,15 @@ impl Server {
                         lazybox_ipc::Command::GetResourcePosture => "GetResourcePosture",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
-                    // `Write` fires on every keystroke — at info it floods
-                    // the log and makes real lifecycle lines unreadable.
-                    if matches!(cmd, lazybox_ipc::Command::Write { .. }) {
+                    // `Write` and `RecordComposingBuffer` fire on every
+                    // keystroke — at info they flood the log and make
+                    // real lifecycle lines unreadable (#1237: the format
+                    // + send is also avoidable per-character work).
+                    if matches!(
+                        cmd,
+                        lazybox_ipc::Command::Write { .. }
+                            | lazybox_ipc::Command::RecordComposingBuffer { .. }
+                    ) {
                         tracing::debug!("daemon ← {label}");
                     } else {
                         tracing::info!("daemon ← {label}");

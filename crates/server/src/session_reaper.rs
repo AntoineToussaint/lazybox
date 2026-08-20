@@ -78,7 +78,8 @@ pub(crate) async fn sweep_with(
     threshold: Duration,
     now: chrono::DateTime<chrono::Utc>,
 ) -> usize {
-    let records = match config.store.list_workspaces() {
+    let records = match crate::store_blocking(&config.store, |store| store.list_workspaces()).await
+    {
         Ok(records) => records,
         Err(error) => {
             tracing::warn!(%error, "session reap: list_workspaces failed — skipping sweep");

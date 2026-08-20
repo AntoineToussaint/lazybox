@@ -1596,6 +1596,7 @@ async fn handle_spawn_inner(
             // know "we reached ready at least once."
             let mut signaled_ready = false;
             let mut auth_required_emitted = false;
+            let pump_started = std::time::Instant::now();
             let mut nudged_startup_prompts =
                 std::collections::HashSet::<lazybox_agents::UnattendedPromptKind>::new();
             let check_ready = |state_buf: &Vec<u8>,
@@ -1672,6 +1673,7 @@ async fn handle_spawn_inner(
                     &state_buf,
                     id_for_pump,
                     &mut auth_required_emitted,
+                    pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
                 )
                 .await;
                 maybe_nudge_unattended_startup(
@@ -1682,6 +1684,7 @@ async fn handle_spawn_inner(
                     &key_for_pump,
                     unattended,
                     &mut nudged_startup_prompts,
+                    pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
                 );
                 last_chunk_len = sub.replay.len();
                 if sub.replay_complete {
@@ -1809,6 +1812,7 @@ async fn handle_spawn_inner(
                         &state_buf,
                         id_for_pump,
                         &mut auth_required_emitted,
+                        pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
                     )
                     .await;
                     maybe_nudge_unattended_startup(
@@ -1819,6 +1823,7 @@ async fn handle_spawn_inner(
                         &key_for_pump,
                         unattended,
                         &mut nudged_startup_prompts,
+                        pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
                     );
                     last_chunk_len = snapshot.replay.len();
                     check_ready(
@@ -1890,6 +1895,7 @@ async fn handle_spawn_inner(
                     &state_buf,
                     id_for_pump,
                     &mut auth_required_emitted,
+                    pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
                 )
                 .await;
                 maybe_nudge_unattended_startup(
@@ -1900,6 +1906,7 @@ async fn handle_spawn_inner(
                     &key_for_pump,
                     unattended,
                     &mut nudged_startup_prompts,
+                    pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
                 );
                 last_chunk_len = chunk.bytes.len();
                 if !signaled_first_output {
@@ -5055,14 +5062,36 @@ fn detect_window(buf: &[u8]) -> &[u8] {
     &buf[buf.len().saturating_sub(DETECT_WINDOW)..]
 }
 
+/// How long after pump start the auth/startup scanners run
+/// unconditionally. Past it, the expensive strip+lowercase scan only
+/// runs when a cheap raw-bytes prefilter sees auth-ish text — a healthy
+/// streaming agent used to pay both full scans on EVERY chunk forever
+/// (~120 KiB scanned + 32 KiB allocated per chunk × 50 agents ≈ up to a
+/// third of a core, #1237).
+const CHUNK_SCAN_STARTUP_WINDOW: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Case-insensitive raw-window scan for the substrings every auth
+/// failure phrasing shares. One branch-predictable pass, no allocation
+/// — the full detector still decides; this only skips it when the
+/// window can't possibly match.
+fn auth_prefilter(window: &[u8]) -> bool {
+    window.windows(4).any(|w| w.eq_ignore_ascii_case(b"auth"))
+        || window.windows(6).any(|w| w.eq_ignore_ascii_case(b"log in"))
+        || window.windows(5).any(|w| w.eq_ignore_ascii_case(b"login"))
+}
+
 async fn maybe_emit_auth_required(
     config: &ServerConfig,
     agent: Option<&std::sync::Arc<dyn lazybox_agents::Agent>>,
     state_buf: &[u8],
     terminal_id: TerminalId,
     emitted: &mut bool,
+    in_startup_window: bool,
 ) {
     if *emitted {
+        return;
+    }
+    if !in_startup_window && !auth_prefilter(detect_window(state_buf)) {
         return;
     }
     let Some(failure) = agent.and_then(|agent| agent.detect_auth_failure(detect_window(state_buf)))
@@ -5087,8 +5116,15 @@ fn maybe_nudge_unattended_startup(
     backend_key: &str,
     unattended: bool,
     nudged: &mut std::collections::HashSet<lazybox_agents::UnattendedPromptKind>,
+    in_startup_window: bool,
 ) {
     if !unattended {
+        return;
+    }
+    // The trust/consent gate this nudges through is a BOOT phenomenon;
+    // scanning every chunk of a long-running session for it was pure
+    // waste (#1237).
+    if !in_startup_window {
         return;
     }
     let Some(agent) = agent else {
@@ -6326,21 +6362,24 @@ pub(crate) async fn handle_write_batch(
     let answered_chooser = writes
         .iter()
         .any(|bytes| bytes.len() == 1 && matches!(bytes[0], b'1'..=b'9' | b'y' | b'n' | 0x1b));
-    let current_state = config.terminal.agent_state_for(terminal_id).await;
+    // One global-lock acquisition for the whole admission context
+    // (#1237) — this used to be three separate FIFO queue joins per
+    // keystroke.
+    let Some((key, current_state, current_shape)) =
+        config.terminal.write_context_for(terminal_id).await
+    else {
+        tracing::trace!("write to unknown terminal {terminal_id:?}");
+        return false;
+    };
     let chooser_submission = intent == TerminalInputIntent::Compose
         && current_state == Some(lazybox_ipc::AgentState::InputNeeded)
         && answered_chooser
-        && config.terminal.input_needed_shape_for(terminal_id).await
-            == Some(lazybox_agents::PromptShape::Chooser);
+        && current_shape == Some(lazybox_agents::PromptShape::Chooser);
     let submitted = intent == TerminalInputIntent::Submit || chooser_submission;
     let effective_intent = if submitted {
         TerminalInputIntent::Submit
     } else {
         intent
-    };
-    let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
-        tracing::trace!("write to unknown terminal {terminal_id:?}");
-        return false;
     };
     let Some(interaction) = terminal_io::acquire_live(config, terminal_id, &key).await else {
         return false;
@@ -8027,6 +8066,7 @@ async fn pump_recovered_session(
         .await;
     let mut last_chunk_len = 0;
     let mut auth_required_emitted = false;
+    let pump_started = std::time::Instant::now();
 
     if !sub.replay.is_empty() {
         replace_detection_history(&mut state_buf, &mut watchdog_fp, &sub.replay);
@@ -8050,6 +8090,7 @@ async fn pump_recovered_session(
             &state_buf,
             terminal_id,
             &mut auth_required_emitted,
+            pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
         )
         .await;
         let _ = config.bus.send(Event::TerminalOutput {
@@ -8126,6 +8167,7 @@ async fn pump_recovered_session(
                         &state_buf,
                         terminal_id,
                         &mut auth_required_emitted,
+                        pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
                     )
                     .await;
                     last_chunk_len = 0;
@@ -8163,6 +8205,7 @@ async fn pump_recovered_session(
                     &state_buf,
                     terminal_id,
                     &mut auth_required_emitted,
+                    pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
                 )
                 .await;
                 last_chunk_len = chunk.bytes.len();
@@ -9177,9 +9220,15 @@ pub async fn handle_record_composing_buffer(
     terminal_id: TerminalId,
     buffer: &str,
 ) {
-    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
-        tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
-        return;
+    let backend_key = match config.terminal.live_backend_key(terminal_id) {
+        Some(key) => key.to_string(),
+        None => match config.terminal.backend_key_for(terminal_id).await {
+            Some(key) => key,
+            None => {
+                tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
+                return;
+            }
+        },
     };
     let _guard = config
         .terminal
@@ -10010,6 +10059,70 @@ mod tests {
         }
     }
 
+    /// #1237: the auth-failure prefilter must never skip a window the
+    /// real detector would match (it only skips windows that CANNOT
+    /// match), and healthy streaming output is rejected without paying
+    /// the strip+lowercase scan.
+    #[test]
+    fn auth_prefilter_admits_every_failure_phrasing_and_skips_noise() {
+        for failure in [
+            "Not logged in. Run `claude auth login` to continue.",
+            "AUTHENTICATION failed — token expired",
+            "Please log in to continue",
+            "OAuth error: please login again",
+        ] {
+            assert!(
+                auth_prefilter(failure.as_bytes()),
+                "prefilter must admit: {failure}",
+            );
+        }
+        for noise in [
+            "compiling lazybox-server v0.1.11 (54/128)",
+            "test result: ok. 400 passed; 0 failed",
+            "wrote src/main.rs — running cargo check",
+        ] {
+            assert!(
+                !auth_prefilter(noise.as_bytes()),
+                "prefilter must skip plain output: {noise}",
+            );
+        }
+    }
+
+    /// Past the startup window, a real auth failure STILL emits (the
+    /// prefilter admits it); a window the prefilter rejects skips the
+    /// expensive detector entirely and emits nothing.
+    #[tokio::test]
+    async fn auth_scan_past_startup_window_still_catches_failures() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let agent: std::sync::Arc<dyn lazybox_agents::Agent> =
+            std::sync::Arc::new(lazybox_agents::agent::builtins::Claude);
+        let failure = b"Not logged in. Run `claude auth login` to continue.\r\n";
+
+        let mut emitted = false;
+        maybe_emit_auth_required(
+            &config,
+            Some(&agent),
+            failure,
+            TerminalId(41),
+            &mut emitted,
+            false, // past the startup window — prefilter path
+        )
+        .await;
+        assert!(emitted, "a late auth failure must still be detected");
+
+        let mut emitted = false;
+        maybe_emit_auth_required(
+            &config,
+            Some(&agent),
+            b"plain streaming output with no such markers\r\n",
+            TerminalId(42),
+            &mut emitted,
+            false,
+        )
+        .await;
+        assert!(!emitted);
+    }
+
     /// #1215: a snippet-seeded Spawn that collapses onto the live
     /// singleton agent still records the snippet into the recent MRU +
     /// per-workspace sent history — usage is tracked at the selection
@@ -10097,6 +10210,7 @@ mod tests {
             &key,
             true,
             &mut nudged,
+            true,
         );
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -10120,6 +10234,7 @@ mod tests {
             &key,
             true,
             &mut nudged,
+            true,
         );
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(mock.writes_for(&key).await, vec![b"1".to_vec()]);

@@ -32,11 +32,17 @@ pub struct AgentRunHandle {
     pub working_claim_holder: Option<String>,
 }
 
-/// Per-run follow-up backlog. Structured agents process turns serially; a
-/// client that submits faster than the child can finish must receive overload
-/// errors instead of retaining arbitrary prompts for the lifetime of the
-/// daemon.
+/// Per-run follow-up backlog. Structured agents process turns serially;
+/// past this depth a sender WAITS for the run to drain (surfacing a
+/// periodic "still queued" notice) rather than dropping the message —
+/// a typed reply is never destroyed by backpressure (#1249). The bound
+/// keeps memory flat; delivery order is the channel's FIFO.
 pub const AGENT_INPUT_CHANNEL_CAPACITY: usize = 64;
+
+/// How long a queued agent-input send waits before surfacing a "still
+/// queued" notice. The send keeps waiting after each notice — the cap
+/// is a pacing signal, never an admission gate (#1249).
+const AGENT_INPUT_STALL_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub async fn handle_start_agent_run(
     config: &ServerConfig,
@@ -225,12 +231,16 @@ pub async fn handle_start_agent_run(
         mode,
     });
 
+    // The channel was created moments ago with a fresh capacity, so an
+    // awaited send returns immediately unless the child already died —
+    // the one case try_send used to lose the prompt to (#1249): the
+    // agent then started with NO prompt and no resend affordance.
     if let Some(input) = initial_input
-        && let Err(error) = input_tx.try_send(input)
+        && input_tx.send(input).await.is_err()
     {
         let _ = config.bus.send(Event::provider_error_retryable(
             "agent_run:input",
-            format!("initial agent input was not accepted: {error}"),
+            "the agent exited before its initial prompt could be delivered — start it again to resend",
         ));
     }
     if claims_workspace {
@@ -267,22 +277,35 @@ pub async fn handle_send_agent_input(
         };
         run.input_tx.clone()
     };
-    match input_tx.try_send(message) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            let _ = config.bus.send(Event::provider_error_retryable(
-                "agent_run:input",
-                format!(
-                    "agent run {:?} input queue is full; wait for the current turn and retry",
-                    run_id
-                ),
-            ));
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            let _ = config.bus.send(Event::provider_error_permanent(
-                "agent_run",
-                format!("agent run {:?} input channel is closed", run_id),
-            ));
+    // Never drop what the user typed (advise-never-forbid, #1249): this
+    // runs on the Detached lane in its own task, so it can simply wait
+    // for a queue slot instead of refusing with "queue is full; retry".
+    // A wedged consumer surfaces as a periodic "still queued" notice —
+    // honest pacing, not a refusal — and delivery resumes the moment
+    // the run drains.
+    let mut send = std::pin::pin!(input_tx.send(message));
+    loop {
+        match tokio::time::timeout(AGENT_INPUT_STALL_NOTICE_AFTER, &mut send).await {
+            Ok(Ok(())) => return,
+            Ok(Err(_closed)) => {
+                let _ = config.bus.send(Event::provider_error_permanent(
+                    "agent_run",
+                    format!(
+                        "agent run {:?} has ended — the message was not delivered; start a new run and resend it",
+                        run_id
+                    ),
+                ));
+                return;
+            }
+            Err(_elapsed) => {
+                let _ = config.bus.send(Event::provider_error_retryable(
+                    "agent_run:input",
+                    format!(
+                        "message to agent run {:?} is queued behind a busy turn — it will be delivered when the agent catches up",
+                        run_id
+                    ),
+                ));
+            }
         }
     }
 }

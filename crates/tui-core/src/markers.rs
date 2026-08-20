@@ -208,7 +208,7 @@ const ROW_BADGES: &[MarkerDoc] = &[
     MarkerDoc {
         label: "⚑",
         meaning: "This GitHub issue or PR is claimed by an agent, including agents running from another lazybox machine.",
-        when: "Shows while the task carries the shared `working` label; starting another agent asks for confirmation.",
+        when: "Shows while the task carries an active owner-qualified lazybox claim (or a conservatively preserved legacy `working` label); starting another agent names known device/session owners and asks for confirmation.",
     },
     MarkerDoc {
         label: "⚡",

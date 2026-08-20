@@ -1067,6 +1067,23 @@ impl GhClient {
         })
     }
 
+    /// Test-only: a stub client whose transport points at a caller-owned
+    /// mock HTTP server. Lets server-side crash-journey tests (working-claim
+    /// maintenance) drive the real label mutation paths against canned
+    /// responses without the network. Retry middleware is disabled so
+    /// request-count assertions measure our calls, not octocrab's.
+    #[doc(hidden)]
+    pub fn stub_with_base_uri_for_tests(base_uri: &str) -> Result<Self, GhError> {
+        let inner = Octocrab::builder()
+            .base_uri(base_uri)
+            .map_err(GhError::Api)?
+            .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
+            .build()
+            .map_err(GhError::Api)?;
+        let stub = Self::stub_for_tests("test", "fp")?;
+        Ok(Self { inner, ..stub })
+    }
+
     /// Test-only: a stub client whose cached budget already contains a
     /// remote rate-limit observation.
     #[doc(hidden)]
@@ -4226,104 +4243,154 @@ impl GhClient {
         Ok(())
     }
 
-    /// Apply or clear lazybox's GitHub-native fleet claim on the headline
-    /// issue/PR. The repository label is created on first use, so a fresh
-    /// repository does not turn agent coordination into a silent no-op.
-    ///
-    /// Creation and removal are idempotent across machines: a racing label
-    /// creator's 422 and an already-absent label's 404 both mean the desired
-    /// state is already available for the following operation.
-    pub async fn set_working_claim(
-        &self,
-        task: &lazybox_core::Task,
-        claimed: bool,
-    ) -> Result<(), GhError> {
-        let repo = task
-            .repo
-            .as_deref()
-            .ok_or_else(|| GhError::Graphql("working claim: task has no repository".into()))?;
-        self.set_working_claim_target(&task.id, repo, claimed).await
-    }
-
-    /// Target-level fleet-claim mutation used by teardown. The owning daemon
-    /// records this immutable id/repository pair when it acquires a claim, so
-    /// it can clear the same issue even if the workspace headline later
-    /// changes to a PR or the workspace row is removed.
-    pub async fn set_working_claim_target(
+    /// Converge one owner/session-qualified claim on an issue or PR. Applying
+    /// a heartbeat creates or renames only that identity's repository label,
+    /// attaches the desired expiry, and removes superseded expiries for the
+    /// same identity. Clearing removes every attached expiry for that identity.
+    pub async fn sync_working_claim_target(
         &self,
         task_id: &lazybox_core::TaskId,
         repo: &str,
-        claimed: bool,
+        desired_label: Option<&str>,
+        device: &str,
+        session: &str,
     ) -> Result<(), GhError> {
-        if task_id.source != lazybox_core::GITHUB_SOURCE {
-            return Err(GhError::Graphql(format!(
-                "working claim: task source {:?} is not GitHub",
-                task_id.source
-            )));
-        }
-        let (owner, name) = repo.split_once('/').ok_or_else(|| {
-            GhError::Graphql(format!("working claim: invalid repository `{repo}`"))
-        })?;
-        let (task_repo, number) = task_id
-            .key
-            .rsplit_once('#')
-            .and_then(|(task_repo, number)| {
-                number.parse::<u64>().ok().map(|number| (task_repo, number))
-            })
-            .ok_or_else(|| {
-                GhError::Graphql(format!(
-                    "working claim: cannot parse issue number from `{}`",
-                    task_id.key
-                ))
-            })?;
-        if task_repo != repo {
-            return Err(GhError::Graphql(format!(
-                "working claim: task key repository `{task_repo}` does not match `{repo}`"
-            )));
-        }
-
-        let labels = self.list_labels_for_repo(owner, name).await?;
-        let existing_name = labels
-            .iter()
-            .find(|label| {
-                label
-                    .name
-                    .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
-            })
-            .map(|label| label.name.clone());
+        let (owner, name, number) = working_claim_target(task_id, repo)?;
         let handler = self.inner.issues(owner, name);
+        self.acquire_or_block("list issue working labels")?;
+        let mut page = handler
+            .list_labels_for_issue(number)
+            .per_page(100)
+            .send()
+            .await
+            .map_err(GhError::Api)?;
+        let mut attached = Vec::new();
+        loop {
+            attached.extend(page.items.iter().map(|label| label.name.clone()));
+            if page.next.is_none() {
+                break;
+            }
+            self.acquire_or_block("list issue working labels next page")?;
+            page = match self
+                .inner
+                .get_page::<octocrab::models::Label>(&page.next)
+                .await
+                .map_err(GhError::Api)?
+            {
+                Some(next) => next,
+                None => break,
+            };
+        }
 
-        if claimed {
-            let label_name = match existing_name {
-                Some(label) => label,
-                None => {
-                    self.acquire_or_block("create working label")?;
+        let owned = attached
+            .into_iter()
+            .filter(|name| {
+                lazybox_core::QualifiedWorkingClaim::parse(name)
+                    .is_some_and(|claim| claim.device == device && claim.session == session)
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(desired) = desired_label {
+            let parsed = lazybox_core::QualifiedWorkingClaim::parse(desired).ok_or_else(|| {
+                GhError::Graphql("working claim: desired label is malformed".into())
+            })?;
+            if parsed.device != device || parsed.session != session {
+                return Err(GhError::Graphql(
+                    "working claim: desired label does not match its owner".into(),
+                ));
+            }
+            if !owned.iter().any(|name| name == desired) {
+                let mut available = false;
+                if let Some(previous) = owned.first() {
+                    self.acquire_or_block("renew working claim label")?;
                     match handler
-                        .create_label(
-                            lazybox_core::WORKING_LABEL_NAME,
+                        .update_label(
+                            previous,
+                            desired,
                             "fbca04",
-                            "Claimed by a lazybox agent; cleared when the session ends.",
+                            "Claimed by a lazybox agent; expires without a heartbeat.",
                         )
                         .await
                     {
-                        Ok(label) => label.name,
-                        Err(error) if octocrab_error_status(&error) == Some(422) => {
-                            // Another box created the same repository label
-                            // between our list and create requests.
-                            lazybox_core::WORKING_LABEL_NAME.to_string()
-                        }
+                        Ok(_) => available = true,
+                        Err(error) if matches!(octocrab_error_status(&error), Some(404 | 422)) => {}
                         Err(error) => return Err(GhError::Api(error)),
                     }
                 }
-            };
-            self.acquire_or_block("add working label")?;
-            handler
-                .add_labels(number, &[label_name])
-                .await
-                .map_err(GhError::Api)?;
-        } else if let Some(label_name) = existing_name {
-            self.acquire_or_block("remove working label")?;
-            if let Err(error) = handler.remove_label(number, label_name).await
+                if !available {
+                    self.acquire_or_block("create working claim label")?;
+                    match handler
+                        .create_label(
+                            desired,
+                            "fbca04",
+                            "Claimed by a lazybox agent; expires without a heartbeat.",
+                        )
+                        .await
+                    {
+                        Ok(_) => {}
+                        Err(error) if octocrab_error_status(&error) == Some(422) => {}
+                        Err(error) => return Err(GhError::Api(error)),
+                    }
+                }
+                self.acquire_or_block("add working claim label")?;
+                handler
+                    .add_labels(number, &[desired.to_string()])
+                    .await
+                    .map_err(GhError::Api)?;
+            }
+            // Superseded expiries are deleted at the repository level: a
+            // qualified label names exactly one claim lease, so once it is
+            // stale its *definition* is garbage too — detaching alone would
+            // leak one dead label into the repo's label picker per heartbeat
+            // (the rename path above already carried the definition forward).
+            for previous in owned.iter().filter(|name| name.as_str() != desired) {
+                self.acquire_or_block("delete working claim label")?;
+                if let Err(error) = handler.delete_label(previous).await
+                    && octocrab_error_status(&error) != Some(404)
+                {
+                    return Err(GhError::Api(error));
+                }
+            }
+        } else {
+            // Release deletes the repository-level definition (which also
+            // detaches it from the issue) so a finished claim leaves nothing
+            // behind in the repo's label picker.
+            for label in &owned {
+                self.acquire_or_block("delete working claim label")?;
+                if let Err(error) = handler.delete_label(label).await
+                    && octocrab_error_status(&error) != Some(404)
+                {
+                    return Err(GhError::Api(error));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove exact expired qualified labels without interpreting or touching
+    /// the legacy `working` label or any still-live owner. Deletion happens at
+    /// the repository level — an expired lease's label definition is unique to
+    /// that lease, so deleting the definition both detaches it from the issue
+    /// and keeps dead labels from accumulating in the repo's label picker.
+    pub async fn remove_working_claim_labels_target(
+        &self,
+        task_id: &lazybox_core::TaskId,
+        repo: &str,
+        labels: &[String],
+    ) -> Result<(), GhError> {
+        if labels.is_empty() {
+            return Ok(());
+        }
+        let (owner, name, _number) = working_claim_target(task_id, repo)?;
+        let handler = self.inner.issues(owner, name);
+        for label in labels {
+            if lazybox_core::QualifiedWorkingClaim::parse(label).is_none() {
+                return Err(GhError::Graphql(
+                    "working claim cleanup: refusing malformed or legacy label".into(),
+                ));
+            }
+            self.acquire_or_block("delete working claim label")?;
+            if let Err(error) = handler.delete_label(label).await
                 && octocrab_error_status(&error) != Some(404)
             {
                 return Err(GhError::Api(error));
@@ -4498,6 +4565,39 @@ fn octocrab_error_status(error: &octocrab::Error) -> Option<u16> {
         octocrab::Error::GitHub { source, .. } => Some(source.status_code.as_u16()),
         _ => None,
     }
+}
+
+fn working_claim_target<'a>(
+    task_id: &lazybox_core::TaskId,
+    repo: &'a str,
+) -> Result<(&'a str, &'a str, u64), GhError> {
+    if task_id.source != lazybox_core::GITHUB_SOURCE {
+        return Err(GhError::Graphql(format!(
+            "working claim: task source {:?} is not GitHub",
+            task_id.source
+        )));
+    }
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| GhError::Graphql(format!("working claim: invalid repository `{repo}`")))?;
+    let (task_repo, number) = task_id
+        .key
+        .rsplit_once('#')
+        .and_then(|(task_repo, number)| {
+            number.parse::<u64>().ok().map(|number| (task_repo, number))
+        })
+        .ok_or_else(|| {
+            GhError::Graphql(format!(
+                "working claim: cannot parse issue number from `{}`",
+                task_id.key
+            ))
+        })?;
+    if task_repo != repo {
+        return Err(GhError::Graphql(format!(
+            "working claim: task key repository `{task_repo}` does not match `{repo}`"
+        )));
+    }
+    Ok((owner, name, number))
 }
 
 impl lazybox_core::TaskProvider for GhClient {
@@ -6082,6 +6182,42 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_recording_response_server(
+        bodies: Vec<&'static str>,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut served = 0usize;
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(connection) => connection,
+                    Err(_) => continue,
+                };
+                let body = bodies[served.min(bodies.len() - 1)];
+                served += 1;
+                let requests = requests.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 8192];
+                    let read = sock.read(&mut buf).await.unwrap_or(0);
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&buf[..read]).into_owned());
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     async fn spawn_sequenced_http_response_server(
         responses: Vec<(&'static str, &'static str, &'static str, &'static str)>,
     ) -> String {
@@ -7046,12 +7182,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn working_claim_creates_missing_repo_label_then_applies_it() {
+    async fn working_claim_creates_missing_qualified_label_then_applies_it() {
+        const LABEL: &str = "lazybox:w:0123456789abcdef0123:1234567890:00000001";
         const CREATED: &str = r#"{
             "id": 1,
             "node_id": "LA_1",
-            "url": "https://api.github.test/repos/o/r/labels/working",
-            "name": "working",
+            "url": "https://api.github.test/repos/o/r/labels/lazybox",
+            "name": "lazybox:w:0123456789abcdef0123:1234567890:ffffffff",
             "description": "Claimed by a lazybox agent",
             "color": "fbca04",
             "default": false
@@ -7059,43 +7196,83 @@ mod tests {
         const APPLIED: &str = r#"[{
             "id": 1,
             "node_id": "LA_1",
-            "url": "https://api.github.test/repos/o/r/labels/working",
-            "name": "working",
+            "url": "https://api.github.test/repos/o/r/labels/lazybox",
+            "name": "lazybox:w:0123456789abcdef0123:1234567890:ffffffff",
             "description": "Claimed by a lazybox agent",
             "color": "fbca04",
             "default": false
         }]"#;
-        const LABELS_QUERY: &str = r#"{"data":{"repository":{"labels":{"nodes":[]}}}}"#;
-        let base_uri = spawn_sequenced_response_server(vec![LABELS_QUERY, CREATED, APPLIED]).await;
+        let base_uri = spawn_sequenced_response_server(vec!["[]", CREATED, APPLIED]).await;
         let client = make_client(&base_uri);
         let task = task_without_node_id(TaskKind::Issue);
 
         client
-            .set_working_claim(&task, true)
+            .sync_working_claim_target(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                Some(LABEL),
+                "0123456789abcdef0123",
+                "1234567890",
+            )
             .await
             .expect("a fresh repository must create and apply the coordination label");
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn working_claim_clear_is_idempotent_when_repo_has_no_label() {
-        const LABELS_QUERY: &str = r#"{"data":{"repository":{"labels":{"nodes":[]}}}}"#;
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let base_uri = spawn_counting_response_server(
-            "200 OK",
-            "application/json",
-            "",
-            LABELS_QUERY,
-            hits.clone(),
-        )
-        .await;
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", "[]", hits.clone())
+                .await;
         let client = make_client(&base_uri);
         let task = task_without_node_id(TaskKind::Issue);
 
         client
-            .set_working_claim(&task, false)
+            .sync_working_claim_target(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                None,
+                "0123456789abcdef0123",
+                "1234567890",
+            )
             .await
             .expect("clearing a missing claim is already success");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clearing_one_machine_claim_never_removes_the_racing_machine() {
+        const ATTACHED: &str = r#"[
+          {"id":1,"node_id":"LA_1","url":"https://api.github.test/repos/o/r/labels/one","name":"lazybox:w:0123456789abcdef0123:1234567890:ffffffff","description":null,"color":"fbca04","default":false},
+          {"id":2,"node_id":"LA_2","url":"https://api.github.test/repos/o/r/labels/two","name":"lazybox:w:fedcba9876543210fedc:aaaaaaaaaa:ffffffff","description":null,"color":"fbca04","default":false},
+          {"id":3,"node_id":"LA_3","url":"https://api.github.test/repos/o/r/labels/working","name":"working","description":null,"color":"fbca04","default":false}
+        ]"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri =
+            spawn_recording_response_server(vec![ATTACHED, "[]"], requests.clone()).await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        client
+            .sync_working_claim_target(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                None,
+                "0123456789abcdef0123",
+                "1234567890",
+            )
+            .await
+            .expect("one owner can release while the racing owner remains");
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "one list plus one owner-specific delete");
+        assert!(requests[1].contains("1234567890"), "{}", requests[1]);
+        assert!(!requests[1].contains("aaaaaaaaaa"), "{}", requests[1]);
+        // Release must delete the repository-level *definition*, not merely
+        // detach the label from the issue — a detach-only release leaks one
+        // dead label into the repo's label picker per agent spawn.
+        assert!(requests[1].starts_with("DELETE "), "{}", requests[1]);
+        assert!(!requests[1].contains("/issues/"), "{}", requests[1]);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7105,7 +7282,13 @@ mod tests {
         task.id.source = "linear".to_string();
 
         let error = client
-            .set_working_claim(&task, true)
+            .sync_working_claim_target(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                None,
+                "0123456789abcdef0123",
+                "1234567890",
+            )
             .await
             .unwrap_err()
             .to_string();
@@ -7120,12 +7303,65 @@ mod tests {
         task.repo = Some("other/repository".to_string());
 
         let error = client
-            .set_working_claim(&task, true)
+            .sync_working_claim_target(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                None,
+                "0123456789abcdef0123",
+                "1234567890",
+            )
             .await
             .unwrap_err()
             .to_string();
 
         assert!(error.contains("does not match"), "{error}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn expired_claim_cleanup_refuses_the_legacy_label_before_http() {
+        let client = make_client("http://127.0.0.1:1");
+        let task = task_without_node_id(TaskKind::Issue);
+
+        let error = client
+            .remove_working_claim_labels_target(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                &[lazybox_core::WORKING_LABEL_NAME.to_string()],
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("refusing malformed or legacy label"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn expired_claim_cleanup_removes_the_exact_qualified_label() {
+        const LABEL: &str = "lazybox:w:0123456789abcdef0123:1234567890:ffffffff";
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_recording_response_server(vec!["[]"], requests.clone()).await;
+        let client = make_client(&base_uri);
+        let task = task_without_node_id(TaskKind::Issue);
+
+        client
+            .remove_working_claim_labels_target(
+                &task.id,
+                task.repo.as_deref().unwrap(),
+                &[LABEL.to_string()],
+            )
+            .await
+            .expect("an expired qualified label can be removed idempotently");
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].contains("1234567890"), "{}", requests[0]);
+        // Expiry cleanup deletes the repo-level definition so expired leases
+        // never accumulate in the repo's label picker.
+        assert!(requests[0].starts_with("DELETE "), "{}", requests[0]);
+        assert!(!requests[0].contains("/issues/"), "{}", requests[0]);
     }
 
     /// Reviewer mutation: `request_reviewers` first resolves the login

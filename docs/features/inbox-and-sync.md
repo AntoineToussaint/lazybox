@@ -50,6 +50,62 @@ one PR, its linked issues, merged activity, and zero-or-more terminal
 
 ---
 
+## Fleet working claims
+
+**Status:** beta — the crash journeys (dead-holder release, live-holder
+heartbeat, foreign-expired cleanup) are covered by automated tests against the
+mock backend; the multi-box checklist below is a manual acceptance pass.
+**Crate(s):** `core` (claim label codec), `gh-provider` (qualified label mutation), `server` (durability + heartbeat), `tui-core` / `tui` (filter, guard, glyph)
+**Config / flags:** —
+**Key bindings:** `f` filter (`claimed`), any agent-spawn action invokes the guard
+
+### What it does
+
+Every writable agent publishes its own GitHub label in the form
+`lazybox:w:<device>:<claim-session>:<expiry>`. The device token comes from the
+box's stable Ed25519 identity. Multiple machines and sessions can therefore
+claim the same task at once without sharing a bit that either machine could
+clear on the other's behalf. The sidebar aggregates all live claims into the
+`⚑` claim glyph in the status column: a single active owner renders as
+`⚑ dddd/ssss` (device/session prefixes), several as `⚑×N`, and a claim with
+no active qualified owner (legacy label, or an expired-but-preserved lease)
+stays the bare glyph. The spawn guard lists full device/session provenance.
+
+The claim never blocks anything: spawning onto a claimed task asks one
+confirmation naming the owners and then proceeds — advise, never forbid.
+
+### Heartbeat and crash policy
+
+Claim intent is written to `state.db` before the GitHub mutation and is keyed
+to the recoverable terminal or structured run. A live daemon heartbeats every
+15 minutes and extends the expiry to one hour. Normal teardown deletes the
+repository-level label definition for every expiry belonging to that exact
+device/session identity (so releases never accumulate dead entries in the
+repo's label picker). After four missed heartbeats, any polling lazybox
+daemon may delete the expired qualified label; the operation is exact-label
+and idempotent, so a concurrent renewal or a second owner is unaffected.
+Heartbeat/sync failures (offline, GitHub down) surface as retryable notices
+debounced to one per workspace per hour — the claim self-heals when
+connectivity returns.
+
+The legacy exact `working` label has no ownership or expiry proof. Lazybox
+continues to surface and guard it with the same `⚑` glyph, but never adopts,
+renews, expires, or deletes it. Recovered agents publish a new qualified
+claim alongside it. **Upgrade note:** builds before owner-qualified claims
+cleared the shared `working` label on agent exit; this build intentionally
+does not, so a `working` label left by a pre-upgrade lazybox (or applied by
+hand) must be removed manually on GitHub once its agent is gone.
+
+### Test checklist (manual, multi-box)
+
+- [ ] Start agents for one task on two boxes; both owners appear and either box can exit without clearing the other.
+- [ ] Restart a daemon with a surviving terminal; the same durable claim is renewed and cleared on later exit.
+- [ ] Stop heartbeats; the qualified label becomes inactive after one hour and is removed on maintenance.
+- [ ] Add an exact `working` label manually; it remains after agent teardown and TTL cleanup.
+- [ ] Select `claimed` in the filter menu and confirm every row showing the `⚑` glyph matches.
+
+---
+
 ## Provider polling / sync loop
 
 **Status:** stable

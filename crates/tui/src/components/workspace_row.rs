@@ -733,19 +733,14 @@ fn abbreviate_label(name: &str) -> String {
 /// cursor row, matching `cell_title`.
 fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
     const MAX_CHIPS: usize = 3;
+    let is_internal_claim = |label: &lazybox_core::Label| {
+        ctx.task.is_some_and(|task| {
+            task.id.source == lazybox_core::GITHUB_SOURCE
+                && lazybox_core::is_working_claim_label_name(&label.name)
+        })
+    };
     let labels = match ctx.task.map(|task| task.labels.as_slice()) {
-        Some(labels)
-            if labels.iter().any(|label| {
-                !ctx.task.is_some_and(|task| {
-                    task.has_working_claim()
-                        && label
-                            .name
-                            .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
-                })
-            }) =>
-        {
-            labels
-        }
+        Some(labels) if labels.iter().any(|label| !is_internal_claim(label)) => labels,
         _ => return Vec::new(),
     };
     let dim = !ctx.is_cursor && ctx.is_stale_issue();
@@ -756,14 +751,7 @@ fn label_spans(ctx: &WorkspaceRowCtx<'_>) -> Vec<Span<'static>> {
             style
         }
     };
-    let visible = labels.iter().filter(|label| {
-        !ctx.task.is_some_and(|task| {
-            task.has_working_claim()
-                && label
-                    .name
-                    .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
-        })
-    });
+    let visible = labels.iter().filter(|label| !is_internal_claim(label));
     let total = visible.clone().count();
     let shown = visible.take(MAX_CHIPS);
     // Upper bound: MAX_CHIPS chips × (space + `[` + name + `]`) +
@@ -1266,6 +1254,17 @@ fn cell_track_main(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
+/// First four characters of an owner id segment — device and session ids are
+/// lowercase hex, but truncate on a char boundary anyway so a malformed label
+/// can never panic the renderer.
+fn owner_prefix(segment: &str) -> &str {
+    let end = segment
+        .char_indices()
+        .nth(4)
+        .map_or(segment.len(), |(idx, _)| idx);
+    &segment[..end]
+}
+
 fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // CI/review pills only exist for a workspace with an upstream task.
     // The passive badges (`⎇ local` / `✎` / `]N` / `ARM` / `FIX` / `⤓main`) that
@@ -1298,10 +1297,26 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 .fg(ctx.theme.warn)
                 .add_modifier(Modifier::BOLD)
         };
-        spans.push(Span::styled(
-            format!(" {} ", crate::components::sidebar::CLAIM_GLYPH),
-            style,
-        ));
+        // Owner provenance rides the claim glyph (#1180 on the #1181 ⚑
+        // presentation): one active qualified owner shows `⚑ dev/sess`,
+        // several show `⚑×N`, and a claim with no active qualified owner
+        // (legacy `working` label, or expired-but-preserved leases) stays
+        // the bare glyph.
+        let active = ctx
+            .task
+            .map(|task| task.active_qualified_working_claims(chrono::Utc::now()))
+            .unwrap_or_default();
+        let glyph = crate::components::sidebar::CLAIM_GLYPH;
+        let label = match active.as_slice() {
+            [owner] => format!(
+                " {glyph} {}/{} ",
+                owner_prefix(&owner.device),
+                owner_prefix(&owner.session)
+            ),
+            owners if !owners.is_empty() => format!(" {glyph}×{} ", owners.len()),
+            _ => format!(" {glyph} "),
+        };
+        spans.push(Span::styled(label, style));
     }
     if let Some(p) = primary {
         spans.push(Span::styled(p.label, p.style));
@@ -2407,6 +2422,76 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect();
         assert_eq!(labels, " [bug]");
+    }
+
+    #[test]
+    fn qualified_working_claim_pill_identifies_device_and_session() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.review = ReviewStatus::None;
+        task.ci = CiStatus::None;
+        task.state = TaskState::Open;
+        task.labels = vec![lazybox_core::Label::new(
+            lazybox_core::qualified_working_claim_label(
+                "0123456789abcdef0123456789abcdef",
+                uuid::Uuid::parse_str("12345678-90ab-cdef-1234-567890abcdef").unwrap(),
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            )
+            .unwrap(),
+        )];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        let status: String = cell_status(&ctx)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(
+            status,
+            format!(" {} 0123/1234 ", crate::components::sidebar::CLAIM_GLYPH)
+        );
+        assert!(label_spans(&ctx).is_empty());
+    }
+
+    #[test]
+    fn multiple_qualified_owners_collapse_to_a_counted_claim_glyph() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.review = ReviewStatus::None;
+        task.ci = CiStatus::None;
+        task.state = TaskState::Open;
+        let expires = chrono::Utc::now() + chrono::Duration::hours(1);
+        task.labels = vec![
+            lazybox_core::Label::new(
+                lazybox_core::qualified_working_claim_label(
+                    "0123456789abcdef0123456789abcdef",
+                    uuid::Uuid::from_u128(1),
+                    expires,
+                )
+                .unwrap(),
+            ),
+            lazybox_core::Label::new(
+                lazybox_core::qualified_working_claim_label(
+                    "fedcba9876543210fedcba9876543210",
+                    uuid::Uuid::from_u128(2),
+                    expires,
+                )
+                .unwrap(),
+            ),
+        ];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+
+        let status: String = cell_status(&ctx)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(
+            status,
+            format!(" {}×2 ", crate::components::sidebar::CLAIM_GLYPH)
+        );
     }
 
     #[test]

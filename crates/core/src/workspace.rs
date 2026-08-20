@@ -42,6 +42,16 @@ use uuid::Uuid;
 /// different spellings.
 pub const WORKING_LABEL_NAME: &str = "working";
 
+/// Prefix for owner-qualified GitHub fleet claims. The remainder encodes a
+/// stable box fingerprint, a claim-session fingerprint, and an expiry.
+pub const WORKING_CLAIM_LABEL_PREFIX: &str = "lazybox:w:";
+
+/// A live daemon renews each qualified claim every 15 minutes. Four missed
+/// heartbeats therefore leave a crashed or abandoned claim eligible for
+/// cleanup after one hour.
+pub const WORKING_CLAIM_HEARTBEAT_SECS: i64 = 15 * 60;
+pub const WORKING_CLAIM_TTL_SECS: i64 = 60 * 60;
+
 /// Stable identifier for a workspace. Human-readable so it survives
 /// renames and shows up well in logs / UIs ("fix-auth-2026-04").
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -944,8 +954,8 @@ impl Workspace {
             .find_map(|task| task.parent.as_ref())
     }
 
-    /// Whether the headline task is claimed by an agent through the shared
-    /// [`WORKING_LABEL_NAME`] convention.
+    /// Whether the headline task has an active qualified claim or a
+    /// conservatively preserved legacy [`WORKING_LABEL_NAME`] claim.
     pub fn is_claimed(&self) -> bool {
         self.primary_task().is_some_and(Task::has_working_claim)
     }

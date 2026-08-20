@@ -15,6 +15,7 @@ pub(super) struct ExecutedSpawn {
     pub(super) kind: TerminalKind,
     pub(super) initial_prompt: Option<String>,
     pub(super) terminal_id: TerminalId,
+    pub(super) owning_session: Option<lazybox_core::SessionId>,
     pub(super) state_durability: Option<AgentStateDurability>,
     pub(super) unattended: bool,
 }
@@ -315,6 +316,7 @@ pub(super) async fn execute_spawn_plan(
         kind,
         initial_prompt,
         terminal_id,
+        owning_session,
         state_durability,
         unattended: skip_permissions,
     }))

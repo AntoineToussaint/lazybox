@@ -210,22 +210,6 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::set_labels(c, ws, names).await,
         }
     }
-    pub(crate) async fn set_working_claim(
-        &self,
-        target: &crate::working_claims::WorkingClaimTarget,
-        claimed: bool,
-    ) -> Result<(), lazybox_core::ProviderError> {
-        match self {
-            Self::Github(c) => c
-                .set_working_claim_target(&target.id, &target.repo, claimed)
-                .await
-                .map_err(Into::into),
-            Self::Linear(c) => Err(lazybox_core::ProviderError::unsupported(
-                lazybox_core::TaskProvider::name(c),
-                "set_working_claim",
-            )),
-        }
-    }
     pub async fn post_reply(
         &self,
         ws: &lazybox_core::Workspace,
@@ -1238,181 +1222,6 @@ pub async fn handle_set_labels(
     detach_mutation(async move { set_labels_task(&config, workspace_key, names).await });
 }
 
-/// Mirror an agent's lifecycle into GitHub's shared `working` label.
-/// Remote success is committed locally and broadcast immediately so every
-/// attached client sees the `WORK` pill without waiting for the next poll.
-/// Any failure is a visible provider error: coordination must never fail
-/// silently while an agent continues editing the task.
-pub(crate) async fn sync_working_claim(
-    config: &ServerConfig,
-    workspace_key: WorkspaceKey,
-    claimed: bool,
-) {
-    if !config.working_claims_enabled {
-        return;
-    }
-    let target = if claimed {
-        let Some(workspace) = load_workspace(config, &workspace_key) else {
-            // Provider-backed workspace keys are generated as
-            // `github-<owner>-<repo>-<number>`. Preserve the visible spawn
-            // error for that owned namespace, while scratch/custom keys
-            // simply have no upstream claim target.
-            if workspace_key
-                .as_str()
-                .starts_with(&format!("{}-", lazybox_gh::SOURCE))
-            {
-                emit_working_claim_error(
-                    config,
-                    &workspace_key,
-                    claimed,
-                    "workspace no longer exists",
-                );
-            }
-            return;
-        };
-        let Some(task) = workspace
-            .primary_task()
-            .filter(|task| task.id.source == lazybox_core::GITHUB_SOURCE)
-        else {
-            return;
-        };
-        let Some(target) = crate::working_claims::WorkingClaimTarget::from_task(task) else {
-            emit_working_claim_error(config, &workspace_key, claimed, "task has no repository");
-            return;
-        };
-        match config
-            .working_claims
-            .plan_acquire(&workspace_key, workspace.is_claimed())
-        {
-            crate::working_claims::AcquirePlan::Apply => {}
-            crate::working_claims::AcquirePlan::KeepOwned => {
-                tracing::debug!(workspace = %workspace_key, "working claim already owned locally");
-                return;
-            }
-            crate::working_claims::AcquirePlan::PreserveExternal => {
-                tracing::info!(workspace = %workspace_key, "preserving pre-existing external working claim");
-                return;
-            }
-        }
-        target
-    } else {
-        match config.working_claims.plan_release(&workspace_key) {
-            crate::working_claims::ReleasePlan::ClearOwned(target) => target,
-            crate::working_claims::ReleasePlan::PreserveExternal => {
-                tracing::info!(workspace = %workspace_key, "last local agent exited; preserving external working claim");
-                return;
-            }
-            crate::working_claims::ReleasePlan::NothingOwned => return,
-        }
-    };
-    let provider = match resolve_gh_client_result(config)
-        .await
-        .map(ProviderHandle::Github)
-    {
-        Ok(provider) => provider,
-        Err(error) => {
-            emit_working_claim_error(config, &workspace_key, claimed, &error);
-            return;
-        }
-    };
-    // A claim is part of spawn/teardown ordering, so it stays inline with the
-    // workspace-agent lock. Do not use the general ten-minute mutation retry
-    // queue here: that would freeze this client's sequential command stream
-    // and delay a racing teardown for the whole retry budget.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(20),
-        provider.set_working_claim(&target, claimed),
-    )
-    .await
-    {
-        Ok(Ok(())) => {
-            if claimed {
-                config
-                    .working_claims
-                    .record_acquired(&workspace_key, target.clone());
-            } else {
-                config.working_claims.record_cleared(&workspace_key);
-            }
-        }
-        Ok(Err(error)) => {
-            emit_working_claim_error(
-                config,
-                &workspace_key,
-                claimed,
-                &humanize_mutation_failure("working claim", &error),
-            );
-            return;
-        }
-        Err(_) => {
-            emit_working_claim_error(
-                config,
-                &workspace_key,
-                claimed,
-                "GitHub did not respond within 20 seconds",
-            );
-            return;
-        }
-    }
-
-    let outcome = if load_workspace(config, &workspace_key).is_some() {
-        apply_and_commit(config, &workspace_key, |fresh| {
-            apply_working_label(fresh, &target.id, claimed);
-        })
-        .await
-    } else {
-        // Workspace removal can win the race with terminal teardown. The
-        // upstream label still belongs to this daemon and was cleared above;
-        // there is intentionally no deleted row to project into.
-        crate::polling::MutationOutcome::Missing
-    };
-    // The upstream mutation succeeded even if the optimistic store commit
-    // raced or failed. Force a provider refresh in either case so the local
-    // row converges instead of displaying stale ownership indefinitely.
-    config.poll.wake(true);
-    if outcome.is_applied() {
-        tracing::info!(workspace = %workspace_key, claimed, "synchronized working claim");
-    }
-}
-
-fn emit_working_claim_error(
-    config: &ServerConfig,
-    workspace_key: &WorkspaceKey,
-    claimed: bool,
-    reason: &str,
-) {
-    let action = if claimed { "apply" } else { "clear" };
-    let message = format!(
-        "agent coordination failed: could not {action} `working` on {workspace_key}: {reason}"
-    );
-    tracing::warn!(workspace = %workspace_key, claimed, %reason, "working claim synchronization failed");
-    let _ = config
-        .bus
-        .send(Event::provider_error_permanent("claim", message));
-}
-
-fn apply_working_label(workspace: &mut Workspace, target: &lazybox_core::TaskId, claimed: bool) {
-    let Some(task) = workspace.task_by_id_mut(target) else {
-        return;
-    };
-    if task.id.source != lazybox_core::GITHUB_SOURCE {
-        return;
-    }
-    if claimed {
-        if !task.has_label(lazybox_core::WORKING_LABEL_NAME) {
-            task.labels.push(lazybox_core::Label::with_color(
-                lazybox_core::WORKING_LABEL_NAME,
-                "fbca04",
-            ));
-        }
-    } else {
-        task.labels.retain(|label| {
-            !label
-                .name
-                .eq_ignore_ascii_case(lazybox_core::WORKING_LABEL_NAME)
-        });
-    }
-}
-
 async fn set_labels_task(config: &ServerConfig, workspace_key: WorkspaceKey, names: Vec<String>) {
     let emit_err = |msg: &str| {
         let _ = config
@@ -1540,7 +1349,7 @@ pub async fn handle_fetch_requestable_reviewers(
     }
 }
 
-async fn resolve_gh_client_result(config: &ServerConfig) -> Result<GhClient, String> {
+pub(crate) async fn resolve_gh_client_result(config: &ServerConfig) -> Result<GhClient, String> {
     if let Some(client) = config.poll.cached_gh_client() {
         return Ok(client);
     }
@@ -3104,11 +2913,8 @@ pub async fn prefetch_top_pr_details(
 
 #[cfg(test)]
 mod github_target_tests {
-    use super::{apply_working_label, github_target};
-    use lazybox_core::{
-        CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState, Workspace,
-        WorkspaceKey,
-    };
+    use super::github_target;
+    use lazybox_core::{CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     fn task(repo: Option<&str>, key: &str) -> Task {
         Task {
@@ -3177,79 +2983,6 @@ mod github_target_tests {
     fn none_when_the_key_has_no_parseable_number() {
         let t = task(Some("octo/widgets"), "octo/widgets");
         assert_eq!(github_target(&t), None);
-    }
-
-    #[test]
-    fn local_claim_projection_adds_once_and_clears_case_insensitively() {
-        let mut workspace = Workspace::from_task(
-            task(Some("octo/widgets"), "octo/widgets#42"),
-            chrono::Utc::now(),
-        );
-        let target = workspace.primary_task().unwrap().id.clone();
-
-        apply_working_label(&mut workspace, &target, true);
-        apply_working_label(&mut workspace, &target, true);
-        assert!(workspace.is_claimed());
-        assert_eq!(
-            workspace
-                .primary_task()
-                .unwrap()
-                .labels
-                .iter()
-                .filter(|label| label.name.eq_ignore_ascii_case("working"))
-                .count(),
-            1,
-        );
-
-        apply_working_label(&mut workspace, &target, false);
-        assert!(!workspace.is_claimed());
-    }
-
-    #[test]
-    fn local_claim_projection_updates_the_acquired_issue_after_pr_promotion() {
-        let mut issue = task(Some("octo/widgets"), "octo/widgets#42");
-        issue.kind = Some(lazybox_core::TaskKind::Issue);
-        let issue_id = issue.id.clone();
-        let mut workspace = Workspace::from_task(issue, chrono::Utc::now());
-        apply_working_label(&mut workspace, &issue_id, true);
-
-        let mut pr = task(Some("octo/widgets"), "octo/widgets#99");
-        pr.kind = Some(lazybox_core::TaskKind::Pr);
-        workspace.attach_task(pr);
-        assert_ne!(workspace.primary_task().unwrap().id, issue_id);
-
-        apply_working_label(&mut workspace, &issue_id, false);
-
-        assert!(
-            !workspace
-                .task_by_id(&issue_id)
-                .unwrap()
-                .has_label(lazybox_core::WORKING_LABEL_NAME),
-            "teardown must clear the originally acquired issue, not the new PR headline"
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_claim_target_is_a_visible_error() {
-        let mut config = crate::ServerConfig::in_memory();
-        config.working_claims_enabled = true;
-        let mut events = config.bus.subscribe();
-
-        super::sync_working_claim(&config, WorkspaceKey::new("github-owner-repo-1164"), true).await;
-
-        match events.recv().await.expect("claim error event") {
-            lazybox_ipc::Event::ProviderError {
-                source,
-                message,
-                kind,
-                ..
-            } => {
-                assert_eq!(source, "claim");
-                assert_eq!(kind, "permanent");
-                assert!(message.contains("workspace no longer exists"));
-            }
-            other => panic!("expected visible claim error, got {other:?}"),
-        }
     }
 }
 

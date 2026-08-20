@@ -1,6 +1,86 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// An owner-qualified fleet claim decoded from a GitHub label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualifiedWorkingClaim {
+    pub label: String,
+    pub device: String,
+    pub session: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl QualifiedWorkingClaim {
+    pub fn parse(label: &str) -> Option<Self> {
+        let encoded = label.strip_prefix(crate::WORKING_CLAIM_LABEL_PREFIX)?;
+        let mut fields = encoded.split(':');
+        let device = fields.next()?;
+        let session = fields.next()?;
+        let expiry = fields.next()?;
+        if fields.next().is_some()
+            || device.len() != 20
+            || session.len() != 10
+            || expiry.len() != 8
+            || !device
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !session
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            || !expiry
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return None;
+        }
+        let timestamp = i64::from(u32::from_str_radix(expiry, 16).ok()?);
+        Some(Self {
+            label: label.to_string(),
+            device: device.to_string(),
+            session: session.to_string(),
+            expires_at: DateTime::from_timestamp(timestamp, 0)?,
+        })
+    }
+
+    pub fn is_active_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at > now
+    }
+
+    pub fn same_owner(&self, other: &Self) -> bool {
+        self.device == other.device && self.session == other.session
+    }
+}
+
+/// Build the bounded GitHub label name for a box-owned claim. The stable box
+/// id is the existing 128-bit Ed25519 fingerprint; 80 bits are carried
+/// upstream, while the full id remains in the daemon's durable provenance.
+pub fn qualified_working_claim_label(
+    box_id: &str,
+    claim_session: uuid::Uuid,
+    expires_at: DateTime<Utc>,
+) -> Option<String> {
+    if box_id.len() < 20
+        || !box_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let expires = u32::try_from(expires_at.timestamp()).ok()?;
+    let session = claim_session.simple().to_string();
+    Some(format!(
+        "{}{owner}:{session}:{expires:08x}",
+        crate::WORKING_CLAIM_LABEL_PREFIX,
+        owner = &box_id[..20],
+        session = &session[..10],
+    ))
+}
+
+pub fn is_working_claim_label_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(crate::WORKING_LABEL_NAME)
+        || QualifiedWorkingClaim::parse(name).is_some()
+}
+
 /// A unique identifier for a task, scoped by source.
 /// e.g. ("github", "owner/repo#123") or ("linear", "ENG-456")
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -579,14 +659,47 @@ impl Task {
             .any(|label| label.name.eq_ignore_ascii_case(name))
     }
 
-    /// Whether this is a GitHub task carrying lazybox's fleet-claim label.
+    /// Whether this is a GitHub task carrying an active lazybox fleet claim.
     ///
     /// `working` is also a legitimate workflow label in other providers
     /// (notably Linear). Centralizing the source check prevents those tasks
     /// from being rendered as agent-owned, hidden from the ordinary label
     /// chips, or guarded by the GitHub-only spawn confirmation.
     pub fn has_working_claim(&self) -> bool {
-        self.id.source == crate::GITHUB_SOURCE && self.has_label(crate::WORKING_LABEL_NAME)
+        self.has_working_claim_at(Utc::now())
+    }
+
+    pub fn has_working_claim_at(&self, now: DateTime<Utc>) -> bool {
+        self.id.source == crate::GITHUB_SOURCE
+            && (self.has_label(crate::WORKING_LABEL_NAME)
+                || self
+                    .qualified_working_claims()
+                    .any(|claim| claim.is_active_at(now)))
+    }
+
+    pub fn qualified_working_claims(&self) -> impl Iterator<Item = QualifiedWorkingClaim> + '_ {
+        self.labels
+            .iter()
+            .filter_map(|label| QualifiedWorkingClaim::parse(&label.name))
+    }
+
+    pub fn active_qualified_working_claims(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Vec<QualifiedWorkingClaim> {
+        self.qualified_working_claims()
+            .filter(|claim| claim.is_active_at(now))
+            .collect()
+    }
+
+    pub fn expired_working_claim_labels(&self, now: DateTime<Utc>) -> Vec<String> {
+        if self.id.source != crate::GITHUB_SOURCE {
+            return Vec::new();
+        }
+        self.qualified_working_claims()
+            .filter(|claim| !claim.is_active_at(now))
+            .map(|claim| claim.label)
+            .collect()
     }
 
     /// True when this task represents a pull/merge request rather
@@ -1038,6 +1151,56 @@ mod status_tag_tests {
             !task.has_working_claim(),
             "a Linear workflow label is not a GitHub fleet claim"
         );
+    }
+
+    #[test]
+    fn qualified_working_claim_round_trips_with_a_bounded_label() {
+        let expires_at = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let session = uuid::Uuid::parse_str("12345678-90ab-cdef-1234-567890abcdef").unwrap();
+        let label =
+            qualified_working_claim_label("0123456789abcdef0123456789abcdef", session, expires_at)
+                .unwrap();
+
+        assert_eq!(label.len(), 50, "GitHub labels are limited to 50 bytes");
+        let parsed = QualifiedWorkingClaim::parse(&label).unwrap();
+        assert_eq!(parsed.device, "0123456789abcdef0123");
+        assert_eq!(parsed.session, "1234567890");
+        assert_eq!(parsed.expires_at, expires_at);
+    }
+
+    #[test]
+    fn qualified_claim_ttl_is_deterministic_and_legacy_never_expires() {
+        let expires_at = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        let label = qualified_working_claim_label(
+            "0123456789abcdef0123456789abcdef",
+            uuid::Uuid::nil(),
+            expires_at,
+        )
+        .unwrap();
+        let mut task = base();
+        task.id.source = crate::GITHUB_SOURCE.to_string();
+        task.labels = vec![Label::new(label.clone())];
+
+        assert!(task.has_working_claim_at(expires_at - chrono::Duration::seconds(1)));
+        assert!(!task.has_working_claim_at(expires_at));
+        assert_eq!(task.expired_working_claim_labels(expires_at), vec![label]);
+
+        task.labels.push(Label::new("Working"));
+        assert!(task.has_working_claim_at(expires_at + chrono::Duration::days(365)));
+        assert_eq!(task.expired_working_claim_labels(expires_at).len(), 1);
+    }
+
+    #[test]
+    fn lookalike_claim_labels_are_not_adopted_or_expired() {
+        for label in [
+            "lazybox:w:0123456789abcdef0123:1234567890:nothex00",
+            "lazybox:w:0123456789abcdef0123:1234567890:6b49d200:extra",
+            "lazybox:w:0123456789ABCDEF0123:1234567890:6b49d200",
+            "lazybox:working:someone-else",
+        ] {
+            assert!(QualifiedWorkingClaim::parse(label).is_none(), "{label}");
+            assert!(!is_working_claim_label_name(label), "{label}");
+        }
     }
 
     #[test]

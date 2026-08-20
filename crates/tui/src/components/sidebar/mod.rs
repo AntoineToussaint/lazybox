@@ -1812,7 +1812,10 @@ impl Sidebar {
             };
             let mut seen = std::collections::BTreeSet::new();
             for l in &task.labels {
-                if seen.insert(l.name.as_str()) {
+                if !(task.id.source == lazybox_core::GITHUB_SOURCE
+                    && lazybox_core::is_working_claim_label_name(&l.name))
+                    && seen.insert(l.name.as_str())
+                {
                     *labels.entry(l.name.clone()).or_default() += 1;
                 }
             }

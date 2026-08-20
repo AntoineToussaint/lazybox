@@ -271,7 +271,11 @@ pub const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// Maximum concurrent slow command handlers owned by one client connection.
 /// The two long-lived terminal routers are counted separately. When this cap
 /// is reached, new detached mutations are rejected before spawning a task.
-pub const MAX_CONNECTION_MUTATIONS: usize = 32;
+/// Concurrency knob, NOT an admission gate (#1237): commands past it
+/// queue in the serve loop's overflow and spawn as slots free — a git
+/// mutation is never refused with "too many commands are still in
+/// progress"; a deep backlog logs a warning instead.
+pub const MAX_CONNECTION_MUTATIONS: usize = 128;
 
 /// How long a closing connection waits for its in-flight detached
 /// mutation tasks (merge saves, worktree teardowns, spawns) before
@@ -898,6 +902,17 @@ impl Server {
         // feedback loop that starves the connection. At most one
         // recovery per window; extra lag reports inside it are counted
         // and folded into the next one.
+        // Detached commands past the concurrency cap wait here and spawn
+        // as in-flight mutations complete — never rejected (#1237).
+        let mut pending_detached: std::collections::VecDeque<lazybox_ipc::Command> =
+            std::collections::VecDeque::new();
+        // Keystroke-lane overflow (#1237): a full router channel queues
+        // here and re-offers at the loop top — a keystroke is NEVER
+        // refused with "router is full".
+        let mut pending_terminal_io: std::collections::VecDeque<lazybox_ipc::Command> =
+            std::collections::VecDeque::new();
+        let mut pending_terminal_persist: std::collections::VecDeque<lazybox_ipc::Command> =
+            std::collections::VecDeque::new();
         let mut last_lag_recovery: Option<tokio::time::Instant> = None;
         const LAG_RECOVERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
         // Cloned per connection: several serve loops can share one
@@ -905,6 +920,27 @@ impl Server {
         let mut graceful_stop = self.graceful_stop.clone();
         loop {
             while mutations.try_join_next().is_some() {}
+            while let Some(cmd) = pending_terminal_io.pop_front() {
+                if let Err(error) = terminal_io_tx.try_send(cmd) {
+                    pending_terminal_io.push_front(error.into_inner());
+                    break;
+                }
+            }
+            while let Some(cmd) = pending_terminal_persist.pop_front() {
+                if let Err(error) = terminal_persist_tx.try_send(cmd) {
+                    pending_terminal_persist.push_front(error.into_inner());
+                    break;
+                }
+            }
+            while !pending_detached.is_empty() && detached_mutation_capacity(&mutations) {
+                if let Some(cmd) = pending_detached.pop_front() {
+                    let cfg = self.config.clone();
+                    let tx = conn.tx.clone();
+                    mutations.spawn(async move {
+                        dispatch_command(&cfg, &tx, cmd).await;
+                    });
+                }
+            }
             tokio::select! {
                 // Biased: under a saturated bus (50 streaming agents)
                 // an unbiased select forwards events on ~half the
@@ -1095,24 +1131,27 @@ impl Server {
                             }
                         }
                         CommandLane::TerminalIo => {
-                            if let Err(error) = terminal_io_tx.try_send(cmd) {
-                                let command = error.into_inner();
-                                tracing::warn!(?command, "terminal I/O router rejected command");
-                                terminal_commands::reject_command(
-                                    &conn.tx,
-                                    &command,
-                                    "terminal I/O router is full or unavailable",
+                            // Order: anything already queued goes first.
+                            if !pending_terminal_io.is_empty() {
+                                pending_terminal_io.push_back(cmd);
+                            } else if let Err(error) = terminal_io_tx.try_send(cmd) {
+                                // Queue, never refuse (#1237) — drained
+                                // at the loop top as the router frees.
+                                pending_terminal_io.push_back(error.into_inner());
+                                tracing::warn!(
+                                    queued = pending_terminal_io.len(),
+                                    "terminal I/O router saturated — queueing command"
                                 );
                             }
                         }
                         CommandLane::TerminalPersistence => {
-                            if let Err(error) = terminal_persist_tx.try_send(cmd) {
-                                let command = error.into_inner();
-                                tracing::warn!(?command, "terminal persistence router rejected command");
-                                terminal_commands::reject_command(
-                                    &conn.tx,
-                                    &command,
-                                    "terminal persistence router is full or unavailable",
+                            if !pending_terminal_persist.is_empty() {
+                                pending_terminal_persist.push_back(cmd);
+                            } else if let Err(error) = terminal_persist_tx.try_send(cmd) {
+                                pending_terminal_persist.push_back(error.into_inner());
+                                tracing::warn!(
+                                    queued = pending_terminal_persist.len(),
+                                    "terminal persistence router saturated — queueing command"
                                 );
                             }
                         }
@@ -1124,16 +1163,21 @@ impl Server {
                                     dispatch_command(&cfg, &tx, cmd).await;
                                 });
                             } else {
-                                tracing::warn!(
-                                    max = MAX_CONNECTION_MUTATIONS,
-                                    command = label,
-                                    "connection mutation limit reached — rejecting command"
-                                );
-                                terminal_commands::reject_command(
-                                    &conn.tx,
-                                    &cmd,
-                                    "too many commands are still in progress",
-                                );
+                                // Queue, never refuse (#1237): the cap
+                                // bounds CONCURRENCY; admission is
+                                // unbounded and drains as tasks finish.
+                                // A deep backlog is worth a warning —
+                                // something upstream is slow — but the
+                                // user's command still happens.
+                                pending_detached.push_back(cmd);
+                                if pending_detached.len() % 32 == 1 {
+                                    tracing::warn!(
+                                        max = MAX_CONNECTION_MUTATIONS,
+                                        queued = pending_detached.len(),
+                                        command = label,
+                                        "mutation concurrency saturated — queueing command (will run in order)"
+                                    );
+                                }
                             }
                         }
                     }

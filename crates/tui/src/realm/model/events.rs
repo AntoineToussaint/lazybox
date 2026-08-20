@@ -1410,7 +1410,9 @@ impl<T: TerminalAdapter> Model<T> {
             // dedupes per-process, but a daemon restart would reset
             // its state and could spam the same prompt. Belt and
             // braces.
-            if !self.removal_already_pending(workspace_key) {
+            if !self.removal_already_pending(workspace_key)
+                && !self.dismissed_removal_prompts.contains(workspace_key)
+            {
                 self.removal_prompt_queue.push_back(super::RemovalPrompt {
                     workspace_key: workspace_key.clone(),
                     label: label.clone(),
@@ -1662,7 +1664,9 @@ impl<T: TerminalAdapter> Model<T> {
             has_local_work,
         } = &event
         {
-            if !self.removal_already_pending(workspace_key) {
+            if !self.removal_already_pending(workspace_key)
+                && !self.dismissed_removal_prompts.contains(workspace_key)
+            {
                 let reason = match terminal_state {
                     lazybox_ipc::RemovableTerminalState::Merged => super::RemovalReason::Merged,
                     lazybox_ipc::RemovableTerminalState::Closed => super::RemovalReason::Closed,
@@ -1684,6 +1688,7 @@ impl<T: TerminalAdapter> Model<T> {
         // (#552): drop any queued or mounted "remove closed issue?"
         // prompt for it — the workspace is alive again.
         if let IpcEvent::RemovalCancelled { workspace_key } = &event {
+            self.dismissed_removal_prompts.remove(workspace_key);
             self.cancel_removal_prompt(workspace_key);
             self.redraw = true;
             return;

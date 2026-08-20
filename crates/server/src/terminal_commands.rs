@@ -33,9 +33,12 @@ const WRITE_BATCH_BYTES: usize = 256 * 1024;
 /// event-bus forwarding on the serve loop.
 pub(crate) const ROUTER_CAPACITY: usize = 64;
 
-/// Commands retained behind one slow/wedged terminal. Once full, new work is
-/// rejected explicitly and the client can retry; memory use stays constant.
-const LANE_CAPACITY: usize = 32;
+/// Commands retained behind one slow/wedged terminal. 8× the original
+/// (#1237) — a burst of typing into a briefly-busy session must absorb,
+/// not refuse. Only a genuinely wedged single terminal (a dead PTY that
+/// stopped consuming for hundreds of commands) still rejects, with a
+/// message naming the terminal-level cause and the remedy.
+const LANE_CAPACITY: usize = 256;
 
 /// Small enough to persist an idle draft nearly immediately, large enough to
 /// collapse ordinary typing bursts instead of issuing one SQLite transaction
@@ -114,7 +117,12 @@ pub(crate) async fn run_io_router(
         if let Some(error) = send_error {
             let command = match error {
                 mpsc::error::TrySendError::Full(command) => {
-                    reject_command(&event_tx, &command, "terminal I/O lane is full");
+                    reject_command(
+                        &event_tx,
+                        &command,
+                        "this terminal has stopped consuming input (hundreds of writes \
+                         are already waiting) — the session looks wedged; ]]x closes it",
+                    );
                     continue;
                 }
                 mpsc::error::TrySendError::Closed(command) => command,
@@ -490,7 +498,7 @@ mod tests {
                 client_request_id: "recover-880".into(),
                 continuation_prompt: "Continue the work you were doing.".into(),
             },
-            "terminal I/O lane is full",
+            "this terminal has stopped consuming input — the session looks wedged",
         );
 
         assert!(matches!(
@@ -499,7 +507,7 @@ mod tests {
                 client_request_id,
                 message,
             }) if client_request_id == "recover-880"
-                && message.contains("lane is full")
+                && message.contains("stopped consuming input")
                 && message.contains("retry")
         ));
     }
@@ -536,7 +544,7 @@ mod tests {
                 if matches!(
                     event_rx.recv().await,
                     Some(Event::CommandRejected { command, message })
-                        if command == "Write" && message.contains("lane is full")
+                        if command == "Write" && message.contains("stopped consuming input")
                 ) {
                     break;
                 }

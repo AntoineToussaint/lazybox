@@ -3213,7 +3213,12 @@ impl FlowControl {
     pub const DRAIN_QUANTUM: usize = 256;
     pub const EVENT_CAPACITY: usize = Self::DRAIN_QUANTUM * 2;
     pub const RAW_EVENT_CAPACITY: usize = Self::EVENT_CAPACITY * 2;
-    pub const COMMAND_CAPACITY: usize = 32;
+    /// 8× the original 32 (#1237): capacity is a BATCHING knob, not an
+    /// admission gate — the client's overflow queue accepts commands
+    /// without limit and warns past a grace, so a burst is never
+    /// refused. Bounded by `MAX_RESYNC_REQUESTS_PER_BATCH` through the
+    /// assert below.
+    pub const COMMAND_CAPACITY: usize = 256;
     pub const MAX_RESYNC_REQUESTS_PER_BATCH: usize = Self::DRAIN_QUANTUM;
     /// One full client-pull resync batch plus one bus-lag Snapshot. Reserving
     /// only a handful of slots let a valid batch disconnect itself while

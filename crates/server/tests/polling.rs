@@ -6279,14 +6279,20 @@ mod live_collapse_e2e {
         timeout(TEST_DEADLINE, async {
             let mut live = spawn_live_agent_on_issue("codex").await;
 
-            // Sanity: the backend really runs codex, not claude.
+            // Sanity: the backend really runs codex, not claude. Agent
+            // argv is wrapped in `nice -n <N>` (fleet-priority shading,
+            // #1237) — skip the wrapper before checking the program.
             let argv = live
                 .mock
                 .argv_for(&live.backend_key)
                 .await
                 .expect("spawned session must have argv");
+            let program = match argv.as_slice() {
+                [first, _flag, _n, rest @ ..] if first == "nice" => rest.first(),
+                other => other.first(),
+            };
             assert_eq!(
-                argv.first().map(String::as_str),
+                program.map(String::as_str),
                 Some("codex"),
                 "the live agent under test must be codex (hookless)",
             );

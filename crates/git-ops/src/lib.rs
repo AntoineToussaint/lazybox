@@ -534,7 +534,7 @@ impl WorktreeManager {
             // failure, resource exhaustion) proves nothing about the
             // repo and must propagate as an error instead of nuking a
             // possibly-healthy cache.
-            match bare_repo_health(self.git_runner(), &bare_path).await {
+            match bare_repo_health(self.git_runner(), &bare_path, &self.network_env().await).await {
                 Ok(true) => return Ok(bare_path),
                 Ok(false) => {
                     // git ran and confirmed the repo is unusable
@@ -607,11 +607,8 @@ impl WorktreeManager {
                 &[],
             )
             .await?;
-            // `config remote.origin.url` rather than `remote add`: the
-            // latter also writes a fetch refspec `git clone --bare`
-            // never had, silently diverging new cache entries from old
-            // ones (a plain `git fetch` in a worktree would start
-            // materializing remote-tracking refs for every branch).
+            // `config` rather than `remote add` so the remote's shape is
+            // exactly what lazybox writes — nothing implicit.
             run_git_in(
                 self.git_runner(),
                 &partial,
@@ -619,6 +616,26 @@ impl WorktreeManager {
             )
             .await?;
         }
+        // The standard remote-tracking refspec is REQUIRED, not optional
+        // (#1253): `checkout_at` records `branch.<x>.remote/merge`, and
+        // git resolves `@{u}` by mapping `branch.<x>.merge` THROUGH
+        // `remote.origin.fetch` — without the refspec every managed
+        // worktree fails with "upstream branch not stored as a
+        // remote-tracking branch", ahead/behind goes blank, and
+        // unpushed-commit detection degrades to guessing. The wildcard
+        // does mean a plain `git fetch` materializes remote-tracking
+        // refs for every branch — the standard clone shape agents
+        // expect. Lazybox's own fetches all pass `--no-prune`, so a
+        // user's global `fetch.prune = true` mapped over this wildcard
+        // can never prune the refs lazybox maintains. Written outside
+        // the `!resuming` arm so a resumed pre-#1253 `.partial` is
+        // normalized too.
+        run_git_in(
+            self.git_runner(),
+            &partial,
+            &["config", "remote.origin.fetch", ORIGIN_FETCH_REFSPEC],
+        )
+        .await?;
         self.report(CheckoutPhase::Cloning);
         let auth = self.network_env().await;
         let progress = |line: &str| self.report(CheckoutPhase::CloneProgress(line.to_string()));
@@ -633,6 +650,7 @@ impl WorktreeManager {
                 &partial,
                 &[
                     "fetch",
+                    "--no-prune",
                     "--progress",
                     "--filter=blob:none",
                     "origin",
@@ -1715,12 +1733,33 @@ fn partial_clone_path(bare: &Path) -> PathBuf {
     PathBuf::from(os)
 }
 
+/// The standard remote-tracking refspec every lazybox bare clone must
+/// carry (#1253): `@{u}` resolution maps `branch.<x>.merge` through it,
+/// so without it upstream tracking is dead in every worktree. All
+/// lazybox fetches pass `--no-prune` so this wildcard can never prune
+/// the refs those fetches maintain.
+const ORIGIN_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
+
 /// Validation gate for an existing bare-clone directory. An
 /// interrupted clone (pre-`.partial` scheme, or a tampered dir) can
 /// leave something `exists()` accepts but git can't use. Two probes:
 /// `rev-parse --is-bare-repository` must print `true`, and `HEAD`
 /// must resolve to a commit (a half-fetched clone has a HEAD symref
 /// but no refs behind it).
+///
+/// A healthy verdict also doubles as the maintenance hook every
+/// provision passes through (#1253):
+/// * clones from before the [`ORIGIN_FETCH_REFSPEC`] fix are missing
+///   `remote.origin.fetch` — it is written back once here, upgrading
+///   old caches in place;
+/// * `origin/HEAD` is refreshed against the remote's advertised
+///   default branch ([`refresh_origin_head`]) so an upstream
+///   default-branch rename doesn't leave `delete_local_branch`
+///   protecting the wrong branch.
+///
+/// Both repairs are best-effort: a failure degrades the feature it
+/// serves but never condemns a usable clone. `envs` carries the
+/// network auth for the origin-HEAD refresh.
 ///
 /// Tri-state result — the distinction is load-bearing for the caller:
 /// * `Ok(true)`  — git ran and the repo is usable.
@@ -1732,7 +1771,11 @@ fn partial_clone_path(bare: &Path) -> PathBuf {
 ///   healthy bare clone — orphaning every worktree whose gitdir
 ///   metadata lived under `<bare>/worktrees/` — whenever spawning
 ///   git hiccuped.
-async fn bare_repo_health(git: &dyn GitRunner, bare: &Path) -> Result<bool, GitError> {
+async fn bare_repo_health(
+    git: &dyn GitRunner,
+    bare: &Path,
+    envs: &[(String, String)],
+) -> Result<bool, GitError> {
     // Quiet probes (no error-level logging): a failing probe is an
     // expected, recoverable state, not a git invocation bug. A probe
     // that can't SPAWN, however, is an environment error we surface.
@@ -1757,11 +1800,53 @@ async fn bare_repo_health(git: &dyn GitRunner, bare: &Path) -> Result<bool, GitE
         Some(out) if out.trim() == "true" => {}
         _ => return Ok(false),
     }
-    Ok(
-        probe(git, bare, &["rev-parse", "--verify", "--quiet", "HEAD"])
-            .await?
-            .is_some(),
-    )
+    if probe(git, bare, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+
+    // One-time repair (#1253): pre-fix clones carry no
+    // `remote.origin.fetch`, so `@{u}` can never resolve in their
+    // worktrees. Written back here — the one gate every provision
+    // passes — so existing caches converge on the production shape
+    // without a reclone. Best-effort: a failed write degrades upstream
+    // tracking again, it never fails the health verdict.
+    if probe(git, bare, &["config", "--get", "remote.origin.fetch"])
+        .await?
+        .is_none()
+    {
+        let repaired = git
+            .run(
+                Some(bare),
+                &["config", "remote.origin.fetch", ORIGIN_FETCH_REFSPEC],
+                &[],
+            )
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if repaired {
+            tracing::info!(
+                path = %bare.display(),
+                "bare clone was missing remote.origin.fetch — wrote the \
+                 standard remote-tracking refspec (#1253 one-time repair)"
+            );
+        } else {
+            tracing::warn!(
+                path = %bare.display(),
+                "could not write the missing remote.origin.fetch refspec; \
+                 @{{u}} will keep failing in this repo's worktrees"
+            );
+        }
+    }
+
+    // F9 (#1253): keep origin/HEAD in step with an upstream
+    // default-branch rename. Best-effort and bounded — see the
+    // helper's constraints.
+    refresh_origin_head(git, bare, envs).await;
+
+    Ok(true)
 }
 
 /// Read `remote.origin.url` straight from the config file of a (possibly
@@ -1821,26 +1906,7 @@ async fn set_head_to_remote_default(
     partial: &Path,
     envs: &[(String, String)],
 ) -> Result<(), GitError> {
-    // `ls-remote --symref origin HEAD` prints e.g.
-    // "ref: refs/heads/main\tHEAD" when the server advertises it.
-    let advertised = run_git_in_env(
-        git,
-        partial,
-        &["ls-remote", "--symref", "origin", "HEAD"],
-        envs,
-    )
-    .await
-    .ok()
-    .and_then(|out| {
-        out.lines().find_map(|l| {
-            l.strip_prefix("ref: ")?
-                .split_whitespace()
-                .next()
-                .filter(|r| r.starts_with("refs/heads/"))
-                .map(str::to_string)
-        })
-    });
-    let mut head = advertised;
+    let mut head = remote_advertised_head(git, partial, envs).await;
     if head.is_none() {
         for guess in ["refs/heads/main", "refs/heads/master"] {
             if ref_exists_with(git, partial, guess).await {
@@ -1869,6 +1935,95 @@ async fn set_head_to_remote_default(
         run_git_in(git, partial, &["symbolic-ref", "HEAD", &head]).await?;
     }
     Ok(())
+}
+
+/// The branch `origin` advertises as its HEAD (the default branch),
+/// via `git ls-remote --symref origin HEAD` — the output carries a
+/// "ref: refs/heads/main\tHEAD" line when the server advertises it.
+/// `None` when the remote is unreachable or advertises no symref.
+async fn remote_advertised_head(
+    git: &dyn GitRunner,
+    repo: &Path,
+    envs: &[(String, String)],
+) -> Option<String> {
+    run_git_in_env(
+        git,
+        repo,
+        &["ls-remote", "--symref", "origin", "HEAD"],
+        envs,
+    )
+    .await
+    .ok()
+    .and_then(|out| {
+        out.lines().find_map(|l| {
+            l.strip_prefix("ref: ")?
+                .split_whitespace()
+                .next()
+                .filter(|r| r.starts_with("refs/heads/"))
+                .map(str::to_string)
+        })
+    })
+}
+
+/// Re-point the bare clone's HEAD when origin's default branch was
+/// renamed upstream (#1253 F9). Without this refresh the clone's HEAD
+/// keeps naming the pre-rename branch forever, so
+/// `delete_local_branch`'s default-branch protection guards the wrong
+/// branch and `default_branch()` answers stale.
+///
+/// Constraints, in order of importance:
+/// * HEAD must never be left dangling — [`bare_repo_health`] reads an
+///   unresolvable HEAD as a broken clone, which authorizes
+///   delete+reclone and would orphan every worktree. So the symref
+///   only moves after the target ref demonstrably exists locally
+///   (fetching just that branch first when it doesn't).
+/// * Only the remote's *advertised* symref may repoint HEAD. The
+///   main/master guessing [`set_head_to_remote_default`] applies to a
+///   fresh clone would, on an established clone while offline, flip a
+///   legitimate non-`main` default onto a coincidental `main` branch.
+/// * Best-effort throughout: this is a freshness repair riding the
+///   health gate, never a reason to fail a provision. Offline simply
+///   resolves nothing and returns.
+async fn refresh_origin_head(git: &dyn GitRunner, bare: &Path, envs: &[(String, String)]) {
+    let Some(target) = remote_advertised_head(git, bare, envs).await else {
+        return;
+    };
+    let current = run_git_in(git, bare, &["symbolic-ref", "--quiet", "HEAD"])
+        .await
+        .ok();
+    if current.as_deref().map(str::trim) == Some(target.as_str()) {
+        return;
+    }
+    if !ref_exists_with(git, bare, &target).await {
+        // Materialize the renamed default branch before repointing.
+        // `--no-prune` as everywhere (see ORIGIN_FETCH_REFSPEC). Can
+        // legitimately fail — offline, or the branch checked out in a
+        // shared main worktree — in which case HEAD stays where it is.
+        let _ = run_git_in_env(
+            git,
+            bare,
+            &[
+                "fetch",
+                "--no-prune",
+                "origin",
+                &format!("+{target}:{target}"),
+            ],
+            envs,
+        )
+        .await;
+    }
+    if ref_exists_with(git, bare, &target).await {
+        let moved = run_git_in(git, bare, &["symbolic-ref", "HEAD", &target])
+            .await
+            .is_ok();
+        if moved {
+            tracing::info!(
+                path = %bare.display(),
+                head = %target,
+                "origin's default branch changed — repointed the bare clone's HEAD"
+            );
+        }
+    }
 }
 
 /// Verdict for a directory that already exists at a worktree path.
@@ -3646,6 +3801,14 @@ mod runner_seam_tests {
             let worktree = self.worktree.to_string_lossy();
             let response = match args {
                 ["rev-parse", "--is-bare-repository"] => Ok(Self::output(true, b"true\n")),
+                // Health-gate maintenance (#1253): the refspec is
+                // already present (no repair write follows) …
+                ["config", "--get", "remote.origin.fetch"] => {
+                    Ok(Self::output(true, ORIGIN_FETCH_REFSPEC.as_bytes()))
+                }
+                // … and origin is unreachable for the origin-HEAD
+                // refresh, which must degrade to a silent no-op.
+                ["ls-remote", "--symref", "origin", "HEAD"] => Ok(Self::output(false, &[])),
                 ["rev-parse", "--verify", "--quiet", "HEAD"]
                 | [
                     "fetch",
@@ -3718,6 +3881,11 @@ mod runner_seam_tests {
             [
                 "rev-parse --is-bare-repository",
                 "rev-parse --verify --quiet HEAD",
+                // Health-gate maintenance (#1253): refspec check (no
+                // repair — already present) + origin-HEAD refresh
+                // (scripted unreachable → no-op).
+                "config --get remote.origin.fetch",
+                "ls-remote --symref origin HEAD",
                 "fetch --no-prune origin +refs/heads/feature:refs/remotes/origin/feature",
                 "show-ref --verify --quiet refs/heads/feature",
                 "show-ref --verify --quiet refs/remotes/origin/feature",
@@ -4042,7 +4210,7 @@ mod stalled_clone_tests {
             .expect("retry re-clones from the recorded origin");
         assert_eq!(recloned, bare);
         assert!(
-            bare_repo_health(default_git_runner(), &bare)
+            bare_repo_health(default_git_runner(), &bare, &[])
                 .await
                 .expect("probe runs"),
             "retry must leave a healthy bare clone"
@@ -4152,7 +4320,11 @@ mod health_probe_tests {
     #[tokio::test]
     async fn healthy_bare_clone_probes_ok_true() {
         let (_tmp, bare) = local_bare_clone();
-        assert!(bare_repo_health(default_git_runner(), &bare).await.unwrap());
+        assert!(
+            bare_repo_health(default_git_runner(), &bare, &[])
+                .await
+                .unwrap()
+        );
     }
 
     /// B10 (issue #557): when `origin/HEAD` can't be resolved (offline,
@@ -4248,7 +4420,11 @@ mod health_probe_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let dir = tmp.path().join("not-a-repo.git");
         std::fs::create_dir(&dir).expect("mkdir");
-        assert!(!bare_repo_health(default_git_runner(), &dir).await.unwrap());
+        assert!(
+            !bare_repo_health(default_git_runner(), &dir, &[])
+                .await
+                .unwrap()
+        );
     }
 
     /// Regression: the probe FAILING TO RUN (spawn error — here a cwd
@@ -4263,7 +4439,9 @@ mod health_probe_tests {
         let file = tmp.path().join("bare.git");
         std::fs::write(&file, "not a directory").expect("write file");
         assert!(
-            bare_repo_health(default_git_runner(), &file).await.is_err(),
+            bare_repo_health(default_git_runner(), &file, &[])
+                .await
+                .is_err(),
             "a probe that couldn't run must propagate an error, not condemn the repo"
         );
     }

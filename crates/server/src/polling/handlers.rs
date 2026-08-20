@@ -3192,17 +3192,14 @@ mod inspect_tests {
             ],
         )
         .await;
-        // Lazybox-style remote-tracking refspec so `@{u}` resolves
-        // from worktrees (matches `WorktreeManager::checkout_at`).
-        run(
-            &bare,
-            &[
-                "config",
-                "remote.origin.fetch",
-                "+refs/heads/*:refs/remotes/origin/*",
-            ],
-        )
-        .await;
+        // Deliberately NO `remote.origin.fetch` refspec: this is the
+        // legacy bare-clone shape lazybox wrote before #1253 (and what
+        // `git clone --bare` produces), still on disk for old installs
+        // until `bare_repo_health`'s one-time repair runs. `@{u}` can
+        // never resolve in it, so these tests prove the handlers work
+        // off the branch's own `refs/remotes/origin/<branch>` ref
+        // (maintained per-fetch by `add_wt` below, mirroring
+        // `fetch_origin_ref`) rather than the config refspec.
 
         Fixture {
             base,
@@ -3248,6 +3245,25 @@ mod inspect_tests {
                 branch,
                 &wt.to_string_lossy(),
                 &format!("refs/remotes/origin/{branch}"),
+            ],
+        )
+        .await;
+        // Production `checkout_at` records tracking config when the
+        // worktree branches off a remote-tracking ref. Mirror it: in
+        // the legacy clone shape it can't make `@{u}` resolve, but it
+        // is the evidence `branch_has_upstream_config` uses to classify
+        // a vanished remote ref as BranchDeletedUpstream.
+        run(
+            &fx.bare,
+            &["config", &format!("branch.{branch}.remote"), "origin"],
+        )
+        .await;
+        run(
+            &fx.bare,
+            &[
+                "config",
+                &format!("branch.{branch}.merge"),
+                &format!("refs/heads/{branch}"),
             ],
         )
         .await;

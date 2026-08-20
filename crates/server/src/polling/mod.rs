@@ -3817,12 +3817,13 @@ async fn retire_pr_stub_sessions(
             continue;
         }
         let path = session.worktree_path.clone();
+        let branch = session.worktree_branch.clone();
         let session_id = session.id;
         let on_disk = tokio::fs::metadata(&path).await.is_ok();
         let retire = if !on_disk {
             true
         } else if tokio::fs::metadata(path.join(".git")).await.is_ok() {
-            lazybox_git_ops::worktree_is_pristine(&path, bare.as_deref()).await
+            lazybox_git_ops::worktree_is_pristine(&path, bare.as_deref(), branch.as_deref()).await
         } else {
             // A provisioning fallback leaves a plain empty dir; one
             // with contents could be anything the user put there.
@@ -5185,14 +5186,9 @@ mod rescope_collapse_tests {
                 &bare.to_string_lossy(),
             ],
         );
-        git(
-            &bare,
-            &[
-                "config",
-                "remote.origin.fetch",
-                "+refs/heads/*:refs/remotes/origin/*",
-            ],
-        );
+        // No `remote.origin.fetch` refspec: the legacy pre-#1253 bare-
+        // clone shape — the branch's own remote-tracking ref below is
+        // what the probes must work off (see git-ops `unpushed`).
         git(
             &bare,
             &["fetch", "-q", "origin", "+feat:refs/remotes/origin/feat"],

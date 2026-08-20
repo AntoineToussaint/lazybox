@@ -305,7 +305,7 @@ impl WorktreeManager {
                 WorktreeReclaimBlocker::UncommittedChanges,
             ));
         }
-        if unpushed(self.git_runner(), path, Some(&bare)).await {
+        if unpushed(self.git_runner(), path, Some(&bare), Some(branch)).await {
             return Ok(WorktreeReclaimOutcome::Blocked(
                 WorktreeReclaimBlocker::UnpushedCommits,
             ));
@@ -538,7 +538,14 @@ impl WorktreeManager {
                 inspection.path.display()
             )));
         }
-        if unpushed(self.git_runner(), &inspection.path, Some(bare)).await {
+        if unpushed(
+            self.git_runner(),
+            &inspection.path,
+            Some(bare),
+            inspection.branch.as_deref(),
+        )
+        .await
+        {
             return Err(GitError::Command(format!(
                 "worktree {} has unpushed or unverifiable commits — refusing to delete",
                 inspection.path.display()
@@ -894,7 +901,7 @@ async fn inspect_one(
             if crate::worktree_dir_ready(path).await {
                 tokio::join!(
                     uncommitted(git, path),
-                    unpushed(git, path, bare_path.as_deref())
+                    unpushed(git, path, bare_path.as_deref(), branch.as_deref())
                 )
             } else {
                 (None, false)
@@ -1049,12 +1056,17 @@ async fn ref_exists(git: &dyn GitRunner, bare: &Path, ref_name: &str) -> bool {
 }
 
 /// True when the worktree holds nothing that exists only locally — no
-/// uncommitted changes and no unpushed commits. `bare` feeds the
-/// upstream fallbacks of the unpushed-commit probe; when it can't be
-/// resolved an upstream-less checkout is conservatively reported
-/// non-pristine.
-pub async fn worktree_is_pristine(worktree: &Path, bare: Option<&Path>) -> bool {
-    worktree_is_pristine_with(default_git_runner(), worktree, bare).await
+/// uncommitted changes and no unpushed commits. `bare` and `branch`
+/// feed the upstream fallbacks of the unpushed-commit probe (`branch`
+/// unlocks the branch-own-remote-ref tier — see [`unpushed`]); when
+/// nothing resolves an upstream-less checkout is conservatively
+/// reported non-pristine.
+pub async fn worktree_is_pristine(
+    worktree: &Path,
+    bare: Option<&Path>,
+    branch: Option<&str>,
+) -> bool {
+    worktree_is_pristine_with(default_git_runner(), worktree, bare, branch).await
 }
 
 /// Read the checkout's status and combined staged/unstaged diff against
@@ -1455,8 +1467,12 @@ async fn worktree_is_pristine_with(
     git: &dyn GitRunner,
     worktree: &Path,
     bare: Option<&Path>,
+    branch: Option<&str>,
 ) -> bool {
-    let (dirty, ahead) = tokio::join!(uncommitted(git, worktree), unpushed(git, worktree, bare));
+    let (dirty, ahead) = tokio::join!(
+        uncommitted(git, worktree),
+        unpushed(git, worktree, bare, branch)
+    );
     dirty == Some(false) && !ahead
 }
 
@@ -1511,21 +1527,55 @@ async fn rev_list_count(git: &dyn GitRunner, worktree: &Path, range: &str) -> Op
 
 /// Does the worktree hold commits that never made it upstream?
 ///
-/// `@{u}` resolves the configured upstream — the precise answer when
-/// tracking is set up. With no upstream (a never-pushed local branch
-/// like `lazybox/issue-N`, or a tracking branch whose remote ref was
-/// pruned) the old behavior reported `false`, which let the reaper
-/// classify committed-but-unpushed work as deletable. Instead, fall
-/// back to counting commits ahead of the remote's default branch
-/// (`origin/HEAD`, then the bare clone's HEAD branch); if nothing
-/// resolves, report `true` — conservative: never call work "pushed"
-/// without evidence.
+/// Tiered, most precise first (#1253):
+/// 1. `refs/remotes/origin/<branch>..HEAD` — the branch's OWN
+///    remote-tracking ref. This tier outranks `@{u}` deliberately:
+///    `git worktree add -B <new> refs/remotes/origin/<base>` (the
+///    issue-spawn shape) auto-sets the new branch's upstream to the
+///    BASE branch (`branch.autoSetupMerge` default), so `@{u}..HEAD`
+///    counts the whole feature diff as "unpushed" even after every
+///    commit reached `origin/<branch>`. Comparing against the branch's
+///    own remote ref is immune — and when tracking IS the branch's own
+///    counterpart (the PR shape `checkout_at` records), `@{u}` maps
+///    through the refspec to this very ref, so the two tiers agree.
+/// 2. [`branch_tip_on_remote`] — the branch's remote ref is gone, but
+///    the tip is reachable from *some* remote-tracking ref, proving the
+///    commits reached the remote (merged + branch auto-deleted
+///    upstream): pushed.
+/// 3. `@{u}..HEAD` — the configured upstream, for worktrees whose
+///    branch the caller doesn't know (detached HEAD, callers without a
+///    branch column). Needs the bare clone's `remote.origin.fetch`
+///    refspec to resolve.
+/// 4. Commits ahead of the remote's default branch (`origin/HEAD`,
+///    then the bare clone's HEAD branch) — the coarse legacy fallback.
+///    Only reached when the branch is genuinely unknown upstream, where
+///    it gives the right answer for both extremes: a never-pushed
+///    `lazybox/issue-N` counts its local commits, a stub sitting
+///    exactly on the default counts zero.
+///
+/// If nothing resolves, report `true` — conservative: never call work
+/// "pushed" without evidence.
 ///
 /// `bare == None` means git doesn't even list this directory as a
 /// worktree ("ghost on disk"); there's no branch state to lose, so
 /// the legacy `false` stands and the Untracked cleanup path keeps
 /// working.
-async fn unpushed(git: &dyn GitRunner, worktree: &Path, bare: Option<&Path>) -> bool {
+async fn unpushed(
+    git: &dyn GitRunner,
+    worktree: &Path,
+    bare: Option<&Path>,
+    branch: Option<&str>,
+) -> bool {
+    if let (Some(bare), Some(branch)) = (bare, branch) {
+        let remote_ref = format!("refs/remotes/origin/{branch}");
+        if ref_exists(git, bare, &remote_ref).await {
+            if let Some(n) = rev_list_count(git, worktree, &format!("{remote_ref}..HEAD")).await {
+                return n > 0;
+            }
+        } else if branch_tip_on_remote(git, bare, branch).await {
+            return false;
+        }
+    }
     if let Some(n) = rev_list_count(git, worktree, "@{u}..HEAD").await {
         return n > 0;
     }
@@ -1791,9 +1841,15 @@ mod tests {
         assert_eq!(
             commands,
             [
+                // `unpushed` tier 2 (#1253): the branch's remote ref is
+                // absent, so the tip-on-remote proof runs.
+                "branch -r --contains refs/heads/feature",
                 "config --get branch.feature.remote",
                 "rev-list --count @{u}..HEAD",
                 "show-ref --verify --quiet refs/heads/feature",
+                // Twice: the inspector's remote-ref existence probe and
+                // `unpushed` tier 1 (#1253) each check it.
+                "show-ref --verify --quiet refs/remotes/origin/feature",
                 "show-ref --verify --quiet refs/remotes/origin/feature",
                 "status --porcelain",
                 "worktree list --porcelain",
@@ -1832,7 +1888,7 @@ mod tests {
         assert!(!inspections[0].has_uncommitted_changes);
         assert!(!inspections[0].status_verified);
         assert!(!inspections[0].is_safe_to_delete);
-        assert!(!worktree_is_pristine_with(git.as_ref(), &worktree, Some(&bare)).await);
+        assert!(!worktree_is_pristine_with(git.as_ref(), &worktree, Some(&bare), None).await);
     }
 
     #[tokio::test]

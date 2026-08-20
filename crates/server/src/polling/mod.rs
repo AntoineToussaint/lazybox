@@ -2238,6 +2238,10 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
         use std::time::Instant;
         const CHUNK: Duration = Duration::from_secs(5);
         const UNKNOWN_RETRY: Duration = Duration::from_secs(5);
+        /// Hard floor between scheduled tick starts. A tick can cost a
+        /// full credential resolve + GraphQL sweep; nothing legitimate
+        /// needs it re-run with zero gap.
+        const MIN_TICK_GAP: Duration = Duration::from_secs(5);
 
         tracing::info!(
             "polling: loop started (interval={}s, every tick logs `polling: tick #N starting`)",
@@ -2381,6 +2385,25 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
                 UNKNOWN_RETRY,
                 summary.hot_count,
             );
+            // Wakes raised WHILE the tick body ran (Done agent states,
+            // focus changes, subscribes) left a stored `Notify` permit
+            // that resolved the next wait instantly — and a wake-driven
+            // tick that outlived the warm window zeroed `warm_in`. Both
+            // produced the logged "next tick in 0s" storms: back-to-back
+            // ticks, each re-running credential resolution and the
+            // GraphQL sweep. Drain the permit here and honor it as one
+            // coalesced follow-up after MIN_TICK_GAP; genuinely new
+            // wakes (an explicit Refresh) still interrupt the sleep
+            // immediately, so user latency is unchanged.
+            let woke_during_tick = config.poll.drain_pending_wake();
+            let next_in = if woke_during_tick {
+                tracing::debug!(
+                    "polling: wake during tick #{tick_n} — coalescing into one follow-up tick"
+                );
+                MIN_TICK_GAP
+            } else {
+                next_in.max(MIN_TICK_GAP)
+            };
             if summary.retry_after_secs.is_some() {
                 tracing::warn!(
                     "polling: backing off {}s before next tick (rate-limit hint)",
@@ -2623,6 +2646,28 @@ async fn run_one_tick_with_notifications(
     summary
 }
 
+/// What an EMPTY source list authorizes. `Some(outcome)` — every
+/// provider is deliberately disabled, so rescope with full authority
+/// and let stale rows disappear. `None` — at least one provider is
+/// enabled but produced no source (credentials timed out, cadence
+/// gate, client init failure): a FAILED view of the world, never an
+/// authoritative empty one, so no rescope may run (2026-08-19 audit,
+/// D1 — the fabricated `any_source_succeeded: true` here was one guard
+/// away from deleting every workspace on a `gh auth token` timeout).
+fn empty_sources_rescope_outcome(any_provider_enabled: bool) -> Option<TickOutcome> {
+    if any_provider_enabled {
+        return None;
+    }
+    Some(TickOutcome {
+        polled: vec![],
+        any_source_succeeded: true,
+        retry_after_secs: None,
+        saw_unknown_mergeable: false,
+        source_scopes: std::collections::HashMap::new(),
+        all_full: true,
+    })
+}
+
 /// The body of one poll tick, operating on a `state` checked out of
 /// `poll_state`. Builds the source list, ticks, rescopes. Split out of
 /// `run_one_tick` so the checkout/restore of `poll_state` brackets it
@@ -2658,24 +2703,28 @@ async fn run_tick_inner(
     )
     .await;
     if sources.is_empty() {
-        // User disabled every provider (or credentials all
-        // failed to resolve). Treat as "deliberately empty
-        // result" — rescope so existing workspaces actually
-        // disappear from the sidebar. Without this, unchecking
-        // every provider leaves the inbox frozen with stale
-        // rows that no current poll source could produce.
-        // No-sources path counts as a complete view of "what should be
-        // here" — leave `all_full = true` so rescope removes orphaned
-        // workspaces from the disabled providers.
-        let outcome = TickOutcome {
-            polled: vec![],
-            any_source_succeeded: true,
-            retry_after_secs: None,
-            saw_unknown_mergeable: false,
-            source_scopes: std::collections::HashMap::new(),
-            all_full: true,
-        };
-        rescope_with_state(config, &outcome, state).await;
+        // Two very different worlds produce an empty source list, and
+        // conflating them nearly deleted every workspace (2026-08-19
+        // audit, D1):
+        //
+        // 1. The user disabled every provider. A deliberate empty
+        //    result — rescope with full authority so stale rows from
+        //    the disabled providers actually disappear.
+        // 2. Providers are ENABLED but none produced a source this
+        //    tick — credentials timed out, Linear's cadence gate
+        //    skipped it, a client init failed. That is a FAILED view
+        //    of the world, not an empty one: asserting success +
+        //    `all_full` here sailed a 5s `gh auth token` timeout past
+        //    every rescope authority guard, leaving only the final
+        //    "refusing to delete every workspace" backstop between a
+        //    subprocess timeout and total data loss.
+        match empty_sources_rescope_outcome(!setup.enabled_providers.is_empty()) {
+            Some(outcome) => rescope_with_state(config, &outcome, state).await,
+            None => tracing::warn!(
+                "no poll sources despite enabled providers — treating the tick as failed, \
+                 preserving all workspaces (no rescope)"
+            ),
+        }
         return TickSummary {
             hot_count,
             ..TickSummary::default()
@@ -4098,15 +4147,27 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
 /// Replace the current GitHub focus hint and wake the poll loop when
 /// the focused workspace changes.
 pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
-    let repo = load_workspace(config, key)
-        .and_then(|workspace| {
-            workspace
-                .primary_task()
-                .filter(|task| task.id.source == lazybox_gh::SOURCE)
-                .and_then(|task| task.repo.clone())
-        })
-        .map(|repo| repo.trim().to_string())
-        .filter(|repo| !repo.is_empty());
+    // Off the serve loop: this runs for EVERY FocusWorkspace — once per
+    // sidebar keystroke — and `load_workspace` is a synchronous sqlite
+    // read against a store with a 5s busy timeout. Inline, a
+    // checkpointing store wedged the single-task serve loop (and with
+    // it every keystroke Write and Spawn) behind disk IO.
+    let repo = {
+        let config_owned = config.clone();
+        let key_owned = key.clone();
+        tokio::task::spawn_blocking(move || load_workspace(&config_owned, &key_owned))
+            .await
+            .ok()
+            .flatten()
+    }
+    .and_then(|workspace| {
+        workspace
+            .primary_task()
+            .filter(|task| task.id.source == lazybox_gh::SOURCE)
+            .and_then(|task| task.repo.clone())
+    })
+    .map(|repo| repo.trim().to_string())
+    .filter(|repo| !repo.is_empty());
     let focused_workspace = repo.as_ref().map(|_| key.as_str().to_string());
     let changed = config
         .poll
@@ -4154,9 +4215,9 @@ pub async fn set_focused_workspace(config: &ServerConfig, key: &WorkspaceKey) {
         tracing::info!(
             workspace_key = %key.as_str(),
             github = repo.is_some(),
-            "polling focus changed — waking targeted refresh"
+            "polling focus changed — scheduling debounced targeted refresh"
         );
-        config.poll.wake(false);
+        config.poll.wake_for_focus_debounced();
     }
 }
 
@@ -4167,6 +4228,30 @@ fn workspace_label_for(workspace: &Workspace, key: &WorkspaceKey) -> String {
         .primary_task()
         .map(|t| t.id.key.clone())
         .unwrap_or_else(|| key.as_str().to_string())
+}
+
+#[cfg(test)]
+mod empty_sources_tests {
+    use super::*;
+
+    /// D1 regression (2026-08-19 audit): providers ENABLED but no
+    /// source built (credential timeout, cadence skip, init failure)
+    /// must never rescope — the old path fabricated a "successful,
+    /// exhaustive, empty" outcome that reached the final delete gate.
+    #[test]
+    fn enabled_providers_with_no_sources_never_authorize_a_rescope() {
+        assert!(empty_sources_rescope_outcome(true).is_none());
+    }
+
+    /// All providers deliberately disabled: the legacy full-authority
+    /// empty rescope stays, so stale rows actually disappear.
+    #[test]
+    fn all_providers_disabled_keeps_the_deliberate_empty_rescope() {
+        let outcome = empty_sources_rescope_outcome(false).expect("deliberate empty view");
+        assert!(outcome.any_source_succeeded);
+        assert!(outcome.all_full);
+        assert!(outcome.polled.is_empty());
+    }
 }
 
 #[cfg(test)]

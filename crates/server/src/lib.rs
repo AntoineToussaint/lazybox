@@ -397,6 +397,10 @@ pub struct ServerConfig {
     /// spawns claim the same first-session path independently without one
     /// drop making the other invisible to reclaimers.
     pub(crate) provisioning_worktree_claims: Arc<parking_lot::Mutex<HashMap<PathBuf, usize>>>,
+    /// Completion latches for detached maintenance tasks (background
+    /// worktree removals) so shutdown can wait for them — see
+    /// `register_maintenance_latch` / `drain_maintenance_tasks`.
+    pub(crate) maintenance_done: Arc<parking_lot::Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>>,
 }
 
 impl ServerConfig {
@@ -527,6 +531,30 @@ impl ServerConfig {
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             worktree_ownership_lock: Arc::new(Mutex::new(())),
             provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            maintenance_done: Arc::new(parking_lot::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Register a detached maintenance task's completion latch so the
+    /// shutdown path can wait for it (2026-08-19 audit, L6). The
+    /// background worktree removals (#1132) ran on bare `tokio::spawn`
+    /// outside every drain — quit mid-`git worktree remove` cancelled
+    /// them and left a half-deleted multi-GB directory with no retry
+    /// (the session record was already gone).
+    pub(crate) fn register_maintenance_latch(&self, done: tokio::sync::oneshot::Receiver<()>) {
+        let mut latches = self.maintenance_done.lock();
+        latches.retain(|rx| !rx.is_terminated());
+        latches.push(done);
+    }
+
+    /// Wait for every registered maintenance task to finish (or die).
+    /// Callers bound this with their own timeout.
+    pub async fn drain_maintenance_tasks(&self) {
+        let latches: Vec<_> = std::mem::take(&mut *self.maintenance_done.lock());
+        for rx in latches {
+            // A dropped sender (task panicked / aborted) resolves as
+            // Err — either way the task is no longer running.
+            let _ = rx.await;
         }
     }
 
@@ -585,6 +613,16 @@ impl ServerConfig {
     fn workspace_lock_entry(&self, key: &str) -> Arc<Mutex<()>> {
         {
             let mut map = self.workspace_locks.lock();
+            // Opportunistic GC (2026-08-19 audit, M10): the map was
+            // insert-only — one entry per workspace key EVER seen,
+            // archived ones included. An entry at strong_count == 1 is
+            // held by nobody (a guard or pending locker always clones
+            // the Arc), and any concurrent locker for the same key is
+            // queued behind this map lock and will re-create it — so
+            // dropping unheld entries is race-free.
+            if map.len() > 512 {
+                map.retain(|_, lock| Arc::strong_count(lock) > 1);
+            }
             map.entry(key.to_string()).or_default().clone()
         }
     }
@@ -819,6 +857,14 @@ impl Server {
         // manufacture an arbitrarily large structured-event backlog; live
         // recovery uses the bus-lag snapshot and RequestTerminalResync paths.
         let mut subscribed = false;
+        // Debounce for bus-lag recovery snapshots (2026-08-19 audit,
+        // M7): a genuinely slow client lags again WHILE the expensive
+        // snapshot builds — lag → rebuild → more lag, a positive
+        // feedback loop that starves the connection. At most one
+        // recovery per window; extra lag reports inside it are counted
+        // and folded into the next one.
+        let mut last_lag_recovery: Option<tokio::time::Instant> = None;
+        const LAG_RECOVERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
         // Cloned per connection: several serve loops can share one
         // service-owned watch channel.
         let mut graceful_stop = self.graceful_stop.clone();
@@ -1070,6 +1116,24 @@ impl Server {
                             // lag recovery is rare enough that the brief
                             // serve-loop pause is acceptable.
                             self.config.event_metrics.record_bus_lagged(n);
+                            // Pace, never skip: `Lagged` fires once per
+                            // gap, so a skipped recovery could strand
+                            // the client on zombie state forever. The
+                            // pause bounds the lag→rebuild→lag feedback
+                            // loop instead, and doubles as natural
+                            // backpressure on a chronically slow client.
+                            if let Some(at) = last_lag_recovery {
+                                let since = at.elapsed();
+                                if since < LAG_RECOVERY_DEBOUNCE {
+                                    tracing::warn!(
+                                        lagged = n,
+                                        "client lagged again inside the recovery window — \
+                                         pacing before the next snapshot build"
+                                    );
+                                    tokio::time::sleep(LAG_RECOVERY_DEBOUNCE - since).await;
+                                }
+                            }
+                            last_lag_recovery = Some(tokio::time::Instant::now());
                             tracing::warn!(
                                 lagged = n,
                                 bus_lagged_total =
@@ -1809,6 +1873,11 @@ pub async fn dispatch_command(
             // issue appears now instead of next scheduled sweep (issue
             // #180), then wake the long-lived poll loop — the single
             // source of truth for ticks.
+            //
+            // An explicit refresh also clears the command-credential
+            // cache: a user who just ran `gh auth login` and hit
+            // refresh must not wait out a failure-backoff window.
+            lazybox_auth::invalidate_command_credential_cache();
             if let Some(client) = config.poll.cached_gh_client() {
                 client.force_full_sweep();
             }

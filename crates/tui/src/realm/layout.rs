@@ -201,12 +201,10 @@ impl LayoutCtx {
     pub fn persist(&self) {
         let s = self.sidebar_pct;
         let t = self.right_top_pct;
-        if let Err(e) = lazybox_config::Config::save_with(|c| {
+        lazybox_config::Config::save_with_async(move |c| {
             c.ui.sidebar_pct = Some(s);
             c.ui.right_top_pct = Some(t);
-        }) {
-            tracing::warn!("save splits failed: {e}");
-        }
+        });
     }
 }
 

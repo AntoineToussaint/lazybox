@@ -90,8 +90,22 @@ fn client_scrollback_lines() -> usize {
 /// capping a 50_000-line request at a few hundred rows.
 const CLIENT_SCROLLBACK_BYTES_PER_LINE: usize = 4096;
 
+/// Hard per-slot ceiling on the VT byte backstop (2026-08-19 audit,
+/// M2). The per-line figure above is load-bearing for wide panes
+/// (#857: libghostty's per-row page cost grows with width), but the
+/// product multiplies by EVERY session's slot in one process — a
+/// 50k-line config made each VT a 195 MiB liability, 67 live
+/// terminals a 13 GB theoretical ceiling. 64 MiB still holds the full
+/// 50k lines up to ~300 cols equivalent; only extreme line-count ×
+/// width combinations trade depth for a bounded process.
+const CLIENT_SCROLLBACK_MAX_BYTES: usize = 64 * 1024 * 1024;
+
 fn client_scrollback_bytes() -> Option<usize> {
-    Some(client_scrollback_lines().saturating_mul(CLIENT_SCROLLBACK_BYTES_PER_LINE))
+    Some(
+        client_scrollback_lines()
+            .saturating_mul(CLIENT_SCROLLBACK_BYTES_PER_LINE)
+            .min(CLIENT_SCROLLBACK_MAX_BYTES),
+    )
 }
 
 /// Cap for the per-terminal recent-output buffer.
@@ -103,6 +117,41 @@ fn client_scrollback_bytes() -> Option<usize> {
 /// rolling window of the last ~4 KiB of bytes the daemon streamed in.
 /// 4 KiB is enough to span any prompt the agents have shipped so far.
 pub const RECENT_OUTPUT_CAP: usize = 4 * 1024;
+
+/// Copy `area` out of a frame buffer into an owned buffer keyed to
+/// that same area — the composed-frame cache behind the U1 render
+/// gate. ~10k cell clones for a full-window tile: three orders of
+/// magnitude cheaper than the FFI walk it lets later frames skip.
+fn copy_frame_region(
+    src: &ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+) -> ratatui::buffer::Buffer {
+    let mut out = ratatui::buffer::Buffer::empty(area);
+    let bounded = area.intersection(src.area);
+    for y in bounded.top()..bounded.bottom() {
+        for x in bounded.left()..bounded.right() {
+            out[(x, y)] = src[(x, y)].clone();
+        }
+    }
+    out
+}
+
+/// Blit the cached composed frame into the current frame buffer,
+/// clipped to the intersection of the cache's area and the target
+/// `area` (a frozen pane may have been resized since its freeze-frame;
+/// the uncovered remainder keeps the frame's cleared cells).
+fn blit_cached_frame(
+    dst: &mut ratatui::buffer::Buffer,
+    cached: &ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+) {
+    let bounded = area.intersection(cached.area).intersection(dst.area);
+    for y in bounded.top()..bounded.bottom() {
+        for x in bounded.left()..bounded.right() {
+            dst[(x, y)] = cached[(x, y)].clone();
+        }
+    }
+}
 
 /// DEC private modes carried across a deep-scrollback rebuild
 /// (`apply_scrollback`). The capture replay is content-only, so any
@@ -907,6 +956,18 @@ struct TerminalSlot {
     /// the original spawn size never gets written and the user sees
     /// a frozen-looking pane).
     last_rendered_size: Option<(u16, u16)>,
+    /// The last fully composed frame (cursor overlay included) and the
+    /// `(content_rev, area)` it was painted at (2026-08-19 audit, U1).
+    /// When the VT saw no mutation since that paint, the render path
+    /// blits this instead of re-running the full per-cell FFI grid walk
+    /// (~50k FFI calls for a full-window tile) — the dominant term in
+    /// the observed 100–600 ms render stalls. Invalidated (rev slot set
+    /// to `None`) whenever the parser is replaced wholesale (resync
+    /// reset, deep-scrollback adoption), since a fresh parser restarts
+    /// its revision counter. Also the freeze-frame a crashed agent pane
+    /// renders from after its VT is dropped (M3).
+    last_frame: Option<ratatui::buffer::Buffer>,
+    last_frame_rev: Option<(u64, Rect)>,
     /// Characters the user has typed since the last submit. Only
     /// tracked on Agent terminals — the pinned recap is meaningless
     /// for shells. Cleared when the user hits Enter, Ctrl-C, Ctrl-U,
@@ -1184,6 +1245,17 @@ struct TerminalVt {
     /// (cursor moved off-caret) so a hidden, parked cursor doesn't
     /// leave a stray block (#844).
     last_visible_cursor: Option<vt::render::CursorViewport>,
+    /// Monotonic revision of the grid content, bumped by every
+    /// mutation that can change what a render would show: `feed`,
+    /// an actual viewport `scroll`, a real `ensure_size` change.
+    /// Wholesale parser replacement (`reset`, the deep-scrollback
+    /// adoption) swaps the whole struct, and the slot-level cached
+    /// frame is invalidated at those sites. Unlike libghostty's
+    /// dirty flags (unsound as a skip signal, #239), this is a
+    /// client-side input log: if no mutation ran since the last
+    /// paint, the grid literally cannot differ — skipping the full
+    /// per-cell FFI walk is sound (2026-08-19 audit, U1).
+    content_rev: u64,
     /// Deterministic fault injection for the resync retry contract.
     #[cfg(test)]
     fail_next_reset: bool,
@@ -1211,6 +1283,7 @@ impl TerminalVt {
             rows: DEFAULT_ROWS,
             shadow: None,
             last_visible_cursor: None,
+            content_rev: 0,
             #[cfg(test)]
             fail_next_reset: false,
             _not_send: std::marker::PhantomData,
@@ -1218,6 +1291,7 @@ impl TerminalVt {
     }
 
     fn feed(&mut self, bytes: &[u8]) {
+        self.content_rev = self.content_rev.wrapping_add(1);
         self.terminal.vt_write(bytes);
     }
 
@@ -1266,6 +1340,7 @@ impl TerminalVt {
             };
         }
 
+        self.content_rev = self.content_rev.wrapping_add(1);
         match request {
             ScrollRequest::By(delta) => self
                 .terminal
@@ -1301,6 +1376,7 @@ impl TerminalVt {
         if cols == self.cols && rows == self.rows {
             return;
         }
+        self.content_rev = self.content_rev.wrapping_add(1);
         let _ = self.terminal.resize(cols, rows, 0, 0);
         self.cols = cols;
         self.rows = rows;
@@ -2735,6 +2811,9 @@ impl TerminalStack {
             return;
         }
         slot.vt.feed(replay);
+        // The reset parser restarted its revision counter — a stale
+        // cached frame keyed to the old counter must never blit.
+        slot.last_frame_rev = None;
         // Drop any half-buffered clipboard sequence — the stream is being
         // rebuilt from the ring and we don't re-forward OSC 52 here.
         slot.osc52_carry.clear();
@@ -2822,6 +2901,9 @@ impl TerminalStack {
         // the full parse. Dropping the old parser here is the same grid
         // replacement `reset()` performed, minus the wasted second pass.
         slot.vt = scratch;
+        // The fresh parser restarts its revision counter — a stale
+        // cached frame keyed to the old counter must never blit.
+        slot.last_frame_rev = None;
         let mut modes = Vec::with_capacity(preserved.len() * 8);
         for (value, on) in preserved {
             let flag = if on { 'h' } else { 'l' };
@@ -2873,6 +2955,8 @@ impl TerminalStack {
             osc52_carry: Vec::new(),
             agent_state: lazybox_ipc::AgentState::Idle,
             last_rendered_size: None,
+            last_frame: None,
+            last_frame_rev: None,
             composing,
             prompt_history,
             no_permission,
@@ -3600,6 +3684,22 @@ impl TerminalStack {
                             dead_on_arrival,
                             last_output: last_output.clone(),
                         });
+                        // Reclaim the VT (2026-08-19 audit, M3): a
+                        // frozen pane renders its freeze-frame
+                        // (`last_frame`) from here on, and the dead
+                        // parser would otherwise pin up to the full
+                        // scrollback ceiling until the user closes the
+                        // pane — with crashes routine at fleet scale,
+                        // that accumulated. Only when a painted frame
+                        // exists to freeze on: a never-displayed slot
+                        // keeps its VT (bounded, and `pending_feed`
+                        // still renders on first show).
+                        if slot.last_frame.is_some()
+                            && let Some(fresh) = TerminalVt::new()
+                        {
+                            slot.vt = fresh;
+                            slot.last_frame_rev = None;
+                        }
                     }
                 } else {
                     self.drop_slot(*terminal_id);
@@ -4515,7 +4615,25 @@ impl TerminalStack {
                 slot.last_rendered_size = Some(new_size);
                 self.pending_resizes.push((id, grid.width, grid.height));
             }
-            if let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) {
+            // Content-revision gate (2026-08-19 audit, U1). The full
+            // widget render is a per-cell FFI walk — ~5 round-trips ×
+            // every viewport cell, ~50k calls for a full-window tile,
+            // every frame. When the VT saw NO mutation since the last
+            // paint at this exact area (revision + rect match), the
+            // grid cannot differ, so blit the cached composed frame
+            // (cursor overlay included) instead. Unlike libghostty's
+            // dirty flags (#239) this is sound: the revision is a log
+            // of the VT's *inputs*, not its self-reported dirtiness.
+            // A frozen crashed pane (M3) always blits its freeze-frame
+            // — its VT was dropped to reclaim scrollback memory.
+            let rev_key = (slot.vt.content_rev, grid);
+            let frozen = slot.exited.is_some() && slot.last_frame.is_some();
+            let unchanged = slot.last_frame_rev == Some(rev_key) && slot.last_frame.is_some();
+            if frozen || unchanged {
+                if let Some(cached) = &slot.last_frame {
+                    blit_cached_frame(frame.buffer_mut(), cached, grid);
+                }
+            } else if let Ok(snapshot) = slot.vt.render_state.update(&slot.vt.terminal) {
                 let widget = GhosttyTerminal::new(
                     &snapshot,
                     &mut slot.vt.row_iter,
@@ -4524,6 +4642,8 @@ impl TerminalStack {
                     &mut slot.vt.last_visible_cursor,
                 );
                 frame.render_widget(widget, grid);
+                slot.last_frame = Some(copy_frame_region(frame.buffer_mut(), grid));
+                slot.last_frame_rev = Some(rev_key);
             }
             if let Some(gutter) = gutter
                 && let Ok(bar) = slot.vt.terminal.scrollbar()
@@ -4548,6 +4668,10 @@ impl TerminalStack {
     /// of an exited pane's grid (#356). The frozen last screen stays
     /// visible above it; this row is a filled bar so it reads as an
     /// alert over whatever output the crash left behind.
+    ///
+    /// See also `blit_cached_frame` / `copy_frame_region` (U1): the
+    /// frozen screen itself now comes from the cached composed frame,
+    /// not a live VT.
     ///
     /// A dead-on-arrival exit (#368) — the agent gone within seconds of
     /// spawn — reads as "failed to start" rather than a plain "exited",
@@ -6251,6 +6375,120 @@ mod selection_offset_tests {
         // "line2" — the row two below the highlight.
         let text = copy_between(&mut stack, Rect::new(0, 0, 80, 30), (1, 5), (10, 5));
         assert_eq!(text, "line0");
+    }
+
+    /// U1 regression (2026-08-19 audit): with no VT mutation between
+    /// frames, the render path must repaint from the cached composed
+    /// frame — pixel-identical to a fresh walk — and a subsequent feed
+    /// must invalidate the cache so new content shows.
+    #[test]
+    fn unchanged_terminal_repaints_identically_from_the_cached_frame() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 60;
+        const H: u16 = 8;
+        let area = Rect::new(0, 0, W, H);
+        let mut stack = stack_with(TerminalKind::Shell, None, &[]);
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .vt
+            .feed(b"hello gate\r\n");
+
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let first = term.backend().buffer().clone();
+        assert!(
+            stack.terminals[&TerminalId(1)].last_frame_rev.is_some(),
+            "a fresh paint must populate the frame cache"
+        );
+
+        // No mutation: the second draw takes the blit path and must be
+        // pixel-identical.
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        assert_eq!(*term.backend().buffer(), first, "cached blit == fresh walk");
+
+        // A feed bumps the revision; the next draw must show it.
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .vt
+            .feed(b"fresh bytes\r\n");
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let after = term.backend().buffer();
+        let text: String = (0..H)
+            .map(|y| {
+                (0..W)
+                    .map(|x| after[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("fresh bytes"),
+            "a mutation must invalidate the cached frame: {text}"
+        );
+    }
+
+    /// M3 regression (2026-08-19 audit): an abnormally exited agent
+    /// keeps its last painted screen visible while its VT — up to the
+    /// full scrollback ceiling of memory — is dropped and replaced by
+    /// an empty parser.
+    #[test]
+    fn crashed_agent_pane_freezes_its_screen_and_drops_the_vt() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 60;
+        const H: u16 = 8;
+        let area = Rect::new(0, 0, W, H);
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
+        stack
+            .terminals
+            .get_mut(&TerminalId(1))
+            .unwrap()
+            .vt
+            .feed(b"crash evidence\r\n");
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(2),
+            last_output: None,
+        });
+        let slot = &stack.terminals[&TerminalId(1)];
+        assert!(slot.exited.is_some(), "abnormal exit keeps the frozen slot");
+        assert_eq!(
+            slot.vt.content_rev, 0,
+            "the dead parser was replaced by a fresh empty one"
+        );
+
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = (0..H)
+            .map(|y| {
+                (0..W)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("crash evidence"),
+            "the freeze-frame must keep showing the last screen: {text}"
+        );
+        assert!(
+            text.contains("agent exited"),
+            "the restart banner overlays the frozen screen: {text}"
+        );
     }
 
     /// Every on-screen grid row — top and bottom boundary included —

@@ -891,6 +891,26 @@ impl DaemonPty {
         std::thread::Builder::new()
             .name("lazybox-server-pty".into())
             .spawn(move || {
+                // The finished flag + notify MUST fire even if the loop
+                // panics (2026-08-19 audit, L5): set from a drop guard,
+                // not a trailing statement. A panicking reader used to
+                // leave `is_finished()` false forever — `wait_finished`
+                // never resolved and `is_alive` reported a dead
+                // terminal as live.
+                struct FinishOnDrop {
+                    finished: Arc<std::sync::atomic::AtomicBool>,
+                    notify: Arc<tokio::sync::Notify>,
+                }
+                impl Drop for FinishOnDrop {
+                    fn drop(&mut self) {
+                        self.finished.store(true, Ordering::Release);
+                        self.notify.notify_waiters();
+                    }
+                }
+                let _finish = FinishOnDrop {
+                    finished: reader_finished,
+                    notify: reader_notify,
+                };
                 let mut reader = reader;
                 let mut buf = [0u8; 8192];
                 loop {
@@ -932,8 +952,8 @@ impl DaemonPty {
                         }
                     }
                 }
-                reader_finished.store(true, Ordering::Release);
-                reader_notify.notify_waiters();
+                // `_finish` drops here (or on a panic above) and flips
+                // the finished flag + wakes waiters.
             })
             .map_err(|e| PtyError::Spawn(e.to_string()))?;
 

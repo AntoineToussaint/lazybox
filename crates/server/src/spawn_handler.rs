@@ -1109,6 +1109,36 @@ async fn handle_spawn_inner(
         autonomous,
         "handle_spawn: entry"
     );
+    // Population cap (2026-08-19 audit, M1): agent CLIs are ~110 MB RSS
+    // each and the tmux backend deliberately never reaps, so with no
+    // ceiling the fleet only ratchets upward — a measured 48 live
+    // Claude CLIs (5.5 GB) was the machine-wide pressure incident.
+    // Fresh agent spawns are refused at the cap with a notice naming
+    // the knob; shells, resumes/replacements of existing sessions, and
+    // restart recovery (which never routes through here) stay exempt.
+    if matches!(&kind, TerminalKind::Agent(_))
+        && !resume
+        && replace_terminal_id.is_none()
+        && let Some(cap) = cfg.agent.live_agent_cap()
+    {
+        let live_agents = config.terminal.live_agent_count().await;
+        if live_agents >= cap {
+            tracing::warn!(
+                live_agents,
+                cap,
+                %session_key,
+                "agent spawn refused: live-agent cap reached"
+            );
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "spawn",
+                format!(
+                    "{live_agents} agents are already running — close some (]]x) or \
+                     raise agent.max_live_agents (currently {cap}) in config.yaml"
+                ),
+            ));
+            return None;
+        }
+    }
     // A linked (no-worktree) workspace runs every session in the user's
     // existing on-disk checkout — the same "shared checkout, not an
     // isolated worktree" shape as an on-main spawn. Treat it as on-main
@@ -1487,7 +1517,7 @@ async fn handle_spawn_inner(
         // *after* TerminalSpawned was broadcast, so skipping teardown
         // would leave a phantom terminal entry that satisfies the
         // singleton guard forever and blocks respawn (`w`/`c`/`x`).
-        let exit_code = async {
+        let pump = async {
             let mut sub = sub?;
             // Per-terminal rolling buffer for state detection. Bumped
             // from 4 KiB to 32 KiB after a real bug: Claude's status-
@@ -1999,8 +2029,32 @@ async fn handle_spawn_inner(
                 }
             }
             backend.wait_exit(&key_for_pump).await
-        }
-        .await;
+        };
+        // Tolerate panics inside the pump body (2026-08-19 audit, L5).
+        // tokio swallows task panics, and this task owns state
+        // detection over untrusted PTY bytes AND the teardown at the
+        // bottom — an unwrapped panic skipped teardown silently: the
+        // terminal stayed registered forever, `TerminalExited` never
+        // fired, and the singleton guard blocked respawn with no log
+        // line. Same pattern as the polling loop's wrapper.
+        let exit_code =
+            match futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(pump)).await {
+                Ok(code) => code,
+                Err(payload) => {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        (*s).to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "<non-string panic payload>".to_string()
+                    };
+                    tracing::error!(
+                        terminal_id = ?id_for_pump,
+                        "terminal output pump PANICKED: {msg} — running teardown anyway"
+                    );
+                    None
+                }
+            };
         teardown_exited_terminal(&config_for_pump, id_for_pump, &key_for_pump, exit_code).await;
     });
 
@@ -6100,7 +6154,7 @@ const MAX_SCROLLBACK_REPLAY_BYTES: usize = MAX_FRAME_BYTES as usize - 1024 * 102
 /// fatal oversized-frame disconnect into graceful truncation. The kept
 /// prefix is advanced to the next line boundary so the reply never starts
 /// mid-escape (at worst one already-truncated oldest line is dropped).
-fn cap_scrollback_replay(replay: Vec<u8>, max_bytes: usize) -> Vec<u8> {
+pub(crate) fn cap_scrollback_replay(replay: Vec<u8>, max_bytes: usize) -> Vec<u8> {
     if replay.len() <= max_bytes {
         return replay;
     }
@@ -9342,6 +9396,32 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
             .await;
         }
     }
+
+    // The live-agent cap is deliberately NOT enforced on recovery —
+    // persisted sessions are user state and killing them at boot would
+    // be destructive. But an over-cap fleet is exactly the memory
+    // ratchet the cap exists for (agents only accumulate across
+    // restarts), so surface it loudly instead of silently re-attaching
+    // toward the next OOM.
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    if let Some(cap) = cfg.agent.live_agent_cap() {
+        let live_agents = config.terminal.live_agent_count().await;
+        if live_agents > cap {
+            tracing::warn!(
+                live_agents,
+                cap,
+                "recovered agent fleet exceeds agent.max_live_agents"
+            );
+            let _ = config.bus.send(Event::provider_error_permanent(
+                "spawn",
+                format!(
+                    "{live_agents} agents recovered at startup — above the \
+                     agent.max_live_agents cap of {cap}; close idle sessions (]]x) \
+                     to reclaim memory"
+                ),
+            ));
+        }
+    }
 }
 
 fn gc_session_access_policies(
@@ -9391,10 +9471,28 @@ fn gc_session_access_policies(
 fn gc_scrollback_files(workspaces: &[lazybox_store::WorkspaceRecord], dir: &std::path::Path) {
     let mut keep: std::collections::HashSet<String> = std::collections::HashSet::new();
     for record in workspaces {
+        // A record with no / unreadable JSON contributes no sessions to
+        // the keep-set — but its sessions may still be alive, so
+        // deleting against a PARTIAL keep-set could unlink a live
+        // session's history. Skip the whole sweep (2026-08-19 audit,
+        // D2 — this used to be a bare `return` in the middle of the
+        // keep-set build, which was the same outcome by accident;
+        // making it explicit keeps a future `continue` "fix" from
+        // introducing the partial-keep-set deletion bug).
         let Some(json) = &record.workspace_json else {
+            tracing::warn!(
+                key = %record.key,
+                "scrollback gc: record has no workspace JSON — skipping the sweep \
+                 (cannot prove which files are orphans)"
+            );
             return;
         };
         let Ok(workspace) = serde_json::from_str::<Workspace>(json) else {
+            tracing::warn!(
+                key = %record.key,
+                "scrollback gc: unreadable workspace JSON — skipping the sweep \
+                 (cannot prove which files are orphans)"
+            );
             return;
         };
         for session in &workspace.sessions {

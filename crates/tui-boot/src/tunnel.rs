@@ -253,8 +253,8 @@ impl Tunnel {
             let _ = std::fs::remove_file(&self.local_socket);
         }
         let (program, args) = self.command();
-        Command::new(&program)
-            .args(&args)
+        let mut cmd = Command::new(&program);
+        cmd.args(&args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             // Piped, not inherited: the forward's diagnostics stay out of the
@@ -264,8 +264,31 @@ impl Tunnel {
             .stderr(Stdio::piped())
             // If the supervisor task is dropped (client exit), the child
             // ssh/gcloud is killed rather than orphaned holding the ports.
-            .kill_on_drop(true)
-            .spawn()
+            .kill_on_drop(true);
+        // Own process group: `gcloud` is a Python wrapper around the real
+        // `ssh -N -L`, and `kill_on_drop` only signals the wrapper — the
+        // inner ssh survived it orphaned, still holding the forwarded
+        // socket, so the next launch could bind-race or silently talk to
+        // the dead session's forward. Same class git-ops fixed for git
+        // transport helpers; the group is swept in `supervise_with`.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.spawn()
+    }
+}
+
+/// Kills the child's whole process group with SIGKILL on drop. Mirrors
+/// `git-ops`'s guard: `kill_on_drop` alone reaps only the direct child,
+/// and both tunnel shapes (`gcloud … --tunnel-through-iap`, provider
+/// argv) wrap an inner `ssh` that must die with its wrapper.
+struct KillGroupOnDrop(Option<i32>);
+
+impl Drop for KillGroupOnDrop {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.0 {
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
     }
 }
 
@@ -295,14 +318,18 @@ pub async fn supervise_argv(
 ) {
     supervise_with(move || {
         let _ = std::fs::remove_file(&socket);
-        Command::new(&program)
-            .args(&args)
+        let mut cmd = Command::new(&program);
+        cmd.args(&args)
             .envs(env.iter().map(|(k, v)| (k, v)))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
+            .kill_on_drop(true);
+        // Own process group — see `Tunnel::spawn`: the provider argv also
+        // wraps an inner ssh that must die with its wrapper.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        cmd.spawn()
     })
     .await
 }
@@ -317,6 +344,12 @@ where
     loop {
         match spawn() {
             Ok(mut child) => {
+                // Sweep the whole group when this arm ends — whether the
+                // leader exited on its own (its inner ssh may have
+                // survived, orphaned on the socket) or the supervisor
+                // task was aborted mid-wait. The group only contains
+                // processes this spawn created.
+                let _group = KillGroupOnDrop(child.id().map(|id| id as i32));
                 if let Some(stderr) = child.stderr.take() {
                     tokio::spawn(log_child_stderr(stderr));
                 }

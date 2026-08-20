@@ -342,6 +342,14 @@ async fn drive(
             biased;
             evt = bus_rx.recv() => {
                 match evt {
+                    // Only an `InputNeeded` AgentState ever posts to
+                    // Slack (chat.rs bails on every other state), so
+                    // gate BEFORE dispatching to the HTTP pool
+                    // (2026-08-19 audit, R9): under state churn every
+                    // Working/Done flap used to burn a pool slot — and
+                    // the pool's backpressure blocks this bus reader.
+                    Ok(Event::AgentState { state: s, .. })
+                        if s != lazybox_ipc::AgentState::InputNeeded => {}
                     Ok(e @ (Event::TerminalSpawned { .. } | Event::AgentState { .. })) => {
                         // HTTP-bearing handling — off the loop.
                         let provider = provider.clone();

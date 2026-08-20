@@ -2986,13 +2986,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// Best-effort, mirroring `mark_tour_seen`: a write failure just
     /// means the tip may show once more next boot.
     fn persist_tip_seen(&self, id: String) {
-        if let Err(e) = lazybox_config::Config::save_with(move |c| {
+        lazybox_config::Config::save_with_async(move |c| {
             if !c.ui.tips_seen.contains(&id) {
                 c.ui.tips_seen.push(id.clone());
             }
-        }) {
-            tracing::warn!("save tips_seen failed: {e}");
-        }
+        });
     }
 
     /// Mount the snippet picker with an initial filter (typically

@@ -164,14 +164,21 @@ pub struct Sidebar {
     /// can only cost a frame of cosmetic lag that the next redraw heals —
     /// dispatch always reads live state, never this cache.
     #[cfg(not(test))]
-    workspace_line_cache: Option<(u64, Vec<Option<Line<'static>>>)>,
+    workspace_line_cache: Option<(u64, std::rc::Rc<Vec<Option<Line<'static>>>>)>,
     /// In tests we also track how many times the cache was actually
     /// (re)built, so the #1090 regression can assert a hit skips the
     /// rebuild.
     #[cfg(test)]
-    workspace_line_cache: Option<(u64, Vec<Option<Line<'static>>>)>,
+    workspace_line_cache: Option<(u64, std::rc::Rc<Vec<Option<Line<'static>>>>)>,
     #[cfg(test)]
     workspace_line_builds: std::cell::Cell<usize>,
+    /// One-pass memo for the header's attention counters (2026-08-19
+    /// audit, U4). The header used to run 7 independent
+    /// O(visible × activity) scans per frame — each allocating an
+    /// attention-signal Vec per workspace — to produce a handful of
+    /// integers. Keyed by the same inputs that can change them
+    /// (data_version, agent states, selection marks).
+    header_counters_cache: Option<(u64, render::HeaderCounters)>,
     /// Index into `visible`. Always points at a `Workspace` variant
     /// when there is at least one — `recompute_visible` and the
     /// j/k handlers maintain that invariant.
@@ -422,6 +429,7 @@ impl Sidebar {
             recompute_count: 0,
             data_version: 0,
             workspace_line_cache: None,
+            header_counters_cache: None,
             #[cfg(test)]
             workspace_line_builds: std::cell::Cell::new(0),
             cursor: 0,
@@ -2553,9 +2561,7 @@ impl Sidebar {
         // so the layout survives restart. Best-effort; an I/O
         // error here just means next launch starts expanded.
         let snapshot = self.collapsed_repos.clone();
-        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.collapsed_repos = snapshot) {
-            tracing::warn!("save collapsed_repos failed: {e}");
-        }
+        lazybox_config::Config::save_with_async(|c| c.ui.collapsed_repos = snapshot);
         // Always park the cursor on the toggled header so
         // collapse + immediately re-expand works (Space twice in a
         // row toggles the same repo).
@@ -2585,9 +2591,7 @@ impl Sidebar {
         }
         self.recompute_visible();
         let snapshot = self.collapsed_spaces.clone();
-        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.collapsed_spaces = snapshot) {
-            tracing::warn!("save collapsed_spaces failed: {e}");
-        }
+        lazybox_config::Config::save_with_async(|c| c.ui.collapsed_spaces = snapshot);
         if let Some(idx) = self
             .visible
             .iter()
@@ -2623,9 +2627,7 @@ impl Sidebar {
         lazybox_tui_core::inbox::assign_source(&mut self.spaces, source, space);
         self.recompute_visible();
         let snapshot = self.spaces.clone();
-        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.spaces = snapshot) {
-            tracing::warn!("save spaces failed: {e}");
-        }
+        lazybox_config::Config::save_with_async(|c| c.ui.spaces = snapshot);
         self.space_of_source(source)
     }
 
@@ -2657,9 +2659,7 @@ impl Sidebar {
         // order survives restart. Best-effort; a write error just means
         // the pins reset next launch.
         let snapshot = self.pinned_repos.clone();
-        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.pinned_repos = snapshot) {
-            tracing::warn!("save pinned_repos failed: {e}");
-        }
+        lazybox_config::Config::save_with_async(|c| c.ui.pinned_repos = snapshot);
         Some((repo, now_pinned))
     }
 
@@ -2721,9 +2721,7 @@ impl Sidebar {
             .iter()
             .map(|k| k.as_str().to_string())
             .collect();
-        if let Err(e) = lazybox_config::Config::save_with(|c| c.ui.focused_workspaces = snapshot) {
-            tracing::warn!("save focused_workspaces failed: {e}");
-        }
+        lazybox_config::Config::save_with_async(|c| c.ui.focused_workspaces = snapshot);
     }
 
     /// True when the workspace is currently starred (used by the row
@@ -3369,8 +3367,8 @@ pub(crate) use lazybox_tui_core::inbox::workspace_needs_attention;
 // Re-export the ratatui-styled pills.rs items so callers in the rest of
 // the crate keep their `crate::components::sidebar::*` import paths.
 pub(crate) use pills::{
-    ARM_GLYPH, AUTO_GLYPH, FIX_GLYPH, LegendRow, TRACK_GLYPH, badge_pill_style, relative_time,
-    role_badge, status_legend, status_pills, workspace_type_label,
+    ARM_GLYPH, AUTO_GLYPH, CLAIM_GLYPH, FIX_GLYPH, LegendRow, TRACK_GLYPH, badge_pill_style,
+    relative_time, role_badge, status_legend, status_pills, workspace_type_label,
 };
 #[cfg(test)]
 pub(crate) use pills::{pill_for_tag, status_pill};

@@ -124,6 +124,27 @@ impl AgentTurn {
                 self.last_hook_waiting_on_user = waiting_on_user;
                 self.last_hook_at = Some(std::time::Instant::now());
                 self.watchdog_ticks_since_hook = 0;
+                if !waiting_on_user {
+                    // An affirmative lifecycle hook (PreToolUse /
+                    // PostToolUse / UserPromptSubmit) is authoritative
+                    // "still working" evidence — at least as strong as
+                    // a visible repaint. Before this re-anchor, only
+                    // MEANINGFUL screen progress reset the watchdog
+                    // clock, so a long quiet tool call (static
+                    // transcript, spinner-only repaints filtered as
+                    // non-progress) hit the watchdog despite a fresh
+                    // hook stream and force-flipped a genuinely
+                    // working agent to Done — one half of the
+                    // Working/Done flapping (2026-08-19 audit, R4).
+                    // The quiet timer is deliberately NOT touched:
+                    // byte-silence remains authoritative (#504) and a
+                    // busy Claude repaints its ticker inside that
+                    // window anyway.
+                    let now = tokio::time::Instant::now();
+                    self.content_stable_since = now;
+                    self.watchdog_deadline = self.watchdog_window.map(|window| now + window);
+                    self.deadline_batch_remaining = None;
+                }
             }
             AgentTurnEvent::Tick(tick) => {
                 if tick == AgentTurnTick::Watchdog && self.last_hook.is_some() {
@@ -345,6 +366,26 @@ impl TerminalRegistry {
             .iter()
             .filter_map(|(id, entry)| entry.agent_state.map(|state| (*id, state)))
             .collect()
+    }
+
+    /// Agent terminals whose process is, as far as the registry knows,
+    /// still alive: registered `Agent(_)` entries that aren't finishing
+    /// and aren't already `Exited` (process gone, teardown pending).
+    /// Shells never count. Read by the spawn-time population cap
+    /// (`agent.max_live_agents`, 2026-08-19 audit M1).
+    pub(crate) async fn live_agent_count(&self) -> usize {
+        self.entries
+            .lock()
+            .await
+            .values()
+            .filter(|entry| !entry.finishing)
+            .filter(|entry| {
+                matches!(
+                    entry.meta.as_ref(),
+                    Some((_, lazybox_ipc::TerminalKind::Agent(_)))
+                ) && !matches!(entry.agent_state, Some(AgentState::Exited { .. }))
+            })
+            .count()
     }
 
     #[cfg(test)]
@@ -946,6 +987,12 @@ pub struct PollState {
     /// Linear's force into that flag would re-poll Linear on every GitHub
     /// mutation, defeating its decoupled cadence (#1032).
     poll_force_refresh_requested: Arc<AtomicBool>,
+    /// Generation counter for debounced focus wakes: each focus change
+    /// bumps it, and the delayed waker only fires if the focus has been
+    /// stable for the whole debounce window. Without this, every
+    /// sidebar `j`/`k` that crossed a row was an immediate `wake(false)`
+    /// — scrolling the sidebar ran full poll ticks (2026-08-19 audit).
+    focus_wake_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PollState {
@@ -960,6 +1007,39 @@ impl PollState {
     /// Wait until a refresh request wakes the polling loop.
     pub async fn wait_for_wake(&self) {
         self.wake_signal.notified().await;
+    }
+
+    /// Consume a stored wake permit without blocking; `true` when one
+    /// was pending. `Notify::notify_one` on a loop that isn't waiting
+    /// **stores** the permit, so every `wake()` raised while a tick was
+    /// running (Done agent states, focus changes, subscribes) used to
+    /// resolve the next `wait_for_wake` instantly — a guaranteed
+    /// zero-gap back-to-back tick. The poll driver drains this after
+    /// each tick body and coalesces it into a short, bounded follow-up
+    /// instead (2026-08-19 audit, R1).
+    pub fn drain_pending_wake(&self) -> bool {
+        use futures::FutureExt;
+        self.wake_signal.notified().now_or_never().is_some()
+    }
+
+    /// Wake the poll loop once the focus has settled. Bumps the epoch
+    /// (cancelling any earlier pending focus wake) and fires only if no
+    /// further focus change lands within the debounce window — so a
+    /// j/k sweep across 20 rows produces one targeted refresh for the
+    /// row the user stopped on, not 20 poll ticks.
+    pub fn wake_for_focus_debounced(&self) {
+        const FOCUS_WAKE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
+        let epoch = self
+            .focus_wake_epoch
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        let state = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(FOCUS_WAKE_DEBOUNCE).await;
+            if state.focus_wake_epoch.load(Ordering::Acquire) == epoch {
+                state.wake(false);
+            }
+        });
     }
 
     /// Snapshot the workspace currently driving engagement scheduling.
@@ -1341,5 +1421,140 @@ mod tests {
             clone.backend_key_for(TerminalId(1)).await.as_deref(),
             Some("backend")
         );
+    }
+
+    /// 2026-08-19 audit (R1): a `wake()` raised while a tick runs
+    /// stores a Notify permit that used to resolve the next
+    /// `wait_for_wake` instantly — the "next tick in 0s" storm. The
+    /// driver drains that permit after the tick body; draining must
+    /// consume it (second drain reports none pending).
+    #[tokio::test]
+    async fn drain_pending_wake_consumes_the_stored_permit() {
+        let poll = PollState::default();
+        assert!(!poll.drain_pending_wake(), "fresh state has no permit");
+        poll.wake(false);
+        assert!(poll.drain_pending_wake(), "the stored permit is seen");
+        assert!(!poll.drain_pending_wake(), "and consumed — not sticky");
+    }
+
+    /// R4 regression (2026-08-19 audit): an affirmative lifecycle hook
+    /// must re-anchor the watchdog clock. Before the fix only
+    /// meaningful screen progress did, so a long quiet tool call
+    /// (spinner-only repaints, filtered as non-progress) hit the
+    /// watchdog despite a fresh hook stream and force-flipped a
+    /// working agent to Done — the Working→Done→Working flapping seen
+    /// on terminal 2128.
+    #[tokio::test(start_paused = true)]
+    async fn affirmative_hook_rearms_the_watchdog_deadline() {
+        let window = std::time::Duration::from_secs(15);
+        let mut turn = AgentTurn::default();
+        turn.configure(std::time::Duration::from_secs(5), Some(window));
+
+        // 14s in: no meaningful progress, watchdog nearly due.
+        tokio::time::advance(std::time::Duration::from_secs(14)).await;
+        let hook_seq = turn.record(AgentTurnEvent::HookArrived {
+            waiting_on_user: false,
+        });
+        assert!(hook_seq > 0);
+        // 2s later (16s total — past the original deadline): the hook
+        // re-anchored, so the watchdog must NOT be due.
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(
+            !turn.prepare_schedule(0).watchdog_due,
+            "a fresh affirmative hook is 'still working' evidence — no watchdog fire"
+        );
+        // With the hook stream gone quiet, the bound still holds: the
+        // watchdog fires one window after the LAST evidence, so a lost
+        // Stop hook can't pin Working forever.
+        tokio::time::advance(window).await;
+        assert!(
+            turn.prepare_schedule(0).watchdog_due,
+            "no further evidence — the upper bound must still fire"
+        );
+
+        // A waiting-on-user hook is NOT working evidence and must not
+        // extend the clock.
+        let mut waiting = AgentTurn::default();
+        waiting.configure(std::time::Duration::from_secs(5), Some(window));
+        tokio::time::advance(std::time::Duration::from_secs(14)).await;
+        waiting.record(AgentTurnEvent::HookArrived {
+            waiting_on_user: true,
+        });
+        tokio::time::advance(std::time::Duration::from_secs(2)).await;
+        assert!(
+            waiting.prepare_schedule(0).watchdog_due,
+            "a waiting-on-user hook must not re-arm the watchdog"
+        );
+    }
+
+    /// M1 (2026-08-19 audit): the live-agent population cap counts
+    /// agents whose process is still alive — shells and
+    /// already-`Exited` agents (process gone, teardown pending) are
+    /// out; a `Done` agent still holds ~110 MB of CLI process and
+    /// counts.
+    #[tokio::test]
+    async fn live_agent_count_ignores_shells_and_exited_agents() {
+        use lazybox_ipc::TerminalKind;
+        let registry = TerminalRegistry::default();
+        let key = SessionKey::from("ws-1");
+        registry
+            .insert_meta(
+                TerminalId(1),
+                key.clone(),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        registry
+            .insert_meta(
+                TerminalId(2),
+                key.clone(),
+                TerminalKind::Agent("codex".into()),
+            )
+            .await;
+        registry
+            .insert_meta(TerminalId(3), key.clone(), TerminalKind::Shell)
+            .await;
+        assert_eq!(registry.live_agent_count().await, 2);
+
+        registry
+            .record_agent_state(TerminalId(2), AgentState::Exited { code: Some(0) })
+            .await;
+        assert_eq!(
+            registry.live_agent_count().await,
+            1,
+            "an exited agent's process is gone — it no longer counts"
+        );
+        registry
+            .record_agent_state(TerminalId(1), AgentState::Done)
+            .await;
+        assert_eq!(
+            registry.live_agent_count().await,
+            1,
+            "a Done agent still holds its CLI process and counts"
+        );
+    }
+
+    /// A j/k sweep of focus changes must coalesce into (at most) one
+    /// wake for the row the user stopped on — each bump cancels the
+    /// pending waker, and only the last epoch fires after the window.
+    #[tokio::test(start_paused = true)]
+    async fn focus_wakes_debounce_to_the_last_change() {
+        let poll = PollState::default();
+        for _ in 0..5 {
+            poll.wake_for_focus_debounced();
+            tokio::time::advance(std::time::Duration::from_millis(200)).await;
+        }
+        assert!(
+            !poll.drain_pending_wake(),
+            "no wake while changes keep landing inside the window"
+        );
+        tokio::time::advance(std::time::Duration::from_millis(1100)).await;
+        // Let the spawned waker run.
+        tokio::task::yield_now().await;
+        assert!(
+            poll.drain_pending_wake(),
+            "the settled focus fires exactly one wake"
+        );
+        assert!(!poll.drain_pending_wake());
     }
 }

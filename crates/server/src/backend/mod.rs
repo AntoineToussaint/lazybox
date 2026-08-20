@@ -229,6 +229,20 @@ pub trait SessionBackend: Send + Sync + 'static {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>>;
 
+    /// Gracefully terminate every session whose child cannot survive
+    /// this daemon's exit anyway. Called from the quit path
+    /// (2026-08-19 audit, L2): before this hook, quit simply exited
+    /// and let the kernel SIGHUP each ephemeral child mid-write —
+    /// agent CLIs never got to flush their session files, corrupting
+    /// resume-on-restart. Durable backends (tmux — sessions surviving
+    /// restarts is the feature) keep the default no-op; only backends
+    /// whose children die with the daemon (raw PTY) escalate their
+    /// normal SIGTERM → grace → SIGKILL sweep here, bounded so quit
+    /// can't hang on an ignoring child.
+    fn shutdown_sessions<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async {})
+    }
+
     /// Whether the underlying session is still alive.
     ///
     /// This is deliberately independent of an output subscription:

@@ -1282,7 +1282,10 @@ fn every_terminal_command_round_trips_the_binary_codec() {
 
 #[test]
 fn terminal_resync_batch_round_trips_in_one_binary_frame() {
-    let requests = (1..=lazybox_ipc::COMMAND_CHANNEL_CAPACITY + 9)
+    // The client chunks resync batches at MAX_RESYNC_REQUESTS_PER_BATCH
+    // (#1237), so that is the largest batch a frame ever carries — pin
+    // that a FULL batch round-trips.
+    let requests = (1..=lazybox_ipc::FlowControl::MAX_RESYNC_REQUESTS_PER_BATCH)
         .map(|number| lazybox_ipc::TerminalResyncRequest {
             terminal_id: TerminalId(number as u64),
             required_seq: (number * 10) as u64,

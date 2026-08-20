@@ -1679,6 +1679,12 @@ async fn run_embedded_realm(
     // instead of cancelling a multi-GB `git worktree remove` mid-way
     // and stranding a half-deleted directory (2026-08-19 audit, L6).
     let _ = tokio::time::timeout(Duration::from_secs(10), config.drain_maintenance_tasks()).await;
+    // Keystroke-persisted config (collapse/pin/Space/splitter) rides an
+    // ordered background worker; flush it so a change made just before
+    // quit isn't silently lost (#1211).
+    if !lazybox_config::Config::flush_pending_saves(Duration::from_secs(2)) {
+        tracing::warn!("quit: pending config saves did not flush within the bound");
+    }
     client_runtime.shutdown().await;
     realm_result?
 }

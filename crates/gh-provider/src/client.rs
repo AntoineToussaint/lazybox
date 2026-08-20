@@ -1700,6 +1700,42 @@ impl GhClient {
         Ok(())
     }
 
+    /// Admit `op`, sleeping out SHORT self-imposed waits instead of
+    /// failing the caller. lazybox's own governor exists to pace, not
+    /// refuse: erroring a whole paginated sweep because the local
+    /// bucket wanted 1s meant the sweep aborted, re-fired next cycle
+    /// from page 1, and burned the budget again — the error-loop
+    /// behind "merged-sweep budget error (page N): wait 1s" (#1249).
+    /// GitHub-imposed pauses (secondary limit, remote-low, open
+    /// circuits) still propagate immediately, as does a self-imposed
+    /// wait past the bounded total, so a starved governor degrades to
+    /// the scheduler's honest backoff instead of hanging.
+    async fn acquire_paced(&self, op: &str) -> Result<(), GhError> {
+        const MAX_TOTAL_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+        const MAX_SINGLE_NAP: u64 = 30;
+        let deadline = tokio::time::Instant::now() + MAX_TOTAL_WAIT;
+        loop {
+            match self.acquire_or_block(op) {
+                Ok(()) => return Ok(()),
+                Err(
+                    e @ GhError::RateLimited {
+                        self_throttle: true,
+                        retry_after_secs,
+                        ..
+                    },
+                ) => {
+                    let nap =
+                        std::time::Duration::from_secs(retry_after_secs.clamp(1, MAX_SINGLE_NAP));
+                    if tokio::time::Instant::now() + nap > deadline {
+                        return Err(e);
+                    }
+                    tokio::time::sleep(nap).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     async fn request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
         // Pace BEFORE taking a concurrency slot: a request that is only
         // waiting out its governor gap is not doing work, so it must not
@@ -3418,7 +3454,7 @@ impl GhClient {
             |cursor, page| {
                 let metrics = &metrics;
                 async move {
-                    self.acquire_or_block("PR search").map_err(|error| {
+                    self.acquire_paced("PR search").await.map_err(|error| {
                         tracing::error!("PR search budget error (page {page}): {error}");
                         error
                     })?;
@@ -3539,7 +3575,7 @@ impl GhClient {
                 let metrics = &metrics;
                 let query = &query;
                 async move {
-                    self.acquire_or_block(op).map_err(|error| {
+                    self.acquire_paced(op).await.map_err(|error| {
                         tracing::error!("{op} budget error (page {page}): {error}");
                         error
                     })?;
@@ -3658,7 +3694,7 @@ impl GhClient {
                 let pages_fetched = &pages_fetched;
                 let search_query = &search_query;
                 async move {
-                    self.acquire_or_block("issues search").map_err(|error| {
+                    self.acquire_paced("issues search").await.map_err(|error| {
                         tracing::error!("Issues budget error (page {page}): {error}");
                         error
                     })?;

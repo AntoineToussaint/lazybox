@@ -701,20 +701,26 @@ impl<T: TerminalAdapter> Model<T> {
                         self.execute_dispatch_intent(intent, workspace.as_ref())
                     }
                     Action::MergePr => {
-                        // Re-check merge preconditions against the
-                        // STASHED workspace — state may have moved
-                        // (new failing CI, fresh conflict) while the
-                        // modal was up.
+                        // Structural re-check against the STASHED
+                        // workspace (the PR may have merged/closed
+                        // while the modal was up). Cached soft state
+                        // never refuses (#1203) — GitHub is the
+                        // authority at merge time; a cached block
+                        // becomes an ADVISORY on the send, and a real
+                        // rejection comes back as `PrMergeFailed` with
+                        // GitHub's reason.
                         let intent = crate::intent::resolve_merge(workspace.as_ref());
                         if matches!(intent, crate::intent::Intent::MergePr { .. }) {
+                            if let Some(reason) =
+                                crate::intent::merge_send_advisory(workspace.as_ref())
+                            {
+                                self.flash_info(format!(
+                                    "cached state says {reason} — asking GitHub anyway"
+                                ));
+                            }
                             self.execute_dispatch_intent(intent, workspace.as_ref())
                         } else {
-                            let reason = workspace
-                                .as_ref()
-                                .and_then(|w| w.pr.as_ref())
-                                .and_then(crate::intent::merge_block_reason)
-                                .unwrap_or("the PR is no longer merge-ready");
-                            self.flash_info(format!("can't merge: {reason}"));
+                            self.flash_info("can't merge: the PR isn't open");
                             Vec::new()
                         }
                     }

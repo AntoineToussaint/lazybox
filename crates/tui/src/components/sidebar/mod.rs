@@ -1161,6 +1161,21 @@ impl Sidebar {
         had
     }
 
+    /// The workspace's live AGENT terminal (lowest terminal id when
+    /// several run) and its agent id — the target for
+    /// workspace-addressed agent actions like reset-context (#1204).
+    /// `None` when no agent is running here (shells don't count).
+    pub fn agent_terminal_for(&self, key: &SessionKey) -> Option<(TerminalId, String)> {
+        self.running_terminals
+            .iter()
+            .filter(|(_, (sk, _))| sk == key)
+            .filter_map(|(tid, (_, kind))| match kind {
+                TerminalKind::Agent(id) => Some((*tid, id.clone())),
+                _ => None,
+            })
+            .min_by_key(|(tid, _)| tid.0)
+    }
+
     /// The terminal a broadcast should deliver to for `key`, plus
     /// whether it runs an agent. Agents win over shells (the
     /// settle-gated inject path vs. a raw write); ties break on the

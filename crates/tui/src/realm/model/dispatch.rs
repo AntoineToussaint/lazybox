@@ -700,6 +700,46 @@ impl<T: TerminalAdapter> Model<T> {
                         );
                         self.execute_dispatch_intent(intent, workspace.as_ref())
                     }
+                    Action::ResetAgentContext => match workspace.as_ref() {
+                        Some(ws) => {
+                            let target = self
+                                .sidebar
+                                .agent_terminal_for(&lazybox_core::SessionKey::from(&ws.key));
+                            match target {
+                                Some((terminal_id, agent_id)) => {
+                                    let cmd = lazybox_tui_core::agents::registry()
+                                        .get(&agent_id)
+                                        .and_then(|a| a.clear_context_command());
+                                    match cmd {
+                                        Some(cmd) => {
+                                            self.flash_info(format!(
+                                                "resetting {agent_id} context ({cmd})…"
+                                            ));
+                                            vec![IpcCommand::InjectPrompt {
+                                                terminal_id,
+                                                prompt: cmd.to_string(),
+                                                fallback_spawn: None,
+                                                submit: true,
+                                            }]
+                                        }
+                                        None => {
+                                            self.flash_info(format!(
+                                                "{agent_id} has no context-reset command"
+                                            ));
+                                            Vec::new()
+                                        }
+                                    }
+                                }
+                                None => {
+                                    self.flash_info(
+                                        "no running agent on this workspace — a c starts one",
+                                    );
+                                    Vec::new()
+                                }
+                            }
+                        }
+                        _ => Vec::new(),
+                    },
                     Action::MergePr => {
                         // Structural re-check against the STASHED
                         // workspace (the PR may have merged/closed

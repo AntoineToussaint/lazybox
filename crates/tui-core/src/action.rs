@@ -140,6 +140,12 @@ pub enum Action {
     /// "delete" resolves to a close here (reversible, provider-side).
     /// Confirm-guarded.
     CloseIssue,
+    /// Reset the focused workspace's running agent conversation in
+    /// place — inject the agent's own clear-context command (`/clear`
+    /// for Claude Code, `/new` for Codex) through the settle-gated
+    /// prompt path. Session, worktree, PTY and prompt history survive;
+    /// only the model's context resets. Confirm-guarded (lossy).
+    ResetAgentContext,
     /// Merge the workspace's PR if it's in a merge-ready state. Only
     /// surfaces for provider workspaces that have a merge concept
     /// (today: github PRs).
@@ -487,6 +493,7 @@ pub enum ActionKind {
     LongSnooze,
     Archive,
     CloseIssue,
+    ResetAgentContext,
     MergePr,
     UpdateBranch,
     ToggleAutoMerge,
@@ -635,6 +642,7 @@ impl ActionKind {
         Self::LongSnooze,
         Self::Archive,
         Self::CloseIssue,
+        Self::ResetAgentContext,
         // GitHub menu.
         Self::MergePr,
         Self::UpdateBranch,
@@ -752,6 +760,7 @@ impl Action {
             Action::LongSnooze => ActionKind::LongSnooze,
             Action::Archive => ActionKind::Archive,
             Action::CloseIssue => ActionKind::CloseIssue,
+            Action::ResetAgentContext => ActionKind::ResetAgentContext,
             Action::MergePr => ActionKind::MergePr,
             Action::UpdateBranch => ActionKind::UpdateBranch,
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
@@ -1237,6 +1246,17 @@ impl ActionDef {
                 default_keys: "x c",
                 label: "close issue",
                 describe: "Close the focused GitHub issue upstream (as not-planned). Only on issue workspaces; a true delete needs elevated permissions, so this closes instead. Confirmed first.",
+                section: Section::Workspace,
+            },
+            ActionKind::ResetAgentContext => &Self {
+                kind: ActionKind::ResetAgentContext,
+                // Under the `x` workspace leader, not `a` — confirmed
+                // (destructive) actions live behind a risk-signaling
+                // leader, and `a` is the cheap spawn group. (`x r` is
+                // the scan-root chord; `w` = wipe the agent's memory.)
+                default_keys: "x w",
+                label: "reset agent",
+                describe: "Reset the running agent's conversation context in place (injects the agent's clear command — /clear for Claude, /new for Codex). Session, worktree and prompt history survive; only the model's context resets. Confirmed first.",
                 section: Section::Workspace,
             },
             ActionKind::MergePr => &Self {
@@ -1873,6 +1893,14 @@ impl ActionDef {
                  out of the inbox once the close lands. Reopen on \
                  GitHub to undo.",
             },
+            // Lossy for the agent's working memory: everything it knew
+            // about the task in flight is gone (the code and prompt
+            // history survive).
+            ActionKind::ResetAgentContext => Guard::Confirm {
+                prompt: "Reset the agent's conversation context? The session, \
+                 worktree and prompt history survive — only what the model \
+                 currently knows is cleared.",
+            },
             // Mutates (or destroys) the upstream item. The static copy
             // covers both resolutions; the dispatcher overrides with a
             // prompt naming the focused issue/PR number + title.
@@ -2019,6 +2047,7 @@ impl ActionKind {
             ActionKind::LongSnooze => "long_snooze",
             ActionKind::Archive => "archive",
             ActionKind::CloseIssue => "close_issue",
+            ActionKind::ResetAgentContext => "reset_agent_context",
             ActionKind::MergePr => "merge_pr",
             ActionKind::UpdateBranch => "update_branch",
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
@@ -2300,6 +2329,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::MoveGroupDown
         | ActionKind::MoveGroupTop
         | ActionKind::MoveGroupBottom
+        | ActionKind::ResetAgentContext
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -2834,6 +2864,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // workspace with a PR acts on the PR, and an already-closed
         // issue has nothing to close. Both GitHub and Linear issues
         // route through the provider's `close_issue` now (#1060).
+        // Available whenever a workspace is selected: whether an agent
+        // is actually running (and has a clear command) is checked at
+        // dispatch, which flashes a hint instead of hiding the action
+        // (advise, never forbid).
+        ActionKind::ResetAgentContext => has_ws,
         ActionKind::CloseIssue => workspace
             .map(|w| {
                 w.pr.is_none()

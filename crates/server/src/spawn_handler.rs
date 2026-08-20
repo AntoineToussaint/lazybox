@@ -9725,6 +9725,16 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
         }
     }
 
+    // #1198: sessions on workspaces whose PR/issue closed past the reap
+    // grace are not resurrected — the periodic reaper would only kill
+    // them again. Same predicate as the reaper, so restore and reap
+    // can't disagree.
+    let reap_threshold = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .agent
+        .reap_closed_after();
+    let restore_now = chrono::Utc::now();
+
     for record in workspaces {
         let Some(json) = record.workspace_json else {
             continue;
@@ -9732,6 +9742,15 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
         let Ok(workspace) = serde_json::from_str::<Workspace>(&json) else {
             continue;
         };
+        if let Some(threshold) = reap_threshold
+            && crate::session_reaper::closed_beyond(&workspace, threshold, restore_now)
+        {
+            tracing::info!(
+                workspace = %workspace.key,
+                "restore: skipping session restore — PR/issue closed past agent.reap_closed_after (#1198)"
+            );
+            continue;
+        }
         let session_key = SessionKey::from(workspace.key.as_str());
         for session in &workspace.sessions {
             let kind = match &session.kind {

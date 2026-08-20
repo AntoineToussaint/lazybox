@@ -44,6 +44,9 @@ impl ClientRuntime {
             tasks.push(task);
         }
         tasks.push(crate::auto_wait::spawn(&config));
+        // #1198: hourly reap of sessions whose PR/issue closed past the
+        // grace window (and a startup-restore gate on the same predicate).
+        tasks.push(crate::session_reaper::spawn(&config));
         tasks.push(crate::agent_updates::spawn_scheduled(config.clone()));
         if let Some(task) = crate::proxy::spawn(&config).await {
             tasks.push(task);

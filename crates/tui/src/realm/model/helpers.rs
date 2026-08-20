@@ -952,6 +952,16 @@ pub(super) struct LoopWatchdog {
     worst_suppressed: Duration,
 }
 
+/// Total run-loop iterations that blew [`FRAME_BUDGET`] this session.
+/// Read by the Shift-D resource-posture section; written by
+/// [`LoopWatchdog::observe`].
+static FRAME_BUDGET_OVERRUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Session tally of frame-budget overruns, for the Shift-D screen.
+pub(crate) fn frame_budget_overruns() -> u64 {
+    FRAME_BUDGET_OVERRUNS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl LoopWatchdog {
     /// Record one iteration's work-phase duration, broken down into the
     /// per-segment `timings` so an over-budget warning names the culprit.
@@ -966,6 +976,11 @@ impl LoopWatchdog {
         if elapsed <= FRAME_BUDGET {
             return false;
         }
+        // Session-scoped liveness tally for the Shift-D resource
+        // posture (2026-08-19 audit): every over-budget iteration is a
+        // window in which input, quit, and rendering were all frozen —
+        // counted even when the log line is rate-limited below.
+        FRAME_BUDGET_OVERRUNS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let due = self
             .last_warn_at
             .is_none_or(|at| now.duration_since(at) >= WATCHDOG_WARN_INTERVAL);

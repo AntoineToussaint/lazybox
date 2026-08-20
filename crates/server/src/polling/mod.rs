@@ -3062,7 +3062,8 @@ pub(crate) async fn reprompt_unresolved_removals_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
 ) {
-    let records = match config.store.list_workspaces() {
+    let records = match crate::store_blocking(&config.store, |store| store.list_workspaces()).await
+    {
         Ok(records) => records,
         Err(e) => {
             tracing::warn!("reprompt_unresolved_removals: list_workspaces failed: {e}");
@@ -3102,7 +3103,8 @@ pub(crate) async fn sync_tracked_workspaces_with(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
 ) {
-    let records = match config.store.list_workspaces() {
+    let records = match crate::store_blocking(&config.store, |store| store.list_workspaces()).await
+    {
         Ok(records) => records,
         Err(e) => {
             tracing::warn!("sync_tracked_workspaces: list_workspaces failed: {e}");

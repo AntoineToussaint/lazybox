@@ -269,6 +269,15 @@ pub(crate) struct TerminalTeardownClaim {
 #[derive(Clone, Default)]
 pub struct TerminalRegistry {
     pub(crate) entries: Arc<Mutex<HashMap<TerminalId, TerminalEntry>>>,
+    /// Lock-free read view of `entries`' admission-relevant slice —
+    /// terminal id → live backend key (absent while finishing or
+    /// removed). Maintained by the same registry methods that mutate
+    /// `backend_key`/`finishing`; readers treat it as a FAST PATH with
+    /// the authoritative mutex as fallback, so any drift can only cost
+    /// a slow-path lookup or a momentarily stale admit — never a wrong
+    /// reject. Exists because the keystroke routers used to queue on
+    /// the global async mutex behind 25k/s of pump traffic (#1237).
+    live_backend_keys: Arc<parking_lot::RwLock<HashMap<TerminalId, Arc<str>>>>,
     /// Per-backend serialization primitives outlive a registry entry briefly
     /// while teardown drains writers/persistence, so they remain keyed by the
     /// backend session rather than stored inside the terminal entry.
@@ -278,6 +287,7 @@ pub struct TerminalRegistry {
 
 pub(crate) struct TerminalRegistrationGuard {
     entries: tokio::sync::OwnedMutexGuard<HashMap<TerminalId, TerminalEntry>>,
+    live_backend_keys: Arc<parking_lot::RwLock<HashMap<TerminalId, Arc<str>>>>,
 }
 
 impl TerminalRegistrationGuard {
@@ -289,6 +299,9 @@ impl TerminalRegistrationGuard {
         kind: TerminalKind,
         generation: Option<u64>,
     ) {
+        self.live_backend_keys
+            .write()
+            .insert(id, Arc::from(backend_key.as_str()));
         let entry = self.entries.entry(id).or_default();
         entry.backend_key = Some(backend_key);
         entry.meta = Some((session_key, kind));
@@ -471,6 +484,7 @@ impl TerminalRegistry {
 
     /// Remove a terminal and all of its in-memory lifecycle bookkeeping.
     pub async fn remove_terminal(&self, id: TerminalId) -> Option<String> {
+        self.live_backend_keys.write().remove(&id);
         self.entries
             .lock()
             .await
@@ -479,6 +493,36 @@ impl TerminalRegistry {
     }
 
     /// Snapshot the backend key without holding the map lock in the caller.
+    /// Lock-free fast-path form of [`Self::backend_key_for`] (#1237):
+    /// a `parking_lot` read instead of queueing on the global async
+    /// mutex behind the output pumps. Callers on latency-critical paths
+    /// (keystroke routing) use this first and fall back to the
+    /// authoritative mutex only on a miss.
+    pub fn live_backend_key(&self, id: TerminalId) -> Option<Arc<str>> {
+        self.live_backend_keys.read().get(&id).cloned()
+    }
+
+    /// One-lock read of the keystroke write path's admission context
+    /// (#1237): `(backend_key, agent_state, input_needed_shape)`. The
+    /// write path used to take the global lock three separate times per
+    /// keystroke — each a FIFO queue join behind ~25k/s of pump traffic.
+    pub async fn write_context_for(
+        &self,
+        id: TerminalId,
+    ) -> Option<(
+        String,
+        Option<AgentState>,
+        Option<lazybox_agents::PromptShape>,
+    )> {
+        let entries = self.entries.lock().await;
+        let entry = entries.get(&id).filter(|entry| !entry.finishing)?;
+        Some((
+            entry.backend_key.clone()?,
+            entry.agent_state,
+            entry.input_needed_shape,
+        ))
+    }
+
     pub async fn backend_key_for(&self, id: TerminalId) -> Option<String> {
         self.entries
             .lock()
@@ -976,6 +1020,7 @@ impl TerminalRegistry {
             return Ok(None);
         }
         entry.finishing = true;
+        self.live_backend_keys.write().remove(&id);
         Ok(Some(TerminalTeardownClaim {
             meta: entry.meta.clone(),
             access: entry.access,
@@ -986,6 +1031,7 @@ impl TerminalRegistry {
 
     /// Complete a claimed teardown with one atomic removal.
     pub(crate) async fn finish_teardown(&self, id: TerminalId) {
+        self.live_backend_keys.write().remove(&id);
         self.entries.lock().await.remove(&id);
     }
 
@@ -1022,6 +1068,7 @@ impl TerminalRegistry {
     pub(crate) async fn lock_registration(&self) -> TerminalRegistrationGuard {
         TerminalRegistrationGuard {
             entries: self.entries.clone().lock_owned().await,
+            live_backend_keys: self.live_backend_keys.clone(),
         }
     }
 
@@ -1284,6 +1331,62 @@ impl SpawnCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1237: the lock-free live-key view tracks the registry through
+    /// register → finishing → teardown, so keystroke routing never has
+    /// to queue on the global mutex.
+    #[tokio::test]
+    async fn live_backend_key_tracks_register_finish_and_removal() {
+        let registry = TerminalRegistry::default();
+        let id = TerminalId(9);
+        assert!(registry.live_backend_key(id).is_none());
+
+        registry
+            .register_terminal(
+                id,
+                "backend-9".into(),
+                SessionKey::new("github:o/r#9"),
+                TerminalKind::Shell,
+            )
+            .await;
+        assert_eq!(registry.live_backend_key(id).as_deref(), Some("backend-9"));
+        // The fast path agrees with the authoritative mutex read.
+        assert_eq!(
+            registry.backend_key_for(id).await.as_deref(),
+            Some("backend-9"),
+        );
+
+        registry.remove_terminal(id).await;
+        assert!(registry.live_backend_key(id).is_none());
+        assert!(registry.backend_key_for(id).await.is_none());
+    }
+
+    /// #1237: the single-lock write context equals the three individual
+    /// accessors it replaced.
+    #[tokio::test]
+    async fn write_context_matches_individual_accessors() {
+        let registry = TerminalRegistry::default();
+        let id = TerminalId(11);
+        registry
+            .register_terminal(
+                id,
+                "backend-11".into(),
+                SessionKey::new("github:o/r#11"),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+        registry
+            .record_agent_state(id, lazybox_ipc::AgentState::InputNeeded)
+            .await;
+        registry
+            .record_input_needed_shape(id, lazybox_agents::PromptShape::Chooser)
+            .await;
+
+        let (key, state, shape) = registry.write_context_for(id).await.expect("live terminal");
+        assert_eq!(key, registry.backend_key_for(id).await.unwrap());
+        assert_eq!(state, registry.agent_state_for(id).await);
+        assert_eq!(shape, registry.input_needed_shape_for(id).await);
+    }
 
     #[tokio::test]
     async fn running_agent_terminal_prefers_the_lowest_id_agent_and_skips_shells() {

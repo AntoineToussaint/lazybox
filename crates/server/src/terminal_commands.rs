@@ -88,7 +88,9 @@ pub(crate) async fn run_io_router(
                 | Command::ReauthenticateAgent { .. }
                 | Command::CancelAgentReauthentication { .. }
         );
-        if !handle_missing_terminal && config.terminal.backend_key_for(terminal_id).await.is_none()
+        if !handle_missing_terminal
+            && config.terminal.live_backend_key(terminal_id).is_none()
+            && config.terminal.backend_key_for(terminal_id).await.is_none()
         {
             // Never allocate a 60-second worker for arbitrary stale/hostile
             // terminal ids. Prompt injection with a fallback is the one
@@ -323,7 +325,9 @@ pub(crate) async fn run_persistence_router(
                 continue;
             }
         };
-        if config.terminal.backend_key_for(terminal_id).await.is_none() {
+        if config.terminal.live_backend_key(terminal_id).is_none()
+            && config.terminal.backend_key_for(terminal_id).await.is_none()
+        {
             continue;
         }
 

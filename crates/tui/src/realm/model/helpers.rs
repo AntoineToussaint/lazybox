@@ -593,11 +593,20 @@ pub(super) fn drain_daemon_events<T: TerminalAdapter>(
     !carried.is_empty() || residual > 0
 }
 
+/// Byte cap on one coalesced `TerminalOutput` event (2026-08-19 audit,
+/// U8). A coalesced event is fed to the VT in ONE uninterruptible
+/// `feed` call, and the drain budget is only checkable *between*
+/// events — an uncapped merge of a whole 256-event burst became a
+/// single multi-megabyte parse the 8ms budget could never pre-empt.
+/// Runs past the cap split into several events, each budget-checkable.
+const COALESCE_MAX_BYTES: usize = 256 * 1024;
+
 /// Merge runs of consecutive `TerminalOutput` events that target the
 /// same terminal into one event carrying the concatenated bytes and
 /// the run's first/last sequence range. Order is otherwise preserved — only
 /// *adjacent* same-terminal output is merged, so an interleaved event
-/// for another terminal (or any non-output event) ends the run. Pure;
+/// for another terminal (or any non-output event) ends the run. Runs
+/// are additionally capped at [`COALESCE_MAX_BYTES`]. Pure;
 /// unit-tested in `coalesce_tests`.
 pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
     let mut out: Vec<IpcEvent> = Vec::with_capacity(events.len());
@@ -617,6 +626,7 @@ pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
                 }) = out.last_mut()
                     && *prev_id == terminal_id
                     && prev_seq.saturating_add(1) == first_seq
+                    && prev_bytes.len().saturating_add(bytes.len()) <= COALESCE_MAX_BYTES
                 {
                     // Same terminal and contiguous with the tail run —
                     // extend it while preserving the run's first seq.
@@ -1194,6 +1204,69 @@ impl LoopRuntime {
     }
 }
 
+/// Run-loop heartbeat, stamped once per loop iteration and read by the
+/// input reader thread. When the loop is healthy the idle wait bounds
+/// an iteration at ~16ms, so a beat older than
+/// [`FORCE_QUIT_STALL_MS`] means the loop is genuinely wedged
+/// mid-iteration — input, rendering, and quit are all frozen.
+static LOOP_HEARTBEAT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn heartbeat_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
+}
+
+pub(super) fn beat_loop_heartbeat() {
+    LOOP_HEARTBEAT_MS.store(
+        heartbeat_epoch().elapsed().as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn millis_since_loop_beat() -> u64 {
+    let now = heartbeat_epoch().elapsed().as_millis() as u64;
+    now.saturating_sub(LOOP_HEARTBEAT_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The run loop is considered wedged after this long without a beat.
+const FORCE_QUIT_STALL_MS: u64 = 2_000;
+/// Force-quit chord: this many Ctrl-C presses…
+const FORCE_QUIT_PRESSES: usize = 3;
+/// …inside this window, while the loop is wedged.
+const FORCE_QUIT_WINDOW: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// The last-resort quit path (2026-08-19 audit, L1). Quit is an
+/// ordinary keybinding dispatched inside the single-threaded run loop;
+/// when any phase wedges (blocking IO under memory pressure, a stuck
+/// render), `q q` sits unprocessed and raw mode means Ctrl-C raises no
+/// SIGINT — the only recourse used to be `kill` from another terminal.
+/// The reader thread lives outside the loop, so it can recognize 3×
+/// Ctrl-C while the heartbeat is stale, restore the host terminal
+/// (idempotent, safe from any thread) and exit. While the loop is
+/// HEALTHY the chord never fires — Ctrl-C spam inside an agent
+/// terminal forwards to the PTY exactly as before.
+fn force_quit_chord_fires(
+    presses: &mut Vec<std::time::Instant>,
+    event: &crossterm::event::Event,
+    loop_is_wedged: bool,
+) -> bool {
+    use crossterm::event::{Event, KeyCode, KeyModifiers};
+    let is_ctrl_c_press = matches!(
+        event,
+        Event::Key(k) if k.code == KeyCode::Char('c')
+            && k.modifiers.contains(KeyModifiers::CONTROL)
+            && k.kind == crossterm::event::KeyEventKind::Press
+    );
+    if !is_ctrl_c_press || !loop_is_wedged {
+        presses.clear();
+        return false;
+    }
+    let now = std::time::Instant::now();
+    presses.push(now);
+    presses.retain(|t| now.duration_since(*t) <= FORCE_QUIT_WINDOW);
+    presses.len() >= FORCE_QUIT_PRESSES
+}
+
 /// Spawn the dedicated crossterm reader thread. `crossterm::event::
 /// read()` is a blocking call with no async story, so it gets its own
 /// thread that forwards every host-terminal event into a bounded
@@ -1212,6 +1285,7 @@ fn spawn_input_reader() -> anyhow::Result<tokio::sync::mpsc::Receiver<TimedInput
     std::thread::Builder::new()
         .name("lazybox-input".into())
         .spawn(move || {
+            let mut force_quit_presses: Vec<std::time::Instant> = Vec::new();
             loop {
                 // The dedicated reader thread is the one place the
                 // blocking crossterm read is allowed — see
@@ -1220,13 +1294,42 @@ fn spawn_input_reader() -> anyhow::Result<tokio::sync::mpsc::Receiver<TimedInput
                 let read = crossterm::event::read();
                 match read {
                     Ok(event) => {
+                        // Last-resort quit: only ever fires while the
+                        // run loop is provably wedged (stale heartbeat)
+                        // — see `force_quit_chord_fires`.
+                        let wedged = millis_since_loop_beat() >= FORCE_QUIT_STALL_MS;
+                        if force_quit_chord_fires(&mut force_quit_presses, &event, wedged) {
+                            tracing::error!(
+                                stalled_ms = millis_since_loop_beat(),
+                                "force-quit chord: run loop wedged and 3× Ctrl-C received — \
+                                 restoring the host terminal and exiting"
+                            );
+                            super::host_terminal::restore_host_terminal();
+                            std::process::exit(130);
+                        }
                         let timed = TimedInput {
                             read_at: std::time::Instant::now(),
                             event,
                         };
-                        if tx.blocking_send(timed).is_err() {
-                            // Run loop is gone — nobody to deliver to.
-                            break;
+                        match tx.try_send(timed) {
+                            Ok(()) => {}
+                            Err(tokio::sync::mpsc::error::TrySendError::Full(timed)) => {
+                                if millis_since_loop_beat() >= FORCE_QUIT_STALL_MS {
+                                    // The loop is wedged and the channel is
+                                    // full. Blocking here would wedge THIS
+                                    // thread too and make the force-quit
+                                    // chord unreachable — drop the event
+                                    // instead (a wedged loop would
+                                    // stale-drop it on recovery anyway)
+                                    // and keep reading.
+                                } else if tx.blocking_send(timed).is_err() {
+                                    break;
+                                }
+                            }
+                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                // Run loop is gone — nobody to deliver to.
+                                break;
+                            }
                         }
                     }
                     Err(e) => {
@@ -1416,6 +1519,12 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
     // watchdog reads it.
     let mut timings = PhaseTimings::default();
     while !model.quit {
+        // Stamp the liveness heartbeat FIRST: the force-quit chord
+        // (reader thread) treats a stale beat as "the loop is wedged
+        // mid-iteration". Healthy iterations are bounded by the idle
+        // wait (~16ms), so the beat stays fresh whenever quit and
+        // input are actually being serviced.
+        beat_loop_heartbeat();
         let StepOutcome {
             had_backlog,
             skipped_for_backpressure: _skipped_for_backpressure,
@@ -1578,13 +1687,17 @@ fn report_stale_drops<T: TerminalAdapter>(
 /// ahead of the build, drops delivery latency by a frame; only the visual
 /// echo (which returns as PTY output) still waits one build.
 ///
-/// Scoped to a focused terminal with no modal — the "typing into an agent"
-/// case the reorder targets. The gate is re-checked each pass so a key that
-/// opens a leader popup or leaves the pane hands the remaining buffered
-/// input back to the normal one-per-iteration post-wait path; a scroll notch
-/// breaks the drain so scrollback keeps its one-step-per-frame progression.
-/// A no-op unless a render is already pending (`model.redraw`) — with no
-/// build to jump ahead of, reordering the dispatch would buy nothing.
+/// Applies under EVERY focus (2026-08-19 audit, U8) — originally it was
+/// scoped to a focused terminal with no modal, which left sidebar and
+/// modal input serviced one event per loop iteration at the *bottom*
+/// of the loop: under load those keystrokes queued behind whole drain +
+/// render passes until `STALE_INPUT_MAX_AGE` dropped them — the
+/// "keystrokes vanish while an agent is busy" report. Dispatch is the
+/// same `service_buffered_input` the post-wait path uses, so only the
+/// ordering changes. A scroll notch still breaks the drain so
+/// scrollback keeps its one-step-per-frame progression. A no-op unless
+/// a render is already pending (`model.redraw`) — with no build to
+/// jump ahead of, reordering the dispatch would buy nothing.
 pub(super) fn drain_priority_input<T: TerminalAdapter>(
     model: &mut Model<T>,
     input_rx: &mut tokio::sync::mpsc::Receiver<TimedInput>,
@@ -1593,7 +1706,7 @@ pub(super) fn drain_priority_input<T: TerminalAdapter>(
     timings: &mut PhaseTimings,
     redraw_is_input: &mut bool,
 ) {
-    while model.redraw && model.focus == PaneFocus::Terminals && model.modal_stack.is_empty() {
+    while model.redraw {
         let Ok(timed) = input_rx.try_recv() else {
             break;
         };
@@ -1932,6 +2045,48 @@ mod host_event_redraw_tests {
         m.redraw = false;
         m.dispatch_action_unchecked(&lazybox_tui_core::action::Action::ForceRedraw);
         assert!(m.redraw, "the redraw action must schedule a repaint");
+    }
+}
+
+#[cfg(test)]
+mod force_quit_tests {
+    use super::{FORCE_QUIT_PRESSES, force_quit_chord_fires};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+    fn ctrl_c() -> Event {
+        let mut key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        key.kind = KeyEventKind::Press;
+        Event::Key(key)
+    }
+
+    /// L1 regression (2026-08-19 audit): with the run loop wedged,
+    /// three rapid Ctrl-C presses must fire the force-quit — the only
+    /// in-band escape while quit-the-keybinding is frozen.
+    #[test]
+    fn wedged_loop_plus_three_ctrl_c_fires() {
+        let mut presses = Vec::new();
+        for i in 0..FORCE_QUIT_PRESSES {
+            let fired = force_quit_chord_fires(&mut presses, &ctrl_c(), true);
+            assert_eq!(fired, i + 1 == FORCE_QUIT_PRESSES, "press {}", i + 1);
+        }
+    }
+
+    /// While the loop is healthy the chord must NEVER fire — Ctrl-C
+    /// spam inside an agent terminal is a legitimate interrupt and
+    /// forwards to the PTY untouched.
+    #[test]
+    fn healthy_loop_never_fires_and_resets_the_chord() {
+        let mut presses = Vec::new();
+        for _ in 0..10 {
+            assert!(!force_quit_chord_fires(&mut presses, &ctrl_c(), false));
+        }
+        assert!(presses.is_empty(), "healthy presses must not accumulate");
+        // Two wedged presses, then a non-Ctrl-C key: chord resets.
+        assert!(!force_quit_chord_fires(&mut presses, &ctrl_c(), true));
+        assert!(!force_quit_chord_fires(&mut presses, &ctrl_c(), true));
+        let other = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!force_quit_chord_fires(&mut presses, &other, true));
+        assert!(presses.is_empty(), "a different key breaks the chord");
     }
 }
 

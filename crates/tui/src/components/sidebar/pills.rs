@@ -309,6 +309,7 @@ pub(crate) const ARM_GLYPH: &str = "⚡"; // lazybox client-side merge-on-green
 pub(crate) const AUTO_GLYPH: &str = "◆"; // GitHub-native auto-merge
 pub(crate) const FIX_GLYPH: &str = "🔧"; // auto-fix armed
 pub(crate) const TRACK_GLYPH: &str = "⤓"; // track-main (auto-sync to default branch)
+pub(crate) const CLAIM_GLYPH: &str = "⚑"; // cross-machine working claim (shared `working` label)
 
 /// One row of the sidebar status-icon legend shown in the `?` help
 /// modal: the glyph in its real theme color plus a one-line meaning.
@@ -350,6 +351,11 @@ pub(crate) fn status_legend() -> Vec<LegendRow> {
         ),
         row(AUTO_GLYPH, theme.accent, "GitHub auto-merge enabled"),
         row(FIX_GLYPH, theme.warn, "auto-fix armed"),
+        row(
+            CLAIM_GLYPH,
+            theme.warn,
+            "claimed by an agent (possibly another machine)",
+        ),
         row(
             TRACK_GLYPH,
             theme.accent,

@@ -2986,13 +2986,11 @@ impl<T: TerminalAdapter> Model<T> {
     /// Best-effort, mirroring `mark_tour_seen`: a write failure just
     /// means the tip may show once more next boot.
     fn persist_tip_seen(&self, id: String) {
-        if let Err(e) = lazybox_config::Config::save_with(move |c| {
+        lazybox_config::Config::save_with_async(move |c| {
             if !c.ui.tips_seen.contains(&id) {
                 c.ui.tips_seen.push(id.clone());
             }
-        }) {
-            tracing::warn!("save tips_seen failed: {e}");
-        }
+        });
     }
 
     /// Mount the snippet picker with an initial filter (typically
@@ -3235,7 +3233,9 @@ impl<T: TerminalAdapter> Model<T> {
             "Broadcast to {n} workspace{}",
             if n == 1 { "" } else { "s" }
         );
-        let mut modal = Textarea::new(title).with_header(self.broadcast_header());
+        let mut modal = Textarea::new(title)
+            .with_header(self.broadcast_header())
+            .enter_submits(host_terminal::keyboard_enhancement_active());
         if let Some(body) = snippet_body {
             // Trailing blank line so appended custom text starts on its
             // own line; trimmed back off at send time if unused.

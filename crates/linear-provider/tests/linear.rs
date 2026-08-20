@@ -500,6 +500,138 @@ async fn spawn_status_mock(status: StatusCode, headers: Vec<(&'static str, Strin
     }
 }
 
+/// Mock that answers every request with a fixed non-200 status and a
+/// fixed body. Lets a test drive the 4xx-with-GraphQL-error-body path
+/// (Linear's shape for a revoked API key).
+async fn spawn_status_body_mock(status: StatusCode, body: String) -> MockLinear {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let requests_c = requests.clone();
+    let body = Arc::new(body);
+
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => return,
+                accept = listener.accept() => {
+                    let Ok((stream, _)) = accept else { continue };
+                    let requests = requests_c.clone();
+                    let body = body.clone();
+                    tokio::spawn(async move {
+                        let io = TokioIo::new(stream);
+                        let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                            let requests = requests.clone();
+                            let body = body.clone();
+                            async move {
+                                let _ = req.into_body().collect().await;
+                                requests.fetch_add(1, Ordering::SeqCst);
+                                Ok::<_, std::convert::Infallible>(
+                                    Response::builder()
+                                        .status(status)
+                                        .header("content-type", "application/json")
+                                        .body(Full::new(Bytes::from((*body).clone())))
+                                        .unwrap(),
+                                )
+                            }
+                        });
+                        let _ = http1::Builder::new().serve_connection(io, svc).await;
+                    });
+                }
+            }
+        }
+    });
+
+    MockLinear {
+        addr,
+        shutdown: Some(shutdown_tx),
+        requests,
+        bodies: Arc::new(std::sync::Mutex::new(Vec::new())),
+    }
+}
+
+/// A revoked / expired Linear key answers the viewer query with HTTP
+/// 200 and the auth failure in the `errors` array. That must surface as
+/// an *auth* ProviderError (so the sync-status window shows a red ✗ and
+/// the user knows to re-auth) — not the generic "no viewer data" that
+/// used to leak through as permanent, and not a silently empty inbox.
+#[tokio::test]
+async fn revoked_token_viewer_error_classifies_as_auth() {
+    let auth_error = serde_json::json!({
+        "data": null,
+        "errors": [{ "message": "Authentication required, not authenticated" }]
+    })
+    .to_string();
+    let mock = spawn_mock(vec![auth_error]).await;
+
+    let client = LinearClient::with_key("revoked").with_endpoint(mock.url());
+    let err = client
+        .fetch_all()
+        .await
+        .expect_err("a revoked token must error, not return an empty inbox");
+    let provider_err: lazybox_core::ProviderError = err.into();
+    assert!(
+        provider_err.is_auth(),
+        "revoked-token viewer error must classify as auth, got {provider_err:?}"
+    );
+    assert!(
+        provider_err
+            .diagnostic()
+            .contains("Authentication required"),
+        "the real Linear reason must survive, got {provider_err:?}"
+    );
+
+    mock.shutdown().await;
+}
+
+/// Linear also serves an unauthenticated request as a 4xx whose body
+/// still carries the GraphQL auth error. `error_for_status` used to
+/// discard that body, leaving a bare "HTTP 400" that classifies
+/// permanent. The body reason must win so it reads as auth.
+#[tokio::test]
+async fn http_4xx_auth_body_surfaces_reason_as_auth() {
+    let auth_error = serde_json::json!({
+        "errors": [{ "message": "Authentication required, not authenticated" }]
+    })
+    .to_string();
+    let mock = spawn_status_body_mock(StatusCode::BAD_REQUEST, auth_error).await;
+
+    let client = LinearClient::with_key("revoked").with_endpoint(mock.url());
+    let err = client.fetch_all().await.expect_err("a 4xx must error");
+    let provider_err: lazybox_core::ProviderError = err.into();
+    assert!(
+        provider_err.is_auth(),
+        "a 4xx carrying an auth error body must classify as auth, got {provider_err:?}"
+    );
+    assert!(
+        provider_err
+            .diagnostic()
+            .contains("Authentication required"),
+        "the body reason must survive the status, got {provider_err:?}"
+    );
+
+    mock.shutdown().await;
+}
+
+/// A 403 with no GraphQL error body still classifies as auth off the
+/// raw status — the fallback when Linear sends no reason at all.
+#[tokio::test]
+async fn http_403_without_body_classifies_as_auth() {
+    let mock = spawn_status_mock(StatusCode::FORBIDDEN, vec![]).await;
+
+    let client = LinearClient::with_key("revoked").with_endpoint(mock.url());
+    let err = client.fetch_all().await.expect_err("403 must error");
+    let provider_err: lazybox_core::ProviderError = err.into();
+    assert!(
+        provider_err.is_auth(),
+        "a bare 403 must classify as auth, got {provider_err:?}"
+    );
+
+    mock.shutdown().await;
+}
+
 /// HTTP 429 used to classify as Permanent (the string probes never
 /// matched "429"), so the polling layer gave up on a transient rate
 /// limit. It must surface as a retryable ProviderError carrying the

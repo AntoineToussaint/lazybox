@@ -209,10 +209,15 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 .map(move |id| (id.clone(), (*key, *workspace)))
         })
         .collect();
+    // One O(W) label-map build for every group_label below (U6): the
+    // per-call scan made this pass — one label per row AND per
+    // ancestor step — O(W²) string-allocating work per recompute.
+    let labels = ProjectRepoLabels::build(input.workspaces);
+    let mut seen = HashSet::new();
     for (_, matched) in filtered.clone() {
-        let group = group_label(matched, input.projects, input.workspaces);
+        let group = labels.group_label(matched, input.projects);
         let mut cursor = matched;
-        let mut seen = HashSet::new();
+        seen.clear();
         while let Some(parent_id) = cursor.hierarchy_parent() {
             if !seen.insert(parent_id.clone()) {
                 break;
@@ -220,7 +225,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             let Some((parent_key, parent)) = by_task.get(parent_id).copied() else {
                 break;
             };
-            if group_label(parent, input.projects, input.workspaces) != group {
+            if labels.group_label(parent, input.projects) != group {
                 break;
             }
             if included.insert(parent_key.clone()) {
@@ -266,7 +271,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             continue;
         }
         by_repo
-            .entry(group_label(w, input.projects, input.workspaces))
+            .entry(labels.group_label(w, input.projects))
             .or_default()
             .push((k, w));
     }
@@ -321,12 +326,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         .is_some_and(|s| !s.query.is_empty() && s.scope.is_none());
     let mut all_repos: BTreeSet<String> = by_repo.keys().cloned().collect();
     if input.mailbox == Mailbox::Inbox && input.filters.is_empty() && !global_search {
-        all_repos.extend(
-            input
-                .projects
-                .values()
-                .map(|p| project_label(p, input.workspaces)),
-        );
+        all_repos.extend(input.projects.values().map(|p| labels.project_label(p)));
     }
 
     // Step 4b: order the groups. Pinned groups lead, in the user's pin
@@ -570,9 +570,12 @@ fn emit_workspace_forest(
     // Iterating in sorted order makes the chosen root stable across renders.
     let mut resolves = vec![false; parents.len()];
     let mut path: Vec<usize> = Vec::new();
+    // Clear-and-reuse like `path` — a fresh HashSet per start node was
+    // N container allocations per group per rebuild (U6).
+    let mut seen: HashSet<usize> = HashSet::new();
     for start in 0..parents.len() {
         path.clear();
-        let mut seen = HashSet::new();
+        seen.clear();
         let mut cursor = start;
         let reaches_root = loop {
             if resolves[cursor] {
@@ -681,6 +684,57 @@ pub fn project_label(project: &Project, workspaces: &HashMap<SessionKey, Workspa
         .filter(|w| lazybox_core::workspace_project_key(w).as_ref() == Some(&project.key))
         .find_map(|w| github_task_repo(w, &project.key))
         .unwrap_or_else(|| project.display_name())
+}
+
+/// One-pass memo behind [`group_label`] / [`project_label`] for the
+/// hot compute path (2026-08-19 audit, U6). `project_label` scans
+/// EVERY workspace per call, and the collapsible-hierarchy pass
+/// (812edba0) calls `group_label` once per row *and once per ancestor
+/// step* — O(W²) string-allocating work per recompute. Building this
+/// map is one O(W) pass; each lookup is O(1) with identical labels.
+pub struct ProjectRepoLabels {
+    by_project: HashMap<ProjectKey, String>,
+}
+
+impl ProjectRepoLabels {
+    pub fn build(workspaces: &HashMap<SessionKey, Workspace>) -> Self {
+        let mut by_project = HashMap::new();
+        for w in workspaces.values() {
+            if let Some(pk) = lazybox_core::workspace_project_key(w)
+                && !by_project.contains_key(&pk)
+                && let Some(repo) = github_task_repo(w, &pk)
+            {
+                by_project.insert(pk, repo);
+            }
+        }
+        Self { by_project }
+    }
+
+    /// Memoized [`project_label`].
+    pub fn project_label(&self, project: &Project) -> String {
+        self.by_project
+            .get(&project.key)
+            .cloned()
+            .unwrap_or_else(|| project.display_name())
+    }
+
+    /// Memoized [`group_label`] — same resolution order, same labels.
+    pub fn group_label(&self, w: &Workspace, projects: &BTreeMap<ProjectKey, Project>) -> String {
+        if let Some(pk) = lazybox_core::workspace_project_key(w) {
+            if let Some(repo) = github_task_repo(w, &pk) {
+                return repo;
+            }
+            if let Some(p) = projects.get(&pk) {
+                return self.project_label(p);
+            }
+        }
+        if let Some(repo) = w.primary_task().and_then(|t| t.repo.clone())
+            && !repo.is_empty()
+        {
+            return repo;
+        }
+        NO_REPO.to_string()
+    }
 }
 
 pub fn group_label(

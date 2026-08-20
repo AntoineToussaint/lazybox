@@ -152,13 +152,27 @@ pub fn request_stop() -> std::io::Result<bool> {
 /// treat a non-zero hook exit as a user-visible failure, while a stopped or
 /// restarting lazybox daemon should only mean that one state signal is lost.
 pub async fn ingest_hook_from_stdio(args: &[String]) {
+    // Global deadline over the whole ingest (2026-08-19 audit, L4).
+    // These helpers run once per agent lifecycle hook; two unbounded
+    // waits used to leak processes: a payload writer that never closes
+    // stdin left `read_to_string` parked forever, and after an unclean
+    // daemon death (stale socket file) each helper connected into a
+    // dead backlog and hung its full handshake timeout. Best-effort
+    // delivery means a bounded miss beats a leaked process.
+    const INGEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(8);
+    let _ = tokio::time::timeout(INGEST_DEADLINE, ingest_hook_inner(args)).await;
+}
+
+async fn ingest_hook_inner(args: &[String]) {
     let (backend_key, terminal_id) = parse_hook_correlation(args);
     if backend_key.is_none() && terminal_id.is_none() {
-        let _ = read_stdin_to_string();
+        let _ = read_stdin_bounded().await;
         return;
     }
 
-    let payload = read_stdin_to_string();
+    let Some(payload) = read_stdin_bounded().await else {
+        return;
+    };
     let Some(hook) = lazybox_agents::hook::parse_claude_hook(&payload) else {
         return;
     };
@@ -169,6 +183,21 @@ pub async fn ingest_hook_from_stdio(args: &[String]) {
     };
     if let Err(error) = lazybox_ipc::socket::send_command(&socket_path(), &command).await {
         tracing::warn!("hook-ingest IPC send failed: {error}");
+    }
+}
+
+/// Read the hook payload with its own timeout, off the async runtime
+/// (stdin has no async story). `None` = the writer never delivered a
+/// complete payload in time.
+async fn read_stdin_bounded() -> Option<String> {
+    const STDIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    let read = tokio::task::spawn_blocking(read_stdin_to_string);
+    match tokio::time::timeout(STDIN_TIMEOUT, read).await {
+        Ok(Ok(payload)) => Some(payload),
+        Ok(Err(_)) | Err(_) => {
+            tracing::warn!("hook-ingest: stdin payload not delivered in time");
+            None
+        }
     }
 }
 

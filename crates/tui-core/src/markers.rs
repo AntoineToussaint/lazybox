@@ -206,7 +206,7 @@ pub fn spawning_doc() -> MarkerDoc {
 /// `lazybox_tui::components::workspace_row`'s badge cells.
 const ROW_BADGES: &[MarkerDoc] = &[
     MarkerDoc {
-        label: "WORK",
+        label: "⚑",
         meaning: "This GitHub issue or PR is claimed by an agent, including agents running from another lazybox machine.",
         when: "Shows while the task carries the shared `working` label; starting another agent asks for confirmation.",
     },
@@ -346,7 +346,7 @@ mod tests {
     fn fleet_claim_badge_is_documented() {
         let doc = row_badge_docs()
             .iter()
-            .find(|doc| doc.label == "WORK")
+            .find(|doc| doc.label == "⚑")
             .expect("the cross-machine working claim must be explainable");
         assert!(doc.meaning.contains("another lazybox machine"));
         assert!(doc.when.contains("confirmation"));

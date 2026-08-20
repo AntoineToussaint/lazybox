@@ -157,6 +157,22 @@ pub(crate) fn request_mouse_capture(enabled: bool) -> std::io::Result<()> {
 /// The flag collapses every teardown path to exactly one real restore.
 static RESTORED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the host terminal accepted the Kitty keyboard protocol, so a
+/// modified `Enter` (Shift-Enter) arrives distinct from a bare `Enter`.
+/// Probed once in [`enable_host_terminal`]. Terminals that ignore the
+/// push — Terminal.app, tmux without `extended-keys`, plain SSH — report
+/// `false`; the compose textarea keeps `Enter` as newline there, since a
+/// stripped Shift-Enter would otherwise be misread as submit and post a
+/// half-written message.
+static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
+
+/// Did the host terminal accept the Kitty keyboard protocol? See
+/// [`KEYBOARD_ENHANCED`]. Defaults to `false` until [`enable_host_terminal`]
+/// has probed (e.g. in tests, which never enter host modes).
+pub(crate) fn keyboard_enhancement_active() -> bool {
+    KEYBOARD_ENHANCED.load(Ordering::Relaxed)
+}
+
 /// The escape-sequence half of [`restore_host_terminal`]: every
 /// [`HostMode`] except [`HostMode::RawMode`], in teardown order.
 ///
@@ -311,6 +327,17 @@ pub(crate) fn enable_host_terminal() {
     for mode in HostMode::ALL {
         mode.enable(&mut bytes);
     }
+    // Probe whether the terminal actually honored the keyboard-enhancement
+    // push. Raw mode is already on (first in the loop) and the run loop has
+    // not started reading stdin yet (input is read inline in the run loop,
+    // not by a listener thread — see `Model::build`), so the query response
+    // can't be swallowed. A non-responding terminal / read error counts as
+    // unsupported. The push bytes are still queued below, independent of the
+    // answer — this only decides how the compose textarea maps `Enter`.
+    KEYBOARD_ENHANCED.store(
+        crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false),
+        Ordering::Relaxed,
+    );
     // `Model::new` constructs the async writer before this guard, so startup
     // escapes share the same ordered fd-1 lane as frames, OSC passthrough,
     // mouse toggles, clipboard writes, and restore. `enqueue_raw` retains a

@@ -1624,17 +1624,19 @@ mod seed_tests {
 
         drop(pty);
 
+        // Poll for the marker CONTENT, not mere existence — under CI
+        // load the file can exist before the child's "HUP" write lands,
+        // and an exists-then-read race read back "" (2026-08-20 flake).
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while !exit_path.exists() {
+            loop {
+                if std::fs::read_to_string(&exit_path).is_ok_and(|marker| marker == "HUP") {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
         .await
         .expect("relay child observed hangup");
-        assert_eq!(
-            std::fs::read_to_string(exit_path).expect("exit marker"),
-            "HUP"
-        );
         assert_eq!(
             std::fs::read(input_path).expect("captured relay input"),
             Vec::<u8>::new()

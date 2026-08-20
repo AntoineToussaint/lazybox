@@ -871,6 +871,16 @@ fn request_profile(
         "notifications heartbeat" => (ApiResource::rest("core"), RequestPriority::Recent),
         "budget-bootstrap" => (ApiResource::Graphql, RequestPriority::Recent),
         "hot-target batch query" => (ApiResource::Graphql, RequestPriority::Focused),
+        // User-initiated one-node syncs (`g s`, detail fetch on focus,
+        // the auto-merge pre-merge probe) — a few points each. They
+        // must stay admissible while the primary budget is healthy,
+        // even when the background allowance is spent (#1218): being
+        // classified `Recent` meant an explicit `g s` was refused
+        // exactly when the user most needed it, with the refusal
+        // swallowed as a log line.
+        "single-PR interactive sync" | "single-issue interactive sync" => {
+            (ApiResource::Graphql, RequestPriority::Interactive)
+        }
         "single-PR notification deep-fetch"
         | "single-issue notification deep-fetch"
         | "PR details background prefetch"
@@ -2675,11 +2685,48 @@ impl GhClient {
         repo: &str,
         number: u64,
     ) -> Result<Option<(Task, Option<String>)>, GhError> {
-        self.acquire_or_block("single-PR notification deep-fetch")?;
+        self.fetch_single_pr_with_head_as("single-PR notification deep-fetch", owner, repo, number)
+            .await
+    }
+
+    /// [`fetch_single_pr_with_head`](Self::fetch_single_pr_with_head) at
+    /// interactive priority — for user-initiated targeted syncs (`g s`)
+    /// and the auto-merge pre-merge probe, which must not queue behind
+    /// the background budget (#1218).
+    pub async fn fetch_single_pr_with_head_interactive(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<(Task, Option<String>)>, GhError> {
+        self.fetch_single_pr_with_head_as("single-PR interactive sync", owner, repo, number)
+            .await
+    }
+
+    /// Interactive-priority sibling of [`fetch_single_pr`](Self::fetch_single_pr).
+    pub async fn fetch_single_pr_interactive(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<Task>, GhError> {
+        Ok(self
+            .fetch_single_pr_with_head_interactive(owner, repo, number)
+            .await?
+            .map(|(task, _)| task))
+    }
+
+    async fn fetch_single_pr_with_head_as(
+        &self,
+        operation: &'static str,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<(Task, Option<String>)>, GhError> {
+        self.acquire_or_block(operation)?;
         let body = graphql::single_pr_body(owner, repo, number);
-        let response: graphql::GqlSinglePrResponse = self
-            .post_graphql_with_retry("single-PR notification deep-fetch", &body)
-            .await?;
+        let response: graphql::GqlSinglePrResponse =
+            self.post_graphql_with_retry(operation, &body).await?;
         if let Some(errors) = response.errors {
             // A definitive "not visible" answer (NOT_FOUND / FORBIDDEN:
             // deleted, transferred, private, scope revoked) is NOT a
@@ -2721,11 +2768,33 @@ impl GhClient {
         repo: &str,
         number: u64,
     ) -> Result<Option<Task>, GhError> {
-        self.acquire_or_block("single-issue notification deep-fetch")?;
+        self.fetch_single_issue_as("single-issue notification deep-fetch", owner, repo, number)
+            .await
+    }
+
+    /// Interactive-priority sibling of [`fetch_single_issue`](Self::fetch_single_issue)
+    /// — see [`fetch_single_pr_with_head_interactive`](Self::fetch_single_pr_with_head_interactive).
+    pub async fn fetch_single_issue_interactive(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<Task>, GhError> {
+        self.fetch_single_issue_as("single-issue interactive sync", owner, repo, number)
+            .await
+    }
+
+    async fn fetch_single_issue_as(
+        &self,
+        operation: &'static str,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<Task>, GhError> {
+        self.acquire_or_block(operation)?;
         let body = graphql::single_issue_body(owner, repo, number);
-        let response: graphql::GqlSingleIssueResponse = self
-            .post_graphql_with_retry("single-issue notification deep-fetch", &body)
-            .await?;
+        let response: graphql::GqlSingleIssueResponse =
+            self.post_graphql_with_retry(operation, &body).await?;
         if let Some(errors) = response.errors {
             // See `fetch_single_pr`: a definitive NOT_FOUND / FORBIDDEN
             // is "not visible" (`Ok(None)`), never a cursor-holding

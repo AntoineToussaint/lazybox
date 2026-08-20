@@ -1250,7 +1250,11 @@ impl ActionDef {
             },
             ActionKind::ResetAgentContext => &Self {
                 kind: ActionKind::ResetAgentContext,
-                default_keys: "a r",
+                // Under the `x` workspace leader, not `a` — confirmed
+                // (destructive) actions live behind a risk-signaling
+                // leader, and `a` is the cheap spawn group. (`x r` is
+                // the scan-root chord; `w` = wipe the agent's memory.)
+                default_keys: "x w",
                 label: "reset agent",
                 describe: "Reset the running agent's conversation context in place (injects the agent's clear command — /clear for Claude, /new for Codex). Session, worktree and prompt history survive; only the model's context resets. Confirmed first.",
                 section: Section::Workspace,
@@ -2304,9 +2308,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::SyncWorkspace
         | ActionKind::OpenInBrowser
         | ActionKind::DeleteOrClose => Some("github"),
-        ActionKind::SpawnAgent
-        | ActionKind::RecoverAllAgentCredit
-        | ActionKind::ResetAgentContext => Some("agent"),
+        ActionKind::SpawnAgent | ActionKind::RecoverAllAgentCredit => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
@@ -2327,6 +2329,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::MoveGroupDown
         | ActionKind::MoveGroupTop
         | ActionKind::MoveGroupBottom
+        | ActionKind::ResetAgentContext
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }

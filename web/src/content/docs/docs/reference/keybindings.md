@@ -169,7 +169,6 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | Chord | Action |
 | --- | --- |
 | `a K` | recover all credit |
-| `a r` | reset agent *(confirmed first)* |
 | `a c` | spawn claude |
 | `a x` | spawn codex |
 | `a u` | spawn cursor |
@@ -220,6 +219,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x z` | long snooze *(confirmed first)* |
 | `x x` | archive *(confirmed first)* |
 | `x c` | close issue *(confirmed first)* |
+| `x w` | reset agent *(confirmed first)* |
 | `x u` | move up |
 | `x d` | move down |
 | `x t` | move to top |

@@ -10134,6 +10134,8 @@ mod tests {
             agent_worktree,
             resolve_shell,
             skip_permissions,
+            // Test wrapper mirrors the default: MCP inherited (#1183).
+            false,
             hook_settings_path,
             hook_command,
             model_args,
@@ -14165,8 +14167,8 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--dangerously-skip-permissions".to_string(),
-                "--strict-mcp-config".to_string(),
-            ]
+            ],
+            "unattended argv inherits the user's MCP setup by default (#1183)",
         );
 
         let without_skip = argv_for(

@@ -149,6 +149,7 @@ pub(crate) fn build_spawn_plan(
         &agent_worktree,
         || shell_command,
         no_permission,
+        cfg.agent.strict_mcp(),
         hook_settings.clone(),
         hook_command.as_deref(),
         &model_args,
@@ -223,6 +224,7 @@ pub(crate) fn argv_for(
     agent_worktree: &Path,
     resolve_shell: impl FnOnce() -> String,
     skip_permissions: bool,
+    strict_mcp: bool,
     hook_settings_path: Option<PathBuf>,
     hook_command: Option<&str>,
     model_args: &[String],
@@ -244,6 +246,7 @@ pub(crate) fn argv_for(
                 skip_permissions,
                 access,
                 hook_settings_path,
+                strict_mcp,
             };
             let mut argv = if resume {
                 agent.resume_session(&ctx, provider_session_id)
@@ -477,10 +480,10 @@ mod tests {
         assert!(matches!(&plan.kind, TerminalKind::Agent(id) if id == "claude"));
         assert_eq!(
             plan.argv,
+            // #1183: MCP inherited by default — no --strict-mcp-config.
             vec![
                 "claude",
                 "--dangerously-skip-permissions",
-                "--strict-mcp-config",
                 "--settings",
                 "/run/lazybox/settings-42.json",
                 "--model",

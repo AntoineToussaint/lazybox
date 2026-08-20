@@ -1690,6 +1690,16 @@ pub struct AgentSection {
     /// Unset → 32; `0` → no warnings.
     #[serde(default)]
     pub max_live_agents: Option<usize>,
+    /// Launch unattended (skip-permissions) Claude spawns with
+    /// `--strict-mcp-config`, disabling every ambient MCP server the
+    /// user configured (#1183). Historically always-on to dodge the
+    /// MCP auth-gate stall (#256), which silently made "MCP works
+    /// outside lazybox, not inside" true for every autonomous spawn.
+    /// Default `false`: agents inherit the user's normal MCP setup.
+    /// Read-only spawns stay strict regardless — a reviewer needs no
+    /// MCP reach.
+    #[serde(default)]
+    pub strict_mcp: Option<bool>,
 }
 
 impl Default for AgentSection {
@@ -1703,6 +1713,7 @@ impl Default for AgentSection {
             working_watchdog_secs: None,
             quiet_classify_secs: None,
             max_live_agents: None,
+            strict_mcp: None,
         }
     }
 }
@@ -1719,6 +1730,12 @@ impl AgentSection {
             Some(n) => Some(n),
             None => Some(DEFAULT_MAX_LIVE_AGENTS),
         }
+    }
+
+    /// Whether unattended spawns pass `--strict-mcp-config` (#1183).
+    /// Unset → `false` (inherit the user's MCP servers).
+    pub fn strict_mcp(&self) -> bool {
+        self.strict_mcp.unwrap_or(false)
     }
 
     /// The configured global LLM-gateway base URL, normalized: surrounding
@@ -2789,6 +2806,17 @@ mod duration_human_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1183: strict MCP is opt-in — unset inherits the user's MCP
+    /// servers, `true` restores the #256 always-strict behavior.
+    #[test]
+    fn strict_mcp_defaults_off_and_opts_in() {
+        assert!(!AgentSection::default().strict_mcp());
+        let on = Config::parse("agent:\n  strict_mcp: true\n").unwrap();
+        assert!(on.agent.strict_mcp());
+        let off = Config::parse("agent:\n  strict_mcp: false\n").unwrap();
+        assert!(!off.agent.strict_mcp());
+    }
 
     #[test]
     fn relay_entitlement_config_is_optional_and_round_trips() {

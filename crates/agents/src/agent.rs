@@ -33,6 +33,11 @@ pub struct SpawnCtx {
     /// configured (non-Claude agent, or generation failed) — those fall
     /// back to PTY-based state detection.
     pub hook_settings_path: Option<PathBuf>,
+    /// Pass `--strict-mcp-config` on unattended launches, cutting the
+    /// agent off from the user's ambient MCP servers (#1183). Off by
+    /// default (`agent.strict_mcp`); read-only launches are strict
+    /// regardless.
+    pub strict_mcp: bool,
 }
 
 /// The upstream LLM API an agent speaks to. Used to pick the base-URL
@@ -633,7 +638,14 @@ pub mod builtins {
     fn push_unattended_flags(argv: &mut Vec<String>, ctx: &SpawnCtx) {
         if ctx.skip_permissions {
             argv.push("--dangerously-skip-permissions".into());
-            argv.push("--strict-mcp-config".into());
+            // #1183: strict MCP is opt-in now. Always-on it silently
+            // disabled every user MCP server on autonomous spawns
+            // ("works outside lazybox, not inside"). The #256 auth-gate
+            // concern it addressed is opt-back-in via
+            // `agent.strict_mcp: true`.
+            if ctx.strict_mcp {
+                argv.push("--strict-mcp-config".into());
+            }
         }
     }
 
@@ -1274,12 +1286,26 @@ mod tests {
         };
         assert_eq!(claude.spawn(&off), vec!["claude".to_string()]);
 
+        // #1183: skip-permissions no longer implies strict MCP — the
+        // user's ambient MCP servers stay available by default.
         let on = SpawnCtx {
             skip_permissions: true,
             ..Default::default()
         };
         assert_eq!(
             claude.spawn(&on),
+            vec!["claude".to_string(), SKIP_FLAG.to_string()],
+            "unattended spawns inherit the user's MCP setup by default",
+        );
+
+        // Opting back in (`agent.strict_mcp: true`) restores the flag.
+        let strict = SpawnCtx {
+            skip_permissions: true,
+            strict_mcp: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            claude.spawn(&strict),
             vec![
                 "claude".to_string(),
                 SKIP_FLAG.to_string(),
@@ -1307,6 +1333,21 @@ mod tests {
         };
         assert_eq!(
             claude.resume(&on),
+            vec![
+                "claude".to_string(),
+                "--continue".to_string(),
+                SKIP_FLAG.to_string(),
+            ],
+            "resume inherits the user's MCP setup by default (#1183)",
+        );
+
+        let strict = SpawnCtx {
+            skip_permissions: true,
+            strict_mcp: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            claude.resume(&strict),
             vec![
                 "claude".to_string(),
                 "--continue".to_string(),

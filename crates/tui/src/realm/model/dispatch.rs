@@ -1293,10 +1293,14 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::RenameWorkspace => {
-                // Rename targets the focused workspace's display label
-                // (any workspace, even session-less). Section::Workspace,
-                // so this fires from both Sidebar and Right focus.
-                if let Some(ws) = self.sidebar.selected_workspace() {
+                // A cursor parked on a Space header renames the Space
+                // (#1211); anywhere else, rename targets the focused
+                // workspace's display label (any workspace, even
+                // session-less). Section::Workspace, so this fires from
+                // both Sidebar and Right focus.
+                if let Some((false, space)) = self.sidebar.cursor_header() {
+                    self.mount_rename_space_input(space);
+                } else if let Some(ws) = self.sidebar.selected_workspace() {
                     let session_key: lazybox_core::SessionKey = (&ws.key).into();
                     self.mount_rename_workspace_input(session_key);
                 }

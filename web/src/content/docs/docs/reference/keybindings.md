@@ -49,7 +49,6 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `Shift-C` | connect box | Connect to (or disconnect from) the remote box on demand. |
 | `Shift-K` | resume rate-limited | Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent. |
 | `Ctrl-k` | recover credit | Select the provider's Wait for credit option for the focused blocked agent, wait for its composer, and submit the configured continuation prompt. |
-| `Ctrl-Shift-K` | recover all credit | Run the full credit recovery transaction for every agent currently blocked on a supported credit chooser. |
 | `Shift-P` | activity pane | Cycle the activity pane: full feed → one-line summary (new-activity / failing-CI counts) → hidden → full. |
 | `F8 \| Alt-s \| Ctrl-Alt-s` | text selection | Toggle lazybox's mouse capture so the host terminal regains native text selection (trackpad-select + Cmd-C in agent scrollback). |
 | `Shift-Arrows` | resize splitters | Grow / shrink the focused splitter. |
@@ -169,6 +168,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 
 | Chord | Action |
 | --- | --- |
+| `a K` | recover all credit |
 | `a c` | spawn claude |
 | `a x` | spawn codex |
 | `a u` | spawn cursor |

@@ -254,7 +254,6 @@ pub(crate) struct TerminalEntry {
 pub(crate) struct CreditRecoveryRuntime {
     pub request_id: String,
     pub stage: AgentCreditRecoveryStage,
-    pub observed_state: Option<AgentState>,
     pub evidence: Arc<Notify>,
 }
 
@@ -540,7 +539,6 @@ impl TerminalRegistry {
         entry.credit_recovery = Some(CreditRecoveryRuntime {
             request_id,
             stage: AgentCreditRecoveryStage::SelectingWait,
-            observed_state: None,
             evidence: Arc::new(Notify::new()),
         });
         Ok(())

@@ -732,6 +732,15 @@ async fn fold_and_broadcast_agent_state<R>(
     let terminal_live = live_session.is_some();
     let previous = entry.agent_state;
     let (result, mut committed) = fold(previous, terminal_live);
+    // While a correlated recovery transaction is in flight, hold the
+    // committed pill at `CreditExhausted` so partial progress (the Wait
+    // selection repainting the screen) cannot masquerade as a recovery —
+    // the transaction's own `Recovery`-sourced commit is the exit. The
+    // hold applies **only** while `credit_recovery` is live: with no
+    // transaction, a user answering the chooser directly in the PTY, or
+    // the provider auto-resuming on its own, transitions out normally
+    // (advise, never forbid — the daemon transaction must not be the
+    // only legal exit).
     if let Some(state) = committed
         && previous == Some(lazybox_ipc::AgentState::CreditExhausted)
         && !matches!(
@@ -739,12 +748,10 @@ async fn fold_and_broadcast_agent_state<R>(
             lazybox_ipc::AgentState::CreditExhausted | lazybox_ipc::AgentState::Exited { .. }
         )
         && source != StateSource::Recovery
+        && let Some(recovery) = entry.credit_recovery.as_mut()
     {
-        if let Some(recovery) = entry.credit_recovery.as_mut() {
-            recovery.observed_state = Some(state);
-            if state == lazybox_ipc::AgentState::Working {
-                recovery.evidence.notify_one();
-            }
+        if state == lazybox_ipc::AgentState::Working {
+            recovery.evidence.notify_one();
         }
         committed = None;
     }
@@ -11746,6 +11753,19 @@ mod tests {
             config.terminal.agent_state_for(id).await,
             Some(lazybox_ipc::AgentState::CreditExhausted)
         );
+        assert!(
+            config
+                .terminal
+                .begin_credit_recovery(id, "retry".into())
+                .await
+                .is_ok(),
+            "a failed recovery releases its in-flight reservation"
+        );
+        config.terminal.finish_credit_recovery(id, "retry").await;
+        // After the failed transaction released its reservation, ordinary
+        // detector transitions flow again: a Codex that auto-resumes on its
+        // own (the 120s "Wait for credit" countdown elapsing) must not stay
+        // pinned on the `¢` pill (advise, never forbid).
         let durability = agent_state_durability(&config, id, &backend_key)
             .await
             .expect("registered test terminal has durable state");
@@ -11756,26 +11776,17 @@ mod tests {
             id,
             &SessionKey::new("credit-timeout"),
             StateSource::Pty,
-            |_| Some(lazybox_ipc::AgentState::Idle),
+            |_| Some(lazybox_ipc::AgentState::Working),
         )
         .await;
         assert!(
-            !ordinary_transition.committed,
-            "a failed transaction stays visibly blocked after its composer appears"
+            ordinary_transition.committed,
+            "with no transaction in flight, a provider auto-resume leaves the blocked state"
         );
         assert_eq!(
             config.terminal.agent_state_for(id).await,
-            Some(lazybox_ipc::AgentState::CreditExhausted)
+            Some(lazybox_ipc::AgentState::Working)
         );
-        assert!(
-            config
-                .terminal
-                .begin_credit_recovery(id, "retry".into())
-                .await
-                .is_ok(),
-            "a failed recovery releases its in-flight reservation"
-        );
-        config.terminal.finish_credit_recovery(id, "retry").await;
         let mut correlated_failure = false;
         while let Ok(event) = events.try_recv() {
             if matches!(
@@ -11787,6 +11798,96 @@ mod tests {
             }
         }
         assert!(correlated_failure);
+    }
+
+    /// Advise, never forbid (#1179 review): the correlated recovery
+    /// transaction is never the only legal exit from `CreditExhausted`.
+    /// Keys forward to the PTY, so a user answering the chooser directly is
+    /// a first-class path — the resulting detector transition must commit
+    /// and broadcast. The hold on non-`Recovery` transitions applies only
+    /// while a recovery transaction is actually in flight.
+    #[tokio::test]
+    async fn manual_chooser_answer_escapes_credit_exhaustion_without_a_transaction() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "credit-manual")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(1181);
+        let session_key = SessionKey::new("credit-manual");
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            session_key.clone(),
+            "codex",
+            Some(lazybox_ipc::AgentState::CreditExhausted),
+            None,
+        )
+        .await;
+        let durability = agent_state_durability(&config, id, &backend_key)
+            .await
+            .expect("registered test terminal has durable state");
+
+        // While a transaction is in flight, partial progress is held on the
+        // blocked pill (the transaction's own Recovery commit is the exit).
+        config
+            .terminal
+            .begin_credit_recovery(id, "held".into())
+            .await
+            .expect("reservation");
+        let held = transition_and_broadcast_agent_state(
+            &config.terminal,
+            &config.bus,
+            &durability,
+            id,
+            &session_key,
+            StateSource::Pty,
+            |_| Some(lazybox_ipc::AgentState::Working),
+        )
+        .await;
+        assert!(
+            !held.committed,
+            "mid-transaction repaints must not masquerade as a recovery"
+        );
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::CreditExhausted)
+        );
+        config.terminal.finish_credit_recovery(id, "held").await;
+
+        // With no transaction, the user's own chooser answer flows through
+        // the ordinary detector path: committed, cached, and broadcast.
+        let mut events = config.bus.subscribe();
+        let manual = transition_and_broadcast_agent_state(
+            &config.terminal,
+            &config.bus,
+            &durability,
+            id,
+            &session_key,
+            StateSource::Pty,
+            |_| Some(lazybox_ipc::AgentState::Working),
+        )
+        .await;
+        assert!(
+            manual.committed,
+            "a manual chooser answer must leave CreditExhausted without any daemon transaction"
+        );
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::Working)
+        );
+        assert!(
+            matches!(
+                events.try_recv().expect("state broadcast"),
+                Event::AgentState {
+                    terminal_id,
+                    state: lazybox_ipc::AgentState::Working,
+                    ..
+                } if terminal_id == id
+            ),
+            "the manual escape is broadcast like any other transition"
+        );
     }
 
     #[tokio::test]

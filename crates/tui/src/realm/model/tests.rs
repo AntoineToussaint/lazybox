@@ -9390,6 +9390,54 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Advise, never forbid (#1179 review): a workspace whose agent sits on
+    /// the `¢` credit chooser is still fully workable. `w w` keeps
+    /// targeting the blocked agent (the daemon parks the prompt behind the
+    /// chooser gate and delivers it once the block clears — degraded, not
+    /// refused), and spawning a fresh sibling agent goes through untouched.
+    #[test]
+    fn credit_exhausted_workspace_still_accepts_work_and_spawn() {
+        use lazybox_ipc::{AgentState, Command, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(3),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: sk.clone(),
+            terminal_id: TerminalId(3),
+            state: AgentState::CreditExhausted,
+        });
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        let injected = cmds.iter().find_map(|command| match command {
+            Command::InjectPrompt { terminal_id, .. } => Some(*terminal_id),
+            _ => None,
+        });
+        assert_eq!(
+            injected,
+            Some(TerminalId(3)),
+            "`w w` on a credit-exhausted agent still dispatches the work prompt: {cmds:?}",
+        );
+
+        let cmds = m.dispatch_action(&Action::SpawnAgent("claude".into()));
+        assert!(
+            cmds.iter()
+                .any(|command| matches!(command, Command::Spawn { .. })),
+            "spawning a sibling agent on a credit-exhausted workspace is never vetoed: {cmds:?}",
+        );
+    }
+
     /// Issue #418: with SEVERAL distinct agents running, `w w` must ask
     /// which one to inject into (a chooser modal) instead of silently
     /// picking the default; the pick replays the work spawn against the

@@ -997,14 +997,18 @@ impl ActionDef {
                 kind: ActionKind::RecoverAgentCredit,
                 default_keys: "Ctrl-k",
                 label: "recover credit",
-                describe: "Select the provider's Wait for credit option for the focused blocked agent, wait for its composer, and submit the configured continuation prompt.",
+                describe: "Select the provider's Wait for credit option for the focused blocked agent, wait for its composer, and submit the configured continuation prompt. Chooser detection is Codex-only today; you can always answer the chooser directly in the terminal instead.",
                 section: Section::Global,
             },
             ActionKind::RecoverAllAgentCredit => &Self {
                 kind: ActionKind::RecoverAllAgentCredit,
-                default_keys: "Ctrl-Shift-K",
+                // A leader chord on purpose: the natural `Ctrl-Shift-K`
+                // needs the kitty keyboard protocol most emulators lack —
+                // it would arrive as plain `Ctrl-k` and silently run the
+                // *focused* recovery instead.
+                default_keys: "a K",
                 label: "recover all credit",
-                describe: "Run the full credit recovery transaction for every agent currently blocked on a supported credit chooser.",
+                describe: "Run the full credit recovery transaction for every agent currently blocked on a supported credit chooser (Codex-style Wait-for-credit choosers).",
                 section: Section::Global,
             },
             ActionKind::ToggleFocusMode => &Self {
@@ -2275,7 +2279,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::SyncWorkspace
         | ActionKind::OpenInBrowser
         | ActionKind::DeleteOrClose => Some("github"),
-        ActionKind::SpawnAgent => Some("agent"),
+        ActionKind::SpawnAgent | ActionKind::RecoverAllAgentCredit => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),

@@ -15,7 +15,7 @@ use crate::components::sidebar::AttentionSummary;
 use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
-use tuirealm::ratatui::widgets::Paragraph;
+use tuirealm::ratatui::widgets::{Block, Borders, Paragraph};
 
 /// Compose the focus-mode header title from a workspace's `name`, its
 /// canonical `owner/repo` slug (if any), and its 1-based jump `number`
@@ -122,6 +122,101 @@ pub fn render(frame: &mut Frame, area: Rect, title: &str, summary: AttentionSumm
             hint_rect,
         );
     }
+}
+
+/// Chrome for one focus-mode workspace pane (#1258), precomputed by
+/// `Model::view` outside the draw closure (same borrow discipline as
+/// the event header above). Pure data — the render fns below turn it
+/// into a bordered pane frame.
+pub struct FocusPaneChrome {
+    /// Workspace display name; the placeholder text for an empty pane.
+    pub title: String,
+    /// 0-based slot in the starred roster (rendered 1-based) — the
+    /// digit `]]<digit>` retargets this pane by. `None` when the
+    /// workspace isn't starred (it entered via fallback or retarget).
+    pub digit: Option<usize>,
+    /// Compact agent-state badge (`● asking`, `· working`, …) with its
+    /// alert style, straight from the terminal stack's vocabulary.
+    pub badge: Option<(&'static str, Style)>,
+    /// Whether this pane holds pane focus (accent border, input target).
+    pub focused: bool,
+    /// The terminal to render in the body; `None` renders the dim
+    /// placeholder instead.
+    pub terminal: Option<lazybox_ipc::TerminalId>,
+    /// Body text when `terminal` is `None` — the star nudge for an
+    /// unassigned pane, a no-terminal note for an assigned workspace
+    /// whose session has nothing running.
+    pub placeholder: String,
+}
+
+/// Draw one focus-pane frame: a bordered block whose top line carries
+/// the pane header — star digit + workspace name + agent-state badge —
+/// with the accent border marking the focused (input-receiving) pane.
+/// Returns the inner rect the pane body (terminal or placeholder)
+/// renders into.
+pub fn render_pane_frame(frame: &mut Frame, area: Rect, chrome: &FocusPaneChrome) -> Rect {
+    if area.width < 2 || area.height < 2 {
+        return Rect::default();
+    }
+    let theme = crate::theme::current();
+    let border_style = if chrome.focused {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.chrome)
+    };
+    let mut title: Vec<Span> = Vec::new();
+    if let Some(d) = chrome.digit {
+        title.push(Span::styled(
+            format!(" {} ", d + 1),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        title.push(Span::raw(" "));
+    }
+    title.push(Span::styled(
+        format!("{} ", chrome.title),
+        if chrome.focused {
+            Style::default()
+                .fg(theme.text_strong)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_dim)
+        },
+    ));
+    if let Some((label, style)) = chrome.badge {
+        title.push(Span::styled(format!("{label} "), style));
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Line::from(title));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    inner
+}
+
+/// Body of a pane with nothing to show: a dim centered nudge naming
+/// the way to fill it (star a workspace, then `]]<digit>`).
+pub fn render_pane_placeholder(frame: &mut Frame, inner: Rect, text: &str) {
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let theme = crate::theme::current();
+    let row = Rect {
+        y: inner.y + inner.height / 2,
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            text.to_string(),
+            Style::default().fg(theme.text_dim),
+        )))
+        .alignment(Alignment::Center),
+        row,
+    );
 }
 
 #[cfg(test)]

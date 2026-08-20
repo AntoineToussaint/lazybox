@@ -1401,6 +1401,30 @@ pub struct Model<T: TerminalAdapter> {
     /// clears it. Toggled by `.` (sidebar) or `]]f` (terminal);
     /// `]]<digit>` jumps straight to a specific agent.
     focus_mode: bool,
+    /// Focus-mode multi-workspace layout (#1258). Active only while
+    /// `focus_mode` is on; `Single` renders exactly the historical
+    /// one-fullscreen-terminal focus mode. Cycled by `]]v`, persisted
+    /// as `ui.focus_layout`, seeded by `apply_client_config`.
+    focus_layout: lazybox_config::FocusLayout,
+    /// Index of the focused workspace pane in a multi-pane focus
+    /// layout ([`crate::realm::layout::focus_layout_areas`] order).
+    /// Keyboard input routes to this pane's terminal only; `]]<arrow>`
+    /// moves it, `]]<digit>` retargets it.
+    focus_pane: usize,
+    /// Sticky per-pane workspace assignments for the multi-pane focus
+    /// layouts. Populated from the starred roster (current workspace
+    /// first, then the next starred workspaces in sidebar order, then
+    /// most-recently-active agent workspaces) on focus-mode entry and
+    /// when cycling out of `Single`; `]]<digit>` overwrites the focused
+    /// pane's slot. `None` renders a dim placeholder naming the star
+    /// action.
+    focus_pane_slots: [Option<lazybox_core::SessionKey>; 4],
+    /// Pane-level zoom (#1258): while `true`, a multi-pane focus
+    /// layout renders the focused pane full-screen (exactly like
+    /// `Single`); `]]z` toggles it, cycling the layout clears it.
+    /// Render-only — dispatch still treats the layout as multi-pane so
+    /// arrows keep moving pane focus underneath the zoom.
+    focus_zoom: bool,
     /// Three pane wrappers held as typed fields so the orchestrator
     /// can call `.drain_cmds()` etc. directly. The wrappers also
     /// track their own `focused: bool` flag, which we keep in sync
@@ -2281,6 +2305,10 @@ impl<T: TerminalAdapter> Model<T> {
             viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
             focus_mode: false,
+            focus_layout: lazybox_config::FocusLayout::Single,
+            focus_pane: 0,
+            focus_pane_slots: [None, None, None, None],
+            focus_zoom: false,
             sidebar: Sidebar::new(SIDEBAR_PID),
             right: Right::new(RIGHT_PID),
             terminals: Terminals::new(TERMINALS_PID),
@@ -2878,6 +2906,10 @@ impl<T: TerminalAdapter> Model<T> {
             tracing::warn!("ui.theme = {name:?} not found; using the default theme");
         }
         let ui_defaults = user_config.resolved_ui();
+        // Focus-mode layout (#1258): seed the persisted `ui.focus_layout`
+        // so both the embedded binary and attach clients boot into the
+        // remembered layout; `]]v` cycles + persists it at runtime.
+        self.focus_layout = ui_defaults.focus_layout;
         self.apply_sidebar_config(
             user_config.attention.clone(),
             user_config.ui.collapsed_repos.clone(),
@@ -5924,11 +5956,67 @@ impl<T: TerminalAdapter> Model<T> {
             // reachable controls are all `]]` leader chords: `]]<digit>`
             // jumps to another agent, `]]q` exits back to the sidebar.
             let esc = self.ui_defaults.terminal_escape_char;
-            let hint = format!("{esc}{esc}<n> jump · {esc}{esc}q exit");
+            // In a multi-pane layout the digits retarget the focused
+            // pane and `]]v` cycles the layout — say so (#1258).
+            let hint = if self.focus_multi_pane_active() {
+                format!("{esc}{esc}v layout · {esc}{esc}<n> retarget · {esc}{esc}q exit")
+            } else {
+                format!("{esc}{esc}<n> jump · {esc}{esc}q exit")
+            };
             (title, self.sidebar.attention_summary(), hint)
         } else {
             (String::new(), Default::default(), String::new())
         };
+        // Multi-pane focus layout (#1258): resolve each pane's chrome
+        // (name, star digit, agent badge, terminal) out here for the
+        // same borrow reason as the header above. Empty ⇒ the draw
+        // closure takes the historical single-terminal path — `Single`
+        // and pane-zoom render pixel-identical to focus mode today.
+        let focus_layout = self.focus_layout;
+        let focus_panes: Vec<crate::realm::components::focus_header::FocusPaneChrome> =
+            if focus_mode && focus_layout != lazybox_config::FocusLayout::Single && !self.focus_zoom
+            {
+                let theme = crate::theme::current();
+                let numbered = self.sidebar.numbered_workspace_keys();
+                (0..focus_layout.pane_count())
+                    .map(|i| {
+                        let key = self.focus_pane_slots.get(i).cloned().flatten();
+                        let focused = i == self.focus_pane;
+                        match key {
+                            Some(key) => {
+                                let title = self
+                                    .sidebar
+                                    .workspace_by_key(&key)
+                                    .map(|w| w.name.clone())
+                                    .unwrap_or_else(|| key.to_string());
+                                let terminal = self.terminals.display_terminal_for(&key);
+                                crate::realm::components::focus_header::FocusPaneChrome {
+                                    title,
+                                    digit: numbered.iter().position(|k| *k == key),
+                                    badge: terminal
+                                        .and_then(|id| self.terminals.pane_state_badge(id, theme)),
+                                    focused,
+                                    terminal,
+                                    placeholder: "no running terminal in this workspace"
+                                        .to_string(),
+                                }
+                            }
+                            None => crate::realm::components::focus_header::FocusPaneChrome {
+                                title: "unassigned".to_string(),
+                                digit: None,
+                                badge: None,
+                                focused,
+                                terminal: None,
+                                placeholder:
+                                    "no starred workspace — star one with * · ]]<digit> retargets"
+                                        .to_string(),
+                            },
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let mut captured_area = Rect::default();
         let mut footer_overflow: Option<Rect> = None;
         // Split the `terminal.draw` cost into *build* (walking the widget
@@ -5954,7 +6042,37 @@ impl<T: TerminalAdapter> Model<T> {
                     focus_summary,
                     &focus_hint,
                 );
-                self.terminals.view_in(body, f);
+                if focus_panes.is_empty() {
+                    // Single layout (and pane zoom): the historical
+                    // fullscreen render, untouched.
+                    self.terminals.view_in(body, f);
+                } else {
+                    // Multi-pane layout (#1258): one bordered pane per
+                    // roster slot, each showing that workspace's display
+                    // terminal; the shared per-frame prologue keeps the
+                    // off-screen buffering + click-target bookkeeping
+                    // that `view_in`'s own prologue normally does.
+                    self.terminals.begin_focus_frame();
+                    let rects = crate::realm::layout::focus_layout_areas(body, focus_layout);
+                    for (chrome, rect) in focus_panes.iter().zip(rects) {
+                        let inner = crate::realm::components::focus_header::render_pane_frame(
+                            f, rect, chrome,
+                        );
+                        match chrome.terminal {
+                            Some(id) => {
+                                self.terminals
+                                    .render_terminal_by_id(id, inner, f, chrome.focused)
+                            }
+                            None => {
+                                crate::realm::components::focus_header::render_pane_placeholder(
+                                    f,
+                                    inner,
+                                    &chrome.placeholder,
+                                )
+                            }
+                        }
+                    }
+                }
                 body
             } else {
                 let (left, right_top, right_bottom) = apply_activity_mode(

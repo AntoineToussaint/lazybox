@@ -201,6 +201,47 @@ impl Terminals {
         self.inner.render(area, frame, self.focused);
     }
 
+    /// Per-frame prologue for the focus-mode multi-pane render path
+    /// (#1258); call once before the first `render_terminal_by_id`.
+    pub fn begin_focus_frame(&mut self) {
+        self.inner.begin_focus_frame();
+    }
+
+    /// Render one terminal into a focus-mode workspace pane (#1258).
+    /// `pane_focused` marks the focused pane; the terminal renders as
+    /// keyboard-focused only when the stack itself holds pane focus too.
+    pub fn render_terminal_by_id(
+        &mut self,
+        id: TerminalId,
+        area: Rect,
+        frame: &mut Frame,
+        pane_focused: bool,
+    ) {
+        self.inner
+            .render_terminal_by_id(id, area, frame, self.focused && pane_focused);
+    }
+
+    /// The terminal a focus-mode pane displays for a session: agent
+    /// first, else its most recent terminal of any kind (#1258).
+    pub fn display_terminal_for(&self, session_key: &SessionKey) -> Option<TerminalId> {
+        self.inner.display_terminal_for(session_key)
+    }
+
+    /// Sessions with a live agent terminal, most recent first — the
+    /// focus-pane roster's shortfall fallback (#1258).
+    pub fn recent_agent_sessions(&self) -> Vec<SessionKey> {
+        self.inner.recent_agent_sessions()
+    }
+
+    /// Compact agent-state badge for a focus-pane header (#1258).
+    pub fn pane_state_badge(
+        &self,
+        id: TerminalId,
+        theme: &crate::theme::Theme,
+    ) -> Option<(&'static str, tuirealm::ratatui::style::Style)> {
+        self.inner.pane_state_badge(id, theme)
+    }
+
     /// Direct key dispatch.
     pub fn handle_key_direct(
         &mut self,

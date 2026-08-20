@@ -2837,6 +2837,7 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn toggle_focus_mode(&mut self) {
         if self.focus_mode {
             self.focus_mode = false;
+            self.focus_zoom = false;
             self.redraw = true;
             return;
         }
@@ -2844,8 +2845,203 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_hint("no agent terminal to focus");
             return;
         }
+        // The workspace focus mode is about to show: entering from the
+        // sidebar, the post-dispatch `sync_panes` makes the CURSOR
+        // workspace the active session (that's what `.` means there);
+        // from the terminal (`]]f`) the active session already is it.
+        // Pane 1 anchors on that eventual state, not the stale active
+        // session (#1258).
+        let anchor = if self.focus == PaneFocus::Sidebar {
+            self.sidebar
+                .selected_workspace_key()
+                .cloned()
+                .or_else(|| self.terminals.active_session().cloned())
+        } else {
+            self.terminals.active_session().cloned()
+        };
         self.focus_mode = true;
         self.set_focus(PaneFocus::Terminals);
+        // Multi-pane layouts (#1258) re-derive their roster on every
+        // entry so pane 1 is the workspace being focused *now*, with
+        // the starred roster behind it.
+        self.focus_zoom = false;
+        self.focus_pane = 0;
+        if self.focus_layout != lazybox_config::FocusLayout::Single {
+            self.populate_focus_panes_from(anchor);
+        }
+        self.redraw = true;
+    }
+
+    /// Whether the pane-level `]]` chords (#1258) are live: focus mode
+    /// with a multi-pane layout. Pane zoom deliberately doesn't turn
+    /// this off — zoom is render-only, so arrows keep moving pane focus
+    /// (and the zoom follows) underneath it.
+    pub(super) fn focus_multi_pane_active(&self) -> bool {
+        self.focus_mode && self.focus_layout != lazybox_config::FocusLayout::Single
+    }
+
+    /// Fill the multi-pane focus roster (#1258): pane 1 = the current
+    /// workspace, panes 2..N = the next starred workspaces in sidebar
+    /// order (dedup, only those with a live terminal to show), then
+    /// most-recently-active agent workspaces, then `None` (rendered as
+    /// a dim placeholder naming the star action). Always fills all
+    /// four slots so cycling deeper into `Grid` keeps pane continuity.
+    pub(super) fn populate_focus_panes(&mut self) {
+        let anchor = self.terminals.active_session().cloned();
+        self.populate_focus_panes_from(anchor);
+    }
+
+    /// [`Self::populate_focus_panes`] with an explicit pane-1 anchor —
+    /// the workspace that is (or is about to become) current. Anchors
+    /// without a live terminal fall through to the roster like any
+    /// other workspace.
+    pub(super) fn populate_focus_panes_from(&mut self, anchor: Option<lazybox_core::SessionKey>) {
+        let mut chosen: Vec<lazybox_core::SessionKey> = Vec::new();
+        if let Some(cur) = anchor
+            && self.terminals.terminal_count_for(&cur) > 0
+        {
+            chosen.push(cur);
+        }
+        for key in self.sidebar.numbered_workspace_keys() {
+            if chosen.len() >= 4 {
+                break;
+            }
+            if !chosen.contains(&key) && self.terminals.terminal_count_for(&key) > 0 {
+                chosen.push(key);
+            }
+        }
+        for key in self.terminals.recent_agent_sessions() {
+            if chosen.len() >= 4 {
+                break;
+            }
+            if !chosen.contains(&key) {
+                chosen.push(key);
+            }
+        }
+        let mut slots: [Option<lazybox_core::SessionKey>; 4] = [None, None, None, None];
+        for (slot, key) in slots.iter_mut().zip(chosen) {
+            *slot = Some(key);
+        }
+        self.focus_pane_slots = slots;
+    }
+
+    /// Cycle the focus-mode layout (`]]v`, #1258): Single → SplitV →
+    /// SplitH → Grid → Single, persisted as `ui.focus_layout` so the
+    /// choice survives restarts and reaches attach clients through
+    /// `apply_client_config`. Only acts inside focus mode — outside it
+    /// the layout has nothing to show, so flash instead of silently
+    /// flipping a persisted setting.
+    pub(super) fn cycle_focus_layout(&mut self) {
+        if !self.focus_mode {
+            self.flash_hint("focus layout applies in focus mode — ]]f first");
+            return;
+        }
+        let was = self.focus_layout;
+        let next = was.next();
+        self.focus_layout = next;
+        self.focus_zoom = false;
+        // Cycling out of Single starts a fresh multi-pane journey:
+        // derive the roster from the workspace being viewed right now.
+        // Deeper cycles (SplitV → SplitH → Grid) keep the assignments
+        // so panes don't reshuffle underfoot.
+        if was == lazybox_config::FocusLayout::Single && next != lazybox_config::FocusLayout::Single
+        {
+            self.populate_focus_panes();
+            self.focus_pane = 0;
+        }
+        if self.focus_pane >= next.pane_count() {
+            // The layout shrank under the focused pane. Keep the
+            // workspace the user was driving on screen: its slot moves
+            // to pane 1 rather than the view teleporting back.
+            self.focus_pane_slots.swap(0, self.focus_pane);
+            self.set_focus_pane(0);
+        }
+        // Runtime flip first; the save failure is surfaced, not rolled
+        // back (same contract as `]]t` / `ui.terminal_new_layout`).
+        match lazybox_config::Config::save_with(|c| c.ui.focus_layout = next) {
+            Ok(()) => self.flash_info(format!("focus layout: {}", next.label())),
+            Err(e) => self.flash_info(format!(
+                "focus layout: {} (couldn't save: {e})",
+                next.label()
+            )),
+        }
+        self.redraw = true;
+    }
+
+    /// Focus the `idx`-th workspace pane (#1258). A pane with a
+    /// workspace routes keyboard input there by making its session the
+    /// active one — the same sidebar-focus + `sync_panes` path the
+    /// `]]<digit>` jump uses, so the event header, activity scoping,
+    /// and the PTY write path all follow. A placeholder pane still
+    /// takes the accent border (so `]]<digit>` can retarget it) but
+    /// leaves the active session — and therefore typing — where it was.
+    pub(super) fn set_focus_pane(&mut self, idx: usize) {
+        self.focus_pane = idx;
+        if let Some(key) = self.focus_pane_slots.get(idx).cloned().flatten()
+            && self.sidebar.focus_workspace_key(&key)
+        {
+            self.set_focus(PaneFocus::Terminals);
+            self.sync_panes();
+        }
+        self.redraw = true;
+    }
+
+    /// Move pane focus one step (`]]<arrow>` in a multi-pane focus
+    /// layout, #1258). Panes-first by design: in a multi-pane layout
+    /// the arrows address workspace panes exclusively — each pane shows
+    /// a single terminal, so intra-workspace tile motion has no visible
+    /// target there and stays a `Single`-layout behavior. Motion clamps
+    /// at the edges (no wrap).
+    pub(super) fn move_focus_pane(&mut self, dir: lazybox_core::TileDirection) {
+        let visible = self.focus_layout.pane_count();
+        let next = crate::realm::layout::focus_pane_move(self.focus_layout, self.focus_pane, dir)
+            .min(visible.saturating_sub(1));
+        if next != self.focus_pane {
+            self.set_focus_pane(next);
+        }
+    }
+
+    /// Retarget the FOCUSED pane to the Nth starred workspace
+    /// (`]]<digit>` in a multi-pane focus layout, #1258; 1-based like
+    /// the sidebar badges). If that workspace already occupies another
+    /// pane the two panes swap — the alternative (two panes sharing one
+    /// terminal) would render one VT into two different rects and
+    /// flip-flop its PTY size every frame.
+    pub(super) fn retarget_focus_pane(&mut self, n: usize) {
+        let roster = self.sidebar.numbered_workspace_keys();
+        let Some(target) = roster.get(n.saturating_sub(1)).cloned() else {
+            self.flash_hint(format!("no focused workspace #{n} — star one with focus"));
+            return;
+        };
+        // Search ALL four slots, not just the visible ones: a duplicate
+        // parked in a hidden slot would surface as two panes sharing
+        // one terminal on the next cycle into Grid.
+        let already = self
+            .focus_pane_slots
+            .iter()
+            .position(|s| s.as_ref() == Some(&target));
+        match already {
+            Some(other) if other != self.focus_pane => {
+                self.focus_pane_slots.swap(self.focus_pane, other);
+            }
+            Some(_) => {}
+            None => self.focus_pane_slots[self.focus_pane] = Some(target),
+        }
+        // Re-focus the (possibly new) workspace under the focused pane
+        // so input routing and the event header follow the retarget.
+        self.set_focus_pane(self.focus_pane);
+    }
+
+    /// Toggle pane-level zoom (`]]z` in a multi-pane focus layout,
+    /// #1258): render the focused pane full-screen — exactly the
+    /// `Single` layout — and back. Mirrors the tile zoom's feedback
+    /// contract: zooming in flashes the restore chord, restoring is its
+    /// own feedback.
+    pub(super) fn toggle_focus_pane_zoom(&mut self) {
+        self.focus_zoom = !self.focus_zoom;
+        if self.focus_zoom {
+            self.flash_hint("zoomed pane — ]]z to restore");
+        }
         self.redraw = true;
     }
 

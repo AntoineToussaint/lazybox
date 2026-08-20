@@ -15768,7 +15768,9 @@ mod focus_mode_tests {
         Model::new_for_test(client, Size::new(120, 40)).expect("model init")
     }
 
-    fn workspace_with_agent(key: &str) -> Workspace {
+    /// Shared with `focus_layout_tests` (#1258), which populates panes
+    /// from the same starred-workspace roster these tests exercise.
+    pub(super) fn workspace_with_agent(key: &str) -> Workspace {
         let task = Task {
             author: String::new(),
             id: lazybox_core::TaskId {
@@ -24759,5 +24761,514 @@ mod focus_indicator_and_burst_guard_tests {
             m.status.notice.is_none(),
             "focus bounce reset the run — the next press is not a burst"
         );
+    }
+}
+
+#[cfg(test)]
+mod focus_layout_tests {
+    //! Journey tests for the focus-mode multi-workspace layouts
+    //! (#1258): `]]v` cycling + `ui.focus_layout` persistence, pane
+    //! population from the starred roster (with shortfall fallback and
+    //! placeholder), `]]<digit>` retargeting the focused pane,
+    //! `]]<arrow>` pane focus + input routing, per-layout render
+    //! partition, and the PTY resize fan-out on layout changes.
+    //!
+    //! Every test that stars a workspace or cycles the layout persists
+    //! config, so each runs under `ENV_LOCK` with a temp
+    //! `LAZYBOX_HOME` — never the real `~/.lazybox`.
+    use super::super::*;
+    use lazybox_config::FocusLayout;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{
+        Command as IpcCommand, Event as IpcEvent, TerminalId, TerminalKind, channel,
+    };
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+    use tuirealm::ratatui::layout::Size;
+
+    type TestModel = Model<tuirealm::terminal::TestTerminalAdapter>;
+
+    /// Run `f` with `LAZYBOX_HOME` pointed at a fresh temp dir, under
+    /// the crate-wide env lock, flushing queued config saves before
+    /// tearing the home down so no write can land outside it.
+    fn with_temp_home<T>(name: &str, f: impl FnOnce(&std::path::Path) -> T) -> T {
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!(
+            "lazybox-focus-layout-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("create temp home");
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this test binary.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+        let out = f(&home);
+        assert!(
+            lazybox_config::Config::flush_pending_saves(std::time::Duration::from_secs(5)),
+            "queued config saves must flush inside the temp home"
+        );
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+        out
+    }
+
+    fn build_model() -> (TestModel, lazybox_ipc::Connection) {
+        let (client, server) = channel::pair();
+        let m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        (m, server)
+    }
+
+    fn char_key(c: char) -> RealmKey {
+        RealmKey::new(Key::Char(c), RealmMods::NONE)
+    }
+
+    fn bracket_leader(m: &mut TestModel, follow: RealmKey) {
+        m.dispatch_key(char_key(']'));
+        m.dispatch_key(char_key(']'));
+        m.dispatch_key(follow);
+    }
+
+    /// Upsert a workspace and give it a live agent terminal with the
+    /// given id. Leaves the terminal stack's active session on `key`.
+    fn add_workspace(m: &mut TestModel, slug: &str, terminal: u64) -> SessionKey {
+        let ws = super::focus_mode_tests::workspace_with_agent(slug);
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.terminals.set_active_session(Some(key.clone()));
+        m.terminals.on_daemon_event(&IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(terminal),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        key
+    }
+
+    /// Star (focus) a workspace so it enters the `]]<digit>` roster.
+    fn star(m: &mut TestModel, key: &SessionKey) {
+        assert!(m.sidebar.focus_workspace_key(key), "workspace visible");
+        assert!(
+            m.sidebar.toggle_focus_at_cursor().is_some_and(|(_, on)| on),
+            "toggle must star, not unstar"
+        );
+    }
+
+    /// Enter focus mode from the sidebar via `.` — the journey path.
+    fn enter_focus_mode(m: &mut TestModel) {
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        m.dispatch_key(char_key('.'));
+        assert!(m.focus_mode, "`.` enters focus mode");
+    }
+
+    fn frame_rows(m: &mut TestModel) -> Vec<String> {
+        m.view();
+        let buffer = m.terminal.raw().backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|row| {
+                (0..buffer.area.width)
+                    .map(|col| buffer[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// `]]v` cycles Single → SplitV → SplitH → Grid → Single inside
+    /// focus mode, persists `ui.focus_layout` through the temp config
+    /// home, and a fresh model picks the choice back up through
+    /// `apply_client_config` — the attach-client load path. Outside
+    /// focus mode the chord flashes instead of flipping the setting.
+    #[test]
+    fn bracket_v_cycles_the_layout_and_persists_across_boots() {
+        with_temp_home("cycle", |home| {
+            let (mut m, _server) = build_model();
+            add_workspace(&mut m, "owner/repo#1", 1);
+            enter_focus_mode(&mut m);
+            assert_eq!(m.focus_layout, FocusLayout::Single, "boot default");
+
+            for expected in [
+                FocusLayout::SplitV,
+                FocusLayout::SplitH,
+                FocusLayout::Grid,
+                FocusLayout::Single,
+                FocusLayout::SplitV,
+            ] {
+                bracket_leader(&mut m, char_key('v'));
+                assert_eq!(m.focus_layout, expected, "`]]v` cycles in order");
+                assert!(m.focus_mode, "cycling stays in focus mode");
+            }
+
+            // Persisted: the temp home's YAML carries the last choice.
+            let cfg = lazybox_config::Config::load_from(&home.join("config.yaml"))
+                .expect("config written by `]]v`");
+            assert_eq!(cfg.ui.focus_layout, FocusLayout::SplitV);
+
+            // Round trip: a fresh model (fresh boot / attach client)
+            // applies the persisted layout via apply_client_config.
+            let (mut fresh, _server2) = build_model();
+            fresh.apply_client_config(&cfg);
+            assert_eq!(fresh.focus_layout, FocusLayout::SplitV);
+
+            // Outside focus mode the chord is a hint, not a cycle.
+            bracket_leader(&mut m, char_key('f'));
+            assert!(!m.focus_mode);
+            bracket_leader(&mut m, char_key('v'));
+            assert_eq!(
+                m.focus_layout,
+                FocusLayout::SplitV,
+                "`]]v` outside focus mode must not flip the persisted layout"
+            );
+        });
+    }
+
+    /// Pane population (#1258): pane 1 = the current workspace, then
+    /// the starred roster in sidebar order (skipping duplicates and
+    /// starred workspaces with no live terminal), then the
+    /// most-recently-active agent workspaces, then a placeholder.
+    #[test]
+    fn panes_populate_from_starred_roster_with_shortfall_and_placeholder() {
+        with_temp_home("populate", |_| {
+            let (mut m, _server) = build_model();
+            let ws1 = add_workspace(&mut m, "owner/repo#1", 1);
+            let ws2 = add_workspace(&mut m, "owner/repo#2", 2);
+            let ws3 = add_workspace(&mut m, "owner/repo#3", 3);
+            // Starred but terminal-less: must be skipped by population.
+            let ws4 = {
+                let ws = super::focus_mode_tests::workspace_with_agent("owner/repo#4");
+                let key = SessionKey::from(&ws.key);
+                m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+                key
+            };
+            star(&mut m, &ws2);
+            star(&mut m, &ws4);
+            // ws3 stays unstarred: it can only enter panes through the
+            // most-recently-active-agent fallback.
+            m.terminals.set_active_session(Some(ws1.clone()));
+            // `.` acts on the sidebar cursor's workspace — park it on
+            // ws1 so that's the "current workspace" pane 1 anchors on.
+            assert!(m.sidebar.focus_workspace_key(&ws1));
+
+            // Direct field write avoids a `]]v` config save here; entry
+            // itself populates a non-Single layout.
+            m.focus_layout = FocusLayout::Grid;
+            enter_focus_mode(&mut m);
+
+            assert_eq!(
+                m.focus_pane_slots,
+                [Some(ws1), Some(ws2), Some(ws3), None],
+                "current first, starred-with-terminal second, MRU-agent \
+                 fallback third, placeholder for the shortfall \
+                 (terminal-less starred ws4 skipped)"
+            );
+            assert_eq!(m.focus_pane, 0, "entry focuses pane 1");
+
+            // The placeholder pane renders the star nudge.
+            let rows = frame_rows(&mut m);
+            assert!(
+                rows.iter().any(|r| r.contains("no starred workspace")),
+                "grid shortfall renders the dim placeholder: {rows:?}"
+            );
+        });
+    }
+
+    /// `]]<digit>` in a multi-pane layout retargets only the FOCUSED
+    /// pane; a digit naming a workspace already visible in another pane
+    /// swaps the two panes instead of duplicating the terminal.
+    #[test]
+    fn bracket_digit_retargets_only_the_focused_pane_in_splitv() {
+        with_temp_home("retarget", |_| {
+            let (mut m, _server) = build_model();
+            let ws1 = add_workspace(&mut m, "owner/repo#1", 1);
+            let ws2 = add_workspace(&mut m, "owner/repo#2", 2);
+            let ws3 = add_workspace(&mut m, "owner/repo#3", 3);
+            star(&mut m, &ws2);
+            star(&mut m, &ws3);
+            m.terminals.set_active_session(Some(ws1.clone()));
+            // `.` acts on the sidebar cursor's workspace — park it on
+            // ws1 so that's the "current workspace" pane 1 anchors on.
+            assert!(m.sidebar.focus_workspace_key(&ws1));
+            m.focus_layout = FocusLayout::SplitV;
+            enter_focus_mode(&mut m);
+
+            let roster = m.sidebar.numbered_workspace_keys();
+            assert_eq!(roster.len(), 2, "only the starred pair is numbered");
+            let digit_of = |k: &SessionKey| {
+                (b'1' + roster.iter().position(|r| r == k).expect("in roster") as u8) as char
+            };
+            assert_eq!(
+                m.focus_pane_slots[..2],
+                [Some(ws1.clone()), Some(roster[0].clone())],
+                "SplitV: current workspace + first starred"
+            );
+
+            // Retarget pane 1 (focused) to ws3.
+            bracket_leader(&mut m, char_key(digit_of(&ws3)));
+            assert!(m.focus_mode, "retarget stays in focus mode");
+            assert_eq!(m.focus_pane, 0, "retarget keeps the focused pane");
+            assert_eq!(
+                m.focus_pane_slots[0].as_ref(),
+                Some(&ws3),
+                "the FOCUSED pane took the digit's workspace"
+            );
+            let untouched = m.focus_pane_slots[1].clone();
+            assert_eq!(
+                untouched.as_ref(),
+                Some(&roster[0]),
+                "the unfocused pane is untouched"
+            );
+            assert_eq!(
+                m.terminals.active_session(),
+                Some(&ws3),
+                "input now routes to the retargeted workspace"
+            );
+
+            // Retargeting to the workspace shown in the other pane
+            // swaps the panes rather than showing one VT twice.
+            let other = untouched.expect("pane 2 occupied");
+            bracket_leader(&mut m, char_key(digit_of(&other)));
+            assert_eq!(m.focus_pane_slots[0].as_ref(), Some(&other));
+            assert_eq!(m.focus_pane_slots[1].as_ref(), Some(&ws3), "swapped");
+        });
+    }
+
+    /// `]]<arrow>` moves pane focus between workspace panes
+    /// (panes-first — see `Model::move_focus_pane`), and keyboard input
+    /// routes to the focused pane's terminal only.
+    #[test]
+    fn arrows_move_pane_focus_and_input_routes_to_the_focused_pane() {
+        with_temp_home("routing", |_| {
+            let (mut m, mut server) = build_model();
+            let ws1 = add_workspace(&mut m, "owner/repo#1", 1);
+            let ws2 = add_workspace(&mut m, "owner/repo#2", 2);
+            star(&mut m, &ws2);
+            m.terminals.set_active_session(Some(ws1.clone()));
+            // `.` acts on the sidebar cursor's workspace — park it on
+            // ws1 so that's the "current workspace" pane 1 anchors on.
+            assert!(m.sidebar.focus_workspace_key(&ws1));
+            m.focus_layout = FocusLayout::SplitV;
+            enter_focus_mode(&mut m);
+            while server.rx.try_recv().is_ok() {}
+
+            let writes_for = |server: &mut lazybox_ipc::Connection| {
+                let mut ids = Vec::new();
+                while let Ok(cmd) = server.rx.try_recv() {
+                    if let IpcCommand::Write { terminal_id, .. } = cmd {
+                        ids.push(terminal_id);
+                    }
+                }
+                ids
+            };
+
+            // Pane 1 focused: typing reaches terminal 1 only.
+            m.dispatch_key(char_key('a'));
+            assert_eq!(writes_for(&mut server), vec![TerminalId(1)]);
+
+            // `]]→` moves pane focus to pane 2 (session ws2).
+            bracket_leader(&mut m, RealmKey::new(Key::Right, RealmMods::NONE));
+            assert_eq!(m.focus_pane, 1, "arrow moved pane focus");
+            assert_eq!(m.terminals.active_session(), Some(&ws2));
+            while server.rx.try_recv().is_ok() {}
+            m.dispatch_key(char_key('b'));
+            assert_eq!(
+                writes_for(&mut server),
+                vec![TerminalId(2)],
+                "input follows pane focus"
+            );
+
+            // Clamped at the right edge; `]]←` comes back.
+            bracket_leader(&mut m, RealmKey::new(Key::Right, RealmMods::NONE));
+            assert_eq!(m.focus_pane, 1, "no wrap past the edge");
+            bracket_leader(&mut m, RealmKey::new(Key::Left, RealmMods::NONE));
+            assert_eq!(m.focus_pane, 0);
+            assert_eq!(m.terminals.active_session(), Some(&ws1));
+
+            // Shrink continuity: cycling back to Single while focused
+            // on pane 2 keeps THAT workspace on screen instead of
+            // teleporting back to pane 1's.
+            bracket_leader(&mut m, RealmKey::new(Key::Right, RealmMods::NONE));
+            assert_eq!(m.terminals.active_session(), Some(&ws2));
+            for _ in 0..3 {
+                bracket_leader(&mut m, char_key('v')); // SplitH → Grid → Single
+            }
+            assert_eq!(m.focus_layout, FocusLayout::Single);
+            assert_eq!(m.focus_pane, 0);
+            assert_eq!(
+                m.terminals.active_session(),
+                Some(&ws2),
+                "the workspace the user was driving survives the shrink"
+            );
+        });
+    }
+
+    /// Each multi-pane layout renders its pane partition with a
+    /// one-line header per pane (workspace name, star digit) and the
+    /// accent border on the focused pane.
+    #[test]
+    fn layouts_render_pane_partitions_and_headers() {
+        with_temp_home("render", |_| {
+            let (mut m, _server) = build_model();
+            let ws1 = add_workspace(&mut m, "owner/repo#1", 1);
+            let ws2 = add_workspace(&mut m, "owner/repo#2", 2);
+            star(&mut m, &ws2);
+            m.terminals.set_active_session(Some(ws1.clone()));
+            // `.` acts on the sidebar cursor's workspace — park it on
+            // ws1 so that's the "current workspace" pane 1 anchors on.
+            assert!(m.sidebar.focus_workspace_key(&ws1));
+            let name1 = m.sidebar.workspace_by_key(&ws1).expect("ws1").name.clone();
+            let name2 = m.sidebar.workspace_by_key(&ws2).expect("ws2").name.clone();
+            m.focus_layout = FocusLayout::SplitV;
+            enter_focus_mode(&mut m);
+
+            // SplitV: both pane headers on the same (top-border) row,
+            // ws2 in the right half, its roster digit alongside.
+            let rows = frame_rows(&mut m);
+            let header_row = rows
+                .iter()
+                .find(|r| r.contains(&name1) && r.contains(&name2))
+                .unwrap_or_else(|| panic!("both pane headers on one row: {rows:?}"));
+            let mid = 120 / 2;
+            assert!(
+                header_row.find(&name2).expect("ws2 header") >= mid,
+                "ws2 pane sits in the right half: {header_row:?}"
+            );
+            assert!(
+                header_row.contains(&format!("1 {name2}")),
+                "starred pane header carries its `]]<digit>` badge: {header_row:?}"
+            );
+            // The focused pane (left) carries the accent border.
+            let buffer = m.terminal.raw().backend().buffer().clone();
+            let accent = crate::theme::current().accent;
+            assert_eq!(
+                buffer[(0u16, 1u16)].style().fg,
+                Some(accent),
+                "focused pane border is accent"
+            );
+            assert_ne!(
+                buffer[(mid as u16, 1u16)].style().fg,
+                Some(accent),
+                "unfocused pane border is not accent"
+            );
+
+            // SplitH: ws2's header moves below ws1's.
+            m.focus_layout = FocusLayout::SplitH;
+            let rows = frame_rows(&mut m);
+            let row_of = |needle: &str| {
+                rows.iter()
+                    .position(|r| r.contains(needle))
+                    .unwrap_or_else(|| panic!("{needle:?} rendered: {rows:?}"))
+            };
+            assert!(
+                row_of(&name2) > row_of(&name1),
+                "SplitH stacks the second pane below the first"
+            );
+
+            // Grid: both workspaces plus placeholder panes below.
+            m.focus_layout = FocusLayout::Grid;
+            m.populate_focus_panes();
+            let rows = frame_rows(&mut m);
+            assert!(rows.iter().any(|r| r.contains(&name1)));
+            assert!(rows.iter().any(|r| r.contains(&name2)));
+            assert!(
+                rows.iter().any(|r| r.contains("no starred workspace")),
+                "grid shortfall renders placeholders: {rows:?}"
+            );
+        });
+    }
+
+    /// `Single` is pixel-identical to the historical focus mode, and
+    /// `]]z` pane zoom renders the focused pane exactly like `Single`
+    /// (the event header may differ — it advertises the extra chords).
+    #[test]
+    fn single_layout_is_pixel_identical_and_zoom_matches_it() {
+        with_temp_home("zoom", |_| {
+            let (mut m, _server) = build_model();
+            let ws1 = add_workspace(&mut m, "owner/repo#1", 1);
+            let ws2 = add_workspace(&mut m, "owner/repo#2", 2);
+            star(&mut m, &ws2);
+            m.terminals.set_active_session(Some(ws1.clone()));
+            assert!(m.sidebar.focus_workspace_key(&ws1));
+            enter_focus_mode(&mut m);
+            m.status.notice = None;
+            let single = frame_rows(&mut m);
+
+            // Grid + `]]z` zoom on pane 1 (same workspace fullscreen).
+            m.focus_layout = FocusLayout::Grid;
+            m.populate_focus_panes();
+            bracket_leader(&mut m, char_key('z'));
+            assert!(m.focus_zoom, "`]]z` zooms the focused pane");
+            // The zoom flash would differ in the footer; the comparison
+            // is about the pane body, so drop the notice first.
+            m.status.notice = None;
+            let zoomed = frame_rows(&mut m);
+            assert_eq!(
+                single[1..],
+                zoomed[1..],
+                "pane zoom == the Single render below the event header"
+            );
+
+            bracket_leader(&mut m, char_key('z'));
+            assert!(!m.focus_zoom, "`]]z` again restores the grid");
+            let restored = frame_rows(&mut m);
+            assert!(
+                restored.iter().any(|r| r.contains("no starred workspace")),
+                "restore brings the multi-pane grid back"
+            );
+        });
+    }
+
+    /// Entering, cycling, and leaving a layout resize every visible
+    /// pane's PTY through the per-terminal Resize command path.
+    #[test]
+    fn layout_changes_fan_out_pty_resizes() {
+        with_temp_home("resize", |_| {
+            let (mut m, mut server) = build_model();
+            let ws1 = add_workspace(&mut m, "owner/repo#1", 1);
+            let ws2 = add_workspace(&mut m, "owner/repo#2", 2);
+            star(&mut m, &ws2);
+            m.terminals.set_active_session(Some(ws1.clone()));
+            assert!(m.sidebar.focus_workspace_key(&ws1));
+            enter_focus_mode(&mut m);
+
+            let resizes_for = |server: &mut lazybox_ipc::Connection| {
+                let mut out = std::collections::HashMap::new();
+                while let Ok(cmd) = server.rx.try_recv() {
+                    if let IpcCommand::Resize {
+                        terminal_id, cols, ..
+                    } = cmd
+                    {
+                        out.insert(terminal_id, cols);
+                    }
+                }
+                out
+            };
+
+            // Entering Single focus mode: the active terminal grows to
+            // (near) full width.
+            m.view();
+            let entry = resizes_for(&mut server);
+            let full = *entry.get(&TerminalId(1)).expect("entry resize");
+            assert!(full > 100, "fullscreen terminal spans the frame: {full}");
+
+            // `]]v` → SplitV: BOTH panes' PTYs get their half-width.
+            bracket_leader(&mut m, char_key('v'));
+            assert_eq!(m.focus_layout, FocusLayout::SplitV);
+            m.view();
+            let split = resizes_for(&mut server);
+            let left = *split.get(&TerminalId(1)).expect("pane 1 resized");
+            let right = *split.get(&TerminalId(2)).expect("pane 2 resized");
+            assert!(
+                left < full / 2 + 2 && right < full / 2 + 2,
+                "split panes are half-width: {left}/{right} vs {full}"
+            );
+
+            // Leaving focus mode restores the three-pane terminal rect.
+            bracket_leader(&mut m, char_key('f'));
+            assert!(!m.focus_mode);
+            m.view();
+            let back = resizes_for(&mut server);
+            let restored = *back.get(&TerminalId(1)).expect("exit resize");
+            assert_ne!(restored, left, "exit re-fans the PTY size out");
+        });
     }
 }

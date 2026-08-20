@@ -2398,6 +2398,92 @@ impl TerminalStack {
             .map(|(id, _)| *id)
     }
 
+    /// The terminal a focus-mode workspace pane displays for
+    /// `session_key` (#1258): the session's agent terminal
+    /// ([`Self::agent_terminal_for`]), falling back to its most recent
+    /// terminal of any kind — live before exited, newest spawn (highest
+    /// id) first, deterministic either way.
+    pub fn display_terminal_for(&self, session_key: &SessionKey) -> Option<TerminalId> {
+        self.agent_terminal_for(session_key).or_else(|| {
+            self.terminals
+                .iter()
+                .filter(|(_, s)| s.session_key == *session_key)
+                .min_by_key(|(id, s)| (s.exited.is_some(), std::cmp::Reverse(id.0)))
+                .map(|(id, _)| *id)
+        })
+    }
+
+    /// Sessions with a live agent terminal, most-recently-spawned agent
+    /// first (spawn order is the recency signal the stack has — ids are
+    /// monotonically allocated). The shortfall fallback for the
+    /// focus-mode pane roster (#1258): when the starred roster runs
+    /// out, panes fill from here.
+    pub fn recent_agent_sessions(&self) -> Vec<SessionKey> {
+        let mut newest: std::collections::HashMap<SessionKey, u64> =
+            std::collections::HashMap::new();
+        for (id, slot) in &self.terminals {
+            if matches!(slot.kind, TerminalKind::Agent(_)) && slot.exited.is_none() {
+                let entry = newest.entry(slot.session_key.clone()).or_insert(id.0);
+                *entry = (*entry).max(id.0);
+            }
+        }
+        let mut ordered: Vec<(u64, SessionKey)> =
+            newest.into_iter().map(|(k, id)| (id, k)).collect();
+        ordered.sort_by_key(|a| std::cmp::Reverse(a.0));
+        ordered.into_iter().map(|(_, k)| k).collect()
+    }
+
+    /// The compact agent-state badge for a focus-pane header (#1258):
+    /// the same glyph/color vocabulary the tab strip and tile headers
+    /// use, `None` for shells and unknown terminals.
+    pub fn pane_state_badge(
+        &self,
+        id: TerminalId,
+        theme: &crate::theme::Theme,
+    ) -> Option<(&'static str, Style)> {
+        let slot = self.terminals.get(&id)?;
+        if !matches!(slot.kind, TerminalKind::Agent(_)) {
+            return None;
+        }
+        Self::agent_state_badge(slot.agent_state, slot.exited.is_some(), true, theme)
+    }
+
+    /// Reset the per-frame render bookkeeping without drawing the
+    /// tab-strip chrome — the prologue of [`Self::render`], split out
+    /// for the focus-mode multi-pane path (#1258), which renders one
+    /// terminal per workspace pane via [`Self::render_terminal_by_id`]
+    /// instead of the active session's tile tree. Must be called once
+    /// per frame before the first `render_terminal_by_id` so terminals
+    /// that fell off-screen revert to buffering and stale click targets
+    /// are dropped.
+    pub fn begin_focus_frame(&mut self) {
+        for slot in self.terminals.values_mut() {
+            slot.displayed = false;
+        }
+        self.tab_strip_hits.clear();
+        self.tile_hits.clear();
+    }
+
+    /// Render one specific terminal into `area` — the focus-mode pane
+    /// body path (#1258). Shares `render_one_terminal` with the normal
+    /// render, so the per-terminal PTY-resize bookkeeping
+    /// (`last_rendered_size` → `pending_resizes`) applies to every
+    /// visible pane: entering, cycling, or leaving a layout changes the
+    /// pane rects and fans the resizes out through `drain_cmds` exactly
+    /// like a tile split does. Unknown ids and empty rects are no-ops.
+    pub fn render_terminal_by_id(
+        &mut self,
+        id: TerminalId,
+        area: Rect,
+        frame: &mut Frame,
+        focused: bool,
+    ) {
+        if area.width == 0 || area.height == 0 || !self.terminals.contains_key(&id) {
+            return;
+        }
+        self.render_one_terminal(id, area, area, frame, focused);
+    }
+
     /// If the cell at frame-space `(col, row)` lies inside a URL,
     /// file path, or `#N` / `owner/repo#N` issue reference, return the
     /// matching [`ClickTarget`]. Otherwise `None`.

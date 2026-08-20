@@ -6761,12 +6761,24 @@ mod coalesce_tests {
             dismissed_updates: Vec::new(),
         });
 
-        let command = server.rx.try_recv().expect("one batched recovery command");
-        let IpcCommand::RequestTerminalResync { requests } = command else {
-            panic!("expected resync batch, got {command:?}");
-        };
-        assert_eq!(requests.len(), count);
-        assert!(server.rx.try_recv().is_err(), "the storm used one slot");
+        // #1237: the storm chunks at MAX_RESYNC_REQUESTS_PER_BATCH and
+        // every request survives — a few commands, never one per event,
+        // never a loss.
+        let mut total = 0;
+        let mut commands = 0;
+        while let Ok(command) = server.rx.try_recv() {
+            let IpcCommand::RequestTerminalResync { requests } = command else {
+                panic!("expected resync batch, got {command:?}");
+            };
+            assert!(requests.len() <= lazybox_ipc::FlowControl::MAX_RESYNC_REQUESTS_PER_BATCH);
+            total += requests.len();
+            commands += 1;
+        }
+        assert_eq!(total, count, "every desynced terminal is requested");
+        assert!(
+            commands <= 2,
+            "the storm collapses into a couple of commands"
+        );
     }
 
     /// Output for a different terminal ends the run — no cross-terminal
@@ -7843,6 +7855,146 @@ mod modal_input_responsiveness_tests {
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The "merged — remove?" prompt must respect Esc: the daemon's
+    /// 5-minute drop-healing reprompt re-emits forever, and the client
+    /// used to remount the modal every time — the same message "again
+    /// and again and again". Esc now suppresses that workspace's
+    /// re-emits for the session; a RemovalCancelled (workspace back to
+    /// life) re-arms it.
+    #[test]
+    fn escaped_removal_prompt_does_not_nag_again() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:o/r#42");
+        let emit = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| {
+            m.handle_daemon_event(IpcEvent::MergedPrRemovable {
+                workspace_key: key.clone(),
+                label: "o/r#42".into(),
+                terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+                active_terminal_count: 0,
+                has_local_work: false,
+            });
+        };
+
+        emit(&mut m);
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::RemoveOutOfScope),
+            "first emit prompts",
+        );
+
+        // Esc: "not now" — remembered for the session.
+        let _ = m.handle_modal_dismissed();
+        assert!(m.top_modal().is_none());
+
+        // The daemon's reprompt fires again (and again) — swallowed.
+        emit(&mut m);
+        emit(&mut m);
+        assert!(
+            m.top_modal().is_none(),
+            "an Esc-dismissed prompt must not remount on re-emits",
+        );
+
+        // The workspace coming back to life re-arms the prompt.
+        m.handle_daemon_event(IpcEvent::RemovalCancelled {
+            workspace_key: key.clone(),
+        });
+        emit(&mut m);
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::RemoveOutOfScope),
+            "a revived workspace may prompt anew",
+        );
+    }
+
+    /// #1237: a full IPC channel must NEVER drop a command ("command
+    /// was not accepted" was a refusal without reason). Overflow queues
+    /// client-side and delivers in order once the channel drains.
+    #[test]
+    fn full_command_channel_queues_and_delivers_everything_in_order() {
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let m = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model");
+        while server.rx.try_recv().is_ok() {} // initial Subscribe
+
+        // Overfill: the channel holds COMMAND_CAPACITY; the rest queue.
+        let total = lazybox_ipc::FlowControl::COMMAND_CAPACITY + 8;
+        for i in 0..total {
+            m.send_cmd(lazybox_ipc::Command::Write {
+                terminal_id: lazybox_ipc::TerminalId(1),
+                bytes: vec![(i % 251) as u8],
+                intent: lazybox_ipc::TerminalInputIntent::Compose,
+            });
+        }
+        assert_eq!(
+            m.pending_cmds.borrow().len(),
+            8,
+            "overflow queues instead of dropping",
+        );
+
+        // The daemon drains; the flush delivers the backlog in order.
+        let mut received = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            received.push(cmd);
+        }
+        m.flush_pending_cmds();
+        while let Ok(cmd) = server.rx.try_recv() {
+            received.push(cmd);
+        }
+        let bytes: Vec<u8> = received
+            .iter()
+            .filter_map(|cmd| match cmd {
+                lazybox_ipc::Command::Write { bytes, .. } => Some(bytes[0]),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        assert_eq!(
+            bytes, expected,
+            "every command arrives, in order — none dropped"
+        );
+        assert!(m.pending_cmds.borrow().is_empty());
+        assert!(
+            m.cmds_backlogged_since.get().is_none(),
+            "backlog marker cleared",
+        );
+    }
+
+    /// The backlog notice is graced and honest: a fresh backlog stays
+    /// quiet (it normally clears within a frame); a persistent one
+    /// names the count and that delivery is queued — never a refusal.
+    #[test]
+    fn backlog_notice_is_graced_and_names_the_queue() {
+        let (client, _server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model");
+
+        // Wedge the channel, then queue one command.
+        for _ in 0..lazybox_ipc::FlowControl::COMMAND_CAPACITY {
+            let _ = m.client.send(lazybox_ipc::Command::Refresh);
+        }
+        m.send_cmd(lazybox_ipc::Command::Refresh);
+        assert_eq!(m.pending_cmds.borrow().len(), 1);
+
+        m.status.notice = None;
+        m.tick_daemon_health();
+        assert!(m.status.notice.is_none(), "fresh backlog stays quiet");
+
+        m.cmds_backlogged_since.set(Some(
+            std::time::Instant::now() - std::time::Duration::from_secs(3),
+        ));
+        m.tick_daemon_health();
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("persistent backlog notices");
+        assert!(
+            notice.message.contains("queued, delivering in order"),
+            "the notice states what happens, not a refusal: {}",
+            notice.message,
+        );
     }
 
     /// #1237: `sync_panes` runs after every keystroke — with the
@@ -20256,9 +20408,20 @@ mod daemon_disconnect_tests {
         m.send_cmd(IpcCommand::Refresh);
         m.tick_daemon_health();
 
-        let notice = m.status.notice.as_ref().expect("congestion notice");
+        // #1237: a full channel QUEUES — no refusal, no immediate
+        // notice (the grace covers the normal within-a-frame drain),
+        // and definitely no disconnect banner.
+        assert_eq!(m.pending_cmds.borrow().len(), 1, "queued, not dropped");
+        assert!(!m.daemon_disconnect_notified);
+
+        // A backlog that persists past the grace is announced honestly.
+        m.cmds_backlogged_since.set(Some(
+            std::time::Instant::now() - std::time::Duration::from_secs(3),
+        ));
+        m.tick_daemon_health();
+        let notice = m.status.notice.as_ref().expect("backlog notice");
         assert_eq!(notice.severity, NoticeSeverity::Retryable);
-        assert!(notice.message.contains("not accepted"));
+        assert!(notice.message.contains("queued, delivering in order"));
         assert!(!m.daemon_disconnect_notified);
     }
 

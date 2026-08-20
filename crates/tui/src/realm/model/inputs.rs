@@ -1150,7 +1150,13 @@ showing keybinding search only",
         // used to be here (each `pending_* = None`) — a missed one was
         // the leak the enum exists to prevent. Notable semantics that
         // still hold by dropping the flow:
-        //   * RemoveOutOfScope Esc = defer; the daemon re-emits later.
+        //   * RemoveOutOfScope Esc on a merged/closed prompt = "not
+        //     now, THIS SESSION" — the key is remembered below and
+        //     later re-emits are swallowed client-side, because the
+        //     daemon's 5-minute reprompt (which heals dropped
+        //     broadcasts) cannot tell a drop from an explicit Esc and
+        //     used to nag forever. A TUI restart re-prompts once;
+        //     `x x` removes any time; explicit N stays durable.
         //   * MergeConfirm Esc = "decide later" — it does NOT send
         //     `ConfirmMerge { accept: false }` (that pins the issue as
         //     rejected until restart); the daemon's `prompted_merge`
@@ -1158,7 +1164,18 @@ showing keybinding search only",
         //     (`handle_confirmed`) pins the rejection.
         //   * Broadcast / Handoff Esc cancels compose; the sidebar
         //     multi-select survives (only composing was abandoned).
-        self.modal_flow = None;
+        let dismissed_flow = self.modal_flow.take();
+        if top == Some(Id::RemoveOutOfScope)
+            && let Some(ModalFlow::RemovalPrompt { workspace, .. }) = &dismissed_flow
+        {
+            let first = self.dismissed_removal_prompts.insert(workspace.clone());
+            if first {
+                self.flash_hint(
+                    "won't ask again this session — x x removes the workspace whenever you're ready",
+                );
+            }
+        }
+        drop(dismissed_flow);
         let mut cmds: Vec<IpcCommand> = Vec::new();
         // A few modals carry cancel state that is NOT part of the flow
         // enum — release it here.

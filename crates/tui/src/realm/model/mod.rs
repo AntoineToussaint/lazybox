@@ -1590,6 +1590,22 @@ pub struct Model<T: TerminalAdapter> {
     /// writer is behind. Unlike a closed channel this is retryable and must
     /// not falsely brand the daemon disconnected.
     cmd_send_overloaded: std::cell::Cell<bool>,
+    /// Commands the bounded IPC channel could not take RIGHT NOW.
+    /// Nothing is ever dropped (#1237): a full channel queues here in
+    /// order and [`Model::flush_pending_cmds`] delivers on every loop
+    /// iteration. The old behavior silently discarded the command —
+    /// including keystrokes — behind "command was not accepted", the
+    /// exact refusal-without-reason lazybox must never do.
+    pending_cmds: std::cell::RefCell<std::collections::VecDeque<IpcCommand>>,
+    /// When the pending queue FIRST became non-empty — drives the
+    /// honest "daemon busy, N queued" notice after a short grace.
+    cmds_backlogged_since: std::cell::Cell<Option<std::time::Instant>>,
+    /// Merged/closed removal prompts the user Esc-dismissed THIS
+    /// session (#1237 UX): later daemon re-emits for these keys are
+    /// swallowed so the 5-minute drop-healing reprompt can't nag. A
+    /// restart re-prompts once; explicit "keep" stays durable
+    /// daemon-side.
+    dismissed_removal_prompts: std::collections::HashSet<lazybox_core::WorkspaceKey>,
     /// One-shot latch for the "daemon disconnected" Permanent notice —
     /// the disconnect is detected repeatedly (every failed send, every
     /// wake on the closed event channel), but the banner should be
@@ -2306,6 +2322,9 @@ impl<T: TerminalAdapter> Model<T> {
             sync_error_source: None,
             cmd_send_failed: std::cell::Cell::new(false),
             cmd_send_overloaded: std::cell::Cell::new(false),
+            pending_cmds: std::cell::RefCell::new(std::collections::VecDeque::new()),
+            cmds_backlogged_since: std::cell::Cell::new(None),
+            dismissed_removal_prompts: std::collections::HashSet::new(),
             daemon_disconnect_notified: false,
             daemon_reconnecting_notified: false,
             mouse_capture_on: true,
@@ -3927,23 +3946,56 @@ impl<T: TerminalAdapter> Model<T> {
     /// batching so rejected resync debt can be requeued instead of silently
     /// disappearing.
     fn try_send_cmd(&self, cmd: IpcCommand) -> bool {
-        if let Err(e) = self.client.send(cmd) {
-            tracing::warn!("ipc send failed: {e}");
-            // Don't pretend the keypress worked: flag the failure so
-            // the next `tick_daemon_health` raises the disconnect
-            // banner. A `Cell` because this method is `&self` and is
-            // called from borrow-heavy paths that can't take `&mut`.
-            match e {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                    self.cmd_send_overloaded.set(true);
+        // Order guarantee: while a backlog exists, new commands join it
+        // rather than jumping the queue.
+        if !self.pending_cmds.borrow().is_empty() {
+            self.pending_cmds.borrow_mut().push_back(cmd);
+            return true;
+        }
+        match self.client.send(cmd) {
+            Ok(()) => true,
+            Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => {
+                // NEVER drop (#1237): a full channel queues the command
+                // for the per-iteration flush. The user's action WILL
+                // happen; congestion only delays it — and past a short
+                // grace `tick_daemon_health` says so honestly instead
+                // of refusing without reason.
+                self.pending_cmds.borrow_mut().push_back(cmd);
+                if self.cmds_backlogged_since.get().is_none() {
+                    self.cmds_backlogged_since
+                        .set(Some(std::time::Instant::now()));
                 }
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                true
+            }
+            Err(e @ tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!("ipc send failed: {e}");
+                self.cmd_send_failed.set(true);
+                false
+            }
+        }
+    }
+
+    /// Deliver queued commands in order until the channel fills again.
+    /// Called once per loop iteration (`tick_daemon_health`) — the
+    /// daemon drains its side in microseconds, so a backlog normally
+    /// clears within a frame.
+    pub(crate) fn flush_pending_cmds(&self) {
+        loop {
+            let Some(cmd) = self.pending_cmds.borrow_mut().pop_front() else {
+                self.cmds_backlogged_since.set(None);
+                return;
+            };
+            match self.client.send(cmd) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => {
+                    self.pending_cmds.borrow_mut().push_front(cmd);
+                    return;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     self.cmd_send_failed.set(true);
+                    return;
                 }
             }
-            false
-        } else {
-            true
         }
     }
 
@@ -3973,9 +4025,24 @@ impl<T: TerminalAdapter> Model<T> {
     /// tick section (and unit tests) so a dead channel surfaces within
     /// one frame of the first failed send instead of never.
     pub(crate) fn tick_daemon_health(&mut self) {
+        self.flush_pending_cmds();
+        // The old "command was not accepted" refusal is gone (#1237):
+        // commands queue and always deliver. Past a short grace, tell
+        // the truth about the delay instead.
+        if let Some(since) = self.cmds_backlogged_since.get()
+            && since.elapsed() > std::time::Duration::from_secs(2)
+        {
+            let queued = self.pending_cmds.borrow().len();
+            self.flash(
+                format!("⚠ daemon is busy — {queued} command(s) queued, delivering in order"),
+                crate::realm::components::footer::NoticeSeverity::Retryable,
+            );
+        }
+        // Remote-link congestion still surfaces (those sends have no
+        // local queue), reworded to say what actually happened.
         if self.cmd_send_overloaded.take() {
             self.flash(
-                "⚠ command was not accepted — daemon connection is congested; wait and retry",
+                "⚠ remote link congested — the last remote command was not delivered; retry",
                 crate::realm::components::footer::NoticeSeverity::Retryable,
             );
         }

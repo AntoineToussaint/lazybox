@@ -107,6 +107,10 @@ impl Terminals {
         self.inner.terminal_is_agent(id)
     }
 
+    pub fn terminal_agent_state(&self, id: TerminalId) -> Option<lazybox_ipc::AgentState> {
+        self.inner.terminal_agent_state(id)
+    }
+
     pub(crate) fn terminal_agent_id(&self, id: TerminalId) -> Option<&str> {
         self.inner.terminal_agent_id(id)
     }

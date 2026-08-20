@@ -24,6 +24,7 @@
 //! `/tmp/lazybox.log`.
 
 use crate::AuthFailure;
+use crate::agent::AgentObservation;
 use crate::pty::PromptShape;
 use lazybox_ipc::AgentState;
 
@@ -51,6 +52,18 @@ pub const CODEX_PROMPT_PHRASES: &[&str] = &[
     "press enter to continue",
     "do you trust the contents",
 ];
+
+/// Credit-exhaustion copy emitted by Codex. A phrase is only classified as
+/// blocking when the same screen also exposes the provider's Wait option;
+/// prose in the transcript that merely discusses credits remains ordinary
+/// output.
+pub const CODEX_CREDIT_EXHAUSTED_PHRASES: &[&str] = &[
+    "your workspace is out of credits",
+    "you've reached your workspace credit limit",
+    "you hit your spend cap set in your workspace",
+];
+
+const CODEX_WAIT_FOR_CREDIT_PHRASES: &[&str] = &["wait for credit"];
 
 /// Standalone phrases that are unambiguously Claude blocking on user
 /// input — no chat context realistically produces them, so matching one
@@ -707,7 +720,7 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     let decision = classify(&s, &compact, None);
     if matches!(
         decision.state,
-        AgentState::InputNeeded | AgentState::LimitReached
+        AgentState::InputNeeded | AgentState::LimitReached | AgentState::CreditExhausted
     ) {
         return false;
     }
@@ -1464,7 +1477,20 @@ pub fn codex_input_needed_in_current_chunk(
     let mark = last_chunk_start.min(recent_output.len());
     let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
     let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+    codex_input_needed_in_current_chunk_from(&s, s_mark, &compact, compact_mark)
+}
 
+/// [`codex_input_needed_in_current_chunk`] over an already stripped (`s`) and
+/// compacted (`compact`) window plus their chunk-boundary marks. Callers that
+/// have already paid for the ANSI strip / compaction — the per-chunk pump path
+/// runs on every repaint frame — reuse those buffers instead of scanning the
+/// 16 KiB window a second time.
+fn codex_input_needed_in_current_chunk_from(
+    s: &str,
+    s_mark: usize,
+    compact: &str,
+    compact_mark: usize,
+) -> Option<PromptShape> {
     let phrase_touched = CODEX_PROMPT_PHRASES.iter().any(|phrase| {
         let needle: String = phrase
             .chars()
@@ -1479,7 +1505,7 @@ pub fn codex_input_needed_in_current_chunk(
         return Some(PromptShape::Chooser);
     }
 
-    let arrow_touched = codex_arrow_option_pos(&compact).is_some_and(|pos| {
+    let arrow_touched = codex_arrow_option_pos(compact).is_some_and(|pos| {
         // `›` is three UTF-8 bytes, followed by one ASCII digit and one
         // ASCII delimiter (`.` or `)`).
         pos + '›'.len_utf8() + 2 > compact_mark
@@ -1491,7 +1517,7 @@ pub fn codex_input_needed_in_current_chunk(
     // Bare prompt families do not have Codex's modal chrome. Keep their
     // existing bottom-of-screen guard and additionally require the latest
     // chunk to touch the marker.
-    let prompt_zone = last_nonempty_lines(recent_tail(&s, CODEX_PROMPT_TAIL_WINDOW), 5);
+    let prompt_zone = last_nonempty_lines(recent_tail(s, CODEX_PROMPT_TAIL_WINDOW), 5);
     let bare_prompt_touched = YN_PROMPT_PATTERNS.iter().any(|pattern| {
         s.rfind(pattern)
             .is_some_and(|pos| pos + pattern.len() > s_mark && prompt_zone.contains(pattern))
@@ -1499,6 +1525,47 @@ pub fn codex_input_needed_in_current_chunk(
         .rfind("approve?")
         .is_some_and(|pos| pos + "approve?".len() > s_mark && prompt_zone.contains("approve?"));
     bare_prompt_touched.then_some(PromptShape::Chooser)
+}
+
+/// Typed counterpart to [`codex_input_needed_in_current_chunk`]. Credit
+/// exhaustion wins over the generic chooser classification when the newest
+/// chunk completes either half of the provider screen.
+pub fn codex_blocked_in_current_chunk(
+    recent_output: &[u8],
+    last_chunk_start: usize,
+) -> Option<AgentObservation> {
+    let mark = last_chunk_start.min(recent_output.len());
+    let (s, s_mark) = strip_ansi_lossy_marked(recent_output, mark);
+    let (compact, compact_mark) = compact_lower_marked(&s, s_mark);
+
+    let footer_pos = codex_footer_pos(&compact);
+    if codex_state_from(&s, &compact, Some(compact_mark), footer_pos) == AgentState::CreditExhausted
+        && (compact_match_touched(&compact, CODEX_CREDIT_EXHAUSTED_PHRASES, compact_mark)
+            || compact_match_touched(&compact, CODEX_WAIT_FOR_CREDIT_PHRASES, compact_mark))
+    {
+        return Some(AgentObservation::from_state(AgentState::CreditExhausted));
+    }
+
+    // Reuse the strip / compaction computed above rather than re-scanning the
+    // 16 KiB window inside `codex_input_needed_in_current_chunk` — this runs on
+    // every repaint frame of a live session.
+    codex_input_needed_in_current_chunk_from(&s, s_mark, &compact, compact_mark)
+        .map(AgentObservation::input_needed)
+}
+
+pub fn codex_credit_exhausted_hint(recent_output: &[u8]) -> Option<String> {
+    let stripped = strip_ansi_lossy(recent_output);
+    let compact = compact_lower(&stripped);
+    codex_credit_exhausted_pos(&compact)?;
+    if compact.contains("askyourworkspaceownertoaddmore")
+        || compact.contains("askyourworkspaceownertorefill")
+    {
+        Some("ask your workspace owner to add credits".into())
+    } else if compact.contains("spendcap") {
+        Some("increase your workspace spend cap".into())
+    } else {
+        Some("add credits or switch subscription".into())
+    }
 }
 
 /// Whether Codex is ready to receive a pasted prompt: the composer footer is
@@ -1510,13 +1577,21 @@ pub fn codex_input_needed_in_current_chunk(
 pub fn codex_ready_for_prompt(recent_output: &[u8]) -> bool {
     let s = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&s);
+    codex_ready_for_prompt_from(&s, &compact)
+}
+
+/// [`codex_ready_for_prompt`] over an already stripped (`s`) and compacted
+/// (`compact`) detect window. Callers that have paid for the ANSI strip /
+/// compaction once — the per-chunk pump path runs on every repaint frame —
+/// reuse those buffers instead of scanning the 16 KiB window twice.
+fn codex_ready_for_prompt_from(s: &str, compact: &str) -> bool {
     // Compute the composer-footer offset once and feed it to BOTH the
     // readiness gate (is the composer drawn at all?) and the state decision.
     // This runs on every chunk while the spawn-time injector polls for
     // readiness, so sharing the offset avoids a second `rfind` scan for the
     // footer that `codex_state_of` would otherwise repeat internally.
-    let footer_pos = codex_footer_pos(&compact);
-    footer_pos.is_some() && codex_state_from(&s, &compact, None, footer_pos) == AgentState::Idle
+    let footer_pos = codex_footer_pos(compact);
+    footer_pos.is_some() && codex_state_from(s, compact, None, footer_pos) == AgentState::Idle
 }
 
 /// Chunk-aware companion to [`codex_ready_for_prompt`] (issue #425).
@@ -1571,12 +1646,17 @@ pub fn codex_ready_for_prompt_chunked(recent_output: &[u8], last_chunk_start: us
     if composer_painted
         && codex_footer_pos(&compact).is_some()
         && codex_prompt_pos(frame).is_none()
+        && codex_credit_exhausted_pos(frame).is_none()
         && !codex_bare_prompt_in_tail(&s)
     {
         return true;
     }
 
-    codex_ready_for_prompt(recent_output)
+    // Fall back to the whole-buffer positional read, reusing the strip /
+    // compaction already computed above — this runs on every repaint frame,
+    // so a second 16 KiB ANSI strip here would double the pump's per-chunk
+    // cost on a continuously-repainting session (issue #629 watchdog stress).
+    codex_ready_for_prompt_from(&s, &compact)
 }
 
 /// Byte offset of the most recent Codex *composer* arrow in `compact` — `›`
@@ -1622,11 +1702,16 @@ fn codex_state_from(
 ) -> AgentState {
     let work_pos = codex_working_pos(compact);
     let prompt_pos = codex_prompt_pos(compact);
+    let credit_pos = codex_credit_exhausted_pos(compact);
 
     // Same-chunk rule (see [`work_anchor_for`]): on a full repaint the
     // approval modal and an earlier status line land in ONE chunk; the work
     // anchor must not then suppress a prompt that arrived in the same paint.
     let work_against = |marker: Option<usize>| work_anchor_for(marker, work_pos, last_chunk_start);
+
+    if marker_at_least_as_recent(credit_pos, footer_pos.max(work_against(credit_pos))) {
+        return AgentState::CreditExhausted;
+    }
 
     // A live approval / consent modal is the bottom-most marker — more recent
     // than the resting footer and any status line painted above it.
@@ -1758,6 +1843,28 @@ fn codex_prompt_pos(compact: &str) -> Option<usize> {
     .into_iter()
     .flatten()
     .max()
+}
+
+/// A credit banner is actionable only while its Wait option is visible.
+/// Requiring both signals rejects chat prose, release notes, and stale banner
+/// text after the chooser has disappeared.
+fn codex_credit_exhausted_pos(compact: &str) -> Option<usize> {
+    let exhausted = last_compact_match_pos(compact, CODEX_CREDIT_EXHAUSTED_PHRASES)?;
+    let wait = last_compact_match_pos(compact, CODEX_WAIT_FOR_CREDIT_PHRASES)?;
+    Some(exhausted.min(wait))
+}
+
+fn compact_match_touched(compact: &str, patterns: &[&str], mark: usize) -> bool {
+    patterns.iter().any(|pattern| {
+        let needle: String = pattern
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .flat_map(char::to_lowercase)
+            .collect();
+        compact
+            .rfind(&needle)
+            .is_some_and(|pos| pos + needle.len() > mark)
+    })
 }
 
 /// Byte offset of the most recent Codex selection arrow sitting directly on a

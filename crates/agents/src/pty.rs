@@ -94,6 +94,25 @@ pub struct PtyProtocol {
     readiness: ReadinessPolicy,
 }
 
+/// Provider-owned interaction for leaving a credit-exhaustion chooser.
+///
+/// The daemon owns the recovery transaction, but only the adapter knows how
+/// its chooser is safely selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreditRecoveryProtocol {
+    select_wait: &'static [u8],
+}
+
+impl CreditRecoveryProtocol {
+    pub const fn new(select_wait: &'static [u8]) -> Self {
+        Self { select_wait }
+    }
+
+    pub const fn select_wait(self) -> &'static [u8] {
+        self.select_wait
+    }
+}
+
 impl PtyProtocol {
     /// Default for simple CLIs that accept ordinary line input and do not
     /// expose a reliable visual composer-ready marker.

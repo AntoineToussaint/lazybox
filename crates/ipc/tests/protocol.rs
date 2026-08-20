@@ -472,6 +472,11 @@ fn all_commands() -> Vec<Command> {
             dedupe_key: "github|merge|rate limited".into(),
         },
         Command::GetResourcePosture,
+        Command::RecoverAgentCredit {
+            terminal_id: TerminalId(12),
+            client_request_id: "credit-recovery-1".into(),
+            continuation_prompt: "Continue the work you were doing.".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -1071,6 +1076,16 @@ fn all_events() -> Vec<Event> {
             terminal_resyncs: 0,
             inline_budget_violations: 2,
         }),
+        Event::AgentCreditRecovery {
+            terminal_id: TerminalId(12),
+            client_request_id: "credit-recovery-1".into(),
+            stage: lazybox_ipc::AgentCreditRecoveryStage::WaitingForComposer,
+        },
+        Event::AgentCreditExhausted {
+            session_key: key,
+            terminal_id: TerminalId(12),
+            hint: "add credits or switch subscription".into(),
+        },
     ]
 }
 
@@ -1157,6 +1172,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ClearErrors => "ClearErrors",
         Command::DeleteError { .. } => "DeleteError",
         Command::GetResourcePosture => "GetResourcePosture",
+        Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
     }
 }
 
@@ -1254,6 +1270,8 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentUsageLimit { .. } => "AgentUsageLimit",
         Event::WorkspaceCreated { .. } => "WorkspaceCreated",
         Event::ResourcePosture(_) => "ResourcePosture",
+        Event::AgentCreditRecovery { .. } => "AgentCreditRecovery",
+        Event::AgentCreditExhausted { .. } => "AgentCreditExhausted",
     }
 }
 
@@ -1265,12 +1283,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        78,
+        79,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        87,
+        89,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

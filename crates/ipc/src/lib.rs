@@ -343,6 +343,12 @@ pub enum AgentState {
     /// Appended last: the socket transport encodes this enum by bincode
     /// ordinal, so it must never be reordered ahead of `Exited`.
     LimitReached,
+    /// The provider has exhausted the account's available credit and is
+    /// parked on a recovery chooser. Unlike a normal permission prompt, this
+    /// state remains visible until the complete recovery transaction has
+    /// selected the provider-owned wait option, reached a ready composer,
+    /// and submitted the continuation prompt.
+    CreditExhausted,
 }
 
 impl AgentState {
@@ -359,6 +365,7 @@ impl AgentState {
         AgentState::Done,
         AgentState::Exited { code: None },
         AgentState::LimitReached,
+        AgentState::CreditExhausted,
     ];
 }
 
@@ -1474,6 +1481,16 @@ pub enum Command {
     /// [`Event::ResourcePosture`]. Appended last (bincode is
     /// ordinal-sensitive).
     GetResourcePosture,
+    /// Recover one provider credit-exhaustion chooser and continue the
+    /// interrupted turn. The request is correlated because success is only
+    /// reached after chooser selection, composer readiness, and confirmed
+    /// prompt submission. Appended after main's `GetResourcePosture`
+    /// (bincode is ordinal-sensitive).
+    RecoverAgentCredit {
+        terminal_id: TerminalId,
+        client_request_id: String,
+        continuation_prompt: String,
+    },
 }
 
 impl Command {
@@ -2476,6 +2493,20 @@ pub enum Event {
     /// become an incident. Appended last (bincode is
     /// ordinal-sensitive).
     ResourcePosture(ResourcePosture),
+    /// Progress for a correlated credit-recovery transaction. The agent
+    /// remains `CreditExhausted` throughout these stages. Appended after
+    /// main's `ResourcePosture` (bincode is ordinal-sensitive).
+    AgentCreditRecovery {
+        terminal_id: TerminalId,
+        client_request_id: String,
+        stage: AgentCreditRecoveryStage,
+    },
+    /// Provider-owned guidance parsed from a newly detected credit chooser.
+    AgentCreditExhausted {
+        session_key: SessionKey,
+        terminal_id: TerminalId,
+        hint: String,
+    },
 }
 
 /// Daemon resource posture for the Shift-D sync-status screen.
@@ -2505,6 +2536,14 @@ pub struct ResourcePosture {
     pub terminal_resyncs: u64,
     /// Inline serve-loop commands that overran their budget.
     pub inline_budget_violations: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum AgentCreditRecoveryStage {
+    SelectingWait,
+    WaitingForComposer,
+    InjectingContinuation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -4071,9 +4110,10 @@ mod agent_state_tests {
                 | AgentState::Idle
                 | AgentState::Done
                 | AgentState::Exited { .. }
-                | AgentState::LimitReached => {}
+                | AgentState::LimitReached
+                | AgentState::CreditExhausted => {}
             }
         }
-        assert_eq!(AgentState::ALL.len(), 6);
+        assert_eq!(AgentState::ALL.len(), 7);
     }
 }

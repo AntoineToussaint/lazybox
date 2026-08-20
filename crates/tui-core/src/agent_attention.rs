@@ -188,6 +188,16 @@ pub fn workspace_is_limit_reached(
     )
 }
 
+pub fn workspace_is_credit_exhausted(
+    workspace: &Workspace,
+    states: &HashMap<SessionKey, AgentState>,
+) -> bool {
+    matches!(
+        workspace_agent_state(workspace, states),
+        Some(AgentState::CreditExhausted)
+    )
+}
+
 /// True iff the workspace's agent process has exited (clean or crash;
 /// drives the `✗` indicator). Kept distinct from a blank/`Idle` row so a
 /// dead agent reads as "the process ended, restart it" rather than
@@ -281,12 +291,20 @@ fn next_matching_workspace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use AgentState::{Done, Idle, InputNeeded, LimitReached, Working};
+    use AgentState::{CreditExhausted, Done, Idle, InputNeeded, LimitReached, Working};
     use lazybox_core::WorkspaceKey;
     use std::collections::HashSet;
 
     const EXITED: AgentState = AgentState::Exited { code: Some(1) };
-    const ALL: [AgentState; 6] = [Working, InputNeeded, Idle, Done, EXITED, LimitReached];
+    const ALL: [AgentState; 7] = [
+        Working,
+        InputNeeded,
+        Idle,
+        Done,
+        EXITED,
+        LimitReached,
+        CreditExhausted,
+    ];
 
     fn ws_key(n: u32) -> SessionKey {
         SessionKey::from(&WorkspaceKey::new(format!("owner/repo#{n}")))
@@ -412,6 +430,7 @@ mod tests {
                     workspace_is_done(&ws, &states),
                     workspace_is_exited(&ws, &states),
                     workspace_is_limit_reached(&ws, &states),
+                    workspace_is_credit_exhausted(&ws, &states),
                 ]
                 .iter()
                 .filter(|p| **p)

@@ -709,6 +709,19 @@ fn codex_requires_ready_before_initial_prompt_injection() {
 }
 
 #[test]
+fn credit_chooser_selection_is_owned_by_the_codex_adapter() {
+    assert_eq!(
+        Codex
+            .credit_recovery_protocol()
+            .expect("Codex credit recovery")
+            .select_wait(),
+        b"\r"
+    );
+    assert!(Claude.credit_recovery_protocol().is_none());
+    assert!(Cursor.credit_recovery_protocol().is_none());
+}
+
+#[test]
 fn claude_detects_chooser_footer() {
     // The Claude Code permission chooser is recognisable by its
     // `Esc to cancel` footer plus a question phrasing and numbered

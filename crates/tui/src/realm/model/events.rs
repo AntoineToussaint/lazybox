@@ -946,6 +946,57 @@ impl<T: TerminalAdapter> Model<T> {
         if self.handle_pr_chat_agent_event(&event) {
             return;
         }
+        match &event {
+            IpcEvent::AgentCreditExhausted { hint, .. } => {
+                let key = lazybox_tui_core::action::ActionDef::for_kind(
+                    lazybox_tui_core::action::ActionKind::RecoverAgentCredit,
+                )
+                .effective_keys_display(&self.action_key_overrides);
+                self.flash_error(format!(
+                    "agent is out of credit — {hint}; press {key} to recover"
+                ));
+            }
+            IpcEvent::AgentCreditRecovery {
+                client_request_id,
+                stage,
+                ..
+            } if self
+                .pending_credit_recoveries
+                .contains_key(client_request_id) =>
+            {
+                let message = match stage {
+                    lazybox_ipc::AgentCreditRecoveryStage::SelectingWait => {
+                        "selecting Wait for credit…"
+                    }
+                    lazybox_ipc::AgentCreditRecoveryStage::WaitingForComposer => {
+                        "waiting for credit and a ready composer…"
+                    }
+                    lazybox_ipc::AgentCreditRecoveryStage::InjectingContinuation => {
+                        "credit available — submitting continuation…"
+                    }
+                };
+                self.flash_info(message);
+            }
+            IpcEvent::CommandCompleted { client_request_id }
+                if self
+                    .pending_credit_recoveries
+                    .remove(client_request_id)
+                    .is_some() =>
+            {
+                self.flash_info("credit recovered — continuation submitted");
+            }
+            IpcEvent::CommandFailed {
+                client_request_id,
+                message,
+            } if self
+                .pending_credit_recoveries
+                .remove(client_request_id)
+                .is_some() =>
+            {
+                self.flash_error(format!("credit recovery failed — {message}"));
+            }
+            _ => {}
+        }
         // New-workspace creation is request-correlated because the daemon,
         // not the client, allocates the final collision-suffixed key. Reveal
         // that exact row as soon as durability is acknowledged, then keep the
@@ -1120,6 +1171,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalModelChanged { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. }
                 | IpcEvent::AgentUsageLimit { .. }
+                | IpcEvent::AgentCreditRecovery { .. }
+                | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
                 | IpcEvent::ResourcePosture(..) => {}
@@ -1964,6 +2017,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::TerminalModelChanged { .. }
             | IpcEvent::RecoveredTerminalsRequireRestart { .. }
             | IpcEvent::AgentUsageLimit { .. }
+            | IpcEvent::AgentCreditRecovery { .. }
+            | IpcEvent::AgentCreditExhausted { .. }
             | IpcEvent::WorkspaceCreated { .. }
             | IpcEvent::ErrorInbox { .. }
             | IpcEvent::ResourcePosture(..) => {}
@@ -2238,6 +2293,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::TerminalModelChanged { .. }
                 | IpcEvent::RecoveredTerminalsRequireRestart { .. }
                 | IpcEvent::AgentUsageLimit { .. }
+                | IpcEvent::AgentCreditRecovery { .. }
+                | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
                 | IpcEvent::ResourcePosture(..) => {}

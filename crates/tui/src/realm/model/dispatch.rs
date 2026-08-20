@@ -1683,6 +1683,12 @@ impl<T: TerminalAdapter> Model<T> {
             Action::ResumeRateLimited => {
                 cmds.extend(self.resume_rate_limited_agents());
             }
+            Action::RecoverAgentCredit => {
+                cmds.extend(self.recover_agent_credit(false));
+            }
+            Action::RecoverAllAgentCredit => {
+                cmds.extend(self.recover_agent_credit(true));
+            }
             Action::ToggleActivityPane => {
                 if let Some(ws_key) = self.sidebar.selected_workspace().map(|w| w.key.clone()) {
                     self.activity_pane.cycle(

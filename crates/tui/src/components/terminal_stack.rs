@@ -1588,6 +1588,12 @@ impl TerminalStack {
         }
     }
 
+    pub fn terminal_agent_state(&self, terminal_id: TerminalId) -> Option<lazybox_ipc::AgentState> {
+        self.terminals.get(&terminal_id).and_then(|slot| {
+            matches!(slot.kind, TerminalKind::Agent(_)).then_some(slot.agent_state)
+        })
+    }
+
     /// Whether the pane should render only its header row.
     pub fn is_collapsed(&self) -> bool {
         self.collapsed
@@ -4821,7 +4827,9 @@ impl TerminalStack {
         let needs_you = !exited
             && matches!(
                 slot.agent_state,
-                lazybox_ipc::AgentState::InputNeeded | lazybox_ipc::AgentState::LimitReached
+                lazybox_ipc::AgentState::InputNeeded
+                    | lazybox_ipc::AgentState::LimitReached
+                    | lazybox_ipc::AgentState::CreditExhausted
             );
         // Attention: a background tile whose agent needs you paints its
         // whole bar warn so it's noticeable without watching every tile.
@@ -4944,6 +4952,10 @@ impl TerminalStack {
             // sidebar pill already uses for it.
             AgentState::LimitReached => Some((
                 "⏳ limited",
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+            )),
+            AgentState::CreditExhausted => Some((
+                "¢ no credit",
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             )),
             // Idle has nothing to act on; `Exited` is surfaced by the
@@ -10735,7 +10747,7 @@ mod zoom_and_tile_header_tests {
         );
 
         for compact in [true, false] {
-            // Working / Done / LimitReached are identical across both
+            // Working / Done / blocked states are identical across both
             // surfaces (only the asking label differs).
             assert_eq!(
                 label(AgentState::Working, false, compact),
@@ -10747,6 +10759,10 @@ mod zoom_and_tile_header_tests {
             assert_eq!(
                 label(AgentState::LimitReached, false, compact),
                 Some("⏳ limited")
+            );
+            assert_eq!(
+                label(AgentState::CreditExhausted, false, compact),
+                Some("¢ no credit")
             );
             // Silent states render nothing on BOTH surfaces — no
             // per-surface drift.

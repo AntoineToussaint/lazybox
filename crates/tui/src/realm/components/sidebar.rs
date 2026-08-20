@@ -770,6 +770,11 @@ impl Sidebar {
         self.inner.cursor_header()
     }
 
+    /// Monotonic revision of everything `sync_panes` projects (#1237).
+    pub fn pane_state_rev(&self) -> u64 {
+        self.inner.pane_state_rev()
+    }
+
     /// Rename the Space at the cursor (#1211) — claims + rendered
     /// sources move, collapse flag follows, config persists.
     pub fn rename_space(&mut self, old: &str, new: &str) -> Option<(String, String)> {

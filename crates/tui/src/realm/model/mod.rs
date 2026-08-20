@@ -1843,6 +1843,10 @@ pub struct Model<T: TerminalAdapter> {
     /// preselect) feeds the daemon's round-robin scheduler without
     /// each call site needing its own emit hook.
     last_focused_session_key: Option<lazybox_core::SessionKey>,
+    /// `(selected key, sidebar pane revision)` of the last full
+    /// `sync_panes` projection — the per-keystroke identity gate
+    /// (#1237).
+    last_pane_sync_identity: Option<(Option<lazybox_core::SessionKey>, u64)>,
     /// Set by a daemon-event handler that needs the panes re-projected
     /// from the (possibly moved) sidebar selection, flushed to a single
     /// `sync_panes` once the whole drain batch is handled. A merge burst
@@ -2339,6 +2343,7 @@ impl<T: TerminalAdapter> Model<T> {
             outdated_scroll_hinted: None,
             no_permission_hinted: None,
             last_focused_session_key: None,
+            last_pane_sync_identity: None,
             needs_pane_sync: false,
             workspace_focus: std::collections::HashMap::new(),
             activity_pane: ActivityPaneState::default(),

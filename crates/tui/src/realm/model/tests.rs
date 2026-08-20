@@ -6664,6 +6664,10 @@ mod coalesce_tests {
 
         model.handle_daemon_event(out(1, b"one", 1));
         model.handle_daemon_event(out(1, b"three", 3));
+        // #1237: resync requests flush once per drain batch (the drain
+        // loop calls this after each batch), so a desync storm can't
+        // emit one command per event into the channel keystrokes share.
+        model.flush_pending_terminal_resyncs();
         assert!(matches!(
             server.rx.try_recv(),
             Ok(IpcCommand::RequestTerminalResync {
@@ -7839,6 +7843,50 @@ mod modal_input_responsiveness_tests {
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// #1237: `sync_panes` runs after every keystroke — with the
+    /// selection and sidebar revision unchanged it must skip the full
+    /// projection (no per-character Workspace clone), and any daemon
+    /// event re-arms it.
+    #[test]
+    fn pane_sync_gates_on_identity_and_rearms_on_events() {
+        let mut m = build_model();
+        let key = WorkspaceKey::new("github:acme/a#1");
+        let mut ws = lazybox_core::Workspace::empty(key.clone(), "main", chrono::Utc::now());
+        ws.project_key = Some(lazybox_core::ProjectKey::github("acme", "a"));
+        ws.pr = Some(repo_task("github:acme/a#1", "acme/a"));
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(
+            m.sidebar
+                .focus_workspace_key(&lazybox_core::SessionKey::from(&key))
+        );
+        m.sync_panes();
+        let projected = m.last_pane_sync_identity.clone();
+        assert!(
+            projected.is_some(),
+            "first sync projects and records identity"
+        );
+
+        // Keystroke-path repeat with nothing changed: identity stable
+        // (the fast path took it).
+        m.sync_panes();
+        assert_eq!(m.last_pane_sync_identity, projected);
+
+        // Any daemon event bumps the sidebar's pane revision, so the
+        // next sync re-projects under a NEW identity — staleness is
+        // impossible past one event.
+        let ws = lazybox_core::Workspace::empty(
+            WorkspaceKey::new("github:o/r#77"),
+            "fresh",
+            chrono::Utc::now(),
+        );
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.sync_panes();
+        assert_ne!(
+            m.last_pane_sync_identity, projected,
+            "a daemon event re-arms the projection",
+        );
     }
 
     /// #1206 journey on a temp `LAZYBOX_HOME`: `x m` with no

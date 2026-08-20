@@ -28,7 +28,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// commands. Snapshot recovery can mark hundreds of terminals at once;
     /// chunking by the protocol bound keeps each frame finite without
     /// consuming one command-channel slot per terminal (#1171).
-    fn flush_pending_terminal_resyncs(&mut self) {
+    pub(super) fn flush_pending_terminal_resyncs(&mut self) {
         let requests = self.terminals.drain_pending_resync_requests();
         if requests.is_empty() {
             return;
@@ -908,7 +908,11 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::TerminalOutput { terminal_id, .. } = &event {
             let visible = self.terminals.is_terminal_visible(*terminal_id);
             self.terminals.on_daemon_event(&event);
-            self.flush_pending_terminal_resyncs();
+            // Resync requests queued by this event flush once per drain
+            // batch (#1237, with the batch's `flush_pane_sync`), not per
+            // event — during a desync storm the per-event flush emitted
+            // one command per event into the 32-slot channel keystrokes
+            // share, so the batching cap never engaged.
             if visible {
                 self.redraw = true;
             }
@@ -2939,6 +2943,28 @@ impl<T: TerminalAdapter> Model<T> {
     /// Called after every key dispatch and once per daemon-event drain
     /// batch (via [`Self::flush_pane_sync`]).
     pub(super) fn sync_panes(&mut self) {
+        // Identity gate (#1237): this runs after EVERY key dispatch, and
+        // used to deep-clone the selected Workspace (sessions + tasks +
+        // the full activity Vec) plus re-project all three panes per
+        // character typed. When the selection AND the sidebar's pane
+        // revision are unchanged since the last sync, nothing the
+        // projection reads can have changed — skip it all. Daemon events
+        // bump the revision (per event), so any real change re-syncs on
+        // the next call.
+        let identity = (
+            self.sidebar.selected_workspace_key().cloned(),
+            self.sidebar.pane_state_rev(),
+        );
+        if self.last_pane_sync_identity.as_ref() == Some(&identity) {
+            // Deferred one-shots still honored on the fast path: a
+            // spawn-follow parked here must not wait for the next
+            // daemon event.
+            if let Some(tid) = self.deferred_focus_terminal.take() {
+                self.terminals.focus_terminal(tid);
+            }
+            return;
+        }
+        self.last_pane_sync_identity = Some(identity);
         let workspace = self.sidebar.selected_workspace().cloned();
         let session_key = self.sidebar.selected_workspace_key().cloned();
         // Daemon round-robin hint: every cursor mutation that

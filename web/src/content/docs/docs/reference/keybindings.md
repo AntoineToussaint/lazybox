@@ -128,6 +128,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]h` | Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one |
 | `]]u` | Scan the visible terminal for URLs and open the picked one in the browser (a lone URL opens straight away) |
 | `]]f` | Toggle focus mode |
+| `]]v` | Cycle the focus-mode layout (single → split │ → split ─ → 2×2 grid over the starred roster); persists `ui.focus_layout` |
 | `]]q` | Exit to the sidebar |
 | `` ]]` `` | Open the fuzzy jump-to-workspace picker |
 | `]]1…9` | Jump to the Nth agent workspace (sidebar order) |

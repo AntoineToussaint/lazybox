@@ -944,6 +944,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.terminals.layout_is_splits(),
             self.terminals.visible_terminal_count(),
             self.terminals.terminal_new_layout(),
+            self.focus_mode.then_some(self.focus_layout),
         );
         rows.extend(
             self.sidebar
@@ -1004,6 +1005,15 @@ impl<T: TerminalAdapter> Model<T> {
         // a previous `]]s`-from-the-sidebar target (#871).
         self.leader_target = None;
         match cmd {
+            // In a multi-pane focus layout (#1258) the digit / arrow /
+            // zoom chords act at the workspace-pane level: digits
+            // retarget the FOCUSED pane, arrows move pane focus
+            // (panes-first — intra-workspace tile motion stays a
+            // Single-layout behavior), zoom maximizes the focused pane.
+            // Everywhere else they keep their historical meanings.
+            LeaderCmd::JumpNumbered(n) if self.focus_multi_pane_active() => {
+                self.retarget_focus_pane(n)
+            }
             LeaderCmd::JumpNumbered(n) => self.jump_to_numbered_workspace(n),
             LeaderCmd::Snippets => self.mount_snippet_picker(String::new()),
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
@@ -1015,10 +1025,13 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::JumpPicker => self.mount_jump_picker(),
             LeaderCmd::SplitVertical => self.terminals.split_tile(PendingSplit::Vertical, cmds),
             LeaderCmd::SplitHorizontal => self.terminals.split_tile(PendingSplit::Horizontal, cmds),
+            LeaderCmd::MoveTile(dir) if self.focus_multi_pane_active() => self.move_focus_pane(dir),
             LeaderCmd::MoveTile(dir) => self.terminals.move_tile_focus(dir, cmds),
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
+            LeaderCmd::ZoomTile if self.focus_multi_pane_active() => self.toggle_focus_pane_zoom(),
             LeaderCmd::ZoomTile => self.toggle_terminal_zoom(),
             LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(),
+            LeaderCmd::CycleFocusLayout => self.cycle_focus_layout(),
         }
     }
 

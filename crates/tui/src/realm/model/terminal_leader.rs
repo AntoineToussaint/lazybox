@@ -7,7 +7,7 @@
 //! up in the popup and resolves on the keyboard, and the unit tests
 //! below fail if a menu row stops mapping to a command.
 
-use lazybox_config::NewTerminalLayout;
+use lazybox_config::{FocusLayout, NewTerminalLayout};
 use lazybox_core::TileDirection;
 use tuirealm::event::{Key, KeyModifiers};
 
@@ -62,6 +62,11 @@ pub(super) enum LeaderCmd {
     /// `]]t` — flip the new-terminal layout preference (split ⇄ tabs)
     /// and persist it. Affects the *next* spawn, not open terminals.
     ToggleNewLayout,
+    /// `]]v` — cycle the focus-mode layout (#1258): Single → SplitV →
+    /// SplitH → Grid → Single, persisting `ui.focus_layout`. Only
+    /// meaningful inside focus mode; outside it the Model flashes a
+    /// hint instead of cycling.
+    CycleFocusLayout,
 }
 
 /// One fixed character command. Dispatch, the runtime which-key popup,
@@ -123,6 +128,13 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         command: LeaderCmd::ToggleFocusMode,
         menu_label: "focus mode",
         reference: "Toggle focus mode",
+        sidebar: false,
+    },
+    FixedCommandSpec {
+        key: 'v',
+        command: LeaderCmd::CycleFocusLayout,
+        menu_label: "focus layout",
+        reference: "Cycle the focus-mode layout (single → split │ → split ─ → 2×2 grid over the starred roster); persists `ui.focus_layout`",
         sidebar: false,
     },
     FixedCommandSpec {
@@ -229,37 +241,57 @@ impl LeaderCmd {
     /// feeding that char back through [`Self::from_key`] (#343). The one
     /// multi-char entry, the arrow aggregate, is deliberately
     /// non-dispatchable (it needs a direction) and is skipped there.
+    /// `focus_layout` is `Some(current)` while focus mode is on and
+    /// `None` outside it: the `]]v` row is advertised only where the
+    /// chord does something (in focus mode), and while a multi-pane
+    /// layout is active the arrow / zoom rows describe the pane-level
+    /// motions that take over there (#1258).
     pub(super) fn menu_rows(
         splits: bool,
         tab_count: usize,
         new_layout: NewTerminalLayout,
+        focus_layout: Option<FocusLayout>,
     ) -> Vec<(String, String)> {
+        let multi_pane = focus_layout.is_some_and(|l| l != FocusLayout::Single);
         let mut rows = Vec::with_capacity(FIXED_COMMANDS.len() + 1);
         for spec in FIXED_COMMANDS {
             // Zoom only does anything with a multi-tile grid — don't
-            // advertise it in Tabs mode where `]]z` is a no-op.
-            if spec.key == 'z' && !splits {
+            // advertise it in Tabs mode where `]]z` is a no-op. A
+            // multi-pane focus layout re-purposes it as pane zoom, so
+            // there it's always live.
+            if spec.key == 'z' && !splits && !multi_pane {
+                continue;
+            }
+            // The focus-layout cycle only acts inside focus mode.
+            if spec.key == 'v' && focus_layout.is_none() {
                 continue;
             }
             // Tile/tab navigation sits next to the split controls and
-            // before close, matching the established menu order.
+            // before close, matching the established menu order. In a
+            // multi-pane focus layout arrows move *pane* focus instead.
             if spec.key == 'x' {
-                if splits {
+                if multi_pane {
+                    rows.push(("←↓↑→".to_string(), "move pane".to_string()));
+                } else if splits {
                     rows.push(("←↓↑→".to_string(), "move tile".to_string()));
                 } else if tab_count >= 2 {
                     rows.push(("←→".to_string(), "switch tab".to_string()));
                 }
             }
-            let label = if spec.key == 't' {
-                // Show the current default so this doubles as a status row.
-                match new_layout {
-                    NewTerminalLayout::Split => "new shells: split",
-                    NewTerminalLayout::Tabs => "new shells: tabs",
-                }
-            } else {
-                spec.menu_label
+            let label = match spec.key {
+                // Show the current default so these double as status rows.
+                't' => match new_layout {
+                    NewTerminalLayout::Split => "new shells: split".to_string(),
+                    NewTerminalLayout::Tabs => "new shells: tabs".to_string(),
+                },
+                'v' => match focus_layout {
+                    Some(l) => format!("layout: {}", l.label()),
+                    None => spec.menu_label.to_string(),
+                },
+                'z' if multi_pane => "zoom pane".to_string(),
+                _ => spec.menu_label.to_string(),
             };
-            rows.push((spec.key.to_string(), label.to_string()));
+            rows.push((spec.key.to_string(), label));
         }
         rows
     }
@@ -322,7 +354,7 @@ mod tests {
     /// they're vouched for by the dedicated arrow test below.
     #[test]
     fn every_menu_row_key_resolves_to_a_command() {
-        for (key, label) in LeaderCmd::menu_rows(true, 1, NewTerminalLayout::Split) {
+        for (key, label) in LeaderCmd::menu_rows(true, 1, NewTerminalLayout::Split, None) {
             if key.contains('←') {
                 continue;
             }
@@ -390,16 +422,31 @@ mod tests {
         let labels = |rows: Vec<(String, String)>| -> Vec<String> {
             rows.into_iter().map(|(_, l)| l).collect()
         };
-        let splits = labels(LeaderCmd::menu_rows(true, 2, NewTerminalLayout::Split));
+        let splits = labels(LeaderCmd::menu_rows(
+            true,
+            2,
+            NewTerminalLayout::Split,
+            None,
+        ));
         assert!(splits.iter().any(|l| l == "move tile"));
         assert!(!splits.iter().any(|l| l == "switch tab"));
 
-        let one_tab = labels(LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split));
+        let one_tab = labels(LeaderCmd::menu_rows(
+            false,
+            1,
+            NewTerminalLayout::Split,
+            None,
+        ));
         assert!(!one_tab.iter().any(|l| l == "move tile"));
         assert!(!one_tab.iter().any(|l| l == "switch tab"));
         assert!(one_tab.iter().any(|l| l == "close terminal"));
 
-        let two_tabs = labels(LeaderCmd::menu_rows(false, 2, NewTerminalLayout::Split));
+        let two_tabs = labels(LeaderCmd::menu_rows(
+            false,
+            2,
+            NewTerminalLayout::Split,
+            None,
+        ));
         assert!(two_tabs.iter().any(|l| l == "switch tab"));
     }
 
@@ -408,12 +455,12 @@ mod tests {
     /// the generated docs still know it.
     #[test]
     fn zoom_row_shows_only_in_splits_but_always_resolves() {
-        let splits = LeaderCmd::menu_rows(true, 2, NewTerminalLayout::Split);
+        let splits = LeaderCmd::menu_rows(true, 2, NewTerminalLayout::Split, None);
         assert!(
             splits.iter().any(|(k, l)| k == "z" && l == "zoom tile"),
             "the Splits menu advertises zoom",
         );
-        let tabs = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split);
+        let tabs = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split, None);
         assert!(
             !tabs.iter().any(|(k, _)| k == "z"),
             "the Tabs menu hides the no-op zoom row",
@@ -428,18 +475,73 @@ mod tests {
         );
     }
 
+    /// The `]]v` focus-layout row shows only inside focus mode, carries
+    /// the current layout as a status label, and in a multi-pane layout
+    /// the arrow / zoom rows switch to their pane-level meanings
+    /// (#1258). The chord itself always resolves so dispatch and the
+    /// generated docs still know it.
+    #[test]
+    fn focus_layout_row_shows_only_in_focus_mode() {
+        let outside = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split, None);
+        assert!(
+            !outside.iter().any(|(k, _)| k == "v"),
+            "no focus-layout row outside focus mode",
+        );
+
+        let single = LeaderCmd::menu_rows(
+            false,
+            1,
+            NewTerminalLayout::Split,
+            Some(FocusLayout::Single),
+        );
+        assert!(
+            single
+                .iter()
+                .any(|(k, l)| k == "v" && l == "layout: single"),
+            "focus mode advertises the cycle with the current layout: {single:?}",
+        );
+        // Single layout keeps the historical tile semantics: no pane
+        // rows, zoom hidden without a Splits grid.
+        assert!(!single.iter().any(|(_, l)| l == "move pane"));
+        assert!(!single.iter().any(|(k, _)| k == "z"));
+
+        let grid =
+            LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split, Some(FocusLayout::Grid));
+        assert!(
+            grid.iter()
+                .any(|(k, l)| k == "v" && l == "layout: grid 2×2")
+        );
+        assert!(
+            grid.iter().any(|(_, l)| l == "move pane"),
+            "multi-pane layout advertises pane motion: {grid:?}",
+        );
+        assert!(
+            grid.iter().any(|(k, l)| k == "z" && l == "zoom pane"),
+            "multi-pane layout advertises pane zoom: {grid:?}",
+        );
+
+        assert!(matches!(
+            LeaderCmd::from_key(Key::Char('v'), KeyModifiers::NONE),
+            Some(LeaderCmd::CycleFocusLayout)
+        ));
+        assert!(
+            LeaderCmd::reference_rows().iter().any(|(k, _)| k == "v"),
+            "the docs reference lists the layout cycle regardless of mode",
+        );
+    }
+
     /// The `]]t` row always shows and reflects the current default;
     /// its key resolves like every other command row.
     #[test]
     fn layout_toggle_row_reflects_current_preference() {
-        let split = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split);
+        let split = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split, None);
         assert!(
             split
                 .iter()
                 .any(|(k, l)| k == "t" && l == "new shells: split")
         );
 
-        let tabs = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Tabs);
+        let tabs = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Tabs, None);
         assert!(
             tabs.iter()
                 .any(|(k, l)| k == "t" && l == "new shells: tabs")

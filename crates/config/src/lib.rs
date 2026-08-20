@@ -674,6 +674,78 @@ where
     })
 }
 
+/// Focus-mode multi-workspace layout (issue #1258): how many workspace
+/// panes focus mode shows and how they tile. `Single` is the historical
+/// one-fullscreen-terminal behavior; `SplitV` puts two workspaces side
+/// by side, `SplitH` stacks two, `Grid` tiles four in a 2×2. Cycled
+/// live with the `]]v` terminal-leader command, which persists back
+/// here so the layout survives restarts and reaches attach clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum FocusLayout {
+    #[default]
+    Single,
+    #[serde(rename = "split-v")]
+    SplitV,
+    #[serde(rename = "split-h")]
+    SplitH,
+    Grid,
+}
+
+impl FocusLayout {
+    /// Number of workspace panes the layout shows.
+    pub fn pane_count(self) -> usize {
+        match self {
+            FocusLayout::Single => 1,
+            FocusLayout::SplitV | FocusLayout::SplitH => 2,
+            FocusLayout::Grid => 4,
+        }
+    }
+
+    /// The next layout in the `]]v` cycle:
+    /// Single → SplitV → SplitH → Grid → Single.
+    pub fn next(self) -> Self {
+        match self {
+            FocusLayout::Single => FocusLayout::SplitV,
+            FocusLayout::SplitV => FocusLayout::SplitH,
+            FocusLayout::SplitH => FocusLayout::Grid,
+            FocusLayout::Grid => FocusLayout::Single,
+        }
+    }
+
+    /// Short human label for notices / menu rows.
+    pub fn label(self) -> &'static str {
+        match self {
+            FocusLayout::Single => "single",
+            FocusLayout::SplitV => "split │",
+            FocusLayout::SplitH => "split ─",
+            FocusLayout::Grid => "grid 2×2",
+        }
+    }
+}
+
+/// Lenient field deserializer for `ui.focus_layout`: an unrecognized
+/// value warns and falls back to `single` rather than sinking the whole
+/// config load — same policy as [`de_lenient_new_terminal_layout`].
+fn de_lenient_focus_layout<'de, D>(de: D) -> Result<FocusLayout, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(de)?;
+    Ok(match raw.trim().to_ascii_lowercase().as_str() {
+        "single" => FocusLayout::Single,
+        "split-v" | "splitv" | "split_v" => FocusLayout::SplitV,
+        "split-h" | "splith" | "split_h" => FocusLayout::SplitH,
+        "grid" | "2x2" => FocusLayout::Grid,
+        other => {
+            tracing::warn!(
+                "unknown ui.focus_layout {other:?}; expected `single`, `split-v`, `split-h`, or `grid`, using `single`"
+            );
+            FocusLayout::Single
+        }
+    })
+}
+
 /// How the Activity (right) pane opens for a workspace: the whole
 /// description + activity feed (`Full`), a single-line summary of the
 /// counts that matter (`Summary`), or folded away entirely (`Hidden`,
@@ -964,6 +1036,13 @@ pub struct UiSection {
     /// workspace with nothing to show still auto-hides regardless.
     #[serde(default, deserialize_with = "de_lenient_activity_pane_mode")]
     pub activity_pane_default: ActivityPaneMode,
+    /// Focus-mode multi-workspace layout (issue #1258): `single` (the
+    /// historical fullscreen terminal, default), `split-v` (two
+    /// workspaces side by side), `split-h` (two stacked), or `grid`
+    /// (2×2). Cycle live with `]]v` inside focus mode, which persists
+    /// back here.
+    #[serde(default, deserialize_with = "de_lenient_focus_layout")]
+    pub focus_layout: FocusLayout,
     /// Default Confirm-modal button per invocation source (issue #525):
     /// a destructive chord (`destructive_shortcut`) defaults `Enter` to
     /// `yes`; an unsolicited provider prompt (`event`, e.g. merged-PR
@@ -1067,6 +1146,7 @@ impl Default for UiSection {
             tips_seen: Vec::new(),
             terminal_new_layout: NewTerminalLayout::default(),
             activity_pane_default: ActivityPaneMode::default(),
+            focus_layout: FocusLayout::default(),
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
             auto_wait_on_limit: false,
@@ -1109,6 +1189,9 @@ pub struct UiDefaults {
     /// Initial Activity-pane mode for an un-toggled workspace. See
     /// [`UiSection::activity_pane_default`].
     pub activity_pane_default: ActivityPaneMode,
+    /// Focus-mode multi-workspace layout. See
+    /// [`UiSection::focus_layout`].
+    pub focus_layout: FocusLayout,
     /// Per-source Confirm-modal defaults. See
     /// [`UiSection::confirm_default`].
     pub confirm_default: ConfirmDefaults,
@@ -1152,6 +1235,7 @@ impl Default for UiDefaults {
             agent_dead_on_arrival: Duration::from_millis(10_000),
             terminal_new_layout: NewTerminalLayout::default(),
             activity_pane_default: ActivityPaneMode::default(),
+            focus_layout: FocusLayout::default(),
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
             show_agent_model: true,
@@ -1198,6 +1282,7 @@ impl UiSection {
             agent_dead_on_arrival: d.agent_dead_on_arrival,
             terminal_new_layout: self.terminal_new_layout,
             activity_pane_default: self.activity_pane_default,
+            focus_layout: self.focus_layout,
             confirm_default: self.confirm_default,
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
@@ -3571,6 +3656,75 @@ repos:
             NewTerminalLayout::Split,
             "unknown value falls back to the default"
         );
+    }
+
+    /// `ui.focus_layout` defaults to `single` (unchanged fullscreen
+    /// focus mode), accepts every layout, and round-trips (#1258).
+    #[test]
+    fn focus_layout_defaults_to_single_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(
+            cfg.ui.resolved().focus_layout,
+            FocusLayout::Single,
+            "absent → the historical single-pane default"
+        );
+
+        for (yaml, want) in [
+            ("single", FocusLayout::Single),
+            ("split-v", FocusLayout::SplitV),
+            ("splitv", FocusLayout::SplitV),
+            ("split-h", FocusLayout::SplitH),
+            ("grid", FocusLayout::Grid),
+            ("2x2", FocusLayout::Grid),
+        ] {
+            let cfg: Config =
+                serde_yaml::from_str(&format!("ui:\n  focus_layout: {yaml}\n")).expect("parse");
+            assert_eq!(cfg.ui.resolved().focus_layout, want, "value {yaml:?}");
+            let written = serde_yaml::to_string(&cfg).expect("serialize");
+            let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+            assert_eq!(
+                reparsed.ui.resolved().focus_layout,
+                want,
+                "{yaml:?} survives round-trip"
+            );
+        }
+    }
+
+    /// A typo'd `ui.focus_layout` must not sink the whole config load —
+    /// it warns and falls back to `single`.
+    #[test]
+    fn focus_layout_tolerates_a_bad_value() {
+        let cfg: Config = serde_yaml::from_str("ui:\n  focus_layout: hexagon\n")
+            .expect("a bad layout value must not fail the whole parse");
+        assert_eq!(cfg.ui.resolved().focus_layout, FocusLayout::Single);
+    }
+
+    /// The `]]v` cycle visits every layout exactly once and returns to
+    /// `single`; pane counts match the tiles each layout draws.
+    #[test]
+    fn focus_layout_cycle_visits_all_and_wraps() {
+        let mut seen = vec![FocusLayout::Single];
+        let mut cur = FocusLayout::Single;
+        loop {
+            cur = cur.next();
+            if cur == FocusLayout::Single {
+                break;
+            }
+            seen.push(cur);
+        }
+        assert_eq!(
+            seen,
+            vec![
+                FocusLayout::Single,
+                FocusLayout::SplitV,
+                FocusLayout::SplitH,
+                FocusLayout::Grid,
+            ]
+        );
+        assert_eq!(FocusLayout::Single.pane_count(), 1);
+        assert_eq!(FocusLayout::SplitV.pane_count(), 2);
+        assert_eq!(FocusLayout::SplitH.pane_count(), 2);
+        assert_eq!(FocusLayout::Grid.pane_count(), 4);
     }
 
     /// `ui.activity_pane_default` defaults to `full`, accepts

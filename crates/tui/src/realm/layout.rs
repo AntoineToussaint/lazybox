@@ -331,6 +331,95 @@ pub(crate) fn focus_mode_areas(pane_area: Rect) -> (Rect, Rect) {
     (header, body)
 }
 
+/// Partition the focus-mode body (everything under the event header)
+/// into the workspace-pane rects of a [`FocusLayout`] (#1258). Pane
+/// order is the pane index the Model tracks focus by: `SplitV` is
+/// left→right, `SplitH` top→bottom, `Grid` reads top-left, top-right,
+/// bottom-left, bottom-right. `Single` returns the body untouched so
+/// the historical one-fullscreen-terminal render stays pixel-identical.
+/// Panes butt directly against each other — each multi-pane rect is
+/// drawn with its own border, which provides the visual seam.
+pub(crate) fn focus_layout_areas(body: Rect, layout: lazybox_config::FocusLayout) -> Vec<Rect> {
+    use lazybox_config::FocusLayout as L;
+    let halves_h = |r: Rect| -> (Rect, Rect) {
+        let left_w = r.width / 2;
+        (
+            Rect { width: left_w, ..r },
+            Rect {
+                x: r.x + left_w,
+                width: r.width - left_w,
+                ..r
+            },
+        )
+    };
+    let halves_v = |r: Rect| -> (Rect, Rect) {
+        let top_h = r.height / 2;
+        (
+            Rect { height: top_h, ..r },
+            Rect {
+                y: r.y + top_h,
+                height: r.height - top_h,
+                ..r
+            },
+        )
+    };
+    match layout {
+        L::Single => vec![body],
+        L::SplitV => {
+            let (l, r) = halves_h(body);
+            vec![l, r]
+        }
+        L::SplitH => {
+            let (t, b) = halves_v(body);
+            vec![t, b]
+        }
+        L::Grid => {
+            let (top, bottom) = halves_v(body);
+            let (tl, tr) = halves_h(top);
+            let (bl, br) = halves_h(bottom);
+            vec![tl, tr, bl, br]
+        }
+    }
+}
+
+/// Move focus-mode pane focus one step in `dir` (#1258). Pure pane
+/// geometry over the index order [`focus_layout_areas`] defines;
+/// motion clamps at the edges (no wrap) so an arrow is always a
+/// spatial move, never a surprise teleport. Returns the new pane
+/// index — unchanged when the direction has no neighbor.
+pub(crate) fn focus_pane_move(
+    layout: lazybox_config::FocusLayout,
+    from: usize,
+    dir: lazybox_core::TileDirection,
+) -> usize {
+    use lazybox_config::FocusLayout as L;
+    use lazybox_core::TileDirection as D;
+    match layout {
+        L::Single => 0,
+        L::SplitV => match dir {
+            D::Left => 0,
+            D::Right => 1,
+            _ => from.min(1),
+        },
+        L::SplitH => match dir {
+            D::Up => 0,
+            D::Down => 1,
+            _ => from.min(1),
+        },
+        L::Grid => {
+            let from = from.min(3);
+            let (row, col) = (from / 2, from % 2);
+            let (row, col) = match dir {
+                D::Left => (row, 0),
+                D::Right => (row, 1),
+                D::Up => (0, col),
+                D::Down => (1, col),
+            };
+            row * 2 + col
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,6 +673,58 @@ mod tests {
             bottom.height,
             right_top.height + right_bottom.height - ACTIVITY_SUMMARY_HEIGHT
         );
+    }
+
+    #[test]
+    fn focus_layout_areas_partition_the_body_exactly() {
+        use lazybox_config::FocusLayout as L;
+        let body = Rect::new(0, 1, 121, 39); // odd width: remainder must not be lost
+        for layout in [L::Single, L::SplitV, L::SplitH, L::Grid] {
+            let rects = focus_layout_areas(body, layout);
+            assert_eq!(rects.len(), layout.pane_count(), "{layout:?}");
+            let cells: u32 = rects.iter().map(|r| r.width as u32 * r.height as u32).sum();
+            assert_eq!(
+                cells,
+                body.width as u32 * body.height as u32,
+                "{layout:?} panes must tile the body with no gaps or overlap"
+            );
+            for r in &rects {
+                assert!(r.x >= body.x && r.x + r.width <= body.x + body.width);
+                assert!(r.y >= body.y && r.y + r.height <= body.y + body.height);
+            }
+        }
+        // Single is byte-identical to the body — the pixel-identity
+        // guarantee starts here.
+        assert_eq!(focus_layout_areas(body, L::Single), vec![body]);
+        // Grid order is TL, TR, BL, BR.
+        let grid = focus_layout_areas(body, L::Grid);
+        assert!(grid[0].x < grid[1].x && grid[0].y == grid[1].y);
+        assert!(grid[2].y > grid[0].y && grid[2].x == grid[0].x);
+        assert!(grid[3].x > grid[2].x && grid[3].y == grid[2].y);
+    }
+
+    #[test]
+    fn focus_pane_move_is_spatial_and_clamps_at_edges() {
+        use lazybox_config::FocusLayout as L;
+        use lazybox_core::TileDirection as D;
+        // SplitV: left/right move, up/down inert, edges clamp.
+        assert_eq!(focus_pane_move(L::SplitV, 0, D::Right), 1);
+        assert_eq!(focus_pane_move(L::SplitV, 1, D::Right), 1);
+        assert_eq!(focus_pane_move(L::SplitV, 1, D::Left), 0);
+        assert_eq!(focus_pane_move(L::SplitV, 0, D::Up), 0);
+        // SplitH: up/down move, left/right inert.
+        assert_eq!(focus_pane_move(L::SplitH, 0, D::Down), 1);
+        assert_eq!(focus_pane_move(L::SplitH, 1, D::Up), 0);
+        assert_eq!(focus_pane_move(L::SplitH, 0, D::Right), 0);
+        // Grid: 2D moves between quadrants, clamping at edges.
+        assert_eq!(focus_pane_move(L::Grid, 0, D::Right), 1);
+        assert_eq!(focus_pane_move(L::Grid, 1, D::Down), 3);
+        assert_eq!(focus_pane_move(L::Grid, 3, D::Left), 2);
+        assert_eq!(focus_pane_move(L::Grid, 2, D::Up), 0);
+        assert_eq!(focus_pane_move(L::Grid, 0, D::Left), 0);
+        assert_eq!(focus_pane_move(L::Grid, 3, D::Down), 3);
+        // Single always resolves to the only pane.
+        assert_eq!(focus_pane_move(L::Single, 0, D::Right), 0);
     }
 
     #[test]

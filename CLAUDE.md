@@ -229,7 +229,20 @@ failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace
 has no activity), `.`
 toggle focus mode (near-fullscreen agent terminal behind a slim event
-header; from inside a terminal use `]]f`, and `]]q` exits),
+header; from inside a terminal use `]]f`, and `]]q` exits). Focus mode
+carries **multi-workspace layouts** (#1258): `]]v` cycles Single →
+SplitV → SplitH → 2×2 Grid (persisted as `ui.focus_layout`, applied to
+attach clients too); the panes fill from the starred roster — pane 1 =
+the current workspace, then the next starred workspaces with a live
+terminal in sidebar order, then most-recently-active agent workspaces,
+then a dim star-nudge placeholder — each pane a bordered frame (accent
+= focused) titled with the workspace name + agent-state badge + star
+digit, showing that workspace's agent terminal (fallback: most recent),
+its PTY resized to the pane. Input goes to the focused pane only;
+`]]<arrow>` moves pane focus (panes-first — tile motion stays a Single
+behavior), `]]<digit>` retargets the focused pane (swapping if the
+target is already visible), `]]z` zooms the focused pane to Single and
+back,
 `]]<digit>` jump the focused terminal straight to the Nth **focused**
 (starred) workspace (sidebar order; the number rides a badge on each
 focused row and the `]]` leader popup — only focused workspaces are
@@ -435,7 +448,11 @@ menu), so it's the reliable mouse path (Alt/Ctrl ride the SGR mouse
 report; Cmd isn't encoded and most emulators eat it, so don't rely on
 it); both need capture on, while `]]u` works even with capture off.
 `]]f`
-toggles focus mode, `]]q` exits to the sidebar, `]]<digit>` jumps to
+toggles focus mode, `]]v` cycles the focus-mode layout (Single →
+SplitV → SplitH → Grid, #1258 — persists `ui.focus_layout`; only live
+in focus mode, and in a multi-pane layout `]]<arrow>` / `]]<digit>` /
+`]]z` become pane-focus / pane-retarget / pane-zoom, the popup rows
+following suit), `]]q` exits to the sidebar, `]]<digit>` jumps to
 the Nth focused (starred) workspace, and `` ]]` `` opens the fuzzy workspace
 switcher. The snippet picker (see
 [`docs/snippets.md`](docs/snippets.md)) is a category-grouped list with

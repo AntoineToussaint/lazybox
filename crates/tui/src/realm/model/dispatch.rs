@@ -1792,7 +1792,16 @@ impl<T: TerminalAdapter> Model<T> {
                 self.pending_refresh_ack = true;
             }
             Action::ForceRedraw => {
+                // Ctrl-L is the user saying "what I see is wrong — show
+                // me the truth" (#1254). Repaint the host screen AND
+                // re-request every visible terminal's authoritative
+                // daemon replay: the repaint alone cannot fix a client
+                // VT grid that parsed a torn stream. Deliberately NOT
+                // inside `force_full_redraw` itself — resize and
+                // focus-regain repaints happen constantly and must not
+                // each fetch megabytes of replay ring.
                 self.force_full_redraw();
+                self.request_terminal_truth();
             }
             Action::OpenHelp => {
                 self.mount_help_ask();

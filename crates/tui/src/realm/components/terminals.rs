@@ -196,6 +196,18 @@ impl Terminals {
         self.inner.requeue_resync_requests(requests);
     }
 
+    /// Tick-driven retry for desynced slots whose resync came back
+    /// unavailable (#1254): re-arms due requests on a bounded backoff.
+    pub fn tick_resync_retries(&mut self, now: std::time::Instant) {
+        self.inner.tick_resync_retries(now);
+    }
+
+    /// Ctrl-L truth hatch (#1254): mark every visible slot desynced so
+    /// the daemon's authoritative replay replaces the client grid.
+    pub fn mark_visible_desynced(&mut self) {
+        self.inner.mark_visible_desynced();
+    }
+
     /// Direct render entry point.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {
         self.inner.render(area, frame, self.focused);

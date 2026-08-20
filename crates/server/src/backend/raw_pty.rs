@@ -628,12 +628,24 @@ mod tests {
                 .await
                 .expect("spawn stubborn");
             b.shutdown_sessions().await;
+            // The sweep bounds SIGNALLING, not reaping: SIGKILL has
+            // been sent, but under CI load the exit-watcher thread may
+            // not have `wait()`ed the child yet — and a zombie still
+            // answers `kill(pid, 0)`, so an immediate `is_alive` check
+            // raced it on Linux runners. Converge on death instead;
+            // the outer 10s deadline keeps the guarantee bounded.
             for key in [&polite, &stubborn] {
-                assert_eq!(
-                    b.is_alive(key).await.ok(),
-                    Some(false),
-                    "session {key} must be dead after the shutdown sweep"
-                );
+                let end = tokio::time::Instant::now() + Duration::from_secs(8);
+                loop {
+                    if b.is_alive(key).await.ok() == Some(false) {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < end,
+                        "session {key} must be dead after the shutdown sweep"
+                    );
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
             }
         })
         .await

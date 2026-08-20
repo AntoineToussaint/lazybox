@@ -21,6 +21,7 @@ fn sample_ctx() -> SpawnCtx {
         skip_permissions: false,
         access: lazybox_ipc::AgentRunAccess::Default,
         hook_settings_path: None,
+        strict_mcp: false,
     }
 }
 
@@ -145,17 +146,31 @@ fn claude_skip_permissions_appends_unattended_flags() {
         skip_permissions: true,
         ..sample_ctx()
     };
-    // `--strict-mcp-config` makes Claude ignore ambient MCP configs so an
-    // unauthenticated MCP server can't wedge the autonomous spawn on its
-    // `run /mcp` auth gate (issue #256).
+    // #1183: autonomous spawns keep the user's ambient MCP servers by
+    // default — always-on `--strict-mcp-config` (the #256 auth-gate
+    // dodge) silently made MCP "work outside lazybox, not inside".
+    // `agent.strict_mcp: true` opts the flag back in.
     assert_eq!(
         agent.spawn(&ctx),
         vec![
             "claude".to_string(),
             "--dangerously-skip-permissions".to_string(),
+        ],
+        "autonomous (skip_permissions) spawn bypasses tool prompts but inherits MCP"
+    );
+    let strict = SpawnCtx {
+        skip_permissions: true,
+        strict_mcp: true,
+        ..sample_ctx()
+    };
+    assert_eq!(
+        agent.spawn(&strict),
+        vec![
+            "claude".to_string(),
+            "--dangerously-skip-permissions".to_string(),
             "--strict-mcp-config".to_string(),
         ],
-        "autonomous (skip_permissions) spawn must bypass tool-use prompts and drop ambient MCP"
+        "agent.strict_mcp: true restores the #256 behavior"
     );
     assert_eq!(
         agent.resume(&ctx),
@@ -163,9 +178,18 @@ fn claude_skip_permissions_appends_unattended_flags() {
             "claude".to_string(),
             "--continue".to_string(),
             "--dangerously-skip-permissions".to_string(),
+        ],
+        "resume carries the unattended flags and inherits MCP (#1183)"
+    );
+    assert_eq!(
+        agent.resume(&strict),
+        vec![
+            "claude".to_string(),
+            "--continue".to_string(),
+            "--dangerously-skip-permissions".to_string(),
             "--strict-mcp-config".to_string(),
         ],
-        "resume must carry the unattended flags too so a resumed autonomous session stays clean"
+        "strict opt-in restores the flag on resume too"
     );
 }
 
@@ -706,6 +730,19 @@ fn codex_requires_ready_before_initial_prompt_injection() {
     // Never paste the work prompt into Codex's directory-trust or approval
     // chooser. The adapter's composer detector is the authoritative gate.
     assert!(Codex.pty_protocol().requires_ready());
+}
+
+#[test]
+fn credit_chooser_selection_is_owned_by_the_codex_adapter() {
+    assert_eq!(
+        Codex
+            .credit_recovery_protocol()
+            .expect("Codex credit recovery")
+            .select_wait(),
+        b"\r"
+    );
+    assert!(Claude.credit_recovery_protocol().is_none());
+    assert!(Cursor.credit_recovery_protocol().is_none());
 }
 
 #[test]

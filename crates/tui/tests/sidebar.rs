@@ -1323,9 +1323,12 @@ fn contextual_bindings_surface_fix_ci_when_red() {
         labels.contains(&"fix CI"),
         "CI-failing PR must surface fix CI, got {labels:?}",
     );
+    // The github group is absent as a FOOTER HINT on a red-CI row —
+    // fix-CI is the likelier action — but `g m` itself still fires
+    // (#1203: cached state advises at send time, it never refuses).
     assert!(
         !labels.contains(&"github"),
-        "the github group (merge) must NOT show when CI is failing, got {labels:?}",
+        "the footer promotes fix CI over merge on a red-CI PR, got {labels:?}",
     );
 }
 
@@ -1401,27 +1404,15 @@ fn merge_target_fires_on_green_ci_without_approval() {
     }
 }
 
+/// #1203: cached soft blocks (changes requested, red CI) no longer
+/// hide `g m` — the action stays live and the send carries an
+/// advisory; GitHub is the authority. Only a structurally unmergeable
+/// row (no PR, or the PR isn't open) yields no target.
 #[test]
-fn merge_target_is_hidden_when_changes_requested() {
+fn merge_target_survives_cached_soft_blocks_but_not_a_closed_pr() {
     let mut s = Sidebar::new(PaneId::new(1));
     let mut pr = make_task("o/r", "o/r#1", Utc::now());
     pr.review = ReviewStatus::ChangesRequested;
-    pr.ci = CiStatus::Success;
-    s.on_event(&Event::Snapshot {
-        workspaces: vec![Workspace::from_task(pr, Utc::now())],
-        terminals: vec![],
-        projects: vec![],
-        recent_snippets: Vec::new(),
-        dismissed_updates: Vec::new(),
-    });
-    assert!(s.merge_target_for_cursor().is_none());
-}
-
-#[test]
-fn merge_target_is_hidden_when_ci_failing() {
-    let mut s = Sidebar::new(PaneId::new(1));
-    let mut pr = make_task("o/r", "o/r#1", Utc::now());
-    pr.review = ReviewStatus::Approved;
     pr.ci = CiStatus::Failure;
     s.on_event(&Event::Snapshot {
         workspaces: vec![Workspace::from_task(pr, Utc::now())],
@@ -1430,7 +1421,25 @@ fn merge_target_is_hidden_when_ci_failing() {
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),
     });
-    assert!(s.merge_target_for_cursor().is_none());
+    assert!(
+        s.merge_target_for_cursor().is_some(),
+        "soft-blocked open PR keeps its merge target (advise, never forbid)"
+    );
+
+    let mut merged = make_task("o/r", "o/r#2", Utc::now());
+    merged.state = lazybox_core::TaskState::Merged;
+    let mut s2 = Sidebar::new(PaneId::new(1));
+    s2.on_event(&Event::Snapshot {
+        workspaces: vec![Workspace::from_task(merged, Utc::now())],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(
+        s2.merge_target_for_cursor().is_none(),
+        "a merged PR has nothing to merge"
+    );
 }
 
 #[test]

@@ -29,4 +29,4 @@
  * Variants are appended, never reordered: the socket transport
  * encodes this enum by bincode ordinal.
  */
-export type AgentState = "Working" | "InputNeeded" | "Idle" | "Done" | { "Exited": { code: number | null, } } | "LimitReached";
+export type AgentState = "Working" | "InputNeeded" | "Idle" | "Done" | { "Exited": { code: number | null, } } | "LimitReached" | "CreditExhausted";

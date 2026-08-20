@@ -555,6 +555,23 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::MoveToSpacePicker, modal);
     }
 
+    /// Mount the rename-Space input (#1211), prefilled with the current
+    /// name. Submit → `Sidebar::rename_space`.
+    pub(super) fn mount_rename_space_input(&mut self, space: String) {
+        use crate::realm::components::input::Input;
+
+        if matches!(self.modal_stack.last(), Some(Id::RenameSpace)) {
+            return;
+        }
+        self.set_modal_flow(ModalFlow::RenameSpace {
+            space: space.clone(),
+        });
+        let modal = Input::new(format!("Rename Space {space} to…"))
+            .title("Rename Space")
+            .with_input(space);
+        self.mount_modal(Id::RenameSpace, modal);
+    }
+
     pub(super) fn mount_move_to_space_input(&mut self, source: String) {
         use crate::realm::components::input::Input;
 
@@ -2418,6 +2435,10 @@ impl<T: TerminalAdapter> Model<T> {
         if is_repo {
             actions.push(Action::ToggleRepoPin);
             actions.push(Action::MoveToSpace);
+        } else {
+            // Space headers rename in place (#1211) — same action the
+            // keyboard reaches via `x R` on the header row.
+            actions.push(Action::RenameWorkspace);
         }
 
         let labels: Vec<String> = actions

@@ -3518,6 +3518,104 @@ snippets:
         );
     }
 
+    #[test]
+    fn recover_credit_focused_and_bulk_target_only_credit_blocked_agents() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("codex".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent(), agent()]);
+        m.ui_defaults.credit_recovery_prompt = "Resume precisely here.".into();
+        for (i, state) in [
+            AgentState::CreditExhausted,
+            AgentState::Working,
+            AgentState::CreditExhausted,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+
+        m.terminals.set_active_session(Some(keys[0].clone()));
+        assert!(m.terminals.focus_terminal(TerminalId(1)));
+        m.focus = PaneFocus::Terminals;
+        let focused = m.dispatch_action(&Action::RecoverAgentCredit);
+        assert!(matches!(
+            focused.as_slice(),
+            [IpcCommand::RecoverAgentCredit {
+                terminal_id: TerminalId(1),
+                continuation_prompt,
+                ..
+            }] if continuation_prompt == "Resume precisely here."
+        ));
+        assert!(
+            m.dispatch_action(&Action::RecoverAgentCredit).is_empty(),
+            "a repeated focused keypress is idempotent while recovery is pending"
+        );
+
+        let bulk = m.dispatch_action(&Action::RecoverAllAgentCredit);
+        let targets: Vec<_> = bulk
+            .iter()
+            .filter_map(|command| match command {
+                IpcCommand::RecoverAgentCredit { terminal_id, .. } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            vec![3],
+            "bulk skips the already-pending focused target and the working agent"
+        );
+    }
+
+    #[test]
+    fn recover_credit_command_correlation_clears_pending_and_reports_failure() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("codex".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent()]);
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::CreditExhausted,
+        });
+        m.action_key_overrides
+            .insert("recover_agent_credit".into(), "F6".into());
+        m.handle_daemon_event(IpcEvent::AgentCreditExhausted {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            hint: "add credits or switch subscription".into(),
+        });
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.message.contains("press F6 to recover")),
+            "the recovery notice uses the effective remapped key"
+        );
+        let commands = m.dispatch_action(&Action::RecoverAgentCredit);
+        let IpcCommand::RecoverAgentCredit {
+            client_request_id, ..
+        } = &commands[0]
+        else {
+            panic!("expected correlated recovery command")
+        };
+        m.handle_daemon_event(IpcEvent::CommandFailed {
+            client_request_id: client_request_id.clone(),
+            message: "composer readiness timed out; retry".into(),
+        });
+        let notice = m.status.notice.as_ref().expect("failure notice");
+        assert!(notice.message.contains("composer readiness timed out"));
+        assert!(
+            !m.dispatch_action(&Action::RecoverAgentCredit).is_empty(),
+            "a failed correlated request is retryable"
+        );
+    }
+
     /// #1012: the escalating usage-limit alert rides the count of
     /// rate-limited workspaces — a sticky footer banner (naming the
     /// resume action, plus the parsed reset time) raised as agents hit
@@ -6883,6 +6981,7 @@ mod stale_input_tests {
                 // Drop — text/config inputs and multi-step flow steps.
                 Id::NewWorkspace
                 | Id::RenameWorkspace
+                | Id::RenameSpace
                 | Id::MoveToSpace
                 | Id::NewProject
                 | Id::NewWorkspaceRepo
@@ -6935,6 +7034,7 @@ mod stale_input_tests {
             Id::Notes,
             Id::NewWorkspace,
             Id::RenameWorkspace,
+            Id::RenameSpace,
             Id::MoveToSpace,
             Id::MoveToSpacePicker,
             Id::HeaderContext,
@@ -7813,6 +7913,108 @@ mod modal_input_responsiveness_tests {
             priority: None,
             state_label: None,
         }
+    }
+
+    /// #1211 journey on a temp `LAZYBOX_HOME`: `x R` on a Space header
+    /// renames the Space in place — repos regroup under the new name,
+    /// the collapse flag follows, `ui.spaces` persists — while `x R`
+    /// on a workspace row still mounts the workspace rename.
+    #[test]
+    fn rename_space_from_its_header_renames_and_persists() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home =
+            std::env::temp_dir().join(format!("lazybox-rename-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        let seed = [
+            ("github:acme/a#1", "acme", "a"),
+            ("github:obin-ai/c#3", "obin-ai", "c"),
+        ];
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: seed
+                .iter()
+                .map(|(k, owner, repo)| {
+                    let mut w = lazybox_core::Workspace::empty(
+                        WorkspaceKey::new(*k),
+                        "main",
+                        chrono::Utc::now(),
+                    );
+                    w.project_key = Some(lazybox_core::ProjectKey::github(owner, repo));
+                    w.pr = Some(repo_task(k, &format!("{owner}/{repo}")));
+                    w
+                })
+                .collect(),
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        // On a workspace row, `x R` still renames the workspace.
+        assert!(
+            m.sidebar
+                .focus_workspace_key(&lazybox_core::SessionKey::from(&WorkspaceKey::new(
+                    "github:acme/a#1"
+                )))
+        );
+        m.dispatch_action(&Action::RenameWorkspace);
+        assert_eq!(m.top_modal(), Some(&Id::RenameWorkspace));
+        m.pop_modal();
+        m.modal_flow = None;
+
+        // On the Space header, the same chord renames the Space.
+        assert!(m.sidebar.focus_header_row("acme"));
+        m.dispatch_action(&Action::RenameWorkspace);
+        assert_eq!(m.top_modal(), Some(&Id::RenameSpace));
+        let _ = m.handle_input_submitted("Clients".into());
+
+        let headers = m.sidebar.__test_header_rows();
+        assert!(
+            headers
+                .iter()
+                .any(|(is_repo, n)| !is_repo && n == "Clients"),
+            "space renamed on screen: {headers:?}",
+        );
+        assert!(
+            !headers.iter().any(|(is_repo, n)| !is_repo && n == "acme"),
+            "old space header gone: {headers:?}",
+        );
+        assert!(
+            headers.iter().any(|(is_repo, n)| *is_repo && n == "acme/a"),
+            "repo regrouped under the new Space: {headers:?}",
+        );
+
+        // Persisted: `ui.spaces` carries the claim under the new name.
+        let cfg_path = home.join("config.yaml");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let ok = lazybox_config::Config::load_from(&cfg_path)
+                .map(|c| {
+                    c.ui.spaces
+                        .iter()
+                        .any(|s| s.name == "Clients" && s.sources.iter().any(|x| x == "acme/a"))
+                })
+                .unwrap_or(false);
+            if ok {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "renamed Space never persisted",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// #1211 journey on a temp `LAZYBOX_HOME`: a repo moves within its
@@ -9292,6 +9494,54 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Advise, never forbid (#1179 review): a workspace whose agent sits on
+    /// the `¢` credit chooser is still fully workable. `w w` keeps
+    /// targeting the blocked agent (the daemon parks the prompt behind the
+    /// chooser gate and delivers it once the block clears — degraded, not
+    /// refused), and spawning a fresh sibling agent goes through untouched.
+    #[test]
+    fn credit_exhausted_workspace_still_accepts_work_and_spawn() {
+        use lazybox_ipc::{AgentState, Command, TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(pr)));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(3),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: sk.clone(),
+            terminal_id: TerminalId(3),
+            state: AgentState::CreditExhausted,
+        });
+        assert!(m.sidebar.focus_workspace_key(&sk));
+
+        let cmds = m.dispatch_action(&Action::Work);
+        let injected = cmds.iter().find_map(|command| match command {
+            Command::InjectPrompt { terminal_id, .. } => Some(*terminal_id),
+            _ => None,
+        });
+        assert_eq!(
+            injected,
+            Some(TerminalId(3)),
+            "`w w` on a credit-exhausted agent still dispatches the work prompt: {cmds:?}",
+        );
+
+        let cmds = m.dispatch_action(&Action::SpawnAgent("claude".into()));
+        assert!(
+            cmds.iter()
+                .any(|command| matches!(command, Command::Spawn { .. })),
+            "spawning a sibling agent on a credit-exhausted workspace is never vetoed: {cmds:?}",
+        );
+    }
+
     /// Issue #418: with SEVERAL distinct agents running, `w w` must ask
     /// which one to inject into (a chooser modal) instead of silently
     /// picking the default; the pick replays the work spawn against the
@@ -10065,10 +10315,18 @@ mod merge_focus_follow_tests {
         use lazybox_tui_core::action::Action;
         let mut m = build_model();
         let ready = workspace("owner/repo#1", true, Duration::hours(1));
-        let mut blocked = workspace("owner/repo#2", true, Duration::hours(2));
-        blocked.pr.as_mut().unwrap().review = lazybox_core::ReviewStatus::ChangesRequested;
+        // Soft-blocked (changes requested): under #1203 the cache no
+        // longer refuses — GitHub is the authority, so this one FIRES.
+        let mut soft_blocked = workspace("owner/repo#2", true, Duration::hours(2));
+        soft_blocked.pr.as_mut().unwrap().review = lazybox_core::ReviewStatus::ChangesRequested;
+        // Will regress to MERGED under the open modal — structurally
+        // ineligible by confirm time. Seeded open so it can be selected.
+        let merged = workspace("owner/repo#3", true, Duration::hours(3));
+        let mut merged_row = merged.clone();
+        merged_row.pr.as_mut().unwrap().state = lazybox_core::TaskState::Merged;
         let ready_key = ready.key.clone();
-        seed_and_select(&mut m, vec![ready, blocked]);
+        let soft_key = soft_blocked.key.clone();
+        seed_and_select(&mut m, vec![ready, soft_blocked, merged]);
 
         let pending = m.dispatch_action(&Action::MergePr);
         assert!(pending.is_empty(), "merge gates on confirm first");
@@ -10077,16 +10335,31 @@ mod merge_focus_follow_tests {
             Some(ModalFlow::ActionConfirm {
                 action: Action::MergePr,
                 targets,
-            }) => assert_eq!(targets.len(), 2, "the whole selection is stashed"),
+            }) => assert_eq!(targets.len(), 3, "the whole selection is stashed"),
             other => panic!("expected a bulk merge confirm, got {other:?}"),
         }
+        // The third PR merges upstream while the confirm is up —
+        // structurally ineligible by the time the user hits Yes.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(merged_row)));
 
         let cmds = m.handle_confirmed(true);
-        assert_eq!(cmds.len(), 1, "only the merge-ready PR fires");
-        match &cmds[0] {
-            IpcCommand::MergePr { workspace_key } => assert_eq!(workspace_key, &ready_key),
-            other => panic!("expected MergePr for the ready PR, got {other:?}"),
-        }
+        let mut merged_keys: Vec<String> = cmds
+            .iter()
+            .map(|c| match c {
+                IpcCommand::MergePr { workspace_key } => workspace_key.as_str().to_string(),
+                other => panic!("expected MergePr, got {other:?}"),
+            })
+            .collect();
+        merged_keys.sort();
+        let mut expected = vec![
+            ready_key.as_str().to_string(),
+            soft_key.as_str().to_string(),
+        ];
+        expected.sort();
+        assert_eq!(
+            merged_keys, expected,
+            "ready AND soft-blocked fire (GitHub decides); only the merged PR is skipped"
+        );
         assert_eq!(m.sidebar.broadcast_selected_count(), 0);
     }
 
@@ -10183,10 +10456,13 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let a = workspace("owner/repo#1", true, Duration::hours(1));
         let b = workspace("owner/repo#2", true, Duration::hours(2));
+        // Structural regressions: one merged, one closed, under the
+        // open modal. (Soft regressions — failing CI, fresh conflict —
+        // no longer refuse per #1203; only a PR that isn't open left.)
         let mut a_red = a.clone();
-        a_red.pr.as_mut().unwrap().ci = lazybox_core::CiStatus::Failure;
+        a_red.pr.as_mut().unwrap().state = lazybox_core::TaskState::Merged;
         let mut b_red = b.clone();
-        b_red.pr.as_mut().unwrap().ci = lazybox_core::CiStatus::Failure;
+        b_red.pr.as_mut().unwrap().state = lazybox_core::TaskState::Closed;
         seed_and_select(&mut m, vec![a, b]);
 
         assert!(m.dispatch_action(&Action::MergePr).is_empty());

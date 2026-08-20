@@ -996,6 +996,9 @@ pub struct UiSection {
     /// detects + surfaces the block unless you opt in.
     #[serde(default)]
     pub auto_wait_on_limit: bool,
+    /// Prompt submitted after a credit chooser has cleared and the provider
+    /// composer is ready.
+    pub credit_recovery_prompt: String,
     /// Show each running agent's model + reasoning effort next to its
     /// sidebar badge (`C Opus`, `X gpt-5.5 · xhigh`) and on its
     /// terminal tab (where it rides the `◆` tier badge). The value is the
@@ -1067,6 +1070,7 @@ impl Default for UiSection {
             confirm_default: ConfirmDefaults::default(),
             keep_awake: false,
             auto_wait_on_limit: false,
+            credit_recovery_prompt: default_credit_recovery_prompt(),
             show_agent_model: true,
             usage_limit_alerts: true,
             usage_summary: true,
@@ -1117,6 +1121,7 @@ pub struct UiDefaults {
     /// Escalate a footer alert as agents hit their usage limit. See
     /// [`UiSection::usage_limit_alerts`].
     pub usage_limit_alerts: bool,
+    pub credit_recovery_prompt: String,
     /// Show the always-visible per-provider usage summary. See
     /// [`UiSection::usage_summary`].
     pub usage_summary: bool,
@@ -1151,6 +1156,7 @@ impl Default for UiDefaults {
             keep_awake: false,
             show_agent_model: true,
             usage_limit_alerts: true,
+            credit_recovery_prompt: default_credit_recovery_prompt(),
             usage_summary: true,
             usage_budgets: std::collections::BTreeMap::new(),
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
@@ -1165,6 +1171,11 @@ impl UiSection {
     /// each field.
     pub fn resolved(&self) -> UiDefaults {
         let d = UiDefaults::default();
+        let credit_recovery_prompt = if self.credit_recovery_prompt.trim().is_empty() {
+            d.credit_recovery_prompt.clone()
+        } else {
+            self.credit_recovery_prompt.clone()
+        };
         UiDefaults {
             auto_mark_delay: self.auto_mark_delay.unwrap_or(d.auto_mark_delay),
             quit_double_tap_window: self
@@ -1191,6 +1202,7 @@ impl UiSection {
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
             usage_limit_alerts: self.usage_limit_alerts,
+            credit_recovery_prompt,
             usage_summary: self.usage_summary,
             usage_budgets: self.usage_budgets.clone(),
             // Sourced from the `terminal` section (see
@@ -1199,6 +1211,10 @@ impl UiSection {
             scrollback_lines: d.scrollback_lines,
         }
     }
+}
+
+fn default_credit_recovery_prompt() -> String {
+    "Continue the work you were doing.".to_string()
 }
 
 /// Worktree-layout configuration — mount points, mostly. The daemon
@@ -1674,6 +1690,16 @@ pub struct AgentSection {
     /// Unset → 32; `0` → no warnings.
     #[serde(default)]
     pub max_live_agents: Option<usize>,
+    /// Launch unattended (skip-permissions) Claude spawns with
+    /// `--strict-mcp-config`, disabling every ambient MCP server the
+    /// user configured (#1183). Historically always-on to dodge the
+    /// MCP auth-gate stall (#256), which silently made "MCP works
+    /// outside lazybox, not inside" true for every autonomous spawn.
+    /// Default `false`: agents inherit the user's normal MCP setup.
+    /// Read-only spawns stay strict regardless — a reviewer needs no
+    /// MCP reach.
+    #[serde(default)]
+    pub strict_mcp: Option<bool>,
 }
 
 impl Default for AgentSection {
@@ -1687,6 +1713,7 @@ impl Default for AgentSection {
             working_watchdog_secs: None,
             quiet_classify_secs: None,
             max_live_agents: None,
+            strict_mcp: None,
         }
     }
 }
@@ -1703,6 +1730,12 @@ impl AgentSection {
             Some(n) => Some(n),
             None => Some(DEFAULT_MAX_LIVE_AGENTS),
         }
+    }
+
+    /// Whether unattended spawns pass `--strict-mcp-config` (#1183).
+    /// Unset → `false` (inherit the user's MCP servers).
+    pub fn strict_mcp(&self) -> bool {
+        self.strict_mcp.unwrap_or(false)
     }
 
     /// The configured global LLM-gateway base URL, normalized: surrounding
@@ -2773,6 +2806,17 @@ mod duration_human_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1183: strict MCP is opt-in — unset inherits the user's MCP
+    /// servers, `true` restores the #256 always-strict behavior.
+    #[test]
+    fn strict_mcp_defaults_off_and_opts_in() {
+        assert!(!AgentSection::default().strict_mcp());
+        let on = Config::parse("agent:\n  strict_mcp: true\n").unwrap();
+        assert!(on.agent.strict_mcp());
+        let off = Config::parse("agent:\n  strict_mcp: false\n").unwrap();
+        assert!(!off.agent.strict_mcp());
+    }
 
     #[test]
     fn relay_entitlement_config_is_optional_and_round_trips() {
@@ -4091,6 +4135,29 @@ auto_fix:
         assert_eq!(r.short_snooze, d.short_snooze);
         assert_eq!(r.long_snooze, d.long_snooze);
         assert_eq!(r.log_path, d.log_path);
+        assert_eq!(
+            r.credit_recovery_prompt,
+            "Continue the work you were doing."
+        );
+    }
+
+    #[test]
+    fn credit_recovery_prompt_is_configurable_and_blank_uses_default() {
+        let configured: Config = serde_yaml::from_str(
+            "ui:\n  credit_recovery_prompt: Resume from the interrupted step.\n",
+        )
+        .expect("credit recovery config parses");
+        assert_eq!(
+            configured.resolved_ui().credit_recovery_prompt,
+            "Resume from the interrupted step."
+        );
+
+        let blank: Config =
+            serde_yaml::from_str("ui:\n  credit_recovery_prompt: '   '\n").expect("blank parses");
+        assert_eq!(
+            blank.resolved_ui().credit_recovery_prompt,
+            "Continue the work you were doing."
+        );
     }
 
     #[test]

@@ -14,7 +14,7 @@
 //! `mount_setup_modal`, `unmount_setup_modal`) co-locates here
 //! since it's the same modal-state-mutation shape.
 
-use super::{ChoicePayload, HelpQuestionKind, Id, ModalFlow, Model, Msg};
+use super::{ChoicePayload, HelpQuestionKind, Id, ModalFlow, Model, Msg, PaneFocus};
 use crate::realm::UserEvent;
 use lazybox_ipc::{Command as IpcCommand, TerminalId};
 use std::path::{Path, PathBuf};
@@ -295,6 +295,71 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
+    pub(super) fn recover_agent_credit(&mut self, bulk: bool) -> Vec<IpcCommand> {
+        let targets = if bulk {
+            self.sidebar.credit_exhausted_terminals()
+        } else if self.focus == PaneFocus::Terminals {
+            self.terminals
+                .focused_terminal_id()
+                .filter(|id| {
+                    self.terminals.terminal_agent_state(*id)
+                        == Some(lazybox_ipc::AgentState::CreditExhausted)
+                })
+                .into_iter()
+                .collect()
+        } else {
+            let Some(key) = self.sidebar.selected_workspace_key().cloned() else {
+                self.flash_hint("focus an out-of-credit agent first");
+                return Vec::new();
+            };
+            let targets = self.sidebar.credit_exhausted_terminals_for(&key);
+            if targets.len() > 1 {
+                self.flash_hint("focus one blocked terminal, or use recover all");
+                return Vec::new();
+            }
+            targets
+        };
+        if targets.is_empty() {
+            self.flash_hint(if bulk {
+                "no out-of-credit agents to recover"
+            } else {
+                "the focused agent is not waiting for credit"
+            });
+            return Vec::new();
+        }
+
+        let mut commands = Vec::new();
+        for terminal_id in targets {
+            if self
+                .pending_credit_recoveries
+                .values()
+                .any(|pending| *pending == terminal_id)
+            {
+                continue;
+            }
+            let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+            self.pending_credit_recoveries
+                .insert(client_request_id.clone(), terminal_id);
+            commands.push(IpcCommand::RecoverAgentCredit {
+                terminal_id,
+                client_request_id,
+                continuation_prompt: self.ui_defaults.credit_recovery_prompt.clone(),
+            });
+        }
+        if commands.is_empty() {
+            self.flash_hint("credit recovery is already in progress");
+            return commands;
+        }
+        let count = commands.len();
+        self.flash_info(if count == 1 {
+            "recovering out-of-credit agent…".into()
+        } else {
+            format!("recovering {count} out-of-credit agents…")
+        });
+        self.redraw = true;
+        commands
+    }
+
     /// Deliver the composed handoff body into the target session
     /// (`x s`, issue #431): a running agent gets the same settle-gated
     /// `InjectPrompt` (+ `RecordUserMessage` recap) the broadcast path
@@ -418,6 +483,25 @@ impl<T: TerminalAdapter> Model<T> {
                         );
                     }
                     _ => {}
+                }
+            }
+            Some(Id::RenameSpace) => {
+                let new = text.trim().to_string();
+                let old = match self.modal_flow.take() {
+                    Some(ModalFlow::RenameSpace { space }) => Some(space),
+                    _ => None,
+                };
+                if let Some(old) = old {
+                    match self.sidebar.rename_space(&old, &new) {
+                        Some((old, new)) => {
+                            self.flash_info(format!("Space {old} → {new}"));
+                            self.redraw = true;
+                        }
+                        // Blank / unchanged: advise, never error.
+                        None => self.flash_hint("Space name unchanged"),
+                    }
+                } else {
+                    tracing::warn!("rename-space submit without a stashed name — dropped");
                 }
             }
             Some(Id::RenameWorkspace) => {

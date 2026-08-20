@@ -268,6 +268,55 @@ pub fn move_source_in_space(
     true
 }
 
+/// Rename a Space (#1211): move every source it claims — plus
+/// `rendered_sources`, the repos currently resolving into it on screen
+/// (covers auto-seeded Spaces with no config entry) — into the entry
+/// named `new`, creating it in the old entry's position (or at the end
+/// for an auto-seed). Renaming onto an existing Space merges into it.
+/// Returns `false` for a blank/unchanged name (advise-level no-op).
+pub fn rename_space(
+    spaces: &mut Vec<lazybox_config::SpaceConfig>,
+    old: &str,
+    new: &str,
+    rendered_sources: &[String],
+) -> bool {
+    let new = new.trim();
+    if new.is_empty() || new == old {
+        return false;
+    }
+    let old_idx = spaces.iter().position(|s| s.name == old);
+    let mut moved: Vec<String> = match old_idx {
+        Some(idx) => spaces.remove(idx).sources,
+        None => Vec::new(),
+    };
+    for src in rendered_sources {
+        if !moved.contains(src) {
+            moved.push(src.clone());
+        }
+    }
+    match spaces.iter_mut().find(|s| s.name == new) {
+        Some(target) => {
+            for src in moved {
+                if !target.sources.contains(&src) {
+                    target.sources.push(src);
+                }
+            }
+        }
+        None => {
+            let entry = lazybox_config::SpaceConfig {
+                name: new.to_string(),
+                sources: moved,
+            };
+            match old_idx {
+                // Keep the renamed Space's display position.
+                Some(idx) => spaces.insert(idx.min(spaces.len()), entry),
+                None => spaces.push(entry),
+            }
+        }
+    }
+    true
+}
+
 /// Pure function: build the sidebar's visible-row list + per-repo
 /// summaries from the workspace map, mailbox filter, and
 /// repo-subscription config. No `Sidebar` borrow.
@@ -1658,6 +1707,58 @@ mod tests {
     /// config (auto-seeds get empty-source entries, existing entries
     /// keep their sources), unrendered entries survive at the tail,
     /// and end-of-list moves clamp instead of erroring.
+    /// #1211: rename keeps display position, merges into an existing
+    /// target, materializes an auto-seed's rendered sources, and
+    /// refuses blank/unchanged names.
+    #[test]
+    fn rename_space_moves_claims_and_rendered_sources() {
+        let mut spaces = vec![
+            lazybox_config::SpaceConfig {
+                name: "Work".into(),
+                sources: vec!["o/r".into()],
+            },
+            lazybox_config::SpaceConfig {
+                name: "Later".into(),
+                sources: vec!["x/y".into()],
+            },
+        ];
+
+        // Plain rename: claims move, position kept.
+        assert!(rename_space(&mut spaces, "Work", "Deep Work", &[]));
+        assert_eq!(spaces[0].name, "Deep Work");
+        assert_eq!(spaces[0].sources, ["o/r"]);
+
+        // Rename onto an existing Space merges (no dupes).
+        assert!(rename_space(
+            &mut spaces,
+            "Deep Work",
+            "Later",
+            &["o/r".into()]
+        ));
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].name, "Later");
+        assert_eq!(spaces[0].sources, ["x/y", "o/r"]);
+
+        // Auto-seed (no entry): rendered sources materialize the claim.
+        assert!(rename_space(
+            &mut spaces,
+            "obin-ai",
+            "Platform",
+            &["obin-ai/a".into(), "obin-ai/b".into()],
+        ));
+        let platform = spaces
+            .iter()
+            .find(|s| s.name == "Platform")
+            .expect("created");
+        assert_eq!(platform.sources, ["obin-ai/a", "obin-ai/b"]);
+
+        // Blank / unchanged: refuse, mutate nothing.
+        let before = spaces.clone();
+        assert!(!rename_space(&mut spaces, "Later", "  ", &[]));
+        assert!(!rename_space(&mut spaces, "Later", "Later", &[]));
+        assert_eq!(spaces, before);
+    }
+
     #[test]
     fn move_space_materializes_rendered_order_and_clamps() {
         let mut spaces = vec![

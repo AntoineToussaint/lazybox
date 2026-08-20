@@ -120,6 +120,17 @@ impl Sidebar {
         self.inner.displays_agent_state(session_key, state)
     }
 
+    pub fn credit_exhausted_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.credit_exhausted_terminals()
+    }
+
+    pub fn credit_exhausted_terminals_for(
+        &self,
+        key: &lazybox_core::SessionKey,
+    ) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.credit_exhausted_terminals_for(key)
+    }
+
     /// Drain footer-notice strings the inner sidebar queued in
     /// response to AgentState transitions. Returns one short string
     /// per Active→Asking edge, suitable for `Notice` rendering. The
@@ -749,6 +760,12 @@ impl Sidebar {
     /// routes right-click to the header menu (#1211).
     pub fn cursor_header(&self) -> Option<(bool, String)> {
         self.inner.cursor_header()
+    }
+
+    /// Rename the Space at the cursor (#1211) — claims + rendered
+    /// sources move, collapse flag follows, config persists.
+    pub fn rename_space(&mut self, old: &str, new: &str) -> Option<(String, String)> {
+        self.inner.rename_space(old, new)
     }
 
     /// Test-only: park the cursor on a header row by name.

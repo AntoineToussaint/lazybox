@@ -335,6 +335,9 @@ impl InboxModel {
 /// winning. Mirrors the TUI's `aggregate_agent_state`.
 fn aggregate_agent_state(states: impl Iterator<Item = AgentState>) -> Option<AgentState> {
     states.max_by_key(|state| match state {
+        // Credit exhaustion outranks everything — nothing moves until
+        // the account is topped up or the agent is recovered (#1179).
+        AgentState::CreditExhausted => 7,
         // A usage-limit block outranks even `InputNeeded` — the most
         // urgent "act externally before this moves" state (#847).
         AgentState::LimitReached => 6,
@@ -3898,6 +3901,7 @@ mod tests {
             }),
             closes_issues: vec![],
             linked_tasks: vec![],
+            parent: None,
             priority: None,
             state_label: None,
         }

@@ -2166,6 +2166,7 @@ impl GhClient {
         let mut state = self.notifications_state.lock();
         state.last_full_sweep_at = Some(chrono::Utc::now());
         state.force_full_sweep = false;
+        state.backoff_catchup_sweep_due = false;
         if state.last_modified.is_none() {
             state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
         }
@@ -2326,9 +2327,14 @@ impl GhClient {
         let was_armed = state.heartbeat_back_off_until.is_some();
         state.heartbeat_back_off_until = Some(deadline);
         if !was_armed {
+            // One catch-up sweep for whatever the dead heartbeat may
+            // have missed; subsequent backed-off ticks stay hot-only
+            // (#1218 — a full sweep every tick for the whole back-off
+            // window burned the most quota during exhaustion).
+            state.backoff_catchup_sweep_due = true;
             tracing::warn!(
                 back_off_secs = Self::HEARTBEAT_BACK_OFF.as_secs(),
-                "notifications heartbeat failed — backing off; full sweeps continue",
+                "notifications heartbeat failed — backing off; one catch-up sweep, then hot-only ticks",
             );
         }
     }

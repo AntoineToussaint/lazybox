@@ -204,6 +204,14 @@ pub(crate) struct NotificationsState {
     /// full GraphQL sweep on every tick. Cleared by
     /// `note_heartbeat_succeeded` once the endpoint recovers.
     pub(crate) heartbeat_back_off_until: Option<std::time::Instant>,
+    /// One catch-up full sweep owed because the heartbeat just failed
+    /// (#1218): without the notifications channel we may have missed
+    /// changes, so the NEXT tick sweeps — but only once per backed-off
+    /// episode. Ticks after that stay hot-only until the normal sweep
+    /// cadence elapses; the old behavior (every backed-off tick a full
+    /// sweep, for the whole 10-minute window) burned the most quota
+    /// exactly when the bucket was already exhausted.
+    pub(crate) backoff_catchup_sweep_due: bool,
     /// One-shot "force the next sweep" flag. Set by a manual
     /// `Command::Refresh` so the next tick runs a full `involves:USER`
     /// search regardless of where we are in the `FULL_SWEEP_INTERVAL`
@@ -244,9 +252,11 @@ impl NotificationsState {
     ///   - a manual refresh forced the next sweep (`force_full_sweep`),
     ///   - no sweep has run yet (bootstrap, first tick after daemon start),
     ///   - the configured `threshold` has elapsed since the last sweep,
-    ///   - the notifications heartbeat is currently in a back-off window
-    ///     (a chronic heartbeat failure → skip the round-trip and just
-    ///     do the sweep until it recovers).
+    ///   - the heartbeat just failed and its one catch-up sweep hasn't
+    ///     run yet (`backoff_catchup_sweep_due`) — after that, a
+    ///     backed-off heartbeat leaves ticks hot-only until the normal
+    ///     cadence elapses (#1218: promoting every backed-off tick to a
+    ///     full sweep burned quota precisely during exhaustion).
     ///
     /// Centralized here (rather than inlined in `GhClient`) so the
     /// timer arithmetic can be unit-tested without spinning up a real
@@ -259,7 +269,7 @@ impl NotificationsState {
         if self.force_full_sweep {
             return true;
         }
-        if self.heartbeat_backed_off() {
+        if self.backoff_catchup_sweep_due {
             return true;
         }
         match self.last_full_sweep_at {
@@ -572,17 +582,30 @@ mod tests {
         // now," `is_full_sweep_due` must return true while the
         // back-off window is active so the polling layer skips the
         // heartbeat and goes straight to the sweep.
-        let s = NotificationsState {
+        let mut s = NotificationsState {
             // Sweep happened RIGHT now — timer alone wouldn't promote.
             last_full_sweep_at: Some(Utc::now()),
-            // Back-off armed 100ms into the future.
+            // Back-off armed 100ms into the future, catch-up owed.
             heartbeat_back_off_until: Some(
                 std::time::Instant::now() + std::time::Duration::from_millis(100),
             ),
+            backoff_catchup_sweep_due: true,
             ..Default::default()
         };
         assert!(s.heartbeat_backed_off());
-        assert!(s.is_full_sweep_due(std::time::Duration::from_secs(600)));
+        assert!(
+            s.is_full_sweep_due(std::time::Duration::from_secs(600)),
+            "the owed catch-up sweep promotes exactly one tick",
+        );
+        // Catch-up consumed (mark_full_sweep_done clears it): the still-
+        // backed-off heartbeat no longer promotes every tick — hot-only
+        // until the normal cadence elapses (#1218).
+        s.backoff_catchup_sweep_due = false;
+        assert!(s.heartbeat_backed_off());
+        assert!(
+            !s.is_full_sweep_due(std::time::Duration::from_secs(600)),
+            "a backed-off heartbeat alone must not promote full sweeps",
+        );
     }
 
     #[test]

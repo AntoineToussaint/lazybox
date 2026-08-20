@@ -427,6 +427,15 @@ struct OperationState {
     material_forecast_errors: u64,
 }
 
+/// Minimum spacing between Interactive requests allowed through an open
+/// secondary cooldown (#1218 item 5). A secondary (abuse-limiter) pause
+/// is usually opened by BACKGROUND churn; hard-blocking the user's own
+/// `g s` / `g m` / reply behind it refuses user work — lazybox advises,
+/// it does not forbid. One spaced request at a time still lets the
+/// cooldown cool; scheduled work keeps waiting out the full window, and
+/// PRIMARY exhaustion (the quota is actually gone) still blocks everyone.
+const SECONDARY_INTERACTIVE_GAP: Duration = Duration::from_secs(20);
+
 #[derive(Debug, Clone)]
 struct CircuitState {
     reason: String,
@@ -458,6 +467,9 @@ pub struct RateBudget {
     total: Accounting,
     request_latencies_ms: VecDeque<u64>,
     secondary_circuit: Option<CircuitState>,
+    /// Earliest instant the next Interactive request may pass through an
+    /// open secondary cooldown ([`SECONDARY_INTERACTIVE_GAP`] pacing).
+    secondary_interactive_next: Option<Instant>,
     primary_circuits: HashMap<String, CircuitState>,
     secondary_failures: u32,
     min_request_gap: Duration,
@@ -487,6 +499,7 @@ impl RateBudget {
             total: Accounting::default(),
             request_latencies_ms: VecDeque::new(),
             secondary_circuit: None,
+            secondary_interactive_next: None,
             primary_circuits: HashMap::new(),
             secondary_failures: 0,
             min_request_gap: DEFAULT_MIN_REQUEST_GAP,
@@ -746,10 +759,22 @@ impl RateBudget {
 
         self.expire_circuits(wall_now);
         if let Some(circuit) = &self.secondary_circuit {
-            return Err(AcquireError::CircuitOpen {
-                reason: circuit.reason.clone(),
-                retry_at: circuit.retry_at,
-            });
+            // #1218 item 5: user-initiated requests pass through a
+            // secondary cooldown, spaced SECONDARY_INTERACTIVE_GAP apart;
+            // everything scheduled waits out the window. Primary
+            // exhaustion below still blocks unconditionally.
+            let interactive_may_pass = priority == RequestPriority::Interactive
+                && self
+                    .secondary_interactive_next
+                    .is_none_or(|next| mono_now >= next);
+            if interactive_may_pass {
+                self.secondary_interactive_next = Some(mono_now + SECONDARY_INTERACTIVE_GAP);
+            } else {
+                return Err(AcquireError::CircuitOpen {
+                    reason: circuit.reason.clone(),
+                    retry_at: circuit.retry_at,
+                });
+            }
         }
         if let Some(circuit) = self.primary_circuits.get(resource.key()) {
             return Err(AcquireError::CircuitOpen {
@@ -1431,6 +1456,7 @@ impl RateBudget {
             total: self.total.clone(),
             request_latencies_ms: self.request_latencies_ms.clone(),
             secondary_circuit: self.secondary_circuit.clone(),
+            secondary_interactive_next: self.secondary_interactive_next,
             primary_circuits: self.primary_circuits.clone(),
             secondary_failures: self.secondary_failures,
             min_request_gap: self.min_request_gap,
@@ -2141,9 +2167,11 @@ mod tests {
         let mut budget = RateBudget::new(100, 6000.0);
         let retry_at = budget.observe_secondary_limit(None, wall_now);
         assert!(retry_at >= wall_now + chrono::Duration::seconds(60));
+        // Scheduled work waits out the window on every resource —
+        // interactive pass-through (#1218 item 5) has its own test.
         for resource in [ApiResource::Graphql, ApiResource::rest("core")] {
             assert!(matches!(
-                budget.admit(resource, "blocked", RequestPriority::Interactive, 1),
+                budget.admit(resource, "blocked", RequestPriority::Focused, 1),
                 Err(AcquireError::CircuitOpen { .. })
             ));
         }
@@ -2161,6 +2189,75 @@ mod tests {
         );
         let recovered = budget.observe_secondary_limit(None, wall_now);
         assert!(recovered < wall_now + chrono::Duration::seconds(120));
+    }
+
+    /// #1218 item 5: a secondary cooldown (usually opened by background
+    /// churn) must not refuse the user's own actions — Interactive
+    /// requests pass, paced one per SECONDARY_INTERACTIVE_GAP, while
+    /// scheduled priorities keep waiting out the window.
+    #[test]
+    fn secondary_cooldown_lets_spaced_interactive_requests_through() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let mut budget = RateBudget::new(100, 6000.0);
+        budget.observe_secondary_limit(None, wall_now);
+
+        assert!(
+            budget
+                .admit_at(
+                    ApiResource::Graphql,
+                    "g-sync",
+                    RequestPriority::Interactive,
+                    1,
+                    wall_now,
+                    mono_now
+                )
+                .is_ok(),
+            "the first interactive request passes the open cooldown",
+        );
+        assert!(
+            matches!(
+                budget.admit_at(
+                    ApiResource::Graphql,
+                    "g-sync",
+                    RequestPriority::Interactive,
+                    1,
+                    wall_now,
+                    mono_now + Duration::from_secs(1)
+                ),
+                Err(AcquireError::CircuitOpen { .. })
+            ),
+            "a second interactive request inside the gap is paced",
+        );
+        assert!(
+            budget
+                .admit_at(
+                    ApiResource::Graphql,
+                    "g-sync",
+                    RequestPriority::Interactive,
+                    1,
+                    wall_now,
+                    mono_now + SECONDARY_INTERACTIVE_GAP
+                )
+                .is_ok(),
+            "the gap elapsing readmits interactive work",
+        );
+        for scheduled in [RequestPriority::Focused, RequestPriority::Recent] {
+            assert!(
+                matches!(
+                    budget.admit_at(
+                        ApiResource::Graphql,
+                        "bg",
+                        scheduled,
+                        1,
+                        wall_now,
+                        mono_now + SECONDARY_INTERACTIVE_GAP * 2
+                    ),
+                    Err(AcquireError::CircuitOpen { .. })
+                ),
+                "scheduled work still waits out the cooldown",
+            );
+        }
     }
 
     #[test]
@@ -2270,12 +2367,14 @@ mod tests {
 
         let mut restored = RateBudget::new(100, 6000.0);
         restored.restore_at(source.persisted_state(), wall_now, mono_now);
-        // A fresh daemon must NOT fire until the persisted cooldown expires.
+        // A fresh daemon's SCHEDULED work must NOT fire until the
+        // persisted cooldown expires (interactive requests pace through
+        // per #1218 item 5 — covered by its own test).
         assert!(matches!(
             restored.admit_at(
                 ApiResource::Graphql,
                 "post-restart",
-                RequestPriority::Interactive,
+                RequestPriority::Focused,
                 1,
                 wall_now,
                 mono_now,

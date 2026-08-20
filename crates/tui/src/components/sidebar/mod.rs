@@ -146,6 +146,11 @@ pub struct Sidebar {
     /// coalescing regression can assert one rebuild per batch (#1030).
     #[cfg(test)]
     recompute_count: usize,
+    /// Monotonic revision of everything `sync_panes` projects from this
+    /// sidebar (#1237): bumped on every daemon event and every visible
+    /// rebuild. Lets the per-keystroke pane sync skip its Workspace
+    /// clone + full projection when nothing it reads can have changed.
+    pane_state_rev: u64,
     /// Monotonic version bumped on every `recompute_visible_inner` — i.e.
     /// whenever the daemon pushes workspace data (all task/CI/review/label
     /// content arrives as an upsert that recomputes) or a local
@@ -427,6 +432,7 @@ impl Sidebar {
             recompute_pending: false,
             #[cfg(test)]
             recompute_count: 0,
+            pane_state_rev: 0,
             data_version: 0,
             workspace_line_cache: None,
             header_counters_cache: None,
@@ -2976,6 +2982,7 @@ impl Sidebar {
     }
 
     fn recompute_visible(&mut self) {
+        self.pane_state_rev = self.pane_state_rev.wrapping_add(1);
         // During a batched daemon-event drain, record that a rebuild is
         // owed and defer it to `flush_recompute` — collapsing a poll
         // sweep's N per-upsert rebuilds into one (#1030).
@@ -3016,6 +3023,11 @@ impl Sidebar {
     #[cfg(test)]
     pub fn recompute_count(&self) -> usize {
         self.recompute_count
+    }
+
+    /// See the `pane_state_rev` field (#1237).
+    pub fn pane_state_rev(&self) -> u64 {
+        self.pane_state_rev
     }
 
     /// Test-only: number of workspace rows in the current visible list.

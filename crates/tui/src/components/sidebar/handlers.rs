@@ -204,6 +204,10 @@ impl Sidebar {
     }
 
     pub fn on_event(&mut self, event: &Event) {
+        // Any daemon event may mutate state the pane projection reads
+        // (terminal maps, stacks, workspaces) — bump the projection rev
+        // so the next `sync_panes` runs in full (#1237).
+        self.pane_state_rev = self.pane_state_rev.wrapping_add(1);
         match event {
             Event::Snapshot {
                 workspaces,

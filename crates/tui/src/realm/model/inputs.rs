@@ -1354,7 +1354,7 @@ showing keybinding search only",
                         self.note_spawn_feedback(&commands);
                         cmds.extend(commands);
                     } else {
-                        self.flash_info("agent start cancelled — existing WORK claim kept");
+                        self.flash_info("agent start cancelled — existing ⚑ claim kept");
                     }
                 }
             }

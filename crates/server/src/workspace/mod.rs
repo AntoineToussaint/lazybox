@@ -1166,8 +1166,23 @@ fn spawn_worktree_removal(
     paths: Vec<std::path::PathBuf>,
 ) -> tokio::task::JoinHandle<()> {
     let mgr = config.worktree_manager();
+    // Completion latch so the shutdown drain can wait for this task
+    // (2026-08-19 audit, L6): a quit mid-`git worktree remove` used to
+    // cancel it, leaving a half-deleted multi-GB directory with no
+    // retry. Sent from a drop guard so a panic resolves the latch too.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    config.register_maintenance_latch(done_rx);
     let config = config.clone();
     tokio::spawn(async move {
+        struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let _done = SignalOnDrop(Some(done_tx));
         // Serialize with provisioning/adoption while taking the fresh
         // inspector snapshot. The per-repo lock inside `delete_inspected_if`
         // closes the final status-to-remove window.

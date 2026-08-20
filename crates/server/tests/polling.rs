@@ -415,12 +415,22 @@ async fn set_focused_workspace_never_blocks_on_an_in_flight_poll() {
         Some(workspace.key.as_str()),
         "the exact workspace focus must remain available to engagement scheduling",
     );
-    tokio::time::timeout(Duration::from_millis(50), config.poll.wait_for_wake())
+    // Focus wakes are debounced (2026-08-19 audit, R8): a j/k sweep
+    // must coalesce into one targeted refresh for the row the user
+    // stopped on, so the wake fires only after the ~1s settle window —
+    // never immediately per keystroke.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), config.poll.wait_for_wake())
+            .await
+            .is_err(),
+        "a focus change must not wake the poll loop before the debounce window",
+    );
+    tokio::time::timeout(Duration::from_millis(1500), config.poll.wait_for_wake())
         .await
-        .expect("focus change did not wake the poll loop");
+        .expect("the settled focus change did not wake the poll loop");
     polling::set_focused_workspace(&config, &workspace.key).await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(10), config.poll.wait_for_wake())
+        tokio::time::timeout(Duration::from_millis(1500), config.poll.wait_for_wake())
             .await
             .is_err(),
         "repeating the same focus should not schedule redundant polls",

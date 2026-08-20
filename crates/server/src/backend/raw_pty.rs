@@ -308,6 +308,59 @@ impl SessionBackend for RawPtyBackend {
         })
     }
 
+    /// Quit-path sweep (L2): these children die with the daemon no
+    /// matter what — without this they died by kernel SIGHUP mid-write
+    /// when the master fds closed at process exit, truncating agent
+    /// session files. SIGTERM everything first (parallel), give the
+    /// whole sweep one bounded grace window, then SIGKILL the rest.
+    /// The bound is deliberately tighter than the per-kill
+    /// `kill_grace`: quit is waiting on this.
+    fn shutdown_sessions<'a>(&'a self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+            let ptys: Vec<(String, std::sync::Arc<crate::pty::DaemonPty>)> = {
+                let map = self.sessions.lock().await;
+                map.iter()
+                    .filter(|(_, s)| !s.pty.is_finished())
+                    .map(|(k, s)| (k.clone(), s.pty.clone()))
+                    .collect()
+            };
+            if ptys.is_empty() {
+                return;
+            }
+            tracing::info!(
+                sessions = ptys.len(),
+                "shutdown: terminating raw-pty sessions (SIGTERM → {}s grace → SIGKILL)",
+                SHUTDOWN_GRACE.as_secs()
+            );
+            for (_, pty) in &ptys {
+                pty.kill();
+            }
+            let waits = ptys.iter().map(|(key, pty)| {
+                let pty = pty.clone();
+                let key = key.clone();
+                async move {
+                    if tokio::time::timeout(SHUTDOWN_GRACE, pty.wait_exit())
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            key = %key,
+                            "shutdown: child ignored SIGTERM — escalating to SIGKILL"
+                        );
+                        pty.force_kill();
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(500),
+                            pty.wait_exit(),
+                        )
+                        .await;
+                    }
+                }
+            });
+            futures::future::join_all(waits).await;
+        })
+    }
+
     fn is_alive<'a>(
         &'a self,
         key: &'a str,
@@ -549,6 +602,42 @@ mod tests {
         })
         .await
         .expect("test deadline exceeded");
+    }
+
+    /// L2 regression (2026-08-19 audit): the quit path used to exit
+    /// the process and let the kernel SIGHUP every raw-PTY child
+    /// mid-write. `shutdown_sessions` must terminate live children
+    /// gracefully (SIGTERM first, SIGKILL for a trapping child) and
+    /// return within its bound, so quit never hangs on an ignoring
+    /// child.
+    #[tokio::test]
+    async fn shutdown_sessions_terminates_live_children_bounded() {
+        timeout(Duration::from_secs(10), async {
+            let b = RawPtyBackend::new();
+            let polite = b
+                .spawn(&sh("while :; do sleep 0.1; done"), None, &[], "polite")
+                .await
+                .expect("spawn polite");
+            let stubborn = b
+                .spawn(
+                    &sh("trap '' TERM; while :; do sleep 0.1; done"),
+                    None,
+                    &[],
+                    "stubborn",
+                )
+                .await
+                .expect("spawn stubborn");
+            b.shutdown_sessions().await;
+            for key in [&polite, &stubborn] {
+                assert_eq!(
+                    b.is_alive(key).await.ok(),
+                    Some(false),
+                    "session {key} must be dead after the shutdown sweep"
+                );
+            }
+        })
+        .await
+        .expect("shutdown sweep exceeded the test deadline — it must be bounded");
     }
 
     /// Regression (unbounded 50ms poll loop): `wait_exit` used to spin

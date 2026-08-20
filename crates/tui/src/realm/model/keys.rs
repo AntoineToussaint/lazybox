@@ -758,12 +758,12 @@ impl<T: TerminalAdapter> Model<T> {
         if !claimed_targets.is_empty() {
             let prompt = if claimed_targets.len() == 1 {
                 format!(
-                    "{} is already marked WORK by another agent or machine. Start anyway?",
+                    "{} is already claimed (⚑) by another agent or machine. Start anyway?",
                     claimed_targets.iter().next().expect("one claimed target")
                 )
             } else {
                 format!(
-                    "{} selected tasks are already marked WORK by another agent or machine. Start agents anyway?",
+                    "{} selected tasks are already claimed (⚑) by another agent or machine. Start agents anyway?",
                     claimed_targets.len()
                 )
             };

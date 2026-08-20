@@ -6423,6 +6423,46 @@ mod coalesce_tests {
         }
     }
 
+    /// U8 regression (2026-08-19 audit): a run past the byte cap must
+    /// split into several contiguous events instead of one giant
+    /// uninterruptible VT feed the drain budget can never pre-empt.
+    /// The split events stay contiguous (no fabricated gap), so the
+    /// TerminalStack's sequence check accepts them all.
+    #[test]
+    fn oversized_runs_split_at_the_byte_cap() {
+        let chunk = vec![b'x'; 200 * 1024];
+        let merged = coalesce_adjacent_output(vec![
+            out(1, &chunk, 1),
+            out(1, &chunk, 2),
+            out(1, &chunk, 3),
+        ]);
+        assert!(
+            merged.len() >= 2,
+            "600 KiB of adjacent output must not merge into one event"
+        );
+        let mut expected_first = 1;
+        let mut total = 0;
+        for evt in &merged {
+            match evt {
+                Event::TerminalOutput {
+                    bytes,
+                    first_seq,
+                    seq,
+                    ..
+                } => {
+                    assert_eq!(
+                        *first_seq, expected_first,
+                        "split events must stay contiguous"
+                    );
+                    expected_first = seq + 1;
+                    total += bytes.len();
+                }
+                other => panic!("expected TerminalOutput, got {other:?}"),
+            }
+        }
+        assert_eq!(total, 3 * 200 * 1024, "no bytes lost in the split");
+    }
+
     /// Coalescing must not erase the only evidence of a missing chunk.
     /// Keeping non-contiguous ranges separate lets TerminalStack reject
     /// the second range and wait for an authoritative resync.
@@ -11460,10 +11500,13 @@ mod input_priority_tests {
         );
     }
 
-    /// Scoped to the terminal: with focus on another pane the pre-dispatch
-    /// is inert, so a sidebar key can't be diverted into the PTY.
+    /// Pre-emption applies under every focus (2026-08-19 audit, U8) —
+    /// a sidebar key is serviced ahead of the pending render through
+    /// the SAME dispatcher the post-wait path uses, so it lands on the
+    /// sidebar (never diverted into the PTY) instead of queuing behind
+    /// a render pass until the stale-drop discards it.
     #[test]
-    fn other_pane_focus_is_inert() {
+    fn sidebar_focus_pre_dispatches_to_the_sidebar_not_the_pty() {
         let (mut m, mut server) = model_with_focused_agent();
         m.focus = PaneFocus::Sidebar;
         drain_startup(&mut server);
@@ -11486,7 +11529,11 @@ mod input_priority_tests {
             written_bytes(&mut server).is_empty(),
             "no write off the terminal pane"
         );
-        assert!(irx.try_recv().is_ok(), "the key stays buffered");
+        assert!(
+            irx.try_recv().is_err(),
+            "the sidebar key was serviced by the pre-dispatch, not left to go stale"
+        );
+        assert!(redraw_is_input, "a serviced key paints immediately");
     }
 
     /// A scroll notch breaks the drain so scrollback keeps its

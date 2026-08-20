@@ -604,6 +604,13 @@ fn spawn_agent_command(config: &AgentStreamConfig) -> Result<(Child, ChildStdin,
     command.stdout(Stdio::piped());
     command.stderr(Stdio::inherit());
     command.kill_on_drop(true);
+    // Own process group: cancelling a structured run SIGKILLs the agent
+    // CLI, and `kill_on_drop` alone orphans whatever tool subprocess it
+    // had in flight (a `bash` tool call, a `git push`). The group is
+    // swept in the spawner's `wait` future — same class git-ops fixed
+    // for git transport helpers.
+    #[cfg(unix)]
+    command.process_group(0);
 
     let mut child = command.spawn().ctx("spawn structured-agent child")?;
     let stdin = child
@@ -651,12 +658,30 @@ impl AgentStreamSpawner for ProcessAgentStreamSpawner {
     ) -> Pin<Box<dyn Future<Output = Result<AgentStreamIo>> + Send + 'a>> {
         Box::pin(async move {
             let (mut child, stdin, stdout) = spawn_agent_command(&config)?;
+            // Group sweep on every exit of the wait future — a normal
+            // exit disarms nothing on purpose: the CLI exiting non-zero
+            // (or the run being cancelled, dropping this future) may
+            // leave an in-flight tool subprocess behind, and killpg on
+            // a dead leader's group is one syscall that can only reach
+            // processes this spawn created. A clean exit means the CLI
+            // reaped its own tools; sweeping then is a no-op.
+            struct KillGroupOnDrop(Option<i32>);
+            impl Drop for KillGroupOnDrop {
+                fn drop(&mut self) {
+                    #[cfg(unix)]
+                    if let Some(pgid) = self.0 {
+                        unsafe { libc::killpg(pgid, libc::SIGKILL) };
+                    }
+                }
+            }
+            let group = KillGroupOnDrop(child.id().map(|id| id as i32));
             Ok(AgentStreamIo {
                 stdin: Box::pin(stdin),
                 stdout: Box::pin(stdout),
-                wait: Box::pin(
-                    async move { child.wait().await.ok().and_then(|status| status.code()) },
-                ),
+                wait: Box::pin(async move {
+                    let _group = group;
+                    child.wait().await.ok().and_then(|status| status.code())
+                }),
             })
         })
     }

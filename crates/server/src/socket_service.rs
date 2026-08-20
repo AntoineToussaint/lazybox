@@ -151,7 +151,25 @@ impl SocketService {
                     let (mut rd, mut wr) = match accept {
                         Ok(pair) => pair,
                         Err(e) => {
-                            tracing::warn!("accept error: {e}");
+                            // Back off on resource-exhaustion errors
+                            // (2026-08-19 audit, R6): EMFILE/ENFILE make
+                            // `accept()` fail instantly and forever, and a
+                            // bare `continue` was a 100%-CPU spin that also
+                            // flooded the log. Transient per-connection
+                            // errors (ECONNABORTED) still retry at once.
+                            let resource_exhausted = matches!(
+                                &e,
+                                lazybox_ipc::transport::TransportError::Accept(io) if matches!(
+                                    io.raw_os_error(),
+                                    Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+                                )
+                            );
+                            if resource_exhausted {
+                                tracing::warn!("accept error (backing off 500ms): {e}");
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            } else {
+                                tracing::warn!("accept error: {e}");
+                            }
                             continue;
                         }
                     };
@@ -211,6 +229,17 @@ impl SocketService {
             }
         }
 
+        // Stop accepting FIRST: drop the listener and unlink the socket
+        // file before the multi-second drain below (2026-08-19 audit,
+        // L4). While both survived the drain, the kernel kept
+        // completing `connect()`s into a backlog nothing would ever
+        // `accept()` — every hook helper that fired during teardown
+        // (and teardown fires a burst of them) connected "successfully"
+        // and then hung its full 5s handshake timeout. With the file
+        // gone they get a clean instant ECONNREFUSED/ENOENT instead.
+        drop(listener);
+        let _ = std::fs::remove_file(&self.socket);
+
         // The service owns every accepted connection task. On explicit
         // shutdown (SIGTERM via the signal handler), first raise the
         // graceful-stop signal: each serve loop breaks and runs its own
@@ -240,9 +269,21 @@ impl SocketService {
         }
         connections.shutdown().await;
 
-        // Cleanup: drop the socket file + pid file so next `start`
-        // doesn't mistake us for still-running.
-        let _ = std::fs::remove_file(&self.socket);
+        // Gracefully terminate ephemeral (raw-PTY) sessions before the
+        // process exits — durable backends (tmux) no-op. Without this
+        // the kernel SIGHUP'd every child mid-write when the master
+        // fds closed at exit (2026-08-19 audit, L2). Bounded inside
+        // (SIGTERM → 2s → SIGKILL) with an outer belt.
+        let config = (self.config_factory)();
+        let _ =
+            tokio::time::timeout(Duration::from_secs(4), config.backend.shutdown_sessions()).await;
+        // Detached maintenance (background worktree removals) — see L6.
+        let _ =
+            tokio::time::timeout(Duration::from_secs(10), config.drain_maintenance_tasks()).await;
+
+        // Cleanup: the socket file went at the top of shutdown; the pid
+        // file goes last so the next `start` doesn't mistake us for
+        // still-running.
         let _ = std::fs::remove_file(&self.pid_file);
         Ok(())
     }

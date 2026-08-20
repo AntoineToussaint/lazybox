@@ -630,7 +630,14 @@ impl TmuxBackend {
                 return Vec::new();
             }
         };
-        let seed = normalize_capture(&out);
+        // Byte-cap the seed (2026-08-19 audit, M5): `history-limit`
+        // bounds LINES, but with `-e` styling a line has no byte bound
+        // — seeds are pinned for the PTY's whole life and copied into
+        // every snapshot replay, so an unbounded one multiplies badly.
+        // Line-boundary-safe tail trim, oldest lines dropped first.
+        const SEED_CAP_BYTES: usize = 4 * 1024 * 1024;
+        let seed =
+            crate::spawn_handler::cap_scrollback_replay(normalize_capture(&out), SEED_CAP_BYTES);
         if let Some(raw) = crate::pty::debug_byte_fingerprint(&out) {
             let normalized = crate::pty::byte_fingerprint(&seed);
             tracing::debug!(

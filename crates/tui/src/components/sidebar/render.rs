@@ -81,6 +81,23 @@ fn extend_cursor_fill(spans: &mut Vec<Span<'_>>, row_budget: usize, style: Style
     }
 }
 
+/// The header's attention tallies, computed in one pass and memoized
+/// (2026-08-19 audit, U4). Mirrors `workspace_count` /
+/// `total_unread_count` / `count_visible_with_signal` /
+/// `visible_broadcast_selected_count` / `limit_reached_workspace_count`
+/// exactly — those remain the semantic source of truth for the jumps
+/// and tips that run off the render path.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct HeaderCounters {
+    pub(crate) count: usize,
+    pub(crate) unread: usize,
+    pub(crate) input_pending: usize,
+    pub(crate) ci_failing: usize,
+    pub(crate) review_pending: usize,
+    pub(crate) selected: usize,
+    pub(crate) limited: usize,
+}
+
 /// One-shot `DefaultHasher` over a single `Hash` value — a building block
 /// for the render-line cache signature (#1090).
 fn hash_one<H: std::hash::Hash>(v: &H) -> u64 {
@@ -148,11 +165,16 @@ impl Sidebar {
             Mailbox::Inactive => "INACTIVE",
             Mailbox::Snoozed => "SNOOZED",
         };
-        let count = self.workspace_count();
-        let unread = self.total_unread_count();
-        let input_pending = self.input_pending_count();
-        let ci_failing = self.ci_failing_count();
-        let review_pending = self.review_pending_count();
+        // One memoized pass for every header tally (U4) — the
+        // individual count fns remain the single source of semantics
+        // and are what `compute_header_counters` mirrors; jumps/tips
+        // still call them directly off the render path.
+        let counters = self.header_counters();
+        let count = counters.count;
+        let unread = counters.unread;
+        let input_pending = counters.input_pending;
+        let ci_failing = counters.ci_failing;
+        let review_pending = counters.review_pending;
 
         // Right inset reserves only the scroll-indicator column (drawn
         // at `area.width - 1`); there's no extra edge margin stacked on
@@ -188,7 +210,7 @@ impl Sidebar {
         // broadcast will target (issue #786). Placed ahead of the passive
         // badges below and fitted on its own (see the header assembly), so
         // the live mode indicator survives a narrow sidebar.
-        let selected = self.visible_broadcast_selected_count();
+        let selected = counters.selected;
         let mut signal_spans: Vec<Span> = Vec::with_capacity(8);
         if unread > 0 {
             signal_spans.push(Span::styled(
@@ -235,7 +257,7 @@ impl Sidebar {
         // agent is blocked on its provider usage limit, so the proactive
         // "act before more hit the wall" signal reads at a glance next to
         // the `?` input count. Same `⏳` glyph as the per-row pill.
-        let limited = self.limit_reached_workspace_count();
+        let limited = counters.limited;
         if limited > 0 {
             if !signal_spans.is_empty() {
                 signal_spans.push(Span::raw("  "));
@@ -661,13 +683,36 @@ impl Sidebar {
         // provider-specific status columns for groups that never fill them.
         // Sizing within a group keeps alignment clean where the eye
         // actually scans (issue #961).
-        let mut rendered_workspace_lines =
-            self.cached_workspace_lines(row_budget, theme, now, focused);
+        let rendered_workspace_lines = self.cached_workspace_lines(row_budget, theme, now, focused);
+
+        // Clamp the scroll BEFORE building any rows (2026-08-19 audit,
+        // U5), then build ONLY the viewport window. Every `VisibleRow`
+        // is exactly one line, so the window is a plain range over
+        // `visible` — the old path built and laid out every row of the
+        // whole list each frame (~150 rows against a ~40-row viewport)
+        // and let the Paragraph widget skip the off-screen prefix.
+        let total_rows = self.visible.len();
+        let viewport = inner.height as usize;
+        if !self.scroll_detached {
+            if self.cursor < self.scroll {
+                self.scroll = self.cursor;
+            } else if viewport > 0 && self.cursor >= self.scroll + viewport {
+                self.scroll = self.cursor + 1 - viewport;
+            }
+        }
+        let max_scroll = total_rows.saturating_sub(viewport);
+        if self.scroll > max_scroll {
+            self.scroll = max_scroll;
+        }
+        self.last_viewport = viewport;
+        self.rendered_scroll = self.scroll;
 
         let lines: Vec<Line> = self
             .visible
             .iter()
             .enumerate()
+            .skip(self.scroll)
+            .take(viewport)
             .map(|(i, row)| match row {
                 VisibleRow::FocusedHeader => {
                     use crate::components::icons;
@@ -868,9 +913,11 @@ impl Sidebar {
                     }
                     Line::from(spans)
                 }
+                // Clone from the shared cache — only the viewport's
+                // workspace rows pay it, not all ~150 (U2/U5).
                 VisibleRow::Workspace(_) => rendered_workspace_lines
-                    .get_mut(i)
-                    .and_then(|slot| slot.take())
+                    .get(i)
+                    .and_then(|slot| slot.clone())
                     .unwrap_or_default(),
                 VisibleRow::Session {
                     workspace,
@@ -907,31 +954,11 @@ impl Sidebar {
             })
             .collect();
 
-        // Row-window the list. Each `VisibleRow` is exactly one line,
-        // so the scroll offset is a plain row count — clamp it to keep
-        // `cursor` in view, then bound it to the tail so the last rows
-        // can't scroll past the bottom edge. A wheel-detached viewport
-        // skips the cursor clamp: the wheel only moves the display,
-        // and snapping back here would undo it on the next frame. The
-        // detach flag is cleared by explicit cursor moves, so j/k et
-        // al. still re-anchor.
-        let total_rows = lines.len();
-        let viewport = inner.height as usize;
-        if !self.scroll_detached {
-            if self.cursor < self.scroll {
-                self.scroll = self.cursor;
-            } else if viewport > 0 && self.cursor >= self.scroll + viewport {
-                self.scroll = self.cursor + 1 - viewport;
-            }
-        }
-        let max_scroll = total_rows.saturating_sub(viewport);
-        if self.scroll > max_scroll {
-            self.scroll = max_scroll;
-        }
-        self.last_viewport = viewport;
-        self.rendered_scroll = self.scroll;
-
-        let para = Paragraph::new(lines).scroll((self.scroll as u16, 0));
+        // The window above already starts at `self.scroll` (clamped
+        // pre-build; a wheel-detached viewport keeps its position, and
+        // explicit cursor moves clear the detach flag so j/k still
+        // re-anchor) — the Paragraph paints the slice from its top.
+        let para = Paragraph::new(lines);
         frame.render_widget(para, inner);
 
         // First-run / empty-inbox guidance. When the list is genuinely
@@ -1128,6 +1155,74 @@ impl Sidebar {
     /// (`wrapping_add` of per-entry hashes) since their iteration order is not
     /// stable. A missed input can only cost one frame of cosmetic lag that the
     /// next redraw heals; it can never desync dispatch, which reads live state.
+    /// All header-badge tallies computed in ONE pass over the visible
+    /// list (2026-08-19 audit, U4) — see `header_counters`.
+    fn compute_header_counters(&self) -> HeaderCounters {
+        use lazybox_tui_core::inbox::AttentionSignal;
+        let mut c = HeaderCounters::default();
+        for row in &self.visible {
+            let VisibleRow::Workspace(key) = row else {
+                continue;
+            };
+            let Some(workspace) = self.workspaces.get(key) else {
+                continue;
+            };
+            c.count += 1;
+            c.unread += workspace.unread_count();
+            let signals = workspace_attention_signals(workspace, &self.agents);
+            if signals.contains(&AttentionSignal::AgentAsking) {
+                c.input_pending += 1;
+            }
+            if signals.contains(&AttentionSignal::CiFailing) {
+                c.ci_failing += 1;
+            }
+            if signals.contains(&AttentionSignal::ReviewPending) {
+                c.review_pending += 1;
+            }
+            if self.broadcast_selected.contains(key) {
+                c.selected += 1;
+            }
+        }
+        c.limited = self.limit_reached_workspace_count();
+        c
+    }
+
+    /// Memoized front door to [`Self::compute_header_counters`]. The
+    /// header used to re-run 7 independent O(visible × activity) scans
+    /// per frame; the counters can only change when the workspace data
+    /// recomputes (`data_version`), an agent state moves, or the
+    /// multi-select changes — all folded into the key.
+    pub(crate) fn header_counters(&mut self) -> HeaderCounters {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.data_version.hash(&mut h);
+        let mut fold: u64 = 0;
+        for (k, st) in &self.agents {
+            fold = fold.wrapping_add(hash_one(k) ^ agent_state_code(st).rotate_left(1));
+        }
+        fold.hash(&mut h);
+        let mut fold: u64 = 0;
+        for (tid, (sk, st)) in &self.agent_terminal_states {
+            fold = fold
+                .wrapping_add(hash_one(tid) ^ hash_one(sk).rotate_left(3) ^ agent_state_code(st));
+        }
+        fold.hash(&mut h);
+        let mut fold: u64 = 0;
+        for k in &self.broadcast_selected {
+            fold = fold.wrapping_add(hash_one(k).rotate_left(7));
+        }
+        fold.hash(&mut h);
+        let sig = h.finish();
+        if let Some((cached_sig, counters)) = self.header_counters_cache
+            && cached_sig == sig
+        {
+            return counters;
+        }
+        let counters = self.compute_header_counters();
+        self.header_counters_cache = Some((sig, counters));
+        counters
+    }
+
     fn workspace_lines_signature(
         &self,
         row_budget: usize,
@@ -1211,18 +1306,24 @@ impl Sidebar {
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
-    ) -> Vec<Option<Line<'static>>> {
+    ) -> std::rc::Rc<Vec<Option<Line<'static>>>> {
         let sig = self.workspace_lines_signature(row_budget, focused, now);
         if let Some((cached_sig, lines)) = &self.workspace_line_cache {
             if *cached_sig == sig {
-                return lines.clone();
+                // Rc, not a deep clone (2026-08-19 audit, U2): a HIT
+                // used to clone every span and its owned String — ~600
+                // allocations per frame — which re-created most of the
+                // cost the memo existed to remove. The consumer clones
+                // only the handful of viewport rows it actually paints.
+                return std::rc::Rc::clone(lines);
             }
         }
-        let lines = self.prebuild_workspace_lines(row_budget, theme, now, focused);
+        let lines =
+            std::rc::Rc::new(self.prebuild_workspace_lines(row_budget, theme, now, focused));
         #[cfg(test)]
         self.workspace_line_builds
             .set(self.workspace_line_builds.get() + 1);
-        self.workspace_line_cache = Some((sig, lines.clone()));
+        self.workspace_line_cache = Some((sig, std::rc::Rc::clone(&lines)));
         lines
     }
 

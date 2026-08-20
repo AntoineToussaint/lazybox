@@ -188,6 +188,7 @@ fn resolve_log_path() -> std::path::PathBuf {
 /// (eprintln — the subscriber isn't up yet) but never blocks launch.
 fn open_log_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
     use std::fs::OpenOptions;
+    rotate_oversized_log(path);
     let mut options = OpenOptions::new();
     options.create(true).append(true);
     #[cfg(unix)]
@@ -204,6 +205,26 @@ fn open_log_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         }
     }
     Ok(file)
+}
+
+/// Size cap applied at launch: a log past this rolls to `<path>.1`
+/// (replacing the previous roll) so the pair is bounded at ~2× the cap.
+/// Launch-time-only keeps rotation off the hot path — one long-lived
+/// session can still exceed the cap, but every restart reclaims it,
+/// which is what turned a `/tmp/lazybox.log` into 138 MB before.
+const LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
+
+fn rotate_oversized_log(path: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= LOG_MAX_BYTES {
+        return;
+    }
+    let rolled = path.with_extension("log.1");
+    if let Err(e) = std::fs::rename(path, &rolled) {
+        eprintln!("warning: couldn't rotate {}: {e}", path.display());
+    }
 }
 
 /// Sibling perf-log path for `main`: `/tmp/lazybox.log` →
@@ -237,8 +258,24 @@ fn init_tracing() -> anyhow::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "lazybox=info,lazybox_gh=info,lazybox_server=info".into());
 
+    // Off-thread, buffered log writer. The previous `Mutex<File>`
+    // writer did one unbuffered `write(2)` per event under a single
+    // process-global lock shared by the UI thread and every daemon
+    // task — under disk pressure any `info!` on the UI loop blocked
+    // on a lock held mid-write, which is a frame-budget violation the
+    // logger itself caused. `lossy(true)` drops lines rather than ever
+    // back-pressuring a caller: liveness beats log completeness here.
+    let (writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .lossy(true)
+        .thread_name("lazybox-log")
+        .finish(file);
+    // The guard flushes on drop; the subscriber is global for the whole
+    // process lifetime, so park it in a leaked box rather than thread it
+    // through main (statics never drop either — nothing is lost).
+    Box::leak(Box::new(guard));
+
     let main_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::sync::Mutex::new(file))
+        .with_writer(writer)
         .with_ansi(false)
         .with_filter(env_filter);
 
@@ -249,15 +286,23 @@ fn init_tracing() -> anyhow::Result<()> {
     let perf_layer = lazybox_tui::perf::enabled()
         .then(|| perf_log_path(&log_path))
         .and_then(|path| match open_log_file(&path) {
-            Ok(perf_file) => Some(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(std::sync::Mutex::new(perf_file))
-                    .with_ansi(false)
-                    .with_filter(
-                        tracing_subscriber::filter::Targets::new()
-                            .with_target(lazybox_tui::perf::TARGET, tracing::Level::TRACE),
-                    ),
-            ),
+            Ok(perf_file) => {
+                let (perf_writer, perf_guard) =
+                    tracing_appender::non_blocking::NonBlockingBuilder::default()
+                        .lossy(true)
+                        .thread_name("lazybox-perf-log")
+                        .finish(perf_file);
+                Box::leak(Box::new(perf_guard));
+                Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(perf_writer)
+                        .with_ansi(false)
+                        .with_filter(
+                            tracing_subscriber::filter::Targets::new()
+                                .with_target(lazybox_tui::perf::TARGET, tracing::Level::TRACE),
+                        ),
+                )
+            }
             Err(e) => {
                 eprintln!("warning: couldn't open perf log {}: {e}", path.display());
                 None
@@ -886,13 +931,39 @@ fn spawn_terminal_restore_on_signal(drain: Option<DaemonDrain>) {
 #[cfg(unix)]
 async fn wait_for_exit_signal() {
     use tokio::signal::unix::{SignalKind, signal};
-    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-    let mut hup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
-    let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
+    // Degrade per-signal instead of `expect` (2026-08-19 audit, L7):
+    // this runs inside a spawned task, so a panicked install (fd
+    // exhaustion is plausible with many PTYs) was silently swallowed by
+    // tokio — the process lost terminal-restore-on-signal AND the
+    // daemon drain, stranding the shell in raw mode on the next kill.
+    // Whichever handlers did install still work.
+    let install = |kind: SignalKind, name: &str| match signal(kind) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            tracing::error!("install {name} handler failed ({e}) — that signal won't be graceful");
+            None
+        }
+    };
+    let mut term = install(SignalKind::terminate(), "SIGTERM");
+    let mut hup = install(SignalKind::hangup(), "SIGHUP");
+    let mut int = install(SignalKind::interrupt(), "SIGINT");
+    if term.is_none() && hup.is_none() && int.is_none() {
+        // Nothing installed: never resolve — the caller's select keeps
+        // the other exit paths (quit keybinding) working.
+        std::future::pending::<()>().await;
+    }
+    async fn recv_or_pend(slot: &mut Option<tokio::signal::unix::Signal>) {
+        match slot {
+            Some(signal) => {
+                signal.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    }
     tokio::select! {
-        _ = term.recv() => {},
-        _ = hup.recv() => {},
-        _ = int.recv() => {},
+        _ = recv_or_pend(&mut term) => {},
+        _ = recv_or_pend(&mut hup) => {},
+        _ = recv_or_pend(&mut int) => {},
     }
 }
 
@@ -1596,6 +1667,18 @@ async fn run_embedded_realm(
         // connections; most of that window already elapsed in parallel.
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
     }
+    // Gracefully terminate ephemeral (raw-PTY) sessions before the
+    // process exits. Without this, returning from main closed every
+    // PTY master fd and the kernel SIGHUP'd the agents mid-write —
+    // truncated agent session files, corrupted resume (2026-08-19
+    // audit, L2). Durable backends (tmux) no-op: their sessions
+    // surviving quit is the feature. Bounded internally (SIGTERM →
+    // 2s grace → SIGKILL), with an outer belt so quit can never hang.
+    let _ = tokio::time::timeout(Duration::from_secs(4), config.backend.shutdown_sessions()).await;
+    // Let detached maintenance (background worktree removals) finish
+    // instead of cancelling a multi-GB `git worktree remove` mid-way
+    // and stranding a half-deleted directory (2026-08-19 audit, L6).
+    let _ = tokio::time::timeout(Duration::from_secs(10), config.drain_maintenance_tasks()).await;
     client_runtime.shutdown().await;
     realm_result?
 }

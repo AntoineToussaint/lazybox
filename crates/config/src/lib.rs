@@ -1656,6 +1656,17 @@ pub struct AgentSection {
     /// `Working`); raise it to be less eager to call a turn finished.
     #[serde(default)]
     pub quiet_classify_secs: Option<u64>,
+    /// Ceiling on concurrently live agent terminals across all
+    /// workspaces. Agent CLIs are heavyweight (~110 MB RSS each,
+    /// measured) and the tmux backend deliberately never reaps —
+    /// sessions accumulate across restarts until the machine runs out
+    /// of memory (a measured 48 live Claude CLIs = 5.5 GB was the
+    /// 2026-08-19 pressure incident). At the cap, a new agent spawn is
+    /// refused with a notice naming this knob; shells, resumes of
+    /// existing sessions, and restart recovery are never blocked.
+    /// Unset → 32; `0` → no cap.
+    #[serde(default)]
+    pub max_live_agents: Option<usize>,
 }
 
 impl Default for AgentSection {
@@ -1668,11 +1679,25 @@ impl Default for AgentSection {
             metering_proxy: false,
             working_watchdog_secs: None,
             quiet_classify_secs: None,
+            max_live_agents: None,
         }
     }
 }
 
+/// Default for [`AgentSection::max_live_agents`] when unset.
+pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;
+
 impl AgentSection {
+    /// Effective live-agent ceiling: unset → [`DEFAULT_MAX_LIVE_AGENTS`],
+    /// explicit `0` → `None` (uncapped).
+    pub fn live_agent_cap(&self) -> Option<usize> {
+        match self.max_live_agents {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => Some(DEFAULT_MAX_LIVE_AGENTS),
+        }
+    }
+
     /// The configured global LLM-gateway base URL, normalized: surrounding
     /// whitespace trimmed and a blank string treated as unset. This is the
     /// single definition of "gateway configured" — the spawn-time
@@ -1967,21 +1992,59 @@ impl Config {
     }
 
     /// Load from `~/.lazybox/config.yaml`, falling back to defaults.
+    ///
+    /// Cached process-wide: `load()` used to be a full disk read +
+    /// YAML parse on every call, and ~30 daemon call sites run it on
+    /// hot paths (per bus event, per polled task) — dozens of parses
+    /// per poll sweep. The cache returns a clone of the last parsed
+    /// snapshot, revalidated by a `stat` on every call: the file's
+    /// (mtime, len) stamp must match, so an external write is picked
+    /// up immediately while the expensive read + parse only re-runs
+    /// when the file actually changed. In-process saves invalidate
+    /// directly. `load_from` stays uncached — an explicit path is an
+    /// explicit read.
     pub fn load() -> Result<Self, ConfigError> {
         let path = Self::default_path();
-        if path.exists() {
-            Self::load_from(&path)
-        } else {
-            tracing::info!("No config file at {}, using defaults", path.display());
-            Ok(Self::default())
+        {
+            let mut cache = config_cache().lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(entry) = cache.as_mut().filter(|entry| entry.path == path)
+                && file_stamp(&path) == entry.stamp
+            {
+                return Ok(entry.snapshot.clone());
+            }
         }
+        // Miss or stale: read outside the lock (the parse can take
+        // milliseconds; concurrent callers may briefly duplicate the
+        // work but never serialize behind it), then publish.
+        let stamp = file_stamp(&path);
+        let loaded = if path.exists() {
+            Self::load_from(&path)?
+        } else {
+            tracing::debug!("No config file at {}, using defaults", path.display());
+            Self::default()
+        };
+        let mut cache = config_cache().lock().unwrap_or_else(|e| e.into_inner());
+        *cache = Some(ConfigCacheEntry {
+            path,
+            snapshot: loaded.clone(),
+            stamp,
+        });
+        Ok(loaded)
+    }
+
+    /// Drop the `load()` cache so the next call re-reads the file.
+    /// Called by the save paths; public for tests and for callers that
+    /// know they changed the file out from under the process.
+    pub fn invalidate_cache() {
+        let mut cache = config_cache().lock().unwrap_or_else(|e| e.into_inner());
+        *cache = None;
     }
 
     /// Load from a specific path.
     pub fn load_from(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
         let config = Self::parse(&contents)?;
-        tracing::info!("Loaded config from {}", path.display());
+        tracing::debug!("Loaded config from {}", path.display());
         for warning in config.model_alias_warnings() {
             tracing::warn!("{warning}");
         }
@@ -2049,6 +2112,9 @@ impl Config {
         // visible to other users, even transiently.
         restrict_to_owner(&tmp).map_err(|e| cleanup_on_err(e.into()))?;
         std::fs::rename(&tmp, path).map_err(|e| cleanup_on_err(e.into()))?;
+        // The written file may be the default path — cheapest correct
+        // move is to always drop the `load()` cache.
+        Self::invalidate_cache();
         Ok(())
     }
 
@@ -2067,6 +2133,46 @@ impl Config {
         F: FnOnce(&mut Self),
     {
         Self::save_with_at(&Self::default_path(), f)
+    }
+
+    /// `save_with` off the calling thread, mutations applied in send
+    /// order by one dedicated worker (2026-08-19 audit, U9). The
+    /// keystroke paths (pin, star, collapse, splitter drag) used to run
+    /// the full read + parse + serialize + write synchronously on the
+    /// UI thread before the frame that showed the toggle. In-memory UI
+    /// state stays authoritative; this only persists it. Ordering
+    /// through a single worker (not a thread per save) keeps two rapid
+    /// toggles of the same field from racing to disk out of order.
+    pub fn save_with_async<F>(f: F)
+    where
+        F: FnOnce(&mut Self) + Send + 'static,
+    {
+        type Job = Box<dyn FnOnce() + Send>;
+        static TX: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
+        let tx = TX.get_or_init(|| {
+            let (tx, rx) = std::sync::mpsc::channel::<Job>();
+            let spawned = std::thread::Builder::new()
+                .name("lazybox-config-persist".into())
+                .spawn(move || {
+                    while let Ok(job) = rx.recv() {
+                        job();
+                    }
+                });
+            if let Err(e) = spawned {
+                tracing::warn!("config persist worker failed to spawn: {e}");
+            }
+            tx
+        });
+        let job: Job = Box::new(move || {
+            if let Err(e) = Self::save_with(f) {
+                tracing::warn!("async config save failed: {e}");
+            }
+        });
+        if let Err(std::sync::mpsc::SendError(job)) = tx.send(job) {
+            // Worker gone (spawn failed / panicked): degrade to the
+            // synchronous path rather than dropping the save.
+            job();
+        }
     }
 
     /// `save_with` against an explicit path. Split out so tests can
@@ -2091,6 +2197,29 @@ impl Config {
     pub fn default_path() -> PathBuf {
         lazybox_core::paths::config_yaml()
     }
+}
+
+struct ConfigCacheEntry {
+    /// The path the snapshot was resolved from. `default_path()` can
+    /// change mid-process (`LAZYBOX_HOME` — the test suites swap it),
+    /// so a path mismatch is a cache miss, never a stale hit.
+    path: PathBuf,
+    snapshot: Config,
+    stamp: Option<(std::time::SystemTime, u64)>,
+}
+
+fn config_cache() -> &'static std::sync::Mutex<Option<ConfigCacheEntry>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<ConfigCacheEntry>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// (mtime, len) identity of the config file; `None` when it doesn't
+/// exist (also a cacheable state — "no file, defaults").
+fn file_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta.modified().ok()?;
+    Some((mtime, meta.len()))
 }
 
 /// Chmod `path` to 0600 if any group/other permission bit is set.
@@ -3397,6 +3526,70 @@ repos:
         // Reload as a subsequent launch would.
         let reloaded = Config::load_from(&path).expect("reload config");
         assert_eq!(reloaded.scan.roots, vec![PathBuf::from("~/development")]);
+    }
+
+    /// `Config::load()` is cached process-wide (the daemon calls it on
+    /// hot paths), but the cache must never serve stale data: an
+    /// external write to the file (new mtime/len stamp) and an
+    /// in-process `save_to` (explicit invalidation) must both be
+    /// visible on the very next `load()`.
+    #[test]
+    fn load_cache_revalidates_on_file_change_and_save() {
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
+                    None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
+                }
+            }
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("lazybox-config-cache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir temp");
+        let _dir_guard = TempDir(dir.clone());
+        let _env_guard = EnvGuard(std::env::var_os("LAZYBOX_HOME"));
+        unsafe { std::env::set_var("LAZYBOX_HOME", &dir) };
+        Config::invalidate_cache();
+
+        let path = Config::default_path();
+        std::fs::write(&path, "scan:\n  max_depth: 2\n").expect("write v1");
+        assert_eq!(Config::load().expect("load v1").scan.max_depth, 2);
+        // Cached: a second load returns the same snapshot.
+        assert_eq!(Config::load().expect("load cached").scan.max_depth, 2);
+
+        // External raw write (different length → different stamp):
+        // visible on the very next load, no invalidation call needed.
+        std::fs::write(&path, "scan:\n  max_depth: 7\n# v2\n").expect("write v2");
+        assert_eq!(Config::load().expect("load v2").scan.max_depth, 7);
+
+        // In-process save: visible immediately via explicit
+        // invalidation even if the stamp were somehow identical.
+        Config::save_with(|cfg| cfg.scan.max_depth = 9).expect("save v3");
+        assert_eq!(Config::load().expect("load v3").scan.max_depth, 9);
+
+        Config::invalidate_cache();
+    }
+
+    /// M1 (2026-08-19 audit): the live-agent cap defaults on (unset →
+    /// 32), an explicit value wins, and `0` opts out entirely.
+    #[test]
+    fn live_agent_cap_defaults_on_and_zero_uncaps() {
+        assert_eq!(
+            AgentSection::default().live_agent_cap(),
+            Some(DEFAULT_MAX_LIVE_AGENTS)
+        );
+        let cfg: Config = serde_yaml::from_str("agent:\n  max_live_agents: 7\n").expect("parse");
+        assert_eq!(cfg.agent.live_agent_cap(), Some(7));
+        let cfg: Config = serde_yaml::from_str("agent:\n  max_live_agents: 0\n").expect("parse");
+        assert_eq!(cfg.agent.live_agent_cap(), None, "0 = uncapped");
     }
 
     /// Autonomous sessions launch in no-permission mode by default,

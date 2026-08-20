@@ -1638,6 +1638,20 @@ impl LinearSchedule {
         };
         inner.next_due = Some(now + interval);
     }
+
+    /// Re-arm after a FAILED sweep (credential resolution or fetch).
+    /// Before this, the schedule only ever advanced at the tail of a
+    /// successful fetch — so a timing-out `linear auth token` or a
+    /// Linear outage left `next_due` in the past and the source
+    /// retried at full tick cadence forever, burning a 5s subprocess
+    /// timeout per tick. A failure re-arms on the active cadence
+    /// (retrying is fine — storming is not) and leaves the idle
+    /// streak / signature untouched: failures carry no evidence about
+    /// upstream change.
+    fn record_failure(&self, now: std::time::Instant, cadence: &LinearCadence) {
+        let mut inner = self.inner.lock();
+        inner.next_due = Some(now + cadence.active);
+    }
 }
 
 /// Order-independent fingerprint of a kept Linear ticket set, used to
@@ -1744,11 +1758,17 @@ impl TaskSource for LinearSource {
     {
         Box::pin(async move {
             self.emit_progress("Querying Linear for issues…");
-            let outcome = self
-                .client
-                .fetch_all_with_coverage()
-                .await
-                .map_err(lazybox_core::ProviderError::from)?;
+            let outcome = match self.client.fetch_all_with_coverage().await {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    // A failed fetch must still advance the cadence —
+                    // see `record_failure` for the retry-storm this
+                    // prevents.
+                    self.schedule
+                        .record_failure(std::time::Instant::now(), &self.cadence);
+                    return Err(lazybox_core::ProviderError::from(e));
+                }
+            };
             let complete = !outcome.is_partial();
             *self.last_coverage_partial.lock() = outcome.is_partial();
             self.emit_progress(format!(
@@ -2252,6 +2272,30 @@ mod linear_cadence_tests {
         // A ticket changed → snap back to the fast cadence immediately.
         sched.record(t, 99, true, &cad);
         assert!(!sched.is_due(t + Duration::from_secs(59)));
+        assert!(sched.is_due(t + Duration::from_secs(60)));
+    }
+
+    /// 2026-08-19 audit (R3): the schedule used to advance ONLY at the
+    /// tail of a successful fetch, so a failing `linear auth token` or
+    /// a Linear outage left `next_due` in the past and the source
+    /// retried (5s subprocess timeout included) on every single tick.
+    /// A failure must gate the next attempt by the active cadence.
+    #[test]
+    fn a_failed_sweep_still_rearms_the_cadence() {
+        let sched = LinearSchedule::default();
+        let cad = cadence();
+        let t = Instant::now();
+        assert!(sched.is_due(t), "never-armed schedule polls eagerly");
+        sched.record_failure(t, &cad);
+        assert!(
+            !sched.is_due(t + Duration::from_secs(59)),
+            "a failure must not leave the source due on the very next tick"
+        );
+        assert!(sched.is_due(t + Duration::from_secs(60)));
+        // Failures carry no evidence about upstream change: a
+        // subsequent identical success still starts its idle streak
+        // from scratch rather than inheriting failure state.
+        sched.record(t, 7, true, &cad);
         assert!(sched.is_due(t + Duration::from_secs(60)));
     }
 
@@ -2789,279 +2833,20 @@ pub(super) async fn sources_for_with_engagement(
                 };
                 match client_result {
                     Ok(client) => {
-                        let filter = setup.provider_config("github");
-                        // Load YAML once for all runtime GitHub knobs
-                        // that are intentionally outside the setup
-                        // wizard: mention allowlist, auto-fix, and the
-                        // documented `providers.github.*` section.
-                        let cfg = lazybox_config::Config::load().ok();
-                        let github_cfg = cfg.as_ref().map(|c| &c.providers.github);
-                        let config_scopes = github_cfg
-                            .map(|g| github_scopes_from_filters(&g.filters))
-                            .unwrap_or_default();
-                        let watch_repos = github_cfg
-                            .map(|g| github_watch_repos_from_filters(&g.filters))
-                            .unwrap_or_default();
-                        let detect_needs_reply =
-                            github_cfg.map(|g| g.detect_needs_reply).unwrap_or(true);
-                        let poll_interval = github_cfg
-                            .map(|g| g.poll_interval)
-                            .unwrap_or(Duration::from_secs(60));
-                        let background_budget_share = github_cfg
-                            .map(|g| g.background_budget_share)
-                            .unwrap_or(lazybox_gh::rate_budget::DEFAULT_BACKGROUND_SHARE);
-                        let mut scopes = setup
-                            .selected_scopes
-                            .get("github")
-                            .cloned()
-                            .unwrap_or_default();
-                        scopes.extend(config_scopes);
-                        // Opt-in (`providers.github.include_accessible_repos`):
-                        // widen the allowlist to every repo the user can reach
-                        // (owned / org-member / direct-collaborator), so an
-                        // involved PR fetched by `involves:me` in a repo they
-                        // didn't tick isn't silently dropped by the post-fetch
-                        // filter. Off by default so an explicit selection still
-                        // narrows.
-                        let include_accessible = github_cfg
-                            .map(|g| g.include_accessible_repos)
-                            .unwrap_or(false);
-                        if include_accessible {
-                            // A rebuilt client (cold cache / token rotation)
-                            // may be a different account — drop the memo so its
-                            // memberships are refetched, not the old account's.
-                            if restore_sync_cursors {
-                                state.implicit_gh_scopes = None;
-                            }
-                            if state.implicit_gh_scopes.is_none() {
-                                // Cache only a COMPLETE fetch; on failure leave
-                                // it `None` so the next tick retries rather than
-                                // pinning a truncated allowlist that would hide
-                                // repos until restart.
-                                match client.accessible_scopes().await {
-                                    Ok(accessible) => state.implicit_gh_scopes = Some(accessible),
-                                    Err(e) => tracing::info!(
-                                        "github accessible-scopes fetch failed, retrying next tick: {e}"
-                                    ),
-                                }
-                            }
-                            if let Some(implicit) = &state.implicit_gh_scopes {
-                                scopes.extend(implicit.iter().cloned());
-                            }
-                        }
-                        let pr_qualifiers =
-                            build_pr_search_qualifiers(&filter, &scopes, client.username());
-                        let issue_qualifiers =
-                            build_issue_search_qualifiers(&filter, &scopes, client.username());
-                        // `with_filters` returns a new owned client
-                        // sharing the same budget Arc — `.clone()` on
-                        // the result is cheap and keeps the cache in
-                        // sync with what GhSource holds.
-                        let client = client
-                            .with_background_share(background_budget_share)
-                            .with_filters(pr_qualifiers, issue_qualifiers)
-                            .with_watch_repos(watch_repos.iter().cloned().collect())
-                            .with_needs_reply(detect_needs_reply);
-                        if restore_sync_cursors && let Some(store) = cursor_store.clone() {
-                            let key = format!("github:sync-cursors:v1:{}", client.username());
-                            match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
-                                Ok(Ok(Some(payload))) => {
-                                    match serde_json::from_str::<lazybox_gh::SyncCursors>(&payload)
-                                    {
-                                        Ok(cursors) => client.restore_sync_cursors(cursors),
-                                        Err(error) => tracing::warn!(
-                                            "parse persisted GitHub sync cursors failed: {error}"
-                                        ),
-                                    }
-                                }
-                                Ok(Ok(None)) => {}
-                                Ok(Err(error)) => {
-                                    tracing::warn!("load GitHub sync cursors failed: {error}")
-                                }
-                                Err(error) => {
-                                    tracing::warn!("load GitHub sync cursors task failed: {error}")
-                                }
-                            }
-                        }
-                        // Reload the rate/throttle state BEFORE the
-                        // governor's first `begin_background_tick` below so
-                        // a restarted daemon resumes respecting the primary
-                        // budget, secondary cooldown, and backoff level it
-                        // learned last run instead of re-bursting into the
-                        // same throttle.
-                        if restore_sync_cursors && let Some(store) = cursor_store.clone() {
-                            let key = format!("github:rate-state:v1:{}", client.username());
-                            match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
-                                Ok(Ok(Some(payload))) => {
-                                    match serde_json::from_str::<lazybox_gh::PersistedRateState>(
-                                        &payload,
-                                    ) {
-                                        Ok(state) => client.restore_rate_state(state),
-                                        Err(error) => tracing::warn!(
-                                            "parse persisted GitHub rate state failed: {error}"
-                                        ),
-                                    }
-                                }
-                                Ok(Ok(None)) => {}
-                                Ok(Err(error)) => {
-                                    tracing::warn!("load GitHub rate state failed: {error}")
-                                }
-                                Err(error) => {
-                                    tracing::warn!("load GitHub rate state task failed: {error}")
-                                }
-                            }
-                        }
-                        // Cache + announce the authenticated viewer
-                        // login so the TUI can render `@me` for the
-                        // local user's bylines. Diffs the cache so we
-                        // only broadcast when the value actually
-                        // changes (token rotation, credential
-                        // refresh, …) — quiet on the steady-state
-                        // poll loop.
-                        let viewer = client.username().to_string();
-                        if !viewer.is_empty() {
-                            let mut logins = viewer_identities.lock();
-                            let entry = logins.iter_mut().find(|(src, _)| src == "github");
-                            let changed = match entry {
-                                Some((_, existing)) if *existing == viewer => false,
-                                Some((_, existing)) => {
-                                    *existing = viewer.clone();
-                                    true
-                                }
-                                None => {
-                                    logins.push(("github".into(), viewer.clone()));
-                                    true
-                                }
-                            };
-                            let snapshot = logins.clone();
-                            drop(logins);
-                            if changed {
-                                let _ = bus.send(Event::ViewerIdentities { logins: snapshot });
-                            }
-                        }
-                        gh_client_cache.store(client.clone());
-                        // Resolve the `@lazybox` allowlist. Empty YAML
-                        // list → fall back to "just the authenticated
-                        // viewer", which mirrors the design doc's MVP
-                        // scope (only the local lazybox user's own
-                        // issues + comments count).
-                        let mut mention_allowed: std::collections::BTreeSet<String> = cfg
-                            .as_ref()
-                            .map(|c| c.mention.allowed_logins.iter().cloned().collect())
-                            .unwrap_or_default();
-                        if mention_allowed.is_empty() && !viewer.is_empty() {
-                            mention_allowed.insert(viewer.clone());
-                        }
-                        // Auto-fix settings (off unless the user opted
-                        // in via `auto_fix.enabled: true`).
-                        let auto_fix = cfg
-                            .as_ref()
-                            .map(|c| c.auto_fix.to_settings())
-                            .unwrap_or_default();
-                        // Commit/PR conventions injected into autonomous
-                        // work briefs (default Conventional Commits).
-                        let conventions = cfg
-                            .as_ref()
-                            .map(|c| c.conventions.clone())
-                            .unwrap_or_default();
-                        // Round-robin scheduling. Pre-fetch we:
-                        //   1. Ask the client whether this tick will
-                        //      actually run a full sweep. Most ticks
-                        //      take the notifications fast path and
-                        //      never consult the round-robin pick —
-                        //      advancing the cursor / tick counter on
-                        //      those stamped repos "synced" without a
-                        //      single query and evaluated the global-
-                        //      sweep modulus against an inflated
-                        //      counter.
-                        //   2. On a full-sweep tick: prune stale
-                        //      cursor entries, pick the per-tick
-                        //      slice, bump the cursor for repos we're
-                        //      about to query, and increment the tick
-                        //      counter AFTER the pick so the K-th-tick
-                        //      rule observes the value we passed in.
-                        let will_full_sweep = client.should_full_sweep();
-                        let now = std::time::Instant::now();
-                        let sessioned_repos = engagement.sessioned_repos();
-                        let governor_interval =
-                            super::background_tick_interval(poll_interval, engagement.hot_count());
-                        let governor_plan = client.begin_background_tick(governor_interval);
-                        let want_prs = filter.pr_enabled();
-                        let scan_issues = filter.issue_enabled() || !mention_allowed.is_empty();
-                        let forecast = client.background_sweep_forecast(want_prs, scan_issues);
-                        state.round_robin.prune(now);
-                        let global_due = will_run_global(
-                            state.round_robin.cursor.len(),
-                            state.round_robin.tick,
-                            DEFAULT_ROUND_ROBIN_N,
-                        );
-                        let required_sweep_points = forecast.required_points(global_due, want_prs);
-                        let max_repos = if client.manual_refresh_pending() {
-                            usize::MAX
-                        } else {
-                            forecast.repo_capacity(
-                                governor_plan.graphql_points,
-                                global_due,
-                                DEFAULT_ROUND_ROBIN_N,
-                            )
-                        };
-                        let full_sweep_admitted = full_sweep_admitted(
-                            will_full_sweep,
-                            client.manual_refresh_pending(),
-                            &governor_plan,
-                            required_sweep_points,
-                        );
-                        let scheduling = plan_round_robin_tick_budgeted(
-                            &mut state.round_robin,
-                            sessioned_repos,
-                            full_sweep_admitted,
-                            DEFAULT_ROUND_ROBIN_N,
-                            max_repos,
-                            now,
-                        );
-                        if will_full_sweep {
-                            tracing::info!(
-                                source = lazybox_gh::SOURCE,
-                                tick = state.round_robin.tick,
-                                run_global = scheduling.run_global,
-                                round_robin = ?scheduling.repos,
-                                sessioned = sessioned_repos.len(),
-                                known_repos = state.round_robin.cursor.len(),
-                                focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
-                                allowance = governor_plan.graphql_points,
-                                required = required_sweep_points,
-                                reserve_share = background_budget_share,
-                                pressure = governor_plan.pressure,
-                                admitted = full_sweep_admitted,
-                                "round-robin scheduling decision"
-                            );
-                        }
-                        sources.push(Box::new(GhSource {
+                        push_github_source(
                             client,
-                            filter,
-                            scopes,
-                            watch_repos,
-                            detect_needs_reply,
-                            bus: bus.clone(),
-                            mention_allowed_logins: mention_allowed,
-                            auto_fix,
-                            conventions,
-                            pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(
-                                Vec::new(),
-                            )),
-                            scheduling,
-                            governor_plan,
-                            cursor_store: cursor_store.clone(),
-                            // Default to Full so a never-fetched
-                            // source doesn't accidentally block rescope.
-                            last_kind: parking_lot::Mutex::new(FetchMode::Full),
-                            retry_after_secs: parking_lot::Mutex::new(None),
-                            last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
-                            last_windowed: parking_lot::Mutex::new(false),
-                            hot_targets: engagement.hot_targets().to_vec(),
-                            cold_targets: engagement.cold_targets().clone(),
+                            restore_sync_cursors,
+                            setup,
+                            bus.clone(),
+                            state,
+                            viewer_identities.clone(),
+                            gh_client_cache.clone(),
+                            engagement,
                             poll_notifications,
-                        }));
+                            cursor_store.clone(),
+                            &mut sources,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         // A dead token at startup used to be log-only:
@@ -3077,7 +2862,55 @@ pub(super) async fn sources_for_with_engagement(
                     }
                 }
             }
-            Err(e) => tracing::info!("github credentials not available: {e}"),
+            // Resolution failed. Before this fallback, a transient
+            // `gh auth token` timeout (system load, cold keychain)
+            // blacked out GitHub for the whole tick even though a
+            // perfectly good authenticated client sat in the cache —
+            // and the only trace was an `info!` line, so the UI showed
+            // a healthy-looking frozen inbox. Reuse the cached client
+            // for this tick; if the token was actually rotated, its
+            // requests 401 and the next successful resolve replaces it.
+            Err(e) => match gh_client_cache.cached() {
+                Some(existing) => {
+                    tracing::warn!(
+                        "github credential resolution failed ({e}); reusing the cached \
+                         authenticated client for this tick"
+                    );
+                    push_github_source(
+                        existing,
+                        false,
+                        setup,
+                        bus.clone(),
+                        state,
+                        viewer_identities.clone(),
+                        gh_client_cache.clone(),
+                        engagement,
+                        poll_notifications,
+                        cursor_store.clone(),
+                        &mut sources,
+                    )
+                    .await;
+                }
+                None => {
+                    // No client to fall back to. An `Exhausted` chain
+                    // is mere absence (user never configured GitHub) —
+                    // stay quiet. Anything else is a real failure the
+                    // user must see instead of a silently dead sync.
+                    if matches!(e, lazybox_auth::CredentialError::Exhausted) {
+                        tracing::info!("github credentials not available: {e}");
+                    } else {
+                        tracing::warn!("github credential resolution failed: {e}");
+                        state.broadcast_error_debounced(
+                            &bus,
+                            lazybox_gh::SOURCE,
+                            &lazybox_core::ProviderError::retryable(
+                                lazybox_gh::SOURCE,
+                                format!("credential resolution failed: {e}"),
+                            ),
+                        );
+                    }
+                }
+            },
         }
     }
 
@@ -3119,12 +2952,307 @@ pub(super) async fn sources_for_with_engagement(
                         .with_schedule(schedule, cadence),
                     ))
                 }
-                Err(e) => tracing::info!("linear not configured: {e}"),
+                Err(e) => {
+                    // Re-arm the cadence even though nothing was
+                    // built: a timing-out `linear auth token` used to
+                    // leave `next_due` in the past, so every single
+                    // tick re-spawned the 5s subprocess forever.
+                    let cadence = lazybox_config::Config::load()
+                        .map(|c| LinearCadence::from_config(&c.providers.linear))
+                        .unwrap_or_default();
+                    schedule.record_failure(std::time::Instant::now(), &cadence);
+                    tracing::info!("linear not configured: {e}");
+                }
             }
         }
     }
 
     sources
+}
+
+/// Build and push the GitHub task source from an authenticated
+/// client. Extracted from `sources_for_with_engagement` so the
+/// credential-failure path can reach it too: a failed `gh auth token`
+/// with a cached client falls back here instead of blacking out
+/// GitHub for the tick (2026-08-19 resilience audit, R2).
+#[allow(clippy::too_many_arguments)]
+async fn push_github_source(
+    client: GhClient,
+    restore_sync_cursors: bool,
+    setup: &lazybox_core::PersistedSetup,
+    bus: tokio::sync::broadcast::Sender<Event>,
+    state: &mut TickState,
+    viewer_identities: std::sync::Arc<parking_lot::Mutex<Vec<(String, String)>>>,
+    gh_client_cache: crate::registries::GithubClientCache,
+    engagement: &EngagementSnapshot,
+    poll_notifications: bool,
+    cursor_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
+    sources: &mut Vec<Box<dyn TaskSource>>,
+) {
+    let filter = setup.provider_config("github");
+    // Load YAML once for all runtime GitHub knobs
+    // that are intentionally outside the setup
+    // wizard: mention allowlist, auto-fix, and the
+    // documented `providers.github.*` section.
+    let cfg = lazybox_config::Config::load().ok();
+    let github_cfg = cfg.as_ref().map(|c| &c.providers.github);
+    let config_scopes = github_cfg
+        .map(|g| github_scopes_from_filters(&g.filters))
+        .unwrap_or_default();
+    let watch_repos = github_cfg
+        .map(|g| github_watch_repos_from_filters(&g.filters))
+        .unwrap_or_default();
+    let detect_needs_reply = github_cfg.map(|g| g.detect_needs_reply).unwrap_or(true);
+    let poll_interval = github_cfg
+        .map(|g| g.poll_interval)
+        .unwrap_or(Duration::from_secs(60));
+    let background_budget_share = github_cfg
+        .map(|g| g.background_budget_share)
+        .unwrap_or(lazybox_gh::rate_budget::DEFAULT_BACKGROUND_SHARE);
+    let mut scopes = setup
+        .selected_scopes
+        .get("github")
+        .cloned()
+        .unwrap_or_default();
+    scopes.extend(config_scopes);
+    // Opt-in (`providers.github.include_accessible_repos`):
+    // widen the allowlist to every repo the user can reach
+    // (owned / org-member / direct-collaborator), so an
+    // involved PR fetched by `involves:me` in a repo they
+    // didn't tick isn't silently dropped by the post-fetch
+    // filter. Off by default so an explicit selection still
+    // narrows.
+    let include_accessible = github_cfg
+        .map(|g| g.include_accessible_repos)
+        .unwrap_or(false);
+    if include_accessible {
+        // A rebuilt client (cold cache / token rotation)
+        // may be a different account — drop the memo so its
+        // memberships are refetched, not the old account's.
+        if restore_sync_cursors {
+            state.implicit_gh_scopes = None;
+        }
+        if state.implicit_gh_scopes.is_none() {
+            // Cache only a COMPLETE fetch; on failure leave
+            // it `None` so the next tick retries rather than
+            // pinning a truncated allowlist that would hide
+            // repos until restart.
+            match client.accessible_scopes().await {
+                Ok(accessible) => state.implicit_gh_scopes = Some(accessible),
+                Err(e) => {
+                    tracing::info!("github accessible-scopes fetch failed, retrying next tick: {e}")
+                }
+            }
+        }
+        if let Some(implicit) = &state.implicit_gh_scopes {
+            scopes.extend(implicit.iter().cloned());
+        }
+    }
+    let pr_qualifiers = build_pr_search_qualifiers(&filter, &scopes, client.username());
+    let issue_qualifiers = build_issue_search_qualifiers(&filter, &scopes, client.username());
+    // `with_filters` returns a new owned client
+    // sharing the same budget Arc — `.clone()` on
+    // the result is cheap and keeps the cache in
+    // sync with what GhSource holds.
+    let client = client
+        .with_background_share(background_budget_share)
+        .with_filters(pr_qualifiers, issue_qualifiers)
+        .with_watch_repos(watch_repos.iter().cloned().collect())
+        .with_needs_reply(detect_needs_reply);
+    if restore_sync_cursors && let Some(store) = cursor_store.clone() {
+        let key = format!("github:sync-cursors:v1:{}", client.username());
+        match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
+            Ok(Ok(Some(payload))) => {
+                match serde_json::from_str::<lazybox_gh::SyncCursors>(&payload) {
+                    Ok(cursors) => client.restore_sync_cursors(cursors),
+                    Err(error) => {
+                        tracing::warn!("parse persisted GitHub sync cursors failed: {error}")
+                    }
+                }
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!("load GitHub sync cursors failed: {error}")
+            }
+            Err(error) => {
+                tracing::warn!("load GitHub sync cursors task failed: {error}")
+            }
+        }
+    }
+    // Reload the rate/throttle state BEFORE the
+    // governor's first `begin_background_tick` below so
+    // a restarted daemon resumes respecting the primary
+    // budget, secondary cooldown, and backoff level it
+    // learned last run instead of re-bursting into the
+    // same throttle.
+    if restore_sync_cursors && let Some(store) = cursor_store.clone() {
+        let key = format!("github:rate-state:v1:{}", client.username());
+        match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {
+            Ok(Ok(Some(payload))) => {
+                match serde_json::from_str::<lazybox_gh::PersistedRateState>(&payload) {
+                    Ok(state) => client.restore_rate_state(state),
+                    Err(error) => {
+                        tracing::warn!("parse persisted GitHub rate state failed: {error}")
+                    }
+                }
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!("load GitHub rate state failed: {error}")
+            }
+            Err(error) => {
+                tracing::warn!("load GitHub rate state task failed: {error}")
+            }
+        }
+    }
+    // Cache + announce the authenticated viewer
+    // login so the TUI can render `@me` for the
+    // local user's bylines. Diffs the cache so we
+    // only broadcast when the value actually
+    // changes (token rotation, credential
+    // refresh, …) — quiet on the steady-state
+    // poll loop.
+    let viewer = client.username().to_string();
+    if !viewer.is_empty() {
+        let mut logins = viewer_identities.lock();
+        let entry = logins.iter_mut().find(|(src, _)| src == "github");
+        let changed = match entry {
+            Some((_, existing)) if *existing == viewer => false,
+            Some((_, existing)) => {
+                *existing = viewer.clone();
+                true
+            }
+            None => {
+                logins.push(("github".into(), viewer.clone()));
+                true
+            }
+        };
+        let snapshot = logins.clone();
+        drop(logins);
+        if changed {
+            let _ = bus.send(Event::ViewerIdentities { logins: snapshot });
+        }
+    }
+    gh_client_cache.store(client.clone());
+    // Resolve the `@lazybox` allowlist. Empty YAML
+    // list → fall back to "just the authenticated
+    // viewer", which mirrors the design doc's MVP
+    // scope (only the local lazybox user's own
+    // issues + comments count).
+    let mut mention_allowed: std::collections::BTreeSet<String> = cfg
+        .as_ref()
+        .map(|c| c.mention.allowed_logins.iter().cloned().collect())
+        .unwrap_or_default();
+    if mention_allowed.is_empty() && !viewer.is_empty() {
+        mention_allowed.insert(viewer.clone());
+    }
+    // Auto-fix settings (off unless the user opted
+    // in via `auto_fix.enabled: true`).
+    let auto_fix = cfg
+        .as_ref()
+        .map(|c| c.auto_fix.to_settings())
+        .unwrap_or_default();
+    // Commit/PR conventions injected into autonomous
+    // work briefs (default Conventional Commits).
+    let conventions = cfg
+        .as_ref()
+        .map(|c| c.conventions.clone())
+        .unwrap_or_default();
+    // Round-robin scheduling. Pre-fetch we:
+    //   1. Ask the client whether this tick will
+    //      actually run a full sweep. Most ticks
+    //      take the notifications fast path and
+    //      never consult the round-robin pick —
+    //      advancing the cursor / tick counter on
+    //      those stamped repos "synced" without a
+    //      single query and evaluated the global-
+    //      sweep modulus against an inflated
+    //      counter.
+    //   2. On a full-sweep tick: prune stale
+    //      cursor entries, pick the per-tick
+    //      slice, bump the cursor for repos we're
+    //      about to query, and increment the tick
+    //      counter AFTER the pick so the K-th-tick
+    //      rule observes the value we passed in.
+    let will_full_sweep = client.should_full_sweep();
+    let now = std::time::Instant::now();
+    let sessioned_repos = engagement.sessioned_repos();
+    let governor_interval = super::background_tick_interval(poll_interval, engagement.hot_count());
+    let governor_plan = client.begin_background_tick(governor_interval);
+    let want_prs = filter.pr_enabled();
+    let scan_issues = filter.issue_enabled() || !mention_allowed.is_empty();
+    let forecast = client.background_sweep_forecast(want_prs, scan_issues);
+    state.round_robin.prune(now);
+    let global_due = will_run_global(
+        state.round_robin.cursor.len(),
+        state.round_robin.tick,
+        DEFAULT_ROUND_ROBIN_N,
+    );
+    let required_sweep_points = forecast.required_points(global_due, want_prs);
+    let max_repos = if client.manual_refresh_pending() {
+        usize::MAX
+    } else {
+        forecast.repo_capacity(
+            governor_plan.graphql_points,
+            global_due,
+            DEFAULT_ROUND_ROBIN_N,
+        )
+    };
+    let full_sweep_admitted = full_sweep_admitted(
+        will_full_sweep,
+        client.manual_refresh_pending(),
+        &governor_plan,
+        required_sweep_points,
+    );
+    let scheduling = plan_round_robin_tick_budgeted(
+        &mut state.round_robin,
+        sessioned_repos,
+        full_sweep_admitted,
+        DEFAULT_ROUND_ROBIN_N,
+        max_repos,
+        now,
+    );
+    if will_full_sweep {
+        tracing::info!(
+            source = lazybox_gh::SOURCE,
+            tick = state.round_robin.tick,
+            run_global = scheduling.run_global,
+            round_robin = ?scheduling.repos,
+            sessioned = sessioned_repos.len(),
+            known_repos = state.round_robin.cursor.len(),
+            focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
+            allowance = governor_plan.graphql_points,
+            required = required_sweep_points,
+            reserve_share = background_budget_share,
+            pressure = governor_plan.pressure,
+            admitted = full_sweep_admitted,
+            "round-robin scheduling decision"
+        );
+    }
+    sources.push(Box::new(GhSource {
+        client,
+        filter,
+        scopes,
+        watch_repos,
+        detect_needs_reply,
+        bus: bus.clone(),
+        mention_allowed_logins: mention_allowed,
+        auto_fix,
+        conventions,
+        pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+        scheduling,
+        governor_plan,
+        cursor_store: cursor_store.clone(),
+        // Default to Full so a never-fetched
+        // source doesn't accidentally block rescope.
+        last_kind: parking_lot::Mutex::new(FetchMode::Full),
+        retry_after_secs: parking_lot::Mutex::new(None),
+        last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
+        last_windowed: parking_lot::Mutex::new(false),
+        hot_targets: engagement.hot_targets().to_vec(),
+        cold_targets: engagement.cold_targets().clone(),
+        poll_notifications,
+    }));
 }
 
 /// Convenience: build the default source set assuming both providers

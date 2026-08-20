@@ -1298,7 +1298,10 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
                 .fg(ctx.theme.warn)
                 .add_modifier(Modifier::BOLD)
         };
-        spans.push(Span::styled(" WORK ", style));
+        spans.push(Span::styled(
+            format!(" {} ", crate::components::sidebar::CLAIM_GLYPH),
+            style,
+        ));
     }
     if let Some(p) = primary {
         spans.push(Span::styled(p.label, p.style));
@@ -2395,7 +2398,10 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect();
-        assert_eq!(status, " WORK ");
+        assert_eq!(
+            status,
+            format!(" {} ", crate::components::sidebar::CLAIM_GLYPH)
+        );
         let labels: String = label_spans(&ctx)
             .iter()
             .map(|span| span.content.as_ref())

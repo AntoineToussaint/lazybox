@@ -6832,11 +6832,11 @@ async fn tick_dispatches_auto_fix_action_spawns_agent() {
     // otherwise the first-run workspace-trust dialog eats the injected
     // fix prompt and any later Edit/Bash approval deadlocks the run.
     let argvs = mock.all_argv().await;
+    // Agent argv rides under the `nice -n <N>` wrapper (#1237); the
+    // program just has to appear with the skip flag.
     assert!(
-        argvs
-            .iter()
-            .any(|a| a.first().map(String::as_str) == Some("claude")
-                && a.iter().any(|s| s == "--dangerously-skip-permissions")),
+        argvs.iter().any(|a| a.iter().any(|s| s == "claude")
+            && a.iter().any(|s| s == "--dangerously-skip-permissions")),
         "auto-fix spawn must pass --dangerously-skip-permissions; got {argvs:?}"
     );
 }

@@ -3220,7 +3220,16 @@ impl Sidebar {
         };
 
         let workspace = self.selected_workspace();
-        let is_ready = self.merge_target_for_cursor().is_some();
+        // Footer PRIORITY heuristic only: cached readiness decides
+        // whether merge or work/fix-CI is the better hint for this row.
+        // `g m` availability itself is structural (#1203) — an open PR
+        // always merges on request, with the cached state as a send
+        // advisory — so a "not ready" cache here hides nothing, it just
+        // promotes the likelier next action.
+        let is_ready = self.merge_target_for_cursor().is_some()
+            && workspace
+                .and_then(|w| w.pr.as_ref())
+                .is_some_and(|pr| lazybox_tui_core::intent::merge_block_reason(pr).is_none());
         let mut actions: Vec<Action> = Vec::with_capacity(6);
 
         // A live multi-select means every normal Workspace action now

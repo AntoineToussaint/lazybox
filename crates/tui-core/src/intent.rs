@@ -527,9 +527,18 @@ pub fn resolve_adopt(workspace: Option<&Workspace>) -> Intent {
     }
 }
 
-/// Resolve `g m` (merge). Same READY-gating the contextual
-/// footer uses — the resolver and the hint share one predicate via
-/// [`merge_block_reason`].
+/// Resolve `g m` (merge). Gates only on STRUCTURAL facts — the row has
+/// an open PR. Cached soft state (CI, review verdicts, mergeability,
+/// branch-protection) deliberately does NOT block (#1203): the cache
+/// goes stale — hours stale under a rate-limit backoff — and a
+/// pre-block on it refused merges GitHub would have accepted. GitHub
+/// is the authority at merge time: the daemon ships the mutation and a
+/// real rejection comes back as `PrMergeFailed` with GitHub's reason
+/// (correcting the cached conflict state as a side effect). ADVISE,
+/// NEVER FORBID: the dispatch path surfaces the cached reason as an
+/// advisory next to the send, not as a refusal. `merge_block_reason`
+/// remains the (stricter, correct) predicate for the READY tag and the
+/// no-keypress auto-merge path.
 pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {
     let Some(ws) = workspace else {
         return Intent::NoOp;
@@ -537,12 +546,25 @@ pub fn resolve_merge(workspace: Option<&Workspace>) -> Intent {
     let Some(pr) = ws.pr.as_ref() else {
         return Intent::NoOp;
     };
-    if merge_block_reason(pr).is_some() {
+    if !matches!(
+        pr.state,
+        lazybox_core::TaskState::Open | lazybox_core::TaskState::InReview
+    ) {
         return Intent::NoOp;
     }
     Intent::MergePr {
         workspace_key: ws.key.clone(),
     }
+}
+
+/// The cached soft-block advisory for a `g m` send, or `None` when the
+/// cache says the PR is merge-ready. Never used to refuse — only to
+/// annotate the send ("cached state says X — asking GitHub").
+pub fn merge_send_advisory(workspace: Option<&Workspace>) -> Option<&'static str> {
+    workspace
+        .and_then(|w| w.pr.as_ref())
+        .and_then(merge_block_reason)
+        .filter(|reason| *reason != "the PR isn't open")
 }
 
 /// Resolve `g u` (update branch). Only fires when the workspace's PR is
@@ -1620,34 +1642,55 @@ mod tests {
         }
     }
 
+    /// #1203: cached soft state advises, it never refuses. All three
+    /// soft blocks — changes requested, red CI, a cached conflict —
+    /// still resolve to a merge send (GitHub is the authority and its
+    /// rejection comes back with the real reason); the cached reason
+    /// rides along as the send advisory instead.
     #[test]
-    fn merge_with_changes_requested_is_blocked() {
+    fn merge_with_changes_requested_sends_with_advisory() {
         let ws = pr("o/r#1", CiStatus::Success, ReviewStatus::ChangesRequested);
-        assert_eq!(resolve_merge(Some(&ws)), Intent::NoOp);
+        assert!(matches!(resolve_merge(Some(&ws)), Intent::MergePr { .. }));
         assert_eq!(
-            merge_block_reason(ws.pr.as_ref().unwrap()),
+            merge_send_advisory(Some(&ws)),
             Some("changes were requested — address the review first")
         );
     }
 
     #[test]
-    fn merge_with_red_ci_is_noop() {
+    fn merge_with_red_ci_sends_with_advisory() {
         let ws = pr("o/r#1", CiStatus::Failure, ReviewStatus::Approved);
-        assert_eq!(resolve_merge(Some(&ws)), Intent::NoOp);
-        assert_eq!(
-            merge_block_reason(ws.pr.as_ref().unwrap()),
-            Some("CI isn't green yet")
-        );
+        assert!(matches!(resolve_merge(Some(&ws)), Intent::MergePr { .. }));
+        assert_eq!(merge_send_advisory(Some(&ws)), Some("CI isn't green yet"));
     }
 
     #[test]
-    fn merge_with_conflict_reports_conflict() {
+    fn merge_with_cached_conflict_sends_with_advisory() {
         let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
         ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
-        assert_eq!(resolve_merge(Some(&ws)), Intent::NoOp);
+        assert!(matches!(resolve_merge(Some(&ws)), Intent::MergePr { .. }));
         assert_eq!(
-            merge_block_reason(ws.pr.as_ref().unwrap()),
+            merge_send_advisory(Some(&ws)),
             Some("the branch has merge conflicts")
+        );
+    }
+
+    /// The stale-cache journey #1203 reported: mergeability `Unknown`
+    /// (not yet computed — common under a rate-limit backoff) must not
+    /// block, and a MERGED/CLOSED PR is the only structural no-op.
+    #[test]
+    fn merge_with_unknown_mergeability_sends_and_closed_pr_noops() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Unknown;
+        assert!(matches!(resolve_merge(Some(&ws)), Intent::MergePr { .. }));
+
+        let mut merged = pr("o/r#2", CiStatus::Success, ReviewStatus::Approved);
+        merged.pr.as_mut().unwrap().state = lazybox_core::TaskState::Merged;
+        assert_eq!(resolve_merge(Some(&merged)), Intent::NoOp);
+        assert_eq!(
+            merge_send_advisory(Some(&merged)),
+            None,
+            "'isn't open' is structural, not an advisory"
         );
     }
 

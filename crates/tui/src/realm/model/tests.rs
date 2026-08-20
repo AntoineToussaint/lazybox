@@ -10065,10 +10065,18 @@ mod merge_focus_follow_tests {
         use lazybox_tui_core::action::Action;
         let mut m = build_model();
         let ready = workspace("owner/repo#1", true, Duration::hours(1));
-        let mut blocked = workspace("owner/repo#2", true, Duration::hours(2));
-        blocked.pr.as_mut().unwrap().review = lazybox_core::ReviewStatus::ChangesRequested;
+        // Soft-blocked (changes requested): under #1203 the cache no
+        // longer refuses — GitHub is the authority, so this one FIRES.
+        let mut soft_blocked = workspace("owner/repo#2", true, Duration::hours(2));
+        soft_blocked.pr.as_mut().unwrap().review = lazybox_core::ReviewStatus::ChangesRequested;
+        // Will regress to MERGED under the open modal — structurally
+        // ineligible by confirm time. Seeded open so it can be selected.
+        let merged = workspace("owner/repo#3", true, Duration::hours(3));
+        let mut merged_row = merged.clone();
+        merged_row.pr.as_mut().unwrap().state = lazybox_core::TaskState::Merged;
         let ready_key = ready.key.clone();
-        seed_and_select(&mut m, vec![ready, blocked]);
+        let soft_key = soft_blocked.key.clone();
+        seed_and_select(&mut m, vec![ready, soft_blocked, merged]);
 
         let pending = m.dispatch_action(&Action::MergePr);
         assert!(pending.is_empty(), "merge gates on confirm first");
@@ -10077,16 +10085,31 @@ mod merge_focus_follow_tests {
             Some(ModalFlow::ActionConfirm {
                 action: Action::MergePr,
                 targets,
-            }) => assert_eq!(targets.len(), 2, "the whole selection is stashed"),
+            }) => assert_eq!(targets.len(), 3, "the whole selection is stashed"),
             other => panic!("expected a bulk merge confirm, got {other:?}"),
         }
+        // The third PR merges upstream while the confirm is up —
+        // structurally ineligible by the time the user hits Yes.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(merged_row)));
 
         let cmds = m.handle_confirmed(true);
-        assert_eq!(cmds.len(), 1, "only the merge-ready PR fires");
-        match &cmds[0] {
-            IpcCommand::MergePr { workspace_key } => assert_eq!(workspace_key, &ready_key),
-            other => panic!("expected MergePr for the ready PR, got {other:?}"),
-        }
+        let mut merged_keys: Vec<String> = cmds
+            .iter()
+            .map(|c| match c {
+                IpcCommand::MergePr { workspace_key } => workspace_key.as_str().to_string(),
+                other => panic!("expected MergePr, got {other:?}"),
+            })
+            .collect();
+        merged_keys.sort();
+        let mut expected = vec![
+            ready_key.as_str().to_string(),
+            soft_key.as_str().to_string(),
+        ];
+        expected.sort();
+        assert_eq!(
+            merged_keys, expected,
+            "ready AND soft-blocked fire (GitHub decides); only the merged PR is skipped"
+        );
         assert_eq!(m.sidebar.broadcast_selected_count(), 0);
     }
 
@@ -10183,10 +10206,13 @@ mod merge_focus_follow_tests {
         let mut m = build_model();
         let a = workspace("owner/repo#1", true, Duration::hours(1));
         let b = workspace("owner/repo#2", true, Duration::hours(2));
+        // Structural regressions: one merged, one closed, under the
+        // open modal. (Soft regressions — failing CI, fresh conflict —
+        // no longer refuse per #1203; only a PR that isn't open left.)
         let mut a_red = a.clone();
-        a_red.pr.as_mut().unwrap().ci = lazybox_core::CiStatus::Failure;
+        a_red.pr.as_mut().unwrap().state = lazybox_core::TaskState::Merged;
         let mut b_red = b.clone();
-        b_red.pr.as_mut().unwrap().ci = lazybox_core::CiStatus::Failure;
+        b_red.pr.as_mut().unwrap().state = lazybox_core::TaskState::Closed;
         seed_and_select(&mut m, vec![a, b]);
 
         assert!(m.dispatch_action(&Action::MergePr).is_empty());

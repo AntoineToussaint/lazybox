@@ -1670,7 +1670,13 @@ impl<T: TerminalAdapter> Model<T> {
                     if self.sidebar.click_to_select(sidebar_rect, m.row) {
                         self.sync_panes();
                     }
-                    if let Some(ws) = self.sidebar.selected_workspace() {
+                    // A click parked on a Space / repo header gets the
+                    // group menu (#1211) — before this split, a header
+                    // right-click opened the menu for whatever workspace
+                    // happened to be selected.
+                    if let Some((is_repo, name)) = self.sidebar.cursor_header() {
+                        self.mount_header_context_menu(is_repo, &name);
+                    } else if let Some(ws) = self.sidebar.selected_workspace() {
                         let session_key: lazybox_core::SessionKey = (&ws.key).into();
                         self.mount_sidebar_context_menu(session_key);
                     }
@@ -2500,6 +2506,10 @@ pub(super) fn action_from_kind(
         ActionKind::OpenGlobalSearch => Action::OpenGlobalSearch,
         ActionKind::ToggleRepoGroup => Action::ToggleRepoGroup,
         ActionKind::ToggleRepoPin => Action::ToggleRepoPin,
+        ActionKind::MoveGroupUp => Action::MoveGroupUp,
+        ActionKind::MoveGroupDown => Action::MoveGroupDown,
+        ActionKind::MoveGroupTop => Action::MoveGroupTop,
+        ActionKind::MoveGroupBottom => Action::MoveGroupBottom,
         ActionKind::ToggleFocusWorkspace => Action::ToggleFocusWorkspace,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,

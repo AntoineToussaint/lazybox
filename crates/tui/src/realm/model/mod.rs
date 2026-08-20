@@ -129,6 +129,12 @@ pub enum Id {
     /// [`Id::MoveToSpace`]). Preselects `ui.last_space`. The source
     /// label lives in the `ModalFlow::MoveToSpace` flow.
     MoveToSpacePicker,
+    /// Right-click menu on a sidebar Space / repo header (#1211). Rows
+    /// carry `ChoicePayload::Index` into the action list stashed in
+    /// `ModalFlow::HeaderContext`; the pick dispatches that action
+    /// against the cursor, which the click already parked on the
+    /// header.
+    HeaderContext,
     /// Single-line input prompt for naming a brand-new local
     /// Project. Submit → `Command::CreateProject { name }`.
     NewProject,
@@ -894,6 +900,11 @@ pub(crate) enum ModalFlow {
     MoveToSpacePick {
         source: String,
         entries: Vec<lazybox_tui_core::choice::SpacePickEntry>,
+    },
+    /// Header right-click menu (#1211): the actions list the picker
+    /// rows index into, snapshotted at mount.
+    HeaderContext {
+        actions: Vec<lazybox_tui_core::action::Action>,
     },
     /// Startup update modal: the available target whose dismissal is
     /// persisted on Esc.

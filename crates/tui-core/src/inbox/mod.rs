@@ -153,6 +153,121 @@ pub fn assign_source(spaces: &mut Vec<lazybox_config::SpaceConfig>, source: &str
     }
 }
 
+/// Direction for a Space / repo reorder (#1211).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDir {
+    Up,
+    Down,
+    Top,
+    Bottom,
+}
+
+impl MoveDir {
+    /// Human label for footer notices ("moved obin-ai up").
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Top => "to the top",
+            Self::Bottom => "to the bottom",
+        }
+    }
+}
+
+/// Where `idx` lands in a list of `len` after moving `dir`, clamped at
+/// the ends so an over-move is a no-op rather than an error.
+fn moved_index(len: usize, idx: usize, dir: MoveDir) -> usize {
+    match dir {
+        MoveDir::Up => idx.saturating_sub(1),
+        MoveDir::Down => (idx + 1).min(len.saturating_sub(1)),
+        MoveDir::Top => 0,
+        MoveDir::Bottom => len.saturating_sub(1),
+    }
+}
+
+/// Reorder the Space tier (#1211): rewrite `spaces` so its entry order
+/// encodes `rendered` (the full on-screen Space order) with `name`
+/// moved per `dir`. Spaces without a config entry (owner auto-seeds /
+/// `Ungrouped`) are materialized with an empty source list — explicit
+/// order without changing what resolves into them. Config entries not
+/// rendered this pass keep their sources and follow at the end in
+/// their original relative order. Returns `false` when `name` isn't
+/// rendered (nothing to move).
+pub fn move_space(
+    spaces: &mut Vec<lazybox_config::SpaceConfig>,
+    rendered: &[String],
+    name: &str,
+    dir: MoveDir,
+) -> bool {
+    let Some(idx) = rendered.iter().position(|s| s == name) else {
+        return false;
+    };
+    let mut order: Vec<String> = rendered.to_vec();
+    let item = order.remove(idx);
+    order.insert(moved_index(rendered.len(), idx, dir), item);
+
+    let mut out: Vec<lazybox_config::SpaceConfig> = order
+        .iter()
+        .map(|n| {
+            spaces
+                .iter()
+                .find(|s| &s.name == n)
+                .cloned()
+                .unwrap_or_else(|| lazybox_config::SpaceConfig {
+                    name: n.clone(),
+                    sources: Vec::new(),
+                })
+        })
+        .collect();
+    for cfg in spaces.iter() {
+        if !order.iter().any(|n| n == &cfg.name) {
+            out.push(cfg.clone());
+        }
+    }
+    *spaces = out;
+    true
+}
+
+/// Reorder a repo within its Space (#1211): materialize `rendered`
+/// (the Space's on-screen repo order) into the Space's `sources` with
+/// `repo` moved per `dir`. Sources the Space already claims but that
+/// aren't rendered this pass (filtered out) keep their claim, appended
+/// in their original order. The Space entry is created when the tier
+/// was implicit (owner auto-seed) — reordering inside it is the moment
+/// it becomes hand-managed. Returns `false` when `repo` isn't
+/// rendered.
+pub fn move_source_in_space(
+    spaces: &mut Vec<lazybox_config::SpaceConfig>,
+    space: &str,
+    rendered: &[String],
+    repo: &str,
+    dir: MoveDir,
+) -> bool {
+    let Some(idx) = rendered.iter().position(|s| s == repo) else {
+        return false;
+    };
+    let mut order: Vec<String> = rendered.to_vec();
+    let item = order.remove(idx);
+    order.insert(moved_index(rendered.len(), idx, dir), item);
+
+    if !spaces.iter().any(|s| s.name == space) {
+        spaces.push(lazybox_config::SpaceConfig {
+            name: space.to_string(),
+            sources: Vec::new(),
+        });
+    }
+    let Some(cfg) = spaces.iter_mut().find(|s| s.name == space) else {
+        return false;
+    };
+    for src in cfg.sources.clone() {
+        if !order.contains(&src) {
+            order.push(src);
+        }
+    }
+    cfg.sources = order;
+    true
+}
+
 /// Pure function: build the sidebar's visible-row list + per-repo
 /// summaries from the workspace map, mailbox filter, and
 /// repo-subscription config. No `Sidebar` borrow.
@@ -381,7 +496,23 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     let distinct_spaces: BTreeSet<&str> = space_of_repo.iter().map(String::as_str).collect();
 
     if distinct_spaces.len() < 2 {
-        for repo in &ordered_repos {
+        // Even without the Space tier rendered, an explicit source
+        // order on the lone Space's config still reorders the flat
+        // repo list (#1211) — so `x u`-style moves keep working when
+        // every repo shares one owner. Stable sort: unlisted repos
+        // keep the pins-then-alphabetical order.
+        let mut flat_repos: Vec<&String> = ordered_repos.iter().collect();
+        if let Some(space) = distinct_spaces.iter().next()
+            && let Some(cfg) = input.spaces.iter().find(|s| s.name == **space)
+        {
+            flat_repos.sort_by_key(|r| {
+                cfg.sources
+                    .iter()
+                    .position(|src| src == *r)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        for repo in flat_repos {
             emit_repo_group(
                 repo,
                 &input,
@@ -1521,6 +1652,99 @@ mod tests {
         assign_source(&mut spaces, "obin-ai/platform", "");
         assert!(spaces[0].sources.is_empty());
         assert_eq!(space_of("obin-ai/platform", &spaces), "obin-ai");
+    }
+
+    /// #1211: moving a Space materializes the full rendered order into
+    /// config (auto-seeds get empty-source entries, existing entries
+    /// keep their sources), unrendered entries survive at the tail,
+    /// and end-of-list moves clamp instead of erroring.
+    #[test]
+    fn move_space_materializes_rendered_order_and_clamps() {
+        let mut spaces = vec![
+            lazybox_config::SpaceConfig {
+                name: "Work".into(),
+                sources: vec!["o/r".into()],
+            },
+            lazybox_config::SpaceConfig {
+                name: "Hidden".into(),
+                sources: vec!["h/h".into()],
+            },
+        ];
+        // On screen: Work, then two auto-seeds; "Hidden" is filtered out.
+        let rendered: Vec<String> = vec!["Work".into(), "acme".into(), "obin-ai".into()];
+
+        assert!(move_space(&mut spaces, &rendered, "obin-ai", MoveDir::Up));
+        assert_eq!(
+            spaces.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["Work", "obin-ai", "acme", "Hidden"],
+        );
+        assert_eq!(spaces[0].sources, ["o/r"], "existing sources survive");
+        assert!(spaces[1].sources.is_empty(), "auto-seed materialized empty");
+        assert_eq!(spaces[3].sources, ["h/h"], "unrendered entry keeps claim");
+
+        // Clamped: already at the top of the rendered order.
+        assert!(move_space(&mut spaces, &rendered, "Work", MoveDir::Up));
+        assert_eq!(spaces[0].name, "Work");
+
+        assert!(move_space(&mut spaces, &rendered, "Work", MoveDir::Bottom));
+        assert_eq!(
+            spaces.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["acme", "obin-ai", "Work", "Hidden"],
+        );
+
+        assert!(
+            !move_space(&mut spaces, &rendered, "Nope", MoveDir::Up),
+            "unrendered name refuses instead of corrupting order",
+        );
+    }
+
+    /// #1211: moving a repo inside a Space materializes the rendered
+    /// repo order into `sources` (creating the entry for an implicit
+    /// auto-seed Space), keeps unrendered claims, and resolution is
+    /// unchanged — every repo still lands in the same Space.
+    #[test]
+    fn move_source_in_space_reorders_and_keeps_claims() {
+        let mut spaces: Vec<lazybox_config::SpaceConfig> = Vec::new();
+        let rendered: Vec<String> =
+            vec!["obin-ai/a".into(), "obin-ai/b".into(), "obin-ai/c".into()];
+
+        // Implicit owner Space: first move materializes it.
+        assert!(move_source_in_space(
+            &mut spaces,
+            "obin-ai",
+            &rendered,
+            "obin-ai/c",
+            MoveDir::Top,
+        ));
+        assert_eq!(spaces.len(), 1);
+        assert_eq!(spaces[0].name, "obin-ai");
+        assert_eq!(spaces[0].sources, ["obin-ai/c", "obin-ai/a", "obin-ai/b"]);
+        assert_eq!(
+            space_of("obin-ai/c", &spaces),
+            "obin-ai",
+            "resolution unchanged"
+        );
+
+        // An unrendered claimed source survives a later move. The move
+        // is computed over the *rendered* order passed in ([a, b, c]),
+        // so `a` moving down lands as [b, a, c] + the unrendered `z`.
+        spaces[0].sources.push("obin-ai/z".into());
+        assert!(move_source_in_space(
+            &mut spaces,
+            "obin-ai",
+            &rendered,
+            "obin-ai/a",
+            MoveDir::Down,
+        ));
+        assert_eq!(
+            spaces[0].sources,
+            ["obin-ai/b", "obin-ai/a", "obin-ai/c", "obin-ai/z"],
+        );
+
+        assert!(
+            !move_source_in_space(&mut spaces, "obin-ai", &rendered, "x/x", MoveDir::Up),
+            "unrendered repo refuses",
+        );
     }
 
     /// A single owner yields a lone Space, so the tier stays suppressed

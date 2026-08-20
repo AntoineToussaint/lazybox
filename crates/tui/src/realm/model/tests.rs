@@ -6867,7 +6867,10 @@ mod stale_input_tests {
                 | Id::EditorRemoveConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
-                Id::SidebarContext | Id::InspectList | Id::ImportCheckoutList => false,
+                // (HeaderContext's entries are all local/reversible, but
+                // a menu popped under a buffered Enter should never act.)
+                Id::SidebarContext | Id::HeaderContext | Id::InspectList
+                | Id::ImportCheckoutList => false,
                 // Drop — outward-effect inputs (post/label/deliver).
                 Id::Reply
                 | Id::Notes
@@ -6934,6 +6937,7 @@ mod stale_input_tests {
             Id::RenameWorkspace,
             Id::MoveToSpace,
             Id::MoveToSpacePicker,
+            Id::HeaderContext,
             Id::NewProject,
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
@@ -7756,6 +7760,192 @@ mod modal_input_responsiveness_tests {
             Some(super::super::ModalFlow::MoveToSpace { ref source })
                 if source == "obin-ai/lazybox"
         ));
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Minimal repo-labeled PR task — enough for the sidebar to group
+    /// the workspace under `repo`'s header.
+    fn repo_task(key: &str, repo: &str) -> lazybox_core::Task {
+        lazybox_core::Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{repo}/pull/1"),
+            repo: Some(repo.into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    /// #1211 journey on a temp `LAZYBOX_HOME`: a repo moves within its
+    /// Space from a *workspace* row (`x d`), a Space moves within the
+    /// tier from its header row (`x t`), the right-click header menu
+    /// dispatches the same moves, and the arrangement persists to
+    /// `ui.spaces`. A lone group advises instead of erroring.
+    #[test]
+    fn group_reorder_moves_repos_and_spaces_and_persists() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-reorder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+
+        let mut m = build_model();
+        // Two owners → the Space tier is active (acme, obin-ai).
+        let seed = [
+            ("github:acme/a#1", "acme", "a"),
+            ("github:acme/b#2", "acme", "b"),
+            ("github:obin-ai/c#3", "obin-ai", "c"),
+        ];
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: seed
+                .iter()
+                .map(|(k, owner, repo)| {
+                    let mut w = lazybox_core::Workspace::empty(
+                        WorkspaceKey::new(*k),
+                        "main",
+                        chrono::Utc::now(),
+                    );
+                    w.project_key = Some(lazybox_core::ProjectKey::github(owner, repo));
+                    w.pr = Some(repo_task(k, &format!("{owner}/{repo}")));
+                    w
+                })
+                .collect(),
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        let headers = m.sidebar.__test_header_rows();
+        assert!(
+            headers.iter().any(|(is_repo, n)| !is_repo && n == "acme"),
+            "space tier should be active, got {headers:?}",
+        );
+
+        // Repo move from a workspace row: cursor inside acme/a → down.
+        assert!(
+            m.sidebar
+                .focus_workspace_key(&lazybox_core::SessionKey::from(&WorkspaceKey::new(
+                    "github:acme/a#1"
+                )))
+        );
+        m.dispatch_action(&Action::MoveGroupDown);
+        let acme_repos: Vec<String> = m
+            .sidebar
+            .__test_header_rows()
+            .into_iter()
+            .filter(|(is_repo, n)| *is_repo && n.starts_with("acme/"))
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(
+            acme_repos,
+            ["acme/b", "acme/a"],
+            "repo moved down in its Space"
+        );
+
+        // Space move from its header row: obin-ai → top of the tier.
+        assert!(m.sidebar.focus_header_row("obin-ai"));
+        m.dispatch_action(&Action::MoveGroupTop);
+        let spaces: Vec<String> = m
+            .sidebar
+            .__test_header_rows()
+            .into_iter()
+            .filter(|(is_repo, _)| !is_repo)
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(spaces, ["obin-ai", "acme"], "space moved to the top");
+
+        // Right-click header menu dispatches the same actions: menu on
+        // repo header acme/b, row 3 = "move to bottom".
+        assert!(m.sidebar.focus_header_row("acme/b"));
+        m.mount_header_context_menu(true, "acme/b");
+        assert_eq!(m.top_modal(), Some(&Id::HeaderContext));
+        let _ = m.handle_choice_picked(vec![ChoicePayload::Index(3)]);
+        let acme_repos: Vec<String> = m
+            .sidebar
+            .__test_header_rows()
+            .into_iter()
+            .filter(|(is_repo, n)| *is_repo && n.starts_with("acme/"))
+            .map(|(_, n)| n)
+            .collect();
+        assert_eq!(
+            acme_repos,
+            ["acme/a", "acme/b"],
+            "menu pick moved repo to bottom"
+        );
+
+        // Persisted: the async worker writes `ui.spaces` with obin-ai
+        // leading. Converge instead of sleeping a fixed guess.
+        let cfg_path = home.join("config.yaml");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let names: Vec<String> = lazybox_config::Config::load_from(&cfg_path)
+                .map(|c| c.ui.spaces.iter().map(|s| s.name.clone()).collect())
+                .unwrap_or_default();
+            if names.first().map(String::as_str) == Some("obin-ai")
+                && names.iter().any(|n| n == "acme")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "ui.spaces never persisted the new order, got {names:?}",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        // Advise, never error: a lone Space group (single repo under
+        // obin-ai) has nowhere to move — no panic, a notice instead.
+        assert!(
+            m.sidebar
+                .focus_workspace_key(&lazybox_core::SessionKey::from(&WorkspaceKey::new(
+                    "github:obin-ai/c#3"
+                )))
+        );
+        m.dispatch_action(&Action::MoveGroupUp);
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);

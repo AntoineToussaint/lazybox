@@ -223,7 +223,21 @@ impl LinearClient {
                 .and_then(|v| v.trim().parse::<u64>().ok());
             return Err(LinearError::RateLimited { retry_after_secs });
         }
-        let resp = resp.error_for_status()?;
+        // On an error status, prefer the GraphQL `errors` body over the
+        // bare HTTP status: Linear returns an expired / revoked API key
+        // as a 4xx whose body carries "Authentication required, not
+        // authenticated", and the shared classifier reads that as auth
+        // (actionable "rotate your token") rather than a generic
+        // permanent "HTTP 400". `error_for_status_ref().err()` extracts
+        // the owned status error while dropping the borrow so the body
+        // stays readable.
+        if let Some(status_err) = resp.error_for_status_ref().err() {
+            let text = resp.text().await.unwrap_or_default();
+            if let Some(msg) = graphql::error_message_from_body(&text) {
+                return Err(LinearError::Graphql(msg));
+            }
+            return Err(LinearError::Http(status_err));
+        }
         let text = resp.text().await?;
         serde_json::from_str::<T>(&text).map_err(|e| {
             LinearError::Graphql(format!(
@@ -258,6 +272,14 @@ impl LinearClient {
             "query": graphql::VIEWER_QUERY,
         });
         let viewer: graphql::ViewerResponse = self.graphql(&viewer_body).await?;
+        // Linear can answer the viewer query with HTTP 200 and the auth
+        // failure in the `errors` array (`{data: null, errors: […]}`).
+        // Check it before `.data`, or a revoked token collapses to a
+        // generic "no viewer data" that classifies permanent instead of
+        // surfacing the real, auth-classified reason.
+        if let Some(msg) = viewer.errors.as_deref().and_then(graphql::join_errors) {
+            return Err(LinearError::Graphql(msg));
+        }
         let viewer_id = viewer
             .data
             .ok_or_else(|| LinearError::Graphql("no viewer data".into()))?
@@ -274,12 +296,7 @@ impl LinearClient {
                             tracing::error!("Linear page {page} failed: {error}");
                             error
                         })?;
-                    if let Some(errors) = resp.errors {
-                        let joined = errors
-                            .iter()
-                            .map(|e| e.message.as_str())
-                            .collect::<Vec<_>>()
-                            .join("; ");
+                    if let Some(joined) = resp.errors.as_deref().and_then(graphql::join_errors) {
                         tracing::error!("Linear GraphQL errors at page {page}: {joined}");
                         return Err(LinearError::Graphql(joined));
                     }

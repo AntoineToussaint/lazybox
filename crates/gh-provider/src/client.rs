@@ -5912,10 +5912,26 @@ mod tests {
         let pe = lazybox_core::ProviderError::from(err);
         assert!(pe.is_retryable());
         assert_eq!(pe.retry_after_secs(), Some(7));
-        // Budget fed: the next acquire is refused until the window.
+        // Budget fed: the cooldown refuses scheduled work until the
+        // window, while ONE paced interactive request still passes
+        // (#1218 item 5 — a 429 opened by background churn must not
+        // refuse the user's own action).
+        match client.budget.lock().admit(
+            crate::rate_budget::ApiResource::Graphql,
+            "post-429-background",
+            crate::rate_budget::RequestPriority::Focused,
+            1,
+        ) {
+            Err(crate::rate_budget::AcquireError::CircuitOpen { .. }) => {}
+            other => panic!("scheduled work must be refused after a 429, got {other:?}"),
+        }
+        assert!(
+            client.budget.lock().try_acquire().is_ok(),
+            "one paced interactive request passes the cooldown",
+        );
         match client.budget.lock().try_acquire() {
             Err(crate::rate_budget::AcquireError::CircuitOpen { .. }) => {}
-            other => panic!("budget must refuse admission after a 429, got {other:?}"),
+            other => panic!("a second interactive inside the gap is paced, got {other:?}"),
         }
     }
 

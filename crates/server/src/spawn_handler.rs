@@ -957,12 +957,13 @@ fn spawn_target_worktree_path(
     workspace: &Workspace,
     session_id: Option<SessionId>,
     on_main: bool,
+    root: &std::path::Path,
 ) -> Option<PathBuf> {
     if workspace.is_linked() {
         return None;
     }
     if on_main {
-        return main_worktree_path(workspace);
+        return main_worktree_path_under(workspace, root);
     }
     if let Some(id) = session_id {
         return workspace.find_session(id).map(|s| s.worktree_path.clone());
@@ -970,7 +971,7 @@ fn spawn_target_worktree_path(
     if let Some(session) = workspace.default_session() {
         return Some(session.worktree_path.clone());
     }
-    Some(worktree_path_for_session(workspace, 0))
+    Some(worktree_path_for_session_under(workspace, 0, root))
 }
 
 /// Move the checkout blocking a stuck spawn aside so its branch is freed
@@ -1000,7 +1001,12 @@ async fn preserve_stuck_worktree(
     };
     let preserve_path = match preserve_holder {
         Some(holder) => PathBuf::from(holder),
-        None => match spawn_target_worktree_path(&workspace, session_id, on_main) {
+        None => match spawn_target_worktree_path(
+            &workspace,
+            session_id,
+            on_main,
+            config.worktree_root_path(),
+        ) {
             Some(path) => path,
             // Linked / unresolvable target: never move the user's real
             // checkout — leave the spawn to surface its own error.
@@ -2526,7 +2532,8 @@ async fn resolve_or_create_session(
     // is enough for `terminal_sessions`. Repo-less / standalone
     // workspaces have no scope and no meaningful "main", so they fall
     // through to normal isolated provisioning.
-    if on_main && let Some(path) = main_worktree_path(&workspace) {
+    if on_main && let Some(path) = main_worktree_path_under(&workspace, config.worktree_root_path())
+    {
         // A failed main-checkout provision FAILS THE SPAWN. The old
         // fallback (`mkdir` an empty dir and carry on) fabricated a
         // directory that masqueraded as the shared main checkout —
@@ -2604,7 +2611,7 @@ async fn resolve_or_create_session(
     // pre-PR. `Session.id` stays a UUID for stable internal identity;
     // only the path is human-friendly.
     let kind_for_session = session_kind_from_terminal(kind);
-    let path = worktree_path_for_session(&workspace, 0);
+    let path = worktree_path_for_session_under(&workspace, 0, config.worktree_root_path());
     let ownership_guard = config.worktree_ownership_lock.lock().await;
     if let Some((adopted_path, session_id)) = recover_untracked_pr_worktree_locked(
         config,
@@ -4934,9 +4941,15 @@ pub fn worktree_path_for_session_under(
 /// repo's resolved default (`main` or `master`), which the folder name
 /// doesn't try to track.
 pub fn main_worktree_path(workspace: &Workspace) -> Option<PathBuf> {
+    main_worktree_path_under(workspace, &worktree_root())
+}
+
+/// Explicit-root form of [`main_worktree_path`] — spawn provisioning
+/// passes the config's root so test configs stay hermetic (#1237).
+pub fn main_worktree_path_under(workspace: &Workspace, root: &std::path::Path) -> Option<PathBuf> {
     workspace
         .worktree_scope()
-        .map(|scope| worktree_root().join(scope).join("_main"))
+        .map(|scope| root.join(scope).join("_main"))
 }
 
 /// Whether the workspace behind `session_key` is a linked (no-worktree)
@@ -16478,8 +16491,42 @@ mod tests {
             "the shell never switched the branch back",
         );
 
-        // Agent: the branch-strict guard still applies — it can't silently
-        // reuse a checkout on the wrong branch.
+        // Agent: an untracked-only drift is lossless to undo, so the spawn
+        // switches the checkout back to the session branch instead of
+        // dead-ending behind the mismatch prompt (advise-never-forbid).
+        let (path, _id, _on_main) = resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &TerminalKind::Agent("claude".into()),
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("an agent spawn auto-switches a clean drifted worktree back");
+        assert_eq!(path, wt, "the agent lands in the existing worktree");
+        let head = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "solutions",
+            "the checkout is back on the session branch",
+        );
+        assert!(
+            wt.join("wip.txt").exists(),
+            "untracked work rides along with the switch"
+        );
+
+        // Drift again, but this time with uncommitted TRACKED changes —
+        // real work is at stake, so the agent keeps the explicit prompt.
+        git(&wt, &["switch", "-q", "-c", "feat/azure-env-render-2"]);
+        std::fs::write(wt.join("tracked.txt"), "v1\n").unwrap();
+        git(&wt, &["add", "tracked.txt"]);
+        git(&wt, &["commit", "-q", "-m", "tracked file"]);
+        std::fs::write(wt.join("tracked.txt"), "v2 uncommitted\n").unwrap();
         let err = resolve_or_create_session(
             &config,
             &session_key,
@@ -16489,10 +16536,20 @@ mod tests {
             lazybox_ipc::SpawnOrigin::Interactive,
         )
         .await
-        .expect_err("an agent must not reuse a worktree on the wrong branch");
+        .expect_err("an agent must not clobber uncommitted tracked work");
         assert!(
             err.to_string().contains("spawn aborted"),
-            "the agent spawn is refused: {err}"
+            "the dirty-drift agent spawn is refused: {err}"
+        );
+        let head = std::process::Command::new("git")
+            .current_dir(&wt)
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "feat/azure-env-render-2",
+            "the refused spawn leaves the dirty checkout untouched",
         );
     }
 

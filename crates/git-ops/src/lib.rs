@@ -2903,12 +2903,64 @@ async fn ensure_worktree_branch(wt_path: &Path, expected: &str) -> Result<(), Gi
     match current_worktree_branch(wt_path).await? {
         None => Ok(()),
         Some(actual) if actual == expected => Ok(()),
-        Some(actual) => Err(GitError::WorktreeBranchMismatch {
-            path: wt_path.to_path_buf(),
-            expected: expected.to_string(),
-            actual,
-        }),
+        Some(actual) => {
+            // A CLEAN drifted checkout switches back automatically
+            // (advise-never-forbid): the drift is usually an agent's
+            // leftover `git switch`, and refusing to spawn over it
+            // dead-ended the user behind a modal. Committed work on the
+            // wrong branch stays on that branch (lossless); untracked
+            // files ride along. Anything uncommitted-and-tracked keeps
+            // the explicit prompt — that is real work at stake. A
+            // failed switch (branch held elsewhere, etc.) falls back to
+            // the same prompt.
+            if worktree_tracked_changes_clean(wt_path).await {
+                let output = apply_git_env(
+                    Command::new("git")
+                        .current_dir(wt_path)
+                        .args(["switch", expected]),
+                )
+                .output()
+                .await?;
+                if output.status.success() {
+                    tracing::info!(
+                        worktree = %wt_path.display(),
+                        from = %actual,
+                        to = %expected,
+                        "clean drifted worktree switched back to its session branch",
+                    );
+                    return Ok(());
+                }
+                tracing::warn!(
+                    worktree = %wt_path.display(),
+                    from = %actual,
+                    to = %expected,
+                    stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+                    "auto-switch of clean drifted worktree failed — falling back to the prompt",
+                );
+            }
+            Err(GitError::WorktreeBranchMismatch {
+                path: wt_path.to_path_buf(),
+                expected: expected.to_string(),
+                actual,
+            })
+        }
     }
+}
+
+/// No staged or unstaged changes to TRACKED files — the lossless-switch
+/// precondition. Untracked files are ignored: `git switch` carries them.
+async fn worktree_tracked_changes_clean(wt_path: &Path) -> bool {
+    let Ok(output) = apply_git_env(Command::new("git").current_dir(wt_path).args([
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+    ]))
+    .output()
+    .await
+    else {
+        return false;
+    };
+    output.status.success() && output.stdout.iter().all(|b| b.is_ascii_whitespace())
 }
 
 async fn current_worktree_branch(wt_path: &Path) -> Result<Option<String>, GitError> {
@@ -5076,6 +5128,51 @@ mod track_main_tests {
         std::fs::write(src.join("f.txt"), body).expect("write");
         git(src, &["add", "f.txt"]);
         git(src, &["commit", "-q", "-m", "advance"]);
+    }
+
+    /// A CLEAN checkout that drifted to another branch switches back
+    /// automatically on re-entry (advise-never-forbid: the "worktree is
+    /// on another branch" refusal wall dead-ended agent spawns); a
+    /// checkout with uncommitted tracked changes keeps the explicit
+    /// mismatch prompt — real work is at stake.
+    #[tokio::test]
+    async fn clean_drifted_worktree_switches_back_dirty_keeps_the_prompt() {
+        let (_tmp, _mgr, _src, wt) = tracked_worktree().await;
+
+        // Drift: an agent-style `git switch -c` onto another branch.
+        git(&wt, &["switch", "-q", "-c", "docs/side-quest"]);
+        // Committed work on the drift branch is LOSSLESS to switch away
+        // from — it stays on that branch.
+        std::fs::write(wt.join("side.txt"), "side\n").expect("write");
+        git(&wt, &["add", "side.txt"]);
+        git(&wt, &["commit", "-q", "-m", "side work"]);
+
+        ensure_worktree_branch(&wt, "scratch")
+            .await
+            .expect("clean drifted checkout must auto-switch back");
+        assert_eq!(
+            current_worktree_branch(&wt)
+                .await
+                .expect("branch")
+                .as_deref(),
+            Some("scratch"),
+        );
+
+        // Drift again, this time with UNCOMMITTED tracked changes.
+        git(&wt, &["switch", "-q", "docs/side-quest"]);
+        std::fs::write(wt.join("side.txt"), "uncommitted edit\n").expect("write");
+        let err = ensure_worktree_branch(&wt, "scratch")
+            .await
+            .expect_err("dirty drifted checkout keeps the prompt");
+        assert!(matches!(err, GitError::WorktreeBranchMismatch { .. }));
+        assert_eq!(
+            current_worktree_branch(&wt)
+                .await
+                .expect("branch")
+                .as_deref(),
+            Some("docs/side-quest"),
+            "the dirty checkout was not touched",
+        );
     }
 
     /// Clean worktree behind main → fast-forwarded onto `origin/main`.

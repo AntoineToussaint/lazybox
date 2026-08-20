@@ -762,6 +762,12 @@ impl Sidebar {
         self.inner.cursor_header()
     }
 
+    /// Rename the Space at the cursor (#1211) — claims + rendered
+    /// sources move, collapse flag follows, config persists.
+    pub fn rename_space(&mut self, old: &str, new: &str) -> Option<(String, String)> {
+        self.inner.rename_space(old, new)
+    }
+
     /// Test-only: park the cursor on a header row by name.
     #[doc(hidden)]
     pub fn focus_header_row(&mut self, name: &str) -> bool {

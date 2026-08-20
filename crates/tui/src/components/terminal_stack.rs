@@ -4145,6 +4145,7 @@ impl TerminalStack {
             kind: TerminalKind::Shell,
             cwd: None,
             initial_prompt: None,
+            initial_snippet: None,
             // A tile-split shell lands in the workspace's default
             // (isolated) worktree, not the shared main checkout.
             on_main: false,

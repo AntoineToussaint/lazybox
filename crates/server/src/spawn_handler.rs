@@ -1091,6 +1091,7 @@ async fn handle_spawn_inner(
     let SpawnOptions {
         cwd,
         initial_prompt,
+        initial_snippet,
         autonomous,
         on_main,
         model_alias,
@@ -1242,6 +1243,7 @@ async fn handle_spawn_inner(
             // pointer indirection to keep the futures finitely sized.
             // (This call passes no fallback, so it can't actually recurse.)
             Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+            record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref()).await;
         }
         let _ = config.bus.send(Event::TerminalFocusRequested {
             terminal_id: existing,
@@ -1331,6 +1333,7 @@ async fn handle_spawn_inner(
         }
         if let Some(prompt) = initial_prompt.as_deref() {
             Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+            record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref()).await;
         }
         let _ = config.bus.send(Event::TerminalFocusRequested {
             terminal_id: existing,
@@ -2116,6 +2119,8 @@ async fn handle_spawn_inner(
         let ready_signal = ready_signal_for_inject;
         let t0_for_inject = t0;
         let config_for_inject = config.clone();
+        let snippet_for_inject = initial_snippet.clone();
+        let session_key_for_inject = session_key.clone();
         tokio::spawn(async move {
             let outcome = run_spawn_inject(
                 &config_for_inject,
@@ -2134,6 +2139,19 @@ async fn handle_spawn_inner(
                 elapsed_ms = t0_for_inject.elapsed().as_millis(),
                 "initial_prompt: spawn-time inject finished",
             );
+            // #1215: a snippet-seeded spawn records the same MRU / sent
+            // history a live-terminal delivery records — once the body
+            // actually landed (Failed already emitted a visible
+            // rejection and records nothing, so a retry re-records).
+            if !matches!(outcome, InjectOutcome::Failed) {
+                record_spawn_snippet(
+                    &config_for_inject,
+                    id,
+                    &session_key_for_inject,
+                    snippet_for_inject.as_ref(),
+                )
+                .await;
+            }
         });
     }
     Some(terminal_id)
@@ -7612,6 +7630,28 @@ pub async fn handle_deliver_snippet(
     }
 }
 
+/// Record a snippet delivered as a spawn's `initial_prompt` (#1215):
+/// same MRU + per-workspace sent history + `SnippetDelivered` event as
+/// the inject path, so "Recent" doesn't depend on the transport. No-op
+/// without a snippet identity (plain `w`-style prompts).
+async fn record_spawn_snippet(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    session_key: &SessionKey,
+    snippet: Option<&lazybox_ipc::SnippetRef>,
+) {
+    if let Some(snippet) = snippet {
+        record_confirmed_snippet(
+            config,
+            terminal_id,
+            session_key.clone(),
+            snippet.key.clone(),
+            None,
+        )
+        .await;
+    }
+}
+
 async fn record_confirmed_snippet(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -9919,6 +9959,54 @@ mod tests {
         }
     }
 
+    /// #1215: a snippet-seeded Spawn that collapses onto the live
+    /// singleton agent still records the snippet into the recent MRU +
+    /// per-workspace sent history — usage is tracked at the selection
+    /// boundary, not per transport. (Paused time: the settle-gated
+    /// inject's bounded waits auto-advance.)
+    #[tokio::test(start_paused = true)]
+    async fn snippet_seeded_spawn_records_recent_mru() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#1215");
+        let backend_key = mock
+            .spawn(&[], None, &[], "snippet-seeded")
+            .await
+            .expect("spawn backing agent");
+        register_test_agent(
+            &config.terminal,
+            TerminalId(15),
+            &backend_key,
+            session_key.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Idle),
+            None,
+        )
+        .await;
+
+        handle_spawn(
+            &config,
+            session_key.clone(),
+            None,
+            TerminalKind::Agent("claude".into()),
+            SpawnOptions {
+                initial_prompt: Some("review this PR".into()),
+                initial_snippet: Some(lazybox_ipc::SnippetRef {
+                    key: "rev".into(),
+                    category: "review".into(),
+                }),
+                autonomous: true,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let snap = crate::client_kv::snapshot(&*config.store);
+        assert_eq!(
+            snap.recent_snippets,
+            vec!["rev".to_string()],
+            "the spawn transport records the same MRU the inject records",
+        );
+    }
     /// #1148: if a Claude version ignores the deterministically seeded trust
     /// record, an autonomous terminal's exact trust chooser is revalidated
     /// from the live backend and answered once. This is the real backend-write

@@ -141,6 +141,7 @@ async fn spawn_and_wait(
             // production spawns without one require a persisted row.
             cwd: test_cwd(),
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         })
         .unwrap();
@@ -761,6 +762,7 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: test_cwd(),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -833,6 +835,7 @@ async fn spawn_hot_path_never_copies_into_the_stable_bin_dir() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: test_cwd(),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -867,6 +870,7 @@ async fn read_only_spawn_rejects_a_writable_singleton() {
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: test_cwd(),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
@@ -887,6 +891,7 @@ async fn read_only_spawn_rejects_a_writable_singleton() {
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: test_cwd(),
                 initial_prompt: Some("Review this work without editing".into()),
+                initial_snippet: None,
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::ReadOnly,
@@ -936,6 +941,7 @@ async fn read_only_prompt_spawn_cannot_inherit_autonomous_bypass() {
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: test_cwd(),
                 initial_prompt: Some("Review this work without editing".into()),
+                initial_snippet: None,
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::ReadOnly,
@@ -1081,6 +1087,7 @@ async fn hook_session_identity_is_persisted_and_used_for_restore() {
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: None,
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
@@ -1244,6 +1251,7 @@ async fn unknown_agent_id_emits_provider_error() {
                 kind: TerminalKind::Agent("does-not-exist".into()),
                 cwd: test_cwd(),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -1298,6 +1306,7 @@ async fn successful_spawn_emits_its_correlated_completion() {
                 kind: TerminalKind::Shell,
                 cwd: test_cwd(),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
@@ -1708,6 +1717,7 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: test_cwd(),
                 initial_prompt: Some(WORK.into()),
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -1783,6 +1793,7 @@ async fn codex_initial_prompt_pastes_then_sends_enter_separately() {
                 kind: TerminalKind::Agent("codex".into()),
                 cwd: test_cwd(),
                 initial_prompt: Some(WORK.into()),
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -1880,6 +1891,7 @@ async fn spawn_onto_existing_singleton_injects_the_prompt() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: Some(WORK.into()),
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -1970,6 +1982,7 @@ async fn linked_workspace_agent_spawn_is_a_singleton() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -2389,6 +2402,7 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
                 kind: TerminalKind::Shell,
                 cwd: test_cwd(),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -2617,6 +2631,7 @@ async fn concurrent_spawns_collapse_onto_one_backend_session() {
                 SpawnOptions {
                     cwd: Some(cwd),
                     initial_prompt: Some(WORK.into()),
+                    initial_snippet: None,
                     autonomous: true,
                     ..Default::default()
                 },
@@ -3183,6 +3198,7 @@ async fn detectorless_spawn_prompt_pastes_blindly_at_the_hard_deadline() {
                 kind: TerminalKind::Agent("cursor-agent".into()),
                 cwd: test_cwd(),
                 initial_prompt: Some(WORK.into()),
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -3681,6 +3697,7 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();
@@ -3838,6 +3855,7 @@ async fn many_concurrent_prompt_spawns_all_deliver() {
                     SpawnOptions {
                         cwd: Some(cwd),
                         initial_prompt: Some(prompt),
+                        initial_snippet: None,
                         ..Default::default()
                     },
                 )
@@ -4104,6 +4122,7 @@ async fn failed_provision_fails_spawn_loudly_and_leaves_no_session() {
                 kind: TerminalKind::Agent("claude".into()),
                 cwd: None,
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();

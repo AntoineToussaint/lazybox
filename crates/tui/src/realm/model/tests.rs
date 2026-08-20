@@ -3257,6 +3257,53 @@ snippets:
         );
     }
 
+    /// #1215: a *snippet* broadcast that auto-starts a session carries
+    /// the snippet's identity on the Spawn — so the daemon records the
+    /// same recent-MRU / sent history the live-terminal delivery
+    /// records, instead of the spawn transport silently forgetting it.
+    #[test]
+    fn snippet_seeded_spawn_carries_the_snippet_identity() {
+        let (mut m, keys) = model_with_scoped_broadcast_targets(&[None]);
+        m.apply_snippets(snippets_from_yaml(
+            "seed",
+            r#"
+snippets:
+  rev:
+    category: review
+    description: Review the diff
+    body: review this PR
+"#,
+        ));
+        m.modal_flow = Some(super::super::ModalFlow::Broadcast {
+            draft: BroadcastDraft {
+                targets: keys.clone(),
+                snippet_key: Some("rev".into()),
+            },
+        });
+        m.modal_stack.push(Id::BroadcastText);
+        let _ = m.handle_textarea_submitted("review this PR".into());
+        assert_eq!(m.top_modal(), Some(&Id::BroadcastConfirm));
+
+        let cmds = m.handle_confirmed(true);
+        let snippet = cmds
+            .iter()
+            .find_map(|c| match c {
+                IpcCommand::Spawn {
+                    initial_prompt,
+                    initial_snippet,
+                    ..
+                } => Some((initial_prompt.clone(), initial_snippet.clone())),
+                _ => None,
+            })
+            .expect("session-less target auto-starts the default agent");
+        assert_eq!(snippet.0.as_deref(), Some("review this PR"));
+        let snippet_ref = snippet
+            .1
+            .expect("spawn carries the snippet identity (#1215)");
+        assert_eq!(snippet_ref.key, "rev");
+        assert_eq!(snippet_ref.category, "review");
+    }
+
     /// #836: confirming the gate delivers to the live target AND spawns
     /// the default agent into the session-less scoped one, seeded with
     /// the broadcast as its initial prompt (the daemon injects it once
@@ -3293,6 +3340,7 @@ snippets:
                     session_key,
                     kind,
                     initial_prompt,
+                    initial_snippet: None,
                     on_main,
                     ..
                 } => Some((
@@ -4440,6 +4488,7 @@ snippets:
                 client_request_id,
                 kind: TerminalKind::Agent(agent),
                 initial_prompt: Some(prompt),
+                initial_snippet: None,
                 access,
                 ..
             } => {
@@ -8447,6 +8496,7 @@ mod merge_focus_follow_tests {
             kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
             cwd: None,
             initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
@@ -8467,6 +8517,7 @@ mod merge_focus_follow_tests {
             kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
             cwd: None,
             initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
@@ -8502,6 +8553,7 @@ mod merge_focus_follow_tests {
             kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
             cwd: None,
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
@@ -9305,6 +9357,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("codex".into()),
             cwd: Some("/tmp/critic".into()),
             initial_prompt: Some("Review without editing".into()),
+            initial_snippet: None,
             on_main: false,
             model_alias: None,
             access: AgentRunAccess::ReadOnly,
@@ -10988,6 +11041,7 @@ mod merge_focus_follow_tests {
             IpcCommand::Spawn {
                 session_key,
                 initial_prompt: Some(prompt),
+                initial_snippet: None,
                 ..
             } => Some((session_key.clone(), prompt.clone())),
             _ => None,
@@ -16523,6 +16577,7 @@ mod worktree_progress_recovery_tests {
             kind: TerminalKind::Agent("claude".into()),
             cwd: None,
             initial_prompt: None,
+            initial_snippet: None,
             on_main: false,
         }
     }
@@ -17037,6 +17092,7 @@ mod worktree_progress_recovery_tests {
             kind: TerminalKind::Agent("claude".into()),
             cwd: None,
             initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
             on_main: false,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
@@ -17082,6 +17138,7 @@ mod worktree_progress_recovery_tests {
             kind: TerminalKind::Agent("claude".into()),
             cwd: None,
             initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
             on_main: false,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {

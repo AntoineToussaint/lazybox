@@ -662,6 +662,7 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     kind: TerminalKind::Shell,
                     cwd: None,
                     initial_prompt: None,
+                    initial_snippet: None,
                     on_main: false,
                     access: lazybox_ipc::AgentRunAccess::Default,
                 };

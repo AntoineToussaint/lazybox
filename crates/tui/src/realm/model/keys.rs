@@ -871,6 +871,7 @@ impl<T: TerminalAdapter> Model<T> {
                     kind: fallback.kind.clone(),
                     cwd: fallback.cwd.clone(),
                     initial_prompt: Some(prompt.clone()),
+                    initial_snippet: None,
                     on_main: false,
                 });
             }

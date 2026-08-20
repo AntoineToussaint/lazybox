@@ -42,6 +42,11 @@ pub fn plan_spawn_for_terminal(cmd: Command, terminal_id: TerminalId) -> Command
             kind: TerminalKind::Agent(agent_id),
             cwd,
             initial_prompt: Some(prompt),
+            // Contextual work prompts are never snippet-seeded, so the
+            // spawn→inject rewrite has no snippet identity to preserve
+            // (#1215's broadcast seed path never routes through here —
+            // a live terminal gets DeliverSnippet instead).
+            initial_snippet: _,
             on_main: _,
             access,
         } if access == lazybox_ipc::AgentRunAccess::Default => Command::InjectPrompt {
@@ -90,6 +95,7 @@ mod tests {
             kind: TerminalKind::Agent("codex".to_string()),
             cwd: Some("/tmp/worktree".to_string()),
             initial_prompt: prompt.map(str::to_string),
+            initial_snippet: None,
             on_main: false,
             model_alias: Some("L".to_string()),
             access: lazybox_ipc::AgentRunAccess::Default,

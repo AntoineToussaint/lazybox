@@ -1677,6 +1677,7 @@ impl<T: TerminalAdapter> Model<T> {
             kind: lazybox_ipc::TerminalKind::Agent(agent.clone()),
             cwd: None,
             initial_prompt: Some(prompt),
+            initial_snippet: None,
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
@@ -3023,6 +3024,10 @@ impl<T: TerminalAdapter> Model<T> {
             kind,
             cwd,
             initial_prompt,
+            // A retried snippet-seeded spawn goes back through
+            // RecreateWorktree, which doesn't carry snippet identity —
+            // the MRU was already recorded on the first attempt (#1215).
+            initial_snippet: _,
             on_main,
             model_alias,
             access,

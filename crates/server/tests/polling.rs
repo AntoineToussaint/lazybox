@@ -5981,6 +5981,7 @@ mod live_collapse_e2e {
                 kind: TerminalKind::Agent(agent_id.into()),
                 cwd: Some(tmp.path().to_string_lossy().into_owned()),
                 initial_prompt: None,
+                initial_snippet: None,
                 on_main: false,
             })
             .unwrap();

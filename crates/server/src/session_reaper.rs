@@ -10,7 +10,7 @@
 //! - A periodic sweep kills the live terminals of workspaces whose
 //!   PR/issue has been closed/merged longer than
 //!   `agent.reap_closed_after` (default 48h, `0s` disables).
-//! - Startup restore consults the same predicate ([`closed_beyond`]) so
+//! - Startup restore consults the same predicate (`closed_beyond`) so
 //!   a reaped session isn't resurrected at the next boot only to be
 //!   reaped again.
 //!

@@ -1109,13 +1109,15 @@ async fn handle_spawn_inner(
         autonomous,
         "handle_spawn: entry"
     );
-    // Population cap (2026-08-19 audit, M1): agent CLIs are ~110 MB RSS
-    // each and the tmux backend deliberately never reaps, so with no
-    // ceiling the fleet only ratchets upward — a measured 48 live
-    // Claude CLIs (5.5 GB) was the machine-wide pressure incident.
-    // Fresh agent spawns are refused at the cap with a notice naming
-    // the knob; shells, resumes/replacements of existing sessions, and
-    // restart recovery (which never routes through here) stay exempt.
+    // Population advisory (2026-08-19 audit, M1): agent CLIs are
+    // ~110 MB RSS each and the tmux backend deliberately never reaps,
+    // so with no signal the fleet only ratchets upward — a measured 48
+    // live Claude CLIs (5.5 GB) was the machine-wide pressure incident.
+    // ADVISE, NEVER FORBID: the cap warns — it must never refuse a
+    // spawn. An early revision hard-refused fresh agent spawns at the
+    // cap, and a fleet recovered over the cap at startup locked the
+    // user out of `w w` entirely. Slowing down is acceptable;
+    // forbidding work is not.
     if matches!(&kind, TerminalKind::Agent(_))
         && !resume
         && replace_terminal_id.is_none()
@@ -1127,16 +1129,12 @@ async fn handle_spawn_inner(
                 live_agents,
                 cap,
                 %session_key,
-                "agent spawn refused: live-agent cap reached"
+                "live-agent cap exceeded — spawning anyway (advisory only)"
             );
-            let _ = config.bus.send(Event::provider_error_permanent(
+            let _ = config.bus.send(Event::provider_error_retryable(
                 "spawn",
-                format!(
-                    "{live_agents} agents are already running — close some (]]x) or \
-                     raise agent.max_live_agents (currently {cap}) in config.yaml"
-                ),
+                format!("{live_agents} agents running (cap {cap}) — ]]x closes idle sessions"),
             ));
-            return None;
         }
     }
     // A linked (no-worktree) workspace runs every session in the user's
@@ -9399,12 +9397,13 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
         }
     }
 
-    // The live-agent cap is deliberately NOT enforced on recovery —
-    // persisted sessions are user state and killing them at boot would
-    // be destructive. But an over-cap fleet is exactly the memory
-    // ratchet the cap exists for (agents only accumulate across
-    // restarts), so surface it loudly instead of silently re-attaching
-    // toward the next OOM.
+    // The live-agent cap is advisory on recovery too — persisted
+    // sessions are user state and killing them at boot would be
+    // destructive. An over-cap fleet is the memory ratchet the cap
+    // exists for (agents only accumulate across restarts), so say so —
+    // as a transient, dismissable warning, never a sticky error banner
+    // (an early revision shipped this as a permanent red banner with
+    // text long enough to truncate; advisory tone, advisory severity).
     let cfg = lazybox_config::Config::load().unwrap_or_default();
     if let Some(cap) = cfg.agent.live_agent_cap() {
         let live_agents = config.terminal.live_agent_count().await;
@@ -9412,15 +9411,11 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
             tracing::warn!(
                 live_agents,
                 cap,
-                "recovered agent fleet exceeds agent.max_live_agents"
+                "recovered agent fleet exceeds agent.max_live_agents (advisory)"
             );
-            let _ = config.bus.send(Event::provider_error_permanent(
+            let _ = config.bus.send(Event::provider_error_retryable(
                 "spawn",
-                format!(
-                    "{live_agents} agents recovered at startup — above the \
-                     agent.max_live_agents cap of {cap}; close idle sessions (]]x) \
-                     to reclaim memory"
-                ),
+                format!("{live_agents} agents running (cap {cap}) — ]]x closes idle sessions"),
             ));
         }
     }
@@ -10138,6 +10133,73 @@ mod tests {
             context.provider_session_id.as_deref(),
             Some("legacy-conversation-709")
         );
+    }
+
+    /// ADVISE, NEVER FORBID (M1 follow-up): a fleet over the agent cap
+    /// must never lock out a user-initiated spawn. An early revision
+    /// hard-refused fresh spawns at the cap, so a startup that
+    /// recovered 47 sessions bricked `w w` entirely — the journey this
+    /// test pins is "a human can always start an agent"; the cap's
+    /// only effect is a transient advisory notice.
+    #[tokio::test]
+    async fn over_cap_fleet_never_blocks_an_interactive_spawn() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let cap = lazybox_config::Config::load()
+            .unwrap_or_default()
+            .agent
+            .live_agent_cap()
+            .unwrap_or(0);
+        for i in 0..(cap.max(1) + 5) {
+            config
+                .terminal
+                .insert_meta(
+                    TerminalId(10_000 + i as u64),
+                    SessionKey::from(format!("test:fleet-{i}").as_str()),
+                    TerminalKind::Agent("claude".into()),
+                )
+                .await;
+        }
+        let mut events = config.bus.subscribe();
+
+        let spawned = handle_spawn(
+            &config,
+            SessionKey::from("test:over-cap-user-spawn"),
+            None,
+            TerminalKind::Agent("claude".into()),
+            SpawnOptions {
+                cwd: Some(
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(
+            spawned.is_some(),
+            "the cap is advisory — a user spawn over the cap must still proceed"
+        );
+
+        if cap > 0 {
+            let kind = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Event::ProviderError { message, kind, .. } =
+                        events.recv().await.expect("advisory event")
+                        && message.contains("agents running (cap")
+                    {
+                        break kind;
+                    }
+                }
+            })
+            .await
+            .expect("over-cap advisory notice deadline");
+            assert_eq!(
+                kind, "retryable",
+                "the advisory must be transient, never a sticky error banner"
+            );
+        }
     }
 
     #[tokio::test]

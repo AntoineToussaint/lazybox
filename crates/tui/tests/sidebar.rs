@@ -159,13 +159,15 @@ fn workspace_upserted_inserts_then_updates_in_place() {
     let mut s = Sidebar::new(PaneId::new(1));
     let now = Utc::now();
     let w = make_workspace("owner/repo", "o/r#1", now);
-    s.on_event(&Event::WorkspaceUpserted(Box::new(w)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(w)));
     assert_eq!(s.workspace_count(), 1);
 
     // Same key, newer timestamp, renamed: same row, name updated.
     let mut updated = make_workspace("owner/repo", "o/r#1", now + Duration::minutes(5));
     updated.name = "renamed".into();
-    s.on_event(&Event::WorkspaceUpserted(Box::new(updated.clone())));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        updated.clone(),
+    )));
     assert_eq!(s.workspace_count(), 1);
     assert_eq!(
         s.selected_workspace().map(|w| w.name.as_str()),
@@ -222,7 +224,7 @@ fn cursor_follows_workspace_key_across_resort() {
     if let Some(t) = bumped.pr.as_mut() {
         t.updated_at = now + Duration::hours(1);
     }
-    s.on_event(&Event::WorkspaceUpserted(Box::new(bumped)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(bumped)));
     assert_eq!(
         s.selected_session_key(),
         Some(&ws_key(&w2)),
@@ -1861,7 +1863,7 @@ fn workspace_upserted_does_not_clobber_asking_state() {
 
     // 2. Polling re-broadcasts the workspace (fresh from store —
     //    no transient asking state).
-    s.on_event(&Event::WorkspaceUpserted(Box::new(w)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(w)));
 
     // 3. The asking-set must STILL hold the entry.
     s.focus_workspace_key(&ws_key(&make_workspace("owner/repo", "o/r#1", now))); // re-anchor cursor
@@ -1993,14 +1995,13 @@ fn ci_failure_transition_enqueues_desktop_notification() {
     // rising edge must queue exactly one banner; staying failing on
     // the next poll must not re-notify.
     let mut s = Sidebar::new(PaneId::new(1));
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
-        "o/r#1",
-        |t| t.ci = CiStatus::Success,
-    ))));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        workspace_with("o/r#1", |t| t.ci = CiStatus::Success),
+    )));
     let _ = s.drain_pending_notifications();
 
     let red = workspace_with("o/r#1", |t| t.ci = CiStatus::Failure);
-    s.on_event(&Event::WorkspaceUpserted(Box::new(red.clone())));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(red.clone())));
     let queued = s.drain_pending_notifications();
     assert_eq!(queued.len(), 1, "green→failing must notify once");
     assert!(
@@ -2010,7 +2011,7 @@ fn ci_failure_transition_enqueues_desktop_notification() {
     );
     assert_eq!(queued[0].workspace_key, ws_key(&red));
 
-    s.on_event(&Event::WorkspaceUpserted(Box::new(red)));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(red)));
     assert!(
         s.drain_pending_notifications().is_empty(),
         "failing→failing must not re-notify",
@@ -2023,10 +2024,9 @@ fn first_sight_of_workspace_does_not_notify() {
     // first upsert for it, or a fresh row from a filter change) seeds
     // the baseline silently — no startup banner burst.
     let mut s = Sidebar::new(PaneId::new(1));
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
-        "o/r#1",
-        |t| t.ci = CiStatus::Failure,
-    ))));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        workspace_with("o/r#1", |t| t.ci = CiStatus::Failure),
+    )));
     assert!(
         s.drain_pending_notifications().is_empty(),
         "first sight seeds the baseline silently",
@@ -2050,15 +2050,13 @@ fn ci_failure_transition_respects_desktop_notify_off() {
         None,
         &lazybox_config::DisplayConfig::default(),
     );
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
-        "o/r#1",
-        |t| t.ci = CiStatus::Success,
-    ))));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        workspace_with("o/r#1", |t| t.ci = CiStatus::Success),
+    )));
     let _ = s.drain_pending_notifications();
-    s.on_event(&Event::WorkspaceUpserted(Box::new(workspace_with(
-        "o/r#1",
-        |t| t.ci = CiStatus::Failure,
-    ))));
+    s.on_event(&Event::WorkspaceUpserted(std::sync::Arc::new(
+        workspace_with("o/r#1", |t| t.ci = CiStatus::Failure),
+    )));
     assert!(
         s.drain_pending_notifications().is_empty(),
         "desktop_notify off must suppress provider-event banners",

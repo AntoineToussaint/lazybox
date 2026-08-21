@@ -221,6 +221,7 @@
             "cleanup_prompt": "unresolved",
             "created_at": "2023-11-14T22:13:20Z",
             "gh_issues": [],
+            "hopper": null,
             "key": "github-o-r-42",
             "last_viewed_at": null,
             "linear_issues": [],
@@ -280,7 +281,7 @@
             "project_key": "github-o-r",
             "read_indices": [],
             "remote": null,
-            "schema": 4,
+            "schema": 6,
             "seen_count": 0,
             "sent_snippets": [],
             "sessions": [],
@@ -300,6 +301,7 @@
         "cleanup_prompt": "unresolved",
         "created_at": "2023-11-14T22:13:20Z",
         "gh_issues": [],
+        "hopper": null,
         "key": "github-o-r-42",
         "last_viewed_at": null,
         "linear_issues": [],
@@ -359,7 +361,7 @@
         "project_key": "github-o-r",
         "read_indices": [],
         "remote": null,
-        "schema": 4,
+        "schema": 6,
         "seen_count": 0,
         "sent_snippets": [],
         "sessions": [],
@@ -536,6 +538,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 1815157976,
+  "protocol_fingerprint": 382152659,
   "protocol_version": 4
 }

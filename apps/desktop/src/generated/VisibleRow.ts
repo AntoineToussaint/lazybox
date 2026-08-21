@@ -25,4 +25,4 @@ import type { WorkspaceKind } from "./WorkspaceKind";
  * Headers are render-only — j/k navigation and key dispatch skip
  * them, so the cursor always rests on a Workspace or Session row.
  */
-export type VisibleRow = "FocusedHeader" | { "SpaceHeader": string } | { "RepoHeader": string } | { "KindHeader": WorkspaceKind } | { "Workspace": SessionKey } | { "Session": { workspace: SessionKey, session_id: SessionId, } };
+export type VisibleRow = "FocusedHeader" | "HopperHeader" | { "SpaceHeader": string } | { "RepoHeader": string } | { "KindHeader": WorkspaceKind } | { "Workspace": SessionKey } | { "Session": { workspace: SessionKey, session_id: SessionId, } };

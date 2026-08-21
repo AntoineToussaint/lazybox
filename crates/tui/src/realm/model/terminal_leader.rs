@@ -120,13 +120,6 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         sidebar: true,
     },
     FixedCommandSpec {
-        key: 'H',
-        command: LeaderCmd::OpenHopper,
-        menu_label: "hopper",
-        reference: "Open the personal Hopper editor",
-        sidebar: false,
-    },
-    FixedCommandSpec {
         key: 'u',
         command: LeaderCmd::OpenUrls,
         menu_label: "open url",
@@ -180,6 +173,18 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         command: LeaderCmd::CloseTerminal,
         menu_label: "close terminal",
         reference: "Close the focused terminal (tile or active tab)",
+        sidebar: false,
+    },
+    // Keep this after the split/move/close cluster. The popup has a bounded
+    // visible row count; inserting Hopper earlier pushed `close terminal`
+    // below the fold in split layouts even though that command is essential
+    // tile chrome. `]]H` remains directly dispatchable and globally
+    // documented even when the tail collapses into “+N more”.
+    FixedCommandSpec {
+        key: 'H',
+        command: LeaderCmd::OpenHopper,
+        menu_label: "hopper",
+        reference: "Open the personal Hopper editor",
         sidebar: false,
     },
     FixedCommandSpec {

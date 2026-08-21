@@ -2436,10 +2436,14 @@ impl LocalServices {
 async fn start_local_gateway(
     user_config: &lazybox_config::Config,
 ) -> Result<LocalServices, String> {
-    lazybox_server::spawn_handler::ensure_stable_hook_exe().ok_or_else(|| {
-        "desktop executable cannot provide the lifecycle hook helper; see the desktop log"
-            .to_string()
-    })?;
+    // In GUI mode, hook exe is optional. Skip if unavailable to prevent
+    // infinite loop of second desktop app instance spawning as hook helper.
+    if !lazybox_server::spawn_handler::ensure_stable_hook_exe().unwrap_or(false) {
+        tracing::warn!(
+            "desktop executable cannot provide lifecycle hook helper; \
+            some session lifecycle features will be unavailable"
+        );
+    }
     if let ServerStatus::Running { pid } = lifecycle::status() {
         // A daemon already runs — usually the TUI's embedded one.
         // Attach to its published loopback gateway instead of refusing

@@ -42,6 +42,12 @@ use tokio::sync::{Mutex, Notify, broadcast, watch};
 /// deep history would need on-disk persistence; this trades a bounded
 /// slice of per-terminal daemon memory (paid only as output accrues)
 /// for parity with the live experience.
+///
+/// NOTE: Tunable via `server.ring_buffer_bytes` in config (#1254-E).
+/// This constant is the default; the daemon's ring initialization
+/// should read the config and use that value instead. Currently set
+/// by [`DaemonPty::spawn`] callers; migration to config-driven size
+/// is tracked in the issue.
 pub const REPLAY_RING_BYTES: usize = 2 * 1024 * 1024;
 
 /// Maximum permitted ring buffer size. A hard cap prevents misconfiguration

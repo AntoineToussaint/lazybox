@@ -486,6 +486,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   let workspaces = new Map<string, Workspace>();
   let terminals = new Map<number, TerminalRecord>();
   let selectedKey: string | null = null;
+  const selectedWorkspaces = new Set<string>(); // Multi-select set for bulk actions
   const markedWorkspaces = new Set<string>();
   const markedActivity = new Map<string, Set<string>>();
   const expandedActivity = new Set<string>();
@@ -2250,6 +2251,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     button.className = "workspace-row";
     button.dataset.key = workspace.key;
     button.classList.toggle("selected", workspace.key === selectedKey);
+    button.classList.toggle("multi-selected", selectedWorkspaces.has(workspace.key));
     button.classList.toggle("marked", markedWorkspaces.has(workspace.key));
     button.type = "button";
     button.setAttribute(
@@ -2317,6 +2319,22 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       bottom,
       workspaceRuntimeSignals(terminals.values(), workspace.key),
     );
+
+    // Render automation pills
+    const automationPills: TaskSignal[] = [];
+    if (workspace.auto_merge_on_green) {
+      automationPills.push({ label: "AUTO", tone: "success" });
+    }
+    if (workspace.policies.auto_fix_ci !== "None" || workspace.policies.auto_fix_conflict !== "None") {
+      automationPills.push({ label: "ARM", tone: "attention" });
+    }
+    if (workspace.track_main) {
+      automationPills.push({ label: "⎇ main" });
+    }
+    if (automationPills.length > 0) {
+      renderTaskBadges(bottom, automationPills);
+    }
+
     const agentJump = liveAgentWorkspaceKeys().indexOf(workspace.key);
     if (agentJump >= 0 && agentJump < 9) {
       renderTaskBadges(bottom, [{ label: `⌥${agentJump + 1}` }]);
@@ -2584,6 +2602,13 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   function toggleWorkspaceMark(key: string): void {
     if (!markedWorkspaces.delete(key)) {
       markedWorkspaces.add(key);
+    }
+    renderInbox();
+  }
+
+  function toggleWorkspaceSelection(key: string): void {
+    if (!selectedWorkspaces.delete(key)) {
+      selectedWorkspaces.add(key);
     }
     renderInbox();
   }
@@ -4806,6 +4831,10 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   }
 
   async function markSelectedRead(): Promise<void> {
+    if (selectedWorkspaces.size > 1) {
+      await performBulkMarkRead();
+      return;
+    }
     if (selectedKey === null) {
       return;
     }
@@ -4813,6 +4842,150 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       commandsForWorkspaceIntent(selectedKey, { type: "mark-read" }),
       "Marking workspace read…",
       "Workspace marked read.",
+    );
+  }
+
+  /**
+   * Perform bulk merge on selected workspaces.
+   * Shows confirmation with eligible/skipped breakdown.
+   */
+  async function performBulkMerge(): Promise<void> {
+    const targets = Array.from(selectedWorkspaces);
+    const eligible = targets.filter((key) => {
+      const workspace = workspaces.get(key);
+      const task = workspace === undefined ? null : primaryTask(workspace);
+      const isPr = task?.kind === "Pr";
+      const hasTerminal = (workspace?.sessions ?? []).some(
+        (s) => s.terminal !== null,
+      );
+      return isPr && !hasTerminal && task?.state !== "Draft";
+    });
+    const skipped = targets.length - eligible.length;
+
+    const affectedList = eligible
+      .map((key) => {
+        const workspace = workspaces.get(key);
+        return workspace ? `${workspace.name} (${taskReference(primaryTask(workspace))})` : key;
+      })
+      .join("\n");
+
+    const message = skipped > 0
+      ? `Merge ${eligible.length} of ${targets.length} PRs?\n\nSkipped: ${skipped} (not mergeable or draft)`
+      : `Merge ${eligible.length} PR${eligible.length === 1 ? "" : "s"}?`;
+
+    const accepted = await confirmUserAction(
+      `Merge ${eligible.length} PR${eligible.length === 1 ? "" : "s"}`,
+      message,
+      "Merge",
+      affectedList || undefined,
+    );
+    if (!accepted) {
+      return;
+    }
+
+    const commands = eligible.map((key) => mergePrCommand(key));
+    await runCommands(
+      commands,
+      `Merging ${eligible.length} PR${eligible.length === 1 ? "" : "s"}…`,
+      `Merge requested for ${eligible.length} PR${eligible.length === 1 ? "" : "s"}.`,
+    );
+  }
+
+  /**
+   * Perform bulk archive on selected workspaces.
+   */
+  async function performBulkArchive(): Promise<void> {
+    const targets = Array.from(selectedWorkspaces);
+    const affectedList = targets
+      .map((key) => {
+        const workspace = workspaces.get(key);
+        return workspace ? workspace.name : key;
+      })
+      .join("\n");
+
+    const message = `Archive ${targets.length} workspace${targets.length === 1 ? "" : "s"}?\n\nSessions will be killed and rows removed from inbox.`;
+
+    const accepted = await confirmUserAction(
+      `Archive ${targets.length} workspace${targets.length === 1 ? "" : "s"}`,
+      message,
+      "Archive",
+      affectedList || undefined,
+    );
+    if (!accepted) {
+      return;
+    }
+
+    const commands = targets.map((key) => archiveCommand(key));
+    await runCommands(
+      commands,
+      `Archiving ${targets.length} workspace${targets.length === 1 ? "" : "s"}…`,
+      `Archived ${targets.length} workspace${targets.length === 1 ? "" : "s"}.`,
+    );
+  }
+
+  /**
+   * Perform bulk snooze on selected workspaces.
+   */
+  async function performBulkSnooze(preset: (typeof SNOOZE_PRESETS)[number]): Promise<void> {
+    const targets = Array.from(selectedWorkspaces);
+    const affectedList = targets
+      .map((key) => {
+        const workspace = workspaces.get(key);
+        return workspace ? workspace.name : key;
+      })
+      .join("\n");
+
+    const message = `Snooze ${targets.length} workspace${targets.length === 1 ? "" : "s"} for ${preset.label}?\n\nThey'll reappear in your inbox when the timer expires.`;
+
+    const accepted = await confirmUserAction(
+      `Snooze ${targets.length} workspace${targets.length === 1 ? "" : "s"}`,
+      message,
+      "Snooze",
+      affectedList || undefined,
+    );
+    if (!accepted) {
+      return;
+    }
+
+    const commands = targets.map((key) => snoozeCommand(key, preset.until(new Date())));
+    await runCommands(
+      commands,
+      `Snoozed ${targets.length} workspace${targets.length === 1 ? "" : "s"} for ${preset.label}…`,
+      `Snoozed ${targets.length} workspace${targets.length === 1 ? "" : "s"}.`,
+    );
+  }
+
+  /**
+   * Perform bulk mark-read on selected workspaces.
+   */
+  async function performBulkMarkRead(): Promise<void> {
+    const targets = Array.from(selectedWorkspaces);
+    const affectedList = targets
+      .map((key) => {
+        const workspace = workspaces.get(key);
+        return workspace ? workspace.name : key;
+      })
+      .join("\n");
+
+    const message = `Mark ${targets.length} workspace${targets.length === 1 ? "" : "s"} as read?`;
+
+    const accepted = await confirmUserAction(
+      `Mark ${targets.length} workspace${targets.length === 1 ? "" : "s"} read`,
+      message,
+      "Mark Read",
+      affectedList || undefined,
+    );
+    if (!accepted) {
+      return;
+    }
+
+    const commands = targets.flatMap((key) =>
+      commandsForWorkspaceIntent(key, { type: "mark-read" }),
+    );
+    await runCommands(
+      commands,
+      `Marking ${targets.length} workspace${targets.length === 1 ? "" : "s"} read…`,
+      `Marked ${targets.length} workspace${targets.length === 1 ? "" : "s"} read.`,
     );
   }
 
@@ -4922,6 +5095,12 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   }
 
   async function snoozeSelected(): Promise<void> {
+    if (selectedWorkspaces.size > 1) {
+      const preset =
+        SNOOZE_PRESETS[Number(snoozeSelect.value)] ?? SNOOZE_PRESETS[1]!;
+      await performBulkSnooze(preset);
+      return;
+    }
     if (selectedKey === null) {
       return;
     }
@@ -5918,7 +6097,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       void refreshInbox(true);
     } else if (event.key === "v" && selectedKey !== null) {
       event.preventDefault();
-      toggleWorkspaceMark(selectedKey);
+      toggleWorkspaceSelection(selectedKey);
     } else if (event.key === "B") {
       event.preventDefault();
       openBroadcastDialog();

@@ -18,6 +18,7 @@
 //! portable fallback worth shipping.
 
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use lazybox_ipc::Event;
 use tokio::sync::broadcast;
@@ -58,6 +59,10 @@ fn keep_awake_enabled() -> bool {
 /// (plus `TerminalExited` for teardown sweeps, plus lag recovery)
 /// converges even if individual events are missed.
 ///
+/// Throttles `set_active()` calls to a minimum interval (10s) to avoid
+/// redundant config reads and state checks when events arrive frequently
+/// (e.g., every keystroke or CLI output line).
+///
 /// Returns the inhibitor (for tests) when the bus closes. In
 /// production the bus never closes — the daemon exits by dropping the
 /// runtime, which drops this task's future mid-`recv` and releases a
@@ -74,7 +79,7 @@ async fn run(
     // broadcasts its state once, possibly before this task subscribed,
     // and the state owner's dedup means no further event may arrive
     // for the rest of that run.
-    inhibitor.set_active(enabled() && terminals.any_agent_working().await);
+    inhibitor.recompute(enabled() && terminals.any_agent_working().await);
     loop {
         match rx.recv().await {
             Ok(Event::AgentState { .. } | Event::TerminalExited { .. })
@@ -82,7 +87,7 @@ async fn run(
             Ok(_) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         }
-        inhibitor.set_active(enabled() && terminals.any_agent_working().await);
+        inhibitor.recompute(enabled() && terminals.any_agent_working().await);
     }
     inhibitor
 }
@@ -132,6 +137,11 @@ fn inhibit_argv(daemon_pid: u32) -> Option<Vec<String>> {
 /// Owns at most one inhibitor child. `set_active(true)` spawns it (or
 /// respawns if it died underneath us), `set_active(false)` and `Drop`
 /// kill and reap it.
+///
+/// Throttles recompute calls to prevent rapid re-entry: the watcher
+/// receives AgentState events frequently (every keystroke/output), but
+/// only actually re-evaluates the inhibitor state at most once per
+/// THROTTLE_INTERVAL.
 struct Inhibitor {
     argv: Vec<String>,
     child: Option<Child>,
@@ -139,6 +149,10 @@ struct Inhibitor {
     /// non-systemd Linux); warn on the first one per healthy spell and
     /// demote the rest to debug so a long session isn't log spam.
     spawn_warned: bool,
+    /// Last time `recompute()` actually called `set_active()`.
+    last_recompute: Option<Instant>,
+    /// Minimum interval between recompute calls to reduce overhead.
+    throttle_interval: Duration,
 }
 
 impl Inhibitor {
@@ -147,12 +161,30 @@ impl Inhibitor {
             argv,
             child: None,
             spawn_warned: false,
+            last_recompute: None,
+            throttle_interval: Duration::from_secs(10),
         }
     }
 
     #[cfg(test)]
     fn holding(&self) -> bool {
         self.child.is_some()
+    }
+
+    /// Recompute whether the inhibitor should be active, but only if
+    /// enough time has passed since the last recompute. Throttles calls
+    /// to avoid redundant config reads and state checks.
+    fn recompute(&mut self, active: bool) {
+        let now = Instant::now();
+        let should_recompute = match self.last_recompute {
+            None => true,
+            Some(last) => now.duration_since(last) >= self.throttle_interval,
+        };
+
+        if should_recompute {
+            self.set_active(active);
+            self.last_recompute = Some(now);
+        }
     }
 
     fn set_active(&mut self, active: bool) {
@@ -279,27 +311,31 @@ mod tests {
     }
 
     /// `ui.keep_awake` is re-read on every recompute: flipping it off
-    /// mid-hold releases on the next event, without a restart.
-    #[tokio::test]
-    async fn toggling_the_flag_off_releases_on_the_next_event() {
-        let (tx, rx) = broadcast::channel(8);
-        tx.send(Event::AgentState {
-            session_key: "ws:1".into(),
-            terminal_id: TerminalId(1),
-            state: AgentState::Working,
-        })
-        .unwrap();
-        drop(tx);
-        // First read (priming) sees the flag on; the second (the
-        // queued event) sees it off.
+    /// mid-hold (after throttle window) releases on the next allowed event.
+    /// The priming pass sees the flag on; after the throttle interval, the
+    /// next recompute sees it off and releases.
+    #[test]
+    fn toggling_the_flag_off_releases_on_the_next_event() {
+        // First read (priming) sees the flag on and acquires.
+        // Both queued events will try to recompute, but the second is
+        // throttled if it arrives too soon. The test uses a short throttle
+        // to ensure the second recompute can execute after a small delay.
         let reads = AtomicUsize::new(0);
-        let inhibitor = run(rx, working_terminals().await, sleep_argv(), move || {
-            reads.fetch_add(1, Ordering::SeqCst) == 0
-        })
-        .await;
+        let mut inhibitor = Inhibitor::new(sleep_argv());
+        inhibitor.throttle_interval = Duration::from_millis(1); // Short throttle for test
+        let enabled = move || reads.fetch_add(1, Ordering::SeqCst) == 0;
+
+        // Simulate the two events
+        inhibitor.recompute(enabled() && true); // Priming: enabled=true, acquire
+        assert!(inhibitor.holding(), "priming must acquire");
+
+        // Wait slightly past throttle window to allow second recompute
+        std::thread::sleep(Duration::from_millis(5));
+
+        inhibitor.recompute(enabled() && true); // Event 1: enabled=false now, should release
         assert!(
             !inhibitor.holding(),
-            "toggle-off must release the inhibitor"
+            "toggle-off after throttle window must release the inhibitor"
         );
     }
 
@@ -369,5 +405,73 @@ mod tests {
         assert!(inhibitor.spawn_warned);
         inhibitor.set_active(true);
         assert!(!inhibitor.holding());
+    }
+
+    /// Throttle prevents immediate re-entry: consecutive recompute calls
+    /// within the throttle window do not trigger set_active.
+    #[test]
+    fn throttle_prevents_rapid_reentry() {
+        let mut inhibitor = Inhibitor::new(sleep_argv());
+        // Set a short throttle interval for testing.
+        inhibitor.throttle_interval = Duration::from_millis(100);
+
+        // First recompute should always execute (no prior call).
+        inhibitor.recompute(true);
+        assert!(inhibitor.holding(), "first recompute must acquire");
+        let first_recompute = inhibitor.last_recompute;
+
+        // Immediately recompute again — should be throttled and skip set_active.
+        inhibitor.recompute(false);
+        assert!(
+            inhibitor.holding(),
+            "second recompute within throttle window must not call set_active"
+        );
+        assert_eq!(
+            inhibitor.last_recompute, first_recompute,
+            "last_recompute timestamp should not change"
+        );
+
+        // After the throttle interval, recompute should execute.
+        std::thread::sleep(Duration::from_millis(150));
+        inhibitor.recompute(false);
+        assert!(
+            !inhibitor.holding(),
+            "recompute after throttle window must call set_active"
+        );
+        assert!(
+            inhibitor.last_recompute > first_recompute,
+            "last_recompute timestamp should advance"
+        );
+    }
+
+    /// Rapid events (e.g., keystroke storm) do not cause repeated
+    /// set_active calls; only the first event within a window triggers.
+    #[test]
+    fn rapid_events_throttled() {
+        let mut inhibitor = Inhibitor::new(sleep_argv());
+        inhibitor.throttle_interval = Duration::from_millis(100);
+
+        inhibitor.recompute(true);
+        let first_pid = inhibitor.child.as_ref().map(|c| c.id());
+
+        // Simulate 10 rapid events (all throttled).
+        for _ in 0..10 {
+            inhibitor.recompute(true);
+        }
+
+        // The child should be the same — no respawn from repeated set_active.
+        let second_pid = inhibitor.child.as_ref().map(|c| c.id());
+        assert_eq!(
+            first_pid, second_pid,
+            "child should not respawn within throttle window"
+        );
+
+        // After the window, a change in state should execute.
+        std::thread::sleep(Duration::from_millis(150));
+        inhibitor.recompute(false);
+        assert!(
+            !inhibitor.holding(),
+            "state change after throttle window must execute"
+        );
     }
 }

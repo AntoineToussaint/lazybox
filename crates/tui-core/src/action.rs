@@ -340,6 +340,8 @@ pub enum Action {
     /// the session-only messages log, it survives restart and can turn
     /// an error class into an issue, an agent run, or a JSONL export.
     OpenErrorInbox,
+    /// Open the personal Hopper editor from any non-terminal pane.
+    OpenHopper,
     /// Clear the current footer notice regardless of severity. Severity
     /// still decides auto-fade (Retryable/Info fade on their timers;
     /// Permanent/Auth stay), but this lets the user swat any notice away
@@ -547,6 +549,7 @@ pub enum ActionKind {
     OpenSyncStatus,
     OpenMessages,
     OpenErrorInbox,
+    OpenHopper,
     DismissNotice,
     InspectNotice,
     OpenSettings,
@@ -593,6 +596,7 @@ impl ActionKind {
         Self::OpenSyncStatus,
         Self::OpenMessages,
         Self::OpenErrorInbox,
+        Self::OpenHopper,
         Self::DismissNotice,
         Self::InspectNotice,
         // The three Jump actions sit together so the help panel reads
@@ -811,6 +815,7 @@ impl Action {
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenMessages => ActionKind::OpenMessages,
             Action::OpenErrorInbox => ActionKind::OpenErrorInbox,
+            Action::OpenHopper => ActionKind::OpenHopper,
             Action::DismissNotice => ActionKind::DismissNotice,
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::OpenThemePicker => ActionKind::OpenThemePicker,
@@ -930,6 +935,13 @@ impl ActionDef {
                 default_keys: "Shift-E",
                 label: "errors",
                 describe: "Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. Sorted by frequency, filterable by source; the selected class shows its full raw + humanized detail. Turn a class into a GitHub issue (`i`), route it to an agent (`a`), or export the set as JSONL (`x`); `d` deletes one class, `c` clears all.",
+                section: Section::Global,
+            },
+            ActionKind::OpenHopper => &Self {
+                kind: ActionKind::OpenHopper,
+                default_keys: "Shift-H",
+                label: "hopper",
+                describe: "Open the personal Hopper editor. Each line is a persistent workspace; Enter adds the next item and Ctrl-S saves.",
                 section: Section::Global,
             },
             ActionKind::DismissNotice => &Self {
@@ -2098,6 +2110,7 @@ impl ActionKind {
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
             ActionKind::OpenErrorInbox => "open_error_inbox",
+            ActionKind::OpenHopper => "open_hopper",
             ActionKind::DismissNotice => "dismiss_notice",
             ActionKind::InspectNotice => "inspect_notice",
             ActionKind::OpenSettings => "open_settings",
@@ -3011,6 +3024,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages
         | ActionKind::OpenErrorInbox
+        | ActionKind::OpenHopper
         | ActionKind::DismissNotice
         | ActionKind::InspectNotice
         | ActionKind::OpenSettings

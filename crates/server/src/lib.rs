@@ -1005,6 +1005,7 @@ impl Server {
                         }
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
+                        lazybox_ipc::Command::SaveHopper { .. } => "SaveHopper",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
                         lazybox_ipc::Command::ActivateWorkspace { .. } => "ActivateWorkspace",
@@ -1921,6 +1922,17 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::CreateProject { name } => {
             workspace::create_local_project(config, &name);
+        }
+        lazybox_ipc::Command::SaveHopper { entries } => {
+            if let Err(error) = workspace::save_hopper(config, entries) {
+                tracing::error!(error = %error, "save hopper failed");
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::provider_error_permanent(
+                        "hopper",
+                        format!("Hopper was not saved: {error}"),
+                    ));
+            }
         }
         lazybox_ipc::Command::Snooze { session_key, until } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());

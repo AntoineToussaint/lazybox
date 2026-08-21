@@ -7037,6 +7037,7 @@ mod stale_input_tests {
                 // Drop — outward-effect inputs (post/label/deliver).
                 Id::Reply
                 | Id::Notes
+                | Id::Hopper
                 | Id::RequestReviewers
                 | Id::AddAssignees
                 | Id::ManageLabels
@@ -7097,6 +7098,7 @@ mod stale_input_tests {
             Id::Polling,
             Id::Reply,
             Id::Notes,
+            Id::Hopper,
             Id::NewWorkspace,
             Id::RenameWorkspace,
             Id::RenameSpace,

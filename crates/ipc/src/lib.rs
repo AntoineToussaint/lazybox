@@ -666,6 +666,17 @@ pub struct DiffFileDto {
     pub hunks: Vec<DiffHunkDto>,
 }
 
+/// One editable row in the personal Hopper. Existing rows carry their
+/// stable workspace key; newly typed rows leave it empty so the daemon
+/// allocates collision-safe workspace identities at the persistence
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct HopperEntryDraft {
+    pub workspace_key: Option<lazybox_core::WorkspaceKey>,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct DiffHunkDto {
@@ -1508,6 +1519,13 @@ pub enum Command {
         terminal_id: TerminalId,
         client_request_id: String,
         continuation_prompt: String,
+    },
+    /// Persist one ordered edit of the active personal Hopper. Existing
+    /// keys are renamed/reordered in place; keyless rows become new
+    /// zero-session workspaces. Omitted existing rows are preserved so a
+    /// text edit can never become an implicit destructive action.
+    SaveHopper {
+        entries: Vec<HopperEntryDraft>,
     },
 }
 

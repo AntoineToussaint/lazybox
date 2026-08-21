@@ -52,8 +52,8 @@ pub use session_key::SessionKey;
 pub use stack::{StackPosition, detect_stacks};
 pub use task::*;
 pub use workspace::{
-    CleanupPrompt, MAX_ACTIVITY_ITEMS, SENT_SNIPPETS_MAX, Session as WorkspaceSession, SessionId,
-    SessionKind, SessionLayout, SessionRunState, TileDirection, TileTree,
+    CleanupPrompt, HopperMeta, MAX_ACTIVITY_ITEMS, SENT_SNIPPETS_MAX, Session as WorkspaceSession,
+    SessionId, SessionKind, SessionLayout, SessionRunState, TileDirection, TileTree,
     WORKING_CLAIM_HEARTBEAT_SECS, WORKING_CLAIM_LABEL_PREFIX, WORKING_CLAIM_TTL_SECS,
     WORKING_LABEL_NAME, WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceDecodeError, WorkspaceKey,
     project_key_for_task, workspace_key_for, workspace_project_key,

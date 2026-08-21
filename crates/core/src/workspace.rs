@@ -180,7 +180,21 @@ pub enum CleanupPrompt {
 /// - 2: `Session::worktree_branch`.
 /// - 3: `Task::reviews` (submitted reviewers + state).
 /// - 4: `Task::parent` (provider-native ticket hierarchy).
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 4;
+/// - 5: `Workspace::hopper` (personal queue membership + order).
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 5;
+
+/// Personal queue metadata for a workspace captured in the Hopper.
+///
+/// The workspace remains the unit of work: this metadata only controls
+/// where it appears in the sidebar and its explicit user-owned ordering.
+/// A hopper workspace may have no project and no sessions until the user
+/// starts work on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct HopperMeta {
+    /// Stable zero-based display order within the active Hopper.
+    pub position: u32,
+}
 
 /// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT
 /// version on save, regardless of what version the row was loaded at.
@@ -238,6 +252,11 @@ pub struct Workspace {
     /// derived workspaces leave this `false`.
     #[serde(default)]
     pub local: bool,
+    /// Present when this is a user-captured personal Hopper workspace.
+    /// Kept separate from local: imported checkouts and hand-created
+    /// project workspaces are local too, but do not belong in the Hopper.
+    #[serde(default)]
+    pub hopper: Option<HopperMeta>,
     /// When `Some`, this is a **linked (no-worktree) checkout**: the
     /// workspace points directly at an existing clone on disk (a
     /// canonical `~/development/<owner>/<repo>` folder imported via the
@@ -359,6 +378,7 @@ impl Workspace {
             key,
             project_key: None,
             local: false,
+            hopper: None,
             linked_checkout: None,
             branch,
             sessions: Vec::new(),
@@ -831,6 +851,7 @@ impl Workspace {
             key: _,
             project_key: _,
             local: _,
+            hopper: _,
             linked_checkout: _,
             name: _,
             branch: _,

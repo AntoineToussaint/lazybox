@@ -190,6 +190,9 @@ pub enum VisibleRow {
     /// their repo groups regardless of which repo they belong to.
     /// Non-selectable like the other headers; j/k skips it.
     FocusedHeader,
+    /// Synthetic personal queue header. Active hopper workspaces render
+    /// here, directly below Focused and outside their assigned repo group.
+    HopperHeader,
     /// Space group header — the higher-level grouping tier (#860),
     /// emitted above the `RepoHeader`s it contains. The string is the
     /// Space name (a user-defined bucket, an owner auto-seed, or

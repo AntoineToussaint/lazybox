@@ -423,6 +423,23 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         .filter_map(|key| filtered_by_key.get(key.as_str()).copied())
         .collect();
 
+    let mut hopper_rows: Vec<(&SessionKey, &Workspace)> = filtered
+        .iter()
+        .copied()
+        .filter(|(key, workspace)| {
+            workspace.hopper.is_some() && !focused_set.contains(key.as_str())
+        })
+        .collect();
+    hopper_rows.sort_by_key(|(key, workspace)| {
+        (
+            workspace
+                .hopper
+                .map(|meta| meta.position)
+                .unwrap_or(u32::MAX),
+            key.as_str(),
+        )
+    });
+
     // Step 2: bucket the non-focused workspaces by project. A
     // workspace's parent project is looked up via
     // `lazybox_core::workspace_project_key` → resolved through the
@@ -431,7 +448,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // orphans whose task.repo failed to derive) land under `(no repo)`.
     let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
     for (k, w) in &filtered {
-        if focused_set.contains(k.as_str()) {
+        if focused_set.contains(k.as_str()) || w.hopper.is_some() {
             continue;
         }
         by_repo
@@ -532,7 +549,21 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         );
     }
 
-    // Step 5b: the repo groups (#860). Two shapes, chosen by whether the
+    // Step 5b: the personal Hopper follows Focused and stays outside
+    // repository grouping even after a repo is assigned. Repository is
+    // execution context; Hopper remains the workspace's ownership.
+    if !hopper_rows.is_empty() {
+        visible.push(VisibleRow::HopperHeader);
+        emit_workspace_forest(
+            &hopper_rows,
+            input.collapsed_tickets,
+            &context_only,
+            &mut visible,
+            &mut ticket_tree,
+        );
+    }
+
+    // Step 5c: the repo groups (#860). Two shapes, chosen by whether the
     // Space tier is active. A source's Space comes from `space_of`
     // (explicit `ui.spaces` assignment, else owner auto-seed). The tier
     // only renders when it yields ≥2 distinct Spaces this pass — a lone
@@ -1577,6 +1608,44 @@ mod tests {
                 && matches!(&w[1], VisibleRow::Workspace(k) if k.as_str() == "ka")
         });
         assert!(ka_after_a_header, "ka stays under owner/a");
+    }
+
+    #[test]
+    fn hopper_follows_focused_and_stays_out_of_repo_groups() {
+        let mut ws = HashMap::new();
+        let focused = workspace_with_task("focused", Some("owner/a"), 10);
+        ws.insert(SessionKey::from(&focused.key), focused);
+        for (key, position) in [("later", 1), ("first", 0)] {
+            let mut hopper = Workspace::empty(WorkspaceKey::new(key), "main", fixed_time());
+            hopper.name = key.into();
+            hopper.project_key = Some(ProjectKey::github("owner", "a"));
+            hopper.hopper = Some(lazybox_core::HopperMeta { position });
+            ws.insert(SessionKey::from(&hopper.key), hopper);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let focus = vec![SessionKey::from("focused")];
+        let mut input = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        input.focused_workspaces = &focus;
+
+        let out = compute_visible(input);
+        assert!(matches!(out.visible[0], VisibleRow::FocusedHeader));
+        assert!(matches!(out.visible[2], VisibleRow::HopperHeader));
+        assert!(matches!(&out.visible[3], VisibleRow::Workspace(key) if key.as_str() == "first"));
+        assert!(matches!(&out.visible[4], VisibleRow::Workspace(key) if key.as_str() == "later"));
+        for hopper_key in ["first", "later"] {
+            assert_eq!(
+                out.visible
+                    .iter()
+                    .filter(|row| matches!(row, VisibleRow::Workspace(key) if key.as_str() == hopper_key))
+                    .count(),
+                1,
+                "hopper rows are never duplicated under their assigned repo"
+            );
+        }
     }
 
     /// The Focused section renders its rows in focus (Vec) order, and a

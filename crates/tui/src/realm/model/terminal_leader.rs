@@ -36,6 +36,9 @@ pub(super) enum LeaderCmd {
     /// every prompt sent to this agent, newest-first, snippet entries
     /// tagged; Enter re-sends the picked one.
     PromptHistory,
+    /// `]]H` — open the personal Hopper without forwarding a key to
+    /// the focused terminal.
+    OpenHopper,
     /// `]]u` — scan the visible terminal for `http(s)://…` URLs and open
     /// the picked one in the browser (issue #596). An emulator-independent
     /// path to agent-output links: a single URL opens straight away, else
@@ -115,6 +118,13 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         menu_label: "prompt history",
         reference: "Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one",
         sidebar: true,
+    },
+    FixedCommandSpec {
+        key: 'H',
+        command: LeaderCmd::OpenHopper,
+        menu_label: "hopper",
+        reference: "Open the personal Hopper editor",
+        sidebar: false,
     },
     FixedCommandSpec {
         key: 'u',
@@ -201,7 +211,9 @@ impl LeaderCmd {
             && !c.is_control()
         {
             let shifted_symbol = !c.is_alphanumeric() && modifiers == KeyModifiers::SHIFT;
-            if !(modifiers.is_empty() || shifted_symbol) {
+            let shifted_command =
+                modifiers == KeyModifiers::SHIFT && FIXED_COMMANDS.iter().any(|spec| spec.key == c);
+            if !(modifiers.is_empty() || shifted_symbol || shifted_command) {
                 return None;
             }
             if let '1'..='9' = c {

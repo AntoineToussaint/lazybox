@@ -750,6 +750,48 @@ impl Sidebar {
                     }
                     Line::from(spans)
                 }
+                VisibleRow::HopperHeader => {
+                    use crate::components::icons;
+                    let is_cursor = i == self.cursor;
+                    let row_bg = if is_cursor && focused {
+                        Some(theme.row_focused())
+                    } else if is_cursor {
+                        Some(theme.row_unfocused())
+                    } else {
+                        None
+                    };
+                    let count = self
+                        .workspaces
+                        .values()
+                        .filter(|workspace| workspace.hopper.is_some())
+                        .count();
+                    let glyph = if self.ascii_glyphs {
+                        ">"
+                    } else {
+                        icons::HOPPER
+                    };
+                    let mut spans = vec![
+                        Span::styled(
+                            format!("{glyph} "),
+                            row_bg.unwrap_or_default().fg(theme.text_dim),
+                        ),
+                        Span::styled(
+                            "Hopper",
+                            row_bg
+                                .unwrap_or_default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {count}"),
+                            row_bg.unwrap_or_default().fg(theme.text_dim),
+                        ),
+                    ];
+                    if let Some(bg) = row_bg {
+                        extend_cursor_fill(&mut spans, row_budget, bg);
+                    }
+                    Line::from(spans)
+                }
                 VisibleRow::SpaceHeader(name) => {
                     // Top tier of the tree (#860): sits above the repo
                     // headers it contains, styled with the accent colour

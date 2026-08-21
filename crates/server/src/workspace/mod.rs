@@ -6,9 +6,10 @@ use crate::polling::{
     load_workspace_offloaded, report_commit_error,
 };
 use chrono::Utc;
-use lazybox_core::{Workspace, WorkspaceKey};
-use lazybox_ipc::Event;
-use lazybox_store::{StoreError, StoreMutation};
+use lazybox_core::{HopperMeta, Workspace, WorkspaceKey};
+use lazybox_ipc::{Event, HopperEntryDraft};
+use lazybox_store::{StoreError, StoreMutation, WorkspaceRecord};
+use std::collections::{HashMap, HashSet};
 
 /// Failure to create a durable workspace record. Creation is a user-issued
 /// command, so callers must propagate this result instead of returning a key
@@ -19,6 +20,259 @@ pub enum CreateWorkspaceError {
     Allocate(#[source] StoreError),
     #[error("persist workspace: {0}")]
     Persist(String),
+}
+
+/// Failure to persist an ordered Hopper edit.
+#[derive(Debug, thiserror::Error)]
+pub enum SaveHopperError {
+    #[error("load workspaces: {0}")]
+    Load(#[source] StoreError),
+    #[error("hopper entry names cannot be empty")]
+    EmptyName,
+    #[error("hopper workspace does not exist: {0}")]
+    Missing(WorkspaceKey),
+    #[error("workspace is not a hopper entry: {0}")]
+    NotHopper(WorkspaceKey),
+    #[error("hopper workspace appeared more than once: {0}")]
+    Duplicate(WorkspaceKey),
+    #[error("serialize hopper workspace {key}: {source}")]
+    Serialize {
+        key: WorkspaceKey,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("persist hopper edit: {0}")]
+    Persist(#[source] StoreError),
+}
+
+/// Atomically create, rename, and reorder the active personal Hopper.
+///
+/// Existing entries omitted by the client are retained after the submitted
+/// rows. That is deliberate: saving text is never an implicit delete.
+pub fn save_hopper(
+    config: &ServerConfig,
+    entries: Vec<HopperEntryDraft>,
+) -> Result<Vec<WorkspaceKey>, SaveHopperError> {
+    let _creation_guard = config.workspace_creations.lock();
+    let records = config
+        .store
+        .list_workspaces()
+        .map_err(SaveHopperError::Load)?;
+    let mut workspaces = HashMap::<WorkspaceKey, Workspace>::new();
+    let mut used = HashSet::<String>::new();
+    for record in records {
+        used.insert(record.key.clone());
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        if let Ok(workspace) = Workspace::decode_persisted(&json) {
+            workspaces.insert(workspace.key.clone(), workspace);
+        }
+    }
+
+    let mut ordered = Vec::<Workspace>::new();
+    let mut seen = HashSet::<WorkspaceKey>::new();
+    for (position, draft) in entries.into_iter().enumerate() {
+        let name = draft.name.trim();
+        if name.is_empty() {
+            return Err(SaveHopperError::EmptyName);
+        }
+        let mut workspace = if let Some(key) = draft.workspace_key {
+            if !seen.insert(key.clone()) {
+                return Err(SaveHopperError::Duplicate(key));
+            }
+            let Some(workspace) = workspaces.remove(&key) else {
+                return Err(SaveHopperError::Missing(key));
+            };
+            if workspace.hopper.is_none() {
+                return Err(SaveHopperError::NotHopper(workspace.key));
+            }
+            workspace
+        } else {
+            let base = {
+                let slug = lazybox_core::slug::slugify(name);
+                if slug.is_empty() {
+                    "hopper-item".to_string()
+                } else {
+                    slug
+                }
+            };
+            let mut suffix = 1u32;
+            let key = loop {
+                let candidate = if suffix == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}-{suffix}")
+                };
+                if used.insert(candidate.clone()) {
+                    break WorkspaceKey::new(candidate);
+                }
+                suffix += 1;
+            };
+            seen.insert(key.clone());
+            let mut workspace = Workspace::empty(key, "main", Utc::now());
+            workspace.local = true;
+            workspace.hopper = Some(HopperMeta {
+                position: position as u32,
+            });
+            workspace
+        };
+        workspace.name = name.to_string();
+        workspace.hopper = Some(HopperMeta {
+            position: position as u32,
+        });
+        ordered.push(workspace);
+    }
+
+    let mut omitted: Vec<Workspace> = workspaces
+        .into_values()
+        .filter(|workspace| workspace.hopper.is_some())
+        .collect();
+    omitted.sort_by_key(|workspace| {
+        (
+            workspace
+                .hopper
+                .map(|meta| meta.position)
+                .unwrap_or(u32::MAX),
+            workspace.created_at,
+            workspace.key.as_str().to_string(),
+        )
+    });
+    for mut workspace in omitted {
+        workspace.hopper = Some(HopperMeta {
+            position: ordered.len() as u32,
+        });
+        ordered.push(workspace);
+    }
+
+    let mutations = ordered
+        .iter()
+        .map(|workspace| {
+            let json =
+                serde_json::to_string(workspace).map_err(|source| SaveHopperError::Serialize {
+                    key: workspace.key.clone(),
+                    source,
+                })?;
+            Ok(StoreMutation::SaveWorkspace(WorkspaceRecord {
+                key: workspace.key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(json),
+            }))
+        })
+        .collect::<Result<Vec<_>, SaveHopperError>>()?;
+    config
+        .store
+        .apply_batch(&mutations)
+        .map_err(SaveHopperError::Persist)?;
+
+    let keys = ordered
+        .iter()
+        .map(|workspace| workspace.key.clone())
+        .collect();
+    for workspace in ordered {
+        let _ = config
+            .bus
+            .send(Event::WorkspaceUpserted(std::sync::Arc::new(workspace)));
+    }
+    Ok(keys)
+}
+
+#[cfg(test)]
+mod hopper_tests {
+    use super::*;
+
+    fn load(config: &ServerConfig, key: &WorkspaceKey) -> Workspace {
+        let record = config
+            .store
+            .get_workspace(key)
+            .expect("read hopper workspace")
+            .expect("hopper workspace exists");
+        Workspace::decode_persisted(
+            record
+                .workspace_json
+                .as_deref()
+                .expect("hopper workspace json"),
+        )
+        .expect("decode hopper workspace")
+    }
+
+    #[test]
+    fn save_hopper_creates_then_renames_and_reorders_stable_workspaces() {
+        let config = ServerConfig::in_memory();
+        let created = save_hopper(
+            &config,
+            vec![
+                HopperEntryDraft {
+                    workspace_key: None,
+                    name: "Write plan".into(),
+                },
+                HopperEntryDraft {
+                    workspace_key: None,
+                    name: "Fix tests".into(),
+                },
+            ],
+        )
+        .expect("create hopper");
+        assert_eq!(created.len(), 2);
+        assert!(load(&config, &created[0]).sessions.is_empty());
+        assert!(load(&config, &created[0]).project_key.is_none());
+
+        save_hopper(
+            &config,
+            vec![
+                HopperEntryDraft {
+                    workspace_key: Some(created[1].clone()),
+                    name: "Fix all tests".into(),
+                },
+                HopperEntryDraft {
+                    workspace_key: Some(created[0].clone()),
+                    name: "Write plan".into(),
+                },
+            ],
+        )
+        .expect("edit hopper");
+
+        let first = load(&config, &created[1]);
+        let second = load(&config, &created[0]);
+        assert_eq!(first.name, "Fix all tests");
+        assert_eq!(first.hopper.expect("hopper metadata").position, 0);
+        assert_eq!(second.hopper.expect("hopper metadata").position, 1);
+    }
+
+    #[test]
+    fn omitted_rows_are_preserved_instead_of_deleted() {
+        let config = ServerConfig::in_memory();
+        let created = save_hopper(
+            &config,
+            vec![
+                HopperEntryDraft {
+                    workspace_key: None,
+                    name: "One".into(),
+                },
+                HopperEntryDraft {
+                    workspace_key: None,
+                    name: "Two".into(),
+                },
+            ],
+        )
+        .expect("create hopper");
+        save_hopper(
+            &config,
+            vec![HopperEntryDraft {
+                workspace_key: Some(created[0].clone()),
+                name: "One renamed".into(),
+            }],
+        )
+        .expect("save partial edit");
+        assert_eq!(load(&config, &created[1]).name, "Two");
+        assert_eq!(
+            load(&config, &created[1])
+                .hopper
+                .expect("hopper metadata")
+                .position,
+            1
+        );
+    }
 }
 
 /// Create an empty workspace (no PR, no issues) named by the user.

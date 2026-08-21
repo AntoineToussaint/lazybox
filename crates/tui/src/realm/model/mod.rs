@@ -108,6 +108,9 @@ pub enum Id {
     /// `Reply`/`BroadcastText`, so `handle_textarea_submitted` routes
     /// on this id. Target key lives in the `ModalFlow::Notes` flow.
     Notes,
+    /// Ordered personal Hopper editor. Existing lines retain stable
+    /// workspace identities; submit dispatches one atomic SaveHopper.
+    Hopper,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -1032,6 +1035,7 @@ pub enum Msg {
     Confirmed(bool),
     InputSubmitted(String),
     TextareaSubmitted(String),
+    HopperSubmitted(Vec<lazybox_ipc::HopperEntryDraft>),
     /// A picker (`Choice`, jump/snippet picker, settings palette)
     /// resolved. Each entry is the *typed value* of a picked row —
     /// never a bare positional index into a parallel "shadow Vec" —
@@ -6391,6 +6395,13 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::TextareaSubmitted(body) => {
                 let cmds = self.handle_textarea_submitted(body);
                 self.dispatch_cmds(cmds);
+            }
+            Msg::HopperSubmitted(entries) => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                    self.dispatch_cmds(vec![IpcCommand::SaveHopper { entries }]);
+                    self.flash_info("Hopper saved");
+                }
             }
             Msg::InputSubmitted(text) => {
                 let cmds = self.handle_input_submitted(text);

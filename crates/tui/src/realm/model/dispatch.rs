@@ -1809,6 +1809,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::OpenErrorInbox => {
                 self.mount_error_inbox();
             }
+            Action::OpenHopper => {
+                self.mount_hopper();
+            }
             Action::OpenSettings => {
                 self.open_settings();
             }

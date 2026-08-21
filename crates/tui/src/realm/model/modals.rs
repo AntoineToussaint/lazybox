@@ -422,6 +422,29 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Notes, modal);
     }
 
+    /// Mount the ordered personal Hopper editor.
+    pub(super) fn mount_hopper(&mut self) {
+        use crate::realm::components::hopper::HopperEditor;
+
+        if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+            return;
+        }
+        let mut rows: Vec<_> = self
+            .sidebar
+            .workspace_iter()
+            .filter_map(|(_, workspace)| {
+                workspace
+                    .hopper
+                    .map(|meta| (meta.position, workspace.key.clone(), workspace.name.clone()))
+            })
+            .collect();
+        rows.sort_by_key(|(position, key, _)| (*position, key.as_str().to_string()));
+        self.mount_modal(
+            Id::Hopper,
+            HopperEditor::new(rows.into_iter().map(|(_, key, name)| (key, name)).collect()),
+        );
+    }
+
     /// Mount the "New workspace" name prompt under a specific
     /// Project. Submit → `Msg::InputSubmitted(name)` while
     /// `Id::NewWorkspace` is on top → `Command::CreateWorkspace

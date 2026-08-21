@@ -9,9 +9,10 @@
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
     AgentRuntimeMode, AgentState, AgentUsage, Command, Event, HookEvent, HookEventKind,
-    PrincipalId, PromptSource, ProviderCredentialInput, ProviderCredentialMetadata, ProviderQuota,
-    QuotaWindow, RemovableTerminalState, SpawnFallback, TerminalId, TerminalInputIntent,
-    TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
+    HopperEntryDraft, PrincipalId, PromptSource, ProviderCredentialInput,
+    ProviderCredentialMetadata, ProviderQuota, QuotaWindow, RemovableTerminalState, SpawnFallback,
+    TerminalId, TerminalInputIntent, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
+    WorktreeStepStatus,
 };
 use tokio::io::duplex;
 
@@ -482,6 +483,12 @@ fn all_commands() -> Vec<Command> {
             terminal_id: TerminalId(12),
             client_request_id: "credit-recovery-1".into(),
             continuation_prompt: "Continue the work you were doing.".into(),
+        },
+        Command::SaveHopper {
+            entries: vec![HopperEntryDraft {
+                workspace_key: Some(lazybox_core::WorkspaceKey::new("morning-plan")),
+                name: "Write morning plan".into(),
+            }],
         },
         Command::Shutdown,
     ]
@@ -1179,6 +1186,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::DeleteError { .. } => "DeleteError",
         Command::GetResourcePosture => "GetResourcePosture",
         Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
+        Command::SaveHopper { .. } => "SaveHopper",
     }
 }
 
@@ -1289,7 +1297,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        79,
+        80,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

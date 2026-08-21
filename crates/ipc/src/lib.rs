@@ -1974,7 +1974,7 @@ pub enum Event {
     },
     TerminalOutput {
         terminal_id: TerminalId,
-        bytes: Vec<u8>,
+        bytes: Arc<[u8]>,
         /// First monotonic per-terminal chunk sequence represented by
         /// `bytes`. Normally equal to `seq`; the TUI drain may coalesce a
         /// contiguous run and preserve this lower bound.

@@ -1184,7 +1184,7 @@ async fn matching_protocol_version_serves_regardless_of_build_fingerprint() {
 fn terminal_binary_frames_preserve_raw_bytes_and_sequence_metadata() {
     let event = Event::TerminalOutput {
         terminal_id: lazybox_ipc::TerminalId(7),
-        bytes: vec![0, 1, 2, 0xff],
+        bytes: Arc::<[u8]>::from(vec![0, 1, 2, 0xff]),
         first_seq: 11,
         seq: 13,
     };
@@ -1374,7 +1374,7 @@ fn json_control_stream_never_serializes_terminal_byte_payloads() {
     assert!(
         api_gateway::control_event(Event::TerminalOutput {
             terminal_id: lazybox_ipc::TerminalId(1),
-            bytes: vec![1, 2, 3],
+            bytes: Arc::<[u8]>::from(vec![1, 2, 3]),
             first_seq: 1,
             seq: 1,
         })

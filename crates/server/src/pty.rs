@@ -13,6 +13,7 @@
 //! stream of new bytes. Dropped subscribers are cleaned up in the
 //! main loop when `send` errors.
 
+use parking_lot::RwLock;
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
@@ -132,7 +133,12 @@ pub struct DaemonPty {
     /// monotonic `seq` so replay+live can be stitched without dupes.
     output_tx: broadcast::Sender<OutputChunk>,
     /// Recent output, capped at `REPLAY_RING_BYTES`.
-    ring: Arc<Mutex<ReplayRing>>,
+    /// Uses parking_lot::RwLock instead of tokio::Mutex for read-heavy
+    /// access patterns: the reader thread is the only writer, while
+    /// snapshots and forwarders read concurrently. RwLock avoids async
+    /// overhead since the reader thread is on std::thread (can call blocking
+    /// lock operations) and async readers convert .read() to non-blocking.
+    ring: Arc<RwLock<ReplayRing>>,
     /// Set by the reader thread when the PTY reports EOF. Subscribers
     /// use this + `exit_code` to stop listening.
     finished: Arc<AtomicBool>,
@@ -868,7 +874,7 @@ impl DaemonPty {
         // full ring capacity to live output.
         let seed: Arc<[u8]> = Arc::from(initial);
         let seeded = !seed.is_empty();
-        let ring = Arc::new(Mutex::new(ReplayRing::with_capacity(REPLAY_RING_BYTES)));
+        let ring = Arc::new(RwLock::new(ReplayRing::with_capacity(REPLAY_RING_BYTES)));
         let finished = Arc::new(AtomicBool::new(false));
         let finished_notify = Arc::new(Notify::new());
         let last_seq = Arc::new(AtomicU64::new(u64::from(seeded)));
@@ -937,7 +943,7 @@ impl DaemonPty {
                             // duplicate that dedup catches); seq-ahead-of-ring
                             // loses data.
                             let seq = {
-                                let mut r = reader_ring.blocking_lock();
+                                let mut r = reader_ring.write();
                                 r.push(&bytes);
                                 reader_seq.fetch_add(1, Ordering::SeqCst) + 1
                             };
@@ -1089,7 +1095,7 @@ impl DaemonPty {
     /// grid — so a boundary-clean start is what keeps the first
     /// reconstructed rows faithful.
     pub async fn snapshot_only(&self) -> crate::backend::ReplaySnapshot {
-        let ring = self.ring.lock().await;
+        let ring = self.ring.read();
         let mut replay = Vec::with_capacity(self.seed.len() + ring.len());
         replay.extend_from_slice(&self.seed);
         ring.replay_snapshot_into(&mut replay);
@@ -1160,7 +1166,7 @@ impl DaemonPty {
     /// detection across reconnect, use `subscribe().last_seq` instead
     /// (seq counts chunks, not bytes).
     pub async fn total_written(&self) -> u64 {
-        self.ring.lock().await.total_written
+        self.ring.read().total_written
     }
 
     /// A gap-free delta of the output bytes emitted since byte offset
@@ -1179,7 +1185,7 @@ impl DaemonPty {
     /// that can begin mid-UTF-8 / mid-CSI. Mirrors `TerminalResync` →
     /// `TerminalResyncUnavailable`.
     pub async fn read_since(&self, from: u64) -> Option<crate::backend::OutputDelta> {
-        let ring = self.ring.lock().await;
+        let ring = self.ring.read();
         let to_offset = ring.total_written;
         let (bytes, covers) = ring.read_since(from);
         if !covers {

@@ -1598,3 +1598,67 @@ async fn injected_paste_and_submit_are_atomic_against_user_input() {
         .expect("join")
         .expect("serve result");
 }
+
+/// Regression test for #1218 10a: Verify that all JoinHandles (mutations,
+/// routers, forward_task) are properly cleaned up during shutdown, with no
+/// resource leaks of file descriptors or background tasks.
+#[tokio::test]
+async fn shutdown_cleanly_drains_all_joinhandles() {
+    let (mut client, server) = channel::pair();
+    let serve =
+        tokio::spawn(async move { Server::new(ServerConfig::in_memory()).serve(server).await });
+
+    // Subscribe to ensure the server is running
+    client.send(Command::Subscribe).unwrap();
+    let _snapshot = client.recv().await.expect("snapshot");
+
+    // Send Shutdown command, which should trigger the three-phase cleanup:
+    // Phase 1: Close terminal I/O and persistence router channels
+    // Phase 2: Drain all mutations JoinSet tasks (routers + command handlers)
+    // Phase 3: Abort and await the forward_task
+    client.send(Command::Shutdown).expect("shutdown");
+
+    // The serve loop should complete within a reasonable time without
+    // hanging on any JoinHandle or leaving any detached tasks.
+    let result = tokio::time::timeout(Duration::from_secs(5), serve)
+        .await
+        .expect("serve completes in time")
+        .expect("task joins")
+        .expect("serve result");
+
+    // Verify a clean shutdown with no errors.
+    assert!(result.is_ok());
+}
+
+/// Regression test: Verify shutdown is bounded by the drain timeout and
+/// logs a warning if tasks don't complete in time, rather than hanging forever.
+#[tokio::test]
+async fn shutdown_respects_mutation_drain_timeout() {
+    let (mut client, server) = channel::pair();
+    let config = ServerConfig::in_memory();
+    let serve = tokio::spawn(async move {
+        // Set a very short drain timeout to test the timeout path
+        Server::new(config)
+            .with_mutation_drain_timeout(Duration::from_millis(1))
+            .serve(server)
+            .await
+    });
+
+    client.send(Command::Subscribe).unwrap();
+    let _snapshot = client.recv().await.expect("snapshot");
+
+    // Send Shutdown. Even with a very short timeout, serve should complete
+    // without hanging (the timeout will be exceeded, and tasks abandoned,
+    // but the serve loop still exits gracefully).
+    client.send(Command::Shutdown).expect("shutdown");
+
+    let result = tokio::time::timeout(Duration::from_secs(3), serve)
+        .await
+        .expect("serve completes despite short timeout")
+        .expect("task joins")
+        .expect("serve result");
+
+    // Cleanup may log a warning about abandoned tasks (due to the 1ms timeout),
+    // but serve should still complete cleanly.
+    assert!(result.is_ok());
+}

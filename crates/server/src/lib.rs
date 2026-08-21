@@ -1268,13 +1268,25 @@ impl Server {
                 }
             }
         }
+        // Shutdown Phase 1: Close the router input channels so the terminal
+        // I/O and persistence routers can drain their internal worker JoinSets
+        // and exit cleanly. This signals to the routers that no more commands
+        // are incoming, allowing them to complete any in-flight operations and
+        // join all their worker tasks.
         drop(terminal_io_tx);
         drop(terminal_persist_tx);
-        // Drain detached mutation tasks before returning — `Shutdown =>
-        // break` used to abandon an in-flight Kill / Spawn / inject
-        // mid-write. Bounded: a wedged clone or git op must not hold
-        // shutdown hostage, so anything still running after
-        // `mutation_drain_timeout` is abandoned (with a breadcrumb).
+        // Shutdown Phase 2: Drain all detached mutation tasks. These include:
+        // - The terminal I/O router (spawned at line 881)
+        // - The persistence router (spawned at line 886)
+        // - User-initiated commands spawned via dispatch_command (line 945)
+        // - Lag recovery snapshots (line 1255)
+        // Each of these tasks is tracked in the mutations JoinSet and properly
+        // awaited here. This prevents resource leaks of JoinHandles, file
+        // descriptors, and git operations.
+        // Bounded drain: a wedged clone or git op must not hold shutdown
+        // hostage, so anything still running after `mutation_drain_timeout`
+        // is abandoned with a warning. The timeout default is MUTATION_DRAIN_TIMEOUT
+        // (~5s); tests can override via `with_mutation_drain_timeout`.
         if !mutations.is_empty() {
             let drain = async { while mutations.join_next().await.is_some() {} };
             if tokio::time::timeout(self.mutation_drain_timeout, drain)
@@ -1284,15 +1296,17 @@ impl Server {
                 tracing::warn!(
                     drain_timeout = ?self.mutation_drain_timeout,
                     "shutdown: detached mutation task(s) still running past the drain bound — \
-                     abandoning them"
+                     abandoning them (connection may have pending I/O or store ops)"
                 );
             }
         }
+        // Shutdown Phase 3: Clean up the connection-owned forward_task
+        // (the event forwarder that bridges the raw event stream to the
+        // client's bounded channel). A healthy forwarder normally ends when
+        // its client receiver closes. On explicit Shutdown, that receiver may
+        // still be alive, so we abort and join the task to ensure it doesn't
+        // outlive this serve() call.
         if let Some(forward_task) = forward_task {
-            // A healthy forwarder normally ends when its client receiver
-            // closes. On explicit Shutdown that receiver may still be alive,
-            // so abort and join the connection-owned task instead of leaving
-            // it detached behind `serve`.
             forward_task.abort();
             let _ = forward_task.await;
         }

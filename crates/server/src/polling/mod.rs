@@ -1248,13 +1248,21 @@ pub struct MergePromptMemory {
 /// per-process pin.
 #[derive(Default)]
 pub struct RemovalPromptMemory {
-    /// Workspace keys we've broadcast `MergedPrRemovable` for, with
-    /// the last emission time. The per-tick reprompt scan re-emits
-    /// after [`REMOVAL_REPROMPT_AFTER`] while the workspace stays a
-    /// removal candidate, so an Esc dismissal or a dropped broadcast
-    /// heals on its own. Cleared wholesale on client (re)connect so a
-    /// fresh subscriber is prompted on the next tick, not in 5 min.
-    pub(crate) prompted: std::collections::HashMap<String, std::time::Instant>,
+    /// Per-principal tracking of which workspaces we've shown
+    /// `MergedPrRemovable` prompts for, with the last emission time. The
+    /// per-tick reprompt scan re-emits after [`REMOVAL_REPROMPT_AFTER`]
+    /// while the workspace stays a removal candidate, so an Esc dismissal
+    /// or a dropped broadcast heals on its own. On client (re)connect,
+    /// only the reconnecting principal's prompts are cleared so a fresh
+    /// subscriber is prompted on the next tick, not in 5 min — but other
+    /// connected clients keep their throttles intact (fixes #1255).
+    ///
+    /// Each principal (client connection) gets its own throttle map to track
+    /// which removal prompts it has seen.
+    pub(crate) prompted: std::collections::HashMap<
+        lazybox_ipc::PrincipalId,
+        std::collections::HashMap<String, std::time::Instant>,
+    >,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3246,6 +3254,12 @@ async fn sync_one_tracked_workspace(
     }
 }
 
+/// The principal used for broadcast removal prompts (those emitted by
+/// the polling loop to all clients, not client-specific replays).
+fn broadcast_principal() -> lazybox_ipc::PrincipalId {
+    lazybox_ipc::PrincipalId::new("broadcast")
+}
+
 /// Handle `Command::KeepMergedWorkspace`: the user answered "no" on
 /// the removal modal. Persist [`lazybox_core::CleanupPrompt::Declined`] on the row so
 /// the reprompt sweep stops asking — across restarts, not just this
@@ -3257,6 +3271,8 @@ pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
         .lock()
         .await
         .prompted
+        .entry(broadcast_principal())
+        .or_insert_with(std::collections::HashMap::new)
         .remove(key.as_str());
     let outcome = apply_and_commit(config, key, |ws| {
         ws.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
@@ -3270,12 +3286,23 @@ pub async fn keep_merged_workspace(config: &ServerConfig, key: &WorkspaceKey) {
 }
 
 /// A client just (re)connected: forget the per-workspace emit
-/// timestamps (NOT the "keep" pins) so the next reprompt sweep
-/// re-fires immediately for anything still unresolved, instead of
-/// waiting out `REMOVAL_REPROMPT_AFTER`. A prompt the reconnecting
-/// client never saw shouldn't be throttled as if it had been.
-pub async fn mark_removal_prompts_for_replay(config: &ServerConfig) {
-    config.poll.removal_prompts.lock().await.prompted.clear();
+/// timestamps (NOT the "keep" pins) for THIS principal so the next
+/// reprompt sweep re-fires immediately for anything still unresolved,
+/// instead of waiting out `REMOVAL_REPROMPT_AFTER`. A prompt the
+/// reconnecting client never saw shouldn't be throttled as if it had been.
+/// Other connected principals keep their throttles intact — only this
+/// one client gets the reset (fixes #1255).
+pub async fn mark_removal_prompts_for_replay(
+    config: &ServerConfig,
+    principal_id: &lazybox_ipc::PrincipalId,
+) {
+    config
+        .poll
+        .removal_prompts
+        .lock()
+        .await
+        .prompted
+        .remove(principal_id);
 }
 
 /// If `workspace`'s PR closes issues that lazybox tracks as their own

@@ -651,7 +651,10 @@ async fn serve_one_connection(
                 break;
             }
         }
-        if write_frame(&mut wr, &Command::Subscribe).await.is_err() {
+        if write_frame(&mut wr, &Command::Subscribe { principal_id: None })
+            .await
+            .is_err()
+        {
             return ConnectionEnd::Dropped;
         }
     }

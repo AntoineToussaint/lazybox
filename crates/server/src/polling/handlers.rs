@@ -2344,15 +2344,19 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     {
         let mut prompts = config.poll.removal_prompts.lock().await;
         let now = std::time::Instant::now();
-        let stale = prompts
+        let principal = super::broadcast_principal();
+        let principal_prompts = prompts
             .prompted
+            .entry(principal)
+            .or_insert_with(std::collections::HashMap::new);
+        let stale = principal_prompts
             .get(key.as_str())
             .map(|prev| now.duration_since(*prev) >= super::REMOVAL_REPROMPT_AFTER)
             .unwrap_or(true);
         if !stale {
             return;
         }
-        prompts.prompted.insert(key.as_str().to_string(), now);
+        principal_prompts.insert(key.as_str().to_string(), now);
     }
 
     let session_paths = workspace_worktree_paths(&workspace);
@@ -2419,14 +2423,12 @@ pub(crate) async fn remove_merged_workspace_with(
 
     // The row is actually gone — now drop its reprompt bookkeeping. On a
     // failed prerequisite it must remain so the level-triggered prompt can
-    // offer the destructive action again.
-    config
-        .poll
-        .removal_prompts
-        .lock()
-        .await
-        .prompted
-        .remove(key.as_str());
+    // offer the destructive action again. Clear for all principals since
+    // the workspace is fully removed.
+    let mut prompts = config.poll.removal_prompts.lock().await;
+    for principal_map in prompts.prompted.values_mut() {
+        principal_map.remove(key.as_str());
+    }
 
     Some(reclaimed)
 }
@@ -4600,27 +4602,27 @@ mod inspect_tests {
         let store = Arc::new(MemoryStore::new());
         let key = seed_closed_issue_no_session(&store, 11);
         let config = fresh_config(store);
-        config
-            .poll
-            .removal_prompts
-            .lock()
-            .await
-            .prompted
-            .insert(key.as_str().to_string(), std::time::Instant::now());
+        {
+            let mut prompts = config.poll.removal_prompts.lock().await;
+            prompts
+                .prompted
+                .entry(super::broadcast_principal())
+                .or_insert_with(std::collections::HashMap::new)
+                .insert(key.as_str().to_string(), std::time::Instant::now());
+        }
         let mut rx = config.bus.subscribe();
 
         cancel_pending_removal(&config, &key).await;
 
-        assert!(
-            !config
-                .poll
-                .removal_prompts
-                .lock()
-                .await
-                .prompted
-                .contains_key(key.as_str()),
-            "reprompt stamp must be dropped"
-        );
+        {
+            let prompts = config.poll.removal_prompts.lock().await;
+            let principal_prompts = prompts.prompted.get(&super::broadcast_principal());
+            assert!(
+                principal_prompts.is_none()
+                    || !principal_prompts.unwrap().contains_key(key.as_str()),
+                "reprompt stamp must be dropped"
+            );
+        }
         let evt = drain_until(&mut rx, |e| matches!(e, Event::RemovalCancelled { .. })).await;
         let Event::RemovalCancelled { workspace_key } = evt else {
             unreachable!()
@@ -4660,12 +4662,16 @@ mod inspect_tests {
             // (fresh CI VM) — dropping the stamp exercises the same
             // "no fresh emit on record" outcome.
             let mut prompts = config.poll.removal_prompts.lock().await;
+            let principal_prompts = prompts
+                .prompted
+                .entry(super::broadcast_principal())
+                .or_insert_with(std::collections::HashMap::new);
             match std::time::Instant::now().checked_sub(crate::polling::REMOVAL_REPROMPT_AFTER) {
                 Some(past) => {
-                    prompts.prompted.insert(key.as_str().to_string(), past);
+                    principal_prompts.insert(key.as_str().to_string(), past);
                 }
                 None => {
-                    prompts.prompted.remove(key.as_str());
+                    principal_prompts.remove(key.as_str());
                 }
             }
         }
@@ -4712,11 +4718,52 @@ mod inspect_tests {
         // First emit happens with nobody subscribed — lost for good.
         crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
 
-        // A client connects: replay reset + the tick it wakes re-sweeps.
+        // A client connects: replay reset for that principal + the tick it wakes re-sweeps.
         let mut rx = config.bus.subscribe();
-        crate::polling::mark_removal_prompts_for_replay(&config).await;
+        let principal = lazybox_ipc::PrincipalId::local();
+        crate::polling::mark_removal_prompts_for_replay(&config, &principal).await;
         crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
         drain_until(&mut rx, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+    }
+
+    /// Regression for #1255: two clients connected, one has seen a removal
+    /// prompt, another reconnects. Only the reconnecting client should see
+    /// the prompt re-fired; the other client's throttle stays intact.
+    #[tokio::test]
+    async fn reconnecting_client_does_not_replay_other_clients_prompts() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "multi", "feat").await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = fresh_config(store);
+        let mgr = lazybox_git_ops::WorktreeManager::new(fx.base.path().to_path_buf());
+
+        // First client connects and receives the removal prompt.
+        let mut rx1 = config.bus.subscribe();
+        let principal1 = lazybox_ipc::PrincipalId::new("client-1");
+        crate::polling::mark_removal_prompts_for_replay(&config, &principal1).await;
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+        let _ = drain_until(&mut rx1, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+
+        // Freeze time: client 1 has now seen the prompt within the throttle window.
+        // Verify it doesn't get re-emitted to client 1.
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+        assert_no_event(&mut rx1, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+
+        // A second client connects and replays — but should ONLY replay to itself,
+        // not re-trigger client 1's throttle.
+        let principal2 = lazybox_ipc::PrincipalId::new("client-2");
+        crate::polling::mark_removal_prompts_for_replay(&config, &principal2).await;
+        let mut rx2 = config.bus.subscribe();
+        crate::polling::reprompt_unresolved_removals_with(&config, &mgr).await;
+
+        // Client 2 should see the prompt (it has a cleared entry).
+        drain_until(&mut rx2, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
+
+        // Client 1's throttle is unaffected and should NOT see a re-emission.
+        assert_no_event(&mut rx1, |e| matches!(e, Event::MergedPrRemovable { .. })).await;
     }
 
     /// Regression for #292: the prompt memory is per-process, so a

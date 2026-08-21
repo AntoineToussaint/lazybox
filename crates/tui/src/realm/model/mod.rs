@@ -2518,7 +2518,9 @@ impl Model<AsyncCrosstermAdapter> {
         // First-run gets an empty snapshot before the wizard finishes
         // (no polling has run yet) so nothing flickers in behind the
         // wizard. Subscribe is idempotent on the daemon side.
-        let _ = model.client.send(IpcCommand::Subscribe);
+        let _ = model
+            .client
+            .send(IpcCommand::Subscribe { principal_id: None });
         model.set_focus_attr();
         Ok(model)
     }

@@ -1758,7 +1758,7 @@ showing keybinding search only",
                     None => Ok(None),
                 };
                 self.unmount_setup_modal();
-                self.send_cmd(IpcCommand::Subscribe);
+                self.send_cmd(IpcCommand::Subscribe { principal_id: None });
                 // Kick off an immediate poll so a freshly added repo
                 // surfaces its open PRs/issues within seconds instead
                 // of waiting for the long-lived 60s loop tick.
@@ -1799,7 +1799,7 @@ showing keybinding search only",
             }
             RunnerStep::Cancel => {
                 self.unmount_setup_modal();
-                self.send_cmd(IpcCommand::Subscribe);
+                self.send_cmd(IpcCommand::Subscribe { principal_id: None });
                 self.set_focus_attr();
             }
             RunnerStep::Stay => {

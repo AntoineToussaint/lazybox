@@ -724,8 +724,14 @@ fn default_true() -> bool {
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum Command {
     /// Start streaming events. Connection replies with `Event::Snapshot`
-    /// then a live stream.
-    Subscribe,
+    /// then a live stream. The optional `principal_id` identifies the
+    /// (re)connecting client; defaults to "local" for backward compatibility.
+    /// Used to scope removal-prompt replay so each client's replay clears
+    /// only its own accumulated prompts, not the daemon-wide map.
+    Subscribe {
+        #[serde(default)]
+        principal_id: Option<PrincipalId>,
+    },
     /// Create a fresh `Session` (== fresh worktree folder) inside the
     /// workspace identified by `session_key` (this name on the wire
     /// holds the workspace key — see the SessionKey docs). The
@@ -3999,7 +4005,9 @@ mod transport_admission_tests {
         let (_event_tx, event_rx) = mpsc::channel(1);
         let client = Client::from_bounded_channels(command_tx, event_rx);
 
-        client.send(Command::Subscribe).expect("first command");
+        client
+            .send(Command::Subscribe { principal_id: None })
+            .expect("first command");
         assert!(matches!(
             client.send(Command::Refresh),
             Err(mpsc::error::TrySendError::Full(Command::Refresh))
@@ -4010,8 +4018,13 @@ mod transport_admission_tests {
     async fn command_receiver_preserves_both_transport_shapes() {
         let (unbounded_tx, unbounded_rx) = mpsc::unbounded_channel();
         let mut unbounded = CommandReceiver::from(unbounded_rx);
-        unbounded_tx.send(Command::Subscribe).expect("open");
-        assert!(matches!(unbounded.recv().await, Some(Command::Subscribe)));
+        unbounded_tx
+            .send(Command::Subscribe { principal_id: None })
+            .expect("open");
+        assert!(matches!(
+            unbounded.recv().await,
+            Some(Command::Subscribe { .. })
+        ));
 
         let (bounded_tx, bounded_rx) = mpsc::channel(1);
         let mut bounded = CommandReceiver::from(bounded_rx);
@@ -4091,8 +4104,10 @@ mod transport_admission_tests {
 
         // Wire normalization: a non-Write passes through untouched.
         assert!(matches!(
-            Command::Subscribe.into_write_chunks().as_slice(),
-            [Command::Subscribe]
+            Command::Subscribe { principal_id: None }
+                .into_write_chunks()
+                .as_slice(),
+            [Command::Subscribe { .. }]
         ));
     }
 

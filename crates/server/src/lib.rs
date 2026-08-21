@@ -960,7 +960,7 @@ impl Server {
                 }
                 cmd = conn.rx.recv() => {
                     let Some(cmd) = cmd else { break };
-                    if matches!(&cmd, lazybox_ipc::Command::Subscribe) {
+                    if matches!(&cmd, lazybox_ipc::Command::Subscribe { .. }) {
                         if subscribed {
                             let _ = conn.tx.send(Event::CommandRejected {
                                 command: "Subscribe".into(),
@@ -1373,7 +1373,7 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
             CommandLane::TerminalPersistence
         }
-        Command::Subscribe => CommandLane::Inline,
+        Command::Subscribe { .. } => CommandLane::Inline,
         _ => CommandLane::Detached,
     }
 }
@@ -1454,7 +1454,8 @@ pub async fn dispatch_command(
     cmd: lazybox_ipc::Command,
 ) {
     match cmd {
-        lazybox_ipc::Command::Subscribe => {
+        lazybox_ipc::Command::Subscribe { principal_id } => {
+            let principal_id = principal_id.unwrap_or_else(lazybox_ipc::PrincipalId::local);
             // Offload the SQLite scans (issue #34) onto `spawn_blocking`
             // so the inline handler doesn't pin the runtime worker on the
             // parking_lot mutex + row iteration. Both scans share one
@@ -1524,7 +1525,8 @@ pub async fn dispatch_command(
             // before it connected (broadcast is fire-and-forget) — reset
             // the reprompt throttle so the tick kicked below re-offers
             // any still-unresolved merged/closed workspace right away.
-            polling::mark_removal_prompts_for_replay(config).await;
+            // Only clear this principal's prompts; other clients keep theirs (fixes #1255).
+            polling::mark_removal_prompts_for_replay(config, &principal_id).await;
             // Kick a fresh poll so the freshly-opened TUI refreshes within
             // a few seconds instead of waiting out the current sleep.
             config.poll.wake(true);

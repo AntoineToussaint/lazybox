@@ -2308,7 +2308,9 @@ where
 fn stream_events_response(config: ServerConfig) -> Response<Body> {
     let bridge = spawn_local_bridge(config);
     let keepalive_tx = bridge.command_tx.clone();
-    let _ = bridge.command_tx.try_send(Command::Subscribe);
+    let _ = bridge
+        .command_tx
+        .try_send(Command::Subscribe { principal_id: None });
     ndjson_desktop_event_response(bridge.event_rx, keepalive_tx)
 }
 
@@ -2407,7 +2409,7 @@ where
 {
     let bridge = spawn_local_bridge(config);
     let command_tx = bridge.command_tx.clone();
-    let _ = command_tx.try_send(Command::Subscribe);
+    let _ = command_tx.try_send(Command::Subscribe { principal_id: None });
     tokio::spawn(async move {
         pump_terminal_commands(body, command_tx).await;
     });
@@ -3045,8 +3047,8 @@ mod auth_tests {
         }
 
         // A non-credential command is untouched.
-        let passthrough = bind_principal(Command::Subscribe, authed);
-        assert!(matches!(passthrough, Command::Subscribe));
+        let passthrough = bind_principal(Command::Subscribe { principal_id: None }, authed);
+        assert!(matches!(passthrough, Command::Subscribe { .. }));
     }
 
     #[tokio::test]

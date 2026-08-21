@@ -680,7 +680,7 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
         )
     })?;
     client
-        .send(lazybox_ipc::Command::Subscribe)
+        .send(lazybox_ipc::Command::Subscribe { principal_id: None })
         .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
     await_workspace_snapshot(&mut client).await?;
     let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
@@ -1255,7 +1255,7 @@ async fn require_snapshot(
     timeout: Duration,
 ) -> anyhow::Result<()> {
     client
-        .send(lazybox_ipc::Command::Subscribe)
+        .send(lazybox_ipc::Command::Subscribe { principal_id: None })
         .map_err(|_| anyhow::anyhow!("relay smoke could not send the subscribe request"))?;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {

@@ -91,6 +91,10 @@ pub struct PeerInfo {
     /// when both were compiled from the same commit; a difference means a
     /// stale daemon or client even though the protocol version matched.
     pub build: String,
+    /// True if this is an interactive client (e.g., TUI) that should get
+    /// priority over background operations (e.g., hooks). Used by the
+    /// server to reserve connection slots for interactive clients.
+    pub is_interactive: bool,
 }
 
 impl PeerInfo {
@@ -121,10 +125,10 @@ where
 }
 
 /// Write this side's build version: a u16 LE length followed by UTF-8
-/// bytes. Sent only after the wire fingerprints are confirmed to match,
-/// so a mismatched (or pre-handshake) peer never reaches this and
-/// can't be desynced by it.
-async fn write_build<W>(w: &mut W) -> std::io::Result<()>
+/// bytes, then a single byte for the interactive flag. Sent only after
+/// the wire fingerprints are confirmed to match, so a mismatched
+/// (or pre-handshake) peer never reaches this and can't be desynced by it.
+async fn write_build<W>(w: &mut W, is_interactive: bool) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -132,7 +136,27 @@ where
     let len = bytes.len().min(MAX_BUILD_BYTES);
     w.write_all(&(len as u16).to_le_bytes()).await?;
     w.write_all(&bytes[..len]).await?;
+    write_interactive(w, is_interactive).await?;
     w.flush().await
+}
+
+/// Write this side's interactive flag: a single byte (0 or 1).
+async fn write_interactive<W>(w: &mut W, is_interactive: bool) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    w.write_all(&[if is_interactive { 1 } else { 0 }]).await?;
+    w.flush().await
+}
+
+/// Read the peer's interactive flag: a single byte.
+async fn read_interactive<R>(r: &mut R) -> Result<bool, HandshakeError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = [0u8; 1];
+    r.read_exact(&mut buf).await?;
+    Ok(buf[0] != 0)
 }
 
 /// Read the peer's build version written by [`write_build`].
@@ -150,8 +174,11 @@ where
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await?;
+    let build = String::from_utf8_lossy(&buf).into_owned();
+    let is_interactive = read_interactive(r).await?;
     Ok(PeerInfo {
-        build: String::from_utf8_lossy(&buf).into_owned(),
+        build,
+        is_interactive,
     })
 }
 
@@ -176,8 +203,14 @@ where
 /// Client side of the connection handshake: send our preamble, then
 /// require a matching one back before any frames flow. Run this
 /// immediately after the transport connects — the server won't accept
-/// frames until it has seen our preamble.
-pub async fn client_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<PeerInfo, HandshakeError>
+/// frames until it has seen our preamble. `is_interactive` marks whether
+/// this is an interactive client (e.g., TUI) that should get priority
+/// connection slots.
+pub async fn client_handshake<R, W>(
+    rd: &mut R,
+    wr: &mut W,
+    is_interactive: bool,
+) -> Result<PeerInfo, HandshakeError>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -192,7 +225,7 @@ where
     }
     // Fingerprints match; exchange build versions so a wire-compatible
     // but different-commit daemon is still detectable by the caller.
-    write_build(wr).await?;
+    write_build(wr, is_interactive).await?;
     read_build(rd).await
 }
 
@@ -201,7 +234,7 @@ where
 /// no reply (the peer isn't speaking lazybox); a well-formed preamble
 /// is always answered with our own — even on fingerprint mismatch — so
 /// the client can render the clear "restart the daemon" error instead
-/// of a bincode decode failure.
+/// of a bincode decode failure. The server marks itself as non-interactive.
 pub async fn server_handshake<R, W>(rd: &mut R, wr: &mut W) -> Result<PeerInfo, HandshakeError>
 where
     R: AsyncRead + Unpin,
@@ -215,7 +248,7 @@ where
             ours: PROTOCOL_FINGERPRINT,
         });
     }
-    write_build(wr).await?;
+    write_build(wr, false).await?;
     read_build(rd).await
 }
 
@@ -223,12 +256,13 @@ async fn client_handshake_with_timeout<R, W>(
     rd: &mut R,
     wr: &mut W,
     timeout: Duration,
+    is_interactive: bool,
 ) -> std::io::Result<PeerInfo>
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    tokio::time::timeout(timeout, client_handshake(rd, wr))
+    tokio::time::timeout(timeout, client_handshake(rd, wr, is_interactive))
         .await
         .map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::TimedOut, "protocol handshake timed out")
@@ -250,7 +284,8 @@ async fn send_command_with_timeout(
     let (mut rd, mut wr) = transport::connect(path)
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let peer = client_handshake_with_timeout(&mut rd, &mut wr, handshake_timeout).await?;
+    // One-shot commands (hooks) are not interactive — they don't need reserved slots.
+    let peer = client_handshake_with_timeout(&mut rd, &mut wr, handshake_timeout, false).await?;
     write_frame(&mut wr, command)
         .await
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -372,12 +407,14 @@ where
 /// Returns a `Client` whose send/recv map to frames on the wire, plus
 /// the daemon's [`PeerInfo`] so the caller can warn on a build skew.
 /// Transport is delegated to `transport::connect` — Unix domain
-/// socket today, named pipe / TCP later.
+/// socket today, named pipe / TCP later. This is an interactive client
+/// and will get priority connection slots at the server.
 pub async fn connect(path: &Path) -> std::io::Result<(Client, PeerInfo)> {
     let (mut rd, mut wr) = transport::connect(path)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let peer = client_handshake_with_timeout(&mut rd, &mut wr, HANDSHAKE_TIMEOUT).await?;
+    // TUI connections are interactive and deserve reserved slots.
+    let peer = client_handshake_with_timeout(&mut rd, &mut wr, HANDSHAKE_TIMEOUT, true).await?;
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
     // Events are read into a BOUNDED channel: when the TUI falls behind
     // and `Client::rx` fills, `reader_loop_bounded` blocks on the send,
@@ -514,7 +551,8 @@ impl RedialError {
 /// the same way a tunnel reset does.
 pub async fn connect_reconnecting_with(redial: Redial) -> std::io::Result<(Client, PeerInfo)> {
     let (mut rd, mut wr) = redial().await.map_err(RedialError::into_io)?;
-    let peer = client_handshake_with_timeout(&mut rd, &mut wr, HANDSHAKE_TIMEOUT).await?;
+    // Reconnecting clients with custom redial are interactive (persistent TUI connections).
+    let peer = client_handshake_with_timeout(&mut rd, &mut wr, HANDSHAKE_TIMEOUT, true).await?;
 
     let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(COMMAND_CHANNEL_CAPACITY);
     let (evt_tx, evt_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
@@ -747,7 +785,8 @@ async fn try_reconnect(
         Err(RedialError::Retryable(_)) => return Err(ReconnectError::Retryable),
         Err(RedialError::Terminal(error)) => return Err(ReconnectError::Fatal(error)),
     };
-    match tokio::time::timeout(HANDSHAKE_TIMEOUT, client_handshake(&mut rd, &mut wr)).await {
+    // Reconnecting clients are interactive (persistent TUI connections).
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, client_handshake(&mut rd, &mut wr, true)).await {
         Ok(Ok(peer)) => Ok(((rd, wr), peer)),
         Ok(Err(
             error @ (HandshakeError::FingerprintMismatch { .. } | HandshakeError::BadMagic(_)),
@@ -1035,9 +1074,10 @@ mod batching_tests {
     async fn client_handshake_times_out_when_peer_stays_silent() {
         let (client, _silent_peer) = tokio::io::duplex(64);
         let (mut rd, mut wr) = tokio::io::split(client);
-        let error = client_handshake_with_timeout(&mut rd, &mut wr, Duration::from_millis(10))
-            .await
-            .expect_err("silent peer must not hold the client forever");
+        let error =
+            client_handshake_with_timeout(&mut rd, &mut wr, Duration::from_millis(10), true)
+                .await
+                .expect_err("silent peer must not hold the client forever");
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 

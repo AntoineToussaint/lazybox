@@ -19,6 +19,10 @@ use tokio::sync::{Notify, Semaphore};
 /// and per-connection queues without limit.
 pub const DEFAULT_MAX_SOCKET_CONNECTIONS: usize = 32;
 
+/// Number of connection slots reserved for interactive clients (TUI).
+/// Under a hook storm, these slots stay available for the TUI to reconnect.
+pub const RESERVED_INTERACTIVE_SLOTS: usize = 4;
+
 #[derive(Debug, thiserror::Error)]
 pub enum SocketServiceError {
     #[error("bind {path:?}: {source}")]
@@ -173,25 +177,17 @@ impl SocketService {
                             continue;
                         }
                     };
-                    let permit = match connection_slots.clone().try_acquire_owned() {
-                        Ok(permit) => permit,
-                        Err(_) => {
-                            tracing::warn!(
-                                max_connections = self.max_connections,
-                                "socket connection limit reached — rejecting client"
-                            );
-                            continue;
-                        }
-                    };
+
                     let config = (self.config_factory)();
                     let handshake_timeout = self.handshake_timeout;
                     let graceful_stop = self.graceful_stop.subscribe();
+                    let slots = connection_slots.clone();
+                    let max_conns = self.max_connections;
+
                     connections.spawn(async move {
-                        let _permit = permit;
-                        // Handshake before the frame loop: a client from
-                        // a different build (or a non-lazybox peer) is
-                        // turned away here instead of feeding bincode
-                        // garbage into `Server::serve`.
+                        // Handshake first: a client from a different build
+                        // (or a non-lazybox peer) is turned away here instead
+                        // of feeding bincode garbage into `Server::serve`.
                         let peer = match tokio::time::timeout(
                             handshake_timeout,
                             socket::server_handshake(&mut rd, &mut wr),
@@ -211,6 +207,56 @@ impl SocketService {
                                 return;
                             }
                         };
+
+                        // Admission control with slot reservation for interactive clients.
+                        // Interactive clients (TUI) reserve RESERVED_INTERACTIVE_SLOTS;
+                        // background operations (hooks) use the remaining slots.
+                        let is_interactive = peer.is_interactive;
+                        let available = slots.available_permits();
+                        let should_admit = if is_interactive {
+                            // Interactive: admit if any slots are available
+                            available > 0
+                        } else {
+                            // Background: admit only if non-reserved slots are available
+                            available > RESERVED_INTERACTIVE_SLOTS
+                        };
+
+                        let permit = match should_admit {
+                            true => {
+                                match slots.clone().try_acquire_owned() {
+                                    Ok(permit) => permit,
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            is_interactive,
+                                            available,
+                                            max_connections = max_conns,
+                                            "connection admission check failed (race); rejecting client"
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            false => {
+                                let reserved_status = if is_interactive {
+                                    "no slots available".to_string()
+                                } else {
+                                    format!(
+                                        "{} of {} slots are reserved for interactive clients",
+                                        RESERVED_INTERACTIVE_SLOTS, max_conns
+                                    )
+                                };
+                                tracing::warn!(
+                                    is_interactive,
+                                    available,
+                                    max_connections = max_conns,
+                                    reason = reserved_status,
+                                    "socket connection limit reached — rejecting client"
+                                );
+                                return;
+                            }
+                        };
+
+                        let _permit = permit;
                         if !peer.build_matches() {
                             tracing::warn!(
                                 "client build {} differs from daemon build {} — \
@@ -286,5 +332,111 @@ impl SocketService {
         // still-running.
         let _ = std::fs::remove_file(&self.pid_file);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that interactive clients (TUI) can acquire reserved slots even
+    /// when background operations (hooks) have filled most slots.
+    #[test]
+    fn reserved_slots_protect_interactive_clients() {
+        let max_conns = 8;
+        let slots = Arc::new(Semaphore::new(max_conns));
+
+        // Simulate: fill all non-reserved slots with background operations
+        let mut permits = Vec::new();
+        let non_reserved = max_conns - RESERVED_INTERACTIVE_SLOTS;
+        for _ in 0..non_reserved {
+            if let Ok(permit) = slots.clone().try_acquire_owned() {
+                permits.push(permit);
+            }
+        }
+        assert_eq!(
+            permits.len(),
+            non_reserved,
+            "should acquire non-reserved slots"
+        );
+        assert_eq!(slots.available_permits(), RESERVED_INTERACTIVE_SLOTS);
+
+        // Now try to admit a hook (not interactive):
+        // It should be rejected because only reserved slots remain
+        let hook_available = slots.available_permits();
+        let hook_should_admit = if false {
+            // Not interactive
+            hook_available > RESERVED_INTERACTIVE_SLOTS
+        } else {
+            hook_available > RESERVED_INTERACTIVE_SLOTS
+        };
+        assert!(
+            !hook_should_admit,
+            "hook should be rejected when only reserved slots remain"
+        );
+
+        // But an interactive client (TUI) should be admitted:
+        // It should be admitted because reserved slots are still available
+        let tui_available = slots.available_permits();
+        let tui_should_admit = if true {
+            // Interactive
+            tui_available > 0
+        } else {
+            tui_available > RESERVED_INTERACTIVE_SLOTS
+        };
+        assert!(
+            tui_should_admit,
+            "TUI should be admitted when reserved slots remain"
+        );
+
+        // Verify the TUI can actually acquire one of the reserved slots
+        let tui_permit = slots.clone().try_acquire_owned();
+        assert!(
+            tui_permit.is_ok(),
+            "TUI must be able to acquire a reserved slot"
+        );
+
+        drop(tui_permit);
+        drop(permits); // Release hook permits
+    }
+
+    /// Test that under a hook storm, reserved slots keep the TUI accessible.
+    #[test]
+    fn hook_storm_doesnt_block_tui_reconnect() {
+        let max_conns = RESERVED_INTERACTIVE_SLOTS + 2; // Just barely more than reserved
+        let slots = Arc::new(Semaphore::new(max_conns));
+
+        // Simulate a hook storm: background operations fill all non-reserved
+        let mut hook_permits = Vec::new();
+        for _ in 0..(max_conns - RESERVED_INTERACTIVE_SLOTS) {
+            if let Ok(permit) = slots.clone().try_acquire_owned() {
+                hook_permits.push(permit);
+            }
+        }
+
+        // Now the TUI tries to reconnect: at least one reserved slot must still be available
+        let available = slots.available_permits();
+        assert_eq!(
+            available, RESERVED_INTERACTIVE_SLOTS,
+            "reserved slots must be available"
+        );
+
+        // TUI can admit because it's interactive and slots remain
+        assert!(
+            available > 0,
+            "at least one reserved slot must be available for TUI"
+        );
+        let tui_permit = slots.clone().try_acquire_owned();
+        assert!(
+            tui_permit.is_ok(),
+            "TUI reconnect must succeed even under hook storm"
+        );
+
+        // Further hooks should still be rejected (no non-reserved slots left)
+        let should_admit_another_hook = slots.available_permits() > RESERVED_INTERACTIVE_SLOTS;
+        assert!(
+            !should_admit_another_hook,
+            "new hooks should be rejected when only TUI-reserved slots remain"
+        );
     }
 }

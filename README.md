@@ -46,6 +46,24 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 - **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
 - **🛰️ Remote-friendly** — a client/daemon split runs over an SSH-forwarded socket for working against a remote box.
 
+## Performance and reliability
+
+**Responsiveness under load:**
+
+- **Async bus-lag recovery** — when clients lag behind the event bus, recovery snapshots are built asynchronously off the serve loop, so the UI never freezes (previously up to 4-second stalls).
+- **Polling backoff** — the scheduler exponentially backs off on empty polls (5s → 10s → ... → 150s max) to reduce idle CPU, resetting to base interval when data arrives. Instant on user refresh.
+- **Lock scope reduction** — provider registry operations are single-acquisition (acquire, copy, release) so slow I/O doesn't serialize unrelated operations. Keystroke dispatch is off the global queue entirely.
+- **Per-terminal event gating** — resync requests are per-terminal, so one congested connection doesn't cascade backpressure to all others.
+
+**Terminal integrity:**
+
+- **Ring buffer validation** — capacity is validated at init (must be nonzero and ≤100 MiB) to catch misconfiguration before it silently loses data.
+- **Per-terminal byte ceiling** — output buffers cap at 64 MiB; crashed agents drop their VT and render a freeze-frame rather than exhausting memory.
+- **DEC-mode sync** — terminal modes (bold, color, charset) stay synchronized between server and client; replays are never torn, and resize events are sequenced with output to prevent mid-redraw corruption.
+- **Archive reconciliation** — archived status is checked per-item during each poll, so reopened PRs and unarchived issues resurface correctly.
+
+For deep dives on these improvements, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+
 ## Install
 
 Prebuilt binaries (macOS arm64/x86_64 and Linux x86_64):

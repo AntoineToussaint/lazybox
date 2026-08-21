@@ -915,6 +915,12 @@ impl Server {
             std::collections::VecDeque::new();
         let mut last_lag_recovery: Option<tokio::time::Instant> = None;
         const LAG_RECOVERY_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+        // Sequencing token for lag recovery snapshots (#1256): ensures that if
+        // multiple lags occur in quick succession, only the latest recovery
+        // snapshot is sent. Shared via Arc<AtomicU64> with background tasks —
+        // if a newer recovery is spawned, the older one checks the current
+        // generation before sending and skips if superseded.
+        let lag_recovery_generation = Arc::new(AtomicU64::new(0));
         // Cloned per connection: several serve loops can share one
         // service-owned watch channel.
         let mut graceful_stop = self.graceful_stop.clone();
@@ -1197,88 +1203,64 @@ impl Server {
                             // Subscribe handler builds) so the client
                             // self-heals.
                             //
-                            // Built INLINE (awaited here, store scans on
-                            // `spawn_blocking`), not on a detached task:
-                            // detaching let bus events forwarded between
-                            // the snapshot LOAD and its SEND be
-                            // overwritten by the older snapshot — zombie
-                            // state came back the moment the resync
-                            // landed. While this builds, no events are
-                            // forwarded for this connection, which is
-                            // exactly the sequencing the snapshot needs;
-                            // lag recovery is rare enough that the brief
-                            // serve-loop pause is acceptable.
+                            // Built on a background task (#1256, fixing
+                            // bus-lag-recovery freeze): snapshot building
+                            // (especially snapshot_terminals, up to ~4s)
+                            // no longer blocks the serve loop. A sequencing
+                            // token (generation counter) ensures ordering —
+                            // if multiple lags occur in quick succession,
+                            // only the latest recovery snapshot is sent,
+                            // coalescing stale recoveries.
                             self.config.event_metrics.record_bus_lagged(n);
-                            // Pace, never skip: `Lagged` fires once per
-                            // gap, so a skipped recovery could strand
-                            // the client on zombie state forever. The
-                            // pause bounds the lag→rebuild→lag feedback
-                            // loop instead, and doubles as natural
-                            // backpressure on a chronically slow client.
-                            if let Some(at) = last_lag_recovery {
+                            // Debounce: never skip recovery (a skipped
+                            // recovery could strand the client on zombie
+                            // state forever), but pace them (#1256). We skip
+                            // spawning a new recovery if one was sent
+                            // recently; the background task uses the
+                            // generation counter to discard any older
+                            // recovery snapshots that might have been
+                            // in flight.
+                            let now = tokio::time::Instant::now();
+                            let should_spawn = if let Some(at) = last_lag_recovery {
                                 let since = at.elapsed();
                                 if since < LAG_RECOVERY_DEBOUNCE {
                                     tracing::warn!(
                                         lagged = n,
                                         "client lagged again inside the recovery window — \
-                                         pacing before the next snapshot build"
+                                         deferring snapshot build to next window"
                                     );
-                                    tokio::time::sleep(LAG_RECOVERY_DEBOUNCE - since).await;
+                                    false
+                                } else {
+                                    true
                                 }
-                            }
-                            last_lag_recovery = Some(tokio::time::Instant::now());
-                            tracing::warn!(
-                                lagged = n,
-                                bus_lagged_total =
-                                    self.config.event_metrics.snapshot().bus_lagged_events,
-                                "client lagged behind bus — sending recovery snapshot"
-                            );
-                            let store = self.config.store.clone();
-                            match tokio::task::spawn_blocking(move || {
-                                let github_scopes = configured_github_scopes();
-                                (
-                                    load_workspaces(&*store),
-                                    load_projects(&*store, &github_scopes),
-                                    client_kv::snapshot(&*store),
-                                )
-                            })
-                            .await
-                            {
-                                Ok((workspaces, projects, client_kv)) => {
-                                    let load_errors =
-                                        workspaces.errors.len() + projects.errors.len();
-                                    let mut terminals =
-                                        spawn_handler::snapshot_terminals(&self.config).await;
-                                    budget_snapshot_replay(&mut terminals);
-                                    let recovery = Event::Snapshot {
-                                        workspaces: workspaces.values,
-                                        terminals,
-                                        projects: projects.values,
-                                        recent_snippets: client_kv.recent_snippets,
-                                        dismissed_updates: client_kv.dismissed_updates,
-                                    };
-                                    if let Err(error) = conn.tx.send_authoritative(recovery) {
-                                        tracing::warn!(
-                                            error = %error,
-                                            "lag-recovery snapshot could not enter reserved lane"
-                                        );
-                                    }
-                                    if load_errors > 0 {
-                                        let _ = conn.tx.send(storage_recovery_event(load_errors));
-                                    }
-                                    self.config.event_metrics.record_bus_lag_recovery();
-                                }
-                                Err(e) => {
-                                    // Send NOTHING: an empty snapshot
-                                    // would wipe the client's sidebar,
-                                    // which is strictly worse than
-                                    // staying lagged until the next
-                                    // recovery opportunity.
-                                    tracing::error!(
-                                        "lag-recovery snapshot load failed: {e} — \
-                                         continuing without a resync",
-                                    );
-                                }
+                            } else {
+                                true
+                            };
+                            if should_spawn {
+                                last_lag_recovery = Some(now);
+                                // Increment generation and get the new value
+                                let current_gen = lag_recovery_generation
+                                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                    + 1;
+                                tracing::warn!(
+                                    lagged = n,
+                                    generation = current_gen,
+                                    bus_lagged_total =
+                                        self.config.event_metrics.snapshot().bus_lagged_events,
+                                    "client lagged behind bus — spawning recovery snapshot task"
+                                );
+                                let config = self.config.clone();
+                                let tx = conn.tx.clone();
+                                let gen_token = lag_recovery_generation.clone();
+                                mutations.spawn(async move {
+                                    build_and_send_lag_recovery_snapshot(
+                                        config,
+                                        tx,
+                                        current_gen,
+                                        gen_token,
+                                    )
+                                    .await;
+                                });
                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -1315,6 +1297,76 @@ impl Server {
             let _ = forward_task.await;
         }
         Ok(())
+    }
+}
+
+/// Build and send a lag recovery snapshot on a background task (#1256).
+/// The snapshot is sent only if the generation counter hasn't been
+/// incremented by the serve loop (indicating a newer recovery was spawned).
+///
+/// This runs detached so the expensive snapshot building (especially
+/// `snapshot_terminals`, up to ~4s) doesn't block command dispatch.
+async fn build_and_send_lag_recovery_snapshot(
+    config: ServerConfig,
+    tx: lazybox_ipc::EventSender,
+    generation: u64,
+    gen_token: Arc<AtomicU64>,
+) {
+    // Build the snapshot off the serve loop.
+    let store = config.store.clone();
+    let store_result = tokio::task::spawn_blocking(move || {
+        let github_scopes = configured_github_scopes();
+        (
+            load_workspaces(&*store),
+            load_projects(&*store, &github_scopes),
+            client_kv::snapshot(&*store),
+        )
+    })
+    .await;
+
+    // Check if our generation is still current. If a newer recovery was
+    // spawned while we were building, skip sending this snapshot.
+    if gen_token.load(std::sync::atomic::Ordering::SeqCst) > generation {
+        tracing::warn!(
+            generation,
+            current_gen = gen_token.load(std::sync::atomic::Ordering::SeqCst),
+            "lag recovery snapshot generation superseded — skipping send"
+        );
+        return;
+    }
+
+    match store_result {
+        Ok((workspaces, projects, client_kv)) => {
+            let load_errors = workspaces.errors.len() + projects.errors.len();
+            let mut terminals = spawn_handler::snapshot_terminals(&config).await;
+            budget_snapshot_replay(&mut terminals);
+            let recovery = Event::Snapshot {
+                workspaces: workspaces.values,
+                terminals,
+                projects: projects.values,
+                recent_snippets: client_kv.recent_snippets,
+                dismissed_updates: client_kv.dismissed_updates,
+            };
+            if let Err(error) = tx.send_authoritative(recovery) {
+                tracing::warn!(
+                    error = %error,
+                    "lag-recovery snapshot could not enter reserved lane"
+                );
+            }
+            if load_errors > 0 {
+                let _ = tx.send(storage_recovery_event(load_errors));
+            }
+            config.event_metrics.record_bus_lag_recovery();
+        }
+        Err(e) => {
+            // Send NOTHING: an empty snapshot would wipe the client's
+            // sidebar, which is strictly worse than staying lagged until
+            // the next recovery opportunity.
+            tracing::error!(
+                "lag-recovery snapshot load failed: {e} — \
+                 continuing without a resync",
+            );
+        }
     }
 }
 

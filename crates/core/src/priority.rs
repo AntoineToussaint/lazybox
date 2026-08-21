@@ -166,7 +166,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: crate::Mergeable::Mergeable,
+            mergeable: crate::Mergeable::new(crate::MergeableState::Mergeable, Utc::now()),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),

@@ -560,7 +560,7 @@ mod merge_gate_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: crate::Mergeable::Mergeable,
+            mergeable: crate::Mergeable::new(crate::MergeableState::Mergeable, chrono::Utc::now()),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -643,7 +643,8 @@ mod merge_gate_tests {
         // Anything the manual gate blocks, auto-merge blocks too.
         let mut armed_conflict = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
         armed_conflict.auto_merge_on_green = true;
-        armed_conflict.pr.as_mut().unwrap().mergeable = crate::Mergeable::Conflicting;
+        armed_conflict.pr.as_mut().unwrap().mergeable =
+            crate::Mergeable::new(crate::MergeableState::Conflicting, chrono::Utc::now());
         assert!(
             !should_auto_merge(&armed_conflict, &own()),
             "conflict blocks"

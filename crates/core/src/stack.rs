@@ -210,7 +210,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: Mergeable::Mergeable,
+            mergeable: Mergeable::new(crate::MergeableState::Mergeable, chrono::Utc::now()),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),

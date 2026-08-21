@@ -37,16 +37,14 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
     upsert_with_context(config, &mut ctx, task).await;
 }
 
-/// Per-tick context shared across a batch of `upsert` calls. Both
-/// fields used to be re-derived from the store on EVERY task — a
-/// KV read + JSON parse for the archive set, and a full workspace-
-/// list deserialize for the closes-issue lookup — which made the
-/// upsert loop's cost quadratic in inbox size. The tick builds this
-/// once and threads it through; the one-off public `upsert` builds a
-/// fresh context per call (identical behavior, just not batched).
+/// Per-tick context shared across a batch of `upsert` calls. The
+/// closes-issue lookup used to be re-derived from the store on EVERY
+/// task, making the upsert loop's cost quadratic in inbox size. The tick
+/// builds this once and threads it through; the one-off public `upsert`
+/// builds a fresh context per call (identical behavior, just not batched).
+/// The archived set is checked fresh on each upsert (issue #1255) to
+/// detect archives that occur mid-poll.
 pub(super) struct UpsertContext {
-    /// Workspace keys the user explicitly archived (`x x`).
-    archived: std::collections::HashSet<String>,
     /// `closes_issues` TaskId → claiming PR workspace key. Mirrors
     /// what `pr_workspace_claiming_issue` derives per call. Updated
     /// inline as PR tasks flow through the batch so an issue polled
@@ -62,7 +60,6 @@ pub(super) struct UpsertContext {
 
 impl UpsertContext {
     pub(super) fn build(config: &ServerConfig) -> Self {
-        let archived = crate::workspace::load_archived_set(config);
         let approvals = approval_policies();
         let mut closes_index = std::collections::HashMap::new();
         if let Ok(records) = config.store.list_workspaces() {
@@ -87,7 +84,6 @@ impl UpsertContext {
             }
         }
         Self {
-            archived,
             closes_index,
             approvals,
         }
@@ -150,10 +146,12 @@ pub(super) async fn upsert_with_context(
 
     // Skip re-creating workspaces the user explicitly archived
     // (`x x`). Without this, every 60s tick re-creates the row
-    // from the upstream task and the dismiss feels broken. Cached
-    // archive set lives in the store under KV_KEY_ARCHIVED.
+    // from the upstream task and the dismiss feels broken. Check
+    // the archived set fresh each time (issue #1255) — if a session
+    // is archived mid-poll, later providers' upserts see the updated
+    // state rather than a stale snapshot.
     let candidate_key = lazybox_core::workspace_key_for(&task);
-    if ctx.archived.contains(&candidate_key) {
+    if crate::workspace::load_archived_set(config).contains(&candidate_key) {
         tracing::debug!(
             workspace_key = %candidate_key,
             "upsert: skipping archived workspace"
@@ -1131,7 +1129,6 @@ mod approval_lookup_tests {
         );
 
         let ctx = UpsertContext {
-            archived: Default::default(),
             closes_index: Default::default(),
             approvals: map,
         };

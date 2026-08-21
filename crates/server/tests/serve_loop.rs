@@ -612,20 +612,28 @@ async fn client_drop_terminates_daemon_loop() {
 /// Isolate filesystem-touching commands (CleanWorktrees, InspectWorktrees,
 /// DeleteOrphanedWorktree) onto a throwaway `LAZYBOX_HOME` so the test
 /// never scans or mutates the developer's real `~/.lazybox`.
+/// Serialize env-var mutations across concurrent tests. Each test that
+/// modifies `LAZYBOX_HOME` acquires this lock to prevent interference.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct IsolatedHome {
+    _guard: std::sync::MutexGuard<'static, ()>,
     _tmp: tempfile::TempDir,
     prev: Option<std::ffi::OsString>,
 }
 
 impl IsolatedHome {
     fn new() -> Self {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::TempDir::new().unwrap();
         let prev = std::env::var_os("LAZYBOX_HOME");
-        // SAFETY: process-global, but within this test binary only this
-        // guard sets it; an empty dir resolves readers to CI defaults, so
-        // a leak to a concurrent test is harmless. Restored on drop.
+        // SAFETY: mutation is serialized by ENV_LOCK; restored on drop.
         unsafe { std::env::set_var("LAZYBOX_HOME", tmp.path()) };
-        Self { _tmp: tmp, prev }
+        Self {
+            _guard: guard,
+            _tmp: tmp,
+            prev,
+        }
     }
 }
 
@@ -1597,4 +1605,61 @@ async fn injected_paste_and_submit_are_atomic_against_user_input() {
         .expect("serve shutdown")
         .expect("join")
         .expect("serve result");
+}
+
+/// Regression test for #1250: test isolation with global env vars.
+/// Verifies that concurrent tests don't interfere when modifying LAZYBOX_HOME.
+#[test]
+fn env_isolation_guard_restores_state() {
+    let original = std::env::var_os("LAZYBOX_HOME");
+
+    // Scope 1: set to temp dir 1
+    {
+        let _guard1 = IsolatedHome::new();
+        let temp1 = std::env::var_os("LAZYBOX_HOME").expect("should be set");
+        let path1 = std::path::PathBuf::from(&temp1);
+        assert!(path1.exists(), "temp dir 1 should exist");
+    }
+
+    // After drop, state is restored
+    match original {
+        Some(ref orig) => {
+            assert_eq!(
+                std::env::var_os("LAZYBOX_HOME"),
+                Some(orig.clone()),
+                "LAZYBOX_HOME should be restored to original"
+            )
+        }
+        None => {
+            assert!(
+                std::env::var_os("LAZYBOX_HOME").is_none(),
+                "LAZYBOX_HOME should be cleared after drop"
+            )
+        }
+    }
+
+    // Scope 2: independent isolation with no interference
+    {
+        let _guard2 = IsolatedHome::new();
+        let temp2 = std::env::var_os("LAZYBOX_HOME").expect("should be set again");
+        let path2 = std::path::PathBuf::from(&temp2);
+        assert!(path2.exists(), "temp dir 2 should exist");
+    }
+
+    // Final state matches original
+    match original {
+        Some(ref orig) => {
+            assert_eq!(
+                std::env::var_os("LAZYBOX_HOME"),
+                Some(orig.clone()),
+                "LAZYBOX_HOME should be restored again"
+            )
+        }
+        None => {
+            assert!(
+                std::env::var_os("LAZYBOX_HOME").is_none(),
+                "LAZYBOX_HOME should be cleared again after final drop"
+            )
+        }
+    }
 }

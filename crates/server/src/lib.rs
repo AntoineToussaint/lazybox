@@ -1090,8 +1090,7 @@ impl Server {
                     // `command_lane`, never by the arm body:
                     //   * `Shutdown` is loop control (handled below).
                     //   * the INLINE lane is a small allow-list of
-                    //     provably-fast, order-sensitive handlers
-                    //     (`Subscribe` only).
+                    //     provably-fast, order-sensitive handlers.
                     //   * terminal I/O/persistence use dedicated ordered
                     //     background lanes (never the serve-loop task).
                     //   * EVERYTHING else — and any command added later,
@@ -1338,6 +1337,7 @@ async fn graceful_stop_requested(rx: &mut Option<tokio::sync::watch::Receiver<bo
 enum CommandLane {
     /// Runs on the serve-loop task itself. Reserved for provably-fast,
     /// order-sensitive handlers; held to [`INLINE_BUDGET`] by a watchdog.
+    #[allow(dead_code)]
     Inline,
     /// Per-terminal FIFO input/resize/close/injection lane. Runs outside the
     /// serve loop.
@@ -1373,7 +1373,7 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
             CommandLane::TerminalPersistence
         }
-        Command::Subscribe => CommandLane::Inline,
+        Command::Subscribe => CommandLane::Detached,
         _ => CommandLane::Detached,
     }
 }

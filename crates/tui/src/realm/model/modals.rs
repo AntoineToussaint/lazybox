@@ -433,15 +433,24 @@ impl<T: TerminalAdapter> Model<T> {
             .sidebar
             .workspace_iter()
             .filter_map(|(_, workspace)| {
-                workspace
-                    .hopper
-                    .map(|meta| (meta.position, workspace.key.clone(), workspace.name.clone()))
+                workspace.hopper.map(|meta| {
+                    (
+                        meta.position,
+                        workspace.key.clone(),
+                        workspace.name.clone(),
+                        meta.completed_at.is_some(),
+                    )
+                })
             })
             .collect();
-        rows.sort_by_key(|(position, key, _)| (*position, key.as_str().to_string()));
+        rows.sort_by_key(|(position, key, _, _)| (*position, key.as_str().to_string()));
         self.mount_modal(
             Id::Hopper,
-            HopperEditor::new(rows.into_iter().map(|(_, key, name)| (key, name)).collect()),
+            HopperEditor::new(
+                rows.into_iter()
+                    .map(|(_, key, name, completed)| (key, name, completed))
+                    .collect(),
+            ),
         );
     }
 

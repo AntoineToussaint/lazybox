@@ -1009,6 +1009,9 @@ impl Server {
                         lazybox_ipc::Command::AssignHopperProject { .. } => {
                             "AssignHopperProject"
                         }
+                        lazybox_ipc::Command::SetHopperCompleted { .. } => {
+                            "SetHopperCompleted"
+                        }
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
                         lazybox_ipc::Command::ActivateWorkspace { .. } => "ActivateWorkspace",
@@ -1942,6 +1945,12 @@ pub async fn dispatch_command(
             project_key,
         } => {
             workspace::assign_hopper_project(config, &workspace_key, project_key).await;
+        }
+        lazybox_ipc::Command::SetHopperCompleted {
+            workspace_key,
+            completed,
+        } => {
+            workspace::set_hopper_completed(config, &workspace_key, completed).await;
         }
         lazybox_ipc::Command::Snooze { session_key, until } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());

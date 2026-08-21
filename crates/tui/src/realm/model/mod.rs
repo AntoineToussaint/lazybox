@@ -1046,6 +1046,11 @@ pub enum Msg {
     InputSubmitted(String),
     TextareaSubmitted(String),
     HopperSubmitted(Vec<lazybox_ipc::HopperEntryDraft>),
+    HopperCompletionRequested {
+        workspace_key: lazybox_core::WorkspaceKey,
+        completed: bool,
+    },
+    HopperDeleteRequested(lazybox_core::WorkspaceKey),
     /// A picker (`Choice`, jump/snippet picker, settings palette)
     /// resolved. Each entry is the *typed value* of a picked row —
     /// never a bare positional index into a parallel "shadow Vec" —
@@ -6415,6 +6420,50 @@ impl<T: TerminalAdapter> Model<T> {
                     self.pop_modal();
                     self.dispatch_cmds(vec![IpcCommand::SaveHopper { entries }]);
                     self.flash_info("Hopper saved");
+                }
+            }
+            Msg::HopperCompletionRequested {
+                workspace_key,
+                completed,
+            } => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                    self.dispatch_cmds(vec![IpcCommand::SetHopperCompleted {
+                        workspace_key,
+                        completed,
+                    }]);
+                    self.flash_info(if completed {
+                        "Hopper item completed"
+                    } else {
+                        "Hopper item reopened"
+                    });
+                }
+            }
+            Msg::HopperDeleteRequested(workspace_key) => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                    let session_key: lazybox_core::SessionKey = (&workspace_key).into();
+                    if let Some(workspace) = self.sidebar.workspace_by_key(&session_key) {
+                        let prompt = if workspace.sessions.is_empty() {
+                            format!(
+                                "Delete ‘{}’? Its clean managed worktree will be removed; local work is protected.",
+                                workspace.name
+                            )
+                        } else {
+                            format!(
+                                "Delete ‘{}’? {} running session(s) will stop and its clean managed worktree will be removed; local work is protected.",
+                                workspace.name,
+                                workspace.sessions.len()
+                            )
+                        };
+                        self.mount_action_confirm(
+                            lazybox_tui_core::action::Action::Archive,
+                            vec![ActionConfirmTarget::Workspace(session_key)],
+                            Some(prompt),
+                        );
+                    } else {
+                        self.flash_info("workspace is gone — nothing to delete");
+                    }
                 }
             }
             Msg::InputSubmitted(text) => {

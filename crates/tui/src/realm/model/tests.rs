@@ -9738,7 +9738,10 @@ mod merge_focus_follow_tests {
         ))));
         let mut hopper = Workspace::empty(WorkspaceKey::new("write-tests"), "main", Utc::now());
         hopper.name = "Write tests".into();
-        hopper.hopper = Some(HopperMeta { position: 0 });
+        hopper.hopper = Some(HopperMeta {
+            position: 0,
+            completed_at: None,
+        });
         let session_key: SessionKey = (&hopper.key).into();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
             hopper.clone(),

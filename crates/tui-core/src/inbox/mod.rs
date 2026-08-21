@@ -1619,7 +1619,10 @@ mod tests {
             let mut hopper = Workspace::empty(WorkspaceKey::new(key), "main", fixed_time());
             hopper.name = key.into();
             hopper.project_key = Some(ProjectKey::github("owner", "a"));
-            hopper.hopper = Some(lazybox_core::HopperMeta { position });
+            hopper.hopper = Some(lazybox_core::HopperMeta {
+                position,
+                completed_at: None,
+            });
             ws.insert(SessionKey::from(&hopper.key), hopper);
         }
         let sub = BTreeSet::new();

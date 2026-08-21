@@ -1535,6 +1535,12 @@ pub enum Command {
         workspace_key: lazybox_core::WorkspaceKey,
         project_key: lazybox_core::ProjectKey,
     },
+    /// Reversible Hopper lifecycle transition. Completion changes mailbox
+    /// placement only; sessions, terminal history, and worktrees survive.
+    SetHopperCompleted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        completed: bool,
+    },
 }
 
 impl Command {

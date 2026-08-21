@@ -181,7 +181,8 @@ pub enum CleanupPrompt {
 /// - 3: `Task::reviews` (submitted reviewers + state).
 /// - 4: `Task::parent` (provider-native ticket hierarchy).
 /// - 5: `Workspace::hopper` (personal queue membership + order).
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 5;
+/// - 6: `HopperMeta::completed_at` (reversible personal completion).
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 6;
 
 /// Personal queue metadata for a workspace captured in the Hopper.
 ///
@@ -194,6 +195,10 @@ pub const WORKSPACE_SCHEMA_VERSION: u32 = 5;
 pub struct HopperMeta {
     /// Stable zero-based display order within the active Hopper.
     pub position: u32,
+    /// Completion moves the item to Inactive without tearing down its
+    /// sessions or checkout. Clearing it reopens the same workspace.
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 /// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT

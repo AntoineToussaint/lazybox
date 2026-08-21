@@ -114,12 +114,15 @@ pub fn save_hopper(
             workspace.local = true;
             workspace.hopper = Some(HopperMeta {
                 position: position as u32,
+                completed_at: None,
             });
             workspace
         };
         workspace.name = name.to_string();
+        let completed_at = workspace.hopper.and_then(|meta| meta.completed_at);
         workspace.hopper = Some(HopperMeta {
             position: position as u32,
+            completed_at,
         });
         ordered.push(workspace);
     }
@@ -139,8 +142,10 @@ pub fn save_hopper(
         )
     });
     for mut workspace in omitted {
+        let completed_at = workspace.hopper.and_then(|meta| meta.completed_at);
         workspace.hopper = Some(HopperMeta {
             position: ordered.len() as u32,
+            completed_at,
         });
         ordered.push(workspace);
     }
@@ -307,6 +312,42 @@ mod hopper_tests {
         assign_hopper_project(&config, &key, second).await;
 
         assert_eq!(load(&config, &key).project_key, Some(first));
+    }
+
+    #[tokio::test]
+    async fn completion_is_reversible_and_preserves_workspace_identity() {
+        let config = ServerConfig::in_memory();
+        let [key] = save_hopper(
+            &config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: "Write release notes".into(),
+            }],
+        )
+        .expect("create hopper")
+        .try_into()
+        .expect("one hopper row");
+
+        set_hopper_completed(&config, &key, true).await;
+        let completed = load(&config, &key);
+        assert!(
+            completed
+                .hopper
+                .expect("hopper metadata")
+                .completed_at
+                .is_some()
+        );
+
+        set_hopper_completed(&config, &key, false).await;
+        let reopened = load(&config, &key);
+        assert_eq!(reopened.key, key);
+        assert!(
+            reopened
+                .hopper
+                .expect("hopper metadata")
+                .completed_at
+                .is_none()
+        );
     }
 }
 
@@ -634,6 +675,22 @@ pub async fn assign_hopper_project(
     }
     workspace.project_key = Some(project_key);
     commit_upsert_offloaded_reported(config, key, workspace, "assign hopper project").await;
+}
+
+/// Complete or reopen a Hopper item without touching sessions, terminal
+/// history, or its checkout. Mailbox classification treats the timestamp as
+/// an Inactive marker; clearing it restores the same workspace to Inbox.
+pub async fn set_hopper_completed(config: &ServerConfig, key: &WorkspaceKey, completed: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    let Some(mut hopper) = workspace.hopper else {
+        return;
+    };
+    hopper.completed_at = completed.then(Utc::now);
+    workspace.hopper = Some(hopper);
+    commit_upsert_offloaded_reported(config, key, workspace, "set hopper completion").await;
 }
 
 /// Record a snippet key as sent to a workspace's agent (issue #463).

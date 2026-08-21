@@ -20,6 +20,7 @@ use tuirealm::state::State;
 struct Row {
     key: Option<WorkspaceKey>,
     name: String,
+    completed: bool,
 }
 
 /// Modal editor for an ordered set of Hopper workspaces.
@@ -32,17 +33,19 @@ pub struct HopperEditor {
 
 impl HopperEditor {
     /// Build the editor from active hopper rows in display order.
-    pub fn new(rows: Vec<(WorkspaceKey, String)>) -> Self {
+    pub fn new(rows: Vec<(WorkspaceKey, String, bool)>) -> Self {
         let mut rows: Vec<Row> = rows
             .into_iter()
-            .map(|(key, name)| Row {
+            .map(|(key, name, completed)| Row {
                 key: Some(key),
                 name,
+                completed,
             })
             .collect();
         rows.push(Row {
             key: None,
             name: String::new(),
+            completed: false,
         });
         let row = rows.len() - 1;
         Self {
@@ -109,6 +112,7 @@ impl HopperEditor {
             Row {
                 key: None,
                 name: suffix,
+                completed: false,
             },
         );
         self.row += 1;
@@ -165,6 +169,13 @@ impl HopperEditor {
                 .collect(),
         )
     }
+
+    fn completion_request(&self) -> Option<(WorkspaceKey, bool)> {
+        self.current()
+            .key
+            .clone()
+            .map(|key| (key, !self.current().completed))
+    }
 }
 
 fn char_column_to_byte(value: &str, column: usize) -> usize {
@@ -208,7 +219,8 @@ impl Component for HopperEditor {
             .take(body_height)
             .map(|(index, row)| {
                 let selected = index == self.row;
-                let prefix = if selected { "> " } else { "  " };
+                let pointer = if selected { "> " } else { "  " };
+                let check = if row.completed { "[✓] " } else { "[ ] " };
                 let style = if selected {
                     theme.row_focused()
                 } else {
@@ -219,13 +231,14 @@ impl Component for HopperEditor {
                     let before = row.name[..col].to_string();
                     let after = row.name[col..].to_string();
                     Line::from(vec![
-                        Span::styled(prefix, style),
+                        Span::styled(pointer, style),
+                        Span::styled(check, style.fg(theme.text_dim)),
                         Span::styled(before, style),
                         Span::styled("▌", style.fg(theme.accent)),
                         Span::styled(after, style),
                     ])
                 } else {
-                    Line::from(Span::styled(format!("{prefix}{}", row.name), style))
+                    Line::from(Span::styled(format!("{pointer}{check}{}", row.name), style))
                 }
             })
             .collect::<Vec<_>>();
@@ -241,6 +254,10 @@ impl Component for HopperEditor {
             Span::raw(" move  "),
             Span::styled("Ctrl-S", Style::default().fg(theme.success).bold()),
             Span::raw(" save  "),
+            Span::styled("Ctrl-D", Style::default().fg(theme.text_dim).bold()),
+            Span::raw(" done/reopen  "),
+            Span::styled("Del", Style::default().fg(theme.error).bold()),
+            Span::raw(" delete  "),
             Span::styled("Esc", Style::default().fg(theme.error).bold()),
             Span::raw(" cancel"),
         ];
@@ -302,7 +319,18 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
         if ctrl && matches!(key.code, Key::Char('s')) {
             return self.drafts().map(Msg::HopperSubmitted);
         }
+        if ctrl && matches!(key.code, Key::Char('d')) {
+            return self.completion_request().map(|(workspace_key, completed)| {
+                Msg::HopperCompletionRequested {
+                    workspace_key,
+                    completed,
+                }
+            });
+        }
         match key.code {
+            Key::Delete => {
+                return self.current().key.clone().map(Msg::HopperDeleteRequested);
+            }
             Key::Enter => self.insert_row_break(),
             Key::Up => self.move_vertical(-1),
             Key::Down => self.move_vertical(1),
@@ -330,10 +358,17 @@ mod tests {
         })
     }
 
+    fn ctrl(code: Key) -> Event<UserEvent> {
+        Event::Keyboard(KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+        })
+    }
+
     #[test]
     fn enter_creates_a_new_identity_without_losing_the_existing_one() {
         let existing = WorkspaceKey::new("first");
-        let mut editor = HopperEditor::new(vec![(existing.clone(), "First".into())]);
+        let mut editor = HopperEditor::new(vec![(existing.clone(), "First".into(), false)]);
         editor.on(&key(Key::Up));
         editor.on(&key(Key::End));
         editor.on(&key(Key::Enter));
@@ -346,7 +381,7 @@ mod tests {
 
     #[test]
     fn existing_row_cannot_be_erased_into_an_implicit_delete() {
-        let mut editor = HopperEditor::new(vec![(WorkspaceKey::new("first"), "A".into())]);
+        let mut editor = HopperEditor::new(vec![(WorkspaceKey::new("first"), "A".into(), false)]);
         editor.on(&key(Key::Up));
         editor.on(&key(Key::End));
         editor.on(&key(Key::Backspace));
@@ -357,6 +392,24 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("complete or delete")
+        );
+    }
+
+    #[test]
+    fn completion_and_delete_are_explicit_existing_row_actions() {
+        let workspace_key = WorkspaceKey::new("first");
+        let mut editor = HopperEditor::new(vec![(workspace_key.clone(), "First".into(), false)]);
+        editor.on(&key(Key::Up));
+        assert_eq!(
+            editor.on(&ctrl(Key::Char('d'))),
+            Some(Msg::HopperCompletionRequested {
+                workspace_key: workspace_key.clone(),
+                completed: true,
+            })
+        );
+        assert_eq!(
+            editor.on(&key(Key::Delete)),
+            Some(Msg::HopperDeleteRequested(workspace_key))
         );
     }
 }

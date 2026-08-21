@@ -44,6 +44,12 @@ use tokio::sync::{Mutex, Notify, broadcast, watch};
 /// for parity with the live experience.
 pub const REPLAY_RING_BYTES: usize = 2 * 1024 * 1024;
 
+/// Maximum permitted ring buffer size. A hard cap prevents misconfiguration
+/// (zero/negative values, accidentally huge allocations) that could silently
+/// cause data loss. 100 MiB bounds per-terminal daemon memory while still
+/// supporting deep scrollback on high-output sessions.
+pub const MAX_RING_SIZE: usize = 100 * 1024 * 1024;
+
 /// On-disk scrollback contract: bytes of raw output retained per
 /// persistent terminal (see [`DaemonPty::spawn_persistent`]).
 ///
@@ -268,6 +274,16 @@ impl Default for ReplayRing {
 
 impl ReplayRing {
     pub fn with_capacity(cap: usize) -> Self {
+        assert!(
+            cap > 0,
+            "ring buffer capacity must be > 0, got {cap}. \
+             Misconfigured ring size would silently cause data loss."
+        );
+        assert!(
+            cap <= MAX_RING_SIZE,
+            "ring buffer capacity {cap} exceeds maximum of {MAX_RING_SIZE} bytes. \
+             This prevents accidental huge allocations that could exhaust daemon memory."
+        );
         Self {
             // Grow on demand up to `cap` rather than reserving it all
             // upfront — an idle terminal shouldn't hold the full
@@ -1279,6 +1295,24 @@ mod capture_tests {
 #[cfg(test)]
 mod ring_tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "ring buffer capacity must be > 0")]
+    fn zero_ring_size_panics() {
+        let _r = ReplayRing::with_capacity(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds maximum of")]
+    fn oversized_ring_panics() {
+        let _r = ReplayRing::with_capacity(MAX_RING_SIZE + 1);
+    }
+
+    #[test]
+    fn max_ring_size_is_accepted() {
+        let r = ReplayRing::with_capacity(MAX_RING_SIZE);
+        assert_eq!(r.cap, MAX_RING_SIZE);
+    }
 
     #[test]
     fn empty_ring_snapshot_is_empty() {

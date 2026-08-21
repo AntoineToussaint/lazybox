@@ -7963,9 +7963,38 @@ pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols:
     let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         return;
     };
+
+    // Get the current output watermark before resizing. This ensures that the client
+    // only applies the resize after processing all output up to this point, preventing
+    // grid corruption from interleaved resize/output chunks (issue #1254).
+    let output_watermark = match tokio::time::timeout(
+        Duration::from_millis(500),
+        config.backend.output_seq(&key),
+    )
+    .await
+    {
+        Ok(Ok(seq)) => seq,
+        Ok(Err(e)) => {
+            tracing::warn!(?terminal_id, %key, cols, rows, %e, "failed to get output seq for resize");
+            0
+        }
+        Err(_) => {
+            tracing::warn!(?terminal_id, %key, cols, rows, "timeout getting output seq for resize");
+            0
+        }
+    };
+
     if let Err(error) = terminal_io::resize_live(config, terminal_id, &key, cols, rows).await {
         tracing::warn!(?terminal_id, %key, cols, rows, %error, "backend resize failed");
     }
+
+    // Emit the resize event with watermark so the client applies it synchronously with output.
+    let _ = config.bus.send(Event::ResizeTerminal {
+        terminal_id,
+        cols,
+        rows,
+        output_watermark,
+    });
 }
 
 /// Request backend termination. Returns true once the backend accepted the

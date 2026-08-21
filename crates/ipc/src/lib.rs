@@ -2043,6 +2043,20 @@ pub enum Event {
         /// paints it; a normal crash keeps its own last screen).
         last_output: Option<String>,
     },
+    /// Terminal grid dimensions changed. Synchronized with output stream:
+    /// `output_watermark` is the highest chunk seq that must be processed
+    /// before applying this resize (issue #1254). The client applies the
+    /// resize only after reaching that seq in the output stream, ensuring
+    /// in-flight output chunks remain in the correct grid dimensions.
+    ResizeTerminal {
+        terminal_id: TerminalId,
+        cols: u16,
+        rows: u16,
+        /// Chunk seq fence: all TerminalOutput with seq <= watermark must
+        /// be applied before resizing the grid. Protects against corruption
+        /// when resize commands arrive interleaved with buffered output.
+        output_watermark: u64,
+    },
     /// Daemon-driven "focus this existing terminal instead of
     /// spawning a duplicate". Fired by the singleton guard in
     /// `handle_spawn` when a `Spawn { Agent(id) }` lands and a

@@ -4166,3 +4166,121 @@ async fn failed_provision_fails_spawn_loudly_and_leaves_no_session() {
     .await
     .expect("deadline");
 }
+
+#[tokio::test]
+async fn resize_emits_event_with_output_watermark() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        let mut client = subscribed(config.clone()).await;
+
+        // Spawn a shell terminal
+        let key = "test/repo";
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                session_key: key.into(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Shell,
+                cwd: test_cwd(),
+                initial_prompt: None,
+                initial_snippet: None,
+                on_main: false,
+            })
+            .unwrap();
+
+        let terminal_id = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .and_then(|e| match e {
+            Event::TerminalSpawned { terminal_id, .. } => Some(terminal_id),
+            _ => None,
+        })
+        .expect("terminal spawn event");
+
+        // Emit some output through the mock backend
+        let backend_key = mock.list().await.unwrap()[0].0.clone();
+        for i in 0..3 {
+            mock.emit(&backend_key, format!("output {}\r\n", i).as_bytes())
+                .await;
+        }
+
+        // Collect output events to establish the current seq
+        let mut output_seqs = vec![];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            match timeout(remaining, client.recv()).await {
+                Ok(Some(Event::TerminalOutput {
+                    terminal_id: tid,
+                    seq,
+                    ..
+                })) if tid == terminal_id => {
+                    output_seqs.push(seq);
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+
+        assert!(
+            !output_seqs.is_empty(),
+            "should have received output chunks"
+        );
+        let last_output_seq = output_seqs.iter().max().copied().unwrap_or(0);
+
+        // Now issue a resize command
+        client
+            .send(Command::Resize {
+                terminal_id,
+                cols: 100,
+                rows: 30,
+            })
+            .unwrap();
+
+        // Wait for the ResizeTerminal event
+        let resize_event = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::ResizeTerminal {
+                        terminal_id: tid,
+                        ..
+                    } if tid == terminal_id
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("resize event should be emitted");
+
+        // Verify the watermark is at or after the last output seq (issue #1254)
+        match resize_event {
+            Event::ResizeTerminal {
+                cols,
+                rows,
+                output_watermark,
+                ..
+            } => {
+                assert_eq!(cols, 100, "resize cols should match");
+                assert_eq!(rows, 30, "resize rows should match");
+                assert!(
+                    output_watermark >= last_output_seq,
+                    "output_watermark {} should be >= last_output_seq {}",
+                    output_watermark,
+                    last_output_seq
+                );
+            }
+            _ => panic!("unexpected event"),
+        }
+    })
+    .await
+    .expect("deadline");
+}

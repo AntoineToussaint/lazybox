@@ -717,14 +717,20 @@ impl RightPane {
     }
 
     /// Undo the most recent auto-mark, if any. Returns
-    /// `(session_key, index)` for the caller to persist via
+    /// `(session_key, index, fingerprint)` for the caller to persist via
     /// `Command::UnmarkActivityRead`.
     ///
     /// Resolves the stored fingerprint to the activity's *current*
     /// position — a poll that introduced a new top-of-feed comment
     /// shifts every older row down by one, and a raw cached index
     /// would un-read the wrong comment.
-    fn undo_auto_mark(&mut self) -> Option<(lazybox_core::SessionKey, usize)> {
+    fn undo_auto_mark(
+        &mut self,
+    ) -> Option<(
+        lazybox_core::SessionKey,
+        usize,
+        lazybox_core::ActivityFingerprint,
+    )> {
         let record = self.last_marked_read.take()?;
         let workspace = self.workspace.as_mut()?;
         let index = match record.resolve(&workspace.activity) {
@@ -746,7 +752,11 @@ impl RightPane {
         // Simpler: just clear; user can re-arm by moving.
         self.mark_timer.disarm();
         self.mark_timer_target = None;
-        Some((lazybox_core::SessionKey::from(&workspace.key), index))
+        Some((
+            lazybox_core::SessionKey::from(&workspace.key),
+            index,
+            record.fingerprint,
+        ))
     }
 
     /// Drive the auto-mark timer. Called from the App's per-tick
@@ -2119,8 +2129,12 @@ impl RightPane {
         // `Command::UnmarkActivityRead` so a restart sees the row
         // back in the unread set.
         if key.code == KeyCode::Char('z') && key.modifiers == KeyModifiers::NONE {
-            if let Some((session_key, index)) = self.undo_auto_mark() {
-                cmds.push(Command::UnmarkActivityRead { session_key, index });
+            if let Some((session_key, index, fingerprint)) = self.undo_auto_mark() {
+                cmds.push(Command::UnmarkActivityRead {
+                    session_key,
+                    index,
+                    fingerprint: Some(fingerprint),
+                });
             }
             return PaneOutcome::Consumed;
         }

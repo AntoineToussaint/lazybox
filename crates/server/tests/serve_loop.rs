@@ -766,6 +766,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         Command::UnmarkActivityRead {
             session_key: "test:ws".into(),
             index: 0,
+            fingerprint: None,
         },
         Command::CreateWorkspace {
             name: "w".into(),
@@ -1705,4 +1706,160 @@ fn env_isolation_guard_restores_state() {
             )
         }
     }
+}
+
+/// Regression test for #1255: UnmarkActivityRead fingerprint prevents
+/// unmarking the wrong activity when indices shift between mark and unmark.
+/// Scenario:
+/// 1. Mark activity[1] as read using its fingerprint
+/// 2. A poll inserts a new activity at index 0 (shifts everything down)
+/// 3. Unmark using the stored fingerprint
+/// 4. Verify activity[1] (now at index 2) is unmarked, not activity at index 1
+#[tokio::test]
+async fn unmark_activity_read_with_fingerprint_handles_index_shifts() {
+    use chrono::Utc;
+    use lazybox_core::{Activity, ActivityFingerprint, ActivityKind, Workspace};
+
+    let (config, _mock) = ServerConfig::in_memory_with_mock();
+    let workspace_key = lazybox_core::WorkspaceKey::new("github:o/r#100");
+
+    // Create activities with distinguishable fingerprints
+    let now = Utc::now();
+    let activities = vec![
+        Activity {
+            author: "alice".into(),
+            body: "first comment".into(),
+            created_at: now,
+            kind: ActivityKind::Comment,
+            node_id: Some("IC_1".into()),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        },
+        Activity {
+            author: "bob".into(),
+            body: "second comment".into(),
+            created_at: now,
+            kind: ActivityKind::Comment,
+            node_id: Some("IC_2".into()),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        },
+    ];
+
+    // Create workspace with initial activities
+    let mut workspace = Workspace::empty(workspace_key.clone(), "main", now);
+    workspace.activity = activities;
+
+    // Persist the workspace
+    config
+        .store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: workspace_key.as_str().to_string(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+
+    // Get the fingerprint of activity[1] (bob's comment) before marking
+    let target_fingerprint = ActivityFingerprint::of(&workspace.activity[1]);
+
+    // Mark activity[1] as read
+    lazybox_server::workspace::mark_activity_read(
+        &config,
+        &workspace_key,
+        1,
+        Some(&target_fingerprint),
+    )
+    .await;
+
+    // Verify it's marked as read
+    let ws_before: lazybox_core::Workspace = {
+        let record = config
+            .store
+            .get_workspace(&workspace_key)
+            .expect("load workspace")
+            .expect("workspace exists");
+        serde_json::from_str(record.workspace_json.as_deref().expect("workspace json")).unwrap()
+    };
+    assert!(
+        !ws_before.is_activity_unread(1),
+        "activity[1] should be marked as read"
+    );
+    assert!(
+        ws_before.is_activity_unread(0),
+        "activity[0] should still be unread"
+    );
+
+    // Simulate a poll by inserting a new activity at the top
+    let new_activity = Activity {
+        author: "charlie".into(),
+        body: "newest comment".into(),
+        created_at: now,
+        kind: ActivityKind::Comment,
+        node_id: Some("IC_0".into()),
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    };
+    let mut ws_after_poll = ws_before.clone();
+    ws_after_poll.activity.insert(0, new_activity);
+    // Read state is POSITIONAL (`read_indices`), not fingerprint-keyed. A real
+    // poll remaps those indices to the shifted positions via the upsert
+    // seen-preservation path; this manual remap stands in for that, moving
+    // bob's read-mark from index 1 to its new index 2. Without it the unmark
+    // has no read-mark at bob's row to undo.
+    ws_after_poll.read_indices = std::iter::once(2).collect();
+
+    config
+        .store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: workspace_key.as_str().to_string(),
+            created_at: ws_after_poll.created_at,
+            workspace_json: Some(serde_json::to_string(&ws_after_poll).unwrap()),
+        })
+        .unwrap();
+
+    // Unmark using the stored fingerprint
+    // The fingerprint should resolve to index 2 (bob's comment is now at index 2)
+    lazybox_server::workspace::unmark_activity_read(
+        &config,
+        &workspace_key,
+        1,
+        Some(&target_fingerprint),
+    )
+    .await;
+
+    // Verify the correct activity was unmarked
+    let ws_final: lazybox_core::Workspace = {
+        let record = config
+            .store
+            .get_workspace(&workspace_key)
+            .expect("load workspace")
+            .expect("workspace exists");
+        serde_json::from_str(record.workspace_json.as_deref().expect("workspace json")).unwrap()
+    };
+
+    // activity[0] (charlie's new comment) should be unread
+    assert!(
+        ws_final.is_activity_unread(0),
+        "activity[0] (charlie's comment) should be unread"
+    );
+    // activity[1] (alice's original comment) should still be unread
+    assert!(
+        ws_final.is_activity_unread(1),
+        "activity[1] (alice's comment) should still be unread"
+    );
+    // activity[2] (bob's comment, now at index 2 but with correct fingerprint) should be unmarked
+    assert!(
+        ws_final.is_activity_unread(2),
+        "activity[2] (bob's comment) should be unmarked via fingerprint resolution"
+    );
+
+    // The key assertion: if fingerprint didn't work, activity[1] would be unmarked instead
+    // This verifies the fingerprint correctly resolved through the index shift
 }

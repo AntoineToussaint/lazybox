@@ -2657,9 +2657,16 @@ pub async fn mark_activity_read(
 
 /// Reverse of `mark_activity_read`. `z` undo binds here. The TUI
 /// re-resolves the undo target against its latest snapshot before
-/// sending, so this path still travels as a raw index.
-pub async fn unmark_activity_read(config: &ServerConfig, key: &WorkspaceKey, index: usize) {
-    apply_activity_mark(config, key, index, None, /*read=*/ false).await;
+/// sending, so this path still travels as a raw index. When fingerprint
+/// is provided, it prevents unmarking the wrong activity if indices
+/// shifted between the mark and unmark operations.
+pub async fn unmark_activity_read(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    index: usize,
+    fingerprint: Option<&lazybox_core::ActivityFingerprint>,
+) {
+    apply_activity_mark(config, key, index, fingerprint, /*read=*/ false).await;
 }
 
 async fn apply_activity_mark(

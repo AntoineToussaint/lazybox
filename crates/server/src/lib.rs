@@ -1905,9 +1905,13 @@ pub async fn dispatch_command(
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::mark_activity_read(config, &key, index, fingerprint.as_ref()).await;
         }
-        lazybox_ipc::Command::UnmarkActivityRead { session_key, index } => {
+        lazybox_ipc::Command::UnmarkActivityRead {
+            session_key,
+            index,
+            fingerprint,
+        } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            workspace::unmark_activity_read(config, &key, index).await;
+            workspace::unmark_activity_read(config, &key, index, fingerprint.as_ref()).await;
         }
         lazybox_ipc::Command::CreateWorkspace {
             name,

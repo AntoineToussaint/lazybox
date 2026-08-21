@@ -310,6 +310,9 @@ fn all_commands() -> Vec<Command> {
         Command::UnmarkActivityRead {
             session_key: key.clone(),
             index: 2,
+            fingerprint: Some(lazybox_core::ActivityFingerprint::NodeId(
+                "IC_kwDOtest123".into(),
+            )),
         },
         Command::CreateWorkspace {
             name: "audit-wire".into(),

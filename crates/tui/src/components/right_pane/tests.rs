@@ -369,7 +369,7 @@ mod undo_auto_mark_tests {
         // The "beta" row is now at index 2 — undo MUST resolve to 2,
         // not the stale 1.
         assert_eq!(
-            undone.map(|(_k, i)| i),
+            undone.map(|(_k, i, _fp)| i),
             Some(2),
             "z undo should follow the fingerprint to the new index, not unmark the wrong row"
         );

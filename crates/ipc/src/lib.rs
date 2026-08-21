@@ -1021,6 +1021,8 @@ pub enum Command {
     UnmarkActivityRead {
         session_key: SessionKey,
         index: usize,
+        #[serde(default)]
+        fingerprint: Option<lazybox_core::ActivityFingerprint>,
     },
     /// Create a brand-new pre-PR workspace with a user-chosen name
     /// inside a specific Project. The daemon allocates a fresh

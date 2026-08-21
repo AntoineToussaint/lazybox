@@ -2592,7 +2592,7 @@ impl<T: TerminalAdapter> Model<T> {
                 );
                 match intent {
                     crate::intent::Intent::SpawnAgent {
-                        workspace_key,
+                        workspace_key: _,
                         agent_id,
                         prompt,
                     } => match (running_terminal, prompt) {
@@ -2606,13 +2606,13 @@ impl<T: TerminalAdapter> Model<T> {
                         // No live agent → spawn one with the prompt.
                         (None, body) => ApplyOutcome::Spawn {
                             step: super::BulkAgentStep::Spawn(bulk_spawn_command(
-                                (&workspace_key).into(),
+                                key.clone(),
                                 lazybox_ipc::TerminalKind::Agent(agent_id),
                                 body,
                                 None,
                                 model_alias,
                             )),
-                            follow: (&workspace_key).into(),
+                            follow: key.clone(),
                         },
                     },
                     // Merged / closed workspace steers to cleanup.

@@ -1919,11 +1919,14 @@ async fn handle_spawn_inner(
                         &mut signaled_ready,
                         &ready_signal_for_pump,
                     );
-                    let _ = bus.send(Event::TerminalResync {
-                        terminal_id: id_for_pump,
-                        replay: snapshot.replay,
-                        seq: snapshot.last_seq,
-                    });
+                    // Gap recovery is now scoped per-client via forwarders: each
+                    // client's forwarder detects gaps when it sees resumed output
+                    // with a seq jump, and requests its own resync independently.
+                    // Do not broadcast the recovery to all subscribers — this
+                    // avoids wasting bandwidth and causing unnecessary re-renders
+                    // on clients that didn't experience the gap. The pump still
+                    // processes the snapshot for agent-state detection, but the
+                    // broadcast resync is omitted.
                     last_seq = snapshot.last_seq;
                     continue;
                 }

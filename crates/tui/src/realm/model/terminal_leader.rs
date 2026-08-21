@@ -36,6 +36,9 @@ pub(super) enum LeaderCmd {
     /// every prompt sent to this agent, newest-first, snippet entries
     /// tagged; Enter re-sends the picked one.
     PromptHistory,
+    /// `]]H` — open the personal Hopper without forwarding a key to
+    /// the focused terminal.
+    OpenHopper,
     /// `]]u` — scan the visible terminal for `http(s)://…` URLs and open
     /// the picked one in the browser (issue #596). An emulator-independent
     /// path to agent-output links: a single URL opens straight away, else
@@ -172,6 +175,18 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         reference: "Close the focused terminal (tile or active tab)",
         sidebar: false,
     },
+    // Keep this after the split/move/close cluster. The popup has a bounded
+    // visible row count; inserting Hopper earlier pushed `close terminal`
+    // below the fold in split layouts even though that command is essential
+    // tile chrome. `]]H` remains directly dispatchable and globally
+    // documented even when the tail collapses into “+N more”.
+    FixedCommandSpec {
+        key: 'H',
+        command: LeaderCmd::OpenHopper,
+        menu_label: "hopper",
+        reference: "Open the personal Hopper editor",
+        sidebar: false,
+    },
     FixedCommandSpec {
         key: 'z',
         command: LeaderCmd::ZoomTile,
@@ -201,7 +216,9 @@ impl LeaderCmd {
             && !c.is_control()
         {
             let shifted_symbol = !c.is_alphanumeric() && modifiers == KeyModifiers::SHIFT;
-            if !(modifiers.is_empty() || shifted_symbol) {
+            let shifted_command =
+                modifiers == KeyModifiers::SHIFT && FIXED_COMMANDS.iter().any(|spec| spec.key == c);
+            if !(modifiers.is_empty() || shifted_symbol || shifted_command) {
                 return None;
             }
             if let '1'..='9' = c {

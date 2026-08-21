@@ -110,6 +110,13 @@ pub enum PickFlow {
     },
     StartAgentProject,
     NewWorkspaceRepo,
+    /// One-time project assignment for a repo-less Hopper workspace. The
+    /// action is carried through the picker so the TUI can resume it only
+    /// after the daemon echoes the persisted assignment.
+    HopperProject {
+        workspace: WorkspaceKey,
+        action: Action,
+    },
     /// Repo picker for an unmapped Linear team (#1041). Each row carries a
     /// [`PickPayload::as_text`] `owner/repo`; the pick persists
     /// `providers.linear.teams.<team>` and re-provisions.
@@ -240,6 +247,11 @@ pub enum PickOutcome<F> {
     SaveDefaultModel {
         agent_id: String,
         alias: Option<String>,
+    },
+    AssignHopperProject {
+        workspace: WorkspaceKey,
+        project: lazybox_core::ProjectKey,
+        action: Action,
     },
     DispatchAction {
         session_key: SessionKey,
@@ -494,6 +506,15 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 .unwrap_or(PickOutcome::NoOp),
             None => PickOutcome::NoOp,
         },
+        PickFlow::HopperProject { workspace, action } => picks
+            .first()
+            .and_then(P::project)
+            .map(|project| PickOutcome::AssignHopperProject {
+                workspace,
+                project,
+                action,
+            })
+            .unwrap_or(PickOutcome::NoOp),
         PickFlow::LinearTeamRepo { team } => picks
             .first()
             .and_then(P::as_text)
@@ -1064,6 +1085,19 @@ mod tests {
                 PickFlow::StartAgentProject,
             ),
             PickOutcome::MountNewWorkspace(key) if key == project_key
+        ));
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::Project(project_key.clone())],
+                PickFlow::HopperProject {
+                    workspace: workspace_key.clone(),
+                    action: Action::SpawnShell,
+                },
+            ),
+            PickOutcome::AssignHopperProject { workspace, project, action }
+                if workspace == workspace_key
+                    && project == project_key
+                    && action == Action::SpawnShell
         ));
         assert!(matches!(
             resolve_pick(

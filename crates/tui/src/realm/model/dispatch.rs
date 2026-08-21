@@ -386,6 +386,16 @@ impl<T: TerminalAdapter> Model<T> {
         action: &lazybox_tui_core::action::Action,
     ) -> Vec<IpcCommand> {
         use lazybox_tui_core::action::{Action, ActionDef};
+        if Self::hopper_action_requires_project(action) {
+            let repo_less_hopper = self.sidebar.selected_workspace().and_then(|workspace| {
+                (workspace.hopper.is_some() && workspace.project_key.is_none())
+                    .then(|| workspace.key.clone())
+            });
+            if let Some(workspace) = repo_less_hopper {
+                self.mount_hopper_project_picker(workspace, action.clone());
+                return Vec::new();
+            }
+        }
         // `g m` on a single PR lazybox already knows is conflicting is a
         // doomed dispatch — GitHub would only reject it. Skip straight to
         // the one-key resolve prompt rather than a merge confirm that can
@@ -459,6 +469,26 @@ impl<T: TerminalAdapter> Model<T> {
             return Vec::new();
         }
         self.dispatch_action_unchecked(action)
+    }
+
+    fn hopper_action_requires_project(action: &lazybox_tui_core::action::Action) -> bool {
+        use lazybox_tui_core::action::Action;
+        matches!(
+            action,
+            Action::Work
+                | Action::WorkWith(_)
+                | Action::SpawnAgent(_)
+                | Action::WorkTier(_)
+                | Action::SpawnTier(_)
+                | Action::SpawnAgentRemote(_)
+                | Action::SpawnShell
+                | Action::SpawnAgentOnMain(_)
+                | Action::SpawnShellOnMain
+                | Action::OpenEditor
+                | Action::OpenWith
+                | Action::OpenWithApp(_)
+                | Action::ViewDiff
+        )
     }
 
     /// Resolve what a destructive action mounted right now would act
@@ -1808,6 +1838,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::OpenErrorInbox => {
                 self.mount_error_inbox();
+            }
+            Action::OpenHopper => {
+                self.mount_hopper();
             }
             Action::OpenSettings => {
                 self.open_settings();

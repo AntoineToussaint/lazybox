@@ -1819,6 +1819,15 @@ impl<T: TerminalAdapter> Model<T> {
             // optimistic chip edit (reviewers/assignees/labels) on this
             // workspace (#476).
             self.reconcile_optimistic(ws.key.as_str());
+            let resume = self
+                .pending_hopper_action
+                .as_ref()
+                .is_some_and(|(key, _)| key == &ws.key && ws.project_key.is_some());
+            if resume && let Some((_, action)) = self.pending_hopper_action.take() {
+                let commands = self.dispatch_action(&action);
+                self.dispatch_cmds(commands);
+                self.flash_info("repo assigned — starting workspace");
+            }
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);

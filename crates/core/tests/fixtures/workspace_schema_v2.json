@@ -1,8 +1,9 @@
 {
-  "schema": 4,
+  "schema": 6,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
+  "hopper": null,
   "linked_checkout": "/home/dev/code/acme/widget",
   "name": "Add the frobnicator",
   "branch": "feat/frobnicator",

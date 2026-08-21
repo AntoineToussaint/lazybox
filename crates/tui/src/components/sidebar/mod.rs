@@ -1072,6 +1072,7 @@ impl Sidebar {
             VisibleRow::Workspace(k) => Some(k),
             VisibleRow::Session { workspace, .. } => Some(workspace),
             VisibleRow::FocusedHeader
+            | VisibleRow::HopperHeader
             | VisibleRow::SpaceHeader(_)
             | VisibleRow::RepoHeader(_)
             | VisibleRow::KindHeader(_) => None,
@@ -1408,6 +1409,7 @@ impl Sidebar {
             Some(VisibleRow::Workspace(_))
             | Some(VisibleRow::Session { .. })
             | Some(VisibleRow::FocusedHeader)
+            | Some(VisibleRow::HopperHeader)
             | Some(VisibleRow::SpaceHeader(_))
             | Some(VisibleRow::RepoHeader(_))
             | Some(VisibleRow::KindHeader(_)) => {
@@ -2126,7 +2128,7 @@ impl Sidebar {
                 .map(|p| p.key.clone()),
             // The `★ Focused` header isn't a project — starring is a
             // cross-repo shortlist, not a group you create workspaces in.
-            VisibleRow::FocusedHeader => None,
+            VisibleRow::FocusedHeader | VisibleRow::HopperHeader => None,
             // Kind headers (PRs / Issues) don't belong to a single
             // project — they partition workspaces within a project,
             // so the parent project is whichever RepoHeader came
@@ -2605,7 +2607,10 @@ impl Sidebar {
             // Neither the `★ Focused` header (nor rows lifted under it)
             // nor a Space header belongs to a repo group — pin / collapse
             // no-op there.
-            Some(VisibleRow::FocusedHeader) | Some(VisibleRow::SpaceHeader(_)) | None => None,
+            Some(VisibleRow::FocusedHeader)
+            | Some(VisibleRow::HopperHeader)
+            | Some(VisibleRow::SpaceHeader(_))
+            | None => None,
         }
     }
 
@@ -3407,6 +3412,7 @@ impl Sidebar {
                         session_id,
                     } => *workspace == key && Some(*session_id) == prior_session,
                     VisibleRow::FocusedHeader
+                    | VisibleRow::HopperHeader
                     | VisibleRow::SpaceHeader(_)
                     | VisibleRow::RepoHeader(_)
                     | VisibleRow::KindHeader(_) => false,

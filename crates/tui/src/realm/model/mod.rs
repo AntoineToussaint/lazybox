@@ -108,6 +108,12 @@ pub enum Id {
     /// `Reply`/`BroadcastText`, so `handle_textarea_submitted` routes
     /// on this id. Target key lives in the `ModalFlow::Notes` flow.
     Notes,
+    /// Ordered personal Hopper editor. Existing lines retain stable
+    /// workspace identities; submit dispatches one atomic SaveHopper.
+    Hopper,
+    /// One-time tracked-project picker shown when a repo-less Hopper row
+    /// first needs a worktree-backed action.
+    HopperProject,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -779,6 +785,13 @@ pub(crate) struct RemovalPrompt {
 /// (`deferred_focus_project`, `deferred_focus_terminal`).
 #[derive(Debug, Clone)]
 pub(crate) enum ModalFlow {
+    /// Project picker for a repo-less Hopper workspace. The selected project
+    /// is persisted first; `pending_hopper_action` resumes this action on the
+    /// daemon's authoritative workspace echo.
+    HopperProject {
+        workspace: lazybox_core::WorkspaceKey,
+        action: lazybox_tui_core::action::Action,
+    },
     /// Provider sign-in confirmation or a retry after login failed.
     AgentAuth {
         terminal_id: lazybox_ipc::TerminalId,
@@ -1032,6 +1045,12 @@ pub enum Msg {
     Confirmed(bool),
     InputSubmitted(String),
     TextareaSubmitted(String),
+    HopperSubmitted(Vec<lazybox_ipc::HopperEntryDraft>),
+    HopperCompletionRequested {
+        workspace_key: lazybox_core::WorkspaceKey,
+        completed: bool,
+    },
+    HopperDeleteRequested(lazybox_core::WorkspaceKey),
     /// A picker (`Choice`, jump/snippet picker, settings palette)
     /// resolved. Each entry is the *typed value* of a picked row —
     /// never a bare positional index into a parallel "shadow Vec" —
@@ -1723,6 +1742,9 @@ pub struct Model<T: TerminalAdapter> {
     /// modal does when it resolves. Replaces the old fan of `pending_*`
     /// Options; see [`ModalFlow`]. `None` when no flow modal is armed.
     modal_flow: Option<ModalFlow>,
+    /// Event-fed continuation after a Hopper project pick. It waits for the
+    /// daemon's durable `WorkspaceUpserted` acknowledgement before spawning.
+    pending_hopper_action: Option<(lazybox_core::WorkspaceKey, lazybox_tui_core::action::Action)>,
     /// Provider authentication prompts are daemon-driven and may
     /// arrive while another modal is open, so they wait here until the
     /// current interaction completes.
@@ -2365,6 +2387,7 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             modal_flow: None,
+            pending_hopper_action: None,
             auth_prompt_queue: std::collections::VecDeque::new(),
             conversion: None,
             last_reply_body: None,
@@ -6391,6 +6414,57 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::TextareaSubmitted(body) => {
                 let cmds = self.handle_textarea_submitted(body);
                 self.dispatch_cmds(cmds);
+            }
+            Msg::HopperSubmitted(entries) => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                    self.dispatch_cmds(vec![IpcCommand::SaveHopper { entries }]);
+                    self.flash_info("Hopper saved");
+                }
+            }
+            Msg::HopperCompletionRequested {
+                workspace_key,
+                completed,
+            } => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                    self.dispatch_cmds(vec![IpcCommand::SetHopperCompleted {
+                        workspace_key,
+                        completed,
+                    }]);
+                    self.flash_info(if completed {
+                        "Hopper item completed"
+                    } else {
+                        "Hopper item reopened"
+                    });
+                }
+            }
+            Msg::HopperDeleteRequested(workspace_key) => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                    let session_key: lazybox_core::SessionKey = (&workspace_key).into();
+                    if let Some(workspace) = self.sidebar.workspace_by_key(&session_key) {
+                        let prompt = if workspace.sessions.is_empty() {
+                            format!(
+                                "Delete ‘{}’? Its clean managed worktree will be removed; local work is protected.",
+                                workspace.name
+                            )
+                        } else {
+                            format!(
+                                "Delete ‘{}’? {} running session(s) will stop and its clean managed worktree will be removed; local work is protected.",
+                                workspace.name,
+                                workspace.sessions.len()
+                            )
+                        };
+                        self.mount_action_confirm(
+                            lazybox_tui_core::action::Action::Archive,
+                            vec![ActionConfirmTarget::Workspace(session_key)],
+                            Some(prompt),
+                        );
+                    } else {
+                        self.flash_info("workspace is gone — nothing to delete");
+                    }
+                }
             }
             Msg::InputSubmitted(text) => {
                 let cmds = self.handle_input_submitted(text);

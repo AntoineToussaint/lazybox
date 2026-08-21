@@ -26,6 +26,9 @@ pub const PIN: &str = "\u{f08d}";
 /// star (not a Nerd Font glyph) so it renders on any terminal.
 pub const STAR: &str = "\u{2605}";
 
+/// Personal Hopper queue (nf-fa-inbox, U+F01C).
+pub const HOPPER: &str = "\u{f01c}";
+
 // ── Activity kinds ────────────────────────────────────────────────────
 
 pub const COMMENT: &str = "";

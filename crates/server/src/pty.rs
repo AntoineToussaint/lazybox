@@ -1100,6 +1100,14 @@ impl DaemonPty {
         }
     }
 
+    /// Snapshot the ring buffer contents for deduplication purposes.
+    /// Returns the current ring buffer bytes (not including the durable seed),
+    /// used to detect and remove overlapping content when reattaching (#1254).
+    pub async fn snapshot_for_dedup(&self) -> Result<Vec<u8>, PtyError> {
+        let ring = self.ring.lock().await;
+        Ok(ring.snapshot())
+    }
+
     /// Queue bytes for the writer thread. Returns promptly in every
     /// case: a healthy PTY enqueues immediately; a wedged child (write
     /// queue full past `WRITE_ENQUEUE_TIMEOUT`) gets a `WriteStalled`

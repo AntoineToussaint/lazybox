@@ -123,6 +123,12 @@ pub const SENT_SNIPPETS_MAX: usize = 12;
 /// single survivor and the other silently lost its state. Occurrence is
 /// stable across re-polls because Rust's `sort_by_key` is a stable sort:
 /// equal-`created_at` items keep their relative order.
+///
+/// NOTE (#1255): The IPC layer uses `ActivityFingerprint` (node_id or
+/// 64-char body prefix) for marking activity as read, while this internal
+/// layer uses the full body. The two are kept separate to preserve the
+/// intended edit-detection behavior (full body change → unread) while still
+/// allowing delete reconciliation at the node_id level.
 type ActivityIdentity = (String, String, DateTime<Utc>, usize);
 
 /// Per-index identities for `list`, assigning occurrence indices (in
@@ -625,10 +631,17 @@ impl Workspace {
     /// `node_id` when both sides carry one (an *edited* comment keeps
     /// its node id but changes its body — upserting by node id
     /// replaces the stale copy instead of appending a duplicate
-    /// forever), falling back to the (author, body, created_at)
-    /// content tuple for node-id-less items. Re-sorts newest-first
+    /// forever), falling back to the `ActivityFingerprint` (node_id or
+    /// 64-char body prefix) for node-id-less items. Re-sorts newest-first
     /// afterwards. Cheap to call repeatedly — provider polls produce
     /// overlapping feeds.
+    ///
+    /// **Delete reconciliation (#1255)**: When all items in the incoming
+    /// feed have node_ids (GitHub-native stable identifiers), stored items
+    /// with node_ids that don't appear in the incoming set are removed.
+    /// This ensures deleted upstream comments don't persist locally forever
+    /// as unread. Node-id-less items are never deleted via reconciliation
+    /// since they lack stable identifiers across polls.
     ///
     /// Read/seen state is remapped *content-wise* across the merge:
     /// both `read_indices` (explicit per-item marks) and `seen_count`
@@ -662,7 +675,7 @@ impl Workspace {
         }
         // Snapshot read + seen state by stable identity BEFORE we
         // mutate. Identities are occurrence-aware so two distinct
-        // node-id-less twins never share a key.
+        // fingerprint-matching items never share a key.
         let identities = activity_identities(&self.activity);
         let read_keys: HashSet<ActivityIdentity> = self
             .read_indices
@@ -677,13 +690,30 @@ impl Workspace {
             .cloned()
             .collect();
 
-        // Occurrence counter for the tuple fallback: the k-th incoming
-        // item with a given content tuple maps to the k-th stored item
-        // with that tuple, so a batch of identical-tuple events doesn't
-        // all fold onto the first match — genuinely distinct twins both
+        // Detect if this poll has stable node_ids. If all incoming items
+        // carry node_ids, we can safely reconcile deletes by removing
+        // stored node-id-carrying items that don't appear in incoming.
+        // If ANY incoming item lacks a node_id, we skip reconciliation
+        // since the poll is incomplete (some providers don't provide node_ids).
+        let has_stable_ids = !incoming.is_empty() && incoming.iter().all(|a| a.node_id.is_some());
+        let incoming_node_ids: HashSet<String> = if has_stable_ids {
+            incoming
+                .iter()
+                .filter_map(|a| a.node_id.as_deref().map(str::to_string))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+
+        // Occurrence counter for the fingerprint: the k-th incoming
+        // item with a given fingerprint maps to the k-th stored item
+        // with matching content, so a batch of identical-fingerprint events
+        // doesn't all fold onto the first match — genuinely distinct twins
         // survive instead of collapsing into one.
-        let mut claimed: HashMap<(String, String, DateTime<Utc>), usize> = HashMap::new();
+        let mut claimed: HashMap<crate::ActivityFingerprint, usize> = HashMap::new();
         for act in incoming {
+            let incoming_fp = crate::ActivityFingerprint::of(act);
+
             // Upsert by node id when both sides have one — replaces
             // the body/edited fields of the stored copy.
             if let Some(nid) = act.node_id.as_deref()
@@ -695,17 +725,22 @@ impl Workspace {
                 *existing = act.clone();
                 continue;
             }
-            // Tuple fallback. Upsert rather than skip so a re-poll
-            // that gained a node_id migrates it onto the stored item —
-            // but claim stored occurrences in order so distinct twins
-            // don't all target the same slot.
-            let tuple = (act.author.clone(), act.body.clone(), act.created_at);
-            let skip = claimed.get(&tuple).copied().unwrap_or(0);
+
+            // Content-based fallback. For items without node_ids (or items
+            // where the node_id doesn't match any stored item), match by content:
+            // the k-th incoming item with matching content claims the k-th stored
+            // item with the same (author, body, created_at), so distinct twins
+            // don't all collapse. This also handles the case where an incoming
+            // node-id-carrying item matches a stored node-id-less item with
+            // identical content — the node_id gets added to the stored item.
+            let skip = claimed.get(&incoming_fp).copied().unwrap_or(0);
             let target = self
                 .activity
                 .iter()
                 .enumerate()
                 .filter(|(_, a)| {
+                    // Match by: author, body, created_at (same as old tuple fallback).
+                    // This works even when node_ids differ or are absent.
                     a.author == act.author && a.body == act.body && a.created_at == act.created_at
                 })
                 .map(|(i, _)| i)
@@ -714,8 +749,27 @@ impl Workspace {
                 Some(i) => self.activity[i] = act.clone(),
                 None => self.activity.push(act.clone()),
             }
-            *claimed.entry(tuple).or_insert(0) += 1;
+            *claimed.entry(incoming_fp).or_insert(0) += 1;
         }
+
+        // Delete reconciliation (#1255): If all incoming items have stable
+        // node_ids, remove any stored items that have a node_id not in the
+        // incoming set. This safely removes deleted upstream comments without
+        // breaking backfill polls (which have stable ids). Node-id-less items
+        // are never deleted since they lack stable identifiers.
+        if has_stable_ids {
+            self.activity.retain(|a| {
+                // Keep all node-id-less items (they're from providers
+                // that don't provide stable ids, so we can't detect deletes).
+                let Some(nid) = a.node_id.as_deref() else {
+                    return true;
+                };
+                // For node-id-carrying items, keep only if it appears
+                // in the incoming poll.
+                incoming_node_ids.contains(nid)
+            });
+        }
+
         self.sort_activity();
         // Sorted newest-first, so truncation drops the oldest items.
         self.activity.truncate(MAX_ACTIVITY_ITEMS);
@@ -2642,6 +2696,79 @@ mod tests {
             ws.unread_count(),
             1,
             "exactly one twin stays unread across the re-poll",
+        );
+    }
+
+    /// Regression (#1255): deleted comments must be removed from the local
+    /// feed when they vanish from the upstream poll. Before this fix,
+    /// deleted items persisted forever as unread because merge_activity
+    /// was upsert-only (never removing items). Delete reconciliation only
+    /// applies when all items have stable node_ids (GitHub-native).
+    #[test]
+    fn merge_activity_deletes_upstream_missing_items() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        // Use node_ids so delete reconciliation applies (all incoming items must have them).
+        ws.merge_activity(&[
+            activity_with_node(30, "newest", "n-newest"),
+            activity_with_node(20, "middle", "n-middle"),
+            activity_with_node(10, "oldest", "n-oldest"),
+        ]);
+        assert_eq!(ws.activity.len(), 3);
+
+        // Mark all as read so we can track state across deletion.
+        ws.mark_read_all();
+        assert_eq!(ws.unread_count(), 0);
+
+        // Next poll drops the middle comment (deleted upstream).
+        // Since all incoming items have node_ids, stored items with node_ids
+        // that don't appear are removed.
+        ws.merge_activity(&[
+            activity_with_node(30, "newest", "n-newest"),
+            activity_with_node(10, "oldest", "n-oldest"),
+        ]);
+
+        assert_eq!(ws.activity.len(), 2, "deleted item removed");
+        assert!(
+            ws.activity.iter().all(|a| a.body != "middle"),
+            "middle comment is gone"
+        );
+        // All remaining items stay read (they were marked read before deletion).
+        assert_eq!(
+            ws.unread_count(),
+            0,
+            "remaining read items keep read state after deletion"
+        );
+    }
+
+    /// Delete reconciliation must work correctly with node_id-carrying items.
+    /// A deleted comment's node_id should not match any incoming item, so it
+    /// gets removed even if the fingerprint matching would have found it via
+    /// body-prefix alone.
+    #[test]
+    fn merge_activity_delete_reconciliation_with_node_ids() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+
+        // Initial poll: comments with node_ids.
+        ws.merge_activity(&[
+            activity_with_node(30, "comment A", "node-1"),
+            activity_with_node(20, "comment B", "node-2"),
+        ]);
+        assert_eq!(ws.activity.len(), 2);
+
+        // Mark comment B as read.
+        ws.mark_activity_read(1);
+        assert_eq!(ws.unread_count(), 1);
+
+        // Next poll: comment B is deleted (not present).
+        // Only comment A survives.
+        ws.merge_activity(&[activity_with_node(30, "comment A", "node-1")]);
+
+        assert_eq!(ws.activity.len(), 1, "deleted comment B removed");
+        assert_eq!(ws.activity[0].body, "comment A", "only comment A survives");
+        assert_eq!(
+            ws.unread_count(),
+            1,
+            "comment A is still unread (was never marked read)"
         );
     }
 

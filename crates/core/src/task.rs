@@ -420,7 +420,7 @@ pub const ACTIVITY_FINGERPRINT_BODY_PREFIX: usize = 64;
 /// to carry read state across a re-sort — node-id first, content
 /// tuple fallback — kept in core precisely so the TUI's fingerprint
 /// and the daemon's resolution can't drift.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum ActivityFingerprint {
     NodeId(String),
